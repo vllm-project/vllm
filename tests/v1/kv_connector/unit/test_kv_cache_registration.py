@@ -18,6 +18,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     compute_layout_strides,
 )
@@ -148,13 +150,17 @@ def test_allocator_views_and_aliases_keep_their_values(
             )
         ],
     )
-    caches = allocate_kv_cache(config, torch.device("cpu"), physical_layout)
+    layouts: dict[str, KVCacheTensorLayout] = {}
+    caches = allocate_kv_cache(
+        config, torch.device("cpu"), physical_layout, tensor_layouts=layouts
+    )
     caches["first"].copy_(torch.arange(64).reshape(2, 2, 4, 4))
     caches["second"].fill_(-1)
     add_kv_sharing_layers_to_kv_cache_groups({"alias": "first"}, config.kv_cache_groups)
     caches["alias"] = caches["first"]
+    layouts["alias"] = layouts["first"]
     connector = make_connector(config)
-    connector.register_kv_caches_with_layouts(caches, config.get_tensor_layouts(caches))
+    connector.register_kv_caches_with_layouts(caches, layouts)
     consumer = connector.sub_connectors[1]
     assert isinstance(consumer, AxisRegistrationConnector)
     assert consumer.registered_caches is caches
@@ -211,10 +217,82 @@ def test_missing_descriptors_stay_unspecified(make_connector):
     )
     caches = {"raw": torch.empty(256, dtype=torch.uint8), "custom": torch.empty(2)}
     connector = make_connector(config)
-    layouts = config.get_tensor_layouts(caches)
+    layouts: dict[str, KVCacheTensorLayout] = {}
+    assert (
+        allocate_kv_cache(
+            config, torch.device("cpu"), KVCacheLayout.LBHNC, tensor_layouts=layouts
+        )
+        == {}
+    )
     assert layouts == {}
     connector.register_kv_caches_with_layouts(caches, layouts)
     consumer = connector.sub_connectors[1]
     assert isinstance(consumer, AxisRegistrationConnector)
     assert consumer.registered_caches is caches
     assert consumer.layouts == {}
+
+
+def test_hybrid_allocator_registers_each_created_view(make_connector):
+    """Hybrid specs share axis roles, not shapes, dtype or content encoding."""
+    specs = {
+        "full": FullAttentionSpec(
+            block_size=4, num_kv_heads=2, head_size=2, dtype=torch.float32
+        ),
+        "sliding": SlidingWindowSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=2,
+            dtype=torch.float16,
+            sliding_window=8,
+        ),
+        "mamba": MambaSpec(
+            block_size=4,
+            shapes=((2,), (2, 2)),
+            dtypes=(torch.float32, torch.float32),
+        ),
+        "raw": HiSparseResidentSpec(block_size=4, page_size=64),
+    }
+    num_blocks = 2
+    size = sum(num_blocks * spec.page_size_bytes for spec in specs.values())
+    tensors = []
+    offset = 0
+    for name, spec in specs.items():
+        tensors.append(
+            KVCacheTensor(
+                size=size,
+                layers=[name],
+                offset=offset,
+                layer_stride=num_blocks * spec.page_size_bytes,
+                block_stride=spec.page_size_bytes,
+            )
+        )
+        offset += num_blocks * spec.page_size_bytes
+    config = KVCacheConfig(
+        num_blocks,
+        tensors,
+        [KVCacheGroupSpec([name], spec) for name, spec in specs.items()],
+    )
+    layouts: dict[str, KVCacheTensorLayout] = {}
+    caches = allocate_kv_cache(
+        config, torch.device("cpu"), KVCacheLayout.LBHNC, tensor_layouts=layouts
+    )
+    assert set(layouts) == {"full", "sliding", "mamba"}
+    assert caches["full"].shape == (2, 2, 4, 4)
+    assert caches["sliding"].shape == (2, 1, 2, 4)
+    assert caches["mamba"].shape == (2, 1, 1, 24)
+    assert caches["raw"].ndim == 1
+    assert caches["full"].dtype == torch.float32
+    assert caches["sliding"].dtype == torch.float16
+    for value, name in enumerate(layouts, start=1):
+        caches[name].fill_(value)
+    connector = make_connector(config)
+    connector.register_kv_caches_with_layouts(caches, layouts)
+    consumer = connector.sub_connectors[1]
+    assert isinstance(consumer, AxisRegistrationConnector)
+    for value, name in enumerate(layouts, start=1):
+        axes = consumer.layouts[name]
+        assert axes.axes == (Axis.BLOCK, Axis.HEAD, Axis.STATE, Axis.CONTENT)
+        assert torch.all(consumer.registered_caches[name] == value)
+        assert consumer.registered_caches[name].untyped_storage().data_ptr() == (
+            caches["raw"].untyped_storage().data_ptr()
+        )

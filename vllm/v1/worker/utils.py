@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
+from vllm.v1.kv_cache_layout import KVCacheTensorLayout
 from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
@@ -566,12 +567,16 @@ def allocate_kv_cache(
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
+    *,
+    tensor_layouts: dict[str, KVCacheTensorLayout] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
     Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
     groups overlay each other, so tensors may address the same bytes.
+    When supplied, ``tensor_layouts`` is populated as layer views are created;
+    raw storage is left unspecified. The output mapping must initially be empty.
     """
     if not kv_cache_config.kv_cache_tensors:
         return {}
@@ -622,6 +627,7 @@ def allocate_kv_cache(
             layout,
             tensor,
             kernel_block_size=kernel_block_size,
+            tensor_layouts=tensor_layouts,
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches

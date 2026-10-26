@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
+from vllm.v1.kv_cache_layout import KVCacheTensorLayout
 from vllm.v1.worker.utils import allocate_kv_cache, select_common_block_size
 
 if TYPE_CHECKING:
@@ -85,6 +86,8 @@ def allocate_hisparse_kv_caches(
     layout: KVCacheLayout,
     kernel_block_sizes: list[int],
     host_pool: HiSparseHostPool,
+    *,
+    tensor_layouts: dict[str, KVCacheTensorLayout] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the host pool separately from the shared device backing."""
     device_config = copy(kv_cache_config)
@@ -93,7 +96,13 @@ def allocate_hisparse_kv_caches(
         for tensor in kv_cache_config.kv_cache_tensors
         if not tensor.host_resident
     ]
-    kv_caches = allocate_kv_cache(device_config, device, layout, kernel_block_sizes)
+    kv_caches = allocate_kv_cache(
+        device_config,
+        device,
+        layout,
+        kernel_block_sizes,
+        tensor_layouts=tensor_layouts,
+    )
     host_tensors = [
         tensor for tensor in kv_cache_config.kv_cache_tensors if tensor.host_resident
     ]
@@ -114,6 +123,7 @@ def allocate_hisparse_kv_caches(
             layout,
             tensor,
             kernel_block_size=kernel_block_sizes[host_group_id],
+            tensor_layouts=tensor_layouts,
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
@@ -126,6 +136,8 @@ def init_hisparse_kv_cache(
     vllm_config: VllmConfig,
     forward_context: dict[str, Any],
     block_tables: "BlockTables",
+    *,
+    tensor_layouts: dict[str, KVCacheTensorLayout] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
     host_pool = get_hisparse_host_pool(vllm_config, kv_cache_config)
@@ -136,6 +148,7 @@ def init_hisparse_kv_cache(
             vllm_config.cache_config.get_resolved_kv_cache_layout(),
             kernel_block_sizes,
             host_pool,
+            tensor_layouts=tensor_layouts,
         )
         cache_handles = bind_hisparse_kv_caches(
             forward_context=forward_context,

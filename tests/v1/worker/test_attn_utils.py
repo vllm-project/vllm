@@ -37,6 +37,7 @@ from vllm.v1.kv_cache_interface import (
     SparseCacheRole,
     compute_layout_strides,
 )
+from vllm.v1.kv_cache_layout import KVCacheAxis, KVCacheTensorLayout
 from vllm.v1.worker.gpu import attn_utils
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
@@ -479,7 +480,7 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
     )
     pools = []
 
-    def allocate(*args):
+    def allocate(*args, tensor_layouts=None):
         pools.append(args[-1])
         if shared:
             args[-1].shared_region = region
@@ -772,14 +773,25 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
         host_buffers.append(torch.zeros(size, dtype=torch.int8))
         return host_buffers[-1]
 
+    tensor_layouts: dict[str, KVCacheTensorLayout] = {}
     caches = allocate_hisparse_kv_caches(
         config,
         torch.device("cpu"),
         KVCacheLayout.LBHNC,
         [2, 2, 2],
         SimpleNamespace(allocate=host_allocator),
+        tensor_layouts=tensor_layouts,
     )
     assert len(config.kv_cache_tensors) == 3
+    assert set(tensor_layouts) == {"source", "indexer"}
+    for name, tensor_layout in tensor_layouts.items():
+        assert tensor_layout.axes == (
+            KVCacheAxis.BLOCK,
+            KVCacheAxis.HEAD,
+            KVCacheAxis.STATE,
+            KVCacheAxis.CONTENT,
+        )
+        tensor_layout.validate_shape(caches[name].shape)
 
     assert [buf.numel() for buf in host_buffers] == [3 * page]
     assert caches["source"].shape[0] == 3

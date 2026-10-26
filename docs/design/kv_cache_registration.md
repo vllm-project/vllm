@@ -14,9 +14,20 @@ indexing order**. `KVCacheLayout` continues to
 describe the allocator's physical stride permutation. Consumers must use the
 actual tensor's shape, strides, dtype, and storage offset for addressing.
 
-Both GPU model runners pass descriptors for the standardized allocator's
+Both GPU model runners pass descriptors produced when the allocator creates
 logical `[block, head, token/state, content]` views, including views with
-padded blocks or layers sharing an allocation. `CONTENT` is opaque: the
+padded blocks or layers sharing an allocation. To collect them, pass a fresh
+`tensor_layouts` dictionary to `allocate_kv_cache`; the allocator populates it
+through `create_kv_cache_views`, alongside the returned tensors. Existing
+callers can omit this keyword and keep the tensor-only return value.
+HiSparse collects host-view descriptors through the same view creator.
+Shared layers inherit their target view's descriptor.
+
+Hybrid groups may have different shapes, dtypes, state granularity and content
+encodings while sharing these axis roles. Layer names identify per-layer views;
+the actual tensor's strides and storage offset describe cross-layer packing.
+Descriptors describe the views registered with the connector, before any
+mapping to attention-private kernel-block views. `CONTENT` is opaque: the
 layer's `KVCacheSpec` describes its encoding and packing. Axis metadata alone
 does not identify quantization scales or split packed K and V.
 

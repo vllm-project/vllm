@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_layout import KVCacheTensorLayout
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.ubatch_utils import get_num_ubatches
 from vllm.v1.worker.utils import (
@@ -404,6 +405,7 @@ def init_kv_cache(
     *,
     block_tables: "BlockTables | None" = None,
     attn_groups: Iterable[AttentionGroup] = (),
+    tensor_layouts: dict[str, KVCacheTensorLayout] | None = None,
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
@@ -416,6 +418,7 @@ def init_kv_cache(
                 vllm_config,
                 forward_context,
                 block_tables,
+                tensor_layouts=tensor_layouts,
             )
         else:
             kv_caches = allocate_kv_cache(
@@ -423,9 +426,12 @@ def init_kv_cache(
                 device,
                 vllm_config.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
+                tensor_layouts=tensor_layouts,
             )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
+        if tensor_layouts is not None and target in tensor_layouts:
+            tensor_layouts[layer_name] = tensor_layouts[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
     # decoder layer, so a layer name carries two integers (layer + module index).
     num_attn_module = (

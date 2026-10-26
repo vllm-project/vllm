@@ -76,6 +76,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_layout import KVCacheTensorLayout
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -795,6 +796,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         # Capture warmup providers that depend on allocated KV-cache strides.
+        tensor_layouts: dict[str, KVCacheTensorLayout] = {}
         with self.jit_warmup_registry.activate():
             kv_caches_dict = init_kv_cache(
                 self.compilation_config.static_forward_context,
@@ -802,6 +804,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.device,
                 self.kernel_block_sizes,
                 self.vllm_config,
+                tensor_layouts=tensor_layouts,
                 kv_cache_allocation_context=kv_cache_allocation_context,
                 block_tables=self.block_tables,
                 # Draft groups build their own metadata, so they map the views too.
@@ -822,7 +825,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector = get_kv_connector(
                 self.vllm_config,
                 kv_caches_dict,
-                self.kv_cache_config.get_tensor_layouts(kv_caches_dict),
+                tensor_layouts,
             )
 
             # AuxOutput connector requires resolved kv_cache_config.

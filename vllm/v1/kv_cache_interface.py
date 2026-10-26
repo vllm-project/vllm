@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 import math
 from collections import Counter
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
@@ -428,11 +428,14 @@ def create_kv_cache_views(
     layout: KVCacheLayout,
     kv_cache_tensor: KVCacheTensor,
     kernel_block_size: int | None = None,
+    *,
+    tensor_layouts: dict[str, KVCacheTensorLayout] | None = None,
 ) -> list[torch.Tensor]:
     """View a flat int8 buffer as one 4D ``[B, H, N, C]`` view per layer.
 
     Block ``b`` of layer ``l`` starts at the tensor offset plus its layer and
     block stride contributions.
+    ``tensor_layouts``, when supplied, receives axis semantics for these views.
     """
     num_layers = len(kv_cache_tensor.layers)
     layer_stride = kv_cache_tensor.layer_stride
@@ -485,6 +488,16 @@ def create_kv_cache_views(
         if dtype is not None:
             cache_logical = cache_logical.view(dtype)
         views.append(cache_logical)
+    if tensor_layouts is not None:
+        tensor_layout = KVCacheTensorLayout(
+            (
+                KVCacheAxis.BLOCK,
+                KVCacheAxis.HEAD,
+                KVCacheAxis.STATE,
+                KVCacheAxis.CONTENT,
+            )
+        )
+        tensor_layouts.update((name, tensor_layout) for name in kv_cache_tensor.layers)
     return views
 
 
@@ -1563,35 +1576,6 @@ class KVCacheConfig:
 
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
-
-    def get_tensor_layouts(
-        self, layer_names: Iterable[str]
-    ) -> dict[str, KVCacheTensorLayout]:
-        """Describe standardized allocator views for connector registration.
-
-        The standard allocator returns logical [B, H, N, C] views regardless of
-        physical stride order. Raw storage specs are omitted. Custom allocators
-        must describe their own registered views.
-        """
-        standard_layout = KVCacheTensorLayout(
-            (
-                KVCacheAxis.BLOCK,
-                KVCacheAxis.HEAD,
-                KVCacheAxis.STATE,
-                KVCacheAxis.CONTENT,
-            )
-        )
-        described_layers = {
-            name
-            for group in self.kv_cache_groups
-            if all(
-                spec.has_layer_views for spec in iter_layer_specs(group.kv_cache_spec)
-            )
-            for name in group.layer_names
-        }
-        return {
-            name: standard_layout for name in layer_names if name in described_layers
-        }
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
