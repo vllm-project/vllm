@@ -19,6 +19,7 @@ import socket
 import stat
 import struct
 import tempfile
+import time
 from dataclasses import dataclass, fields
 from typing import Any, NamedTuple
 
@@ -46,6 +47,9 @@ _LEN_STRUCT = struct.Struct("!Q")
 # Sanity bound for a single message. IPC handles are tiny; only small
 # non-CUDA tensors are ever shipped by value.
 MAX_MSG_SIZE = 1 << 34
+# Bound for one JSON message on the remote warmup-cache control plane.
+# Warmup cache tables are small JSON documents.
+MAX_JSON_MSG_SIZE = 1 << 26
 
 
 def _current_uid() -> int:
@@ -464,9 +468,45 @@ def recv_msg(sock: socket.socket) -> Any:
     return pickle.loads(_recv_exact(sock, length))
 
 
-def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
+def send_json(sock: socket.socket, obj: Any) -> None:
+    payload = json.dumps(obj).encode()
+    if len(payload) > MAX_JSON_MSG_SIZE:
+        raise ValueError("JSON message exceeds configured limit")
+    sock.sendall(_LEN_STRUCT.pack(len(payload)))
+    sock.sendall(payload)
+
+
+def recv_json(
+    sock: socket.socket,
+    max_size: int = MAX_JSON_MSG_SIZE,
+    deadline: float | None = None,
+) -> Any:
+    """Receive one JSON message.
+
+    Args:
+        sock: Connected socket.
+        max_size: Largest payload accepted.
+        deadline: ``time.monotonic()`` by which the whole message must have
+            arrived; a per-read timeout alone lets a peer trickle bytes
+            forever.
+
+    """
+    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size, deadline))
+    if length > max_size:
+        raise ValueError(f"Message size {length} exceeds limit {max_size}")
+    return json.loads(_recv_exact(sock, length, deadline))
+
+
+def _recv_exact(
+    sock: socket.socket, num_bytes: int, deadline: float | None = None
+) -> bytes:
     buf = bytearray()
     while len(buf) < num_bytes:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Peer did not send its message in time")
+            sock.settimeout(remaining)
         chunk = sock.recv(num_bytes - len(buf))
         if not chunk:
             raise ConnectionError("Socket closed while receiving message")
