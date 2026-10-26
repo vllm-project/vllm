@@ -45,7 +45,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
@@ -128,12 +128,14 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
+        info: CPUOffloadingInfo | None = None,
     ):
         super().__init__(
             num_chunks=num_chunks,
             cache_policy=cache_policy,
             cache_policy_module_path=cache_policy_module_path,
             enable_events=enable_events,
+            info=info,
         )
         self._mmap_region = mmap_region
         # read/write is for CPU<->secondary transfers,
@@ -542,8 +544,7 @@ class TieringOffloadingManager(OffloadingManager):
                     self.primary_tier.complete_read(
                         transfer_job.keys, transfer_job.req_context
                     )
-                    if completed_job.success:
-                        self._update_backpressure(tier, job_metadata, completed_job)
+                    self._update_backpressure(tier, job_metadata, completed_job)
 
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int
@@ -563,13 +564,16 @@ class TieringOffloadingManager(OffloadingManager):
         if detector is None:
             return
         was_under_pressure = detector.is_under_pressure()
-        tj = job_metadata.transfer_job
-        num_bytes = (
-            completed_job.transfer_bytes
-            if completed_job.transfer_bytes is not None
-            else len(tj.keys) * tier.block_size_bytes
-        )
-        detector.update(tj.submit_time, num_bytes)
+        if completed_job.success:
+            tj = job_metadata.transfer_job
+            num_bytes = (
+                completed_job.transfer_bytes
+                if completed_job.transfer_bytes is not None
+                else len(tj.keys) * tier.block_size_bytes
+            )
+            detector.update(tj.submit_time, num_bytes)
+        else:
+            detector.on_store_failed()
         if detector.is_under_pressure() != was_under_pressure:
             tier_idx = self._tier_index[tier]
             logger.info(

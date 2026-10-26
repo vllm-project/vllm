@@ -181,15 +181,22 @@ class NixlTransport(DataTransport):
                 self._backends,
             )
         else:
-            cfg = _NixlAgentConfig(
-                num_threads=self._num_threads, capture_telemetry=True
-            )
+            cfg = _NixlAgentConfig(backends=[], capture_telemetry=True)
             logger.info(
                 "NixlTransport %s: NIXL backends=[UCX] num_threads=%d",
                 self._agent_name,
                 self._num_threads,
             )
         self._agent = _NixlAgent(self._agent_name, cfg)
+        if not non_ucx_backends:
+            # The tier moves host memory only. UCX otherwise also wires up
+            # rc_gda GPU lanes to every peer, and their connect fails after a
+            # peer stalls or is replaced, leaving that peer unreachable until
+            # restart. UCX_* env vars win over engine_config.
+            params = {"engine_config": "TLS=^rc_gda"}
+            if self._num_threads > 0:
+                params["num_threads"] = str(self._num_threads)
+            self._agent.create_backend("UCX", params)
 
         total_size = self._num_blocks * self._block_len
         reg_descs = [(self._base_addr, total_size, 0, "")]
