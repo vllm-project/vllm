@@ -330,6 +330,9 @@ class ShardedRDTWeightTransferEngine(
         # fused module share one entry; replay dedups. A live name absent here
         # fails the plan build.
         self._name_to_plan: dict[str, list[_Scatter]] = {}
+        # leaf module -> [(param_name, fn)]: the post-load transforms of params
+        # whose loader is a ``composed_weight_loader`` (see _composed_post_fns).
+        self._post_load_fns: dict[Any, list[tuple[str, Any]]] = {}
         # name -> (dtype_name, shape) for every init name; the bake builds its
         # lazies from this.
         self._name_meta: dict[str, tuple[str, list[int]]] = {}
@@ -834,6 +837,7 @@ class ShardedRDTWeightTransferEngine(
             init_info.dtype_names,
             init_info.shapes,
         )
+        self._post_load_fns.clear()
         self._name_meta = {n: (d, s) for n, d, s in zip(names, dtype_names, shapes)}
         if not names:
             return
@@ -874,6 +878,17 @@ class ShardedRDTWeightTransferEngine(
         self._live_names = set(recorder.copied_names)
 
         n_groups = len({id(g) for g in self._name_to_plan.values()})
+        if self._post_load_fns:
+            logger.info(
+                "Sharded RDT: %d param(s) carry a composed post-load transform, "
+                "re-applied after each sync's scatter (e.g. %s)",
+                sum(len(v) for v in self._post_load_fns.values()),
+                next(
+                    f"{type(m).__name__}.{n}"
+                    for m, v in self._post_load_fns.items()
+                    for n, _ in v
+                ),
+            )
         logger.info(
             "Sharded RDT dry-run baked %d/%d names into %d leaf modules "
             "(%d live) in %.3fs",
@@ -933,6 +948,11 @@ class ShardedRDTWeightTransferEngine(
                     continue
                 # Bypass online_process_loader: stamp the *original* loader.
                 original = _get_original_loader(tensor)
+                # Reload metadata can retain a prior bake's recording stamp.
+                while hasattr(original, "_rdt_stamp_inner"):
+                    original = original._rdt_stamp_inner
+                for post_fn in _composed_post_fns(original):
+                    self._post_load_fns.setdefault(module, []).append((name, post_fn))
                 tensor.weight_loader = _make_stamp(module, name, original)
 
     def _restore_after_dry_run(self, model: torch.nn.Module) -> None:
@@ -1389,6 +1409,13 @@ class ShardedRDTWeightTransferEngine(
             for layer in layers:
                 info = LAYERWISE_INFO.get(layer)
                 assert info is not None  # completed leaf module is set up for reload
+                # The replay copies checkpoint bytes and never runs the loader, so
+                # a composed loader's post-step must be re-run here, once the
+                # module's last scatter has landed -- exactly what
+                # ``composed_loader`` does after its inner copy.
+                for pname, fn in self._post_load_fns.get(layer, ()):
+                    param = getattr(layer, pname)
+                    param.data.copy_(fn(param))
                 quant_method = getattr(layer, "quant_method", None)
                 if isinstance(quant_method, QuantizeMethodBase):
                     if hasattr(layer, "_already_called_process_weights_after_loading"):
@@ -1443,6 +1470,7 @@ class ShardedRDTWeightTransferEngine(
         self._router = None
         # Drop strong references to baked modules so the model can be freed.
         self._name_to_plan.clear()
+        self._post_load_fns.clear()
         self._name_meta.clear()
         self._live_names.clear()
         # Drop the cached plan (holds _Scatter refs to the baked layers).
@@ -1450,6 +1478,25 @@ class ShardedRDTWeightTransferEngine(
         # Release the receive buffers (their NIXL registration is pinned for the
         # process lifetime; freeing the tensors just drops our strong refs).
         self._dest_buffers = [{} for _ in range(self._ring_depth)]
+
+
+def _composed_post_fns(loader: Any) -> list[Any]:
+    """The post-load transforms of a ``composed_weight_loader``, in apply order.
+
+    ``composed_weight_loader(loader, fn)`` runs ``loader`` and then
+    ``param.data.copy_(fn(param))`` -- Mamba2 loads ``A`` this way, as
+    ``-exp(A_log)``. During the bake ``param`` is a meta tensor, not a
+    ``FakeRDTTensor``, so ``fn`` records nothing: only the inner copy of the raw
+    checkpoint slice is baked. Replaying that alone lands ``A_log`` in ``A``,
+    which silently breaks every SSM layer (positive ``A``: the state grows
+    instead of decaying, and generations stop terminating). The replay re-applies
+    these after the module's scatters. Empty for any other loader.
+    """
+    fns = []
+    while hasattr(loader, "post_load_fn"):
+        fns.append(loader.post_load_fn)
+        loader = loader.inner_loader
+    return fns[::-1]  # the innermost composition runs first
 
 
 def _plan_digest(keys_per_chunk: list) -> str:

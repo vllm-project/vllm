@@ -1617,6 +1617,10 @@ def composed_weight_loader(
         param.data.copy_(fn(param))
         return
 
+    # Weight transfer engines that replay recorded copies instead of running the
+    # loader (sharded_rdt) must re-apply ``fn`` themselves; expose both parts.
+    composed_loader.inner_loader = loader  # type: ignore[attr-defined]
+    composed_loader.post_load_fn = fn  # type: ignore[attr-defined]
     return composed_loader
 
 

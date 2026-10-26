@@ -34,6 +34,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
     ShardedRDTWeightTransferInitInfo,
+    _composed_post_fns,
     _dtype_from_name,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_fake import (
@@ -1464,6 +1465,9 @@ BAKE_MODELS = [
     # parameter subclasses out on those, and the plain second `load_weights`
     # this test compares against then cannot run.
     pytest.param("hmellor/tiny-random-DeepseekV2ForCausalLM", id="mla-moe"),
+    # MambaMixer2.A loads through composed_weight_loader (A = -exp(A_log)), a
+    # post-load transform the recorded copies alone do not reproduce.
+    pytest.param("yujiepan/mamba2-codestral-v0.1-tiny-random", id="mamba2"),
 ]
 
 
@@ -1503,6 +1507,106 @@ class TestRequiresTheRayExecutor:
             pass
 
         self._construct(_CustomExecutor)
+
+
+class TestComposedPostLoadTransform:
+    """The bake records only a ``composed_weight_loader``'s inner copy, so the
+    replay re-applies its ``fn`` (Mamba2's ``A = -exp(A_log)``)."""
+
+    def test_the_post_fn_is_recovered_from_a_composed_loader(self):
+        from vllm.model_executor.model_loader.weight_utils import (
+            composed_weight_loader,
+            sharded_weight_loader,
+        )
+
+        # As in vllm/model_executor/layers/mamba/mamba_mixer2.py.
+        loader = composed_weight_loader(
+            sharded_weight_loader(0), lambda x: -torch.exp(x.float())
+        )
+        (fn,) = _composed_post_fns(loader)
+        a_log = torch.tensor([0.0, 1.0, 2.0])
+        assert torch.allclose(fn(a_log), -torch.exp(a_log))
+
+    def test_nested_compositions_apply_innermost_first(self):
+        from vllm.model_executor.model_loader.weight_utils import (
+            composed_weight_loader,
+            default_weight_loader,
+        )
+
+        loader = composed_weight_loader(
+            composed_weight_loader(default_weight_loader, lambda x: x + 1),
+            lambda x: x * 10,
+        )
+        param = torch.zeros(2)
+        loader(param, torch.ones(2))
+
+        replayed = torch.ones(2)
+        for fn in _composed_post_fns(loader):
+            replayed = fn(replayed)
+        torch.testing.assert_close(replayed, param)
+
+    def test_rebaking_applies_the_transform_once(self):
+        """A second bake must not stack the transform: reload metadata can retain
+        the first bake's stamp, which must be unwrapped before matching."""
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            record_metadata_for_reloading,
+        )
+        from vllm.model_executor.model_loader.weight_utils import (
+            composed_weight_loader,
+            default_weight_loader,
+        )
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.A = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+                self.A.weight_loader = composed_weight_loader(
+                    default_weight_loader, lambda x: -torch.exp(x.float())
+                )
+
+            def load_weights(self, weights):
+                for _, weight in weights:
+                    self.A.weight_loader(self.A, weight)
+
+        model = _Model()
+        record_metadata_for_reloading(model)
+        eng = object.__new__(ShardedRDTWeightTransferEngine)
+        eng.model = model
+        eng.device = torch.device("cpu")
+        eng._name_to_plan = {}
+        eng._post_load_fns = {}
+        init_info = ShardedRDTWeightTransferInitInfo(
+            names=["A_log"], dtype_names=["float32"], shapes=[[4]]
+        )
+        a_log = torch.arange(4, dtype=torch.float32)
+
+        for _ in range(2):
+            eng._bake(init_info)
+            model.A.data.copy_(a_log)
+            for name, fn in eng._post_load_fns[model]:
+                param = model.get_parameter(name)
+                param.data.copy_(fn(param))
+            torch.testing.assert_close(model.A, -torch.exp(a_log))
+
+    def test_shutdown_releases_modules_with_post_load_transforms(self):
+        import gc
+        import weakref
+
+        cfg = SimpleNamespace(
+            parallel_config=SimpleNamespace(distributed_executor_backend="ray"),
+            model_config=None,
+        )
+        eng = ShardedRDTWeightTransferEngine(None, cfg, torch.device("cpu"), None)
+        mixer = torch.nn.Module()
+        mixer_ref = weakref.ref(mixer)
+        eng._name_to_plan["A_log"] = [_copy("A_log", layer=mixer)]
+        eng._post_load_fns[mixer] = [("A", lambda x: -torch.exp(x.float()))]
+        del mixer
+
+        eng.shutdown()
+        gc.collect()
+
+        assert mixer_ref() is None
 
 
 def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
@@ -1609,6 +1713,7 @@ def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
     eng.model = model
     eng.device = device
     eng._name_to_plan = {}
+    eng._post_load_fns = {}
     eng._name_meta = {}
     eng._live_names = set()
     eng._bake(
@@ -1677,6 +1782,11 @@ def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
                 dest = getattr(c.layer, c.param_name)
                 dest.as_strided(c.shape, c.stride, c.offset).copy_(t)
                 touched.add(param_name_of[(id(c.layer), c.param_name)])
+        # As _run_quant does once a module's scatters have landed.
+        for layer, fns in eng._post_load_fns.items():
+            for pname, fn in fns:
+                param = getattr(layer, pname)
+                param.data.copy_(fn(param))
 
     assert loaded, "the reference load wrote nothing"
     # The plan owns everything with a checkpoint source. Anything else the model
