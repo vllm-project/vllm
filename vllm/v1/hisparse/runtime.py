@@ -225,7 +225,7 @@ class HiSparseHostPool:
         self.backing: torch.Tensor | None = None
         self.registered: torch.Tensor | None = None
         self.shared_region: SharedOffloadRegion | None = None
-        self.shared_pinned: list[torch.Tensor] = []
+        self.pinned: list[torch.Tensor] = []
 
     def allocate(self, size: int) -> torch.Tensor:
         if self.backing is not None:
@@ -244,7 +244,7 @@ class HiSparseHostPool:
             ]
             assert config.hisparse_host_num_blocks is not None
             assert config.hisparse_host_block_stride is not None
-            _, self.shared_pinned, self.shared_region = allocate_hisparse_host_pools(
+            _, self.pinned, self.shared_region = allocate_hisparse_host_pools(
                 self.vllm_config,
                 tensor_sizes,
                 config.hisparse_host_num_blocks,
@@ -257,6 +257,7 @@ class HiSparseHostPool:
         else:
             check_hisparse_host_memory(size)
             self.backing, self.registered = allocate_pinned_host_pool(size)
+            self.pinned = [self.registered]
         return self.backing
 
 
@@ -776,7 +777,7 @@ class HiSparseRuntime:
         self.eager_host_mirror = config.eager_host_mirror
         self.resident_source_index = -1
         self.request_state_indices: torch.Tensor | None = None
-        self.shared_host_region: SharedOffloadRegion | None = None
+        self.host_pool: HiSparseHostPool | None = None
 
     @property
     def host_cache(self) -> torch.Tensor:

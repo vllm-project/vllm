@@ -154,10 +154,7 @@ def init_hisparse_kv_cache(
         )
         return kv_caches
     except Exception:
-        if host_pool.shared_region is not None:
-            release_pinned_state([], host_pool.shared_pinned, host_pool.shared_region)
-        elif host_pool.registered is not None:
-            release_pinned_state([], [host_pool.registered])
+        release_pinned_state([], host_pool.pinned, host_pool.shared_region)
         drop_hisparse_host_pool(vllm_config)
         raise
 
@@ -281,7 +278,7 @@ def bind_hisparse_kv_caches(
                 host_pool.registered.untyped_storage().data_ptr()
             )
             cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
-            cache_handle.runtime.shared_host_region = host_pool.shared_region
+            cache_handle.runtime.host_pool = host_pool
             cache_handle.runtime.bind_source_cache(
                 source_cache,
                 registered_host_pool=host_pool.registered,
