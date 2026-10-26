@@ -4,12 +4,15 @@
 import torch
 from torch.testing import assert_close
 
+from vllm.platforms import current_platform
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+
+DEVICE = current_platform.device_type
 
 
 def test_pack_seq_basic_fp8():
     """Test basic functionality of pack_seq_triton with fp8 and 3D tensors."""
-    device = "cuda"
+    device = DEVICE
     dtype = torch.float8_e4m3fn
 
     # Test cases with 3D tensors (N, H, D)
@@ -47,7 +50,7 @@ def test_pack_seq_basic_fp8():
 
 def test_pack_seq_custom_padding_fp8():
     """Test pack_seq_triton with custom padding values for fp8."""
-    device = "cuda"
+    device = DEVICE
     dtype = torch.float8_e4m3fn
     N, H, D, B = 20, 8, 16, 2
     lengths = torch.tensor([10, 10], device=device)
@@ -78,7 +81,7 @@ def test_pack_seq_custom_padding_fp8():
 
 def test_pack_seq_default_negative_inf_padding_fp8():
     """Test that pack_seq_triton uses -inf padding by default for fp8."""
-    device = "cuda"
+    device = DEVICE
     dtype = torch.float8_e4m3fn
     # B = 2
     N, H, D = 20, 8, 16
@@ -97,7 +100,7 @@ def test_pack_seq_default_negative_inf_padding_fp8():
 
 def test_pack_seq_edge_cases_fp8():
     """Test pack_seq_triton with edge cases for fp8."""
-    device = "cuda"
+    device = DEVICE
     dtype = torch.float8_e4m3fn
 
     # Test with single batch element
@@ -124,7 +127,7 @@ def test_pack_seq_edge_cases_fp8():
 
 def test_pack_seq_different_block_sizes_fp8():
     """Test pack_seq_triton with different block sizes for fp8."""
-    device = "cuda"
+    device = DEVICE
     dtype = torch.float8_e4m3fn
     N, H, D, B = 100, 16, 32, 4
     lengths = torch.tensor([25, 25, 25, 25], device=device)
@@ -148,7 +151,7 @@ def test_pack_seq_different_block_sizes_fp8():
 
 def test_pack_seq_shape_consistency():
     """Test that pack_seq_triton maintains shape consistency."""
-    device = "cuda"
+    device = DEVICE
     dtype = torch.float8_e4m3fn
     N, H, D, B = 20, 8, 16, 2
     lengths = torch.tensor([10, 10], device=device)
@@ -166,7 +169,7 @@ def test_pack_seq_shape_consistency():
 
 def test_pack_unpack_roundtrip_fp8():
     """Test that pack -> unpack gives us back the original data for fp8."""
-    device = "cuda"
+    device = DEVICE
     dtype = torch.float8_e4m3fn
 
     # Test cases with 3D tensors
@@ -202,7 +205,7 @@ def test_pack_unpack_roundtrip_fp8():
 
 def test_unpack_seq_triton_edge_cases_fp8():
     """Test unpack function with edge cases for fp8."""
-    device = "cuda"
+    device = DEVICE
     dtype = torch.float8_e4m3fn
 
     # Test with single batch element
