@@ -329,3 +329,292 @@ def test_aiter_sparse_mla_stays_off_with_kv_connector(monkeypatch, model) -> Non
     monkeypatch.setattr(rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True)
     assert rocm._aiter_sparse_mla_enabled(has_kv_transfer=False)
     assert not rocm._aiter_sparse_mla_enabled(has_kv_transfer=True)
+
+
+@pytest.mark.parametrize("wo_a_fp8", [False, True])
+@pytest.mark.parametrize(
+    "num_heads", [64, 128], ids=["aiter", "aiter_decode_opus_prefill"]
+)
+@torch.inference_mode()
+def test_deepseek_v4_forward_mqa_matches_reference(
+    monkeypatch,
+    workspace_init,
+    num_heads: int,
+    wo_a_fp8: bool,
+) -> None:
+    """forward_mqa on a mixed decode + prefill batch matches a torch reference
+    whichever kernels serve it: each row comes out inverse-RoPE'd exactly once,
+    by the store of the kernel that wrote it or by the standalone pass. With an
+    fp8 wo_a no row is rotated here (inverse_rope_group_quant does it later)."""
+    import vllm.models.deepseek_v4.amd.rocm as rocm
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
+    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+        quantize_and_insert_k_cache,
+    )
+    from vllm.platforms.rocm import on_gfx950
+    from vllm.utils.torch_utils import set_random_seed
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+
+    if not on_gfx950():
+        pytest.skip("the aiter sparse MLA kernel is gfx950-only")
+    device = torch.device("cuda")
+    set_random_seed(0)
+    head_dim, nope_dim, rope_dim = 512, 448, 64
+    window, block_size, max_model_len = 128, 64, 1024
+
+    # Two decode rows, then prefills with and without a prefix.
+    prefix_lens, query_lens = [300, 700, 100, 0], [1, 1, 40, 50]
+    seq_lens = [p + q for p, q in zip(prefix_lens, query_lens)]
+    num_reqs, num_tokens = len(query_lens), sum(query_lens)
+    num_blocks = num_reqs * max_model_len // block_size
+    block_table = torch.randperm(num_blocks, device=device).view(num_reqs, -1).int()
+    positions = torch.cat([torch.arange(p, s) for p, s in zip(prefix_lens, seq_lens)])
+    token_to_req = torch.repeat_interleave(
+        torch.arange(num_reqs), torch.tensor(query_lens)
+    )
+    positions = positions.to(device)
+
+    def slots(req, pos):
+        block = block_table[req, pos // block_size].long()
+        return block * block_size + pos % block_size
+
+    # The SWA cache holds every token so far, this step's included.
+    swa_cache = torch.zeros(
+        (num_blocks, block_size, 584), dtype=torch.uint8, device=device
+    )
+    for req, seq_len in enumerate(seq_lens):
+        k = torch.randn(seq_len, head_dim, device=device) * 0.5
+        pos = torch.arange(seq_len, device=device)
+        quantize_and_insert_k_cache(
+            k.bfloat16(), swa_cache, slots(req, pos), block_size=block_size
+        )
+
+    vllm_config = create_vllm_config(
+        model_name="facebook/opt-125m",
+        max_model_len=max_model_len,
+        block_size=block_size,
+        max_num_seqs=num_reqs,
+        max_num_batched_tokens=256,
+        hf_config_override={"compress_ratios": [1], "sliding_window": window},
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_dim,
+        dtype=torch.bfloat16,
+        sliding_window=window,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+    )
+    qsl = torch.tensor([0] + query_lens).cumsum(0).to(torch.int32)
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32)
+    common = CommonAttentionMetadata(
+        query_start_loc=qsl.to(device),
+        query_start_loc_cpu=qsl,
+        seq_lens=seq_lens_t.to(device),
+        seq_lens_cpu_upper_bound=seq_lens_t,
+        num_reqs=num_reqs,
+        num_actual_tokens=num_tokens,
+        max_query_len=max(query_lens),
+        max_seq_len=max(seq_lens),
+        block_table_tensor=block_table,
+        slot_mapping=slots(token_to_req.to(device), positions),
+        positions=positions,
+        causal=True,
+    )
+    monkeypatch.setattr(rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True)
+    swa_metadata = rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder(
+        swa_spec, ["swa"], vllm_config, device
+    ).build(0, common)
+    monkeypatch.setattr(
+        rocm,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"swa": swa_metadata}),
+    )
+
+    inv_freq = 1.0 / 10000 ** (
+        torch.arange(0, rope_dim, 2, device=device).float() / rope_dim
+    )
+    freqs = torch.outer(torch.arange(max_model_len, device=device).float(), inv_freq)
+    cos_sin_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
+
+    # An SWA-only layer, with the attributes the decode and prefill paths read.
+    attn = rocm.DeepseekV4ROCMAiterMLAAttention.__new__(
+        rocm.DeepseekV4ROCMAiterMLAAttention
+    )
+    torch.nn.Module.__init__(attn)
+    attn.prefix = "attn"
+    attn.swa_cache_layer = SimpleNamespace(prefix="swa", kv_cache=swa_cache)
+    attn.kv_cache = None
+    attn.compress_ratio = 1
+    attn.window_size = window
+    attn.max_image_tokens = 0
+    attn.topk_indices_buffer = torch.full(
+        (num_tokens, 1), -1, dtype=torch.int32, device=device
+    )
+    attn.n_local_heads = num_heads
+    attn.head_dim, attn.nope_head_dim, attn.rope_head_dim = head_dim, nope_dim, rope_dim
+    attn.scale = head_dim**-0.5
+    attn.attn_sink = torch.randn(num_heads, device=device)
+    attn.kv_cache_dtype = "fp8_ds_mla"
+    attn._has_kv_transfer = False
+    attn.rotary_emb = SimpleNamespace(cos_sin_cache=cos_sin_cache)
+    attn._wo_a_fp8_weight = torch.empty(0) if wo_a_fp8 else None
+    attn._use_aiter_sparse_mla_decode = rocm._aiter_sparse_mla_enabled(False)
+    attn._use_aiter_sparse_mla_prefill = rocm._aiter_sparse_mla_prefill_enabled(
+        num_heads, False
+    )
+
+    q = (torch.randn(num_tokens, num_heads, head_dim, device=device) * 0.5).bfloat16()
+    output = torch.empty_like(q)
+    attn.forward_mqa(q, None, positions, output)
+
+    # Reference: attention with the sink over each token's window of the
+    # dequantized cache, then the inverse GPT-J RoPE on the last 64 lanes.
+    keys = torch.empty(
+        num_reqs, max(seq_lens), head_dim, dtype=torch.bfloat16, device=device
+    )
+    dequantize_and_gather_k_cache(
+        keys,
+        swa_cache,
+        seq_lens=seq_lens_t.to(device),
+        gather_lens=None,
+        block_table=block_table,
+        block_size=block_size,
+        offset=0,
+        use_fnuz=current_platform.is_fp8_fnuz(),
+    )
+    expected = torch.empty(num_tokens, num_heads, head_dim, device=device)
+    for row in range(num_tokens):
+        pos = int(positions[row])
+        k = keys[token_to_req[row], max(0, pos - window + 1) : pos + 1].float()
+        scores = q[row].float() @ k.T * attn.scale
+        m = torch.maximum(scores.amax(-1), attn.attn_sink)
+        p = torch.exp(scores - m[:, None])
+        expected[row] = p @ k / (p.sum(-1) + torch.exp(attn.attn_sink - m))[:, None]
+    if not wo_a_fp8:
+        cos, sin = cos_sin_cache[positions].unsqueeze(1).chunk(2, dim=-1)
+        even = expected[..., nope_dim::2].clone()
+        odd = expected[..., nope_dim + 1 :: 2].clone()
+        expected[..., nope_dim::2] = even * cos + odd * sin
+        expected[..., nope_dim + 1 :: 2] = odd * cos - even * sin
+
+    # Per row, so a single unrotated or twice-rotated row cannot hide.
+    err = (output.float() - expected).flatten(1).norm(dim=1)
+    rel = err / expected.flatten(1).norm(dim=1)
+    assert rel.max() < 1e-2, rel
+
+
+@pytest.mark.parametrize("output", ["bf16", "mxfp8"])
+@torch.inference_mode()
+def test_sparse_mla_store_epilogue_matches_standalone_passes(output: str) -> None:
+    """The inverse RoPE (and MXFP8 quantization) aiter applies in its store
+    matches running the kernel without it and then the standalone passes it
+    replaces: rocm_inverse_rope_rows_ / rocm_inverse_rope_mxfp8_rows."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+        quantize_and_insert_k_cache,
+    )
+    from vllm.platforms.rocm import on_gfx950
+    from vllm.utils.torch_utils import set_random_seed
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_inverse_rope_mxfp8_rows,
+        rocm_inverse_rope_rows_,
+    )
+
+    if not on_gfx950():
+        pytest.skip("the aiter sparse MLA kernel is gfx950-only")
+    device = torch.device("cuda")
+    set_random_seed(0)
+    num_tokens, num_heads, head_dim, rope_dim, block_size = 10, 64, 512, 64, 64
+
+    def fp8_ds_mla_cache(num_rows: int) -> torch.Tensor:
+        cache = torch.zeros(
+            (num_rows // block_size, block_size, 584), dtype=torch.uint8, device=device
+        )
+        k = torch.randn(num_rows, head_dim, device=device) * 0.5
+        slots = torch.arange(num_rows, device=device)
+        quantize_and_insert_k_cache(k.bfloat16(), cache, slots, block_size=block_size)
+        return cache
+
+    def ragged(keys_per_row: int, num_rows: int):
+        indices = torch.cat(
+            [
+                torch.randperm(num_rows, device=device)[:keys_per_row]
+                for _ in range(num_tokens)
+            ]
+        )
+        indptr = torch.arange(0, (num_tokens + 1) * keys_per_row, keys_per_row)
+        return indptr.to(device, torch.int32), indices.int()
+
+    swa_cache, compressed_cache = fp8_ds_mla_cache(256), fp8_ds_mla_cache(128)
+    swa_indptr, swa_indices = ragged(32, 256)
+    topk_indptr, topk_indices = ragged(48, 128)
+    q = (torch.randn(num_tokens, num_heads, head_dim, device=device) * 0.5).bfloat16()
+    sink = torch.randn(num_heads, device=device)
+    positions = torch.randint(0, 4096, (num_tokens,), device=device)
+    inv_freq = 1.0 / 10000 ** (
+        torch.arange(0, rope_dim, 2, device=device).float() / rope_dim
+    )
+    freqs = torch.outer(torch.arange(4096, device=device).float(), inv_freq)
+    cos_sin_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
+
+    def sparse_mla(o, rotate: bool, out_mxfp8=None) -> None:
+        rocm_aiter_ops.triton_sparse_mla_fwd(
+            q,
+            swa_cache,
+            o,
+            head_dim**-0.5,
+            swa_indptr,
+            swa_indices,
+            attn_sink=sink,
+            extra_kv_buffer=compressed_cache,
+            extra_kv_indptr=topk_indptr,
+            extra_kv_indices=topk_indices,
+            inv_rope_positions=positions if rotate else None,
+            inv_rope_cos_sin_cache=cos_sin_cache if rotate else None,
+            out_mxfp8=out_mxfp8,
+        )
+
+    unrotated = torch.empty_like(q)
+    sparse_mla(unrotated, rotate=False)
+    expected = unrotated.clone()
+    rocm_inverse_rope_rows_(expected, positions, cos_sin_cache, rope_dim)
+
+    if output == "bf16":
+        fused = torch.empty_like(q)
+        sparse_mla(fused, rotate=True)
+        torch.testing.assert_close(fused, expected)
+        return
+
+    def mxfp8_buffers():
+        return (
+            torch.empty(
+                num_tokens,
+                num_heads * head_dim,
+                dtype=torch.float8_e4m3fn,
+                device=device,
+            ),
+            torch.empty(
+                num_tokens, num_heads * head_dim // 32, dtype=torch.uint8, device=device
+            ),
+        )
+
+    def dequantize(data, scale):
+        blocks = data.float().view(num_tokens, -1, 32)
+        blocks = blocks * torch.exp2(scale.float() - 127).unsqueeze(-1)
+        return blocks.view_as(q)
+
+    fused_mxfp8 = mxfp8_buffers()
+    sparse_mla(None, rotate=True, out_mxfp8=fused_mxfp8)
+    standalone_mxfp8 = mxfp8_buffers()
+    rocm_inverse_rope_mxfp8_rows(
+        unrotated, positions, cos_sin_cache, rope_dim, *standalone_mxfp8
+    )
+    # MXFP8 rounding alone puts both about 0.03 rel-L2 off the bf16 rows
+    for data, scale in (fused_mxfp8, standalone_mxfp8):
+        err = (dequantize(data, scale) - expected.float()).norm()
+        assert err / expected.float().norm() < 0.05
