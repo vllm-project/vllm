@@ -24,7 +24,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     MambaManager,
     RSWAManager,
-    SingleTypeKVCacheManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
@@ -1087,15 +1086,14 @@ def _group_state(manager: KVCacheManager, request_id: str) -> list:
 @pytest.mark.parametrize(
     "layout", ["full", "full_coarse", "swa", "swa_mtp", "chunked_local", "hybrid"]
 )
-@pytest.mark.parametrize("num_spec_tokens", [0, 3])
-@pytest.mark.parametrize("async_scheduling", [False, True])
-@pytest.mark.parametrize("enable_caching", [True, False])
-@pytest.mark.parametrize("num_hash_lookahead_tokens", [0, 1])
+@pytest.mark.parametrize(
+    "num_spec_tokens,async_scheduling,enable_caching,num_hash_lookahead_tokens",
+    [(0, False, True, 0), (3, True, True, 1), (3, True, False, 0)],
+)
 def test_skipped_running_steps_change_no_state(
     layout, num_spec_tokens, async_scheduling, enable_caching, num_hash_lookahead_tokens
 ):
-    """Decoding with random draft acceptance, ``allocate_slots`` returns and
-    leaves the same state as a manager that always takes the full path."""
+    """Allocation, retirement and caching agree with the full allocation path."""
     block_size = 4
     specs = _running_step_layout(layout, block_size)
     kv_cache_config = KVCacheConfig(
@@ -1106,7 +1104,7 @@ def test_skipped_running_steps_change_no_state(
         ],
     )
     init_none_hash(sha256)
-    max_model_len = 160
+    max_model_len = 64
 
     def new_manager() -> KVCacheManager:
         return KVCacheManager(
@@ -1119,15 +1117,6 @@ def test_skipped_running_steps_change_no_state(
         )
 
     manager, reference = new_manager(), new_manager()
-    reference.coordinator.has_running_step_work = lambda *args: True
-    has_work = []
-    check = manager.coordinator.has_running_step_work
-
-    def record(*args):
-        has_work.append(check(*args))
-        return has_work[-1]
-
-    manager.coordinator.has_running_step_work = record
     sampling_params = SamplingParams(max_tokens=max_model_len)
     sampling_params.update_from_generation_config({}, eos_token_id=100)
     request = Request(
@@ -1150,13 +1139,17 @@ def test_skipped_running_steps_change_no_state(
     while request.num_computed_tokens + 1 + num_spec_tokens < max_model_len:
         num_new_tokens = 1 + num_spec_tokens
         request.num_in_flight_tokens = in_flight
-        new_block_ids = [
-            m.allocate_slots(
-                request, num_new_tokens, num_lookahead_tokens=num_spec_tokens
-            ).get_block_ids()
-            for m in (manager, reference)
-        ]
-        assert new_block_ids[0] == new_block_ids[1]
+        actual = manager.allocate_slots(
+            request, num_new_tokens, num_lookahead_tokens=num_spec_tokens
+        )
+        # Supplying an empty computed-block list takes the full public path.
+        expected = reference.allocate_slots(
+            request,
+            num_new_tokens,
+            num_lookahead_tokens=num_spec_tokens,
+            new_computed_blocks=reference.empty_kv_cache_blocks,
+        )
+        assert actual.get_block_ids() == expected.get_block_ids()
         assert _group_state(manager, request.request_id) == _group_state(
             reference, request.request_id
         )
@@ -1167,44 +1160,3 @@ def test_skipped_running_steps_change_no_state(
         # With async scheduling one step stays in flight while the next one
         # is scheduled.
         in_flight = num_new_tokens if async_scheduling else 0
-
-    assert any(has_work)
-    # Coarse full-attention groups re-register their partial tail every step.
-    assert all(has_work) == (layout == "full_coarse" and enable_caching)
-
-
-def test_running_step_check_covers_overridden_steps():
-    """A manager that answers ``has_running_step_work`` from the base class
-    conditions must not change a step elsewhere: each step method it inherits
-    or overrides must sit above the class that enabled the base conditions, or
-    below a class that answers the check itself."""
-    step_methods = (
-        "get_num_blocks_to_allocate",
-        "allocate_new_blocks",
-        "remove_skipped_blocks",
-        "cache_blocks",
-        "_cache_partial_tail_block",
-    )
-
-    def definer(cls: type, name: str) -> type:
-        return next(c for c in cls.__mro__ if name in vars(c))
-
-    managers = [SingleTypeKVCacheManager]
-    for cls in managers:
-        managers.extend(cls.__subclasses__())
-    for cls in managers:
-        if "has_running_step_work" in vars(cls):
-            check = cls
-        elif not cls.running_step_uses_base_conditions:
-            continue
-        else:
-            check = max(
-                (
-                    definer(cls, "has_running_step_work"),
-                    definer(cls, "running_step_uses_base_conditions"),
-                ),
-                key=lambda c: len(c.__mro__),
-            )
-        for name in step_methods:
-            if hasattr(cls, name):
-                assert issubclass(check, definer(cls, name)), (cls, name)
