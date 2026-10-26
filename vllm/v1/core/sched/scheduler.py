@@ -58,8 +58,6 @@ from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutp
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
-    get_mamba_prefill_checkpoint_position,
-    is_mamba_prefill_checkpoint_valid,
 )
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
@@ -350,9 +348,6 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
-            enable_mamba_shared_prefix_checkpoint=(
-                self.cache_config.enable_mamba_shared_prefix_checkpoint
-            ),
         )
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
@@ -412,42 +407,7 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.scheduler_reserve_full_isl
         )
 
-        self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
-        self.need_mamba_block_aligned_split = (
-            self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
-        )
-        # TODO: Support models with multiple Mamba specs that require different
-        # prefill checkpoint alignments instead of selecting the first one.
-        self.mamba_prefill_checkpoint_alignment = next(
-            (
-                group.kv_cache_spec.prefill_checkpoint_alignment
-                for group in kv_cache_config.kv_cache_groups
-                if isinstance(group.kv_cache_spec, MambaSpec)
-            ),
-            None,
-        )
-        self.mamba_has_prefill_checkpoint_blocks = self.has_mamba_layers and all(
-            not isinstance(group.kv_cache_spec, MambaSpec)
-            or group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
-            for group in kv_cache_config.kv_cache_groups
-        )
-        # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.
-        # Split there only if the backend cannot save it within the final chunk.
-        self.mamba_partial_cache_hit = (
-            self.need_mamba_block_aligned_split
-            and self.hash_block_size < self.block_size
-            and self.kv_cache_manager.coordinator.enable_partial_hash_hits
-        )
-        # Opt-in: also stop at the junction, where an eagle sibling resumes. The
-        # manager decides whether it can check-point there (per-group eagle bit,
-        # no MTP re-prefill tail); splitting for a stop it would refuse costs a
-        # forward pass and displaces the block-boundary stop.
-        self.mamba_shared_prefix_checkpoint = (
-            self.mamba_partial_cache_hit
-            and self.kv_cache_manager.mamba_shared_prefix_checkpoint
-        )
-
         # Counts of non-empty steps scheduled / processed. update_from_output
         # is called once per scheduled step in FIFO order, so these stay in sync.
         self.sched_step_seq = 0
@@ -523,121 +483,6 @@ class Scheduler(SchedulerInterface):
             min_num_output_tokens += 1
         # Reaching max_tokens finishes the request, so no step verifies the drafts.
         return min_num_output_tokens >= request.max_tokens
-
-    def _mamba_block_aligned_split(
-        self,
-        request: Request,
-        num_new_tokens: int,
-        num_new_local_computed_tokens: int = 0,
-        num_external_computed_tokens: int = 0,
-    ) -> int:
-        """Clip a prefill chunk so it ends where Mamba state must be cached.
-
-        In "align" cache mode reusable SSM states are materialized at block
-        boundaries, plus mandatory early stops (the prompt's partial-tail hash
-        boundary, a detected shared-prefix junction). If a block is larger
-        than the configured prefill chunk limit, intermediate chunks keep
-        private running state until they reach the next cacheable position.
-        """
-        start = (
-            request.num_computed_tokens
-            + num_new_local_computed_tokens
-            + num_external_computed_tokens
-        )
-        # Split only during prefill: `request.num_tokens - 1` extends this to
-        # resumed requests replaying their output tokens.
-        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
-        if start >= prefill_end:
-            return num_new_tokens
-
-        block_size = self.cache_config.block_size
-        # The last block-aligned position whose state can be cached. With
-        # Eagle, FullAttn prunes the last matching block, so back off one
-        # block to avoid a Mamba cache miss.
-        ckpt_block_size = (
-            self.hash_block_size if self.mamba_partial_cache_hit else self.block_size
-        )
-        last_cache_position = get_mamba_prefill_checkpoint_position(
-            request.num_tokens,
-            block_size,
-            self.use_eagle_block_drop,
-        )
-
-        end = start + num_new_tokens
-        checkpoint_position = get_mamba_prefill_checkpoint_position(
-            prefill_end,
-            ckpt_block_size,
-            drop_eagle_block=self.use_eagle_block_drop,
-        )
-        use_internal_checkpoint = (
-            self.mamba_has_prefill_checkpoint_blocks
-            and end >= prefill_end
-            and is_mamba_prefill_checkpoint_valid(
-                query_start=start,
-                query_end=end,
-                checkpoint_position=checkpoint_position,
-                hash_block_size=self.hash_block_size,
-                mamba_block_size=block_size,
-                checkpoint_alignment=self.mamba_prefill_checkpoint_alignment,
-            )
-        )
-        if use_internal_checkpoint:
-            last_cache_position = 0
-        # Invariant: slot p holds the state after exactly (p + 1) * block_size
-        # tokens. State is written at chunk ends, so chunk ends must be block
-        # aligned. Exempt: the prompt's last chunk, whose slot decode advances
-        # to the boundary. A block too wide for one chunk advances sub-block
-        # and re-aligns at the next boundary.
-        if end < prefill_end:
-            max_prefill_tokens = self.max_num_scheduled_tokens
-            long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
-            if long_prefill_threshold > 0:
-                max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
-            aligned_end = end // block_size * block_size
-            if aligned_end > start or block_size <= max_prefill_tokens:
-                end = aligned_end
-
-        next_block_boundary = (start // block_size + 1) * block_size
-        tail_boundary = (
-            get_mamba_prefill_checkpoint_position(
-                request.num_prompt_tokens,
-                self.hash_block_size,
-                self.use_eagle_block_drop,
-            )
-            if self.mamba_partial_cache_hit and not use_internal_checkpoint
-            else 0
-        )
-        junction = request.shared_prefix_boundary
-        # Block-floored: a sub-block junction's state is not separately cacheable.
-        block_floored = start + (junction - start) // block_size * block_size
-        # Past the prompt the manager writes nothing, so fall back to the
-        # block-floored stop rather than dropping it: a resumed request replaying
-        # output tokens can still observe a junction there.
-        junction_stop = (
-            junction
-            if self.mamba_shared_prefix_checkpoint
-            and junction <= request.num_prompt_tokens
-            else block_floored
-        )
-        stops = (
-            # Same invariant: a chunk starting mid-block stops at the boundary
-            # rather than running past it.
-            next_block_boundary
-            if start % block_size != 0 and not use_internal_checkpoint
-            else 0,
-            # Never run past the last cacheable block boundary mid-chunk.
-            last_cache_position,
-            # Stop at the prompt checkpoint unless the backend saves it internally.
-            tail_boundary
-            if last_cache_position < tail_boundary < request.num_prompt_tokens
-            else 0,
-            # Marconi shared-prefix junction: cache its state so sibling
-            # requests sharing the prefix can reuse it.
-            junction_stop if start < junction < end else 0,
-        )
-        # Stop at the earliest mandatory position strictly inside the chunk.
-        end = min((s for s in stops if start < s < end), default=end)
-        return max(end - start, 0)
 
     def _get_local_prefix_cache_hit(
         self, request: Request, max_cache_hit_length: int | None = None
@@ -834,12 +679,6 @@ class Scheduler(SchedulerInterface):
                 - self.num_sampled_tokens_per_step,
             )
 
-            # Apply Mamba alignment before encoder caps.
-            if self.need_mamba_block_aligned_split:
-                num_new_tokens = self._mamba_block_aligned_split(
-                    request, num_new_tokens
-                )
-
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
             external_load_encoder_input: list[int] = []
@@ -876,9 +715,7 @@ class Scheduler(SchedulerInterface):
                 #    its max_total_tokens or max_model_len.
                 # 2. The encoder budget is exhausted.
                 # 3. The encoder cache is exhausted.
-                # 4. Insufficient budget for a block-aligned chunk in hybrid
-                #    models with mamba cache mode \"align\".
-                # 5. Insufficient budget to keep a multi-module MTP prefill
+                # 4. Insufficient budget to keep a multi-module MTP prefill
                 #    chunk out of the prefill-lookahead window.
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
@@ -1318,29 +1155,6 @@ class Scheduler(SchedulerInterface):
 
                     num_new_tokens = min(num_new_tokens, request_token_budget)
                     assert num_new_tokens > 0
-
-                    # Apply Mamba alignment before encoder caps.
-                    if self.need_mamba_block_aligned_split:
-                        num_new_tokens = self._mamba_block_aligned_split(
-                            request,
-                            num_new_tokens,
-                            num_new_local_computed_tokens,
-                            num_external_computed_tokens,
-                        )
-                        if num_new_tokens == 0:
-                            break
-                        if (
-                            pad_spec_decode
-                            and num_new_tokens != 1 + self.num_spec_tokens
-                        ):
-                            # Alignment clipped the placeholder rows. The split
-                            # aligns prefill chunks, but the padded tail rows are
-                            # speculative positions, not prefill tokens. A padded
-                            # request must keep all 1 + num_spec rows or the
-                            # sampler's row count stops matching its query rows,
-                            # so drop the padding instead of shortening it.
-                            num_new_tokens = 1
-                            pad_spec_decode = False
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
@@ -3209,13 +3023,6 @@ class Scheduler(SchedulerInterface):
         if self.connector is None:
             return False, None
 
-        finished_partial_tails: list[tuple[int, int, int]] = []
-        kv_transfer_config = self.vllm_config.kv_transfer_config
-        if kv_transfer_config is not None and kv_transfer_config.is_kv_producer:
-            finished_partial_tails = (
-                self.kv_cache_manager.finalize_partial_tail_offloads(request)
-            )
-
         # Free any out-of-window prefix blocks before we hand the block table to
         # the connector, on the processed-token basis (see `allocate_slots`).
         self.kv_cache_manager.remove_skipped_blocks(
@@ -3230,14 +3037,6 @@ class Scheduler(SchedulerInterface):
             request_id=request.request_id,
             num_computed_tokens=request.num_computed_tokens,
         )
-        partial_tail_delay = False
-        if finished_partial_tails:
-            partial_tail_delay = self.connector.register_finished_partial_tail(
-                request,
-                block_ids,
-                finished_partial_tails,
-            )
-
         if not isinstance(self.connector, SupportsHMA):
             # NOTE(Kuntai): We should deprecate this code path after we enforce
             # all connectors to support HMA.
@@ -3251,7 +3050,7 @@ class Scheduler(SchedulerInterface):
             delay_free, kv_xfer_params = self.connector.request_finished_all_groups(
                 request, block_ids
             )
-        return delay_free or partial_tail_delay, kv_xfer_params
+        return delay_free, kv_xfer_params
 
     def _request_remaining_blocks(self, request: Request) -> int:
         """Blocks `request` still needs to hold its full sequence and be promoted."""

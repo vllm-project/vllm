@@ -33,7 +33,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
     resolve_kv_cache_block_sizes,
 )
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -334,7 +334,6 @@ class UMBPStoreConnectorScheduler:
         )
         self._requests: dict[str, Request] = {}
         self._request_trackers: dict[str, RequestTracker] = {}
-        self._pending_finished_stores: dict[str, list[BlockTransferPlan]] = {}
         self._gpu_block_pool: BlockPool | None = None
         self._store_events: dict[int, _StoreEvent] = {}
         self._kv_events: list[KVCacheEvent] = []
@@ -772,16 +771,12 @@ class UMBPStoreConnectorScheduler:
             and block_state.boundary_state_offloads
         ):
             self._add_boundary_state_plans(
-                block_state.boundary_state_offloads,
+                block_state,
                 meta,
                 set(scheduler_output.finished_req_ids),
                 set(scheduler_output.preempted_req_ids or ()),
             )
 
-        finished_stores = self._pending_finished_stores
-        self._pending_finished_stores = {}
-        for plans in finished_stores.values():
-            meta.store_plans.extend(plans)
         event_plan_groups = tuple(meta.store_plan_groups())
         if event_plan_groups:
             event = self._store_event_counter
@@ -803,17 +798,11 @@ class UMBPStoreConnectorScheduler:
                         )
                     ]
                 )
-                # Transfer ownership from request-finish pins to the event.
-                for plans in finished_stores.values():
-                    self._gpu_block_pool.free_blocks(
-                        self._gpu_block_pool.blocks[block_id]
-                        for block_id in dict.fromkeys(plan.block_id for plan in plans)
-                    )
         return meta
 
     def _add_boundary_state_plans(
         self,
-        offloads: dict[str, list[tuple[int, int, int]]],
+        block_state: KVConnectorBlockState,
         meta: UMBPConnectorMetadata,
         finished: set[str],
         preempted: set[str],
@@ -822,7 +811,7 @@ class UMBPStoreConnectorScheduler:
         if self.codec is None:
             return
         prefix_groups = set(self.kv_cache_config.prefix_cacheable_group_ids)
-        for request_id, entries in offloads.items():
+        for request_id, entries in block_state.boundary_state_offloads.items():
             if request_id in finished or request_id in preempted:
                 logger.debug(
                     "UMBP boundary offloads dropped request=%s entries=%d: %s",
@@ -840,8 +829,27 @@ class UMBPStoreConnectorScheduler:
                     len(entries),
                 )
                 continue
+            sources = list(entries)
+            # A sub-block Mamba state (the prompt's internal prefill checkpoint)
+            # resumes only with the full-attention page at the same boundary.
+            block_ids = block_state.get_block_ids(request_id)
+            for boundary_tokens in {entry[2] for entry in entries}:
+                for group_id in prefix_groups:
+                    spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+                    group_block_size = self.group_block_sizes[group_id]
+                    if (
+                        block_ids is None
+                        or not isinstance(spec, FullAttentionSpec)
+                        or boundary_tokens % group_block_size == 0
+                    ):
+                        continue
+                    index = boundary_tokens // group_block_size
+                    if index < len(block_ids[group_id]):
+                        sources.append(
+                            (group_id, block_ids[group_id][index], boundary_tokens)
+                        )
             plans: list[BlockTransferPlan] = []
-            for group_id, block_id, boundary_tokens in entries:
+            for group_id, block_id, boundary_tokens in sources:
                 if group_id not in prefix_groups or block_id == NULL_BLOCK_ID:
                     continue
                 if boundary_tokens <= 0:
@@ -1165,84 +1173,6 @@ class UMBPStoreConnectorScheduler:
             pending.future.cancel()
         return False, None
 
-    def register_finished_partial_tail(
-        self,
-        request: Request,
-        block_ids: tuple[list[int], ...],
-        partial_tail_offloads: list[tuple[int, int, int]],
-    ) -> bool:
-        """Pin finished boundary pages without delaying core request cleanup."""
-        pool = self._gpu_block_pool
-        if (
-            not self.store_enabled
-            or self.codec is None
-            or not partial_tail_offloads
-            or pool is None
-        ):
-            return False
-        if request.request_id in self._pending_finished_stores:
-            return False
-        prefix_groups = set(self.kv_cache_config.prefix_cacheable_group_ids)
-        tracker = self._request_trackers.get(request.request_id)
-        if tracker is None:
-            return False
-        boundaries = {entry[2] for entry in partial_tail_offloads}
-        if len(boundaries) != 1:
-            logger.warning("UMBP partial tail entries span several boundaries")
-            return False
-        boundary = boundaries.pop()
-        if (
-            boundary <= 0
-            or boundary % self.hash_block_size != 0
-            or boundary != request.num_computed_tokens
-            or bool(getattr(request, "num_in_flight_tokens", 0))
-        ):
-            return False
-        hash_index = boundary // self.hash_block_size - 1
-        if hash_index >= len(request.block_hashes):
-            return False
-        sources = {
-            group_id: block_id for group_id, block_id, _ in partial_tail_offloads
-        }
-        if not sources.keys() <= prefix_groups:
-            return False
-        # Core hands off Mamba state pages. Include the matching FA tail page
-        # so every group can resolve the same fine-grained prefix boundary.
-        for group_id in prefix_groups:
-            spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
-            if (
-                isinstance(spec, FullAttentionSpec)
-                and boundary % self.group_block_sizes[group_id]
-            ):
-                index = boundary // self.group_block_sizes[group_id]
-                if index >= len(block_ids[group_id]):
-                    return False
-                sources.setdefault(group_id, block_ids[group_id][index])
-        plans: list[BlockTransferPlan] = []
-        for group_id, block_id in sources.items():
-            if block_id == NULL_BLOCK_ID or not 0 <= block_id < len(pool.blocks):
-                return False
-            if pool.blocks[block_id].is_null:
-                return False
-            group_block_size = self.group_block_sizes[group_id]
-            plans.append(
-                BlockTransferPlan(
-                    request_id=request.request_id,
-                    block_id=block_id,
-                    group_id=group_id,
-                    key=self.codec.key(request.block_hashes[hash_index], group_id),
-                    block_hash=request.block_hashes[hash_index],
-                    block_size=group_block_size,
-                )
-            )
-        # A Mamba page is a state snapshot, not a token-addressable byte array.
-        # Store full pages for both state and attention, matching restore.
-        pool.touch(
-            [pool.blocks[block_id] for block_id in dict.fromkeys(sources.values())]
-        )
-        self._pending_finished_stores[request.request_id] = plans
-        return False
-
     def update_connector_output(self, output: KVConnectorOutput) -> None:
         metadata = output.kv_connector_worker_meta
         if not isinstance(metadata, UMBPConnectorWorkerMetadata):
@@ -1430,14 +1360,13 @@ class UMBPStoreConnectorScheduler:
 
     def has_pending_push_work(self) -> bool:
         return (
-            bool(self._pending_finished_stores)
-            or bool(self._store_events)
+            bool(self._store_events)
             or self._event_lookup is not None
             or bool(self._pending_event_objects)
         )
 
     def reset_store(self) -> bool:
-        if self._store_events or self._pending_finished_stores:
+        if self._store_events:
             return False
         for pending in self._pending_lookups.values():
             pending.future.cancel()

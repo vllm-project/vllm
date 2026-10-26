@@ -15,7 +15,6 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -145,7 +144,6 @@ class KVCacheManager:
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
-        enable_mamba_shared_prefix_checkpoint: bool = False,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -178,21 +176,6 @@ class KVCacheManager:
             metrics_collector=self.metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
         )
-        # One predicate, read by both sides of the feature, so the scheduler
-        # cannot end a chunk at a junction the manager would refuse -- a refused
-        # junction costs a forward pass and displaces the block-boundary stop.
-        # Multi-module MTP is excluded because ``cache_blocks`` then hands the
-        # manager ``num_computed - num_reprefillable`` rather than the chunk end.
-        self.mamba_shared_prefix_checkpoint = (
-            enable_mamba_shared_prefix_checkpoint
-            and bool(self.coordinator.eagle_group_ids)
-            and self.coordinator.enable_partial_hash_hits
-            and self.coordinator.num_reprefillable_tokens == 0
-        )
-        if self.mamba_shared_prefix_checkpoint:
-            for manager in self.coordinator.single_type_managers:
-                if isinstance(manager, MambaManager):
-                    manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.retained_hit_group_ids = tuple(
@@ -881,12 +864,10 @@ class KVCacheManager:
         """Drain this step's boundary-state hand-offs for a KV connector.
 
         Returns ``{request_id: [(group_id, block_id, boundary_tokens), ...]}``
-        for mamba "align" boundary states: the
-        request's committed boundary-state snapshots and, on a sub-block partial
-        hit, the CoW copy of its last-prompt-boundary state. Only mamba "align"
-        groups contribute; empty otherwise. A connector reads the referenced
-        blocks — never resolving them positionally — and offloads them so a
-        later request can hit that prefix.
+        for the request's committed mamba "align" boundary-state snapshots. Only
+        mamba "align" groups contribute; empty otherwise. A connector reads the
+        referenced blocks — never resolving them positionally — and offloads
+        them so a later request can hit that prefix.
         """
         offloads: dict[str, list[tuple[int, int, int]]] = {}
         for mgr in self.coordinator.single_type_managers:
@@ -899,29 +880,6 @@ class KVCacheManager:
                 offloads.setdefault(req_id, []).append(
                     (group_id, block.block_id, boundary_tokens)
                 )
-        return offloads
-
-    def finalize_partial_tail_offloads(
-        self, request: Request
-    ) -> list[tuple[int, int, int]]:
-        """Consume safe producer partial tails when a request finishes.
-
-        A mamba align table block is a valid boundary source only if no later
-        token was forwarded. The connector pins and queues the exact table
-        block before request cleanup, then releases the pin when every worker
-        reports the store job complete.
-        """
-        offloads: list[tuple[int, int, int]] = []
-        for mgr in self.coordinator.single_type_managers:
-            finalized = mgr.finalize_partial_tail_offload(
-                request.request_id,
-                request.num_computed_tokens,
-                request.num_in_flight_tokens,
-            )
-            if finalized is None:
-                continue
-            group_id, block, boundary_tokens = finalized
-            offloads.append((group_id, block.block_id, boundary_tokens))
         return offloads
 
     def new_step_starts(self) -> None:

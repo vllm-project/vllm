@@ -712,7 +712,6 @@ class RequestTracker:
     # For a fresh request this is len(prompt). For a resumed-from-preemption
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
-    partial_tail_sent: bool = False
 
     def reset(self) -> None:
         self.token_len = 0
@@ -721,7 +720,6 @@ class RequestTracker:
         self.token_ids = None
         self.has_pending_offload = False
         self.prefill_end_tokens = 0
-        self.partial_tail_sent = False
 
     def update(
         self,
@@ -774,16 +772,13 @@ class ReqMeta:
     store_job_id: int | None = None
     # Blocks stored under an explicit prefix hash rather than by position:
     # core-provided mamba "align" states (a block-aligned entry is a committed
-    # snapshot, a non-aligned one the sub-block CoW prompt tail) and the
-    # scheduler-resolved non-Mamba blocks of the prompt's partial tail. The
+    # snapshot, a non-aligned one the prompt's internal prefill checkpoint) and
+    # the scheduler-resolved non-Mamba blocks of the prompt's partial tail. The
     # store-job reference keeps each block alive until every worker rank
     # finishes the job.
     boundary_puts: list[BoundaryPut] | None = None
     # Total computed prefix length at the end of this step.
     completed_token_len: int | None = None
-    # Set on the save that first covers the whole prompt, so the scheduler
-    # publishes the prompt's partial tail once rather than on every save.
-    publish_partial_tail: bool = False
 
     @staticmethod
     def from_request_tracker(
@@ -792,12 +787,9 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
-        save_partial_tail: bool = False,
         num_prompt_tokens: int | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
-        if save_partial_tail:
-            assert num_prompt_tokens is not None
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
@@ -806,15 +798,7 @@ class ReqMeta:
         chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
         num_tokens_to_save = input_token_len // block_size * block_size
 
-        publish_tail = (
-            save_partial_tail
-            and not tracker.partial_tail_sent
-            and num_prompt_tokens is not None
-            and 0 < num_prompt_tokens <= input_token_len
-        )
-        skip_save = skip_save or (
-            num_tokens_to_save < chunk_boundary and not publish_tail
-        )
+        skip_save = skip_save or num_tokens_to_save < chunk_boundary
         # A ReqMeta must never carry both a save AND a load.
         # The save would also be wasted work — the bytes are being looked up
         # in the store right now. Later cached_reqs steps save new tokens
@@ -826,7 +810,6 @@ class ReqMeta:
 
         if not skip_save:
             tracker.num_saved_tokens = num_tokens_to_save
-            tracker.partial_tail_sent |= publish_tail
 
         token_ids = None
         if tracker.token_ids and not skip_save:
@@ -861,7 +844,6 @@ class ReqMeta:
             num_prompt_tokens=num_prompt_tokens,
             prefill_end_tokens=tracker.prefill_end_tokens,
             completed_token_len=input_token_len,
-            publish_partial_tail=publish_tail and not skip_save,
         )
 
 

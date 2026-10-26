@@ -100,8 +100,8 @@ class GroupOffloadConfig(NamedTuple):
     kv_cache_spec: KVCacheSpec
     # Cached manager class for this group's KV cache spec, resolved at init time
     manager_cls: type[SingleTypeKVCacheManager]
-    # Partial-tail data for this group comes from the scheduler's CoW hand-off
-    # rather than the request block table.
+    # Partial-tail data for this group comes from the scheduler's boundary-state
+    # hand-off rather than the request block table.
     requires_cow_source: bool = False
     # True for EAGLE/MTP draft-model attention groups. The trailing chunk
     # of these groups is volatile and lacks a stable hash, so it must
@@ -1640,8 +1640,8 @@ class OffloadingConnectorScheduler:
             assert boundary <= max_boundary
 
             if self._max_eagle_proof_margin:
-                # The CoW hand-off arrives on the step that computes the prompt
-                # tokens past the boundary, and it is not offered again. Workers
+                # The checkpoint hand-off arrives on the step that computes the
+                # prompt's final chunk, and it is not offered again. Workers
                 # submit a store at the next step's start, after this step's
                 # forward, so count the prompt tokens this step computes.
                 prompt_tokens_after_step = min(

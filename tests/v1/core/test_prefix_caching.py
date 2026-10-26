@@ -2583,8 +2583,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     """Test shared prefix detection heuristic for mamba align cache mode
 
     HybridKVCacheCoordinator returns num_uncached_common > 0 when a shared
-    uncached prefix is detected. With mamba_align cache, _mamba_block_aligned_split
-    enforces scheduling aligned with the common prefix.
+    uncached prefix is detected.
     """
     block_size = 16
     manager = make_kv_cache_manager(
@@ -2622,28 +2621,6 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     assert num_computed == 0  # mamba_align doesn't cache intermediate blocks
     # boundary == junction: 2 shared blocks (num_computed 0 + 2 uncached blocks).
     assert shared_prefix_boundary == 2 * block_size
-
-    # Next, validate the align-mode Marconi split. It takes the shared-prefix
-    # junction (absolute) and stops the chunk there (req_2 has num_computed 0).
-    # Create minimal mock with just the needed attributes
-    mock = SimpleNamespace(
-        block_size=block_size,
-        cache_config=SimpleNamespace(block_size=block_size),
-        max_num_scheduled_tokens=3 * block_size,
-        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle_block_drop=False,
-        hash_block_size=block_size,
-        mamba_partial_cache_hit=False,
-        mamba_shared_prefix_checkpoint=False,
-        mamba_has_prefill_checkpoint_blocks=False,
-    )
-    req_2.shared_prefix_boundary = shared_prefix_boundary
-    num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
-        self=mock,
-        request=req_2,
-        num_new_tokens=3 * block_size,
-    )
-    assert num_new_tokens_adjusted == 2 * block_size  # adjust to the common prefix
 
     manager.allocate_slots(req_2, 3 * block_size, 0, computed_blocks)
     # Cleanup

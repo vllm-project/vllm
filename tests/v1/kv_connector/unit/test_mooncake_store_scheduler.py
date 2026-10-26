@@ -60,7 +60,6 @@ def _make_bare_scheduler(
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
-    scheduler._finished_partial_tail_metas = {}
     scheduler._gpu_block_pool = BlockPool(
         num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
     )
@@ -832,24 +831,14 @@ def test_from_request_tracker_load_with_can_load_false_still_saves():
     assert tracker.num_saved_tokens == 48
 
 
-@pytest.mark.parametrize("token_len,save_partial_tail", [(48, False), (13, True)])
-def test_from_request_tracker_no_load_saves_normally(token_len, save_partial_tail):
+def test_from_request_tracker_no_load_saves_normally():
     tracker = RequestTracker(
         req_id="req-0",
-        token_len=token_len,
+        token_len=48,
         allocated_block_ids=([0, 1, 2],),
         num_saved_tokens=0,
-        prefill_end_tokens=token_len,
+        prefill_end_tokens=48,
     )
-    if save_partial_tail:
-        tracker.token_len = 8
-        assert (
-            ReqMeta.from_request_tracker(
-                tracker, 16, save_partial_tail=True, num_prompt_tokens=token_len
-            )
-            is None
-        )
-        tracker.token_len = token_len
 
     req_meta = ReqMeta.from_request_tracker(
         tracker,
@@ -857,32 +846,24 @@ def test_from_request_tracker_no_load_saves_normally(token_len, save_partial_tai
         load_spec=None,
         skip_save=False,
         block_hashes=[b"h0", b"h1", b"h2"],
-        save_partial_tail=save_partial_tail,
-        num_prompt_tokens=token_len,
+        num_prompt_tokens=48,
     )
 
     assert req_meta is not None
     assert req_meta.can_save is True
     assert req_meta.load_spec is None
-    assert req_meta.token_len_chunk == token_len // 16 * 16
-    assert req_meta.completed_token_len == token_len
+    assert req_meta.token_len_chunk == 48
+    assert req_meta.completed_token_len == 48
     assert req_meta.boundary_puts is None
-    assert tracker.num_saved_tokens == token_len // 16 * 16
-    assert (
-        ReqMeta.from_request_tracker(
-            tracker,
-            16,
-            save_partial_tail=save_partial_tail,
-            num_prompt_tokens=token_len,
-        )
-        is None
-    )
+    assert tracker.num_saved_tokens == 48
+    assert ReqMeta.from_request_tracker(tracker, 16, num_prompt_tokens=48) is None
 
 
-def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
-    scheduler = _make_bare_scheduler(
-        hash_block_size=4, enable_partial_hash_hits=True, save_decode_cache=True
-    )
+@pytest.mark.parametrize("handoff", [False, True])
+def test_partial_tail_rides_only_with_the_mamba_checkpoint_handoff(handoff):
+    """The prompt's attention tail is stored only alongside the Mamba state at
+    the same checkpoint; alone it could never complete a hybrid hit."""
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     scheduler._store_group_ids = (0, 1)
     _add_unfinished_request(
         scheduler,
@@ -893,34 +874,31 @@ def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
     block_ids = ([0, 1, 2], [50])
     scheduler._request_trackers["req-0"].allocated_block_ids = block_ids
 
-    def step(num_computed_tokens: int, num_scheduled_tokens: int):
-        return scheduler.build_connector_meta(
-            SimpleNamespace(
-                finished_req_ids=set(),
-                preempted_req_ids=set(),
-                scheduled_new_reqs=[],
-                scheduled_cached_reqs=SimpleNamespace(
-                    req_ids=["req-0"],
-                    new_block_ids=[()],
-                    num_computed_tokens=[num_computed_tokens],
-                    resumed_req_ids=set(),
-                ),
-                num_scheduled_tokens={"req-0": num_scheduled_tokens},
-                scheduled_spec_decode_tokens={},
-                kv_connector_block_state=_make_connector_block_state(block_ids),
-            )
-        ).requests
+    requests = scheduler.build_connector_meta(
+        SimpleNamespace(
+            finished_req_ids=set(),
+            preempted_req_ids=set(),
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["req-0"],
+                new_block_ids=[()],
+                num_computed_tokens=[44],
+                resumed_req_ids=set(),
+            ),
+            num_scheduled_tokens={"req-0": 1},
+            scheduled_spec_decode_tokens={},
+            kv_connector_block_state=_make_connector_block_state(
+                block_ids, [(1, 50, 44)] if handoff else None
+            ),
+        )
+    ).requests
 
-    # The save that completes the prompt carries the tail for the worker.
-    (req_meta,) = step(44, 1)
-    assert req_meta.publish_partial_tail
-    assert req_meta.boundary_puts == [(0, 2, 44)]
-
-    # A later save does not recompute or resend it.
-    (req_meta,) = step(45, 3)
-    assert req_meta.token_len_chunk == 48
-    assert not req_meta.publish_partial_tail
-    assert req_meta.boundary_puts is None
+    if not handoff:
+        assert requests == []
+        return
+    (req_meta,) = requests
+    assert req_meta.token_len_chunk == 0
+    assert req_meta.boundary_puts == [(0, 2, 44), (1, 50, 44)]
 
 
 class _StubLookupClient:
@@ -1186,114 +1164,6 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     assert tracker.has_pending_offload is True
 
 
-@pytest.mark.parametrize("attention_block_size", [4, 8, 16])
-@pytest.mark.parametrize("use_eagle", [False, True])
-@pytest.mark.parametrize("num_workers", [1, 2])
-def test_finished_partial_tail_is_pre_pinned_as_store_job(
-    attention_block_size, use_eagle, num_workers
-):
-    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
-    scheduler._store_group_ids = (0, 1)
-    scheduler.client = SimpleNamespace(discard=lambda *_: None)
-    scheduler._num_workers = num_workers
-    groups = list(scheduler._store_coord.kv_cache_groups)
-    groups[0] = KVCacheGroupSpec(
-        ["attention"],
-        FullAttentionSpec(
-            block_size=attention_block_size,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-        ),
-        is_eagle_group=use_eagle,
-    )
-    scheduler._store_coord = MooncakeStoreCoordinator(
-        groups, 16, 4, use_eagle, enable_partial_hash_hits=True
-    )
-    prompt_tokens = 49 if use_eagle else 45
-    attention_ids = list(
-        range(1, (prompt_tokens + attention_block_size - 1) // attention_block_size + 1)
-    )
-    block_ids = (attention_ids, [50])
-    request = SimpleNamespace(
-        request_id="req-0",
-        block_hashes=[bytes([i]) for i in range(prompt_tokens // 4)],
-        num_computed_tokens=prompt_tokens,
-        num_prompt_tokens=prompt_tokens,
-    )
-    scheduler._request_trackers["req-0"] = RequestTracker(
-        req_id="req-0",
-        token_len=prompt_tokens,
-        allocated_block_ids=block_ids,
-        token_ids=list(range(prompt_tokens)),
-        prefill_end_tokens=prompt_tokens,
-    )
-    pool = scheduler._gpu_block_pool
-    owned_ids = attention_ids + [50]
-    pool.touch([pool.blocks[i] for i in owned_ids])
-
-    delay_free = scheduler.register_finished_partial_tail(
-        request,
-        block_ids,
-        [(1, 50, 44)],
-    )
-
-    # The exact source is pinned immediately, so the request can be freed
-    # before the next connector metadata build.
-    assert delay_free is False
-    proof_end = 48 if use_eagle else 44
-    expected = attention_ids[
-        32 // attention_block_size : (proof_end + attention_block_size - 1)
-        // attention_block_size
-    ]
-    pool.free_blocks([pool.blocks[i] for i in owned_ids])
-    assert all(
-        pool.blocks[i].ref_cnt == (1 if i in expected else 0) for i in attention_ids
-    )
-    assert pool.blocks[50].ref_cnt == 1
-
-    out = SimpleNamespace(
-        finished_req_ids={"req-0"},
-        preempted_req_ids=set(),
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=[],
-            new_block_ids=[],
-            num_computed_tokens=[],
-            resumed_req_ids=set(),
-        ),
-        num_scheduled_tokens={},
-        scheduled_spec_decode_tokens={},
-        kv_connector_block_state=_make_connector_block_state(),
-    )
-    meta = scheduler.build_connector_meta(out)
-
-    assert len(meta.requests) == 1
-    req_meta = meta.requests[0]
-    assert req_meta.req_id == "req-0"
-    assert req_meta.token_len_chunk == 0
-    assert req_meta.block_ids == block_ids
-    assert req_meta.block_hashes == request.block_hashes
-    assert req_meta.boundary_puts == [
-        (0, attention_ids[idx], min((idx + 1) * attention_block_size, proof_end))
-        for idx in range(
-            32 // attention_block_size,
-            (proof_end + attention_block_size - 1) // attention_block_size,
-        )
-    ] + [(1, 50, 44)]
-    assert set(scheduler._pinned_saves[req_meta.store_job_id][0]) == {50, *expected}
-    assert all(pool.blocks[i].ref_cnt == 1 for i in expected + [50])
-    assert scheduler._finished_partial_tail_metas == {}
-
-    for _ in range(num_workers - 1):
-        scheduler.update_connector_output(
-            _make_worker_output({req_meta.store_job_id: 1})
-        )
-        assert all(pool.blocks[i].ref_cnt == 1 for i in expected + [50])
-    scheduler.update_connector_output(_make_worker_output({req_meta.store_job_id: 1}))
-    assert all(pool.blocks[i].ref_cnt == 0 for i in owned_ids)
-
-
 def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
     """Core drops the Mamba checkpoint whenever EAGLE block drop is on, even if
     only the Mamba group carries the eagle flag."""
@@ -1333,23 +1203,23 @@ def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
 
 
 @pytest.mark.parametrize(
-    "completed, mamba_tails, publish, expected",
+    "completed, mamba_tails, expected",
     [
-        # The chunk ending at the junction (40) hands off its Mamba state. Its
-        # attention KV comes from the normal saves, so nothing is added here.
-        (40, [40], False, []),
-        # The prompt-completing save: blocks from the LCM floor 64 up to the
-        # checkpoint 68 plus the EAGLE proof unit, whether or not the junction
-        # hand-off is in the same save.
-        (75, [68], True, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
-        (75, [40, 68], True, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
+        # No Mamba state at the checkpoint: the attention tail alone is useless.
+        (75, [], []),
+        # A sub-block hand-off off the prompt checkpoint (40) adds nothing.
+        (40, [40], []),
+        # The prompt checkpoint hand-off: blocks from the LCM floor 64 up to the
+        # checkpoint 68 plus the EAGLE proof unit, whatever else rides along.
+        (75, [68], [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
+        (75, [40, 68], [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
     ],
 )
-def test_shared_prefix_junction_handoff_adds_no_attention_tail(
-    completed, mamba_tails, publish, expected
+def test_attention_tail_follows_the_prompt_checkpoint_handoff(
+    completed, mamba_tails, expected
 ):
-    """``--enable-mamba-shared-prefix-checkpoint`` also hands off a sub-block
-    Mamba state at the shared-prefix junction, below the prompt checkpoint."""
+    """Only the Mamba hand-off at the prompt checkpoint pulls in the other
+    groups' tail KV."""
     groups = [
         KVCacheGroupSpec(
             ["attention"],
@@ -1380,7 +1250,6 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
         num_prompt_tokens=75,
         completed_token_len=completed,
         boundary_puts=[BoundaryPut(1, 60 + i, n) for i, n in enumerate(mamba_tails)],
-        publish_partial_tail=publish,
     )
 
     assert _partial_tail_non_mamba_puts(coord, req_meta, [4, 16]) == expected

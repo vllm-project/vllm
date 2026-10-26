@@ -79,9 +79,6 @@ def _partial_tail_non_mamba_puts(
     16, blocks of 4 tokens, and a checkpoint at 44, the full-attention blocks
     are 8-10, keyed at 36, 40 and 44.
 
-    A Mamba state handed off at any other position, i.e. a shared-prefix
-    junction (``--enable-mamba-shared-prefix-checkpoint``), adds no puts here.
-
     ``block_sizes`` are the per-group block sizes, indexed like
     ``req_meta.block_ids``.
     """
@@ -91,9 +88,9 @@ def _partial_tail_non_mamba_puts(
         if put.group_id in coord.mamba_group_ids
         and put.num_tokens % block_sizes[put.group_id]
     ]
-    # The tail is due on the save that first covers the prompt, or when Mamba
-    # hands off its checkpoint state.
-    if not mamba_tails and not req_meta.publish_partial_tail:
+    # The tail is due only when Mamba hands off its prompt checkpoint state;
+    # without it the other groups' tail KV can never complete a hybrid hit.
+    if not mamba_tails:
         return []
     prompt_tokens = req_meta.num_prompt_tokens
     completed = req_meta.completed_token_len
@@ -104,10 +101,9 @@ def _partial_tail_non_mamba_puts(
     boundary = get_mamba_prefill_checkpoint_position(
         prompt_tokens, hash_block_size, coord.use_eagle
     )
-    # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
-    # attention KV, EAGLE proof included, ends on an attention block end no later
-    # than this checkpoint's proof, so the normal and prompt-tail saves store it.
-    if not req_meta.publish_partial_tail and boundary not in mamba_tails:
+    # A sub-block hand-off elsewhere (e.g. a resumed request's checkpoint past
+    # the prompt) has no prompt-tail KV to pair with.
+    if boundary not in mamba_tails:
         return []
     num_hashes = len(req_meta.block_hashes)
     if boundary == 0 or boundary // hash_block_size > num_hashes:
@@ -202,7 +198,6 @@ class MooncakeStoreScheduler:
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
-        self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
@@ -366,7 +361,6 @@ class MooncakeStoreScheduler:
                 skip_save=is_consumer,
                 block_hashes=request_real.block_hashes,
                 num_prompt_tokens=request_real.num_prompt_tokens,
-                save_partial_tail=self.enable_partial_hash_hits,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -418,7 +412,6 @@ class MooncakeStoreScheduler:
                         skip_save=is_consumer,
                         block_hashes=request_real.block_hashes,
                         num_prompt_tokens=request_real.num_prompt_tokens,
-                        save_partial_tail=self.enable_partial_hash_hits,
                     )
                 else:
                     # Decode/chunked request
@@ -461,7 +454,6 @@ class MooncakeStoreScheduler:
                         skip_save=False,
                         block_hashes=unfinished_req.block_hashes,
                         num_prompt_tokens=unfinished_req.num_prompt_tokens,
-                        save_partial_tail=self.enable_partial_hash_hits,
                     )
 
                 if req_meta is not None:
@@ -512,13 +504,6 @@ class MooncakeStoreScheduler:
             )
 
         self._apply_current_save_block_ids(meta, scheduler_output)
-
-        # Finish-time handoffs arrive after the producing step's metadata was
-        # built. Their exact blocks were pinned when they were registered, so
-        # they remain valid after request cleanup and need no current snapshot.
-        for req_meta in self._finished_partial_tail_metas.values():
-            meta.add_request(req_meta)
-        self._finished_partial_tail_metas.clear()
 
         if not self._capacity_only:
             self._reference_save_blocks(meta)
@@ -597,78 +582,6 @@ class MooncakeStoreScheduler:
             self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
             pool.touch([pool.blocks[block_id] for block_id in block_ids])
 
-    def register_finished_partial_tail(
-        self,
-        request: Request,
-        block_ids: tuple[list[int], ...],
-        partial_tail_offloads: list[tuple[int, int, int]],
-    ) -> bool:
-        """Queue and pin a finish-time tail for the next connector step."""
-        if self.kv_role == "kv_consumer" or not partial_tail_offloads:
-            return False
-        tracker = self._request_trackers.get(request.request_id)
-        if tracker is None or not any(block_ids):
-            return False
-        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
-        if len(boundaries) != 1:
-            raise ValueError(
-                "Partial-tail offloads for one request must share a boundary"
-            )
-        boundary_tokens = next(iter(boundaries))
-        if boundary_tokens > tracker.prefill_end_tokens:
-            return False
-
-        mamba_puts: list[BoundaryPut] = []
-        for group_id, block_id, boundary in partial_tail_offloads:
-            store_group_id = self._store_group_id_by_kv_cache_group_id.get(group_id)
-            if store_group_id not in self._boundary_state_group_ids:
-                return False
-            if block_id == NULL_BLOCK_ID:
-                return False
-            mamba_puts.append(BoundaryPut(store_group_id, block_id, boundary))
-        req_meta = ReqMeta(
-            req_id=request.request_id,
-            token_len_chunk=0,
-            block_ids=tuple(
-                block_ids[group_id].copy() for group_id in self._store_group_ids
-            ),
-            block_hashes=list(request.block_hashes),
-            can_save=True,
-            num_prompt_tokens=request.num_prompt_tokens,
-            prefill_end_tokens=tracker.prefill_end_tokens,
-            boundary_puts=mamba_puts,
-            completed_token_len=request.num_computed_tokens,
-        )
-        coord = self._store_coord
-        assert coord is not None
-        req_meta.boundary_puts = [
-            *_partial_tail_non_mamba_puts(
-                coord,
-                req_meta,
-                [g.kv_cache_spec.block_size for g in coord.kv_cache_groups],
-            ),
-            *mamba_puts,
-        ]
-        pinned_block_ids = list(
-            dict.fromkeys(put.block_id for put in req_meta.boundary_puts)
-        )
-
-        pool = self._gpu_block_pool
-        assert pool is not None, (
-            "GPU block pool must be bound before a finish-time handoff"
-        )
-        assert request.request_id not in self._finished_partial_tail_metas
-        store_job_id = self._next_store_job_id
-        self._next_store_job_id += 1
-        self._pinned_saves[store_job_id] = (pinned_block_ids, self._num_workers)
-        pool.touch([pool.blocks[block_id] for block_id in pinned_block_ids])
-
-        req_meta.store_job_id = store_job_id
-        self._finished_partial_tail_metas[request.request_id] = req_meta
-        tracker.has_pending_offload = True
-        # The store job owns exact block refs, so request cleanup need not wait.
-        return False
-
     def _handle_boundary_state_offloads(
         self,
         offloads: dict[str, list[tuple[int, int, int]]],
@@ -676,8 +589,8 @@ class MooncakeStoreScheduler:
     ) -> None:
         """Attach exact boundary-state blocks to store jobs for this step.
 
-        Flushed in the step they arrive: the CoW copy is enqueued before the
-        connector event records, so this step's event fences the exact block.
+        Flushed in the step they arrive: this step's forward writes each state
+        before the connector event records, so that event fences the block.
         Entries ride the request's save meta when present, else an
         offload-only ReqMeta (``token_len_chunk=0`` skips the normal save,
         ``can_save=True`` takes the normal enqueue and store-job pinning path).

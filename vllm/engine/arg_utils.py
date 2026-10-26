@@ -818,9 +818,6 @@ class EngineArgs:
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode | None = None
-    enable_mamba_shared_prefix_checkpoint: bool = (
-        CacheConfig.enable_mamba_shared_prefix_checkpoint
-    )
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
 
@@ -1440,10 +1437,6 @@ class EngineArgs:
                 "default": None,
                 "help": _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE,
             },
-        )
-        cache_group.add_argument(
-            "--enable-mamba-shared-prefix-checkpoint",
-            **cache_kwargs["enable_mamba_shared_prefix_checkpoint"],
         )
         cache_group.add_argument(
             "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
@@ -2322,9 +2315,6 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
-            enable_mamba_shared_prefix_checkpoint=(
-                self.enable_mamba_shared_prefix_checkpoint
-            ),
             replayssm_buffer_len=self.replayssm_buffer_len,
             use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,

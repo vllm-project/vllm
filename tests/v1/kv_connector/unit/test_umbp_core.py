@@ -14,6 +14,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
     _DelayedLoadWorkerHandle,
     _DelayedStoreWorkerHandle,
     _EmbeddedRuntime,
+    _hybrid_kv_cache_config,
     _kv_cache_config,
     _SchedulerHandle,
     _StoreRecordingWorkerHandle,
@@ -1064,6 +1065,36 @@ def test_scheduler_stores_from_cores_current_block_table():
     )
 
     assert [plan.block_id for plan in metadata.iter_store_plans()] == [4]
+
+
+@pytest.mark.parametrize("boundary, expected", [(44, {(1, 9), (0, 3)}), (32, {(1, 9)})])
+def test_sub_block_mamba_handoff_also_stores_attention_tail(boundary, expected):
+    """A sub-block Mamba checkpoint resumes only with the attention page at the
+    same boundary; a block-aligned one is covered by the positional save."""
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded"}, prefix_match_unit=4),
+        _hybrid_kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("sub-block-tail")),
+    )
+    hashes = [bytes([i]) for i in range(12)]
+    request = make_request("r", num_tokens=48, block_hashes=hashes)
+    scheduler.update_state_after_alloc(
+        request, SimpleNamespace(get_block_ids=lambda group_ids: ([1, 2, 3], [9])), 0
+    )
+    current = {"r": ([1, 2, 3], [9])}
+    metadata = scheduler.build_connector_meta(
+        make_scheduler_output(
+            block_state=SimpleNamespace(
+                get_block_ids=current.get,
+                boundary_state_offloads={"r": [(1, 9, boundary)]},
+            ),
+        )
+    )
+
+    plans = list(metadata.iter_store_plans())
+    assert {(plan.group_id, plan.block_id) for plan in plans} == expected
+    assert {plan.block_hash for plan in plans} == {hashes[boundary // 4 - 1]}
 
 
 def test_eager_store_deduplicates_same_step_shared_prefix_keys():

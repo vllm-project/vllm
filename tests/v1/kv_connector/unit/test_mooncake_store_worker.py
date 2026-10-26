@@ -1010,8 +1010,8 @@ def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
 
 @pytest.mark.parametrize("use_eagle", [False, True])
 def test_partial_tail_ignores_handoff_off_prompt_boundary(use_eagle):
-    """A Mamba hand-off away from the prompt checkpoint (a shared-prefix
-    junction) gets no attention tail; only its own Mamba put remains."""
+    """A Mamba hand-off away from the prompt checkpoint gets no attention tail;
+    only its own Mamba put remains."""
     store = MagicMock()
     thread = _make_partial_tail_send_thread(store)
     thread.coord.use_eagle = use_eagle
@@ -1023,7 +1023,9 @@ def test_partial_tail_ignores_handoff_off_prompt_boundary(use_eagle):
     assert _resolve_partial_tail(thread, req).boundary_puts == [(1, 7, 8)]
 
 
-def test_eagle_attention_proof_published_after_checkpoint_handoff():
+def test_eagle_attention_proof_published_with_checkpoint_handoff():
+    """The checkpoint hand-off arrives on the prompt-completing step, so the
+    EAGLE proof block is stored in the same job as the Mamba state."""
     store = MagicMock()
     stored = set()
     store.batch_is_exist.side_effect = lambda keys: [int(k in stored) for k in keys]
@@ -1038,7 +1040,7 @@ def test_eagle_attention_proof_published_after_checkpoint_handoff():
     thread.coord.eagle_proof_margin_by_group = {0: 4}
     metadata = _make_partial_tail_req([1, 2, 3])
     metadata.num_prompt_tokens = 13
-    metadata.completed_token_len = 8
+    metadata.completed_token_len = 13
     metadata.boundary_puts = [(1, 7, 8)]
 
     assert thread._maybe_offload_boundary_states(
@@ -1046,19 +1048,9 @@ def test_eagle_attention_proof_published_after_checkpoint_handoff():
     )
     mamba_key = thread.token_databases[1].key_for(b"a1")
     attention_key = thread.token_databases[0].key_for(b"a2")
-    assert mamba_key in stored
-    assert attention_key not in stored
-
-    metadata.completed_token_len = 13
-    metadata.boundary_puts = None
-    metadata.publish_partial_tail = True
-    assert thread._maybe_offload_boundary_states(
-        _resolve_partial_tail(thread, metadata)
-    )
-    assert attention_key in stored
+    assert {mamba_key, attention_key} <= stored
     keys, addrs, *_ = store.batch_put_from_multi_buffers.call_args.args
     assert addrs[keys.index(attention_key)] == [0x1000 + 3 * 256]
-    assert mamba_key not in keys
 
 
 def test_partial_tail_offload_skips_null_source_blocks():
@@ -1418,8 +1410,8 @@ def test_mixed_snapshot_and_sub_block_offloads(saved_tokens, use_eagle):
 def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
     """Under DCP2 the attention block spans the LCM (16) and Mamba blocks are
     half that. The prompt-completing save writes one attention block and one
-    Mamba key: the boundary state from the CoW block, never the interior
-    Mamba blocks."""
+    Mamba key: the handed-off checkpoint block, never the interior Mamba
+    blocks."""
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
@@ -1459,7 +1451,6 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
         boundary_puts=[(1, 7, 44)],
         num_prompt_tokens=45,
         completed_token_len=45,
-        publish_partial_tail=True,
     )
     assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
     assert req.boundary_puts == [(0, 3, 44), (1, 7, 44)]
@@ -1472,10 +1463,9 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
     assert addrs == [[0x1000 + 3 * 256], *([[0x2000 + 7 * 256]] * len(mamba_puts))]
 
 
-def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
-    """A junction hand-off (``--enable-mamba-shared-prefix-checkpoint``) below
-    the prompt checkpoint stores its Mamba state under the junction hash and
-    no attention tail."""
+def test_off_checkpoint_handoff_writes_only_its_mamba_key():
+    """A sub-block hand-off below the prompt checkpoint stores its Mamba state
+    under its own hash and no attention tail."""
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
@@ -1504,7 +1494,7 @@ def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
     )
 
     hs = [bytes([i + 1]) * 4 for i in range(18)]
-    # 75-token prompt (checkpoint 68), chunk cut at the junction 40.
+    # 75-token prompt (checkpoint 68), hand-off at 40.
     req = ReqMeta(
         req_id="req-b",
         token_len_chunk=0,

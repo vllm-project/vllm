@@ -667,7 +667,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if group_ids is not None:
             group_ids = [group_ids[i] for i in missing]
         if req_meta.current_event is not None:
-            # Fence the CoW block copy enqueued earlier this step.
+            # Fence this step's forward, which writes the boundary states.
             req_meta.current_event.synchronize()
         if group_ids is not None:
             assert len(group_ids) == len(keys)
