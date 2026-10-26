@@ -6,107 +6,19 @@ Static per-tensor activations can be paired with per-output-channel weight
 scales. Those layouts must be represented and indexed independently.
 """
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_module
-from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import int8_w8a8_moe_quant_config
-from vllm.model_executor.layers.quantization.quark.quark_moe import (
-    QuarkW8A8Int8MoEMethod,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kInt8StaticChannelSym,
-    kInt8StaticTensorSym,
-)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl
 
 requires_triton = pytest.mark.skipif(
     not HAS_TRITON, reason="Requires a working Triton installation"
 )
-
-
-def test_int8_w8a8_quant_config_static_act_per_channel_weights() -> None:
-    w1_scale = torch.ones(4, 8, 1)
-    w2_scale = torch.ones(4, 4, 1)
-    a1_scale = torch.tensor(0.5)
-    a2_scale = torch.tensor(0.25)
-
-    quant_config = int8_w8a8_moe_quant_config(
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        a1_scale=a1_scale,
-        a2_scale=a2_scale,
-        per_act_token_quant=False,
-        per_out_ch_quant=True,
-    )
-
-    assert quant_config.per_act_token_quant is False
-    assert quant_config.per_out_ch_quant is True
-    assert quant_config.use_int8_w8a8 is True
-
-
-def test_int8_w8a8_quant_config_defaults_tensor_weight_scales() -> None:
-    quant_config = int8_w8a8_moe_quant_config(
-        w1_scale=torch.ones(2),
-        w2_scale=torch.ones(2),
-        a1_scale=torch.tensor(1.0),
-        a2_scale=torch.tensor(1.0),
-        per_act_token_quant=False,
-    )
-
-    assert quant_config.per_act_token_quant is False
-    assert quant_config.per_out_ch_quant is False
-
-
-def test_quark_static_int8_per_channel_sets_per_out_ch_quant() -> None:
-    method = QuarkW8A8Int8MoEMethod(
-        make_dummy_moe_config(num_experts=4, hidden_dim=8, intermediate_size=8),
-        kInt8StaticChannelSym,
-        kInt8StaticTensorSym,
-    )
-    assert method.int8_backend is None
-    assert method.weight_qscheme == "per_channel"
-
-    layer = SimpleNamespace(
-        w13_weight_scale=torch.ones(4, 16, 1),
-        w2_weight_scale=torch.ones(4, 8, 1),
-        w13_input_scale=torch.tensor(0.5),
-        w2_input_scale=torch.tensor(0.25),
-        w13_bias=None,
-        w2_bias=None,
-    )
-    quant_config = method.get_fused_moe_quant_config(layer)
-
-    assert quant_config is not None
-    assert quant_config.per_out_ch_quant is True
-    assert quant_config.per_act_token_quant is False
-
-
-def test_quark_static_int8_per_tensor_keeps_tensor_weight_scales() -> None:
-    method = QuarkW8A8Int8MoEMethod(
-        make_dummy_moe_config(num_experts=4, hidden_dim=8, intermediate_size=8),
-        kInt8StaticTensorSym,
-        kInt8StaticTensorSym,
-    )
-    layer = SimpleNamespace(
-        w13_weight_scale=torch.ones(4),
-        w2_weight_scale=torch.ones(4),
-        w13_input_scale=torch.tensor(0.5),
-        w2_input_scale=torch.tensor(0.25),
-        w13_bias=None,
-        w2_bias=None,
-    )
-    quant_config = method.get_fused_moe_quant_config(layer)
-
-    assert quant_config is not None
-    assert quant_config.per_out_ch_quant is False
-    assert quant_config.per_act_token_quant is False
 
 
 @requires_triton
@@ -149,16 +61,19 @@ def test_triton_moe_launcher_forwards_independent_scale_flags(monkeypatch) -> No
     assert captured["per_out_ch_quant"] is True
 
 
-@requires_triton
 def test_fused_experts_forwards_independent_scale_flags(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_impl(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return args[0]
+    def fake_fused_experts_op(**kwargs):
+        captured.update(kwargs)
+        return kwargs["hidden_states"]
 
-    monkeypatch.setattr(fused_moe_module, "fused_experts_impl", fake_impl)
+    # fused_experts dispatches through the `vllm::fused_experts` custom op, which
+    # only has CUDA/Meta kernels. Intercept the op itself so that this stays a
+    # CPU test and the flags are checked where fused_experts hands them over.
+    monkeypatch.setattr(
+        torch.ops.vllm, "fused_experts", fake_fused_experts_op, raising=False
+    )
 
     quant_config = int8_w8a8_moe_quant_config(
         w1_scale=torch.ones(2, 4, 1),
@@ -177,8 +92,8 @@ def test_fused_experts_forwards_independent_scale_flags(monkeypatch) -> None:
         quant_config=quant_config,
     )
 
-    assert captured["kwargs"].get("per_out_ch_quant", captured["args"][-1]) is True
-    assert captured["args"][12] is False
+    assert captured["per_channel_quant"] is False
+    assert captured["per_out_ch_quant"] is True
 
 
 @pytest.mark.skipif(

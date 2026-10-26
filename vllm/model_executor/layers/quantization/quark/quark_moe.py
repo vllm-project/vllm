@@ -1338,6 +1338,13 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        # Activation- and weight-scale layouts are independent: derive each from
+        # the quant key that describes it.
+        activation_quant_key = self.activation_quant_key
+        assert activation_quant_key is not None
+        per_act_token_quant = activation_quant_key.scale.group_shape.is_per_token()
+        per_out_ch_quant = self.weight_quant_key.scale.group_shape.is_per_channel()
+
         # Static-activation INT8 has no oracle backend (it uses the legacy
         # fused_experts path); build its config directly.
         if self.int8_backend is None:
@@ -1348,8 +1355,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 a2_scale=layer.w2_input_scale,
                 w1_bias=getattr(layer, "w13_bias", None),
                 w2_bias=getattr(layer, "w2_bias", None),
-                per_act_token_quant=False,
-                per_out_ch_quant=(self.weight_qscheme == "per_channel"),
+                per_act_token_quant=per_act_token_quant,
+                per_out_ch_quant=per_out_ch_quant,
             )
         return make_int8_moe_quant_config(
             int8_backend=self.int8_backend,
@@ -1359,8 +1366,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             a2_scale=layer.w2_input_scale,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-            per_act_token_quant=(self.weight_qscheme == "per_channel"),
-            per_out_ch_quant=(self.weight_qscheme == "per_channel"),
+            per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_out_ch_quant,
             layer=layer,
         )
 

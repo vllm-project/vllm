@@ -1590,6 +1590,43 @@ def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_
         assert torch.isfinite(logits).all()
 
 
+@pytest.mark.parametrize(
+    "weight_key, act_key, per_out_ch_quant",
+    [
+        (kInt8StaticChannelSym, kInt8StaticTensorSym, True),
+        (kInt8StaticTensorSym, kInt8StaticTensorSym, False),
+    ],
+    ids=["per_channel_weights", "per_tensor_weights"],
+)
+def test_quark_int8_moe_scale_layout_flags(
+    weight_key: QuantKey, act_key: QuantKey, per_out_ch_quant: bool
+) -> None:
+    """Static per-tensor activations can carry per-channel weight scales.
+
+    The activation and weight scale layouts are independent, so Quark static
+    INT8 must report them separately (the legacy fused_experts path indexes
+    W13/W2 channel scales off the weight layout, not the activation layout).
+    """
+    moe_config = _make_test_moe_config()
+    method = QuarkW8A8Int8MoEMethod(moe_config, weight_key, act_key)
+    assert method.int8_backend is None  # static activations stay on legacy path
+
+    intermediate = moe_config.intermediate_size
+    layer = SimpleNamespace(
+        w13_weight_scale=torch.ones(moe_config.num_experts, 2 * intermediate, 1),
+        w2_weight_scale=torch.ones(moe_config.num_experts, intermediate, 1),
+        w13_input_scale=torch.tensor(0.5),
+        w2_input_scale=torch.tensor(0.25),
+        w13_bias=None,
+        w2_bias=None,
+    )
+    quant_config = method.get_fused_moe_quant_config(layer)
+
+    assert quant_config is not None
+    assert quant_config.per_act_token_quant is False
+    assert quant_config.per_out_ch_quant is per_out_ch_quant
+
+
 @pytest.mark.parametrize("tp", [1])
 def test_quark_int8_w8a8_moe(vllm_runner, tp):
     """Test W8A8 INT8 MoE quantization with a tiny Qwen3 MoE model."""
