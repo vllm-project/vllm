@@ -12,9 +12,11 @@ which the cold-start post-processing (PWAL) runs once:
 - `direct_finish` reruns PWAL through the cold-start entry, then refuses the
   update if a parameter was never written or a tensor moved.
 
-PWAL must write its results into the storage it was given, which
-`replace_parameter` does for any result that fits in it. A failed update
-leaves the model undefined; the engine must be restarted.
+PWAL must write its results into the storage it was given. A result PWAL
+allocates is put back where the tensor sat after cold-start PWAL (see
+`place_in_runtime_layout`), so it may be larger than the checkpoint tensor as
+long as it matches its cold-start layout. A failed update leaves the model
+undefined; the engine must be restarted.
 """
 
 import time
@@ -35,6 +37,7 @@ __all__ = [
     "direct_finish",
     "direct_reload_configured",
     "direct_start",
+    "place_in_runtime_layout",
     "record_checkpoint_layout",
     "record_runtime_layout",
 ]
@@ -42,6 +45,9 @@ __all__ = [
 _RECORD_ATTR = "_direct_reload_record"
 # Tensors a checkpoint may omit; their defaults are filled by PWAL.
 _OPTIONAL_TENSORS = ("k_scale", "v_scale", "q_scale", "prob_scale")
+
+# Cold-start runtime layouts by tensor id, set only while direct_finish reruns PWAL
+_runtime_layouts: dict[int, "TensorLayout"] | None = None
 
 
 class DirectReloadError(RuntimeError):
@@ -216,6 +222,9 @@ def direct_finish(
     if missing:
         _fail(record, f"{len(missing)} parameters were never written: {missing}")
 
+    global _runtime_layouts
+    assert record.runtime is not None
+    _runtime_layouts = {id(t.tensor): t.layout for t in record.runtime.values()}
     start = time.perf_counter()
     try:
         process_weights_after_loading(
@@ -223,6 +232,8 @@ def direct_finish(
         )
     except BaseException as e:
         _fail(record, f"post-processing raised {e!r}", cause=e)
+    finally:
+        _runtime_layouts = None
 
     moved = _moved_tensors(model, record)
     if moved:
@@ -231,6 +242,39 @@ def direct_finish(
         "Direct reload finished: post-processing took %.2f s.",
         time.perf_counter() - start,
     )
+
+
+def place_in_runtime_layout(
+    old: torch.Tensor, new: torch.Tensor
+) -> torch.Tensor | None:
+    """Copy `new` into `old`'s storage where `old` sat after cold-start PWAL.
+
+    Called by `replace_parameter` while a direct reload reruns PWAL. The write
+    covers exactly the bytes the tensor had after cold-start PWAL, so a result
+    larger than the checkpoint view fits without touching other tensors.
+
+    Returns:
+        The view of `old`'s storage holding `new`, or None if `new` does not
+        match the cold-start layout (the caller then falls back).
+
+    """
+    layout = None if _runtime_layouts is None else _runtime_layouts.get(id(old))
+    if (
+        layout is None
+        or new.device != old.device
+        or (tuple(new.shape), tuple(new.stride()), new.dtype)
+        != (layout.shape, layout.stride, layout.dtype)
+    ):
+        return None
+    storage = old.untyped_storage()
+    if layout.byte_range()[1] > storage.nbytes():
+        return None
+    target = layout.view(storage, old.device)
+    if new.data_ptr() != target.data_ptr():
+        if new.untyped_storage().data_ptr() == storage.data_ptr():
+            new = new.clone()
+        target.copy_(new)
+    return target
 
 
 class _TrackedLoader:

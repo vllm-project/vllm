@@ -3,10 +3,9 @@
 """Direct reload on a toy model whose post-processing changes layouts.
 
 Post-processing transposes one weight in place (only its stride changes, the
-matrix is square) and shrinks another into a new, smaller tensor, which
-`replace_parameter` writes back into the loaded storage. After each update the
-model must equal a cold start on that checkpoint, with every tensor at its
-cold-start address.
+matrix is square), shrinks another into a new, smaller tensor and pads a third
+into a new, larger one. After each update the model must equal a cold start on
+that checkpoint, with every tensor at its cold-start address.
 """
 
 from types import SimpleNamespace
@@ -65,6 +64,7 @@ class Model(nn.Module):
         super().__init__()
         self.a = Layer(Transpose(), 4, 4)
         self.b = Layer(DropRowAndDouble(), 3, 5)
+        self.c = Layer(Pad(), 2, 3)
         self.norm = nn.Parameter(torch.empty(5, device="cuda"), False)
 
     def load_weights(self, weights):
@@ -79,6 +79,7 @@ def checkpoint(seed: int) -> dict[str, torch.Tensor]:
     return {
         "a.weight": torch.randn(4, 4, generator=g),
         "b.weight": torch.randn(3, 5, generator=g),
+        "c.weight": torch.randn(2, 3, generator=g),
         "norm": torch.randn(5, generator=g),
     }
 
@@ -86,6 +87,8 @@ def checkpoint(seed: int) -> dict[str, torch.Tensor]:
 def assert_serves(model: Model, ckpt: dict[str, torch.Tensor]) -> None:
     torch.testing.assert_close(model.a.weight.cpu(), ckpt["a.weight"].t())
     torch.testing.assert_close(model.b.weight.cpu(), ckpt["b.weight"][:-1] * 2)
+    torch.testing.assert_close(model.c.weight[:2].cpu(), ckpt["c.weight"])
+    assert model.c.weight[2:].eq(0).all()
     torch.testing.assert_close(model.norm.cpu(), ckpt["norm"])
 
 
@@ -130,7 +133,7 @@ def test_replaced_parameter_is_refused_before_any_write(model):
         start_reload(model)
 
 
-def test_result_larger_than_loaded_storage_fails(model):
+def test_result_unlike_cold_start_fails(model):
     model.b.quant_method = Pad()
     with pytest.raises(DirectReloadError, match="moved"):
         update(model, checkpoint(1).items())

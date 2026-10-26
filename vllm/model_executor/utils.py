@@ -143,6 +143,10 @@ def replace_parameter(
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data
 
+    from vllm.model_executor.model_loader.reload.direct import (
+        place_in_runtime_layout,
+    )
+
     # Keep the object, except online requantization sources (released later)
     # and meta params (no storage; `.data` cannot be rebound to a real tensor).
     if (
@@ -159,6 +163,8 @@ def replace_parameter(
             old_param.data.copy_(new_tensor)
         elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
             old_param.data = new_tensor  # online quantization frees the source
+        elif (placed := place_in_runtime_layout(old_param, new_tensor)) is not None:
+            old_param.data = placed
         else:
             old_param.data = _in_own_storage(old_param, new_tensor)
         for attr_name, attr in new_tensor_attrs.items():
