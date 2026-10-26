@@ -675,7 +675,7 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
     # Factory state is returned untouched.
     assert _normalize_cache_config_for_hash(fresh) is fresh
     # block_size stays significant (the daemon keys on the resolved value).
-    resolved = CacheConfig(block_size=64)
+    resolved = CacheConfig(block_size=32)
     assert (
         _normalize_cache_config_for_hash(resolved).compute_hash()
         != fresh.compute_hash()

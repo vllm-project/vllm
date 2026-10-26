@@ -24,7 +24,9 @@ elif current_platform.is_rocm():
     # and the 16-token default.
     CPU_BLOCK_SIZES = 192
 else:
-    CPU_BLOCK_SIZES = 48
+    # A multiple of the 64-token default (and of any smaller backend-preferred
+    # size such as 16 or 32).
+    CPU_BLOCK_SIZES = 192
 
 _ATTN_BACKENDS: list[str] = []
 if current_platform.is_cuda():
@@ -563,7 +565,9 @@ def test_fs_tiering_offloading(tmp_path) -> None:
     [
         # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
         # ("tiiuae/falcon-mamba-7b", 16, 1),
-        ("state-spaces/mamba-1.4b-hf", 16, 1),
+        # The chunk size must be a multiple of the GPU block size, which
+        # defaults to 64 tokens.
+        ("state-spaces/mamba-1.4b-hf", 64, 1),
     ],
 )
 def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
