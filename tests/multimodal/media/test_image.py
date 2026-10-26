@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pybase64 as base64
 import pytest
-from PIL import Image
+from PIL import Image, features
 from PIL.BlpImagePlugin import BLPFormatError
 
 from vllm.multimodal.image import (
@@ -313,7 +313,7 @@ def test_image_broken_png_rejected():
     [
         # AVIF without a primary item: the AVIF decoder raises RuntimeError
         # from Image.open().
-        (
+        pytest.param(
             base64.b64decode(
                 "AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADrbWV0YQAAAAAAAAAh"
                 "aGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAAAAAAAOAGl0bQAAAAAAAQAAAB5p"
@@ -323,6 +323,9 @@ def test_image_broken_png_rejected():
                 "DQAGgAAAABdpcG1hAAAAAAAAAAEAAQQBAoME"
             ),
             RuntimeError,
+            marks=pytest.mark.skipif(
+                not features.check("avif"), reason="Pillow built without AVIF"
+            ),
         ),
         # BLP2 header with compression 0, which Pillow does not know:
         # BLPFormatError, a NotImplementedError and so a RuntimeError, from
