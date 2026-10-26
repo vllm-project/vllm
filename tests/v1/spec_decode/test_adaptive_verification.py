@@ -355,10 +355,11 @@ def test_draft_budget_kernel_matches_global_topk(num_steps, num_reqs):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_draft_budget_kernel_admits_exact_budget_on_ties():
-    """Tied survivals are handed out in request order without overshooting."""
-    confidence_probs = torch.ones(4, 3, device="cuda")
-    idx_mapping = torch.arange(4, device="cuda")
-    capacities = torch.full((4,), 3, dtype=torch.int32, device="cuda")
-    survival = torch.empty(12, dtype=torch.int32, device="cuda")
-    assign_draft_token_budget(confidence_probs, idx_mapping, capacities, 5, survival)
-    assert capacities.tolist() == [3, 2, 0, 0]
+    """Tied survivals are handed out in request order, across request blocks."""
+    num_reqs, num_steps = 300, 3
+    confidence_probs = torch.ones(num_reqs, num_steps, device="cuda")
+    idx_mapping = torch.arange(num_reqs, device="cuda")
+    capacities = torch.full((num_reqs,), num_steps, dtype=torch.int32, device="cuda")
+    survival = torch.empty(num_reqs * num_steps, dtype=torch.int32, device="cuda")
+    assign_draft_token_budget(confidence_probs, idx_mapping, capacities, 800, survival)
+    assert capacities.tolist() == [3] * 266 + [2] + [0] * 33
