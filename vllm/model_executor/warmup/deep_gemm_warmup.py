@@ -354,7 +354,7 @@ def _get_fp8_fp4_mega_moe_m_values(
     bf16_mega_gate config."""
     dg = _import_deep_gemm()
     gate, experts = module.gate, module.experts
-    uses_mega_gate = _mega_moe_uses_mega_gate(module)
+    uses_mega_gate = _mega_moe_uses_mega_gate(module) and module.use_mega_gate
     if module.use_sequence_parallel:
         max_tokens = cdiv(max_tokens, module.tp_size)
 
