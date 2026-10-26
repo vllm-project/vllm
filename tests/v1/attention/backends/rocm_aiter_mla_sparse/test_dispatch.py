@@ -54,6 +54,7 @@ from tests.v1.attention.backends.rocm_aiter_mla_sparse.sparse_harness import (
     SPARSE_MQA,
     TRITON_DECODE,
     TRITON_PREFILL,
+    check_no_context_for_queryless_rows,
     make_case,
 )
 from tests.v1.attention.model_shapes import (
@@ -299,3 +300,107 @@ def test_wide_kpool_buffer_keeps_live_tail(env, spy):
     case.check(batch, query, indices, out[case.names[0]])
     (fit_args,) = spy.args_of(FIT_KPOOL)
     assert fit_args[0].shape[1] == 256 + 64
+
+
+# Context chunk size for the zero-query cases, small so contexts that still
+# fit in topk (the dense-MHA prefill) take every chunking path.
+SMALL_CHUNK = 96
+
+# Real rows (query_lens, seq_lens) in reorder order, one per dispatch and
+# chunking path; spec rows run with 3 speculative tokens.
+REAL_ROWS = {
+    "decode": ([1, 1], [100, 700]),
+    "spec": ([4, 2], [8, 300]),
+    "dense-prefill": ([64, 7], [64, 7]),
+    "dense-under-one-chunk": ([40, 3], [80, 19]),
+    "dense-exactly-one-chunk": ([16], [16 + SMALL_CHUNK]),
+    "dense-many-chunks": ([8, 24], [8 + 200, 24 + 150]),
+    "sparse-prefill": ([300, 40], [600, 300]),
+    "mixed": ([1, 40, 3, 64], [700, 200, 19, 64]),
+}
+
+# Seq lens of two trailing rows with no query tokens: FULL CUDA graph padding
+# (seq_len 0), or requests an async KV connector is still loading
+# (seq_len > 0, vllm-project/vllm#51486), with more context than any real
+# row; "kv-load" still fits in topk, "kv-load-long" does not.
+ZERO_QUERY_ROWS = {"pad-seq0": [0, 0], "kv-load": [250, 37], "kv-load-long": [700, 37]}
+
+ZERO_QUERY_CASES = {
+    "bf16": {},
+    "fp8": {"kv_cache_dtype": "fp8"},
+}
+
+
+def _watch_dense_prefill(spy, case):
+    """The dense-MHA prefill internals (new tokens, context gather, merge)."""
+    from vllm.model_executor.layers.attention import mla_attention
+
+    assert case.builder._prefill_backend is not None
+    backend = type(case.builder._prefill_backend)
+    spy.watch(backend, "run_prefill_new_tokens", "prefill_new_tokens")
+    spy.watch(backend, "run_prefill_context_chunk", "prefill_context_chunk")
+    spy.watch(mla_attention.ops, "gather_and_maybe_dequant_cache", "context_gather")
+    spy.watch(mla_attention.ops, "cp_gather_cache", "context_gather_cp")
+    spy.watch(mla_attention, "merge_attn_states", "merge_attn_states")
+
+
+def _empty_inputs(spy) -> list[str]:
+    """Kernels handed a tensor with no rows (zero-width rope tensors of a
+    NoPE model have rows and are fine)."""
+
+    def tensors(args, kwargs):
+        for value in (*args, *kwargs.values()):
+            if isinstance(value, (tuple, list)):
+                yield from (v for v in value if isinstance(v, torch.Tensor))
+            elif isinstance(value, torch.Tensor):
+                yield value
+
+    return [
+        name
+        for name, args, kwargs in spy.calls
+        if any(t.dim() > 0 and t.shape[0] == 0 for t in tensors(args, kwargs))
+    ]
+
+
+def _run_with_zero_query_tail(case, spy, rows, tail):
+    q_lens, s_lens = REAL_ROWS[rows]
+    tail_seq = ZERO_QUERY_ROWS[tail]
+    q_lens, s_lens = q_lens + [0] * len(tail_seq), s_lens + tail_seq
+    batch = case.batch(q_lens, s_lens)
+    query = case.query(batch.num_tokens)
+    indices = case.indices(batch)
+    md = case.build(batch)
+    # A context chunk of query-less rows aborts the process in AITER's varlen
+    # attention, so check the plan before handing it to the kernels.
+    check_no_context_for_queryless_rows(md, q_lens, s_lens)
+    _watch_layer(spy, case)
+    spy.reset()
+    out = case.run(batch, query, indices, md)
+    for name, layer in case.layers.items():
+        case.check(batch, query, indices, out[name], layer=layer)
+    empty = _empty_inputs(spy)
+    assert not empty, f"empty tensor passed to {empty}"
+
+
+@pytest.mark.parametrize("variant", list(ZERO_QUERY_CASES))
+@pytest.mark.parametrize("tail", list(ZERO_QUERY_ROWS))
+@pytest.mark.parametrize("rows", list(REAL_ROWS))
+def test_zero_query_rows_after_real_rows(env, spy, rows, tail, variant):
+    """Rows with no query tokens after the real ones change nothing: the real
+    rows match the reference and no kernel is handed an empty tensor."""
+    s_lens = REAL_ROWS[rows][1] + ZERO_QUERY_ROWS[tail]
+    spec_tokens = 3 if rows == "spec" else 0
+    case = make_case(
+        DSV32, s_lens, spec_tokens=spec_tokens, **ZERO_QUERY_CASES[variant]
+    )
+    case.builder.chunked_prefill_workspace_size = SMALL_CHUNK
+    _watch_dense_prefill(spy, case)
+    _run_with_zero_query_tail(case, spy, rows, tail)
+
+
+@pytest.mark.parametrize("tail", list(ZERO_QUERY_ROWS))
+@pytest.mark.parametrize("rows", ["decode", "sparse-prefill", "mixed"])
+def test_zero_query_rows_nope_glm_flash(env, spy, rows, tail):
+    """The same on GLM-5.3-Flash's NoPE path (vLLM's Triton kernels)."""
+    case = make_case(GLM_FLASH, REAL_ROWS[rows][1] + ZERO_QUERY_ROWS[tail])
+    _run_with_zero_query_tail(case, spy, rows, tail)

@@ -111,3 +111,38 @@ def test_decode_build_does_not_sync(env, monkeypatch, spec_tokens, q):
     case.build(batch)
     with runner_sync_check(monkeypatch):
         case.build(batch)
+
+
+@pytest.mark.parametrize("tail_seq", [0, 3000], ids=["pad-seq0", "kv-load"])
+@pytest.mark.parametrize(
+    "query_lens, seq_lens, logits_mb",
+    [
+        ([100, 7], [100, 7], None),  # one chunk
+        ([64, 200], [500, 1200], None),  # one chunk with context
+        ([700, 300, 1000], [700, 300, 1000], 1),  # request and query sub-chunks
+    ],
+    ids=["one-chunk", "extend", "sub-chunks"],
+)
+def test_prefill_chunks_skip_rows_without_queries(
+    env, monkeypatch, query_lens, seq_lens, logits_mb, tail_seq
+):
+    """Rows with no query tokens (CUDA graph padding, or a request whose KV an
+    async connector is loading, vllm-project/vllm#51486) after the real
+    prefills: every chunk has query tokens, the bounds of the real tokens are
+    unchanged, and their K is not gathered."""
+    if logits_mb is not None:
+        monkeypatch.setattr(envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", logits_mb)
+    case = make_idx_case(DEEPSEEK_V3_2, seq_lens + [tail_seq, tail_seq])
+    ref = case.build(case.batch(query_lens, seq_lens))
+    q_all, s_all = query_lens + [0, 0], seq_lens + [tail_seq, tail_seq // 2]
+    md = case.build(case.batch(q_all, s_all))
+    for c in md.prefill.chunks:
+        assert c.token_end > c.token_start, (c.token_start, c.token_end)
+    for field in ("cu_seqlen_ks", "cu_seqlen_ke"):
+        got = torch.cat([getattr(c, field) for c in md.prefill.chunks]).tolist()
+        want = torch.cat([getattr(c, field) for c in ref.prefill.chunks]).tolist()
+        assert got == want, field
+    gathered = sum(c.total_seq_lens for c in md.prefill.chunks if not c.skip_kv_gather)
+    assert gathered == sum(
+        c.total_seq_lens for c in ref.prefill.chunks if not c.skip_kv_gather
+    )

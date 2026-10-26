@@ -22,6 +22,7 @@ entries valid, the rest -1), and asserts the kernels that ran.
 """
 
 import pytest
+import torch
 
 from tests.v1.attention.backends.indexer_harness import check_topk_rows
 from tests.v1.attention.backends.rocm_dsv32_indexer.idx_harness import (
@@ -160,3 +161,41 @@ def test_padded_tokens_are_not_selected(env):
     check_topk_rows(topk, case.logits(batch, q_fp8, weights), case.topk)
     changed = (case.k_cache.kv_cache != before).flatten(1).any(1).sum().item()
     assert changed <= 2  # at most the blocks of the two real tokens
+
+
+# Seq lens of two trailing rows with no query tokens: FULL CUDA graph padding
+# (seq_len 0), or requests an async KV connector is still loading
+# (seq_len > 0, vllm-project/vllm#51486), longer than any real row.
+ZERO_QUERY_ROWS = {"pad-seq0": [0, 0], "kv-load": [3000, 37]}
+
+
+def _tensors(args, kwargs):
+    for value in (*args, *kwargs.values()):
+        if isinstance(value, torch.Tensor):
+            yield value
+        elif isinstance(value, (tuple, list)):
+            yield from (v for v in value if isinstance(v, torch.Tensor))
+
+
+@pytest.mark.parametrize("tail", list(ZERO_QUERY_ROWS))
+@pytest.mark.parametrize("phase", [*PHASES, "sub-chunks"])
+def test_zero_query_rows_after_real_rows(env, spy, monkeypatch, phase, tail):
+    """Rows with no query tokens after the real ones change nothing: the real
+    rows' top-k matches the reference and no kernel is handed an empty
+    tensor, through every prefill chunking path."""
+    if phase == "sub-chunks":
+        monkeypatch.setattr(envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", 1)
+        query_lens, seq_lens = [700, 300, 1000], [700, 300, 1000]
+    else:
+        query_lens, seq_lens = PHASES[phase]
+    tail_seq = ZERO_QUERY_ROWS[tail]
+    phase_rows = (query_lens + [0] * len(tail_seq), seq_lens + tail_seq)
+    case = make_idx_case(DEEPSEEK_V3_2, phase_rows[1])
+    spy.reset()
+    _check(case, phase_rows)
+    empty = [
+        name
+        for name, args, kwargs in spy.calls
+        if any(t.numel() == 0 for t in _tensors(args, kwargs))
+    ]
+    assert not empty, f"empty tensor passed to {empty}"

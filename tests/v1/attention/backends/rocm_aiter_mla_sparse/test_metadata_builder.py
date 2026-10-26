@@ -15,6 +15,7 @@ import torch
 
 from tests.v1.attention.backends.rocm_aiter_mla_sparse.sparse_harness import (
     MLA_METADATA,
+    check_no_context_for_queryless_rows,
     make_case,
 )
 from tests.v1.attention.model_shapes import DEEPSEEK_V3_2, GLM_5_3_FLASH
@@ -219,3 +220,28 @@ def test_capture_build_is_accepted_by_forward(env):
     indices = case.indices(batch)
     out = case.run(batch, query, indices, md)
     case.check(batch, query, indices, out[case.names[0]])
+
+
+@pytest.mark.parametrize("tail_seq", [0, 250], ids=["pad-seq0", "kv-load"])
+@pytest.mark.parametrize(
+    "query_lens, seq_lens",
+    [
+        ([16], [16 + 40]),  # under one chunk
+        ([16], [16 + 96]),  # exactly one chunk
+        ([8, 24], [8 + 200, 24 + 150]),  # many, uneven
+    ],
+    ids=["under-one-chunk", "exactly-one-chunk", "many-uneven"],
+)
+def test_context_chunks_skip_rows_without_queries(env, query_lens, seq_lens, tail_seq):
+    """A row with no query tokens (CUDA graph padding, or a request whose KV an
+    async connector is loading, vllm-project/vllm#51486) gets no context: no
+    dense-MHA context chunk may gather rows nobody attends to."""
+    q_all = query_lens + [0, 0]
+    s_all = seq_lens + [tail_seq, tail_seq // 2]
+    case = make_case(DSV32, s_all)
+    case.builder.chunked_prefill_workspace_size = 96
+    md = case.build(case.batch(q_all, s_all))
+    assert md.num_decodes == 0 and md.prefill is not None
+    assert md.prefill.use_dense_mha
+    assert md.prefill.chunked_context is not None
+    check_no_context_for_queryless_rows(md, q_all, s_all)

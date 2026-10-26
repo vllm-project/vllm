@@ -450,6 +450,28 @@ class SparseCase:
         assert err.max().item() <= FP8_MAX_ABS, f"max abs error {err.max():.3f}"
 
 
+def check_no_context_for_queryless_rows(
+    md: ROCMAiterMLASparseMetadata, query_lens: list[int], seq_lens: list[int]
+) -> None:
+    """Dense-MHA context chunks cover exactly the context of rows that have
+    query tokens; a row without queries (CUDA graph padding, or a request whose
+    KV an async connector is loading) gets none, so no chunk is all such rows.
+    Only checked when the prefill runs dense MHA, the one path that reads them.
+    """
+    prefill = md.prefill
+    if prefill is None or prefill.chunked_context is None or not prefill.use_dense_mha:
+        return
+    rows = list(zip(query_lens, seq_lens))[md.num_decodes :]
+    chunks = md.prefill.chunked_context.chunks
+    real_context = sum(s - q for q, s in rows if q > 0)
+    assert sum(c.num_context_tokens for c in chunks) == real_context
+    for c in chunks:
+        assert c.token_slice.stop > c.token_slice.start, c
+        lens = c.seq_lens.tolist()
+        reqs = range(c.request_slice.start, c.request_slice.stop)
+        assert all(n == 0 for i, n in zip(reqs, lens) if rows[i][0] == 0), lens
+
+
 def blocks_for(seq_lens: list[int], block_size: int, slack: int = 8) -> int:
     return sum(-(-s // block_size) for s in seq_lens) + slack
 

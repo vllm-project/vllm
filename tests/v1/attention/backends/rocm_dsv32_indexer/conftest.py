@@ -4,6 +4,9 @@ import pytest
 import torch
 
 from tests.v1.attention.backends.harness import KernelSpy
+from tests.v1.attention.backends.rocm_dsv32_indexer.known_defects import (
+    mark_known_defects,
+)
 from vllm.platforms import current_platform
 
 
@@ -21,6 +24,7 @@ SKIP_REASON = _rocm_indexer_runnable()
 
 
 def pytest_collection_modifyitems(config, items):
+    mark_known_defects(items)
     if SKIP_REASON is None:
         return
     marker = pytest.mark.skip(reason=SKIP_REASON)
