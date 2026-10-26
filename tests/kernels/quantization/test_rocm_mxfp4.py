@@ -648,13 +648,17 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
         ((1280, 80), True),  # gate/up_proj under TP=2 (out sharded)
         ((2560, 8), True),  # minimal aligned columns
         ((32, 8), True),  # minimal aligned rows and columns
+        ((96, 8), False),  # Qwen3.8 TP1 GDN in_proj_ba; ASM is wrong for M<=64
         ((2560, 20), False),  # shared_expert down_proj (in=640 -> sn=20)
         ((2560, 10), False),  # down_proj under TP=2 (in 640->320 -> sn=10)
         ((30, 8), False),  # rows not a multiple of 32
     ],
 )
 def test_asm_fp4_scale_swizzle_supported_shape_rules(shape, supported):
-    """The ASM swizzle needs rows % 32 == 0 and columns % 8 == 0."""
+    """The ASM swizzle needs rows % 32 == 0 and columns % 8 == 0.
+
+    96 scale rows are layout-legal and still rejected. That tile stays on Triton.
+    """
     from vllm.model_executor.kernels.linear.mxfp4.aiter import (
         _asm_fp4_scale_swizzle_supported,
     )
