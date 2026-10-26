@@ -66,6 +66,11 @@ def pytest_runtest_setup(item):
 @pytest.fixture
 def trtllm_workspace_check(monkeypatch, workspace_init):
     """Opt into workspaces and compare real buffered/unbuffered kernel calls."""
+    from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe_workspace
+
+    if not has_flashinfer_trtllm_fused_moe_workspace():
+        pytest.skip("Requires caller-owned trtllm-gen MoE workspace support")
+
     import flashinfer.fused_moe as fused_moe
     import torch
 

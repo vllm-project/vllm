@@ -59,13 +59,6 @@ MNK_FACTORS = [
 ]
 
 
-def _has_trtllm_moe_workspace() -> bool:
-    """The sizer and the ``workspace_buffer`` kwarg ship together in FlashInfer."""
-    import flashinfer.fused_moe as fused_moe
-
-    return hasattr(fused_moe, "trtllm_fused_moe_workspace_size")
-
-
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", [128])
 @pytest.mark.parametrize("topk", [8])
@@ -164,10 +157,6 @@ def test_trtllm_bf16_moe_modular_no_graph(
         )
 
 
-@pytest.mark.skipif(
-    not _has_trtllm_moe_workspace(),
-    reason="Requires caller-owned trtllm-gen MoE workspace support",
-)
 @pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
 @torch.inference_mode()
 def test_trtllm_bf16_moe_reuses_workspace(activation, trtllm_workspace_check):
