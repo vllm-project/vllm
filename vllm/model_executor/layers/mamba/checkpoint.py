@@ -282,7 +282,7 @@ def store_cache_checkpoints_kernel(
     if HAS_TOKEN_MAP:
         token_idx = tl.load(token_indices_ptr + token_idx, mask=valid_conv, other=0)
     values = tl.load(
-        x_ptr + token_idx * x_stride_0 + width_idx * x_stride_1,
+        x_ptr + token_idx.to(tl.int64) * x_stride_0 + width_idx * x_stride_1,
         mask=valid_conv,
     )
     tl.store(
