@@ -144,6 +144,9 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self.complete_read = self.complete_load
         self.prepare_write = self.prepare_store
         self.complete_write = self.complete_store
+        # Chunks of failed writes the writer may still be filling; kept out of
+        # the free pool until release_quarantined_write().
+        self._quarantined_chunk_ids: set[int] = set()
 
         self._kv_memoryview = mmap_region.create_kv_memoryview()
 
@@ -156,6 +159,54 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         request accesses, so they must not alter request-scoped recency.
         """
         return self._prepare_load(keys, req_context, record_access=False)
+
+    def quarantine_write(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> list[int]:
+        """Fail pending writes like ``complete_write(False)`` but hold their chunks.
+
+        The keys leave the cache (lookups miss and a later store allocates a
+        fresh chunk), while the chunks stay counted as write-pending and out
+        of the free pool. Returns the quarantined chunk ids, to be passed to
+        ``release_quarantined_write`` once the writer can no longer touch them.
+        """
+        chunk_ids: list[int] = []
+        removed_keys: list[OffloadKey] = []
+        for key in keys:
+            chunk = self._policy.get(key)
+            if chunk is not None and not chunk.is_ready:
+                self._policy.remove(key)
+                self._quarantined_chunk_ids.add(chunk.chunk_id)
+                chunk_ids.append(chunk.chunk_id)
+                removed_keys.append(key)
+        if removed_keys and self.events is not None:
+            self.events.append(
+                OffloadingEvent(
+                    keys=removed_keys,
+                    medium=self.medium,
+                    removed=True,
+                    metadata_only=True,
+                )
+            )
+        return chunk_ids
+
+    def release_quarantined_write(self, chunk_ids: Iterable[int]) -> None:
+        """Return quarantined chunks to the free pool."""
+        for chunk_id in chunk_ids:
+            self._quarantined_chunk_ids.remove(chunk_id)
+            self._num_write_pending_chunks -= 1
+            self._free_list.append(chunk_id)
+
+    @property
+    def num_quarantined_chunks(self) -> int:
+        return len(self._quarantined_chunk_ids)
+
+    @override
+    def reset_cache(self) -> None:
+        assert not self._quarantined_chunk_ids, (
+            "reset_cache with quarantined chunks: a tier may still write to them"
+        )
+        super().reset_cache()
 
     def get_kv_memoryview(self) -> memoryview:
         """Return the memoryview over the primary tier's KV cache buffer.
@@ -250,6 +301,9 @@ class TieringOffloadingManager(OffloadingManager):
         #   True:  secondary → primary (promotion)
         #   False: primary → secondary (cascade)
         self._jobs: dict[JobId, JobMetadata] = {}
+        # Finished promotions whose failed chunks are quarantined until the
+        # tier reports them in get_released_jobs(): job_id -> (tier, chunk ids).
+        self._retained_jobs: dict[JobId, tuple[int, list[int]]] = {}
         # Set by reset_cache() until on_reset_flushed(); see lookup().
         self._promotions_held = False
         primary_view = self.primary_tier.get_kv_memoryview()
@@ -491,7 +545,19 @@ class TieringOffloadingManager(OffloadingManager):
                 transfer_job.req_context,
                 True,
             )
-        if failed_keys:
+        if not failed_keys:
+            assert not completed_job.retains_memory
+        elif completed_job.retains_memory:
+            chunk_ids = self.primary_tier.quarantine_write(
+                failed_keys, transfer_job.req_context
+            )
+            # Record even an empty hold: the tier still reports the release.
+            self._retained_jobs[completed_job.job_id] = (
+                job_metadata.tier_idx,
+                chunk_ids,
+            )
+            self._metrics.on_write_quarantined(job_metadata.tier_idx, len(chunk_ids))
+        else:
             self.primary_tier.complete_write(
                 failed_keys,
                 transfer_job.req_context,
@@ -534,6 +600,7 @@ class TieringOffloadingManager(OffloadingManager):
                     f" but belongs to tier #{job_metadata.tier_idx}"
                 )
                 transfer_job = job_metadata.transfer_job
+                assert transfer_job.is_promotion or not completed_job.retains_memory
                 self._metrics.on_job_finished(job_metadata, completed_job)
 
                 if transfer_job.is_promotion:
@@ -547,6 +614,21 @@ class TieringOffloadingManager(OffloadingManager):
                         transfer_job.keys, transfer_job.req_context
                     )
                     self._update_backpressure(tier, job_metadata, completed_job)
+            # After the results, so a release reported in the same round as
+            # its retains_memory result finds the job.
+            for job_id in tier.get_released_jobs():
+                retained = self._retained_jobs.pop(job_id, None)
+                assert retained is not None, (
+                    f"Released job_id {job_id} from tier #{i}"
+                    f" ({tier.tier_type}) was not retaining memory"
+                )
+                tier_idx, chunk_ids = retained
+                assert tier_idx == i, (
+                    f"Released job_id {job_id} reported by tier #{i}"
+                    f" but was retained by tier #{tier_idx}"
+                )
+                self.primary_tier.release_quarantined_write(chunk_ids)
+                self._metrics.on_write_released(i, len(chunk_ids))
 
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int
@@ -1119,8 +1201,10 @@ class TieringOffloadingManager(OffloadingManager):
         # In-flight primary<->secondary transfers (pending promotions are
         # translated to transfer jobs in on_schedule_end), plus any work the
         # secondary tiers themselves still have outstanding.
+        # Retained jobs keep the tiers polled until they release the memory.
         return (
             bool(self._jobs)
+            or bool(self._retained_jobs)
             or any(state.pending_cascade_keys for state in self._req_state.values())
             or any(tier.has_pending_work() for tier in self.secondary_tiers)
         )
@@ -1167,6 +1251,9 @@ class TieringOffloadingManager(OffloadingManager):
         # so manager bookkeeping is consistent before the primary reset.
         self._process_finished_jobs()
         assert not self._jobs
+        assert not self._retained_jobs, (
+            "drain_jobs() returned with retained memory still unreleased"
+        )
 
         # Deferred promotion submissions reserve primary slots that the
         # reset below invalidates; their submit_load() has not yet been

@@ -187,6 +187,7 @@ def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
         TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC,
         TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS,
         TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS,
+        TieringOffloadingMetrics.QUARANTINED_CHUNKS,
     ):
         assert isinstance(metrics[metric_name], OffloadingGaugeMetadata)
         assert metrics[metric_name].labelnames == ("tier",)
@@ -655,6 +656,156 @@ class TestTieringOffloadingManager:
         assert set(self.manager._request_load_sources[_CTX.req_id]) == (
             expected_source_keys
         )
+
+    def _promote_with_retained_failure(
+        self, monkeypatch, chunks, successful_indices=()
+    ) -> list[int]:
+        """Promote ``chunks`` from tier1 into a retains_memory failure.
+
+        Returns the job ids the tier reported, for releasing later.
+        """
+        for chunk in chunks:
+            self.secondary_tier1.chunks[chunk] = True
+        job_ids: list[int] = []
+
+        def submit_retaining(job_metadata: TransferJob) -> None:
+            job_ids.append(job_metadata.job_id)
+            self.secondary_tier1.completed_jobs.append(
+                JobResult(
+                    job_id=job_metadata.job_id,
+                    success=False,
+                    successful_keys=tuple(chunks[i] for i in successful_indices)
+                    or None,
+                    retains_memory=True,
+                )
+            )
+
+        monkeypatch.setattr(self.secondary_tier1, "submit_load", submit_retaining)
+        for chunk in chunks:
+            assert self.manager.lookup(chunk, _CTX) is LookupResult.HIT_PENDING
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+        return job_ids
+
+    def _release(self, monkeypatch, job_ids: list[int]) -> None:
+        monkeypatch.setattr(
+            self.secondary_tier1, "get_released_jobs", lambda: list(job_ids)
+        )
+        self.manager._process_finished_jobs()
+        monkeypatch.setattr(self.secondary_tier1, "get_released_jobs", lambda: [])
+
+    def test_retained_failure_misses_but_holds_chunks_until_released(
+        self, manager_setup, monkeypatch
+    ):
+        """retains_memory fails the keys at once but keeps their chunks out of
+        the pool; get_released_jobs() returns them."""
+        self._start_request()
+        chunks = to_keys(range(2))
+        free_before = self.primary_tier._get_num_free_chunks()
+
+        job_ids = self._promote_with_retained_failure(monkeypatch, chunks)
+
+        assert len(job_ids) == 1
+        assert [self.primary_tier.lookup(c, _CTX) for c in chunks] == [
+            LookupResult.MISS,
+            LookupResult.MISS,
+        ]
+        assert self.primary_tier.num_quarantined_chunks == 2
+        assert self.primary_tier._get_num_free_chunks() == free_before - 2
+        assert self.manager.has_pending_work()
+        reduced = self.manager.get_stats().reduce()
+        label = self.manager._metrics.tier_label(0)
+        assert reduced[f"{TieringOffloadingMetrics.QUARANTINED_JOBS}:{label}"] == 1
+        assert reduced[f"{TieringOffloadingMetrics.QUARANTINED_CHUNKS}:{label}"] == 2
+
+        self._release(monkeypatch, job_ids)
+
+        assert self.primary_tier.num_quarantined_chunks == 0
+        assert self.primary_tier._get_num_free_chunks() == free_before
+        assert self.primary_tier._num_write_pending_chunks == 0
+        assert not self.manager._retained_jobs
+
+    def test_retained_failure_restore_gets_a_fresh_chunk(
+        self, manager_setup, monkeypatch
+    ):
+        """A key whose old chunk is quarantined can be stored again, into a
+        different chunk the late writer cannot touch."""
+        self._start_request()
+        chunk = to_keys([7])
+        job_ids = self._promote_with_retained_failure(monkeypatch, chunk)
+        (held,) = self.manager._retained_jobs[job_ids[0]][1]
+
+        output = self.primary_tier.prepare_write(chunk, _CTX)
+        assert output is not None
+        assert list(output.store_spec.chunk_ids) != [held]
+        self.primary_tier.complete_write(chunk, _CTX, True)
+
+        self._release(monkeypatch, job_ids)
+        assert self.primary_tier.lookup(chunk[0], _CTX) is LookupResult.HIT
+
+    def test_retained_partial_failure_holds_only_failed_chunks(
+        self, manager_setup, monkeypatch
+    ):
+        self._start_request()
+        chunks = to_keys(range(3))
+        job_ids = self._promote_with_retained_failure(
+            monkeypatch, chunks, successful_indices=(0,)
+        )
+
+        assert self.primary_tier.lookup(chunks[0], _CTX) is LookupResult.HIT
+        assert self.primary_tier.num_quarantined_chunks == 2
+        self._release(monkeypatch, job_ids)
+        assert self.primary_tier.num_quarantined_chunks == 0
+
+    def test_release_in_same_round_as_result(self, manager_setup, monkeypatch):
+        """A tier may report the result and its release in one poll round."""
+        self._start_request()
+        chunks = to_keys(range(2))
+        released: list[int] = []
+        monkeypatch.setattr(
+            self.secondary_tier1,
+            "get_released_jobs",
+            lambda: [released.pop()] if released else [],
+        )
+        original = self.secondary_tier1.get_finished_jobs
+
+        def finished_then_release():
+            results = list(original())
+            released.extend(r.job_id for r in results if r.retains_memory)
+            return results
+
+        monkeypatch.setattr(
+            self.secondary_tier1, "get_finished_jobs", finished_then_release
+        )
+        self._promote_with_retained_failure(monkeypatch, chunks)
+        assert self.primary_tier.num_quarantined_chunks == 0
+        assert not self.manager._retained_jobs
+
+    def test_release_of_unknown_job_asserts(self, manager_setup, monkeypatch):
+        monkeypatch.setattr(self.secondary_tier1, "get_released_jobs", lambda: [999])
+        with pytest.raises(AssertionError, match="was not retaining memory"):
+            self.manager._process_finished_jobs()
+
+    def test_reset_after_release_succeeds(self, manager_setup, monkeypatch):
+        """drain_jobs() releasing the retained job lets reset_cache proceed."""
+        self._start_request()
+        job_ids = self._promote_with_retained_failure(monkeypatch, to_keys(range(2)))
+        monkeypatch.setattr(
+            self.secondary_tier1,
+            "drain_jobs",
+            lambda: monkeypatch.setattr(
+                self.secondary_tier1, "get_released_jobs", lambda: job_ids.copy()
+            ),
+        )
+        original = self.manager._process_finished_jobs
+
+        def process_once(*args, **kwargs):
+            original(*args, **kwargs)
+            monkeypatch.setattr(self.secondary_tier1, "get_released_jobs", lambda: [])
+
+        monkeypatch.setattr(self.manager, "_process_finished_jobs", process_once)
+        self.manager.reset_cache()
+        assert self.primary_tier.num_quarantined_chunks == 0
 
     def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
         """Resolved lookups report one sync delay sample per tier and chunk."""

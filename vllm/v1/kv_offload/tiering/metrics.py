@@ -42,6 +42,7 @@ class _TierState:
     active_cascade_count: int = 0
     primary_write_chunk_count: int = 0
     primary_read_chunk_count: int = 0
+    quarantined_chunk_count: int = 0
 
 
 class TieringMetricsTracker:
@@ -128,6 +129,18 @@ class TieringMetricsTracker:
             self._observe_promotion_latency(job_metadata, result)
         self._decrement_tier_state(job_metadata)
 
+    def on_write_quarantined(self, tier_idx: int, chunk_count: int) -> None:
+        self._tier_states[tier_idx].quarantined_chunk_count += chunk_count
+        self._stats.increase_counter(
+            TieringOffloadingMetrics.QUARANTINED_JOBS,
+            labelvalues=self.tier_label(tier_idx),
+        )
+
+    def on_write_released(self, tier_idx: int, chunk_count: int) -> None:
+        state = self._tier_states[tier_idx]
+        state.quarantined_chunk_count -= chunk_count
+        assert state.quarantined_chunk_count >= 0
+
     def on_promotion_allocation_failure(self) -> None:
         self._stats.increase_counter(
             TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES
@@ -184,6 +197,7 @@ class TieringMetricsTracker:
             and state.active_cascade_count == 0
             and state.primary_write_chunk_count == 0
             and state.primary_read_chunk_count == 0
+            and state.quarantined_chunk_count == 0
             for state in self._tier_states
         )
 
@@ -288,6 +302,11 @@ class TieringMetricsTracker:
             stats.set_gauge(
                 TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS,
                 state.active_cascade_count,
+                labelvalues,
+            )
+            stats.set_gauge(
+                TieringOffloadingMetrics.QUARANTINED_CHUNKS,
+                state.quarantined_chunk_count,
                 labelvalues,
             )
 
