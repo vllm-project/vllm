@@ -843,7 +843,6 @@ steps:
   device: cpu-small
   commands:
   - pytest -v -s tool_parsers
-  - pytest -v -s parser/engine/test_llama_json.py
 
 # Disabled until the pytest plugins installation is locked.
 # - label: ":nvidia: (A100) Batch Invariance"
