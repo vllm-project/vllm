@@ -600,6 +600,8 @@ __device__ void radix_topk(const float* __restrict__ row_input,
       }
     }
   }
+  // The CTA's next row reuses this smem; finish the tie loop before it does.
+  __syncthreads();
 }
 
 // ============================================================================
@@ -1118,7 +1120,12 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
   void* args[] = {&input,    &output_indices, &lengths,
                   &num_rows, &top_k_val,      &max_len};
 
-  const int vec_size = ComputeFilteredTopKVecSize<DType>(max_len);
+  // Views like x[:, 1:] keep the stride but shift the base.
+  int vec_size = ComputeFilteredTopKVecSize<DType>(max_len);
+  while (vec_size > 1 &&
+         reinterpret_cast<uintptr_t>(input) % (vec_size * sizeof(DType)) != 0) {
+    vec_size /= 2;
+  }
   const bool use_wide_coarse =
       MAX_K == 1024 && max_len >= FILTERED_TOPK_WIDE_COARSE_MIN_LENGTH &&
       max_len < FILTERED_TOPK_WIDE_COARSE_MAX_LENGTH;

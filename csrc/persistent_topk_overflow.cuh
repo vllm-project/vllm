@@ -40,6 +40,9 @@ struct FilteredTopKTraits;
 
 namespace overflow {
 
+// Sampled recovery pays off only for long rows in large batches. topk.cu
+// currently routes such batches to sampled_topk_kernel, so this matters for
+// direct FilteredTopKRaggedTransform callers and future dispatch changes.
 constexpr uint32_t kSamplingMinRows = 96;
 constexpr uint32_t kSamplingMinLength = 192 * 1024;
 

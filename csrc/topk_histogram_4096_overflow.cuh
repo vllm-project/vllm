@@ -280,7 +280,33 @@ struct CoarseRefineSmem {
   uint32_t output_counter;
   uint32_t equal_counter;
   uint32_t valid;
+  uint32_t key_min;
+  uint32_t key_max;
 };
+
+__device__ __forceinline__ uint32_t warp_reduce_min_full(uint32_t v) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __reduce_min_sync(0xFFFFFFFFu, v);
+#else
+  #pragma unroll
+  for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
+    v = min(v, __shfl_xor_sync(0xFFFFFFFFu, v, mask));
+  }
+  return v;
+#endif
+}
+
+__device__ __forceinline__ uint32_t warp_reduce_max_full(uint32_t v) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __reduce_max_sync(0xFFFFFFFFu, v);
+#else
+  #pragma unroll
+  for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
+    v = max(v, __shfl_xor_sync(0xFFFFFFFFu, v, mask));
+  }
+  return v;
+#endif
+}
 
 __device__ __forceinline__ void select_coarse_refine_digit(
     CoarseRefineSmem* smem, uint32_t prefix, uint32_t shift) {
@@ -306,7 +332,9 @@ __device__ __forceinline__ void select_coarse_refine_digit(
 
 // Refine an overflowing FP16 histogram bin from values already resident in
 // registers. A 12-bit FP16 bin spans at most 22 ordered-FP32 bits for finite
-// values, so two radix-2048 passes select the exact pivot.
+// values, so two radix-2048 passes select the exact pivot. A bin holding a
+// single key (e.g. all-equal scores) needs no refinement: that key is the
+// pivot, so the first pass also tracks the bin's min and max key.
 template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread>
 __device__ __forceinline__ bool exact_topk_refine_registers(
     const float4 (&vecs)[VecsPerThread], int32_t* __restrict__ output,
@@ -326,6 +354,8 @@ __device__ __forceinline__ bool exact_topk_refine_registers(
     smem->prefix = 0;
     smem->remaining = TopK - num_above;
     smem->valid = range.finite;
+    smem->key_min = 0xFFFFFFFFu;
+    smem->key_max = 0;
   }
   __syncthreads();
 
@@ -338,6 +368,8 @@ __device__ __forceinline__ bool exact_topk_refine_registers(
 
     const uint32_t prefix = smem->prefix;
     const uint32_t shift = round == 0 ? kDigitBits : 0;
+    uint32_t key_min = 0xFFFFFFFFu;
+    uint32_t key_max = 0;
     bool done = false;
 #pragma unroll
     for (uint32_t v = 0; v < VecsPerThread && !done; ++v) {
@@ -350,6 +382,10 @@ __device__ __forceinline__ bool exact_topk_refine_registers(
         } else if (extract_coarse_bin_N<HistBits>(values[e]) == coarse_bin) {
           const uint32_t key = convert_to_uint32_v2(values[e]);
           const uint32_t delta = key - base_key;
+          if (round == 0) {
+            key_min = min(key_min, key);
+            key_max = max(key_max, key);
+          }
           if (key < base_key || delta >= kDeltaLimit) {
             atomicExch(&smem->valid, 0);
           } else if (round == 0 || (delta & ~kDigitMask) == prefix) {
@@ -358,9 +394,23 @@ __device__ __forceinline__ bool exact_topk_refine_registers(
         }
       }
     }
+    if (round == 0) {
+      key_min = warp_reduce_min_full(key_min);
+      key_max = warp_reduce_max_full(key_max);
+      if (tx % kWarpSize == 0) {
+        atomicMin(&smem->key_min, key_min);
+        atomicMax(&smem->key_max, key_max);
+      }
+    }
     __syncthreads();
 
     if (smem->valid == 0) return false;
+
+    if (round == 0 && smem->key_min == smem->key_max) {
+      if (tx == 0) smem->prefix = smem->key_min - base_key;
+      __syncthreads();
+      break;
+    }
 
     select_coarse_refine_digit(smem, prefix, shift);
     __syncthreads();

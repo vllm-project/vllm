@@ -340,7 +340,7 @@ __device__ __noinline__ void exact_topk_rescan_cold(
 
 // kRegisterValues refines from the values already held in registers and
 // falls back to the FP32 rescan when the coarse bin cannot bound them.
-enum class OverflowRecovery { kDisabled, kFp32Rescan, kRegisterValues };
+enum class OverflowRecovery { kFp32Rescan, kRegisterValues };
 
 // Defined in topk_histogram_4096_overflow.cuh, like exact_topk_rescan_cold.
 template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread>
@@ -357,8 +357,7 @@ __device__ void exact_topk_rescan(const float* __restrict__ scores,
 
 template <uint32_t TopK, uint32_t HIST_BITS,
           uint32_t VECS_PER_THREAD = kHist4096VecsPerThread,
-          bool UsePredicatedLoads = false,
-          OverflowRecovery Recovery = OverflowRecovery::kDisabled>
+          bool UsePredicatedLoads = false, OverflowRecovery Recovery>
 __device__ void histogram_4096_topk(const float* __restrict__ scores,
                                     int32_t* __restrict__ output,
                                     uint32_t length, void* _smem) {
@@ -597,7 +596,7 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
 
 template <uint32_t TopK, uint32_t HIST_BITS,
           uint32_t VECS_PER_THREAD = kHist4096VecsPerThread,
-          OverflowRecovery Recovery = OverflowRecovery::kDisabled>
+          OverflowRecovery Recovery>
 __device__ __noinline__ void histogram_4096_topk_predicated(
     const float* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, void* _smem) {

@@ -1703,12 +1703,13 @@ def test_cooperative_topk_overflow_negative_halfway(
     _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @pytest.mark.parametrize("num_ties,num_needed", [(20, 12), (40, 20), (100, 52)])
 @torch.inference_mode()
 def test_cooperative_topk_negative_inf_ties(
-    num_ties: int, num_needed: int, top_k: int
+    num_ties: int, num_needed: int, top_k: int, backend: str
 ) -> None:
     num_rows = 4
     seq_len = top_k + num_ties - num_needed
@@ -1721,7 +1722,7 @@ def test_cooperative_topk_negative_inf_ties(
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
 
-    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    _run_topk_backend(backend, logits, lengths, indices, top_k, seq_len)
     torch.accelerator.synchronize()
     _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
 
@@ -1745,11 +1746,14 @@ def test_cooperative_topk_streaming_overflow(
     _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("num_rows", [1, 16, 64])
 @torch.inference_mode()
-def test_cooperative_topk_overflow_staging_fallback(num_rows: int, top_k: int) -> None:
+def test_cooperative_topk_overflow_staging_fallback(
+    num_rows: int, top_k: int, backend: str
+) -> None:
     # The final radix window holds more candidates per CTA than the staging
     # buffer, so recovery falls back to a full candidate rescan.
     seq_len = 262144
@@ -1768,12 +1772,13 @@ def test_cooperative_topk_overflow_staging_fallback(num_rows: int, top_k: int) -
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
 
-    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    _run_topk_backend(backend, logits, lengths, indices, top_k, seq_len)
     torch.accelerator.synchronize()
     _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("num_rows", [1, 64])
 @pytest.mark.parametrize(
@@ -1781,7 +1786,7 @@ def test_cooperative_topk_overflow_staging_fallback(num_rows: int, top_k: int) -
 )
 @torch.inference_mode()
 def test_cooperative_topk_overflow_special_bins(
-    kind: str, num_rows: int, top_k: int
+    kind: str, num_rows: int, top_k: int, backend: str
 ) -> None:
     # Zero/subnormal and infinite coarse bins take the full FP32 radix rescan;
     # single-key bins (all 0.0, -0.0 or +-inf) skip its refinement rounds.
@@ -1818,16 +1823,19 @@ def test_cooperative_topk_overflow_special_bins(
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
 
-    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    _run_topk_backend(backend, logits, lengths, indices, top_k, seq_len)
     torch.accelerator.synchronize()
     _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
 
 
-@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("num_rows", [9, 64])
 @torch.inference_mode()
-def test_cooperative_topk_overflow_mixed_lengths(num_rows: int, top_k: int) -> None:
+def test_cooperative_topk_overflow_mixed_lengths(
+    num_rows: int, top_k: int, backend: str
+) -> None:
     # One launch mixes short, cluster, overflowing and non-overflowing rows;
     # scores past each row's length must never be selected.
     width = 262144
@@ -1844,7 +1852,7 @@ def test_cooperative_topk_overflow_mixed_lengths(num_rows: int, top_k: int) -> N
     lengths = torch.tensor(row_lengths, dtype=torch.int32, device="cuda")
     indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
 
-    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, width)
+    _run_topk_backend(backend, logits, lengths, indices, top_k, width)
     torch.accelerator.synchronize()
     for row, length in enumerate(row_lengths):
         _assert_cooperative_topk_exact(
