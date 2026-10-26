@@ -184,7 +184,7 @@ def make_int8_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
-    per_out_ch_quant: bool = False,
+    per_out_ch_quant: bool | None = None,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
     if (a1_scale is None) != (a2_scale is None):

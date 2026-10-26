@@ -489,7 +489,7 @@ class FusedMoEQuantConfig:
     def make(
         quant_dtype: torch.dtype | str | None = None,
         per_act_token_quant: bool = False,
-        per_out_ch_quant: bool = False,
+        per_out_ch_quant: bool | None = None,
         block_shape: list[int] | None = None,
         w1_scale: Union[torch.Tensor, "PrecisionConfig", None] = None,
         w2_scale: Union[torch.Tensor, "PrecisionConfig", None] = None,
@@ -517,7 +517,9 @@ class FusedMoEQuantConfig:
           for quant_dtype.
         - per_act_token_quant: Activations have per token quantization.
         - per_out_ch_quant: Outputs have per channel quantization. (only
-          for cutlass).
+          for cutlass). Defaults to per_act_token_quant to keep the legacy
+          behaviour for callers that predate the split of the activation and
+          weight scale layouts.
         - block_shape: Optional block size for block-wise quantization.
           Incompatible with per_act_token and per_out_ch quant.
         - w1_scale: Optional scale to be used for w1.
@@ -563,6 +565,12 @@ class FusedMoEQuantConfig:
             "mxfp8",
         }
 
+        if per_out_ch_quant is None:
+            # Callers that predate the split of the activation and weight scale
+            # layouts got per-channel weight scales whenever the activations were
+            # per-channel. Keep that unless the weight layout is stated.
+            per_out_ch_quant = per_act_token_quant
+
         if weight_dtype is None:
             weight_dtype = quant_dtype
 
@@ -598,7 +606,7 @@ def fp8_w8a8_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
-    per_out_ch_quant: bool = False,
+    per_out_ch_quant: bool | None = None,
     block_shape: list[int] | None = None,
     a1_gscale: torch.Tensor | None = None,
     a2_gscale: torch.Tensor | None = None,
@@ -640,7 +648,7 @@ def int8_w8a8_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
-    per_out_ch_quant: bool = False,
+    per_out_ch_quant: bool | None = None,
 ) -> FusedMoEQuantConfig:
     """Construct a quant config for int8 activations and int8 weights."""
     return FusedMoEQuantConfig.make(
@@ -968,7 +976,7 @@ def int4_w4afp8_moe_quant_config(
     g1_alphas: torch.Tensor,
     g2_alphas: torch.Tensor,
     per_act_token_quant: bool = False,
-    per_out_ch_quant: bool = False,
+    per_out_ch_quant: bool | None = None,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
     """Construct a quant config for fp8 activations and int4 weights."""

@@ -729,7 +729,7 @@ def make_fp8_moe_quant_config(
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
     per_act_token_quant: bool = False,
-    per_out_ch_quant: bool = False,
+    per_out_ch_quant: bool | None = None,
     swiglu_limit: float | None = None,
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
