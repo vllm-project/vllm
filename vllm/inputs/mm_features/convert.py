@@ -7,24 +7,29 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Sequence
 from typing import cast
 
-from vllm.entrypoints.generate.base.protocol import MMPayload
-from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
-    decode_mm_kwargs_item,
-    encode_mm_kwargs_item,
-)
-from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-    MultiModalFeatures,
-    PlaceholderRangeInfo,
-)
+import torch
+
 from vllm.inputs import (
     EngineInput,
     MultiModalHashes,
     MultiModalInput,
     MultiModalPlaceholders,
+    mm_input,
+)
+from vllm.inputs.mm_features.serde import (
+    decode_mm_kwargs_item,
+    encode_mm_kwargs_item,
+)
+from vllm.inputs.mm_features.specs import (
+    MMPayload,
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
 )
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
+    MultiModalKwargsItems,
     MultiModalKwargsOptionalItems,
+    PlaceholderRange,
 )
 
 
@@ -130,7 +135,12 @@ def placeholder_ranges_from_engine_input(
     ]
     return {
         modality: [
-            PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
+            PlaceholderRangeInfo(
+                offset=p.offset,
+                length=p.length,
+                is_embed=p.is_embed.tolist() if p.is_embed is not None else None,
+            )
+            for p in ranges
         ]
         for modality, ranges in raw_placeholders.items()
     }
@@ -173,4 +183,63 @@ def extract_mm_features(
         mm_placeholders=mm_placeholders,
         kwargs_data=kwargs_data,
         mm_metadata=mm_metadata,
+        requires_kv=mm_engine_input.get("mm_requires_kv", False),
+        kv_handoff=mm_engine_input.get("mm_kv_handoff"),
     )
+
+
+def engine_input_from_features(
+    token_ids: list[int],
+    features: MultiModalFeatures,
+    *,
+    cache_salt: str | None = None,
+) -> MultiModalInput:
+    """Restore processed input for both Python and Generate API callers."""
+    if not token_ids or any(type(t) is not int or t < 0 for t in token_ids):
+        raise ValueError("features require valid expanded token_ids")
+    mm_placeholders = {}
+    for modality, ranges in features.mm_placeholders.items():
+        if any(p.offset + p.length > len(token_ids) for p in ranges):
+            raise ValueError(
+                "mm_placeholders must remain within the token_ids sequence"
+            )
+        mm_placeholders[modality] = [
+            PlaceholderRange(
+                offset=p.offset,
+                length=p.length,
+                is_embed=(
+                    torch.tensor(p.is_embed, dtype=torch.bool)
+                    if p.is_embed is not None
+                    else None
+                ),
+            )
+            for p in ranges
+        ]
+    if features.requires_kv:
+        # The final prompt token is always recomputed to produce logits, so a
+        # span reaching it would need media that KV alone cannot supply.
+        last_span_end = max(
+            (
+                p.offset + p.length
+                for ranges in mm_placeholders.values()
+                for p in ranges
+            ),
+            default=0,
+        )
+        if last_span_end >= len(token_ids):
+            raise ValueError(
+                "requires_kv needs at least one prompt token after the last "
+                "multimodal span"
+            )
+    result = mm_input(
+        prompt_token_ids=list(token_ids),
+        mm_kwargs=MultiModalKwargsItems(mm_kwargs_from_features(features)),
+        mm_hashes=features.mm_hashes,
+        mm_placeholders=mm_placeholders,
+        cache_salt=cache_salt,
+    )
+    if features.requires_kv:
+        result["mm_requires_kv"] = True
+    if features.kv_handoff is not None:
+        result["mm_kv_handoff"] = features.kv_handoff
+    return result

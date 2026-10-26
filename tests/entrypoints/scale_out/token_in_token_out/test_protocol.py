@@ -26,11 +26,10 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateTokensChoice,
     GenerateTokensResponse,
     GenerateTokensStreamResponse,
-    MultiModalFeatures,
     ParseContext,
-    PlaceholderRangeInfo,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs.mm_features.specs import MultiModalFeatures, PlaceholderRangeInfo
 from vllm.sampling_params import SamplingParams
 
 

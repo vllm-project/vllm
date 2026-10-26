@@ -19,10 +19,11 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
+from vllm.inputs.mm_features.convert import extract_mm_features
+from vllm.inputs.mm_features.specs import MultiModalFeatures
 from vllm.logger import init_logger
 from vllm.renderers.online_derenderer import OnlineDerenderer
 
-from ..token_in_token_out.mm_features import extract_mm_features
 from ..token_in_token_out.protocol import (
     DerenderChatRequest,
     DerenderChatStreamRequest,
@@ -30,7 +31,6 @@ from ..token_in_token_out.protocol import (
     DerenderCompletionStreamRequest,
     DerenderStreamState,
     GenerateTokensResponse,
-    MultiModalFeatures,
 )
 
 logger = init_logger(__name__)

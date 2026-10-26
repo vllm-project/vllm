@@ -62,7 +62,6 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
-    MMPayload,
     PerRequestMetrics,
     StopParam,
     TopLogprobsParam,
@@ -71,6 +70,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs.mm_features.specs import MMPayload
 from vllm.logger import init_logger
 from vllm.renderers import (
     ChatParams,
