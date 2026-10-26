@@ -3083,3 +3083,94 @@ fallback `key=OK` — battement nominal.
 reçu l'ACK du recreate) — le moteur, lui, sert normalement et la clé externe
 n'a pas degradation. Message Maintenance INFO (durcissement du lanceur de la
 tâche `fstier-prune`, sans changement fonctionnel) lu et marqué lu.
+
+---
+
+## 26/10 23:41Z — Cycle de surveillance — ⚠️ **le pruneur planifié était MUET depuis son durcissement** (tier fs 41 Go au-dessus du plafond) ; hotfix local + escalade aux propriétaires
+
+**Moteur (inchangé).** StartedAt `19:54:57Z`, health 200 à **4,7 ms**, `RC=0`,
+OOM=false, 0 `out of memory|Traceback|AssertionError|not found in cache` sur
+20 000 lignes, `/dev/shm` **24G/63G (39 %)**, KV **831 723**, 3 conteneurs up.
+**VRAM** : GPU 0 = **23 149 MiB** (4ᵉ relevé : 23 131 / 23 138 / 23 137 /
+23 149 ⇒ **plateau**), GPU 1 = 22 006, GPU 2 = 88 (libre). **Q41 reste ouverte**
+(ligne d'alerte 23 000 dépassée, marge 1 415 MiB).
+
+**Compteurs moteur.** prompt **84,89 M** · prefix queries 85,05 M / hits
+54,84 M = **64,5 %** · device 54,84 M · **préemptions 1** (0 à 21:41Z, une
+seule en 2 h) · fs lu **16,12 Go** (chunk hits fs/primary non relevés ce cycle)
+· tier RAM `kv_offload_store_bytes` **167,9 Go** (77,5 Go à 21:41Z).
+
+**Tier fs — écritures réelles depuis le boot (scan date de naissance).**
+**1 570 fichiers nés = 41,21 Go réellement écrits** contre **50,29 Go soumis**
+⇒ **9,08 Go supprimés au total** (cohérent avec les 9,19 Go mesurés à 21:41Z).
+
+| fenêtre | soumis | réellement écrits | supprimé |
+|---|---|---|---|
+| boot → 21:41Z | 27,72 Go | 18,53 Go | 9,19 Go (33 %) |
+| **21:41 → 23:41Z** | **22,57 Go** | **22,68 Go** | **≈ 0** |
+
+**Lecture du résultat** : le patch anti-réécriture ne supprime que la
+**réécriture d'un contenu déjà sur disque**. Au boot, le tier contenait encore
+le contenu du run précédent ⇒ 100 % sauté ; en régime établi, le flux est du
+**contenu neuf** (états GDN, nouveaux préfixes) ⇒ plus rien à sauter. Le gain
+est donc **réel mais non permanent** : il ne se rejoue qu'après chaque restart.
+Ratio courant **0,485 Ko/token prompt** ; la cible **÷5** de #198 exige de
+frapper le flux *neuf* (filtre d'admission + v2 snapshots GDN), pas le patch.
+
+### ★ Découverte : le pruneur planifié ne s'exécutait plus (et le census horaire non plus)
+
+Le tier fs plafonnait à **309,6 Go** pour un cap de **268,4 Go** — et
+`myia_vllm/logs/fstier_state.json` n'était plus écrit depuis **19:50Z** alors
+que la tâche `fstier-prune` se déclenchait toutes les 30 min avec
+**LastTaskResult = 0**.
+
+**Cause racine (mesurée, pas supposée).** Le durcissement « fenêtre invisible »
+(roo-extensions `scripts/scheduling/harden-hidden-tasks.ps1`) remplace l'action
+de la tâche par `wscript.exe //B //Nologo <launcher>.vbs`, et le VBS fait
+`WScript.Shell.Run(<commande d'origine **verbatim**>, 0, True)`. Quand l'`Execute`
+d'origine contient un espace — `C:\Program Files\PowerShell\7\pwsh.exe` — le
+chemin **n'est pas quoté** ⇒ CreateProcess résout `C:\Program` ⇒
+**0x80070002 (fichier introuvable)** ⇒ **la tâche ne fait rien** et le
+scheduler **rapporte 0**. Reproduction isolée (VBS de test) : variante non
+quotée → `Err.Number = -2147024894` (= 0x80070002), `rc` vide ; variante
+quotée → l'enfant s'exécute.
+
+**Périmètre.** Sur `C:\ProgramData\maint-scripts\hidden-launchers\` (5
+lanceurs) : `fstier-prune` (durci le **26/10 21:03**) et
+`traffic-census-hourly` (durci le **20/10 17:28**) sont **cassés** ; les trois
+autres sont sains (`powershell.exe` sans chemin, ou chemin sans espace). Le
+census horaire est donc **mort depuis 6 jours** (dernier `last-result.json`
+20/10 15:25Z) — exactement le piège que son propre script documente (« 08/10 :
+37 h d'interruption silencieuse cachées derrière LastTaskResult=0 »).
+
+**Correctif local appliqué** (lane vllm, sur ses **deux** tâches) : chemin de
+l'exécutable **quoté** dans les 2 VBS + commentaire HOTFIX ; sauvegarde
+`maint-scripts/_backup/20261027-vllm-launcher-fix/`. **Vérifié par
+déclenchement réel des tâches** : `fstier-prune` ⇒ état écrit 23:51:17Z
+(`mode=apply`, 0 erreur) ; `traffic-census-hourly` ⇒ `last-result.json`
+**23:51:16Z, ok:true, rc 0** (census ressuscité). Une passe manuelle avait
+ramené le tier de 309,6 à **268,4 Go** (au cap). **Escalade postée sur le
+dashboard `global` avec cross-post roo-extensions (générateur) + Maintenance
+(campagne de durcissement)** — le correctif amont (quoter l'`Execute` +
+propager un exit code non nul) est demandé aux propriétaires, la lane vllm
+garde ses deux tâches et #198.
+
+**Watchdog** : 2 nouveaux `WEDGE fail 1/2` (21:54:01Z, 22:33:02Z) —
+comportement attendu pendant les gros prefills ; **jamais `fail 2/2`**, aucun
+restart, aucun BOOT-STALL.
+
+**Sécurité (census 2 h, `x_forwarded_for`).** 596 requêtes : **576×200**,
+**20×401** (19 sur la clé morte connue `1f7f6080cb65`, 1 sans clé),
+**0×400**. IP avec 200 = hairpin `90.65.170.144` (315) + l'entrée « ? » (261,
+direct interne) ⇒ **aucune nouvelle IP externe**. Corps : 269 en 100K-1M (45 %),
+61 en 10-100K, 23 en 1-10K, 243 < 1K. Clé unique MEDIUM (empreinte
+`be312daf7c1c`, schéma middleware).
+
+**Hôte.** Commit **357,2/395,3 Go = 90,4 %** (marge 38,1 Go) ⇒ **au-dessus du
+seuil 85 % : aucun travail lourd**. nbaudit `ok:true` 23:06Z (`Image/`).
+G: **1ᵉʳ probe KO, 2ᵉ OK** ⇒ latence DriveFS transitoire, pas un hang (à
+re-tester si ça se répète). Condensation RSM : bannière 23:41:08Z, primaire =
+notre moteur avec la clé MEDIUM, fallback `key=OK`, **aucun échec**.
+
+**Restant ouvert** : Q41 (VRAM), #198 (écritures : le flux *neuf* est le
+levier), ACK du hub claudish (toujours sans réponse depuis 20:27Z).
