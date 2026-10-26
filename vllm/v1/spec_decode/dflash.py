@@ -89,6 +89,8 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
+        from vllm.model_executor.models.qwen3_dflash import get_dflash_cache_config
+
         base = super()._create_draft_vllm_config()
         # The draft model is text-only — clear the target's multimodal
         # flag so flash_attn is not rejected for mm_prefix support.
@@ -97,6 +99,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             base.model_config.model_arch_config = replace(arch, is_mm_prefix_lm=False)
         return replace(
             base,
+            cache_config=get_dflash_cache_config(self.vllm_config),
             attention_config=replace(
                 base.attention_config,
                 use_non_causal=not self.dflash_causal,
