@@ -476,6 +476,7 @@ async def test_multimodal_prefix_warmup_preserves_input(
     )
     shared = MIN_WARM_PREFIX_TOKENS + 10
     prompts = [[1] * shared + [2, 3], [1] * shared + [4, 5]]
+    original_prompt_ids = prompts[0].copy()
     image_end = 20 if image_in_prefix else shared + 1
     engine_input = mm_input(
         prompts[0],
@@ -501,13 +502,13 @@ async def test_multimodal_prefix_warmup_preserves_input(
         return
     warm_input = engine.generate.call_args.args[0]
     assert warm_input["type"] == "multimodal"
-    assert warm_input["prompt_token_ids"] == prompts[0][:shared]
+    assert warm_input["prompt_token_ids"] == original_prompt_ids[:shared]
     assert warm_input["mm_kwargs"] is engine_input["mm_kwargs"]
     assert warm_input["mm_hashes"] is engine_input["mm_hashes"]
     assert warm_input["mm_placeholders"] is engine_input["mm_placeholders"]
     assert warm_input["cache_salt"] == "tenant"
     assert "prompt" not in warm_input
-    assert engine_input["prompt_token_ids"] == prompts[0]
+    assert engine_input["prompt_token_ids"] == original_prompt_ids
     assert engine_input["prompt"] == "the original rendered prompt"
 
 
