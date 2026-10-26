@@ -37,13 +37,17 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
-from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
+from vllm.model_executor.layers.fused_moe.config import (
+    nvfp4_moe_quant_config,
+    nvfp4_w4a16_moe_quant_config,
+)
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe import (
     FlashInferB12xExperts,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     reorder_w1w3_to_w3w1,
 )
+from vllm.utils.flashinfer import has_flashinfer_b12x_w4a16_moe
 from vllm.utils.torch_utils import set_random_seed
 
 # Dimensions chosen to satisfy FP4 alignment requirements (k multiple of 256,
@@ -348,6 +352,139 @@ def test_flashinfer_b12x_moe_relu2(
             atol=2e-1,
             rtol=2e-1,
         )
+
+
+def _quantize_per_expert_nvfp4(
+    w: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize ``w`` [E, rows, cols] with a per-expert global scale the way
+    a ModelOpt checkpoint does (w_gs = fp8_max * fp4_max / amax).
+
+    Returns (packed_fp4 [E, rows, cols//2], swizzled_blockscale [E, rows,
+    cols//16], w_gs [E]).
+    """
+    e = w.shape[0]
+    w_gs = (448.0 * 6.0) / w.float().abs().amax(dim=(1, 2))
+    q_list, sf_list = [], []
+    for i in range(e):
+        q, sf = fp4_quantize(
+            w[i],
+            global_scale=w_gs[i : i + 1].contiguous(),
+            sf_vec_size=16,
+            is_sf_swizzled_layout=True,
+        )
+        q_list.append(q)
+        sf_list.append(sf.view(w.shape[1], -1))
+    return torch.stack(q_list), torch.stack(sf_list), w_gs
+
+
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
+@pytest.mark.parametrize("e", [8, 16])
+@pytest.mark.parametrize("topk", [1, 2, 4])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_flashinfer_b12x_moe_w4a16(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    workspace_init,
+):
+    """W4A16 (NVFP4 weights, BF16 activations) through FlashInferB12xExperts.
+
+    Uses ``nvfp4_w4a16_moe_quant_config`` (no activation quantization) with a
+    realistic per-expert weight global scale, and checks that the experts
+    select FlashInfer's ``quant_mode="w4a16"`` path rather than quantizing
+    the activations to FP4.  Since only the weights are quantized the
+    tolerance is tighter than the W4A4 tests.
+    """
+    if not has_flashinfer_b12x_w4a16_moe():
+        pytest.skip("Installed FlashInfer lacks B12xMoEWrapper(quant_mode=...)")
+
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        w1_bf16 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 15
+        w2_bf16 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 15
+
+        # FlashInfer expects [up, gate] row order (see test_flashinfer_b12x_moe).
+        w1_reordered, _ = reorder_w1w3_to_w3w1(
+            w1_bf16.clone(),
+            torch.ones((e, 2 * n, 1), device="cuda", dtype=torch.float32),
+        )
+        w1_q, w1_blockscale, w1_gs = _quantize_per_expert_nvfp4(w1_reordered)
+        w2_q, w2_blockscale, w2_gs = _quantize_per_expert_nvfp4(w2_bf16)
+
+        # vLLM convention: g_alphas = weight_scale_2 = 1 / w_gs.
+        g1_alphas = (1.0 / w1_gs).contiguous()
+        g2_alphas = (1.0 / w2_gs).contiguous()
+
+        quant_config = nvfp4_w4a16_moe_quant_config(
+            g1_alphas=g1_alphas,
+            g2_alphas=g2_alphas,
+            w1_scale=w1_blockscale,
+            w2_scale=w2_blockscale,
+        )
+
+        moe_config = make_dummy_moe_config(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            in_dtype=dtype,
+        )
+
+        experts = FlashInferB12xExperts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+        )
+        assert experts.use_a16
+
+        _process_b12x_weights(
+            experts,
+            w1_blockscale,
+            w2_blockscale,
+            g1_alphas,
+            g2_alphas,
+        )
+        # W4A16 must hand the checkpoint's scales to FlashInfer untouched.
+        torch.testing.assert_close(g1_alphas, 1.0 / w1_gs)
+
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
+            experts,
+        )
+
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+
+        b12x_output = kernel.apply(
+            hidden_states=a,
+            w1=w1_q,
+            w2=w2_q,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=e,
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=None,
+        )
+
+        assert experts._wrapper is not None
+        assert experts._wrapper.quant_mode == "w4a16"
+        assert experts._wrapper.activation_precision == "bf16"
+
+        torch_output = torch_moe(a, w1_bf16, w2_bf16, score, topk)
+
+        torch.testing.assert_close(b12x_output, torch_output, atol=1e-1, rtol=1e-1)
 
 
 if __name__ == "__main__":
