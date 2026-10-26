@@ -58,7 +58,10 @@ Buildkite wiring and perf/accuracy comparison. When reviewing a PR, use
 6. **Boundaries are explicit cases.** Sequence length exactly at, one below
    and one above: a block boundary, the sliding window, a kernel partition
    size, and any context-chunk size the builder uses. Empty context, context
-   longer than one chunk, padded tokens beyond `num_actual_tokens`.
+   longer than one chunk, padded tokens beyond `num_actual_tokens`, and
+   requests with query length 0 after the real prefills (seq_len 0 from CUDA
+   graph padding, seq_len > 0 from an async KV connector load), with prefill
+   chunking active.
 7. **CUDA graphs are tested through the runner's modes.** Cover `NONE`,
    `PIECEWISE`, `FULL_DECODE_ONLY`, `FULL_AND_PIECEWISE` (and `FULL` if the
    builder claims `ALWAYS`). For each graph-captured shape, replay with

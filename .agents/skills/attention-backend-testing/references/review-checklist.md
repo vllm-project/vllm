@@ -13,6 +13,10 @@ can actually break.
 - Does it change the builder? Check for new `.item()`, `.cpu()`, `.tolist()` on
   the decode-only path, new per-build allocations, and buffers that are
   allocated for configs that never read them.
+- Does it plan prefill or context chunks per request? A chunk planner must
+  never emit a chunk with no query tokens: requests with query length 0 sit in
+  the prefill region after FULL CUDA graph padding or an async KV connector
+  load (vllm-project/vllm#55695, #51489).
 - Does it change an op or bump the kernel library? Every backend that calls the
   op is affected; run their suites, not only the one in the title.
 
@@ -34,6 +38,8 @@ can actually break.
 - Sliding window with context longer than the window in extend and decode.
 - KV sharing / KV-update-bypass layers.
 - Full CUDA graph replay with changed block tables.
+- Requests with query length 0 after the real prefills (graph padding, async
+  KV connector loads), combined with prefill chunking.
 - Model runner v2 and async scheduling.
 - The test file is actually collected by a Buildkite step that runs on the
   target GPU, and the backend file is in that step's
