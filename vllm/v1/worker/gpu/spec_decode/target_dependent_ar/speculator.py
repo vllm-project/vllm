@@ -92,7 +92,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 1
+            ),
         )
 
         # PIECEWISE cudagraphs are not supported for draft decodes.
@@ -103,7 +105,10 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
         # Initialize cudagraph manager for draft decodes (draft positions > 0).
         self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config, self.device, cudagraph_mode, decode_query_len=1
+            self.vllm_config,
+            self.device,
+            cudagraph_mode,
+            decode_query_lens={1: self.max_num_reqs},
         )
 
     def capture(self) -> None:
