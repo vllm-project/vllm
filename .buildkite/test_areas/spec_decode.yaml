@@ -182,7 +182,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP DeepSeek + MiMo"
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP DeepSeek + MiMo + GLM"
   key: spec-decode-mtp-deepseek-mimo
   timeout_in_minutes: 30
   device: h200_35gb
@@ -191,13 +191,17 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/v1/attention/backends/
     - vllm/transformers_utils/configs/speculators/
+    - vllm/model_executor/models/glm4_moe_mtp.py
+    - vllm/model_executor/models/glm4_moe_lite_mtp.py
+    - vllm/model_executor/models/glm_ocr_mtp.py
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/mtp/deepseek/
     - pytest -v -s v1/e2e/spec_decode/mtp/mimo/
+    - pytest -v -s v1/e2e/spec_decode/mtp/glm/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode MTP DeepSeek + MiMo"
+      label: ":amd: (MI300) Spec Decode MTP DeepSeek + MiMo + GLM"
       dind: false
       device: mi300_1
       timeout_in_minutes: 40
@@ -210,6 +214,9 @@ steps:
       - vllm/v1/sample/
       - vllm/model_executor/layers/
       - vllm/transformers_utils/configs/speculators/
+      - vllm/model_executor/models/glm4_moe_mtp.py
+      - vllm/model_executor/models/glm4_moe_lite_mtp.py
+      - vllm/model_executor/models/glm_ocr_mtp.py
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
