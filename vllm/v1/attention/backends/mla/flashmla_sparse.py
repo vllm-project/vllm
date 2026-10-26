@@ -439,10 +439,8 @@ class FlashMLASparseMetadataBuilder(
         # PCP+DCP attends prefill rows over the DCP-gathered KV, which only the
         # separate prefill/decode path can do.
         self.pcp_dcp_kv_gather = self.use_pcp and self.dcp_world_size > 1
-        self.fp8_use_mixed_batch = (
-            self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
-            and not self.use_hisparse
-            and not self.pcp_dcp_kv_gather
+        self.fp8_use_mixed_batch = FlashMLASparseImpl._use_fp8_mixed_batch(
+            self.num_heads, self.use_hisparse, self.pcp_dcp_kv_gather
         )
 
         if parallel_config.decode_context_parallel_size > 1:
@@ -717,6 +715,16 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # Compute padded head count for decode
         return 64 if num_heads <= 64 else 128
 
+    @staticmethod
+    def _use_fp8_mixed_batch(
+        num_heads: int, use_hisparse: bool, pcp_dcp_kv_gather: bool
+    ) -> bool:
+        return (
+            num_heads < MIN_HEADS_FOR_BF16_PREFILL
+            and not use_hisparse
+            and not pcp_dcp_kv_gather
+        )
+
     def __init__(
         self,
         num_heads: int,
@@ -789,30 +797,38 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 "the bf16 sparse path is not supported under DCP."
             )
 
-        self.pcp_dcp_kv_gather = False
+        parallel_config = vllm_config.parallel_config
+        self.pcp_dcp_kv_gather = (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        )
+        self.fp8_use_mixed_batch = self._use_fp8_mixed_batch(
+            num_heads,
+            vllm_config.attention_config.hisparse_config is not None,
+            self.pcp_dcp_kv_gather,
+        )
         self.workspace_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
             (q_concat_shape, torch.bfloat16)
         ]
         if kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS:
-            # Reserve workspace during initialization
-            assert vllm_config is not None and vllm_config.model_config is not None
-            prefill_workspace_size = get_prefill_workspace_size(vllm_config)
-            parallel_config = vllm_config.parallel_config
-            self.pcp_dcp_kv_gather = (
-                parallel_config.prefill_context_parallel_size > 1
-                and parallel_config.decode_context_parallel_size > 1
-            )
-            shard_rows = prefill_workspace_size
-            if self.pcp_dcp_kv_gather:
-                # PCP+DCP upconverts this rank's KV shard, then all-gathers the
-                # shards into a workspace of the full prefill size.
-                shard_rows //= parallel_config.decode_context_parallel_size
-            self.prefill_workspace_shape = (shard_rows, self.q_head_size)
-            self.workspace_specs.append((self.prefill_workspace_shape, torch.bfloat16))
-            if self.pcp_dcp_kv_gather:
+            # The bf16 prefill KV buffers scale with max_model_len and are only
+            # read by the separate prefill/decode path.
+            if not self.fp8_use_mixed_batch:
+                assert vllm_config.model_config is not None
+                prefill_workspace_size = get_prefill_workspace_size(vllm_config)
+                shard_rows = prefill_workspace_size
+                if self.pcp_dcp_kv_gather:
+                    # PCP+DCP upconverts this rank's KV shard, then all-gathers
+                    # the shards into a workspace of the full prefill size.
+                    shard_rows //= parallel_config.decode_context_parallel_size
+                self.prefill_workspace_shape = (shard_rows, self.q_head_size)
                 self.workspace_specs.append(
-                    ((prefill_workspace_size, self.q_head_size), torch.bfloat16)
+                    (self.prefill_workspace_shape, torch.bfloat16)
                 )
+                if self.pcp_dcp_kv_gather:
+                    self.workspace_specs.append(
+                        ((prefill_workspace_size, self.q_head_size), torch.bfloat16)
+                    )
             prefill_query_heads = num_heads
             if self.pcp_dcp_kv_gather and self.dcp_world_size > self.pcp_world_size:
                 prefill_query_heads *= parallel_config.tensor_parallel_size
@@ -1442,6 +1458,9 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
         use_fp8_cache = self.kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+        if use_fp8_cache:
+            # The workspace specs were reserved for this path at init.
+            assert attn_metadata.fp8_use_mixed_batch == self.fp8_use_mixed_batch
 
         lse: torch.Tensor | None = None
 
