@@ -926,13 +926,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if failed:
             failed_codes = {result[index] for index in failed}
             logger.warning(
-                "batch_put failed: %d/%d keys failed "
-                "(codes=%s, batch_bytes=%d), first_key=%s",
+                "batch_put failed for request %s: %d/%d keys failed "
+                "(codes=%s, batch_bytes=%d), first_failed_key=%s",
+                req_meta.req_id,
                 len(failed),
                 len(keys),
                 failed_codes,
                 batch_bytes,
-                keys[0],
+                keys[min(failed)],
             )
             if (
                 MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes
