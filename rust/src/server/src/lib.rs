@@ -29,7 +29,7 @@ use axum::body::Body;
 use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    DEFAULT_LOG_STATS_INTERVAL, HttpListenerMode, LoraModulePath, TlsConfig,
+    DEFAULT_LOG_STATS_INTERVAL, HttpListenerMode, LoraModulePath, OutputLogging, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;

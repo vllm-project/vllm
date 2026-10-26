@@ -59,6 +59,8 @@ pub enum CoordinatorMode {
 pub struct ApiServerOptions {
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
+    /// Which generated outputs to log (`--enable-log-outputs`).
+    pub log_outputs: OutputLogging,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
     /// Format logprob tokens as `token_id:{id}` unless the request sets
@@ -75,6 +77,31 @@ pub struct ApiServerOptions {
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
+}
+
+/// Which generated outputs to log, like Python's `--enable-log-outputs` and
+/// `--enable-log-deltas`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub enum OutputLogging {
+    /// Log no generated outputs.
+    #[default]
+    Disabled,
+    /// Log the complete output of each response.
+    Complete,
+    /// Log the complete output of each response and every streamed delta.
+    CompleteAndDeltas,
+}
+
+impl OutputLogging {
+    /// Whether the complete output of each response is logged.
+    pub fn logs_complete(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    /// Whether each streamed delta is logged.
+    pub fn logs_deltas(self) -> bool {
+        matches!(self, Self::CompleteAndDeltas)
+    }
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; origins are denied by default.

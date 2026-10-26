@@ -45,6 +45,7 @@ use crate::routes::openai::completions::types::{
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::routes::output_log::{LoggedOutput, log_output};
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
@@ -140,6 +141,7 @@ async fn collect_completion(
     created: u64,
     ApiServerOptions {
         enable_log_requests,
+        log_outputs,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
         enable_per_request_metrics,
@@ -197,6 +199,21 @@ async fn collect_completion(
     } else {
         None
     };
+    if log_outputs.logs_complete() {
+        // A prompt-only response generates nothing visible, like Python's
+        // `max_tokens=0`.
+        let (output, token_ids) = if prompt_only {
+            ("", [].as_slice())
+        } else {
+            (collected.text.as_str(), collected.token_ids.as_slice())
+        };
+        log_output(
+            LoggedOutput::Response,
+            output,
+            Some(token_ids),
+            Some(&finish_reason),
+        );
+    }
     let text = match &echo {
         None => collected.text,
         Some(prompt) if prompt_only => prompt.clone(),
@@ -249,6 +266,7 @@ async fn completion_chunk_stream(
     created: u64,
     ApiServerOptions {
         enable_log_requests,
+        log_outputs,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
         enable_per_request_metrics,
@@ -279,6 +297,9 @@ async fn completion_chunk_stream(
     let mut visible_text_len = 0_u32;
     let mut first_chunk = true;
     let mut continuous_usage = ContinuousUsage::default();
+    // The generated text so far, for the complete line of
+    // `--enable-log-outputs`.
+    let mut output_log = log_outputs.logs_complete().then(String::new);
 
     /// Yield a chunk with optional continuous usage attached.
     macro_rules! yield_chunk {
@@ -366,6 +387,14 @@ async fn completion_chunk_stream(
                             finished.usage.output_token_count,
                         );
                         let final_chunk = final_chunk(&envelope, finished.finish_reason)?;
+                        if let Some(output_log) = output_log.take() {
+                            log_output(
+                                LoggedOutput::StreamComplete,
+                                &output_log,
+                                None,
+                                final_chunk.choices[0].finish_reason.as_deref(),
+                            );
+                        }
                         yield_chunk!(final_chunk);
 
                         if include_usage {
@@ -403,6 +432,19 @@ async fn completion_chunk_stream(
                 } else {
                     None
                 };
+                if let Some(output_log) = output_log.as_mut() {
+                    output_log.push_str(&delta);
+                    if log_outputs.logs_deltas() && !delta.is_empty() {
+                        log_output(
+                            LoggedOutput::StreamDelta,
+                            &delta,
+                            Some(&token_ids),
+                            finished.as_ref().and_then(|finished| {
+                                completion_finish_reason_to_openai(&finished.finish_reason).ok()
+                            }),
+                        );
+                    }
+                }
                 let mut chunk = delta_chunk(&envelope, delta, logprobs);
                 let delta_token_count = token_ids.len();
                 continuous_usage.add_output_tokens(delta_token_count);
@@ -428,6 +470,14 @@ async fn completion_chunk_stream(
                         finished.usage.output_token_count,
                     );
                     let final_chunk = final_chunk(&envelope, finished.finish_reason)?;
+                    if let Some(output_log) = output_log.take() {
+                        log_output(
+                            LoggedOutput::StreamComplete,
+                            &output_log,
+                            None,
+                            final_chunk.choices[0].finish_reason.as_deref(),
+                        );
+                    }
                     yield_chunk!(final_chunk);
 
                     if include_usage {

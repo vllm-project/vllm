@@ -11,6 +11,7 @@ mod load;
 mod lora;
 mod metrics;
 pub(crate) mod openai;
+mod output_log;
 mod pause;
 mod profile;
 pub(super) mod render;
