@@ -23,7 +23,7 @@ use llm_multimodal::{
     FrameSampling, ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart,
     MediaItemInfo, Modality, ModelMetadata, ModelProcessorSpec, PreProcessorConfig,
     PreprocessedEncoderInputs, PromptReplacement, Tokenizer as TokenResolver, TrackedMedia,
-    VideoClip, VisionPreProcessor, VisionPreprocessingContext,
+    TransparencyPolicy, VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
@@ -974,7 +974,15 @@ impl MultimodalModelInfo {
         fields(stage = "media_fetch")
     )]
     async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
-        let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
+        // Python's image loader composites transparent pixels over white
+        // (`rgba_background_color`), except for a processor that handles the
+        // alpha channel itself (Kimi-K3, whose Python renderer keeps it).
+        let transparency = match &self.image {
+            Some(image) if image.processor.keeps_alpha() => TransparencyPolicy::KeepAlpha,
+            _ => TransparencyPolicy::CompositeOverWhite,
+        };
+        let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector))
+            .with_image_transparency(transparency);
         if let Some((sampling, default_fps)) = self.video_sampling_policy() {
             tracker = tracker
                 .with_video_frame_sampling(sampling)
@@ -1272,6 +1280,73 @@ mod tests {
             info.image.as_ref().unwrap().placeholder.marker_token_ids,
             info.video.as_ref().unwrap().placeholder.marker_token_ids,
         );
+    }
+
+    /// A transparent pixel reaches the encoder as white, the background
+    /// Python's image loader composites it over.
+    #[tokio::test]
+    async fn transparent_pixels_reach_the_encoder_as_white() {
+        let info = qwen3_vl_info();
+        let encoder_input = async |pixel: [u8; 4]| {
+            let mut png = Vec::new();
+            ::image::RgbaImage::from_pixel(32, 32, ::image::Rgba(pixel))
+                .write_to(
+                    &mut std::io::Cursor::new(&mut png),
+                    ::image::ImageFormat::Png,
+                )
+                .unwrap();
+            let media = MediaContentPart::ImageData {
+                data: png,
+                mime_type: Some("image/png".to_string()),
+                uuid: None,
+                detail: None,
+            };
+            let mut tokens = vec![11, QWEN3_IMAGE_PAD_ID, 12];
+            let mut features = info
+                .prepare_multimodal(vec![media], &mut tokens, ModelDtype::Float32, None)
+                .await
+                .unwrap();
+            features.remove(0).data
+        };
+
+        let transparent = encoder_input([0, 0, 0, 0]).await;
+        assert_eq!(transparent, encoder_input([255, 255, 255, 255]).await);
+        assert_ne!(transparent, encoder_input([0, 0, 0, 255]).await);
+    }
+
+    /// A processor that handles the alpha channel itself gets the image as
+    /// decoded; every other one gets it composited over white.
+    #[tokio::test]
+    async fn image_transparency_follows_the_processor() {
+        let mut png = Vec::new();
+        ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([0, 0, 0, 0]))
+            .write_to(
+                &mut std::io::Cursor::new(&mut png),
+                ::image::ImageFormat::Png,
+            )
+            .unwrap();
+        let kimi_k3_info = test_info(
+            "kimi_k3",
+            serde_json::json!({"model_type": "kimi_k3", "media_placeholder_token_id": 163605}),
+            TestTokenizer::new()
+                .with_regular_token("<|media_begin|>", 163602)
+                .with_regular_token("<|media_content|>", 163603)
+                .with_regular_token("<|media_end|>", 163604)
+                .with_regular_token("<|media_pad|>", 163605),
+        );
+        for (info, expected) in [
+            (qwen3_vl_info(), TransparencyPolicy::CompositeOverWhite),
+            (kimi_k3_info, TransparencyPolicy::KeepAlpha),
+        ] {
+            let media = MediaContentPart::ImageData {
+                data: png.clone(),
+                mime_type: Some("image/png".to_string()),
+                uuid: None,
+                detail: None,
+            };
+            let fetched = info.fetch_media(vec![media]).await.unwrap();
+            assert_eq!(fetched.images[0].transparency(), expected);
+        }
     }
 
     #[test]
