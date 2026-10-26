@@ -1153,7 +1153,7 @@ def extract_types_from_schema(
     """
     if fallback is None:
         fallback = ["string"]
-    if schema is True or schema is False:
+    if isinstance(schema, bool):
         return list(fallback)
     if not isinstance(schema, dict):
         return ["string"]
@@ -1194,6 +1194,17 @@ def extract_types_from_schema(
     if types:
         return list(types)
     return list(fallback)
+
+
+def schema_coercion_types(schema: Any) -> list[str]:
+    """Types *schema* justifies coercing a value to; ``[]`` for none.
+
+    An untyped schema (see :func:`schema_admits_any_value`) has no branch
+    that would justify a type change, so callers leave such values verbatim.
+    """
+    if not isinstance(schema, dict) or schema_admits_any_value(schema):
+        return []
+    return extract_types_from_schema(schema, fallback=[])
 
 
 _TYPE_ALIASES: dict[str, str] = {
@@ -1318,6 +1329,11 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     return parsed
 
 
+def value_changed(before: Any, after: Any) -> bool:
+    """Whether *after* differs from *before* in JSON type or value."""
+    return type(after) is not type(before) or after != before
+
+
 def coerce_typed_value(value: Any, schema: Any) -> tuple[Any, bool]:
     """Coerce an already-typed value according to its property *schema*.
 
@@ -1327,18 +1343,14 @@ def coerce_typed_value(value: Any, schema: Any) -> tuple[Any, bool]:
     since no branch of it justifies changing the type. Returns
     ``(value, changed)``.
     """
-    if not isinstance(schema, dict):
-        return value, False
-    if schema_admits_any_value(schema):
-        return value, False
-    types = extract_types_from_schema(schema, fallback=[])
+    types = schema_coercion_types(schema)
     if not types:
         return value, False
     raw_value = (
         value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     )
     coerced = coerce_to_schema_type(raw_value, types)
-    return coerced, type(coerced) is not type(value) or coerced != value
+    return coerced, value_changed(value, coerced)
 
 
 def sanitize_non_finite(value: Any) -> Any:

@@ -173,7 +173,7 @@ class K2HorizonToolParser(ToolParser):
             target_types = [explicit_base]
         else:
             target_types = extract_types_from_schema(schema)
-            if explicit_base in target_types and len(set(target_types)) > 1:
+            if explicit_base in target_types and len(target_types) > 1:
                 target_types = [explicit_base]
 
         raw_value = value if "string" in target_types else value.strip()

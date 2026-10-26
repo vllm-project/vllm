@@ -1768,51 +1768,12 @@ def _collect_arg_deltas(deltas: list) -> str:
 
 def _stream_tool_args(engine, name: str, chunks: list[str]) -> str:
     """Stream a tool call and return the exact joined argument text."""
-    deltas = []
-    deltas.append(
-        engine._events_to_delta(
-            [SemanticEvent(EventType.TOOL_CALL_START, tool_index=0)]
-        )
-    )
-    deltas.append(
-        engine._events_to_delta(
-            [SemanticEvent(EventType.TOOL_NAME, name, tool_index=0)]
-        )
-    )
-    for chunk in chunks:
-        deltas.append(
-            engine._events_to_delta(
-                [SemanticEvent(EventType.ARG_VALUE_CHUNK, chunk, tool_index=0)]
-            )
-        )
-    deltas.append(
-        engine._events_to_delta([SemanticEvent(EventType.TOOL_CALL_END, tool_index=0)])
-    )
-    return _collect_arg_deltas(deltas)
+    per_chunk, flush = _stream_arg_deltas(engine, name, chunks)
+    return "".join(per_chunk) + flush
 
 
 def _run_streaming_tool(engine, name: str, chunks: list[str]) -> dict:
-    deltas = []
-    deltas.append(
-        engine._events_to_delta(
-            [SemanticEvent(EventType.TOOL_CALL_START, tool_index=0)]
-        )
-    )
-    deltas.append(
-        engine._events_to_delta(
-            [SemanticEvent(EventType.TOOL_NAME, name, tool_index=0)]
-        )
-    )
-    for chunk in chunks:
-        deltas.append(
-            engine._events_to_delta(
-                [SemanticEvent(EventType.ARG_VALUE_CHUNK, chunk, tool_index=0)]
-            )
-        )
-    deltas.append(
-        engine._events_to_delta([SemanticEvent(EventType.TOOL_CALL_END, tool_index=0)])
-    )
-    return json.loads(_collect_arg_deltas(deltas))
+    return json.loads(_stream_tool_args(engine, name, chunks))
 
 
 class TestArgDeltaWithConverter:
@@ -2278,30 +2239,26 @@ class TestCoercionInstabilityRegression:
         assert args == '{"a": ' + deep + "}"
 
 
-def _delta_arg_text(delta) -> str:
-    if delta is None:
-        return ""
-    return "".join(
-        tc.function.arguments
-        for tc in delta.tool_calls or []
-        if tc.function and tc.function.arguments
-    )
-
-
 def _stream_arg_deltas(engine, name: str, chunks: list[str]) -> tuple[list[str], str]:
     """Stream a tool call; return per-chunk argument deltas and the flush."""
     engine._events_to_delta([SemanticEvent(EventType.TOOL_CALL_START, tool_index=0)])
     engine._events_to_delta([SemanticEvent(EventType.TOOL_NAME, name, tool_index=0)])
     per_chunk = [
-        _delta_arg_text(
-            engine._events_to_delta(
-                [SemanticEvent(EventType.ARG_VALUE_CHUNK, chunk, tool_index=0)]
-            )
+        _collect_arg_deltas(
+            [
+                engine._events_to_delta(
+                    [SemanticEvent(EventType.ARG_VALUE_CHUNK, chunk, tool_index=0)]
+                )
+            ]
         )
         for chunk in chunks
     ]
-    flush = _delta_arg_text(
-        engine._events_to_delta([SemanticEvent(EventType.TOOL_CALL_END, tool_index=0)])
+    flush = _collect_arg_deltas(
+        [
+            engine._events_to_delta(
+                [SemanticEvent(EventType.TOOL_CALL_END, tool_index=0)]
+            )
+        ]
     )
     return per_chunk, flush
 
