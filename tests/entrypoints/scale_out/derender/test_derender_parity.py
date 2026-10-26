@@ -168,6 +168,10 @@ def _assert_parity(coupled: dict, disagg: dict) -> None:
     assert d["token_ids"] == c["token_ids"]
     assert disagg["usage"]["prompt_tokens"] == coupled["usage"]["prompt_tokens"]
     assert disagg["usage"]["completion_tokens"] == len(c["token_ids"])
+    assert (
+        disagg["usage"]["completion_tokens_details"]
+        == coupled["usage"]["completion_tokens_details"]
+    )
 
 
 async def _run_parity_case(
