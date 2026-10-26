@@ -335,11 +335,12 @@ def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
     monkeypatch.setattr(layer, "get_forward_context", lambda: context[0])
     plans = []
     plan = core.KvBalancedMla.plan
-    monkeypatch.setattr(
-        core.KvBalancedMla,
-        "plan",
-        lambda self, *args: plans.append(1) or plan(self, *args),
-    )
+
+    def counted_plan(self, *args):
+        plans.append(1)
+        plan(self, *args)
+
+    monkeypatch.setattr(core.KvBalancedMla, "plan", counted_plan)
 
     out, lse = mqa(mla, query, metadata)
     assert lse is None

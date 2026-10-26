@@ -78,7 +78,9 @@ class TokenspeedKvBalancedMqa:
         # Under DCP the query is gathered over the ranks' heads.
         self.heads = layer.num_local_heads * dcp
         self.max_q = max_decode_query_len(config)
-        device = torch.device(current_platform.device_type, torch.cuda.current_device())
+        device = torch.device(
+            current_platform.device_type, torch.accelerator.current_device_index()
+        )
         if not core.supports(self.heads, self.max_q, device):
             raise RuntimeError(
                 "mla_decode_backend=kv_balanced needs more than 64 query rows per "
@@ -144,7 +146,7 @@ class TokenspeedKvBalancedMqa:
             from .core import KvBalancedMla, supports
 
             device = torch.device(
-                current_platform.device_type, torch.cuda.current_device()
+                current_platform.device_type, torch.accelerator.current_device_index()
             )
             core = (
                 KvBalancedMla(heads, qlen, self.max_requests, causal, device)

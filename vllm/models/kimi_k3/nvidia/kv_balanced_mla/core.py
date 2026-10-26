@@ -69,7 +69,7 @@ def work_list_len(heads: int, q: int, requests: int, clusters: int) -> int:
 
 
 def max_active_clusters(device: torch.device) -> int:
-    with torch.cuda.device(device):
+    with torch.accelerator.device_index(device.index):
         return cutlass.utils.HardwareInfo().get_max_active_clusters(2)
 
 
