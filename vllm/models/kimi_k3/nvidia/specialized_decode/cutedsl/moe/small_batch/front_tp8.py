@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""TP8 B1 small-batch front (this rank's router shard staged in SMEM, x_moe polling, score
-multicast, threshold top16 over every rank's scores, latent multicast and gather, shared
-gate/up) and the shared-expert finisher."""
+"""TP8 B1 small-batch front (this rank's router shard staged in SMEM, x_moe polling,
+score multicast, threshold top16 over every rank's scores, latent multicast and gather,
+shared gate/up) and the shared-expert finisher."""
 
 import cutlass
 import cutlass.cute as cute
@@ -177,13 +177,13 @@ class SharedSituTables:
 
 
 class MoeFrontTP8:
-    """Each rank computes only its 112-row router shard (not all 896
-    rows, 8x redundant across TP) and multicasts the (score, score + bias) records into
-    every rank's score mailbox (``scores``: the local [parity, token, 896] view; scores_mc:
-    its multicast base). CTA 0's top16 polls all 896 records as before. Each logit is the
-    same per-row GEMV (same K split and warp-partial order), so ids and weights are
-    bitwise unchanged. With at most one router row per CTA, every gate/up row is staged
-    at entry (slots 1-13) instead of after the router GEMV."""
+    """Each rank computes only its 112-row router shard (not all 896 rows, 8x redundant
+    across TP) and multicasts the (score, score + bias) records into every rank's score
+    mailbox (``scores``: the local [parity, token, 896] view; scores_mc: its multicast
+    base). CTA 0's top16 polls all 896 records as before. Each logit is the same per-row
+    GEMV (same K split and warp-partial order), so ids and weights are bitwise
+    unchanged. With at most one router row per CTA, every gate/up row is staged at entry
+    (slots 1-13) instead of after the router GEMV."""
 
     sharded_router = True
     row_bytes = 14400
@@ -277,7 +277,9 @@ class MoeFrontTP8:
         if tid == 0:
             init_barriers(bars, 3, async_proxy=True)
             stage_rows(*dst, 0, router, first_router, router_rows, bars)
-            if cta > 0:  # all gate/up rows at entry: the router shard leaves the slots free
+            if (
+                cta > 0
+            ):  # all gate/up rows at entry: the router shard leaves the slots free
                 stage_rows(*dst, 1, gate_up, gu_start, gu_rows, bars + 1)
             if cta == 0:
                 mailbox_store(epoch.iterator + (par ^ 1) * 32, (Uint32(0),))
@@ -286,7 +288,8 @@ class MoeFrontTP8:
                 observed = mailbox_load(epoch.iterator + par * 32)[0]
         else:
             # Re-arm the other parity's local score records (every expert, both token
-            # slots): remote ranks multicast into them, so each rank re-arms all of its own.
+            # slots): remote ranks multicast into them, so each rank re-arms all of its
+            # own.
             for i in range(cta * 511 + tid - 1, 2 * 896, self.grid * 511):
                 index = (par ^ 1) * 2 * 896 + i
                 mailbox_store(scores.iterator + index * 2, (Uint32(0x80000000),) * 2)
@@ -338,7 +341,9 @@ class MoeFrontTP8:
                 score = routing_sigmoid(logit)
                 record = score_record(score, routing_add(score, my_bias))
                 index = par * 2 * 896 + first_router + tid
-                multicast_words(scores_mc + Uint64(index * 8), record)  # .v2.f32: a plain store
+                multicast_words(
+                    scores_mc + Uint64(index * 8), record
+                )  # .v2.f32: a plain store
         if cta == 0:
             if warp < 8:
                 selected = Top16Fast(2).run(scores, ids, slots, par, 0)

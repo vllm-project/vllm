@@ -409,7 +409,8 @@ def front_geometry(batch, n, ks, kb=None, tg=None, rt=None, ch=None):
 
 @functools.cache
 def compile_route(batch, shared, renorm, roles, device, polled=False, plan=False):
-    # Routing releases the persistent experts at entry (their prologue overlaps routing).
+    # Routing releases the persistent experts at entry (their prologue overlaps
+    # routing).
     kernel = RouteSitu(batch, shared, renorm, batch <= 8, roles, polled, plan)
     f32 = c.Float32
     args: tuple = (fake((batch, 896), None, f32), fake((896,), None, f32))

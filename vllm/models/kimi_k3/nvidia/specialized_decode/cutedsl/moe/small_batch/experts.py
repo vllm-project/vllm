@@ -80,7 +80,9 @@ class _ClusterExperts:
 
     @cute.jit
     def __call__(self, *args):
-        launch(self.kernel, args, self.grid, self.threads, cluster=6, min_blocks_per_mp=1)
+        launch(
+            self.kernel, args, self.grid, self.threads, cluster=6, min_blocks_per_mp=1
+        )
 
 
 class ClusterExpertsTP16(_ClusterExperts):
@@ -415,9 +417,10 @@ class ClusterExpertsTP8(_ClusterExperts):
         fence_tmem()
         tmem = tmem_base[0]
         cute.arch.griddepcontrol_launch_dependents()
-        # No wait for the whole MoE front grid (its shared gate/up passes
-        # and exit) here: poll the published routing slot and latent row, as ClusterExpertsTP16
-        # does; the grid wait moves to the exit (one thread) to keep the completion chain.
+        # No wait for the whole MoE front grid (its shared gate/up passes and exit)
+        # here: poll the published routing slot and latent row, as ClusterExpertsTP16
+        # does; the grid wait moves to the exit (one thread) to keep the completion
+        # chain.
         if warp == 0:
             if lane == 0:
                 expert = Int32(load_volatile(ids.iterator + j)[0])

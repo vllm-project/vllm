@@ -26,7 +26,6 @@ from ..common.primitives import (
     sigmoid,
     smem_words,
     store_f32x4,
-    unpack_bf16,
     wait,
     warp_sum,
     zeros,
@@ -127,10 +126,10 @@ class KdaSplit:
         assert gate_mode in (0, 1)
         assert tokens == 1 or not (self.staged or cluster == 16)
         # TP8 (12 heads) uses fast math. Release the o-proj at entry so its weight loads
-        # overlap KDA: TP8 B1-8 (the producer waits before reading KDA's output), TP16 B1
-        # only: TP16's fused o-proj reads the AttnRes prefix/blocks at launch, which only
-        # the B1-2 skinny projection (it triggers after its PDL wait) guarantees complete;
-        # the B3-8 split-K projection triggers before its wait.
+        # overlap KDA: TP8 B1-8 (the producer waits before reading KDA's output), TP16
+        # B1 only: TP16's fused o-proj reads the AttnRes prefix/blocks at launch, which
+        # only the B1-2 skinny projection (it triggers after its PDL wait) guarantees
+        # complete; the B3-8 split-K projection triggers before its wait.
         self.fast_math = heads == 12
         self.trigger_at_entry = batch == 1 or (heads == 12 and batch <= 8)
         self.cluster = cluster or (8 if batch == 1 else 4)
@@ -496,9 +495,7 @@ class KdaSplit:
         dt = [Float32(0) for _ in range(per)]
         if cutlass.const_expr(self.tokens > 1):  # token column, its features
             token += group % self.tokens
-            features = [
-                16 * (i // 2) + group + 8 * (i % 2) for i in range(rows // 8)
-            ]
+            features = [16 * (i // 2) + group + 8 * (i % 2) for i in range(rows // 8)]
             dt = [dt_bias[head * 128 + value_base + f] for f in features]
         for r in cutlass.range_constexpr(per if self.tokens == 1 else 0):
             if feature + 32 * r < rows:
@@ -513,9 +510,7 @@ class KdaSplit:
                 for chunk in cutlass.range_constexpr(4):
                     col = 32 * chunk + 8 * quarter
                     for half in cutlass.range_constexpr(2):
-                        slot = staged_rows[
-                            (tile * 4 + chunk) * 2 + half, lane, None
-                        ]
+                        slot = staged_rows[(tile * 4 + chunk) * 2 + half, lane, None]
                         source = at(weight, row + 8 * half, col)
                         copy_g2s(slot.iterator, source)
             cute.arch.cp_async_commit_group()
@@ -579,9 +574,7 @@ class KdaSplit:
                 partial[chain] = selected
             value = partial[0]
             if cutlass.const_expr(mode == 1):
-                value = Float32(0) + (
-                    ((value + partial[1]) + partial[2]) + partial[3]
-                )
+                value = Float32(0) + (((value + partial[1]) + partial[2]) + partial[3])
             raw_g.append(Float32(BFloat16(value)))
 
         decay = []

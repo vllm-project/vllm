@@ -74,8 +74,12 @@ class SmallBatchBox:
         self.h2 = OprojMailbox(group, device, tp, rank, (2, POLL_CAP, 3584))
         # TP8 B1 score records [parity, token, 896] x 8 B, multicast by
         # the rank owning each router row (replaces the local, fully recomputed scores).
-        self.route = OprojMailbox(group, device, tp, rank, (2, 2, 3584)) if tp == 8 else None
-        self.latent = armed((3584,), -0x80000000)  # polled latent row (0x80000000: empty)
+        self.route = (
+            OprojMailbox(group, device, tp, rank, (2, 2, 3584)) if tp == 8 else None
+        )
+        self.latent = armed(
+            (3584,), -0x80000000
+        )  # polled latent row (0x80000000: empty)
         self.hg, self.counter = zeros(6144), zeros(1)
         self.tables = {}
         self.batches = (1,) if tp == 8 else (1, 2)
@@ -123,7 +127,13 @@ class SmallBatchChain:
             self.scalars += (Uint64(box.route.mc),)
         head: tuple = (router, bias, box.xmoe, u32(box.epoch))
         if box.tp == 8:
-            tensors = head + (u32(box.route.buffer), box.ids, box.w, down, box.h2.buffer)
+            tensors = head + (
+                u32(box.route.buffer),
+                box.ids,
+                box.w,
+                down,
+                box.h2.buffer,
+            )
             tensors += (box.latent, gate_up, u32(box.hg))
             self.front = _launch("front", tensors, grid=box.sms - 8, renorm=renorm)
             tables = box.situ_tables(beta, linear_beta)

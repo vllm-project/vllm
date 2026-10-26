@@ -128,8 +128,9 @@ class PrefetchController:
             if not layer.is_moe_layer:
                 continue
             index = layer.layer_idx
-            # TP8 B2-8 prefetch nothing: the prefetch kernel competes with the persistent
-            # experts for SMs and HBM and costs more than the warm weights save.
+            # TP8 B2-8 prefetch nothing: the prefetch kernel competes with the
+            # persistent experts for SMs and HBM and costs more than the warm weights
+            # save.
             if tp != 8:
                 # The front GEMM reads [router shard; down shard] from the packed copy.
                 ranges = urgent((packed[index],), grid=8)

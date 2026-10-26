@@ -120,7 +120,8 @@ class PersistentExperts:
     def prepare(self, batch, buffers, out, publish=(), planned=False, twoshot=False):
         """``publish``: (multicast, parity, rank) of the WaveMoeTail latent slot to
         publish (``twoshot``: the ``common.twoshot`` push box); ``planned``: B>8 calls
-        find the plan written (by the routing kernel), else run writes it from x first."""
+        find the plan written (by the routing kernel), else run writes it from x first.
+        """
         mode = "twoshot" if twoshot else bool(publish)
         args: tuple = (batch, self.grid_for(batch), self.device.index, mode)
         args += (streamed(batch), stealing(batch))
