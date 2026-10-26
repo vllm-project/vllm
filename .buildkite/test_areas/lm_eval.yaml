@@ -1121,6 +1121,27 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc-rocm.txt
 
+# Octave kernels are built only for gfx942 and gfx1100, so this runs on MI300.
+- label: ":amd: (MI300) LM Eval Octave KV Cache"
+  key: amd-lm-eval-octave-mi300
+  dind: false
+  device: mi300_1
+  num_devices: 1
+  timeout_in_minutes: 45
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - tests/evals/gsm8k/
+  - tests/utils.py
+  - tests/conftest.py
+  - vllm/v1/attention/backends/rocm_octave_attn.py
+  - vllm/v1/attention/ops/rocm_octave.py
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-octave.txt
+
 - label: ":nvidia: (H100) [Nightly] GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-2xh100
   timeout_in_minutes: 35

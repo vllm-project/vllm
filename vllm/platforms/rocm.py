@@ -376,6 +376,14 @@ def get_cdna_version() -> int:
     return 0
 
 
+def get_rdna_version() -> int:
+    if on_rdna4():
+        return 4
+    if on_gfx11():
+        return 3
+    return 0
+
+
 @cache
 def get_rocm_version() -> tuple[int, ...] | None:
     """Return the installed ROCm release as (major, minor, patch), or None."""
@@ -521,6 +529,7 @@ def _get_backend_priorities(
         backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
+    backends.append(AttentionBackendEnum.ROCM_OCTAVE)
     backends.append(AttentionBackendEnum.ULTRAQUANT)
 
     return backends
