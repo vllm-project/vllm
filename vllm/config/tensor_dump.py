@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Literal
+
 from pydantic import Field
 
 from vllm.config.utils import config
@@ -18,6 +20,12 @@ class TensorDumpOptions:
     """Distributed ranks to capture; None selects all ranks."""
     max_steps: int = Field(default=1, ge=1)
     """Maximum captured forwards per worker between resets."""
+    start_step: int = Field(default=0, ge=0)
+    """Real forwards to skip after startup or reset, including disabled forwards."""
+    layers: list[int] | None = None
+    """Capture only modules under layers.N paths for the selected layer indices."""
+    phase: Literal["all", "prefill", "decode", "mixed"] = "all"
+    """Capture only batches of this phase; mixed batches are not split."""
 
 
 @config

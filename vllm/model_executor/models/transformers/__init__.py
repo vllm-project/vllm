@@ -87,7 +87,7 @@ def vllm_attention_forward(
     if pad_value:
         value = F.pad(value.view(-1, head_dim_v), (0, head_dim_qk - head_dim_v))
         value = value.reshape(hidden, -1)
-    attn_output = self_attn.forward(query, key, value)
+    attn_output = self_attn(query, key, value)
     if pad_value:
         attn_output = attn_output.view(-1, head_dim_qk)[..., :head_dim_v]
         attn_output = attn_output.reshape(hidden, -1)
@@ -112,7 +112,7 @@ def vllm_mla_attention_forward(
     kv_c_normed = kv_c_normed.reshape(-1, kv_c_normed.shape[-1])
     # [batch=1, heads=1, num_tokens, qk_rope] -> [num_tokens, 1, qk_rope]
     k_pe = k_pe.reshape(-1, 1, k_pe.shape[-1])
-    attn_output = self_attn.forward(
+    attn_output = self_attn(
         query,
         kv_c_normed,
         k_pe,

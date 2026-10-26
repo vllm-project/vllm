@@ -47,7 +47,13 @@ def test_cli_config_round_trip(tmp_path, style, monkeypatch):
         TensorDumpConfig()
     )
     expected = TensorDumpConfig(
-        output_dir=str(tmp_path), patterns=["*attn*"], ranks=[0], max_steps=2
+        output_dir=str(tmp_path),
+        patterns=["*attn*"],
+        ranks=[0],
+        max_steps=2,
+        start_step=3,
+        layers=[1],
+        phase="decode",
     )
     options = (
         ["--tensor-dump-config", json.dumps(asdict(expected))]
@@ -61,6 +67,12 @@ def test_cli_config_round_trip(tmp_path, style, monkeypatch):
             "[0]",
             "--tensor-dump-config.max_steps",
             "2",
+            "--tensor-dump-config.start_step",
+            "3",
+            "--tensor-dump-config.layers",
+            "[1]",
+            "--tensor-dump-config.phase",
+            "decode",
         ]
     )
     parsed = EngineArgs.from_cli_args(parser.parse_args(options)).tensor_dump_config
@@ -163,6 +175,63 @@ def test_failed_forward_clears_capture_context(tmp_path, batch):
     dump("outside", torch.ones(1))
     assert [entry["name"] for entry in records(dumper)] == ["batch"]
     assert dumper.step == 1
+
+
+def test_start_step_counts_filtered_forwards_and_reset_restarts_delay(tmp_path, batch):
+    dumper = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path), start_step=2, phase="prefill"),
+        torch.nn.Identity(),
+    )
+    for _ in range(3):
+        with dumper.capture(batch):
+            dump("value", torch.ones(1))
+    assert records(dumper) == []
+    batch.is_prefilling_np[:] = True
+    batch.has_prefill = True
+    with dumper.capture(batch):
+        dump("value", torch.ones(1))
+    assert records(dumper)[0]["value"]["forward_step"] == 3
+    assert dumper.step == 1
+    dumper.control("reset")
+    for _ in range(3):
+        with dumper.capture(batch):
+            pass
+    assert dumper.step == 2
+    assert records(dumper)[-1]["value"]["forward_step"] == 2
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode", "mixed", "all"])
+def test_phase_filter_does_not_capture_mixed_as_prefill_or_decode(tmp_path, phase):
+    buffers = InputBuffers(2, 4, torch.device("cpu"))
+    batch = InputBatch.make_dummy(2, 4, buffers)
+    batch.is_prefilling_np[:] = [True, False]
+    batch.has_prefill = True
+    dumper = TensorDumper(
+        TensorDumpConfig(output_dir=str(tmp_path), phase=phase), torch.nn.Identity()
+    )
+    with dumper.capture(batch):
+        pass
+    saved = records(dumper)
+    assert bool(saved) == (phase in ("mixed", "all"))
+    if saved:
+        assert saved[0]["value"]["phase"] == "mixed"
+        assert saved[0]["value"]["is_prefilling"] == [True, False]
+
+
+def test_layer_filter_matches_layer_component_not_tensor_suffix(tmp_path, batch):
+    model = torch.nn.Module()
+    model.layers = torch.nn.ModuleList([torch.nn.Identity(), torch.nn.Identity()])
+    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path), layers=[1]), model)
+    with dumper.capture(batch):
+        model.layers[0](torch.ones(1))
+        model.layers[1](torch.ones(1))
+        dump("unrelated", torch.ones(1))
+        dump("layers.10", torch.ones(1))
+    assert [entry["name"] for entry in records(dumper)] == [
+        "batch",
+        "layers.1.input.args.0",
+        "layers.1.output",
+    ]
 
 
 def test_constructor_registers_hooks_and_close_removes_them(tmp_path, batch):

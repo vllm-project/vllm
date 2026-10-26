@@ -26,6 +26,9 @@ if dumps from multiple nodes should be collected in one place.
 | `patterns` | `["*"]` | Shell-style globs matched against dump names, such as `*self_attn*`. |
 | `ranks` | `null` | Distributed ranks to capture; null selects all. |
 | `max_steps` | `1` | Maximum captured forwards per worker between resets; must be positive. |
+| `start_step` | `0` | Number of real forwards to skip after startup or reset, including forwards while disabled. |
+| `layers` | `null` | Layer indices selected from module paths containing `layers.N`; null selects all modules. |
+| `phase` | `"all"` | Select `prefill`, `decode`, `mixed`, or all batches. Mixed batches are not split. |
 
 Offline callers can pass the same configuration through `LLM`:
 
@@ -44,6 +47,13 @@ models, logits computation and sampling are outside this capture scope. Hooks
 observe modules invoked through PyTorch's
 `module(...)`; direct `module.forward(...)` calls and kernel-local values are not
 automatically captured.
+
+`start_step` uses a separate forward counter; filtering does not consume the
+`max_steps` capture budget. Phase classification uses MRV2's per-request
+`is_prefilling_np`: all prefill requests means prefill, none means decode, and
+both means mixed. A one-token prefill remains prefill, and speculative decode
+remains decode even when it processes multiple tokens. Layer, phase, rank, and
+name filters apply together. Reset also restarts the forward counter and delay.
 
 ## Read the files
 

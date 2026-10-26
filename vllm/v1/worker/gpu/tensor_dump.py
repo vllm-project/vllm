@@ -14,6 +14,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import regex as re
 import torch
 from torch.utils._pytree import tree_map_only
 
@@ -79,6 +80,7 @@ class TensorDumper:
             )
         )
         self.step = 0
+        self.forward_step = 0
         self._start_step = 0
         self._index = 0
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
@@ -101,10 +103,21 @@ class TensorDumper:
 
     @contextmanager
     def capture(self, batch: "InputBatch") -> Iterator[None]:
+        forward_step = self.forward_step
+        self.forward_step += 1
+        phase = (
+            "prefill"
+            if batch.is_prefilling_np.all()
+            else "mixed"
+            if batch.has_prefill
+            else "decode"
+        )
         if (
             not self.config.enabled
+            or forward_step < self.config.start_step
             or self.step - self._start_step >= self.config.max_steps
             or (self.config.ranks is not None and self.rank not in self.config.ranks)
+            or (self.config.phase != "all" and phase != self.config.phase)
         ):
             yield
             return
@@ -114,6 +127,9 @@ class TensorDumper:
                 "batch",
                 {
                     "parallel_groups": _parallel_groups(),
+                    "phase": phase,
+                    "forward_step": forward_step,
+                    "is_prefilling": batch.is_prefilling_np.tolist(),
                     "request_ids": list(batch.req_ids),
                     "input_ids": batch.input_ids[: batch.num_tokens],
                     "positions": batch.positions[: batch.num_tokens],
@@ -131,6 +147,10 @@ class TensorDumper:
     def dump(self, name: str, value: Any) -> None:
         if _current_dumper.get() is not self:
             return
+        if self.config.layers is not None:
+            layer = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", name)
+            if layer is None or int(layer[1]) not in self.config.layers:
+                return
         for suffix, tensor in _tensors(value):
             tensor_name = name + suffix
             if any(
@@ -164,11 +184,13 @@ class TensorDumper:
             )
         elif action == "reset":
             self._start_step = self.step
+            self.forward_step = 0
         elif action != "get_state":
             raise ValueError(f"Unknown tensor dump action: {action}")
         return {
             "config": asdict(self.config),
             "step": self.step,
+            "forward_step": self.forward_step,
             "captured_steps": self.step - self._start_step,
             "rank": self.rank,
             "directory": str(self.directory),
