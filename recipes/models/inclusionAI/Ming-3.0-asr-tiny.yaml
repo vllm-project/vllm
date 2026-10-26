@@ -3,8 +3,8 @@ meta:
   slug: "ming-3-0-asr-tiny"
   provider: "inclusionAI"
   description: "Chinese, English, and dialect speech recognition with topic, hotword, and dialogue context."
-  date_added: 2026-10-25
-  date_updated: 2026-10-25
+  date_added: 2026-10-26
+  date_updated: 2026-10-26
   tasks:
     - multimodal
   performance_headline: "Context-aware Chinese, English, and dialect ASR; single-GPU serving"
@@ -15,19 +15,21 @@ model:
   nightly_required: true
   install:
     pip:
-      note: "Source preview: run from a vLLM checkout containing Ming ASR support (tested commit 083cf78465eafb5686655749acade8a7ca91b2a3)."
+      note: "Install from main for now."
       command: |
+        git clone --branch main https://github.com/vllm-project/vllm.git
+        cd vllm
         uv venv --python 3.12
         source .venv/bin/activate
-        VLLM_USE_PRECOMPILED=1 \
-        VLLM_PRECOMPILED_WHEEL_COMMIT=e38af8bdc9029b47f86a4e9b9dd98d55957bf4cd \
-          uv pip install -e ".[audio]" --torch-backend=auto
+        VLLM_USE_PRECOMPILED=1 uv pip install --editable ".[audio]" --torch-backend=auto
+        vllm download-kernels
     docker: false
   architecture: moe
   parameter_count: "8.55B"
   active_parameters: "1.3B"
   context_length: 8192
-  base_args: []
+  base_args:
+    - "--trust-remote-code"
   base_env: {}
 
 dependencies:
@@ -186,7 +188,7 @@ guide: |
 
   The [official model card](https://huggingface.co/inclusionAI/Ming-3.0-asr-tiny#usage-notes) describes transcription text output without word-level timestamps or speaker diarization.
 
-  The current vLLM integration does not support translation, segment timestamps, or live audio input. Translation and timestamp requests are rejected. The `context_chunks=true` policy accepts clips up to 60 seconds; ordinary chunking, including requests with context prompts, can accept longer clips subject to the model context and upload limits.
+  The current vLLM integration does not support translation, segment timestamps, or live audio input. Translation and timestamp requests are rejected. The `context_chunks=true` policy accepts clips up to 60 seconds; ordinary chunking, including requests with context prompts, can accept longer clips subject to the model context and upload limits. Longer recordings can produce incomplete transcripts; accepting an upload does not guarantee complete transcription.
 
   ## References
 
