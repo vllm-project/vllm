@@ -404,6 +404,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     cache_policy_module_path=self.cache_policy_module_path,
                     enable_events=self.kv_events_config.enable_kv_cache_events,
                     mmap_region=scheduler_mmap,
+                    info=self.cpu_info,
                 )
 
                 # Create secondary tiers
