@@ -341,7 +341,15 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
-                    if request_allowed is not None:
+                    # Drop candidates a mask has ruled out. `-inf` scores reach
+                    # here whenever something masked the logits -- an allowlist, a
+                    # grammar, a logits processor -- and such a token is not a beam
+                    # the search may take. This ran only when the request carried an
+                    # allowlist, so otherwise a `-inf` candidate could be admitted
+                    # and, with every sibling equally impossible, win on score.
+                    if request_allowed is not None or any(
+                        not math.isfinite(score.logprob) for score in logprobs.values()
+                    ):
                         logprobs = {
                             token: score
                             for token, score in sorted(
@@ -349,7 +357,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                                 key=lambda item: item[1].logprob,
                                 reverse=True,
                             )
-                            if token in request_allowed and math.isfinite(score.logprob)
+                            if (request_allowed is None or token in request_allowed)
+                            and math.isfinite(score.logprob)
                         }
                         for score in logprobs.values():
                             score.rank = None
@@ -398,10 +407,17 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 "with structured outputs"
             )
 
-        # Resolve the backend name from engine config if not already set.
-        if not structured_outputs._backend:
-            structured_outputs._backend = so_config.backend
-
+        # `_backend` is populated by `SamplingParams.verify()`, which the engine runs
+        # per request -- but the backend is built here, before any request exists, so
+        # it would still hold the unresolved `auto` sentinel (or None). Verify a probe
+        # carrying the same `structured_outputs` object: resolution mutates it in
+        # place, and the request gets the validation an ordinary one would get.
+        SamplingParams(structured_outputs=structured_outputs).verify(
+            vllm_config.model_config,
+            vllm_config.speculative_config,
+            vllm_config.structured_outputs_config,
+            tokenizer,
+        )
         backend_name = structured_outputs._backend
         vocab_size = self.model_config.get_vocab_size()
 
