@@ -82,6 +82,11 @@ class AiterCustomAllreduce:
     def custom_all_gather(self, inp: torch.Tensor, dim: int = 0) -> torch.Tensor | None:
         return self._impl.custom_all_gather(inp, dim=dim)
 
+    def all_gather_unreg(self, inp: torch.Tensor, dim: int = 0) -> torch.Tensor:
+        """All-gather that copies ``inp`` into the registered input buffer, also
+        during graph capture, so ``inp`` itself is never IPC-registered."""
+        return self._impl.all_gather_unreg(inp, dim=dim)
+
     def custom_reduce_scatter(
         self, inp: torch.Tensor, out: torch.Tensor, dim: int = 0
     ) -> torch.Tensor | None:
