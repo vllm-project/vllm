@@ -13,6 +13,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed
   commands:
+  - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_cpu_all_reduce.py
   - pytest -v -s distributed/test_shm_broadcast.py
