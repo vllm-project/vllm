@@ -39,6 +39,7 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
+DBOScope = Literal["all", "prefill"]
 EPLBCommunicatorBackend = Literal[
     "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
 ]
@@ -270,6 +271,10 @@ class ParallelConfig:
     prefills. If the number of tokens in the request is greater than this
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
+    dbo_scope: DBOScope = "all"
+    """The batches dual batch overlap applies to. "all" microbatches both
+    prefill and decode batches; "prefill" only microbatches batches containing
+    prefills and runs decode-only batches as a single batch."""
 
     disable_nccl_for_dp_synchronization: bool | None = None
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
