@@ -10,6 +10,7 @@ from vllm.config import (
     DiffusionConfig,
     ECTransferConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
@@ -89,6 +90,8 @@ def create_scheduler(
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
+    lora_config: LoRAConfig | None = None,
+    speculative_config: SpeculativeConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -172,8 +175,8 @@ def create_scheduler(
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
 
-    speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
+        assert speculative_config is None
         spec_kwargs: dict = dict(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )
@@ -216,6 +219,7 @@ def create_scheduler(
         speculative_config=speculative_config,
         diffusion_config=diffusion_config,
         ec_transfer_config=ec_transfer_config,
+        lora_config=lora_config,
         observability_config=ObservabilityConfig(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,
         ),
