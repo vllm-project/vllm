@@ -20,7 +20,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <mutex>
 #include <optional>
+#include <vector>
 
 #include <torch/csrc/stable/c/shim.h>
 #include <torch/csrc/stable/ops.h>
@@ -291,8 +293,9 @@ __device__ __forceinline__ void write_entry_index(
 //   s_hash_vals[hash_size]   first position, then slot | kEntry* tag
 //   s_chunk_off[nbc + 1]     prefix sums for hit, then miss, compaction
 //   s_evict_off[nbc + 1]     prefix sums for evictable compaction
-//   s_counters[5]            distinct hits, union size, per-row valid count,
-//                            misses, per-entry hits
+//   s_counters[5]            distinct hits, union size, per-entry misses,
+//                            host positions (phase 1) then misses,
+//                            per-entry hits
 //   s_done[nbc]              hot slots holding a union row (phase 2), then
 //                            positions phase 3 resolved, one word per chunk
 //   s_lru_out[hot_size]      int16, compacted slots: [hits fwd | evict bwd]
@@ -1278,11 +1281,21 @@ void hisparse_resolve_residency(
       valid_counts.has_value() ? valid_counts.value().stride(0) : 0;
   auto kernel = hisparse_resolve_residency_kernel;
   if (smem_bytes > 48 * 1024) {
-    const cudaError_t attribute_error = cudaFuncSetAttribute(
-        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    STD_TORCH_CHECK(attribute_error == cudaSuccess,
-                    "failed to configure HiSparse swap-in shared memory: ",
-                    cudaGetErrorString(attribute_error));
+    static std::mutex configured_mutex;
+    static std::vector<size_t> configured_smem_bytes;
+    const std::lock_guard<std::mutex> lock(configured_mutex);
+    const size_t device_index = hot_cache.get_device_index();
+    if (configured_smem_bytes.size() <= device_index) {
+      configured_smem_bytes.resize(device_index + 1, 0);
+    }
+    if (configured_smem_bytes[device_index] < smem_bytes) {
+      const cudaError_t attribute_error = cudaFuncSetAttribute(
+          kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+      STD_TORCH_CHECK(attribute_error == cudaSuccess,
+                      "failed to configure HiSparse swap-in shared memory: ",
+                      cudaGetErrorString(attribute_error));
+      configured_smem_bytes[device_index] = smem_bytes;
+    }
   }
   kernel<<<launch_rows, kBlockSize, smem_bytes, stream>>>(
       hot_block_table.const_data_ptr<int32_t>(),

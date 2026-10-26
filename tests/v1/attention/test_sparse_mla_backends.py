@@ -2497,6 +2497,15 @@ def test_hisparse_union_table_scales_with_union_bound(top_k):
     Sizing the table from device_buffer_size needs ~340 KB here and fails.
     """
     device = torch.device(DEVICE_TYPE)
+    try:
+        hisparse_runtime._check_residency_shared_memory(
+            device,
+            ResolvedHiSparseConfig(
+                top_k=top_k, device_buffer_size=32768, max_union_rows=top_k
+            ),
+        )
+    except ValueError:
+        pytest.skip("union bound exceeds this device's shared memory")
     block_size, row_width = 64, 64
     num_blocks = top_k // block_size
     kv_pool = torch.randn(
@@ -2566,7 +2575,7 @@ torch.accelerator.synchronize()
         timeout=60,
     )
     assert result.returncode != 0
-    assert "CUDA error" in result.stderr
+    assert "unspecified launch failure" in result.stderr
 
 
 @requires_hisparse_ops
