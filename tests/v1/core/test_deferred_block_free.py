@@ -544,3 +544,96 @@ def test_cow_retentions_deferred_until_copy_step_processed():
     assert not scheduler.deferred_frees
     out2 = scheduler.schedule()
     assert [r.req_id for r in out2.scheduled_new_reqs] == ["late"]
+
+
+def _setup_async_load_onto_readable_block(release_readable: bool):
+    """Schedule a running request's prefill and one in-flight decode, release a
+    block readable (``BlockPool.unpin_blocks``) at the head of the free queue
+    when ``release_readable``, then admit a request whose KV an async connector
+    load fills.
+
+    Returns (scheduler, importer, outputs, update_state_after_alloc mock).
+    """
+    scheduler = create_scheduler(
+        model=MODEL,
+        async_scheduling=True,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    scheduler.defer_block_free = True
+    pool = scheduler.kv_cache_manager.block_pool
+    _, out0, out1 = _setup_request_with_inflight_step(scheduler)
+
+    if release_readable:
+        (readable,) = pool.get_new_blocks(1)
+        pool.unpin_blocks([readable], lambda block: None)
+        pool.free_block_queue.remove(readable)
+        pool.free_block_queue.prepend_n([readable])
+
+    importer = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, max_tokens=5, req_ids=["imp"]
+    )[0]
+    scheduler.add_request(importer)
+    connector = scheduler.connector
+    assert connector is not None
+    with (
+        patch.object(
+            connector,
+            "get_num_new_matched_tokens",
+            return_value=(2 * scheduler.block_size, True),
+        ),
+        patch.object(connector, "update_state_after_alloc") as registered,
+    ):
+        out2 = scheduler.schedule()
+    assert importer.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    return scheduler, importer, [out0, out1, out2], registered
+
+
+def test_async_load_onto_readable_block_waits_for_inflight_step():
+    """A block released readable stays readable by the in-flight step after
+    the pool hands it out. An async connector load into it isn't ordered
+    against that step, so the load is registered only once it is processed.
+    """
+    scheduler, importer, outputs, registered = _setup_async_load_onto_readable_block(
+        release_readable=True
+    )
+    out0, out1, _ = outputs
+    registered.assert_not_called()
+
+    connector = scheduler.connector
+    with patch.object(connector, "update_state_after_alloc") as registered:
+        scheduler.update_from_output(out0, _make_model_runner_output(out0))
+        outputs.append(scheduler.schedule())
+        registered.assert_not_called()
+
+        scheduler.update_from_output(out1, _make_model_runner_output(out1))
+        outputs.append(scheduler.schedule())
+    registered.assert_called_once()
+    assert registered.call_args.args[0] is importer
+
+
+def test_async_load_without_readable_block_registers_immediately():
+    scheduler, importer, _, registered = _setup_async_load_onto_readable_block(
+        release_readable=False
+    )
+    registered.assert_called_once()
+
+
+def test_abort_held_async_load_frees_after_inflight_step():
+    """No load was posted for a held request, so nothing will report it done;
+    its blocks are freed once the step that may still read them is processed.
+    """
+    scheduler, importer, outputs, _ = _setup_async_load_onto_readable_block(
+        release_readable=True
+    )
+    pool = scheduler.kv_cache_manager.block_pool
+    num_free_held = pool.get_num_free_blocks()
+
+    scheduler.finish_requests(importer.request_id, RequestStatus.FINISHED_ABORTED)
+    assert importer.request_id not in scheduler.requests
+    assert scheduler.deferred_frees
+    assert pool.get_num_free_blocks() == num_free_held
+
+    for output in outputs:
+        scheduler.update_from_output(output, _make_model_runner_output(output))
+    assert not scheduler.deferred_frees
+    assert pool.get_num_free_blocks() > num_free_held

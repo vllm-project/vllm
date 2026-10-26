@@ -928,4 +928,5 @@ class KVCacheManager:
 
     def new_step_starts(self) -> None:
         """Notify the coordinator that a new step is starting."""
+        self.block_pool.reused_readable_block_ids.clear()
         self.coordinator.new_step_starts()
