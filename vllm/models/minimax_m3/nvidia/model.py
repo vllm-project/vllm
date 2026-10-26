@@ -56,9 +56,11 @@ from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -94,6 +96,11 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     get_kv_quant_mode,
 )
+
+_LORA_PACKED_MODULES_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj", "index_q_proj", "index_k_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+}
 
 
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
@@ -933,13 +940,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Checkpoint experts use w1=gate, w2=down, w3=up.
-        return fused_moe_make_expert_params_mapping(
+        mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.num_local_experts,
         )
+        return [
+            (param.replace("base_layer.", ""), weight.replace("base_layer.", ""), *ids)
+            for param, weight, *ids in mapping
+        ]
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # q/k/v_proj -> fused qkv_proj; gate_proj/up_proj -> fused gate_up_proj
@@ -964,6 +975,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         expert_params_mapping = self.get_expert_mapping()
 
         params_dict = dict(self.named_parameters())
+        for name in list(params_dict):
+            if ".base_layer." in name:
+                params_dict.setdefault(
+                    name.replace(".base_layer.", "."), params_dict[name]
+                )
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             # The MTP module is not modeled yet.
@@ -1039,7 +1055,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         return loaded_params
 
 
-class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
+class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
 
     packed_modules_mapping = {
@@ -1049,10 +1065,14 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.packed_modules_mapping = _LORA_PACKED_MODULES_MAPPING
         config = vllm_config.model_config.hf_text_config
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        lora_config = vllm_config.lora_config
+        if lora_config is not None and lora_config.fully_sharded_loras:
+            raise ValueError("MiniMax M3 LoRA does not support fully_sharded_loras.")
         self.model = MiniMaxM3Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -1108,6 +1128,7 @@ class MiniMaxM3SparseForConditionalGeneration(
     MiniMaxM3EncoderCudaGraphMixin,
     SupportsPP,
     SupportsEagle3,
+    SupportsLoRA,
 ):
     """Top-level (VL) entry point for MiniMax M3.
 
@@ -1137,6 +1158,9 @@ class MiniMaxM3SparseForConditionalGeneration(
         },
     )
 
+    def get_mm_mapping(self) -> MultiModelKeys:
+        return MultiModelKeys.from_string_field(language_model="language_model")
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality == "image":
@@ -1147,6 +1171,7 @@ class MiniMaxM3SparseForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.packed_modules_mapping = _LORA_PACKED_MODULES_MAPPING
         config = vllm_config.model_config.hf_config
         self.config = config
         self.quant_config = vllm_config.quant_config

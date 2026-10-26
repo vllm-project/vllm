@@ -22,6 +22,8 @@ from vllm.lora.layers import (
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
+    MiniMaxM3DenseQKVWithLoRA,
+    MiniMaxM3QKVIndexerWithLoRA,
     QKVParallelLinearWithLoRA,
     QKVParallelLinearWithShardedLoRA,
     ReplicatedLinearWithLoRA,
@@ -37,6 +39,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
+    MinimaxM3QKVParallelLinearWithIndexer,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -49,7 +52,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 
 from .utils import DummyLoRAManager
 
@@ -1821,3 +1824,105 @@ def test_replicated_lora_preserves_base_forward_for_subclasses(
     merged_result = merged_layer(torch.cat(inputs))[0]
 
     torch.testing.assert_close(lora_result, merged_result, rtol=rtol, atol=atol)
+
+
+MINIMAX_M3_QKV_PACKED = ["q_proj", "k_proj", "v_proj", "index_q_proj", "index_k_proj"]
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("sparse", [True, False], ids=["sparse", "dense"])
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("stage", STAGES)
+def test_minimax_m3_qkv_lora(default_vllm_config, dist_init, sparse, device, stage):
+    from vllm.lora.utils import from_layer
+
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+    dtype = torch.float16
+    hidden, head, num_heads, num_kv_heads, rank, max_loras = 256, 64, 8, 2, 8, 4
+    lora_config = LoRAConfig(max_loras=max_loras, max_lora_rank=rank, lora_dtype=dtype)
+    punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
+
+    if sparse:
+        with set_default_torch_dtype(dtype):
+            linear = MinimaxM3QKVParallelLinearWithIndexer(
+                hidden, head, num_heads, num_kv_heads, num_kv_heads, head
+            )
+    else:
+        linear = QKVParallelLinear(
+            hidden, head, num_heads, num_kv_heads, bias=False, params_dtype=dtype
+        )
+    linear.weight.data = torch.rand_like(linear.weight.data)
+    lora_linear = from_layer(linear, max_loras, lora_config, MINIMAX_M3_QKV_PACKED)
+    expected_cls = MiniMaxM3QKVIndexerWithLoRA if sparse else MiniMaxM3DenseQKVWithLoRA
+    assert type(lora_linear) is expected_cls
+    lora_linear.set_mapping(punica_wrapper)
+
+    sizes = linear.output_sizes
+    lora_a = [torch.rand(rank, hidden, dtype=dtype) for _ in sizes]
+    lora_b = [torch.rand(size, rank, dtype=dtype) for size in sizes]
+    if not sparse:
+        lora_a += [None, None]
+        lora_b += [None, None]
+    id_to_index = get_random_id_to_index(1, max_loras, log=False)
+    slot = id_to_index.index(1)
+    lora_linear.set_lora(slot, lora_a=lora_a, lora_b=lora_b)
+
+    inputs, index_mapping, prompt_mapping = create_random_inputs(
+        active_lora_ids=[1],
+        num_inputs=8,
+        input_size=(1, hidden),
+        input_range=(0, 1),
+        input_type=dtype,
+        device=device,
+    )
+    lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
+    punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, 512)
+    x = torch.cat(inputs)
+    lora_result = lora_linear(x)[0]
+
+    delta = torch.cat(
+        [x @ a.T @ b.T for a, b in zip(lora_a, lora_b) if b is not None], dim=-1
+    )
+    expected = linear(x)[0] + delta
+    rtol, atol = TOLERANCES[dtype]
+    torch.testing.assert_close(lora_result, expected, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize(
+    "tp_size,num_kv_heads",
+    [(2, 4), (4, 2), (8, 2)],
+    ids=["kv-sharded", "kv-replicated", "kv-replicated-4x"],
+)
+def test_minimax_m3_qkv_indexer_lora_b_shards_like_weight(
+    default_vllm_config, dist_init, tp_size, num_kv_heads
+):
+    hidden, head, num_heads = 16, 8, 8
+    shards = {
+        "q": torch.randn(num_heads * head, hidden),
+        "k": torch.randn(num_kv_heads * head, hidden),
+        "v": torch.randn(num_kv_heads * head, hidden),
+        "index_q": torch.randn(num_kv_heads * head, hidden),
+        "index_k": torch.randn(head, hidden),
+    }
+    for tp_rank in range(tp_size):
+        with (
+            patch(
+                "vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size",
+                return_value=tp_size,
+            ),
+            patch(
+                "vllm.model_executor.layers.linear.get_tensor_model_parallel_rank",
+                return_value=tp_rank,
+            ),
+        ):
+            linear = MinimaxM3QKVParallelLinearWithIndexer(
+                hidden, head, num_heads, num_kv_heads, num_kv_heads, head
+            )
+        for shard_id, weight in shards.items():
+            linear.weight.weight_loader(linear.weight, weight, shard_id)
+        lora_linear = MiniMaxM3QKVIndexerWithLoRA(linear)
+        sliced = lora_linear.slice_lora_b(list(shards.values()))
+        assert [b.shape[0] for b in sliced] == list(lora_linear.output_slices)
+        torch.testing.assert_close(torch.cat(sliced), linear.weight.data)
