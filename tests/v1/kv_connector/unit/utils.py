@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import tempfile
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import chain, count
@@ -683,6 +683,7 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._sealed_writes = {}
     writer._deferred_tasks = []
     writer._defer_timeout = 60.0
+    writer._handled_fences = OrderedDict()
     writer.ensure_worker_started = lambda: None
     return writer
 
