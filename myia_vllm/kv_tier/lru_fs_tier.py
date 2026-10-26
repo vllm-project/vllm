@@ -61,11 +61,35 @@ container environment makes every touch a no-op, restoring exact upstream
 behaviour. The variable is read once, at module import, so it takes effect only
 when the container is recreated (an env change needs a recreate anyway); it is
 not a live toggle.
+
+Write admission (``MYIA_FS_SKIP_REWRITE``, default on)
+-----------------------------------------------------
+A second, independent job: ``submit_store`` drops any block whose file already
+exists on disk. Content-addressed filenames plus upstream's atomic
+``.tmp`` + ``os.replace()`` mean a present file *is* the block, so the rewrite
+only copies identical bytes over identical bytes. Measured on production:
+51 % of fs write volume was exactly that. ``MYIA_FS_SKIP_REWRITE=0`` restores
+upstream write-through (also read at import, also needs a recreate).
+
+The two switches are independent: ``MYIA_FS_TOUCH`` governs recency tracking on
+HIT, ``MYIA_FS_SKIP_REWRITE`` governs write volume. Setting the second to 0
+without the first still leaves correct LRU behaviour.
 """
 
+import dataclasses
 import os
 import time
 from collections.abc import Collection
+
+try:  # same C fast path upstream uses for its own existence checks
+    from vllm.fs_io_C import batch_lookup as _batch_lookup_C
+
+    _HAS_BATCH_LOOKUP_C = True
+except ImportError:  # pragma: no cover - falls back to os.path.exists
+    _batch_lookup_C = None
+    _HAS_BATCH_LOOKUP_C = False
+
+from typing_extensions import override
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
@@ -74,7 +98,18 @@ from vllm.v1.kv_offload.tiering.fs.manager import FileSystemTierManager
 logger = init_logger(__name__)
 
 _ENABLED = os.environ.get("MYIA_FS_TOUCH", "1") != "0"
+_SKIP_REWRITE = os.environ.get("MYIA_FS_SKIP_REWRITE", "1") != "0"
 _MAX_WARNINGS = 5
+
+
+def _noop_store() -> None:
+    """Stand-in task for a store job whose blocks are all already on disk.
+
+    The job must still reach the thread pool: ``TieringOffloadingManager``
+    keeps per-job state (``_jobs``, ``_job_block_counts``) and only clears it
+    when ``get_finished_jobs()`` reports the job, so a job dropped silently
+    would leak that state for the life of the process.
+    """
 
 
 class TouchOnHitFsTier(FileSystemTierManager):
@@ -86,8 +121,16 @@ class TouchOnHitFsTier(FileSystemTierManager):
         self._miss = 0
         self._err = 0
         self._warned = 0
+        self._skip_rewrite = _SKIP_REWRITE
+        self._skipped_keys = 0
+        self._written_keys = 0
         if not _ENABLED:
             logger.warning("TouchOnHitFsTier: MYIA_FS_TOUCH=0 — recency tracking disabled")
+        if not _SKIP_REWRITE:
+            logger.warning(
+                "TouchOnHitFsTier: MYIA_FS_SKIP_REWRITE=0 — every store rewrites "
+                "its blocks, upstream write-through behaviour restored"
+            )
 
     def _mark_used(self, key: OffloadKey) -> None:
         try:
@@ -113,6 +156,85 @@ class TouchOnHitFsTier(FileSystemTierManager):
             self._mark_used(key)
         return result
 
+    @staticmethod
+    def _existing_flags(paths: list[str]) -> list[bool]:
+        if _HAS_BATCH_LOOKUP_C:
+            return list(_batch_lookup_C(paths))
+        return [os.path.exists(p) for p in paths]
+
+    @override
+    def submit_store(self, job_metadata) -> None:
+        """Store only the blocks whose file is not already on disk.
+
+        Why this is safe by construction, not by inspection: block filenames are
+        content-addressed (a hash of the token-block chain, under a per-model
+        namespace and rank), and upstream writes each file through
+        ``<dest>.tmp`` + ``os.replace()``, which is atomic. A file present at
+        its final path is therefore a *complete* file holding exactly the bytes
+        this job would write. Re-writing it copies identical content over
+        identical content — pure write amplification against the SSD.
+
+        Measured on production before this change: 51 % of the fs write volume
+        was such re-writes (154 of 303 files in a 30 min window, 4.04 GB of
+        7.95 GB). See ``_iteration_log/v0320_fstier/NOTES.md`` 26/10 00:15Z.
+
+        Failure mode if the probe lies: the block is not written, so a later
+        lookup MISSes and the prefix is recomputed. There is no correctness
+        hazard — a rejected store only costs prefill, never output.
+        """
+        if not self._skip_rewrite:
+            return super().submit_store(job_metadata)
+
+        keys = list(job_metadata.keys)
+        if not keys:
+            return super().submit_store(job_metadata)
+
+        paths = [self.file_mapper.get_file_name(k) for k in keys]
+        try:
+            existing = self._existing_flags(paths)
+        except Exception as exc:  # fail open: never lose a store to this probe
+            self._err += 1
+            if self._warned < _MAX_WARNINGS:
+                self._warned += 1
+                logger.warning(
+                    "TouchOnHitFsTier: existence probe failed (%s); storing all "
+                    "%d blocks as upstream would",
+                    exc,
+                    len(keys),
+                )
+            return super().submit_store(job_metadata)
+
+        keep = [i for i, present in enumerate(existing) if not present]
+        skipped = len(keys) - len(keep)
+        self._skipped_keys += skipped
+        self._written_keys += len(keep)
+
+        if not keep:
+            # Every block already on disk. The job still has to *finish* on the
+            # pool or the manager never clears its per-job state, so enqueue a
+            # task that does nothing. _store_job_keys is kept: the blocks are
+            # in the tier, and the manager derives its "this key is now
+            # offloaded" event from it.
+            if self.events is not None:
+                self._store_job_keys[job_metadata.job_id] = keys
+            self._job_block_counts[job_metadata.job_id] = 0
+            self._pool.enqueue_store(job_metadata.job_id, 1, [_noop_store])
+            return
+
+        if not skipped:
+            return super().submit_store(job_metadata)
+
+        # Partial: hand upstream a job carrying only the missing blocks,
+        # keeping job_id so the manager's per-job state stays consistent.
+        chunk_ids = job_metadata.chunk_ids
+        super().submit_store(
+            dataclasses.replace(
+                job_metadata,
+                keys=[keys[i] for i in keep],
+                chunk_ids=chunk_ids[keep] if chunk_ids is not None else None,
+            )
+        )
+
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
         """Kept for forward compatibility: dead in v0.32.0, harmless if wired."""
         if not (_ENABLED and keys):
@@ -129,6 +251,8 @@ class TouchOnHitFsTier(FileSystemTierManager):
                     "touch_ok": self._ok,
                     "touch_miss": self._miss,
                     "touch_err": self._err,
+                    "store_written_keys": self._written_keys,
+                    "store_skipped_keys": self._skipped_keys,
                 }
             except Exception:
                 pass
