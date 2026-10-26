@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -9,20 +10,24 @@ import torch
 from PIL import Image as PILImage
 
 from vllm.exceptions import VLLMValidationError
+from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
 )
+from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.worker.encoder_cudagraph_defs import ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 # TODO: to be updated to "google/gemma-4-e2b-it" once the models are available
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
+DIFFUSION_GEMMA_MODEL_ID = "google/diffusiongemma-26B-A4B-it"
 
 
 def test_gemma4_image_schema_accepts_variable_patch_counts():
@@ -201,6 +206,47 @@ def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
     assert replacement == expected
 
 
+@pytest.mark.parametrize(
+    ("model_id", "modality"),
+    [
+        (GEMMA4_MODEL_ID, "image"),
+        (GEMMA4_MODEL_ID, "audio"),
+        (GEMMA4_MODEL_ID, "video"),
+        (DIFFUSION_GEMMA_MODEL_ID, "image"),
+        (DIFFUSION_GEMMA_MODEL_ID, "video"),
+    ],
+)
+def test_placeholder_str_is_replaced(model_id: str, modality: str):
+    """With `--chat-template-content-format string`, the chat frontend writes
+    `get_placeholder_str` into the prompt text, so the prompt replacement must
+    find it there.
+    """
+    ctx = build_model_context(model_id, limit_mm_per_prompt={modality: 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    model_cls = get_model_cls(ctx.model_config)
+    assert supports_multimodal(model_cls)
+    image = PILImage.new("RGB", (64, 64))
+    mm_data = {
+        "image": image,
+        "audio": (np.zeros(16000, dtype=np.float32), 16000),
+        "video": [
+            (
+                np.stack([np.asarray(image)] * 2),
+                {"fps": 2.0, "frames_indices": [0, 1]},
+            )
+        ],
+    }
+    placeholder = model_cls.get_placeholder_str(modality, 1)
+
+    processed = processor(
+        f"{placeholder}\nDescribe this.",
+        mm_items=processor.info.parse_mm_data({modality: mm_data[modality]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    assert len(processed["mm_placeholders"][modality]) == 1
+
+
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 @pytest.mark.parametrize(
     "image_kwargs", [{"rescale_factor": 1 / 127.5}, {"max_soft_tokens": 560}]
@@ -348,3 +394,69 @@ def test_encoder_chunk_no_free_memory_falls_back_to_one():
         )
         == 1
     )
+
+
+def _gemma4_for_encoder_cudagraph() -> Gemma4ForConditionalGeneration:
+    model = object.__new__(Gemma4ForConditionalGeneration)
+    vision_config = SimpleNamespace(
+        patch_size=16, pooling_kernel_size=3, default_output_length=280
+    )
+    model.vision_tower = SimpleNamespace(config=vision_config)
+    model.config = SimpleNamespace(vision_config=vision_config)
+    return model
+
+
+@pytest.mark.parametrize(
+    ("token_budget", "row_tokens"), [(4096, 70), (4096, 280), (70, 280)]
+)
+def test_encoder_cudagraph_capture_rows_fit_token_budget(
+    token_budget: int, row_tokens: int
+):
+    # Regression for #61045: rows were max_frames_per_batch (58 * 32) at
+    # 280 tokens each, so the 4096-token buffer alone was 6.69 GiB.
+    model = _gemma4_for_encoder_cudagraph()
+    inputs = model.prepare_encoder_cudagraph_capture_inputs(
+        token_budget=token_budget,
+        max_batch_size=58,
+        max_frames_per_batch=58 * 32,
+        device="meta",
+        dtype=torch.bfloat16,
+        axis_keys=(row_tokens,),
+    )
+
+    num_rows, row_patches, _ = inputs.values["pixel_values"].shape
+    assert row_patches == row_tokens * 9
+    assert num_rows == max(1, token_budget // row_tokens)
+
+
+def test_encoder_cudagraph_mixed_width_images_pack_by_padded_width():
+    model = _gemma4_for_encoder_cudagraph()
+    mm_kwargs = {
+        "pixel_values": [torch.zeros(2520, 768), torch.zeros(630, 768)],
+        "pixel_position_ids": [
+            torch.zeros(2520, 2, dtype=torch.long),
+            torch.zeros(630, 2, dtype=torch.long),
+        ],
+    }
+
+    specs = model.get_encoder_cudagraph_item_specs(mm_kwargs)
+    assert [spec.output_tokens for spec in specs] == [280, 70]
+    assert [spec.get_path_output_tokens("default") for spec in specs] == [280, 280]
+
+    selected = model.select_encoder_cudagraph_items(mm_kwargs, [1])
+    assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (70,)
+    selected = model.select_encoder_cudagraph_items(mm_kwargs, [0, 1])
+    assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (280,)
+
+
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [{"max_soft_tokens": 560}, {"images_kwargs": {"max_soft_tokens": 560}}],
+)
+def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
+    model = _gemma4_for_encoder_cudagraph()
+    model.config.text_config = SimpleNamespace(hidden_size=8)
+    model.multimodal_config = SimpleNamespace(mm_processor_kwargs=mm_processor_kwargs)
+
+    config = model.get_encoder_cudagraph_config()
+    assert config.capture_axes == ((70, 140, 280, 560),)

@@ -27,6 +27,38 @@ VIDEO_TOKEN_ID = 1003
 TEXT_TOKEN_ID = 0
 
 
+@pytest.mark.parametrize("model_version", ["2.5", "3"])
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_precomputed_vision_embeddings_preserve_items(model_version, modality):
+    """Concatenated embeddings must produce one 2D output per media item."""
+    from vllm.model_executor.models.qwen2_5_omni_thinker import (
+        Qwen2_5OmniThinkerForConditionalGeneration,
+    )
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeThinkerForConditionalGeneration,
+    )
+    from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
+
+    model_class = (
+        Qwen2_5OmniThinkerForConditionalGeneration
+        if model_version == "2.5"
+        else Qwen3OmniMoeThinkerForConditionalGeneration
+    )
+    model = model_class.__new__(model_class)
+    torch.nn.Module.__init__(model)
+    model.visual = Mock(dtype=torch.float32, spatial_merge_size=2)
+    embeds = torch.arange(80, dtype=torch.float64).reshape(10, 8)
+    outputs = model.embed_multimodal(
+        **{
+            f"{modality}_embeds": embeds,
+            f"{modality}_grid_thw": torch.tensor([[1, 2, 4], [2, 4, 4]]),
+        }
+    )
+    sanity_check_mm_encoder_outputs(outputs, expected_num_items=2)
+    for output, expected in zip(outputs, embeds.float().split([2, 8])):
+        torch.testing.assert_close(output, expected)
+
+
 def _mm_embed(shape: tuple[int, ...], value: float, modality: str) -> torch.Tensor:
     return set_mm_embedding_modality(torch.full(shape, value), modality)
 

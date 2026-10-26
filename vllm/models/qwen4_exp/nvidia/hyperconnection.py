@@ -74,7 +74,7 @@ class GatedResidual(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        self.lora_rank = config.hc_lowrank
+        self.hc_lowrank = config.hc_lowrank
         self.hc_count = config.hc_count
         self.hidden_size = config.hidden_size
         self.use_combine = use_combine
@@ -95,11 +95,11 @@ class GatedResidual(nn.Module):
         # -- vLLM Linear weights --------------------------------------------
         # The merged skinny-GEMM shape is physically padded to 16 rows to ensure
         # good alignment and performant implementation chosen by CuBLAS heuristics.
-        self.pad_size = (-(self.lora_rank + self.hc_count)) % 16 if use_combine else 0
+        self.pad_size = (-(self.hc_lowrank + self.hc_count)) % 16 if use_combine else 0
         if use_combine:
             self.input_mix_weight_down_block_inject = MergedColumnParallelLinear(
                 self.hyper_hidden_size,
-                [self.lora_rank, self.hc_count]
+                [self.hc_lowrank, self.hc_count]
                 + ([self.pad_size] if self.pad_size else []),
                 bias=False,
                 params_dtype=config.params_dtype,
@@ -117,7 +117,7 @@ class GatedResidual(nn.Module):
         else:
             self.input_mix_weight_down = ReplicatedLinear(
                 self.hyper_hidden_size,
-                self.lora_rank,
+                self.hc_lowrank,
                 bias=False,
                 params_dtype=config.params_dtype,
                 quant_config=None,
@@ -125,7 +125,7 @@ class GatedResidual(nn.Module):
                 return_bias=False,
             )
         self.input_mix_weight_up = ReplicatedLinear(
-            self.lora_rank,
+            self.hc_lowrank,
             self.hyper_hidden_size,
             bias=False,
             params_dtype=config.params_dtype,
@@ -150,13 +150,13 @@ class GatedResidual(nn.Module):
             return hc_down_silu(
                 xn,
                 self.input_mix_weight_down_block_inject.weight,
-                self.lora_rank,
+                self.hc_lowrank,
                 self.hc_count,
             )
         down_and_injection = self.input_mix_weight_down_block_inject(xn)
-        split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
-        lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
-        return hc_silu(lora, self.hc_count), injection
+        split_sizes = [self.hc_lowrank, self.hc_count, self.pad_size]
+        lowrank, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+        return hc_silu(lowrank, self.hc_count), injection
 
     def mix(
         self, hidden_states: torch.Tensor
@@ -168,8 +168,8 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-        lora, injection = self._down_and_inject(xn)
-        gate = self.input_mix_weight_up(lora)  # [M, D]
+        lowrank, injection = self._down_and_inject(xn)
+        gate = self.input_mix_weight_up(lowrank)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
         return hidden_states, block_input, injection
@@ -196,8 +196,8 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-        lora, injection = self._down_and_inject(xn)
-        gate = self.input_mix_weight_up(lora)  # [M, D]
+        lowrank, injection = self._down_and_inject(xn)
+        gate = self.input_mix_weight_up(lowrank)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
         return hidden_states, block_input, injection

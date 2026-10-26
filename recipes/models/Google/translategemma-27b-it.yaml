@@ -1,0 +1,122 @@
+meta:
+  title: "TranslateGemma 27B IT"
+  slug: "translategemma-27b-it"
+  provider: "Google"
+  description: "Lightweight open translation model from Google (based on Gemma 3) supporting 55 languages. Served via the vLLM-optimized Infomaniak-AI checkpoint."
+  date_added: 2026-03-06
+  date_updated: 2026-04-17
+  tasks:
+    - text
+  performance_headline: "Deployable on laptops/desktops and cloud GPUs; vLLM-optimized checkpoint removes custom JSON inputs"
+  related_recipes: []
+
+model:
+  model_id: "google/translategemma-27b-it"
+  min_vllm_version: "0.14.1"
+  architecture: dense
+  parameter_count: "27B"
+  active_parameters: "27B"
+  context_length: 131072
+  base_args: []
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 65
+    description: "Original Google checkpoint in BF16 (has vLLM compatibility issues — prefer vllm-optimized variant)"
+  vllm_optimized:
+    model_id: "Infomaniak-AI/vllm-translategemma-27b-it"
+    precision: bf16
+    vram_minimum_gb: 65
+    description: "Infomaniak-AI vLLM-optimized checkpoint — recommended. Fixes RoPE config, EOS token, and replaces custom JSON inputs with string delimiters."
+  small_4b:
+    model_id: "google/translategemma-4b-it"
+    precision: bf16
+    vram_minimum_gb: 10
+    description: "4B variant for lower-resource deployments (prefer Infomaniak-AI/vllm-translategemma-4b-it)"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [TranslateGemma](https://huggingface.co/collections/google/translategemma) is a family of lightweight, state-of-the-art open translation models from Google, based on the Gemma 3 family. TranslateGemma models handle translation across 55 languages and are small enough to deploy on laptops, desktops, and modest cloud GPU environments.
+
+  ### Original Models
+  - [google/translategemma-27b-it](https://huggingface.co/google/translategemma-27b-it)
+  - [google/translategemma-4b-it](https://huggingface.co/google/translategemma-4b-it)
+
+  ### Optimized vLLM Models
+  - [Infomaniak-AI/vllm-translategemma-27b-it](https://huggingface.co/Infomaniak-AI/vllm-translategemma-27b-it)
+  - [Infomaniak-AI/vllm-translategemma-4b-it](https://huggingface.co/Infomaniak-AI/vllm-translategemma-4b-it)
+
+  ### Why use the vLLM-optimized models?
+
+  The original Google models have compatibility issues with standard inference engines like vLLM. The optimized versions from Infomaniak-AI ([detailed changes](https://huggingface.co/Infomaniak-AI/vllm-translategemma-27b-it#changes-from-original-model)):
+
+  - **vLLM Compatibility**: Originals require custom JSON parameters (`source_lang_code`/`target_lang_code`). The optimized version uses string delimiters.
+  - **RoPE Simplification**: Originals use a complex RoPE configuration for sliding attention. Optimized uses a standard linear RoPE format (`factor: 8.0`).
+  - **EOS Token Fix**: Corrects the EOS token from `<end_of_turn>` to `<eos>`.
+
+  ## Prerequisites
+
+  ### Docker
+  ```bash
+  docker pull vllm/vllm-openai:latest
+  ```
+
+  ## Deployment Configurations
+
+  Verified for both 4B and 27B:
+  ```bash
+  docker run -itd --name google-translategemma-27b-it \
+    --ipc=host \
+    --network host \
+    --shm-size 16G \
+    --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:latest \
+      Infomaniak-AI/vllm-translategemma-27b-it \
+      --served-model-name translategemma-27b-it \
+      --gpu-memory-utilization 0.8 \
+      --host 0.0.0.0 \
+      --port 8000
+  ```
+
+  ## Client Usage
+
+  Tips:
+  - **Prompt Delimiters**: Encode language metadata directly in the content string:
+    `<<<source>>>{src_lang}<<<target>>>{tgt_lang}<<<text>>>{text}`
+  - **Language Codes**: ISO 639-1 Alpha-2 (e.g. `en`, `zh`) and regional variants (e.g. `en_US`, `zh_CN`).
+  - **Context Limit**: ~2K tokens.
+
+  ### cURL
+  ```bash
+  curl -X POST http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "translategemma-27b-it",
+      "messages": [{
+        "role": "user",
+        "content": "<<<source>>>en<<<target>>>zh<<<text>>>We distribute two models for language identification, which can recognize 176 languages."
+      }]
+    }'
+  ```
+
+  ## References
+
+  - [TranslateGemma collection](https://huggingface.co/collections/google/translategemma)
+  - [Infomaniak-AI optimized 27B](https://huggingface.co/Infomaniak-AI/vllm-translategemma-27b-it)
+  - [Infomaniak-AI optimized 4B](https://huggingface.co/Infomaniak-AI/vllm-translategemma-4b-it)

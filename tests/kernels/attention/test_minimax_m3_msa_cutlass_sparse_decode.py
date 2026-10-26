@@ -65,30 +65,40 @@ SM_SCALE = HEAD_DIM**-0.5
         "decode_query_len",
         "num_q_heads",
         "num_kv_heads",
+        "is_sm103",
         "expected",
     ),
     [
-        pytest.param(8, 4, 64, 4, False, id="tp1-below-min-batch"),
-        pytest.param(16, 4, 64, 4, True, id="tp1-supported"),
-        pytest.param(16, 4, 16, 1, True, id="tp4-min-batch"),
-        pytest.param(24, 4, 16, 1, True, id="tp4-intermediate-batch"),
-        pytest.param(32, 4, 16, 1, True, id="tp4-supported"),
-        pytest.param(16, 1, 64, 4, True, id="tp1-query-len-1"),
-        pytest.param(16, 1, 16, 1, True, id="tp4-query-len-1"),
-        pytest.param(16, 2, 64, 4, True, id="tp1-query-len-2"),
-        pytest.param(16, 2, 16, 1, True, id="tp4-query-len-2"),
-        pytest.param(16, 32, 64, 4, True, id="query-len-upper-bound"),
-        pytest.param(16, 0, 64, 4, False, id="query-len-zero"),
-        pytest.param(16, 33, 64, 4, False, id="query-len-above-bound"),
+        pytest.param(15, 1, 64, 4, True, False, id="qlen1-below-row-floor"),
+        pytest.param(16, 1, 64, 4, True, True, id="qlen1-at-row-floor"),
+        pytest.param(10, 3, 32, 2, True, False, id="qlen3-below-row-floor"),
+        pytest.param(11, 3, 32, 2, True, True, id="qlen3-at-row-floor"),
+        pytest.param(3, 4, 64, 4, True, False, id="qlen4-below-row-floor"),
+        pytest.param(4, 4, 64, 4, True, True, id="qlen4-at-row-floor"),
+        pytest.param(7, 8, 16, 1, True, False, id="qlen8-below-row-floor"),
+        pytest.param(8, 8, 16, 1, True, True, id="qlen8-at-row-floor"),
+        pytest.param(15, 9, 64, 4, True, False, id="unmeasured-query-length"),
+        pytest.param(15, 4, 8, 1, True, False, id="unmeasured-heads"),
+        pytest.param(15, 4, 64, 4, False, False, id="sm100-keeps-old-floor"),
+        pytest.param(16, 32, 64, 4, True, True, id="query-len-upper-bound"),
+        pytest.param(16, 0, 64, 4, True, False, id="query-len-zero"),
+        pytest.param(16, 33, 64, 4, True, False, id="query-len-above-bound"),
     ],
 )
 def test_msa_cutlass_decode_static_dispatch(
     batch_size: int,
     decode_query_len: int,
-    expected: bool,
     num_q_heads: int,
     num_kv_heads: int,
+    is_sm103: bool,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda capability: is_sm103 and capability == (10, 3),
+    )
     assert (
         should_prepare_decode_metadata(
             batch_size,
@@ -177,7 +187,7 @@ def test_msa_cutlass_decode_static_dispatch_nvfp4_has_no_fallback(
     assert should_prepare_decode_metadata(
         1,
         DEFAULT_QUERY_LEN,
-        decode_backend=decode_backend,  # type: ignore[arg-type]
+        decode_backend=decode_backend,
         num_q_heads=16,
         num_kv_heads=1,
         kv_cache_dtype="nvfp4",
@@ -291,6 +301,7 @@ def test_msa_metadata_builder_prepares_cutlass_for_regular_decode(
     builder.kv_cache_dtype = "fp8_e4m3"
     builder.decode_backend = "cutlass"
     builder.msa_cutlass_plan_cache = object()
+    builder.msa_cutlass_min_batch_size = None
 
     metadata = builder.build(
         0,
@@ -486,6 +497,10 @@ def _make_topk(
         pytest.param(64, 4, 8, 8, False, id="tp1-query-len-8"),
         pytest.param(16, 1, 8, 1, True, id="tp4-query-len-1"),
         pytest.param(16, 1, 16, 4, True, id="tp4-query-len-4"),
+        # Measured B300 EAGLE3 dispatch boundaries.
+        pytest.param(64, 4, 2, 4, True, id="tp1-batch-4-query-len-4"),
+        pytest.param(32, 2, 4, 4, True, id="tp2-batch-8-query-len-4"),
+        pytest.param(16, 1, 8, 4, True, id="tp4-batch-16-query-len-4"),
     ],
 )
 def test_msa_cutlass_decode_matches_triton_with_interleaved_cache(
@@ -782,6 +797,46 @@ def _make_nvfp4_kv_cache(
     return kv_cache, torch.cat(dequantized, dim=-1).to(torch.bfloat16)
 
 
+def _e4m3_staged_kv_reference(
+    kv_reference: torch.Tensor, k_scale: torch.Tensor, v_scale: torch.Tensor
+) -> torch.Tensor:
+    """The dequantized NVFP4 cache as an E4M3-query kernel reads it: each
+    code * block_scale rounded to E4M3, then the global scale."""
+    sides = []
+    for side, global_scale in zip(
+        kv_reference.float().split(HEAD_DIM, dim=-1), (k_scale, v_scale)
+    ):
+        sides.append(
+            (side / global_scale).to(torch.float8_e4m3fn).float() * global_scale
+        )
+    return torch.cat(sides, dim=-1).to(torch.bfloat16)
+
+
+def _assert_close_fp8_prefill(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    """The fp8-q prefill rounds each split's probabilities to E4M3, and the splits
+    follow the SM count, so a rare element moves past the BF16 tolerance."""
+    close = torch.isclose(actual, expected, atol=0.05, rtol=0.05)
+    assert close.float().mean().item() > 1 - 1e-4
+    torch.testing.assert_close(actual, expected, atol=0.25, rtol=0.05)
+
+
+def _record_query_dtypes(
+    monkeypatch: pytest.MonkeyPatch, kernel_name: str
+) -> list[torch.dtype]:
+    """Record the query dtype of every ``fmha_sm100.sparse.<kernel_name>`` call."""
+    from vllm.third_party.fmha_sm100 import sparse as msa_sparse
+
+    kernel = getattr(msa_sparse, kernel_name)
+    query_dtypes: list[torch.dtype] = []
+
+    def record(q, *args, **kwargs):
+        query_dtypes.append(q.dtype)
+        return kernel(q, *args, **kwargs)
+
+    monkeypatch.setattr(msa_sparse, kernel_name, record)
+    return query_dtypes
+
+
 def test_nvfp4_kv_cache_views_address_head_slots() -> None:
     """Slot 2h (K) and 2h + 1 (V) hold head h's data then scales, so each head
     is one contiguous run of the page: a TP rank's page is a byte slice."""
@@ -898,27 +953,14 @@ def test_msa_cutlass_decode_nvfp4_matches_triton_on_dequantized_cache(
     torch.testing.assert_close(actual, expected, atol=0.05, rtol=0.05)
 
 
-@pytest.mark.parametrize(
-    ("num_q_heads", "num_kv_heads"),
-    [pytest.param(64, 4, id="tp1"), pytest.param(16, 1, id="tp4")],
-)
-def test_msa_prefill_nvfp4_matches_triton_on_dequantized_cache(
-    num_q_heads: int,
+def _make_prefill_metadata(
+    q_lens: list[int],
+    seq_lens_list: list[int],
+    block_table: torch.Tensor,
     num_kv_heads: int,
-) -> None:
-    """MSA prefill reads NVFP4 pages as their exact dequantized values,
-    including chunked prefill over cached context, and takes q from its fp8
-    copy (the only one the fused insert writes on this path)."""
-    torch.manual_seed(0)
-    q_lens = [300, 128, 77]
-    seq_lens_list = [300, 640, 1100]
-    block_table, num_pages = _make_paged_layout(seq_lens_list)
-    k_scale = torch.tensor(0.5, dtype=torch.float32, device="cuda")
-    v_scale = torch.tensor(2.0, dtype=torch.float32, device="cuda")
-    kv_cache, kv_reference = _make_nvfp4_kv_cache(
-        num_pages, num_kv_heads, "nvfp4", k_scale, v_scale
-    )
-
+) -> tuple[MiniMaxM3SparseMetadata, torch.Tensor]:
+    """Prefill-only metadata (chunks over cached context) and a top-k selecting
+    every causally visible page (<= TOPK per query), ending with the local one."""
     total_q = sum(q_lens)
     seq_lens = torch.tensor(seq_lens_list, dtype=torch.int32, device="cuda")
     context_lens = seq_lens - torch.tensor(q_lens, dtype=torch.int32, device="cuda")
@@ -948,7 +990,6 @@ def test_msa_prefill_nvfp4_matches_triton_on_dequantized_cache(
         prefill=prefill,
     )
 
-    # Every causally visible page (<= TOPK per query), ending with the local one.
     topk = torch.full(
         (total_q, num_kv_heads, TOPK), -1, dtype=torch.int32, device="cuda"
     )
@@ -959,6 +1000,35 @@ def test_msa_prefill_nvfp4_matches_triton_on_dequantized_cache(
             assert visible <= TOPK
             topk[token, :, :visible] = torch.arange(visible, device="cuda")
             token += 1
+    return metadata, topk
+
+
+@pytest.mark.parametrize(
+    ("num_q_heads", "num_kv_heads"),
+    [pytest.param(64, 4, id="tp1"), pytest.param(16, 1, id="tp4")],
+)
+def test_msa_prefill_nvfp4_matches_triton_on_dequantized_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    num_q_heads: int,
+    num_kv_heads: int,
+) -> None:
+    """MSA prefill reads NVFP4 pages as their dequantized values, staged to E4M3
+    for the E4M3 q, including chunked prefill over cached context; it attends
+    with the fp8 q (the only one the fused insert writes on this path)."""
+    torch.manual_seed(0)
+    q_lens = [300, 128, 77]
+    seq_lens_list = [300, 640, 1100]
+    block_table, num_pages = _make_paged_layout(seq_lens_list)
+    k_scale = torch.tensor(0.5, dtype=torch.float32, device="cuda")
+    v_scale = torch.tensor(2.0, dtype=torch.float32, device="cuda")
+    kv_cache, kv_reference = _make_nvfp4_kv_cache(
+        num_pages, num_kv_heads, "nvfp4", k_scale, v_scale
+    )
+
+    metadata, topk = _make_prefill_metadata(
+        q_lens, seq_lens_list, block_table, num_kv_heads
+    )
+    total_q = sum(q_lens)
 
     layer_name = "model.layers.0.self_attn.attn"
     q_scale = 0.5
@@ -976,6 +1046,7 @@ def test_msa_prefill_nvfp4_matches_triton_on_dequantized_cache(
         / q_scale
     ).to(torch.float8_e4m3fn)
     query = query_fp8.to(torch.bfloat16) * q_scale
+    kv_reference = _e4m3_staged_kv_reference(kv_reference, k_scale, v_scale)
     common = dict(
         num_heads=num_q_heads,
         head_size=HEAD_DIM,
@@ -984,6 +1055,7 @@ def test_msa_prefill_nvfp4_matches_triton_on_dequantized_cache(
         topk_blocks=TOPK,
         sparse_block_size=BLOCK_SIZE,
     )
+    query_dtypes = _record_query_dtypes(monkeypatch, "sparse_atten_nvfp4_kv_func")
     forward_context = ForwardContext(
         no_compile_layers={},
         attn_metadata={layer_name: metadata},
@@ -1001,7 +1073,8 @@ def test_msa_prefill_nvfp4_matches_triton_on_dequantized_cache(
             query_fp8=query_fp8,
         )
     current_platform.synchronize()
-    torch.testing.assert_close(actual, expected, atol=0.05, rtol=0.05)
+    assert query_dtypes == [torch.float8_e4m3fn]
+    _assert_close_fp8_prefill(actual, expected)
 
 
 def test_msa_triton_decode_fallback_reads_dequantized_query_fp8() -> None:
@@ -1079,3 +1152,80 @@ def test_msa_triton_decode_fallback_reads_dequantized_query_fp8() -> None:
         )
     current_platform.synchronize()
     torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.02)
+
+
+@pytest.mark.parametrize(
+    ("num_q_heads", "num_kv_heads"),
+    [pytest.param(64, 4, id="tp1"), pytest.param(16, 1, id="tp4")],
+)
+def test_msa_prefill_reads_query_fp8_over_fp8_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    num_q_heads: int,
+    num_kv_heads: int,
+) -> None:
+    """With CUTLASS decode on, FP8 prefill (incl. chunks over cached context)
+    attends with the fp8 q the fused insert writes, not a BF16 copy, and
+    matches Triton on the dequantized q."""
+    torch.manual_seed(0)
+    q_lens = [300, 128, 77]
+    seq_lens_list = [300, 640, 1100]
+    block_table, num_pages = _make_paged_layout(seq_lens_list)
+    kv_cache = (
+        torch.randn(
+            num_pages,
+            num_kv_heads,
+            BLOCK_SIZE,
+            2 * HEAD_DIM,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        * 0.5
+    ).to(torch.float8_e4m3fn)
+    metadata, topk = _make_prefill_metadata(
+        q_lens, seq_lens_list, block_table, num_kv_heads
+    )
+    layer_name = "model.layers.0.self_attn.attn"
+    q_scale = 0.5
+    layer = SimpleNamespace(
+        layer_name=layer_name,
+        topk_indices_buffer=topk,
+        _q_scale_float=q_scale,
+    )
+    query_fp8 = (
+        torch.randn(
+            sum(q_lens), num_q_heads * HEAD_DIM, dtype=torch.bfloat16, device="cuda"
+        )
+        / q_scale
+    ).to(torch.float8_e4m3fn)
+    query = query_fp8.to(torch.bfloat16) * q_scale
+    common = dict(
+        num_heads=num_q_heads,
+        head_size=HEAD_DIM,
+        scale=SM_SCALE,
+        num_kv_heads=num_kv_heads,
+        kv_cache_dtype="fp8",
+        topk_blocks=TOPK,
+        sparse_block_size=BLOCK_SIZE,
+    )
+    impl = MiniMaxM3SparseMSAImpl(**common, msa_decode_backend="cutlass")
+    assert impl.use_cutlass_decode
+    query_dtypes = _record_query_dtypes(monkeypatch, "sparse_atten_func")
+    forward_context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={layer_name: metadata},
+        slot_mapping={},
+    )
+    with override_forward_context(forward_context):
+        expected = MiniMaxM3SparseTritonImpl(**common).forward(
+            layer, query, kv_cache, torch.empty_like(query)
+        )
+        actual = impl.forward(
+            layer,
+            torch.full_like(query, float("nan")),
+            kv_cache,
+            torch.zeros_like(query),
+            query_fp8=query_fp8,
+        )
+    current_platform.synchronize()
+    assert query_dtypes == [torch.float8_e4m3fn]
+    _assert_close_fp8_prefill(actual, expected)

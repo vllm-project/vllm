@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from torch.nn.parameter import Parameter
+
+from vllm.model_executor.utils import replace_parameter
 
 from .inc_wna16_linear import INCXPULinearMethod
 
@@ -78,9 +79,7 @@ class INCXPUW4A8LinearMethod(INCXPULinearMethod):
         super().process_weights_after_loading(layer)
         # The kernel reads both scale tensors as fp16; keep an fp16 copy for the
         # w4a8 path and leave ``scales`` untouched for the w4a16 fallback.
-        layer.scales_fp16 = Parameter(
-            layer.scales.data.to(torch.float16), requires_grad=False
-        )
+        replace_parameter(layer, "scales_fp16", layer.scales.data.to(torch.float16))
 
     def apply_weights(
         self,

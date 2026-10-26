@@ -10,11 +10,14 @@ TieringOffloadingManager without requiring actual storage or network backends.
 
 import logging
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, ClassVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from typing_extensions import override
 
 from vllm.v1.kv_offload.base import (
+    ConfigInfo,
+    ConfigInfoMapping,
     LookupResult,
     Medium,
     OffloadKey,
@@ -32,6 +35,17 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
     from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
+
+
+@dataclass(frozen=True)
+class ExampleTierInfo(ConfigInfo):
+    """Config facts of one ExampleSecondaryTierManager.
+
+    A field name is the label name. A secondary tier needs no name of its own
+    for the tier, because the tier label tells the series of the tiers apart.
+    """
+
+    example_info: int
 
 
 class ExampleSecondaryTierManager(SecondaryTierManager):
@@ -69,6 +83,8 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
             backpressure_detector=backpressure_detector,
         )
 
+        self._config_info = ExampleTierInfo(example_info=custom_param)
+
         logger.info(
             "ExampleSecondaryTierManager initialized with custom_param=%d", custom_param
         )
@@ -80,6 +96,15 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         self.completed_jobs: list[JobResult] = []
         assert primary_kv_view.strides is not None
         self._chunk_size = primary_kv_view.strides[0]
+
+    @classmethod
+    @override
+    def config_info_keys(cls, tier_config: dict[str, Any]) -> tuple[str, ...]:
+        return ExampleTierInfo.config_info_keys()
+
+    @override
+    def config_info(self) -> ConfigInfoMapping:
+        return self._config_info.as_config_info()
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:

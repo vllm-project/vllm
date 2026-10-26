@@ -10,7 +10,12 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     prepare_humming_linear_layer_config,
     quant_key_to_input_schema,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp4Static,
+)
 from vllm.platforms import current_platform
+from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
@@ -35,6 +40,20 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     @classmethod
+    def _supports_quant_scheme(
+        cls,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        if weight_key != kMxfp4Static:
+            return False
+        try:
+            quant_key_to_input_schema(activation_key)
+        except ValueError:
+            return False
+        return True
+
+    @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
         try:
             quant_key_to_input_schema(config.activation_quant_key)
@@ -55,12 +74,20 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         }
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        input_schema = quant_key_to_input_schema(self.config.activation_quant_key)
+        act_key = self.config.activation_quant_key
+        input_schema = quant_key_to_input_schema(act_key)
+        # Keep checkpoint-declared FP8 activations instead of falling back to
+        # A16 for group-scaled weights.
         self.layer_config = prepare_humming_linear_layer_config(
-            layer, quant_config, input_schema=input_schema
+            layer,
+            quant_config,
+            input_schema=input_schema,
+            allow_input_schema_fallback=(
+                act_key is None or act_key.dtype != current_platform.fp8_dtype()
+            ),
         )
         self.compute_config = get_humming_linear_compute_config()
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+        self.locks = create_humming_locks(layer.weight.device)
 
     def apply_weights(
         self,

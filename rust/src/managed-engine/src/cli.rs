@@ -84,7 +84,6 @@ impl ManagedEngineArgs {
     pub fn into_config(
         self,
         model: String,
-        revision: Option<String>,
         max_logprobs: Option<i32>,
         profiler_config: Option<String>,
         reasoning_parser: Option<&str>,
@@ -94,13 +93,10 @@ impl ManagedEngineArgs {
         handshake_port: u16,
         limit_mm_per_prompt: Option<String>,
         hf_overrides: Option<String>,
+        structured_outputs_config: Option<String>,
     ) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
         // Manually forward some args to the Python engine.
-        if let Some(revision) = revision {
-            python_args.push("--revision".to_string());
-            python_args.push(revision);
-        }
         if let Some(max_model_len) = self.max_model_len {
             python_args.push("--max-model-len".to_string());
             python_args.push(max_model_len);
@@ -140,6 +136,10 @@ impl ManagedEngineArgs {
         if let Some(hf_overrides) = hf_overrides {
             python_args.push("--hf-overrides".to_string());
             python_args.push(hf_overrides);
+        }
+        if let Some(structured_outputs_config) = structured_outputs_config {
+            python_args.push("--structured-outputs-config".to_string());
+            python_args.push(structured_outputs_config);
         }
 
         ManagedEngineConfig {

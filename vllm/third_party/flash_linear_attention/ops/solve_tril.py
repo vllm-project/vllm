@@ -69,12 +69,12 @@ def solve_tril_16x16_kernel(
     Ai = Ai + (bos * H + i_h) * 16
 
     offset = (i_t * 16) % BT
+    o_t = (i_t * 16 + o_i).to(tl.int64)
+    m_t = o_t < T
     if not USE_TMA:
-        p_A = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * 16, offset), (16, 16), (1, 0)
-        )
+        p_A = A + o_t[:, None] * (H * BT) + (o_i + offset)[None, :]
         # [16, 16]
-        b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+        b_A = tl.load(p_A, mask=m_t[:, None], other=0.0).to(tl.float32)
     else:
         desc = make_tensor_descriptor(A, [T, BT], [H * BT, 1], [16, 16])
         desc_o = make_tensor_descriptor(Ai, [T, 16], [H * 16, 1], [16, 16])
@@ -88,13 +88,11 @@ def solve_tril_16x16_kernel(
         b_A = tl.where((o_i == i)[:, None], b_a, b_A)
     b_A += m_I
     if not USE_TMA:
-        p_Ai = tl.make_block_ptr(
-            Ai, (T, 16), (H * 16, 1), (i_t * 16, 0), (16, 16), (1, 0)
-        )
+        p_Ai = Ai + o_t[:, None] * (H * 16) + o_i[None, :]
         tl.store(
             p_Ai,
             b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=m_t[:, None],
         )
     else:
         desc_o.store([i_t * 16, 0], b_A.to(desc_o.dtype, fp_downcast_rounding="rtne"))
@@ -143,15 +141,14 @@ def merge_16x16_to_32x32_inverse_kernel(
     A += (bos * H + i_h) * BT
     Ai += (bos * H + i_h) * BT
 
+    o_t = (i_t * BT + o_i).to(tl.int64)
     if not USE_TMA:
-        p_A_11 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0)
+        p_A_11 = A + o_t[:, None] * (H * BT) + o_i[None, :]
+        p_A_22 = A + (o_t[:, None] + 16) * (H * BT) + (o_i[None, :] + 16)
+        b_Ai_11 = tl.load(p_A_11, mask=(o_t[:, None] < T), other=0.0).to(tl.float32)
+        b_Ai_22 = tl.load(p_A_22, mask=(o_t[:, None] + 16 < T), other=0.0).to(
+            tl.float32
         )
-        p_A_22 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0)
-        )
-        b_Ai_11 = tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32)
-        b_Ai_22 = tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32)
     else:
         desc = make_tensor_descriptor(A, [T, BT], [H * BT, 1], [16, 16])
         desc_o = make_tensor_descriptor(Ai, [T, BT], [H * BT, 1], [16, 16])
@@ -175,10 +172,8 @@ def merge_16x16_to_32x32_inverse_kernel(
     b_Ai_22 += m_I
 
     if not USE_TMA:
-        p_A_21 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0)
-        )
-        b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
+        p_A_21 = A + (o_t[:, None] + 16) * (H * BT) + o_i[None, :]
+        b_A_21 = tl.load(p_A_21, mask=(o_t[:, None] + 16 < T), other=0.0).to(tl.float32)
     else:
         b_A_21 = desc.load([i_t * BT + 16, 0]).to(tl.float32)
 
@@ -189,29 +184,23 @@ def merge_16x16_to_32x32_inverse_kernel(
     )
 
     if not USE_TMA:
-        p_Ai_11 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0)
-        )
-        p_Ai_21 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0)
-        )
-        p_Ai_22 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0)
-        )
+        p_Ai_11 = Ai + o_t[:, None] * (H * BT) + o_i[None, :]
+        p_Ai_21 = Ai + (o_t[:, None] + 16) * (H * BT) + o_i[None, :]
+        p_Ai_22 = Ai + (o_t[:, None] + 16) * (H * BT) + (o_i[None, :] + 16)
         tl.store(
             p_Ai_11,
             b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] < T),
         )
         tl.store(
             p_Ai_22,
             b_Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] + 16 < T),
         )
         tl.store(
             p_Ai_21,
             b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] + 16 < T),
         )
     else:
         desc_o.store(
@@ -268,23 +257,22 @@ def merge_16x16_to_64x64_inverse_kernel(
     A += (bos * H + i_h) * BT
     Ai += (bos * H + i_h) * BT
 
+    o_t = (i_t * BT + o_i).to(tl.int64)
     if not USE_TMA:
-        p_A_11 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0)
+        p_A_11 = A + o_t[:, None] * (H * BT) + o_i[None, :]
+        p_A_22 = A + (o_t[:, None] + 16) * (H * BT) + (o_i[None, :] + 16)
+        p_A_33 = A + (o_t[:, None] + 32) * (H * BT) + (o_i[None, :] + 32)
+        p_A_44 = A + (o_t[:, None] + 48) * (H * BT) + (o_i[None, :] + 48)
+        b_Ai_11 = tl.load(p_A_11, mask=(o_t[:, None] < T), other=0.0).to(tl.float32)
+        b_Ai_22 = tl.load(p_A_22, mask=(o_t[:, None] + 16 < T), other=0.0).to(
+            tl.float32
         )
-        p_A_22 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0)
+        b_Ai_33 = tl.load(p_A_33, mask=(o_t[:, None] + 32 < T), other=0.0).to(
+            tl.float32
         )
-        p_A_33 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0)
+        b_Ai_44 = tl.load(p_A_44, mask=(o_t[:, None] + 48 < T), other=0.0).to(
+            tl.float32
         )
-        p_A_44 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0)
-        )
-        b_Ai_11 = tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32)
-        b_Ai_22 = tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32)
-        b_Ai_33 = tl.load(p_A_33, boundary_check=(0, 1)).to(tl.float32)
-        b_Ai_44 = tl.load(p_A_44, boundary_check=(0, 1)).to(tl.float32)
     else:
         desc = make_tensor_descriptor(A, [T, BT], [H * BT, 1], [16, 16])
         desc_o = make_tensor_descriptor(Ai, [T, BT], [H * BT, 1], [16, 16])
@@ -321,30 +309,18 @@ def merge_16x16_to_64x64_inverse_kernel(
     b_Ai_44 += m_I
 
     if not USE_TMA:
-        p_A_21 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0)
-        )
-        p_A_31 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 32, 0), (16, 16), (1, 0)
-        )
-        p_A_32 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 32, 16), (16, 16), (1, 0)
-        )
-        p_A_41 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0)
-        )
-        p_A_42 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0)
-        )
-        p_A_43 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0)
-        )
-        b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
-        b_A_31 = tl.load(p_A_31, boundary_check=(0, 1)).to(tl.float32)
-        b_A_32 = tl.load(p_A_32, boundary_check=(0, 1)).to(tl.float32)
-        b_A_41 = tl.load(p_A_41, boundary_check=(0, 1)).to(tl.float32)
-        b_A_42 = tl.load(p_A_42, boundary_check=(0, 1)).to(tl.float32)
-        b_A_43 = tl.load(p_A_43, boundary_check=(0, 1)).to(tl.float32)
+        p_A_21 = A + (o_t[:, None] + 16) * (H * BT) + o_i[None, :]
+        p_A_31 = A + (o_t[:, None] + 32) * (H * BT) + o_i[None, :]
+        p_A_32 = A + (o_t[:, None] + 32) * (H * BT) + (o_i[None, :] + 16)
+        p_A_41 = A + (o_t[:, None] + 48) * (H * BT) + o_i[None, :]
+        p_A_42 = A + (o_t[:, None] + 48) * (H * BT) + (o_i[None, :] + 16)
+        p_A_43 = A + (o_t[:, None] + 48) * (H * BT) + (o_i[None, :] + 32)
+        b_A_21 = tl.load(p_A_21, mask=(o_t[:, None] + 16 < T), other=0.0).to(tl.float32)
+        b_A_31 = tl.load(p_A_31, mask=(o_t[:, None] + 32 < T), other=0.0).to(tl.float32)
+        b_A_32 = tl.load(p_A_32, mask=(o_t[:, None] + 32 < T), other=0.0).to(tl.float32)
+        b_A_41 = tl.load(p_A_41, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
+        b_A_42 = tl.load(p_A_42, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
+        b_A_43 = tl.load(p_A_43, mask=(o_t[:, None] + 48 < T), other=0.0).to(tl.float32)
     else:
         b_A_21 = desc.load([i_t * BT + 16, 0]).to(tl.float32)
         b_A_31 = desc.load([i_t * BT + 32, 0]).to(tl.float32)
@@ -390,85 +366,65 @@ def merge_16x16_to_64x64_inverse_kernel(
     )
 
     if not USE_TMA:
-        p_Ai_11 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0)
-        )
-        p_Ai_22 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0)
-        )
-        p_Ai_33 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0)
-        )
-        p_Ai_44 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0)
-        )
-        p_Ai_21 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0)
-        )
-        p_Ai_31 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 0), (16, 16), (1, 0)
-        )
-        p_Ai_32 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 16), (16, 16), (1, 0)
-        )
-        p_Ai_41 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0)
-        )
-        p_Ai_42 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0)
-        )
-        p_Ai_43 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0)
-        )
+        p_Ai_11 = Ai + o_t[:, None] * (H * BT) + o_i[None, :]
+        p_Ai_22 = Ai + (o_t[:, None] + 16) * (H * BT) + (o_i[None, :] + 16)
+        p_Ai_33 = Ai + (o_t[:, None] + 32) * (H * BT) + (o_i[None, :] + 32)
+        p_Ai_44 = Ai + (o_t[:, None] + 48) * (H * BT) + (o_i[None, :] + 48)
+        p_Ai_21 = Ai + (o_t[:, None] + 16) * (H * BT) + o_i[None, :]
+        p_Ai_31 = Ai + (o_t[:, None] + 32) * (H * BT) + o_i[None, :]
+        p_Ai_32 = Ai + (o_t[:, None] + 32) * (H * BT) + (o_i[None, :] + 16)
+        p_Ai_41 = Ai + (o_t[:, None] + 48) * (H * BT) + o_i[None, :]
+        p_Ai_42 = Ai + (o_t[:, None] + 48) * (H * BT) + (o_i[None, :] + 16)
+        p_Ai_43 = Ai + (o_t[:, None] + 48) * (H * BT) + (o_i[None, :] + 32)
         tl.store(
             p_Ai_11,
             b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] < T),
         )
         tl.store(
             p_Ai_22,
             b_Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] + 16 < T),
         )
         tl.store(
             p_Ai_33,
             b_Ai_33.to(p_Ai_33.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] + 32 < T),
         )
         tl.store(
             p_Ai_44,
             b_Ai_44.to(p_Ai_44.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] + 48 < T),
         )
         tl.store(
             p_Ai_21,
             b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] + 16 < T),
         )
         tl.store(
             p_Ai_31,
             b_Ai_31.to(p_Ai_31.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] + 32 < T),
         )
         tl.store(
             p_Ai_32,
             b_Ai_32.to(p_Ai_32.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] + 32 < T),
         )
         tl.store(
             p_Ai_41,
             b_Ai_41.to(p_Ai_41.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] + 48 < T),
         )
         tl.store(
             p_Ai_42,
             b_Ai_42.to(p_Ai_42.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] + 48 < T),
         )
         tl.store(
             p_Ai_43,
             b_Ai_43.to(p_Ai_43.dtype.element_ty, fp_downcast_rounding="rtne"),
-            boundary_check=(0, 1),
+            mask=(o_t[:, None] + 48 < T),
         )
     else:
         desc_o.store(

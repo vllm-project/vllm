@@ -19,7 +19,7 @@ from vllm.config import (
 )
 from vllm.config.model import ModelDType
 from vllm.v1.attention.backend import (
-    AttentionImpl,
+    AttentionImplBase,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -127,7 +127,7 @@ def create_common_attn_metadata(
 
 def try_get_attention_backend(
     backend: AttentionBackendEnum,
-) -> tuple[type[AttentionMetadataBuilder], type[AttentionImpl]]:
+) -> tuple[type[AttentionMetadataBuilder], type[AttentionImplBase]]:
     """Try to get the attention backend class, skipping test if not found."""
     try:
         backend_class = backend.get_class()
@@ -180,7 +180,7 @@ def create_standard_kv_cache_spec(
 
 
 def create_vllm_config(
-    model_name: str = "meta-llama/Meta-Llama-3-8B",
+    model_name: str = "Qwen/Qwen3-0.6B",
     tensor_parallel_size: int = 1,
     max_model_len: int = 1024,
     dtype: ModelDType | torch.dtype = "auto",
@@ -189,7 +189,6 @@ def create_vllm_config(
     max_num_seqs: int = 256,
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
-    add_mock_model_methods: bool = True,
     hf_config_override: dict | None = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
@@ -229,24 +228,6 @@ def create_vllm_config(
     device_config = DeviceConfig()
     load_config = LoadConfig()
     compilation_config = CompilationConfig()
-
-    if add_mock_model_methods:
-        # Add mock methods to satisfy backends that need them
-        # This is a workaround because tests don't build full, real models,
-        # but some backends expect to query the model for layer-specific
-        # parameters
-        import types
-
-        model_config.get_num_layers = types.MethodType(lambda self: 1, model_config)
-        model_config.get_sliding_window_for_layer = types.MethodType(
-            lambda self, i: None, model_config
-        )
-        model_config.get_logits_soft_cap_for_layer = types.MethodType(
-            lambda self, i: 0.0, model_config
-        )
-        model_config.get_sm_scale_for_layer = types.MethodType(
-            lambda self, i: 1.0 / model_config.get_head_size() ** 0.5, model_config
-        )
 
     if hf_config_override:
         model_config.hf_config.update(hf_config_override)

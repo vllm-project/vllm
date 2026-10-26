@@ -33,7 +33,9 @@ class DummyConfig:
 
 
 def make_model(config: DummyConfig) -> Ernie4_5_VLMoeForConditionalGeneration:
-    model = object.__new__(Ernie4_5_VLMoeForConditionalGeneration)
+    model = object.__new__(
+        Ernie4_5_VLMoeForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
+    )
     model.config = config
     return model
 

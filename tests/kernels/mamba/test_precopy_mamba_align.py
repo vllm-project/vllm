@@ -31,7 +31,11 @@ import torch
 from vllm.model_executor.layers.mamba import mamba_utils as layer_mamba_utils
 from vllm.platforms import current_platform
 from vllm.v1.worker import mamba_utils as worker_mamba_utils
-from vllm.v1.worker.mamba_utils import _TEMPORAL_TILES, precopy_mamba_align_fused_kernel
+from vllm.v1.worker.mamba_utils import (
+    _TEMPORAL_TILES,
+    postprocess_mamba_fused_kernel,
+    precopy_mamba_align_fused_kernel,
+)
 
 _parametrize: Callable[..., Callable[[Any], Any]]
 
@@ -195,7 +199,8 @@ def test_precopy_matches_v1_copy_specs(
         convs, ssms, device, conv_state_dim_first
     )
     bt_ptrs = torch.tensor([bt.data_ptr()], dtype=torch.int64, device=device)
-    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+    # Non-identity mapping: block-table rows are request slots, not batch rows.
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device).flip(0)
     grid = (num_reqs, NUM_LAYERS * 2, temporal_tiles)
     precopy_mamba_align_fused_kernel[grid](
         dst_col,
@@ -217,6 +222,77 @@ def test_precopy_matches_v1_copy_specs(
         CONV_STATE_DIM_FIRST=conv_state_dim_first,
         HAS_IDX_MAPPING=has_idx_mapping,
         TEMPORAL_TILES=temporal_tiles,
+    )
+    torch.accelerator.synchronize()
+
+    for layer in range(NUM_LAYERS):
+        torch.testing.assert_close(convs[layer], conv_ref[layer], rtol=0, atol=0)
+        torch.testing.assert_close(ssms[layer], ssm_ref[layer], rtol=0, atol=0)
+
+
+@_parametrize("conv_state_dim_first", [False, True])
+@_cuda_required
+def test_v2_postprocess_indexes_block_tables_by_req_slot(conv_state_dim_first):
+    """Under PP the V2 postprocess runs after later steps have re-gathered the
+    batch-ordered tables, so it must index the request-slot tables by slot."""
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    num_reqs = 4
+    block_size = 8
+    num_blocks = num_reqs * MAX_COLS + 1
+    bt = torch.arange(1, num_blocks, dtype=torch.int32, device=device).view(
+        num_reqs, MAX_COLS
+    )
+    # slot 0: copy col 1 -> 0; slot 1: src == dst; slot 2: not aligned;
+    # slot 3: copy col 2 -> 0 with one accepted draft token.
+    num_accepted = torch.tensor([1, 1, 1, 2], dtype=torch.int32, device=device)
+    state_idx = torch.tensor([1, 0, 1, 2], dtype=torch.int32, device=device)
+    new_num_computed = torch.tensor([8, 8, 5, 8], dtype=torch.int32, device=device)
+    ref_src = torch.tensor([1, 0, -1, 2], dtype=torch.int32)
+    ref_dst = torch.zeros(num_reqs, dtype=torch.int32)
+    ref_bias = torch.tensor([0, 0, 0, 1], dtype=torch.int32)
+
+    convs, ssms = _build_state(num_blocks, device, conv_state_dim_first)
+    conv_ref, ssm_ref = _reference(
+        convs,
+        ssms,
+        bt.cpu(),
+        ref_src,
+        ref_dst,
+        ref_bias,
+        num_reqs,
+        conv_state_dim_first,
+    )
+    base, blk_stride, elem, inner, width, group, drc, drs = _build_meta(
+        convs, ssms, device, conv_state_dim_first
+    )
+    bt_ptrs = torch.tensor([bt.data_ptr()], dtype=torch.int64, device=device)
+    idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int32, device=device)
+    postprocess_mamba_fused_kernel[(num_reqs, NUM_LAYERS * 2, 1)](
+        num_accepted.clone(),
+        state_idx,
+        None,
+        new_num_computed,
+        None,
+        bt_ptrs,
+        bt.stride(0),
+        base,
+        blk_stride,
+        elem,
+        inner,
+        width,
+        group,
+        drc,
+        drs,
+        num_accepted,
+        idx_mapping,
+        num_reqs,
+        block_size=block_size,
+        COPY_BLOCK_SIZE=1024,
+        CONV_STATE_DIM_FIRST=conv_state_dim_first,
+        HAS_IDX_MAPPING=True,
+        PRECOMPUTED_NEW_COMPUTED=True,
+        TEMPORAL_TILES=1,
     )
     torch.accelerator.synchronize()
 

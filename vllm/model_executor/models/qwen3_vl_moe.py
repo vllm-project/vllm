@@ -56,6 +56,7 @@ from .qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
+    mrope_positions_factor,
 )
 from .utils import StageMissingLayer, maybe_prefix
 
@@ -73,6 +74,7 @@ class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
             vllm_config=vllm_config,
             prefix=prefix,
             is_fused_checkpoint_transposed=True,
+            mrope_positions_factor=mrope_positions_factor(vllm_config),
         )
 
 

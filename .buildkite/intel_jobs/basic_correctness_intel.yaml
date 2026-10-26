@@ -1,8 +1,8 @@
-group: Basic Correctness
+group: Basic Correctness Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: XPU Sleep Mode
+- label: ":intel: (BMG) Sleep Mode"
   key: xpu-sleep-mode
   timeout_in_minutes: 45
   device: intel_gpu
@@ -26,4 +26,4 @@ steps:
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       pytest -v -s basic_correctness/cpu_offload &&
-      pytest -v -s basic_correctness/memory'
+      pytest -v -s basic_correctness/memory --deselect="tests/basic_correctness/memory/cumem/test_cumem.py::test_basic_cumem"'

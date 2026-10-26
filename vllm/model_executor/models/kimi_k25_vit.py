@@ -15,6 +15,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import Kimi_K25VisionConfig
 from transformers.activations import GELUActivation
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -22,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -39,11 +41,19 @@ from vllm.model_executor.models.vision import (
     run_dp_sharded_mrope_vision_model,
 )
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
+from vllm.transformers_utils.configs.kimi_k3 import KimiK3VisionConfig
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
+
+
+def _get_pos_emb_size(
+    config: Kimi_K25VisionConfig | KimiK3VisionConfig, dim: str
+) -> int:
+    # Legacy checkpoints and Kimi-K3 use `init_pos_emb_*`
+    legacy = getattr(config, f"init_pos_emb_{dim}", None)
+    return legacy if legacy is not None else getattr(config, f"pos_emb_{dim}")
 
 
 def _apply_rope_input_validation(x, freqs_cis):
@@ -187,6 +197,7 @@ class MoonVision3dPatchEmbed(nn.Module):
         pos_emb_type: str = "divided_fixed",
         patch_embed_proj_bias: bool = True,
         pos_emb_interpolation_mode: str = "bicubic",
+        input_norm: nn.Module | None = None,
     ):
         super().__init__()
         assert isinstance(patch_size, int | Sequence), (
@@ -206,6 +217,7 @@ class MoonVision3dPatchEmbed(nn.Module):
             stride=patch_size,
             bias=patch_embed_proj_bias,
         )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         if pos_emb_type == "divided_fixed":
             self.pos_emb = Learnable2DInterpPosEmbDivided_fixed(
@@ -225,6 +237,7 @@ class MoonVision3dPatchEmbed(nn.Module):
         *,
         pos_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        x = self.input_norm(x.flatten(1), self.proj.weight.dtype).view_as(x)
         # forward_native dispatches this non-overlapping patch projection to GEMM.
         x = self.proj.forward_native(x).view(x.size(0), self.proj.out_channels)
         if pos_embeds is not None:
@@ -694,35 +707,35 @@ def tpool_patch_merger_packed(
 
 
 class MoonViT3dPretrainedModel(nn.Module):
-    """Main vision tower model.
-
-    Uses KimiK25VisionConfig directly from transformers_utils/configs/kimi_k25.py.
-    """
+    """Main vision tower model."""
 
     def __init__(
         self,
-        config: KimiK25VisionConfig,
+        config: Kimi_K25VisionConfig | KimiK3VisionConfig,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ):
         super().__init__()
         config = deepcopy(config)
         self.config = config  # Required for run_dp_sharded_mrope_vision_model
-        self.merge_kernel_size = config.merge_kernel_size
+        merge_h, merge_w = config.merge_kernel_size
+        self.merge_kernel_size = (merge_h, merge_w)
         self.patch_size = config.patch_size
-        self.merge_type = config.merge_type
+        self.merge_type = getattr(config, "merge_type", "sd2_tpool")
 
         self.patch_embed = MoonVision3dPatchEmbed(
             out_dim=config.hidden_size,
             patch_size=config.patch_size,
-            pos_emb_height=config.init_pos_emb_height,
-            pos_emb_width=config.init_pos_emb_width,
-            pos_emb_time=config.init_pos_emb_time,
-            pos_emb_type=config.pos_emb_type,
+            pos_emb_height=_get_pos_emb_size(config, "height"),
+            pos_emb_width=_get_pos_emb_size(config, "width"),
+            pos_emb_time=_get_pos_emb_size(config, "time"),
+            pos_emb_type=getattr(config, "pos_emb_type", "divided_fixed"),
             patch_embed_proj_bias=getattr(config, "patch_embed_proj_bias", True),
             pos_emb_interpolation_mode=getattr(
                 config, "pos_emb_interpolation_mode", "bicubic"
             ),
+            input_norm=input_norm,
         )
 
         self.encoder = MoonViT3dEncoder(
@@ -734,14 +747,14 @@ class MoonViT3dPretrainedModel(nn.Module):
                 "qkv_hidden_size": getattr(config, "qkv_hidden_size", None),
                 "mlp_dim": config.intermediate_size,
                 "activation": get_act_fn(
-                    getattr(config, "activation_func", "gelu_pytorch_tanh")
+                    getattr(config, "activation_func", None) or config.hidden_act
                 ),
                 "attn_bias": getattr(config, "attn_bias", True),
                 "norm_type": getattr(config, "norm_type", "layernorm"),
                 "mlp_type": getattr(config, "mlp_type", "mlp2"),
                 "linear_bias": getattr(config, "linear_bias", True),
             },
-            video_attn_type=config.video_attn_type,
+            video_attn_type=getattr(config, "video_attn_type", "spatial_temporal"),
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "encoder"),
         )
@@ -880,7 +893,8 @@ class KimiK25MultiModalProjector(nn.Module):
 
     def __init__(
         self,
-        config: KimiK25VisionConfig,
+        config: Kimi_K25VisionConfig | KimiK3VisionConfig,
+        out_hidden_size: int,
         use_data_parallel: bool = False,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -903,13 +917,13 @@ class KimiK25MultiModalProjector(nn.Module):
             )
             self.linear_2 = ReplicatedLinear(
                 self.hidden_size,
-                getattr(config, "text_hidden_size", config.mm_hidden_size),
+                out_hidden_size,
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.linear_2",
             )
             self.post_norm = torch.nn.RMSNorm(
-                getattr(config, "text_hidden_size", config.mm_hidden_size),
+                out_hidden_size,
                 eps=config.projector_ln_eps,
             )
             self.act = GELUActivation()
@@ -925,7 +939,7 @@ class KimiK25MultiModalProjector(nn.Module):
         )
         self.linear_2 = ReplicatedLinear(
             self.hidden_size,
-            config.mm_hidden_size,
+            out_hidden_size,
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.linear_2",

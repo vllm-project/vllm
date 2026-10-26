@@ -3,6 +3,7 @@
 
 import asyncio
 import functools
+import threading
 import time
 from collections.abc import Callable, Coroutine, Mapping, MutableMapping
 from pathlib import Path
@@ -60,6 +61,33 @@ class MediaDownloadSizeExceededError(ValueError):
         super().__init__(message)
 
 
+class MediaRequestDownloadSizeExceededError(ValueError):
+    """Raised when all HTTP media downloads in one request exceed the limit."""
+
+
+class MediaRequestDownloadBudget:
+    """Thread-safe total of HTTP media bytes received for one request."""
+
+    def __init__(self) -> None:
+        self.used = 0
+        self._lock = threading.Lock()
+
+    def charge(self, size: int) -> None:
+        limit_mb = envs.VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB
+        if limit_mb <= 0:
+            return
+        limit = limit_mb * MiB_bytes
+        with self._lock:
+            received = self.used + size
+            if received > limit:
+                raise MediaRequestDownloadSizeExceededError(
+                    "Request media downloads exceed "
+                    f"VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB={limit_mb:g} "
+                    f"({received} bytes received, including retried attempts)."
+                )
+            self.used = received
+
+
 def _get_media_download_limit_bytes() -> int | None:
     max_size_mb = envs.VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB
     if max_size_mb <= 0:
@@ -105,19 +133,26 @@ def _append_chunk(
     received_bytes: int,
     max_bytes: int | None,
     media_download_limit: bool,
+    request_budget: MediaRequestDownloadBudget | None = None,
 ) -> int:
     if not chunk:
         return received_bytes
     received_bytes += len(chunk)
     if max_bytes is not None and received_bytes > max_bytes:
         _raise_size_exceeded(max_bytes, received_bytes, media_download_limit)
+    if request_budget is not None:
+        request_budget.charge(len(chunk))
     chunks.append(chunk)
     return received_bytes
 
 
-def _read_response_bytes(response: requests.Response, max_bytes: int | None) -> bytes:
+def _read_response_bytes(
+    response: requests.Response,
+    max_bytes: int | None,
+    request_budget: MediaRequestDownloadBudget | None = None,
+) -> bytes:
     max_bytes, media_download_limit = _get_response_size_limit(max_bytes)
-    if max_bytes is None:
+    if max_bytes is None and request_budget is None:
         return response.content
 
     _check_content_length(
@@ -129,16 +164,23 @@ def _read_response_bytes(response: requests.Response, max_bytes: int | None) -> 
     received_bytes = 0
     for chunk in response.iter_content(_RESPONSE_READ_CHUNK_SIZE):
         received_bytes = _append_chunk(
-            chunks, chunk, received_bytes, max_bytes, media_download_limit
+            chunks,
+            chunk,
+            received_bytes,
+            max_bytes,
+            media_download_limit,
+            request_budget,
         )
     return b"".join(chunks)
 
 
 async def _async_read_response_bytes(
-    response: aiohttp.ClientResponse, max_bytes: int | None
+    response: aiohttp.ClientResponse,
+    max_bytes: int | None,
+    request_budget: MediaRequestDownloadBudget | None = None,
 ) -> bytes:
     max_bytes, media_download_limit = _get_response_size_limit(max_bytes)
-    if max_bytes is None:
+    if max_bytes is None and request_budget is None:
         return await response.read()
 
     _check_content_length(response.content_length, max_bytes, media_download_limit)
@@ -146,7 +188,12 @@ async def _async_read_response_bytes(
     received_bytes = 0
     async for chunk in response.content.iter_chunked(_RESPONSE_READ_CHUNK_SIZE):
         received_bytes = _append_chunk(
-            chunks, chunk, received_bytes, max_bytes, media_download_limit
+            chunks,
+            chunk,
+            received_bytes,
+            max_bytes,
+            media_download_limit,
+            request_budget,
         )
     return b"".join(chunks)
 
@@ -407,6 +454,7 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
         max_bytes: int | None = None,
+        request_budget: MediaRequestDownloadBudget | None = None,
     ) -> bytes:
         with self.get_response(
             url,
@@ -416,7 +464,7 @@ class HTTPConnection:
         ) as r:
             r.raise_for_status()
 
-            return _read_response_bytes(r, max_bytes)
+            return _read_response_bytes(r, max_bytes, request_budget)
 
     @_async_retry
     async def async_get_bytes(
@@ -426,6 +474,7 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
         max_bytes: int | None = None,
+        request_budget: MediaRequestDownloadBudget | None = None,
     ) -> bytes:
         async with await self.get_async_response(
             url,
@@ -434,7 +483,7 @@ class HTTPConnection:
         ) as r:
             r.raise_for_status()
 
-            return await _async_read_response_bytes(r, max_bytes)
+            return await _async_read_response_bytes(r, max_bytes, request_budget)
 
     def get_text(self, url: str, *, timeout: float | None = None) -> str:
         with self.get_response(url, timeout=timeout) as r:

@@ -315,10 +315,10 @@ class TestColbertSharedEngine:
         assert scores[0] > scores[1], "ML doc should score higher than Python doc"
         assert scores[2] > scores[1], "DL doc should score higher than Python doc"
 
-    def test_colbert_embed_not_supported(self, colbert_model):
+    def test_colbert_embed_task_not_supported(self, colbert_model):
         """Test that ColBERT model does not support the embed task."""
         with pytest.raises(ValueError, match="Embedding API is not supported"):
-            colbert_model.embed([TEXTS_1[0]])
+            colbert_model.llm.encode([TEXTS_1[0]], pooling_task="embed")
 
 
 @pytest.mark.parametrize(

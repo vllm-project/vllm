@@ -865,6 +865,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
 
+        patterns_registered = False
         for _, layer in attn_layers.items():
             supports_rope = layer.impl.fused_qk_norm_rope_kvcache_supported()
             supports_mrope = (
@@ -893,6 +894,17 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                     layer.head_size,
                 )
                 continue
+            # Every layer the fused writer may serve must read and write the
+            # interleaved V cache, including layers whose patterns are not
+            # registered separately below.
+            layer.impl.set_interleaved_v_cache()
+            # Opaque LayerName is a pattern wildcard on torch >= 2.11, so
+            # homogeneous attention layers produce duplicate search patterns.
+            # As in the other LayerName-aware fusion passes, one supported
+            # layer registers all shape/style variants for the model.
+            if _USE_LAYERNAME and patterns_registered:
+                continue
+            patterns_registered = True
             if supports_rope:
                 for epsilon in [1e-5, 1e-6]:
                     for neox in [True, False]:
@@ -903,7 +915,6 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                 is_neox=neox,
                                 quant_query=quant_q,
                             ).register(self.patterns)
-
             if supports_mrope:
                 for section, is_interleaved in self.mrope_configs:
                     rotary_dim = 2 * sum(section)
@@ -944,13 +955,6 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                     mrope_section=section,
                                     is_interleaved=is_interleaved,
                                 ).register(self.patterns)
-
-            # Opaque LayerName is a pattern wildcard on torch >= 2.11, so
-            # homogeneous attention layers produce duplicate search patterns.
-            # As in the other LayerName-aware fusion passes, one supported
-            # layer registers all shape/style variants for the model.
-            if _USE_LAYERNAME:
-                break
 
         self.dump_patterns(config, self.patterns)
 

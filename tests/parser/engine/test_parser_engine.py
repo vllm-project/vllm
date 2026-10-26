@@ -26,15 +26,21 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.parser.abstract_parser import DelegatingParser
-from vllm.parser.engine.adapters import make_adapters
+from vllm.parser.engine.adapters import (
+    ParserEngineReasoningAdapter,
+    ParserEngineToolAdapter,
+    make_adapters,
+)
 from vllm.parser.engine.events import EventType, SemanticEvent
-from vllm.parser.engine.parser_engine import ParserEngine
+from vllm.parser.engine.parser_engine import ParserEngine, ReasoningEnd
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
     ParserState,
     Transition,
 )
+from vllm.parser.glm47_moe import glm47_moe_config
 from vllm.parser.parser_manager import ParserManager
+from vllm.parser.qwen3 import Qwen3Parser
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -158,11 +164,17 @@ class TestReasoningEndTokenIds:
                 (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
         )
-        assert _make_engine(cfg).reasoning_end_token_ids == {201, 202}
+        engine = _make_engine(cfg)
+        assert engine.reasoning_end_token_ids == {201, 202}
+        assert engine.implicit_reasoning_end_token_ids == {202}
+        assert engine.find_reasoning_end([5, 201]) == ReasoningEnd(1, False)
+        assert engine.find_reasoning_end([5, 202]) == ReasoningEnd(1, True)
 
     def test_transition_staying_in_reasoning_is_ignored(self):
         cfg = _with_reasoning_exits(("THINK_START", ParserState.REASONING, ()))
-        assert _make_engine(cfg).reasoning_end_token_ids == {201}
+        engine = _make_engine(cfg)
+        assert engine.reasoning_end_token_ids == {201}
+        assert engine.implicit_reasoning_end_token_ids == frozenset()
 
     def test_unreported_exit_fails_closed(self):
         cfg = _with_reasoning_exits(
@@ -182,17 +194,40 @@ class TestReasoningEndTokenIds:
     def test_config_without_reasoning_has_empty_set(self):
         assert _make_engine(_hermes_config()).reasoning_end_token_ids == frozenset()
 
-    def test_find_reasoning_end_offset_returns_first_match(self):
+    def test_find_reasoning_end_returns_first_match(self):
         engine = _make_engine()
-        assert engine.find_reasoning_end_offset([5, 201, 6, 201]) == 1
-        assert engine.find_reasoning_end_offset([5, 6]) == 2
-        assert engine.find_reasoning_end_offset([]) == 0
+        assert engine.find_reasoning_end([5, 201, 6, 201]) == ReasoningEnd(1, False)
+        assert engine.find_reasoning_end([5, 6]) == ReasoningEnd(2, False)
+        assert engine.find_reasoning_end([]) == ReasoningEnd(0, False)
         # Rejected-draft placeholders never match.
-        assert engine.find_reasoning_end_offset([-1, 201]) == 1
+        assert engine.find_reasoning_end([-1, 201]) == ReasoningEnd(1, False)
 
-    def test_find_reasoning_end_offset_with_empty_set_returns_none(self):
+    def test_find_reasoning_end_with_empty_set_returns_none(self):
         engine = _make_engine(_hermes_config())
-        assert engine.find_reasoning_end_offset([201]) is None
+        assert engine.find_reasoning_end([201]) is None
+
+
+@pytest.mark.parametrize(
+    ("config", "implicit_token"),
+    [
+        pytest.param(glm47_moe_config(), "<tool_call>", id="glm47_moe"),
+    ],
+)
+def test_implicit_reasoning_end_of_parsers(
+    config: ParserEngineConfig, implicit_token: str
+):
+    literals = sorted(set(config.token_id_terminals.values()))
+    vocab = {literal: 1000 + i for i, literal in enumerate(literals)}
+    engine = _make_engine(config, vocab=vocab)
+    implicit_ids = set()
+    for token_id in engine.reasoning_end_token_ids:
+        end = engine.find_reasoning_end([5, token_id, 6])
+        assert end is not None and end.offset == 1
+        kept = engine.extract_content_ids([5, token_id, 6]) == [token_id, 6]
+        assert end.implicit == kept
+        if end.implicit:
+            implicit_ids.add(token_id)
+    assert implicit_ids == {vocab[implicit_token]}
 
 
 # ── TestEventsToDelta ────────────────────────────────────────────────
@@ -346,7 +381,9 @@ class TestEventsToDelta:
         assert len(indices) == len(set(indices)), (
             f"Duplicate indices in tool_calls: {delta.tool_calls}"
         )
-        assert delta.tool_calls[0].function.name == "get_weather"
+        function = delta.tool_calls[0].function
+        assert function is not None
+        assert function.name == "get_weather"
         assert delta.tool_calls[0].id is not None
 
 
@@ -396,8 +433,10 @@ class TestCoalesceToolCallDeltas:
         assert result[0].index == 0
         assert result[0].id == "call_1"
         assert result[0].type == "function"
-        assert result[0].function.name == "get_weather"
-        assert result[0].function.arguments == '{"city":"Tokyo"}'
+        function = result[0].function
+        assert function is not None
+        assert function.name == "get_weather"
+        assert function.arguments == '{"city":"Tokyo"}'
 
     def test_empty_list(self):
         assert ParserEngine._coalesce_tool_call_deltas([]) == []
@@ -432,8 +471,10 @@ class TestCoalesceToolCallDeltas:
         result = ParserEngine._coalesce_tool_call_deltas(deltas)
         assert len(result) == 2
         assert result[0].index == 0
-        assert result[0].function.name == "f1"
-        assert result[0].function.arguments == '{"x":1}'
+        function = result[0].function
+        assert function is not None
+        assert function.name == "f1"
+        assert function.arguments == '{"x":1}'
         assert result[1].index == 1
 
     def test_id_type_from_later_entry(self):
@@ -453,8 +494,10 @@ class TestCoalesceToolCallDeltas:
         assert len(result) == 1
         assert result[0].id == "call_1"
         assert result[0].type == "function"
-        assert result[0].function.name == "f"
-        assert result[0].function.arguments == '{"a":1}'
+        function = result[0].function
+        assert function is not None
+        assert function.name == "f"
+        assert function.arguments == '{"a":1}'
 
 
 # ── TestContentWhitespaceHandling ────────────────────────────────────
@@ -977,8 +1020,8 @@ def test_parser_manager_preserves_shared_engine_adapters(monkeypatch):
     assert parser_cls is not None
     assert issubclass(parser_cls, DelegatingParser)
     parser = parser_cls(make_mock_tokenizer(_VOCAB))
-    assert parser.reasoning_parser is not None
-    assert parser.tool_parser is not None
+    assert isinstance(parser.reasoning_parser, ParserEngineReasoningAdapter)
+    assert isinstance(parser.tool_parser, ParserEngineToolAdapter)
     assert parser.reasoning_parser._parser_engine_cls is _CombinedTestEngine
     assert parser.tool_parser._parser_engine_cls is _CombinedTestEngine
     request = _make_delegating_request()
@@ -1005,8 +1048,10 @@ def test_parser_manager_preserves_shared_engine_reasoning_wiring():
         make_mock_tokenizer(_VOCAB),
         chat_template_kwargs={"enable_thinking": False},
     )
-    assert parser.reasoning_parser is not None
-    assert parser.reasoning_parser._parser_engine.thinking_enabled is False
+    assert isinstance(parser.reasoning_parser, ParserEngineReasoningAdapter)
+    engine = parser.reasoning_parser._parser_engine
+    assert isinstance(engine, Qwen3Parser)
+    assert engine.thinking_enabled is False
 
 
 def test_parser_manager_preserves_reasoning_only_adapter(monkeypatch):
@@ -1658,6 +1703,57 @@ class TestArgDeltaWithConverter:
         ]
 
 
+# ── TestArgValueExtender ──────────────────────────────────────────
+
+
+def _extender_config(structural: frozenset[str] | None = None) -> ParserEngineConfig:
+    """``_kv_converter`` plus an extender for its trailing ``k=v`` record,
+    which is open until whitespace follows it; mirrors
+    ``_glm47_arg_value_extender``."""
+
+    def factory(raw_args: str):
+        if re.search(r"\w+=\S+$", raw_args) is None:
+            return None
+
+        def extend(delta: str) -> str | None:
+            if re.search(r"\s", delta):
+                return None
+            return json.dumps(delta, ensure_ascii=False)[1:-1]
+
+        return extend
+
+    return dataclasses.replace(
+        _converter_config(),
+        arg_value_extender=factory,
+        arg_structural_chars=structural,
+    )
+
+
+class TestArgValueExtender:
+    """Engine contract for ``ParserEngineConfig.arg_value_extender``."""
+
+    def test_live_extender_sees_deltas_without_structural_chars(self):
+        """A delta without structural chars must still reach the live
+        extender: gating it out drops ``el`` from the streamed value and the
+        next accepted delta ``l=`` lands on the gap, so the converted JSON
+        no longer extends what was streamed."""
+        engine = _make_engine(_extender_config(structural=frozenset("= ")))
+        assert _run_streaming_tool(engine, "f", ["a", "=h", "el", "l=", "o "]) == {
+            "a": "hell=o"
+        }
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"arg_converter": None},
+            {"stream_arg_deltas": False},
+        ],
+    )
+    def test_extender_requires_streaming_conversion(self, overrides):
+        with pytest.raises(ValueError, match="arg_value_extender"):
+            dataclasses.replace(_extender_config(), **overrides)
+
+
 # ── TestSafeArgPrefix ────────────────────────────────────────────
 
 
@@ -1684,7 +1780,7 @@ class TestSafeArgPrefix:
         ],
     )
     def test_safe_arg_prefix(self, json_str, expected):
-        assert ParserEngine._safe_arg_prefix(json_str) == expected
+        assert ParserEngine._safe_arg_prefix(json_str)[0] == expected
 
 
 # ── Coercion instability regression tests ────────────────────────
@@ -1804,6 +1900,7 @@ class TestDropSpecialTokens:
         events = engine._engine.feed("hello<bos>world", [72, 204, 73])
         delta = engine._events_to_delta(events)
         assert delta is not None
+        assert delta.content is not None
         assert "<bos>" not in delta.content
         assert delta.content == "helloworld"
 
@@ -1816,6 +1913,7 @@ class TestDropSpecialTokens:
         events = engine._engine.feed("thinking<eos>more", [72, 205, 73])
         delta = engine._events_to_delta(events)
         assert delta is not None
+        assert delta.reasoning is not None
         assert "<eos>" not in delta.reasoning
         assert delta.reasoning == "thinkingmore"
 
@@ -1830,6 +1928,7 @@ class TestDropSpecialTokens:
         events = engine._engine.feed("hello<bos>world", [])
         delta = engine._events_to_delta(events)
         assert delta is not None
+        assert delta.reasoning is not None
         assert "<bos>" not in delta.reasoning
 
     def test_regular_tokens_spelling_special_survive(self):
@@ -1846,6 +1945,7 @@ class TestDropSpecialTokens:
         events = engine._engine.feed("h<bos>w", [72, 73, 74, 75, 76])
         delta = engine._events_to_delta(events)
         assert delta is not None
+        assert delta.reasoning is not None
         assert "<bos>" in delta.reasoning
 
     def test_configured_terminal_not_treated_as_drop(self):
@@ -1900,6 +2000,7 @@ class TestDropSpecialTokens:
         events = engine._engine.feed("hello<bos>world", [])
         delta = engine._events_to_delta(events)
         assert delta is not None
+        assert delta.reasoning is not None
         assert "<bos>" in delta.reasoning
 
     def test_drops_applied_with_skip_tool_parsing(self):
@@ -1995,6 +2096,7 @@ class TestTruncatedToolOpenerStreamParity:
             tool_parser_name="qwen3_coder",
             enable_auto_tools=True,
         )
+        assert parser_cls is not None
         tokenizer = make_mock_tokenizer(self._QWEN3_VOCAB)
         return parser_cls(tokenizer, [])
 
@@ -2110,6 +2212,7 @@ class TestThinkMarkupWithoutReasoningParser:
             tool_parser_name=tool_parser_name,
             enable_auto_tools=True,
         )
+        assert parser_cls is not None
         tokenizer = make_mock_tokenizer(self._VOCAB)
         return parser_cls(tokenizer, [])
 

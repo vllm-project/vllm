@@ -26,7 +26,7 @@ class PauseState(enum.IntEnum):
 
     - UNPAUSED: Normal operation
     - PAUSE_NEW: No new requests are scheduled, requests already in
-                 running state are scheduled.
+                 running state or holding KV blocks are scheduled.
     - PAUSE_ALL: No requests are scheduled
     """
 
@@ -144,6 +144,12 @@ class SchedulerInterface(ABC):
             request: The new request being added.
 
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def has_request(self, request_id: str) -> bool:
+        """Returns True if the scheduler holds the request, including an open
+        streaming-input session waiting for its next input."""
         raise NotImplementedError
 
     @abstractmethod

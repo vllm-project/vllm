@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import create_vllm_config
+from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -34,6 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
@@ -202,6 +203,20 @@ def mc() -> MultiConnector:
     return mc
 
 
+@pytest.mark.parametrize("chosen", [0, 1])
+def test_loaded_groups_follow_the_connector_serving_the_request(mc, chosen):
+    request = MagicMock(request_id="request")
+    for i, connector in enumerate(mc._connectors):
+        connector.get_num_new_matched_tokens.return_value = (
+            (16, True) if i == chosen else (0, False)
+        )
+        connector.get_loaded_kv_cache_group_ids.return_value = (i,)
+
+    assert mc.get_num_new_matched_tokens(request, 0) == (16, True)
+    assert mc.get_loaded_kv_cache_group_ids(request) == (chosen,)
+    mc._connectors[1 - chosen].get_loaded_kv_cache_group_ids.assert_not_called()
+
+
 def test_multi_connector_mem_pool_context_none(mc: MultiConnector):
     assert mc.get_mem_pool_context() is None
 
@@ -230,6 +245,18 @@ def test_multi_connector_rejects_multiple_mem_pool_contexts(mc: MultiConnector):
         match="Multiple connectors provide a KV cache memory pool",
     ):
         mc.get_mem_pool_context()
+
+
+def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
+    request = MagicMock(request_id="request")
+    mc._requests_to_connector[request.request_id] = 1
+    sources = {CacheHitSource.DISK: 32}
+    mc._connectors[1].get_external_cache_hit_sources.return_value = sources
+
+    assert mc.get_external_cache_hit_sources(request, 32) is sources
+    mc._connectors[1].get_external_cache_hit_sources.assert_called_once_with(
+        request, 32
+    )
 
 
 # Helper function to compare directories recursively
@@ -287,10 +314,13 @@ def test_multi_example_connector_consistency():
         },
     )
 
+    block_size = maybe_update_block_size(16)
+    expected_num_blocks = 2 if block_size == 64 else 7
+    expected_num_matched_tokens = (expected_num_blocks - 1) * block_size
     llm = LLM(
         model=MODEL_NAME,
         enforce_eager=True,
-        block_size=16,
+        block_size=block_size,
         gpu_memory_utilization=0.5,
         kv_transfer_config=kv_transfer_config,
         async_scheduling=False,
@@ -345,7 +375,7 @@ def test_multi_example_connector_consistency():
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
     # First three events are from initialization. Layer hooks run before the
@@ -372,7 +402,7 @@ def test_multi_example_connector_consistency():
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
     # Reset prefix cache or else we'll just get the tokens back from there.
@@ -396,13 +426,14 @@ def test_multi_example_connector_consistency():
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 96",
+        "update_state_after_alloc "
+        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
 
@@ -430,13 +461,14 @@ def test_multi_example_connector_consistency():
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 96",
+        "update_state_after_alloc "
+        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
         "build_connector_meta",
     ]
 
@@ -772,6 +804,23 @@ class TestMultiConnectorStats:
         metrics.observe(payload, engine_idx=2)
 
         child_metrics.observe.assert_called_once_with({"transfer_duration": [1.5]}, 2)
+
+    @pytest.mark.parametrize("with_exporter", [False, True])
+    def test_prom_metrics_skips_stats_only_connectors(self, with_exporter):
+        """Stats-only children must not prevent supported metrics from exporting."""
+        child_metrics = MagicMock()
+        metrics = object.__new__(MultiKVConnectorPromMetrics)
+        metrics._prom_metrics = (
+            {"MooncakeStoreConnector": child_metrics} if with_exporter else {}
+        )
+        payload = {"MooncakeConnector": {"bytes_transferred": [1024]}}
+        if with_exporter:
+            payload["MooncakeStoreConnector"] = {"load_get_bytes": [2048]}
+
+        metrics.observe(payload, engine_idx=2)
+
+        if with_exporter:
+            child_metrics.observe.assert_called_once_with({"load_get_bytes": [2048]}, 2)
 
     def test_aggregate_same_connector(self):
         """Test aggregating stats from the same connector type."""

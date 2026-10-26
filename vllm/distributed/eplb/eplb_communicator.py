@@ -120,8 +120,8 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
                 P2POp(
                     torch.distributed.isend,
                     tensor,
-                    dst_rank,
-                    self._ep_group,
+                    group=self._ep_group,
+                    group_peer=dst_rank,
                 )
             )
 
@@ -136,8 +136,8 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
                 P2POp(
                     torch.distributed.irecv,
                     tensor,
-                    src_rank,
-                    self._ep_group,
+                    group=self._ep_group,
+                    group_peer=src_rank,
                 )
             )
 
@@ -199,8 +199,8 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                         P2POp(
                             torch.distributed.isend,
                             cpu_tensor,
-                            peer_rank,
-                            self._cpu_group,
+                            group=self._cpu_group,
+                            group_peer=peer_rank,
                         )
                     )
                     continue
@@ -211,8 +211,8 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                     P2POp(
                         torch.distributed.irecv,
                         cpu_tensor,
-                        peer_rank,
-                        self._cpu_group,
+                        group=self._cpu_group,
+                        group_peer=peer_rank,
                     )
                 )
                 recv_staging.append((tensor, cpu_tensor))
@@ -354,6 +354,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         # Per-rank expert_id -> physical row; set by set_transfer_context.
         self._expert_to_src_row: list[dict[int, int]] | None = None
         self._layer_idx: int | None = None
+        self.set_stream(None)
 
         nixl_agent_config = nixl_utils.nixl_agent_config
         config = (
@@ -403,7 +404,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         return f"eplb-{self._rank}{pp_suffix}-{uid}"
 
     def set_stream(self, stream: torch.Stream | None) -> None:
-        pass
+        self._stream = stream
 
     def add_send(
         self,
@@ -421,6 +422,13 @@ class NixlEplbCommunicator(EplbCommunicator):
             f"pending transfers from layer {self._layer_idx}; "
             f"execute() was not called after previous add_recv() calls"
         )
+        # NIXL READs bypass device streams; wait for pending copies out of
+        # the receive buffer before add_recv overwrites it.
+        if current_platform.is_rocm():
+            with gpu_sync_allowed():
+                torch.accelerator.current_stream().synchronize()
+                if self._stream is not None:
+                    self._stream.synchronize()
         self._layer_idx = layer_idx
         n = self._num_local_experts
         rank_experts = old_indices[: self._world_size * n].reshape(self._world_size, n)

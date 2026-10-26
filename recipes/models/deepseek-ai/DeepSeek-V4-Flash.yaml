@@ -1,0 +1,1265 @@
+meta:
+  title: "DeepSeek-V4-Flash"
+  slug: "deepseek-v4-flash"
+  provider: "DeepSeek"
+  description: "DeepSeek V4 MoE model with hybrid CSA+HCA attention, manifold-constrained hyper-connections, and three-tier reasoning (Non-think / Think High / Think Max)."
+  date_added: 2026-07-31
+  date_updated: 2026-09-29
+  tasks:
+    - text
+  performance_headline: "Compact 284B/13B V4 sibling — single-node 1M-context serving with FP4+FP8 weights, MTP, and DSpark speculative decoding"
+  related_recipes: []
+  hardware:
+    h200: verified
+    b200: verified
+    gb200: verified
+    b300: verified
+    gb300: verified
+    dgx_station_gb300: verified
+    dgx_spark_gb10: verified
+    rtx_pro_6000_8x: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+    # Atlas A5 8-card mixed serving of FP8 (Preview). 950PR verified 2026-08-29
+    # on vLLM Ascend 0.23.0 (DP4+EP, MTP k=1). 950DT matches the v0.23.0
+    # vLLM Ascend mixed recipe (same command, 4 of 8 NPUs).
+    # 950PR additionally verified 2026-09-09 on FP8 (0731) with DSpark k=5,
+    # same DP4+EP command; 950DT follows it. See the hardware note for the
+    # required fix.
+    ascend_950dt_8x: verified
+    ascend_950pr_8x: verified
+    # Atlas 800 A3 (16× Ascend 910C, 64 GB each). W8A8 quantized checkpoint,
+    # DP2+TP8 on all 16 NPUs. Verified 2026-09-23 on vLLM Ascend v0.23.0-a3.
+    ascend_910c: verified
+
+model:
+  model_id: "deepseek-ai/DeepSeek-V4-Flash"
+  min_vllm_version: "0.20.0"
+  default_frontend: rust
+  docker_image:
+    amd: "vllm/vllm-openai-rocm:nightly"
+  architecture: moe
+  parameter_count: "284B"
+  active_parameters: "13B"
+  context_length: 1048576
+  flashinfer_autotune: true
+  base_args:
+    - "--trust-remote-code"
+    - "--kv-cache-dtype"
+    - "fp8"
+    - "--block-size"
+    - "256"
+
+features:
+  tool_calling:
+    description: "Enable tool calling with DeepSeek V4 chat template support."
+    args:
+      - "--tokenizer-mode"
+      - "deepseek_v4"
+      - "--tool-call-parser"
+      - "deepseek_v4"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Enable reasoning/thinking mode with the DeepSeek V4 reasoning parser."
+    args:
+      - "--reasoning-parser"
+      - "deepseek_v4"
+      - "--reasoning-config"
+      - '{"reasoning_parser":"deepseek_v4","reasoning_start_str":"","reasoning_end_str":""}'
+  spec_decoding:
+    description: "Speculative decoding — pick a drafting method."
+    # Mode = the --speculative-config method only (args); the served checkpoint is
+    # owned by the Variant row. Default is MTP; the 0731 (default) and DSpark
+    # checkpoints flip this to dspark via their `default_modes`.
+    default_mode: mtp
+    modes:
+      mtp:
+        label: "MTP"
+        description: "Built-in Multi-Token Prediction, 2 draft tokens (1 on Hopper)."
+        # The preview FP4+FP8 and NVFP4 checkpoints ship an MTP head only — their
+        # config.json carries no dspark_* block, so dspark can't be drafted there.
+        hardware:
+          rtx_pro_6000_8x: unsupported
+        variants:
+          - fp8
+          - nvfp4
+          - redhat_nvfp4
+          - ascend_w8a8
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":2}'
+        hardware_overrides:
+          hopper:
+            args:
+              - "--speculative-config"
+              - '{"method":"mtp","num_speculative_tokens":1}'
+          # Preview MTP head is next-1. vLLM Ascend 0.23.0 runs the draft eager
+          # while the target keeps FULL_DECODE_ONLY ACLGraph. DSpark is not in
+          # this release; do not raise k or switch method on the preview weights.
+          npu:
+            args:
+              - "--speculative-config"
+              - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
+      dspark:
+        label: "DSpark"
+        description: "DSpark drafting, 7 draft tokens, probabilistic sampling. Requires the DSpark or 0731 checkpoint (Variant row)."
+        # Only the fused checkpoints carry the DSpark draft module — the 0731
+        # release (default) and the DSpark re-pack of the preview weights.
+        variants:
+          - default
+          - dspark
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+        hardware_overrides:
+          dgx_spark_gb10:
+            args:
+              - "--speculative-config"
+              - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","attention_backend":"B12X_MLA_SPARSE"}'
+          # 950PR was verified at k=5 with an eager draft while the target keeps
+          # its FULL_DECODE_ONLY ACLGraph. vLLM Ascend does not implement
+          # probabilistic draft sampling, so that key is left off.
+          npu:
+            args:
+              - "--speculative-config"
+              - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
+
+      dflash:
+        label: "DFlash"
+        description: "DFlash speculative decoding with an externally trained draft model; the served checkpoint is unchanged."
+        variants:
+          - default
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/DeepSeek-V4-Flash-speculator.dflash","num_speculative_tokens":7,"method":"dflash"}'
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    # Official 0731 release: new weights (not a re-pack of the preview), same
+    # architecture and same fused DSpark draft module.
+    model_id: "deepseek-ai/DeepSeek-V4-Flash-0731"
+    label: "FP8 (0731)"
+    precision: fp8
+    vram_minimum_gb: 200
+    description: "Official DeepSeek-V4-Flash release (2026-07-31) superseding the preview — substantially stronger agentic performance, with the DSpark draft module attached."
+    # 950PR does load this checkpoint's DSpark draft module: the v0.23.0-a5 tag
+    # currently ships vLLM Ascend main (0.1.dev1+g6e6aad57e), not the 0.23.0
+    # release. 950DT is offered on the same grounds the FP8 (Preview) row
+    # already uses — one A5 profile, one command, 4 of 8 NPUs — and its 4x96 GB
+    # clears this variant's 200 GB minimum. 0731 itself was run on 950PR.
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103, arch:gfx942, mi355x, rtx_pro_6000_8x, dgx_spark_gb10, ascend_950pr_8x, ascend_950dt_8x]
+    min_vllm_version: "0.25.0"
+    docker_image: "vllm/vllm-openai:v0.28.0"
+    default_modes:
+      spec_decoding: dspark
+    hardware_overrides:
+      rtx_pro_6000_8x:
+        docker_image: "vllm/vllm-openai:nightly"
+      # Same pinning as the FP8 (Preview) variant below: the NVIDIA wheel
+      # carries no NPU kernels, so the pip tab is hidden here.
+      ascend_950pr_8x:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
+        install:
+          pip: false
+      ascend_950dt_8x:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
+        install:
+          pip: false
+      dgx_spark_gb10:
+        docker_image: "eugr/spark-vllm-b12x:latest"
+        # No wheel path here: the B12X args and env below ship only in the
+        # Spark build's image, so the official wheel the pip tab installs
+        # would abort on startup. Hides the tab on this hardware only.
+        install:
+          pip: false
+        extra_args:
+          - "--max-num-seqs"
+          - "8"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--gpu-memory-utilization"
+          - "0.85"
+          - "--enable-prefix-caching"
+          - "--default-chat-template-kwargs.thinking=true"
+          - "--default-chat-template-kwargs.reasoning_effort=high"
+          - "--load-format"
+          - "instanttensor"
+          - "--moe-backend"
+          - "b12x"
+          - "--linear-backend"
+          - "b12x"
+          - "--attention-backend"
+          - "B12X_MLA_SPARSE"
+          - "--max-cudagraph-capture-size"
+          - "64"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+        extra_env:
+          PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+          CUTE_DSL_ARCH: "sm_121a"
+          VLLM_USE_AOT_COMPILE: "1"
+          VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+          VLLM_USE_MEGA_AOT_ARTIFACT: "-1"
+          VLLM_MEMORY_PROFILE_INCLUDE_ATTN: "1"
+          VLLM_USE_FLASHINFER_SAMPLER: "1"
+          VLLM_USE_B12X_WO_PROJECTION: "1"
+          VLLM_USE_B12X_MHC: "1"
+          VLLM_USE_B12X_FP8_GEMM: "1"
+          VLLM_USE_B12X_MOE: "1"
+          VLLM_USE_B12X_SPARSE_INDEXER: "1"
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          B12X_MLA_SM120_UNIFIED: "1"
+          B12X_MOE_FORCE_A8: "1"
+          GLOO_SOCKET_IFNAME: "$IFACE_NAME"
+          MN_IF_NAME: "$IFACE_NAME"
+          NCCL_IB_DISABLE: "0"
+          NCCL_IB_HCA: "$IB_IF"
+          NCCL_IGNORE_CPU_AFFINITY: "1"
+          NCCL_SOCKET_IFNAME: "$IFACE_NAME"
+          OMPI_MCA_btl_tcp_if_include: "$IFACE_NAME"
+          TP_SOCKET_IFNAME: "$IFACE_NAME"
+          UCX_NET_DEVICES: "$IFACE_NAME"
+      blackwell:
+        extra_args:
+          - "--moe-backend"
+          - "deep_gemm_mega_moe"
+  fp8:
+    # Marked "(Preview)" rather than left bare: with the 0731 release on the same
+    # row, an unqualified FP8 pill reads as "the plain one" instead of "the
+    # superseded one". Matches DeepSeek's own naming — their benchmark tables
+    # say `DeepSeek-V4-Flash-0731` vs `DeepSeek-V4-Flash (Preview)`.
+    label: "FP8 (Preview)"
+    precision: fp8
+    vram_minimum_gb: 170
+    description: "Native FP4+FP8 mixed checkpoint (MoE experts FP4, remaining params FP8)"
+    # deep_gemm_mega_moe is an FP8-only MoE kernel — the FP8 checkpoint adds it on
+    # Blackwell; the NVFP4 variant below adds nothing (its experts can't use it).
+    hardware_overrides:
+      dgx_spark_gb10:
+        docker_image: "eugr/spark-vllm-b12x:latest"
+        # No wheel path here: the B12X args and env below ship only in the
+        # Spark build's image, so the official wheel the pip tab installs
+        # would abort on startup. Hides the tab on this hardware only.
+        install:
+          pip: false
+        extra_args:
+          - "--max-num-seqs"
+          - "8"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--gpu-memory-utilization"
+          - "0.85"
+          - "--enable-prefix-caching"
+          - "--default-chat-template-kwargs.thinking=true"
+          - "--default-chat-template-kwargs.reasoning_effort=high"
+          - "--load-format"
+          - "instanttensor"
+          - "--moe-backend"
+          - "b12x"
+          - "--linear-backend"
+          - "b12x"
+          - "--attention-backend"
+          - "B12X_MLA_SPARSE"
+          - "--max-cudagraph-capture-size"
+          - "64"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+        extra_env:
+          PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+          CUTE_DSL_ARCH: "sm_121a"
+          VLLM_USE_AOT_COMPILE: "1"
+          VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+          VLLM_USE_MEGA_AOT_ARTIFACT: "-1"
+          VLLM_MEMORY_PROFILE_INCLUDE_ATTN: "1"
+          VLLM_USE_FLASHINFER_SAMPLER: "1"
+          VLLM_USE_B12X_WO_PROJECTION: "1"
+          VLLM_USE_B12X_MHC: "1"
+          VLLM_USE_B12X_FP8_GEMM: "1"
+          VLLM_USE_B12X_MOE: "1"
+          VLLM_USE_B12X_SPARSE_INDEXER: "1"
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          B12X_MLA_SM120_UNIFIED: "1"
+          B12X_MOE_FORCE_A8: "1"
+          GLOO_SOCKET_IFNAME: "$IFACE_NAME"
+          MN_IF_NAME: "$IFACE_NAME"
+          NCCL_IB_DISABLE: "0"
+          NCCL_IB_HCA: "$IB_IF"
+          NCCL_IGNORE_CPU_AFFINITY: "1"
+          NCCL_SOCKET_IFNAME: "$IFACE_NAME"
+          OMPI_MCA_btl_tcp_if_include: "$IFACE_NAME"
+          TP_SOCKET_IFNAME: "$IFACE_NAME"
+          UCX_NET_DEVICES: "$IFACE_NAME"
+      blackwell:
+        extra_args:
+          - "--moe-backend"
+          - "deep_gemm_mega_moe"
+      # `computeDockerMeta` has no Huawei brand, so a bare string docker_image
+      # would only pin NVIDIA. Exact-GPU overrides land regardless of brand.
+      # The pip tab is hidden: the official vLLM wheel has no NPU kernels.
+      ascend_950dt_8x:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
+        install:
+          pip: false
+      ascend_950pr_8x:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
+        install:
+          pip: false
+  nvfp4:
+    model_id: "nvidia/DeepSeek-V4-Flash-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 170
+    description: "NVIDIA modelopt NVFP4 checkpoint (MoE experts NVFP4; attention, shared experts, router head, and MTP stay FP8) for Blackwell GPUs."
+    # Unlike Inkling's NVFP4 checkpoint, no Hopper W4A16 fallback is documented.
+    # SM120/SM121 need the exact profile-specific runtime paths below.
+    supported_hardware: [arch:sm100, arch:sm103, rtx_pro_6000_8x, dgx_spark_gb10]
+    hardware_overrides:
+      dgx_spark_gb10:
+        docker_image: "eugr/spark-vllm-b12x:latest"
+        # No wheel path here: the B12X args and env below ship only in the
+        # Spark build's image, so the official wheel the pip tab installs
+        # would abort on startup. Hides the tab on this hardware only.
+        install:
+          pip: false
+        extra_args:
+          - "--max-num-seqs"
+          - "8"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--gpu-memory-utilization"
+          - "0.85"
+          - "--enable-prefix-caching"
+          - "--default-chat-template-kwargs.thinking=true"
+          - "--default-chat-template-kwargs.reasoning_effort=high"
+          - "--load-format"
+          - "instanttensor"
+          - "--moe-backend"
+          - "b12x"
+          - "--linear-backend"
+          - "b12x"
+          - "--attention-backend"
+          - "B12X_MLA_SPARSE"
+          - "--max-cudagraph-capture-size"
+          - "64"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+        extra_env:
+          PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+          CUTE_DSL_ARCH: "sm_121a"
+          VLLM_USE_AOT_COMPILE: "1"
+          VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+          VLLM_USE_MEGA_AOT_ARTIFACT: "-1"
+          VLLM_MEMORY_PROFILE_INCLUDE_ATTN: "1"
+          VLLM_USE_FLASHINFER_SAMPLER: "1"
+          VLLM_USE_B12X_WO_PROJECTION: "1"
+          VLLM_USE_B12X_MHC: "1"
+          VLLM_USE_B12X_FP8_GEMM: "1"
+          VLLM_USE_B12X_MOE: "1"
+          VLLM_USE_B12X_SPARSE_INDEXER: "1"
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          B12X_MLA_SM120_UNIFIED: "1"
+          B12X_MOE_FORCE_A8: "1"
+          GLOO_SOCKET_IFNAME: "$IFACE_NAME"
+          MN_IF_NAME: "$IFACE_NAME"
+          NCCL_IB_DISABLE: "0"
+          NCCL_IB_HCA: "$IB_IF"
+          NCCL_IGNORE_CPU_AFFINITY: "1"
+          NCCL_SOCKET_IFNAME: "$IFACE_NAME"
+          OMPI_MCA_btl_tcp_if_include: "$IFACE_NAME"
+          TP_SOCKET_IFNAME: "$IFACE_NAME"
+          UCX_NET_DEVICES: "$IFACE_NAME"
+  redhat_nvfp4:
+    model_id: "RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 170
+    description: "RedHatAI NVFP4+FP8 mixed-precision checkpoint for Blackwell GPUs"
+  dspark:
+    # Official fused DSpark checkpoint — the preview weights with the DSpark draft
+    # module attached (config.json gains the dspark_* block). A distinct served
+    # repo, so it lives on the Variant axis; selecting it defaults the
+    # spec-decoding method to dspark (see features.spec_decoding.modes).
+    model_id: "deepseek-ai/DeepSeek-V4-Flash-DSpark"
+    label: "DSpark"
+    precision: fp8
+    vram_minimum_gb: 200
+    description: "Preview FP4+FP8 weights with the DSpark draft module baked in — same base checkpoint as the default variant plus a fused speculative decoder."
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103, arch:gfx942, mi355x, rtx_pro_6000_8x, dgx_spark_gb10]
+    # DSpark drafting landed in 0.25.0; 0.26.0 is the first release where it also
+    # works on the MI325X/MI355X pills this recipe advertises (ROCm enablement).
+    min_vllm_version: "0.25.0"
+    default_modes:
+      spec_decoding: dspark
+    hardware_overrides:
+      dgx_spark_gb10:
+        docker_image: "eugr/spark-vllm-b12x:latest"
+        # No wheel path here: the B12X args and env below ship only in the
+        # Spark build's image, so the official wheel the pip tab installs
+        # would abort on startup. Hides the tab on this hardware only.
+        install:
+          pip: false
+        extra_args:
+          - "--max-num-seqs"
+          - "8"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--gpu-memory-utilization"
+          - "0.85"
+          - "--enable-prefix-caching"
+          - "--default-chat-template-kwargs.thinking=true"
+          - "--default-chat-template-kwargs.reasoning_effort=high"
+          - "--load-format"
+          - "instanttensor"
+          - "--moe-backend"
+          - "b12x"
+          - "--linear-backend"
+          - "b12x"
+          - "--attention-backend"
+          - "B12X_MLA_SPARSE"
+          - "--max-cudagraph-capture-size"
+          - "64"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+        extra_env:
+          PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+          CUTE_DSL_ARCH: "sm_121a"
+          VLLM_USE_AOT_COMPILE: "1"
+          VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+          VLLM_USE_MEGA_AOT_ARTIFACT: "-1"
+          VLLM_MEMORY_PROFILE_INCLUDE_ATTN: "1"
+          VLLM_USE_FLASHINFER_SAMPLER: "1"
+          VLLM_USE_B12X_WO_PROJECTION: "1"
+          VLLM_USE_B12X_MHC: "1"
+          VLLM_USE_B12X_FP8_GEMM: "1"
+          VLLM_USE_B12X_MOE: "1"
+          VLLM_USE_B12X_SPARSE_INDEXER: "1"
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          B12X_MLA_SM120_UNIFIED: "1"
+          B12X_MOE_FORCE_A8: "1"
+          GLOO_SOCKET_IFNAME: "$IFACE_NAME"
+          MN_IF_NAME: "$IFACE_NAME"
+          NCCL_IB_DISABLE: "0"
+          NCCL_IB_HCA: "$IB_IF"
+          NCCL_IGNORE_CPU_AFFINITY: "1"
+          NCCL_SOCKET_IFNAME: "$IFACE_NAME"
+          OMPI_MCA_btl_tcp_if_include: "$IFACE_NAME"
+          TP_SOCKET_IFNAME: "$IFACE_NAME"
+          UCX_NET_DEVICES: "$IFACE_NAME"
+      blackwell:
+        extra_args:
+          - "--moe-backend"
+          - "deep_gemm_mega_moe"
+  ascend_w8a8:
+    # W8A8 quantized checkpoint for Atlas 800 A3 (16× Ascend 910C, 64 GB each).
+    # TP8 shards the 284B weights across 8 NPUs (35.5 GB each), fitting within
+    # the 64 GB per-NPU limit. DP2 uses all 16 NPUs (2 replicas × 8 NPUs each).
+    model_id: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+    label: "W8A8 (Ascend A3)"
+    precision: int8
+    vram_minimum_gb: 341
+    description: "ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16× Ascend 910C), using DP2+TP8. Requires --quantization ascend."
+    supported_hardware: [ascend_910c]
+    tp:
+      ascend_910c: 8
+    min_vllm_version: "0.23.0"
+    extra_args:
+      - "--data-parallel-size"
+      - "2"
+      - "--quantization"
+      - "ascend"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-num-batched-tokens"
+      - "10240"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--block-size"
+      - "128"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--async-scheduling"
+      - "--api-server-count"
+      - "1"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
+    extra_env:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "2560"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      TASK_QUEUE_ENABLE: "1"
+      LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
+      # Override the npu generation-level "0,1,2,3" (for A5) — A3 uses all 16 NPUs.
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+      # Pull W8A8 weights from ModelScope (Eco-Tech checkpoint).
+      VLLM_USE_MODELSCOPE: "True"
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a3"
+        # Ascend recommends Docker; no official pip wheel for NPU.
+        install:
+          pip: false
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_dep
+  - pd_cluster
+
+# TP+EP is the default deployment; single_node_tp is offered only as a
+# latency-oriented alternative.
+default_strategy: single_node_tep
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+strategy_hardware:
+  # Dual DGX Spark clusters need cross-node TP to shard the checkpoint across
+  # the two GB10 nodes. Keep this opt-in exact to DGX Spark so larger Blackwell
+  # platforms stay on their existing TEP/DEP/PD recommendations.
+  multi_node_tp:
+    dgx_spark_gb10: supported
+  # PD splits into a prefill pool and a decode pool, each sized in whole nodes
+  # (strategy_overrides.pd_cluster gives both `nodes: 1`), so the builder emits
+  # a two-node deployment. RTX Pro 6000 8x is multi_node: false / scalable:
+  # false in taxonomy.yaml — it can't be joined into a cluster, so that command
+  # has nowhere to run. The JSON API already skips pd_cluster on non-scalable
+  # hardware; this makes the Strategy row agree. multi_node_dep needs no entry:
+  # the Nodes row is pinned to 1 here, which already hides every multi_node
+  # strategy.
+  # Atlas A5 mixed serving is DP+EP only (vLLM Ascend 0.23.0). TP-only does not
+  # partition the V4 MoE layers on 950; TEP and intra-node PD are documented
+  # separately in the vLLM Ascend 1P1D tutorial, not this builder.
+  single_node_tp:
+    npu: unsupported
+  single_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  pd_cluster:
+    rtx_pro_6000_8x: unsupported
+    npu: unsupported
+    # Atlas 800 A3 PD separation (1P1D or multi-node) is documented in the
+    # vllm-ascend tutorial separately from the A5 single-node mixed path.
+    ascend_910c: supported
+
+hardware_overrides:
+  blackwell:
+    # Common to every variant on Blackwell. The FP8-only deep_gemm_mega_moe MoE
+    # kernel is added per-variant (FP8 checkpoints), not here.
+    extra_args:
+      - "--attention_config.indexer_kv_dtype"
+      - "mxfp4"
+  amd:
+    extra_args:
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--max-num-seqs"
+      - "512"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--compilation-config"
+      - '{"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"}'
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+  # Shared by 950DT 8x (8×96 GB) and 950PR 8x (8×128 GB). Mixed serving uses 4 of the
+  # 8 NPUs (DP4+EP). HCCL_BUFFSIZE=1024 is required for MC2 dispatch; 200 MB
+  # default fails profile_run with aclnnMoeDistributeDispatchV4 561002.
+  npu:
+    extra_env:
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      HCCL_BUFFSIZE: "1024"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+
+strategy_overrides:
+  single_node_tp:
+    # Latency-oriented TP-only deployment: no expert parallelism (single_node_tp
+    # strategy doesn't add --enable-expert-parallel) and no MoE mega-kernel
+    # backend on Blackwell. Autotune is disabled to minimize startup time.
+    tp: 8
+    hardware_overrides:
+      hopper:
+        extra_args:
+          - "--disable-flashinfer-autotune"
+      blackwell:
+    # Replaces recipe-level blackwell override: keeps the FP4 indexer cache
+    # but drops --moe-backend deep_gemm_mega_moe (TP-only path uses the
+    # default MoE backend).
+        extra_args:
+         - "--attention_config.indexer_kv_dtype"
+         - "mxfp4"
+         - "--disable-flashinfer-autotune"
+      rtx_pro_6000_8x:
+        extra_args:
+          - "--attention_config.indexer_kv_dtype"
+          - "fp8"
+      mi300x:
+        extra_args:
+          - "--gpu-memory-utilization"
+          - "0.85"
+  single_node_tep:
+    hardware_overrides:
+    # sm_120 has neither Blackwell kernel: the FP4 indexer cache and
+    # deep_gemm_mega_moe are SM100-only and abort at startup. Turned back off
+    # here — these are the values vLLM resolves to unaided (FP8 indexer cache,
+    # DEEPGEMM_MXFP4 MoE backend), which is the verified configuration.
+      rtx_pro_6000_8x:
+        extra_args:
+          - "--attention_config.indexer_kv_dtype"
+          - "fp8"
+          - "--moe-backend"
+          - "auto"
+      mi300x:
+        extra_args:
+          - "--gpu-memory-utilization"
+          - "0.85"
+  single_node_dep:
+    # Force DP=4 on all hardware (fills GB200's 4-GPU tray; on 8-GPU nodes use
+    # half the GPUs per replica). dedupeArgs (last-wins) shadows the default
+    # --data-parallel-size that command-synthesis emits from gpu_count.
+    extra_args:
+      - "--data-parallel-size"
+      - "4"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE", "custom_ops":["all"]}'
+    hardware_overrides:
+      # Same sm_120 opt-out as single_node_tep.
+      rtx_pro_6000_8x:
+        extra_args:
+          - "--attention_config.indexer_kv_dtype"
+          - "fp8"
+          - "--moe-backend"
+          - "auto"
+      mi300x:
+        extra_args:
+          - "--gpu-memory-utilization"
+          - "0.85"
+      npu:
+        # A per-strategy generation override replaces the recipe-level one, and
+        # DEP is the only strategy the A5 pills can select — so hardware_overrides.npu
+        # never reaches the command and its env has to be repeated here. Without
+        # HCCL_BUFFSIZE the MC2 dispatch fails profile_run with
+        # aclnnMoeDistributeDispatchV4 561002.
+        extra_env:
+          PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+          OMP_PROC_BIND: "false"
+          OMP_NUM_THREADS: "10"
+          HCCL_BUFFSIZE: "1024"
+          ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+        extra_args:
+          - "--block-size"
+          - "32"
+          - "--kv-cache-dtype"
+          - "auto"
+          - "--safetensors-load-strategy"
+          - "prefetch"
+          - "--async-scheduling"
+          - "--max-num-seqs"
+          - "64"
+          - "--max-num-batched-tokens"
+          - "4096"
+          - "--gpu-memory-utilization"
+          - "0.9"
+          - "--api-server-count"
+          - "1"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - "--additional-config"
+          - '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true}'
+  multi_node_dep:
+    extra_args:
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE", "custom_ops":["all"]}'
+    hardware_overrides:
+      # Same sm_120 opt-out as single_node_tep.
+      rtx_pro_6000_8x:
+        extra_args:
+          - "--attention_config.indexer_kv_dtype"
+          - "fp8"
+          - "--moe-backend"
+          - "auto"
+  multi_node_tp:
+    hardware_overrides:
+      # Multi-node TP is only enabled for DGX Spark in this recipe. Use a
+      # generation-level strategy override so it replaces the generic Blackwell
+      # FP4-indexer / deep_gemm_mega_moe overrides instead of layering on top.
+      blackwell:
+        extra_args:
+          - "--moe-backend"
+          - "b12x"
+          - "--linear-backend"
+          - "b12x"
+          - "--attention-backend"
+          - "B12X_MLA_SPARSE"
+  pd_cluster:
+    env:
+      VLLM_USE_NCCL_SYMM_MEM: "1"
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "1"
+    prefill:
+      nodes: 1               # 1 GB200 node = 4 GPUs
+      parallelism: dep       # DP + expert-parallel pool
+      vllm_args:
+        - "--max-num-seqs"
+        - "8"
+        - "--max-num-batched-tokens"
+        - "65536"
+        - "--no-disable-hybrid-kv-cache-manager"
+        - "--enable-sleep-mode"
+      env: {}
+    decode:
+      nodes: 1               # 1 GB200 nodes = 4 GPUs
+      parallelism: dep
+      vllm_args:
+        - "--max-num-seqs"
+        - "1536"
+        - "--max-num-batched-tokens"
+        - "1536"
+        - "--max-cudagraph-capture-size"
+        - "1536"
+        - "--compilation-config"
+        - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        - "--no-disable-hybrid-kv-cache-manager"
+        - "--enable-sleep-mode"
+      env: {}
+
+hardware_notes:
+  dgx_spark_gb10:
+    title: "DGX Spark setup required"
+    body: "This hardware uses the community eugr/spark-vllm-b12x:latest docker image and a 2-node TP launch — the B12X backends the command relies on are not in vLLM main, so there is no pip/wheel path on Spark. Before running the generated command, check the DGX Spark cluster guide for IFACE_NAME, IB_IF and HEAD_IP."
+    link:
+      label: "DGX Spark cluster guide"
+      href: "#dgx-spark-gb10-cluster"
+  ascend_950dt_8x:
+    title: "vLLM Ascend A5 image required"
+    body: "Mixed serving on one 8-card 950DT node uses 4 of 8 NPUs (DP4+EP). FP8 (Preview) runs MTP k=1; FP8 (0731) runs DSpark k=5, verified on 950PR and offered here on the same A5 command. Pin quay.io/ascend/vllm-ascend:v0.23.0-a5 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=1024 before launch. DeepSeek-V4 on 950 also needs the indexer quant_mode fix in vllm-project/vllm-ascend#16104 — without it the image the tag currently ships aborts during warmup with QuantLightningIndexerV2 EZ0021."
+    link:
+      label: "Ascend 950DT 8x mixed"
+      href: "#huawei-ascend-950dt-8x"
+  ascend_950pr_8x:
+    title: "vLLM Ascend A5 image required"
+    body: "Mixed serving on one 8-card 950PR node uses 4 of 8 NPUs (DP4+EP). FP8 (Preview) runs MTP k=1, same command as 950DT; FP8 (0731) runs DSpark k=5. Pin quay.io/ascend/vllm-ascend:v0.23.0-a5 and set HCCL_BUFFSIZE=1024 before launch. DeepSeek-V4 on 950 also needs the indexer quant_mode fix in vllm-project/vllm-ascend#16104 — without it the image the tag currently ships aborts during warmup with QuantLightningIndexerV2 EZ0021."
+    link:
+      label: "Ascend 950PR 8x mixed"
+      href: "#huawei-ascend-950pr-8x"
+  ascend_910c:
+    title: "vLLM Ascend A3 image required"
+    body: "Single-node DP2+TP8 on all 16 NPUs using the W8A8 quantized checkpoint from Eco-Tech. TP8 shards the 284B weights to 35.5 GB per NPU (within the 64 GB limit). Pin quay.io/ascend/vllm-ascend:v0.23.0-a3 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=2560 before launch. The A3 path uses ModelScope to download the W8A8 weights (pip install modelscope). Multi-node PD separation is also available; see the vllm-ascend tutorial."
+    link:
+      label: "Ascend 910C A3 reference"
+      href: "https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html"
+
+guide: |
+  ## Overview
+
+  DeepSeek-V4-Flash is a 284B-total / 13B-active MoE model in the V4 preview family.
+  It pairs a **hybrid attention stack** — Compressed Sparse Attention (CSA) + Heavily
+  Compressed Attention (HCA) — with **Manifold-Constrained Hyper-Connections (mHC)** to
+  reach 27% of V3.2's per-token inference FLOPs and 10% of V3.2's KV cache at 1M
+  context. Pre-trained on 32T+ tokens; post-training is a two-stage pipeline (domain-
+  specific expert cultivation + unified consolidation via on-policy distillation).
+
+  Checkpoint is **FP4+FP8 mixed**: MoE expert weights are stored in FP4 while the
+  remaining (attention / norm / router) params stay in FP8.
+
+  An **NVFP4 variant** (`nvidia/DeepSeek-V4-Flash-NVFP4`) is also available — NVIDIA
+  modelopt re-quantizes the MoE experts to standard NVFP4 while attention, shared
+  experts, router head, and MTP stay FP8. Pick it from the **Variant** row; it runs on
+  Blackwell GPUs with the FP4 indexer cache. Unlike the native FP8 checkpoint, the
+  NVFP4 experts don't support the `deep_gemm_mega_moe` MoE kernel (FP8-only), so it
+  runs on the default MoE backend.
+
+  ## Checkpoints
+
+  Four checkpoints are on the **Variant** row. They differ in *which weights you serve*
+  and *which draft module ships with them* — the speculative method itself is picked on
+  the **Spec Decoding** row.
+
+  | Variant | Repo | Draft | Notes |
+  | :-- | :-- | :-- | :-- |
+  | **FP8 (0731)** (default) | `deepseek-ai/DeepSeek-V4-Flash-0731` | DSpark | Official release, new weights + DSpark |
+  | **FP8 (Preview)** | `deepseek-ai/DeepSeek-V4-Flash` | MTP | Preview FP4+FP8 mixed weights |
+  | **NVFP4** | `nvidia/DeepSeek-V4-Flash-NVFP4` | MTP | modelopt re-quant, Blackwell |
+  | **DSpark** | `deepseek-ai/DeepSeek-V4-Flash-DSpark` | DSpark | Preview weights + fused DSpark module |
+
+  **0731 is the official DeepSeek-V4-Flash release** and the default here, superseding
+  the preview with substantially stronger agentic capability — 82.7 on Terminal Bench
+  2.1 and 54.4 on DeepSWE, versus 61.8 and 7.3 for the preview. It beats
+  DeepSeek-V4-Pro (Preview) on every agentic benchmark DeepSeek published despite its
+  far smaller activated parameter count. The preview weights remain available as the
+  **FP8 (Preview)** variant for reproducing earlier results.
+
+  **DSpark** is *not* new weights — it is the preview checkpoint with a speculative
+  decoding module attached (see [DeepSpec](https://github.com/deepseek-ai/DeepSpec)).
+  Both fused checkpoints add a `dspark_*` block to `config.json`; the preview and NVFP4
+  checkpoints have no such block, which is why the DSpark method is offered only on the
+  two variants that carry the draft. Selecting either one auto-enables **Spec Decoding**
+  with `method: dspark`, emitting:
+
+  ```
+  --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+  ```
+
+  The fused checkpoints are ~167 GB on disk versus ~160 GB for the preview — the draft
+  module is the difference. Both require **vLLM 0.25.0**: DSpark drafting itself landed
+  in 0.25.0, but ROCm support for it (MI325X / MI355X) only shipped in 0.26.0. On
+  NVIDIA-only deployments 0.25.0 is sufficient, except the 0731 checkpoint
+  on RTX PRO 6000 (sm_120) with DSpark, which needs `vllm/vllm-openai:nightly`
+  and a FlashInfer build containing flashinfer-ai/flashinfer#4380.
+
+  ## Reasoning modes
+
+  The chat template exposes three reasoning-effort modes:
+
+  - **Non-think** — fast, intuitive responses.
+  - **Think High** — explicit chain-of-thought for logical analysis and planning.
+  - **Think Max** — maximum reasoning effort; requires `--max-model-len >= 393216`
+    (384K tokens) to avoid truncation.
+
+  Recommended sampling: `temperature = 1.0`, `top_p = 1.0`.
+
+  On the **0731** variant the effort levels are named `low` / `high` / `max`, and
+  DeepSeek recommends `top_p = 0.95` for agentic scenarios (`1.0` otherwise) with
+  `temperature = 1.0`. Allow up to **384K output tokens** at the `high` and `max`
+  levels.
+
+  Note that neither fused checkpoint ships a Jinja chat template — the repos provide an
+  `encoding/` folder with `encode_messages` / `parse_message_from_completion_text`
+  helpers instead. Serving through vLLM with `--tokenizer-mode deepseek_v4` (the
+  **Tool Calling** pill) applies the built-in DeepSeek-V4 encoding, so the OpenAI-
+  compatible endpoint works without the helper scripts.
+
+  ### OpenAI Client Example
+
+  For DeepSeek-V4, keep reasoning controls in `chat_template_kwargs`, as it exposes a
+  custom **Think Max** mode via `"reasoning_effort": "max"`.
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  model = "deepseek-ai/DeepSeek-V4-Flash"
+  messages = [{"role": "user", "content": "What is 17*19? Return only the final integer."}]
+
+  # Non-think
+  resp = client.chat.completions.create(
+      model=model,
+      messages=messages,
+  )
+
+  # Think High
+  resp = client.chat.completions.create(
+      model=model,
+      messages=messages,
+      extra_body={
+          "chat_template_kwargs": {
+              "thinking": True,
+              "reasoning_effort": "high",
+          },
+      },
+  )
+
+  # Think Max
+  resp = client.chat.completions.create(
+      model=model,
+      messages=messages,
+      extra_body={
+          "chat_template_kwargs": {
+              "thinking": True,
+              "reasoning_effort": "max",
+          },
+      },
+  )
+  ```
+
+  ## Recommended deployment
+
+  Non-disaggregated serving on multi-GPU supported hardware: single-node DP + EP with
+  `--data-parallel-size 4`. Fills a GB200 NVL4 tray exactly; uses 4 of 8 GPUs per
+  replica on H200/B200/B300 (leaving headroom for throughput-vs-latency tuning).
+  On DGX Station, use the single-GPU launch below. For disaggregated prefill/decode
+  on GB200, use the PD Cluster tab.
+
+  ### H100 (8×80 GB)
+
+  The FP8 (0731) and DSpark checkpoints are selectable on H100. A reported
+  8×H100 TP8 + EP deployment of 0731 served requests with vLLM 0.26.0, while
+  the same deployment failed during startup on 0.27.0, both with and without
+  DSpark. See [vLLM #52065](https://github.com/vllm-project/vllm/issues/52065).
+
+  For the separate DSpark checkpoint, a 4×H100 TP4 report on vLLM 0.25.0
+  reached inference after removing `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+  and setting `--gpu-memory-utilization` below 0.9. A 2×H100 NVL report also
+  ran the checkpoint with DSpark k=5 on a custom vLLM build. These reports
+  establish Hopper compatibility, but do not verify this recipe's generated
+  H100 topology or current image. Check startup and inference before production.
+  See [vLLM #49101](https://github.com/vllm-project/vllm/issues/49101) and
+  [the H100 NVL report](https://github.com/vllm-project/vllm/pull/46995#issuecomment-4835994467).
+
+  ### DGX Spark (GB10) cluster
+
+  DGX Spark requires the community Spark vLLM build for this model rather than the
+  stock vLLM release/nightly image. The **DGX Spark (GB10)** hardware pill pins the
+  Docker tab to `eugr/spark-vllm-b12x:latest`, whose build carries the B12X
+  backends and Spark-specific kernels for the GB10 / SM12x family.
+
+  Use **2 nodes**. A single GB10's 128 GB unified memory is below the FP8/NVFP4
+  checkpoint footprint, so the recipe grants DGX Spark a Spark-only **Multi-Node TP**
+  layout (`--tensor-parallel-size 2`, one GB10 per node). The generated command
+  also sets the B12X runtime environment and the Spark network environment; export
+  `IFACE_NAME`, `IB_IF` and `HEAD_IP` on each node before launching.
+
+  To identify the values, first list the ConnectX Ethernet interfaces, RoCE
+  devices and the IP address of the UP ConnectX interface on each Spark:
+
+  ```bash
+  $ ibdev2netdev
+  roceP2p1s0f0 port 1 ==> enP2p1s0f0np0 (Up)
+  roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Down)
+  rocep1s0f0 port 1 ==> enp1s0f0np0 (Up)
+  rocep1s0f1 port 1 ==> enp1s0f1np1 (Down)
+
+  $ ip addr show enp1s0f0np0
+  3: enp1s0f0np0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+      link/ether 4c:62:56:c1:83:68 brd ff:ff:ff:ff:ff:ff
+      inet 100.100.100.10/24 brd 100.100.100.255 scope global noprefixroute enp1s0f0np0
+        valid_lft forever preferred_lft forever
+  ```
+
+  From above example values, we can get the following common values:
+
+  ```bash
+  # Common values for all nodes
+  HEAD_IP="100.100.100.10"         # IP of the head node's UP ConnectX interface
+  IFACE_NAME="enp1s0f0np0"         # The head node's UP ConnectX Ethernet interface
+  IB_IF="rocep1s0f0,roceP2p1s0f0"  # Comma-separated RoCE device name list corresponding to the UP ConnectX interface
+  ```
+
+  ### DGX Station Single-GPU
+
+  ```bash
+  vllm serve deepseek-ai/DeepSeek-V4-Flash \
+    --tensor-parallel-size 1 --pipeline-parallel-size 1 \
+    --kv-cache-dtype fp8 --trust-remote-code --block-size 256 \
+    --gpu-memory-utilization 0.92 \
+    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
+    --attention_config.indexer_kv_dtype mxfp4 \
+    --tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 \
+    --enable-auto-tool-choice --reasoning-parser deepseek_v4 \
+    --max-cudagraph-capture-size 128 \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+  ```
+
+  ### RTX PRO 6000 8× (8×96 GB, sm_120)
+
+  Single-node TP8 + expert parallelism on the **0731** checkpoint. Serving
+  without speculative decoding was verified on 8× RTX PRO 6000 (PCIe, no
+  NVLink). DSpark on **0731** needs `vllm/vllm-openai:nightly` (or a build
+  that includes vLLM #51538) plus a FlashInfer that instantiates the SM120
+  sparse-MLA decode kernel for `topk=192`. The Preview, NVFP4, and DSpark
+  variant checkpoints are not verified on this profile.
+
+  sm_120 cannot use the SM100 FP4 indexer cache or `deep_gemm_mega_moe`.
+  The generated command already sets `--attention_config.indexer_kv_dtype
+  fp8` and `--moe-backend auto`. Do not use `method: mtp` on 0731 — that
+  checkpoint has no MTP head; Spec Decoding defaults to DSpark.
+
+  Host-side FlashInfer install before launching 0731 with DSpark (`--no-deps`
+  is required so pip does not replace vLLM's torch):
+
+  ```bash
+  # Trace: flashinfer-ai/flashinfer#4380
+  # merge: 24d7dfb2639083c5a4d418881099421fc800b7bb (2026-08-08)
+  # wheel: flashinfer-python==0.6.18.dev20260814
+  # index: https://flashinfer.ai/whl/nightly/
+  /usr/bin/python3.12 -m pip install -U --pre flashinfer-python \
+  --index-url https://flashinfer.ai/whl/nightly/ --no-deps
+  /usr/bin/python3.12 -m pip install flashinfer-python
+  /usr/bin/python3.12 -m pip install -U --pre flashinfer-cubin \
+  --index-url https://flashinfer.ai/whl/nightly/
+  /usr/bin/python3.12 -m pip install -U --pre flashinfer-jit-cache \
+  --index-url https://flashinfer.ai/whl/nightly/cu130
+
+  vllm serve deepseek-ai/DeepSeek-V4-Flash-0731 \
+  --trust-remote-code \
+  --kv-cache-dtype fp8 \
+  --block-size 256 \
+  --enable-expert-parallel \
+  --tensor-parallel-size 8 \
+  --moe-backend auto \
+  --attention_config.indexer_kv_dtype fp8 \
+  --tokenizer-mode deepseek_v4 \
+  --tool-call-parser deepseek_v4 \
+  --enable-auto-tool-choice \
+  --reasoning-parser deepseek_v4 \
+  --reasoning-config '{"reasoning_parser":"deepseek_v4","reasoning_start_str":"","reasoning_end_str":""}' \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+  ```
+  
+  ### MI300X (8×192GB)
+
+  Verified single-node serving on MI300X (8×192 GB, CDNA 3) with the same AMD
+  launch as the MI325X/MI355X sections below — the builder lowers
+  `--gpu-memory-utilization` to `0.85` on MI300X (the 192 GB cards leave less
+  headroom at `0.9`), and DSpark speculative decoding is validated on it.
+
+  ### MI325X (1×256GB)
+
+  Validated end-to-end with vLLM 0.25.0 and PyTorch HIP 7.2.53211. Use this
+  conservative TP1 eager-mode launch instead of the MI355X throughput settings:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+
+  vllm serve deepseek-ai/DeepSeek-V4-Flash \
+    --host 0.0.0.0 \
+    --port 8002 \
+    --tensor-parallel-size 1 \
+    --kv-cache-dtype fp8_e4m3 \
+    --max-model-len 4096 \
+    --enable-chunked-prefill \
+    --max-num-batched-tokens 256 \
+    --kv-cache-memory-bytes 10000000000 \
+    --distributed-executor-backend mp \
+    --trust-remote-code \
+    --tokenizer-mode deepseek_v4 \
+    --moe-backend triton_unfused \
+    --enforce-eager
+  ```
+
+  Chunked prefill allows 4K requests while scheduling at most 256 tokens per
+  batch. This configuration loaded the 148.66 GiB checkpoint and passed model-list
+  and chat probes in non-thinking and Think High modes during a 24-hour allocation.
+  Only TP1 at 4K context is verified; TP2+ did not validate successfully. Think Max
+  requires at least 384K context and is not available with this configuration.
+
+  ### MI355X (4×288GB)
+
+  If you want to further lower the latency, you can run with `--tensor-parallel-size 8`.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+
+  vllm serve deepseek-ai/DeepSeek-V4-Flash \
+    --host localhost \
+    --port 8001 \
+    --dtype auto \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 4 \
+    --max-num-seqs 512 \
+    --max-num-batched-tokens 8192 \
+    --distributed-executor-backend mp \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.9 \
+    --tokenizer-mode deepseek_v4 \
+    --reasoning-parser deepseek_v4 \
+    --tool-call-parser deepseek_v4 \
+    --enable-auto-tool-choice \
+    --compilation-config '{"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"}'
+  ```
+
+  #### MI355X is validated on GSM8K dataset:
+
+  ##### Launch command
+
+  ```bash
+  MODEL=deepseek-ai/DeepSeek-V4-Flash
+  lm_eval --model local-completions \
+    --model_args model=$MODEL,base_url=http://0.0.0.0:8001/v1/completions,num_concurrent=128,max_retries=10,max_gen_toks=2048,timeout=60000 \
+    --batch_size auto \
+    --tasks gsm8k \
+    --num_fewshot 8 \
+    --output_path . 2>&1 | tee -a eval.log
+  ```
+
+  ##### Reported result
+
+  ```text
+  local-completions ({'model': 'deepseek-ai/DeepSeek-V4-Flash', 'base_url': 'http://0.0.0.0:8001/v1/completions', 'num_concurrent': 128, 'max_retries': 10, 'max_gen_toks': 2048, 'timeout': 60000}), gen_kwargs: ({}), limit: None, num_fewshot: 8, batch_size: auto
+  |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
+  |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
+  |gsm8k|      3|flexible-extract|     8|exact_match|↑  |0.9439|±  |0.0063|
+  |     |       |strict-match    |     8|exact_match|↑  |0.9431|±  |0.0064|
+  ```
+
+  ### H200 Single-Node PD (Mooncake)
+
+  Single-host disaggregated serving: 4 prefill GPUs + 4 decode GPUs on one 8-GPU H200 node,
+  using MooncakeConnector over RDMA for KV cache transfer.
+
+  **Prefill** (GPUs 0–3, port 8000):
+
+  ```bash
+  docker run --gpus all \
+    --privileged --ipc=host -p 8000:8000 \
+    --network host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v /mnt/shared:/mnt/shared \
+    -e TILELANG_CLEANUP_TEMP_FILES=1 \
+    -e VLLM_DISABLE_COMPILE_CACHE=1 \
+    -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
+    -e VLLM_LOG_STATS_INTERVAL=1 \
+    -e VLLM_MOONCAKE_BOOTSTRAP_PORT=8998 \
+    -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    vllm/vllm-openai:v0.28.0 \
+    deepseek-ai/DeepSeek-V4-Flash \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --block-size 256 \
+    --port 8000 \
+    --data-parallel-size 4 \
+    --enable-expert-parallel \
+    --tokenizer-mode deepseek_v4 \
+    --reasoning-parser deepseek_v4 \
+    --max-model-len auto \
+    --max-num-batched-tokens 16384 \
+    --max-num-seqs 8 \
+    --no-disable-hybrid-kv-cache-manager \
+    --disable-uvicorn-access-log \
+    --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"mooncake_protocol":"rdma"}}'
+  ```
+
+  **Decode** (GPUs 4–7, port 8001):
+
+  ```bash
+  docker run --gpus all \
+    --privileged --ipc=host -p 8001:8001 \
+    --network host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v /mnt/shared:/mnt/shared \
+    -e TILELANG_CLEANUP_TEMP_FILES=1 \
+    -e VLLM_DISABLE_COMPILE_CACHE=1 \
+    -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
+    -e VLLM_LOG_STATS_INTERVAL=1 \
+    -e VLLM_MOONCAKE_BOOTSTRAP_PORT=9889 \
+    -e CUDA_VISIBLE_DEVICES=4,5,6,7 \
+    vllm/vllm-openai:v0.28.0 \
+    deepseek-ai/DeepSeek-V4-Flash \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --block-size 256 \
+    --port 8001 \
+    --data-parallel-size 4 \
+    --enable-expert-parallel \
+    --tokenizer-mode deepseek_v4 \
+    --reasoning-parser deepseek_v4 \
+    --max-model-len auto \
+    --max-num-seqs 512 \
+    --max-num-batched-tokens 512 \
+    --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":512,"compile_ranges_endpoints":[512]}' \
+    --no-disable-hybrid-kv-cache-manager \
+    --disable-uvicorn-access-log \
+    --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"mooncake_protocol":"rdma"}}'
+  ```
+
+  **[Router](https://github.com/vllm-project/router)**:
+
+  ```bash
+  pip install vllm-router
+
+  vllm-router --policy round_robin \
+    --vllm-pd-disaggregation \
+    --prefill http://localhost:8000 \
+    --decode http://localhost:8001 \
+    --host 127.0.0.1 \
+    --port 30000 \
+    --intra-node-data-parallel-size 4 \
+    --kv-connector mooncake
+  ```
+
+  ### H200 Single-Node PD (Nixl)
+
+  Single-host disaggregated serving: 4 prefill GPUs + 4 decode GPUs on one 8-GPU H200 node,
+  using NixlConnector for KV cache transfer.
+
+  **Prefill** (GPUs 0–3, port 8000):
+
+  ```bash
+  docker run --gpus all \
+    --privileged --ipc=host -p 8000:8000 \
+    --network host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v /mnt/shared:/mnt/shared \
+    -e TILELANG_CLEANUP_TEMP_FILES=1 \
+    -e VLLM_DISABLE_COMPILE_CACHE=1 \
+    -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
+    -e VLLM_LOG_STATS_INTERVAL=1 \
+    -e VLLM_NIXL_SIDE_CHANNEL_PORT=5557 \
+    -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    vllm/vllm-openai:v0.28.0 \
+    deepseek-ai/DeepSeek-V4-Flash \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --block-size 256 \
+    --port 8000 \
+    --data-parallel-size 4 \
+    --enable-expert-parallel \
+    --tokenizer-mode deepseek_v4 \
+    --reasoning-parser deepseek_v4 \
+    --max-model-len auto \
+    --max-num-batched-tokens 16384 \
+    --max-num-seqs 8 \
+    --no-disable-hybrid-kv-cache-manager \
+    --disable-uvicorn-access-log \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+  ```
+
+  **Decode** (GPUs 4–7, port 8001):
+
+  ```bash
+  docker run --gpus all \
+    --privileged --ipc=host -p 8001:8001 \
+    --network host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v /mnt/shared:/mnt/shared \
+    -e TILELANG_CLEANUP_TEMP_FILES=1 \
+    -e VLLM_DISABLE_COMPILE_CACHE=1 \
+    -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
+    -e VLLM_LOG_STATS_INTERVAL=1 \
+    -e VLLM_NIXL_SIDE_CHANNEL_PORT=5558 \
+    -e CUDA_VISIBLE_DEVICES=4,5,6,7 \
+    vllm/vllm-openai:v0.28.0 \
+    deepseek-ai/DeepSeek-V4-Flash \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --block-size 256 \
+    --port 8001 \
+    --data-parallel-size 4 \
+    --enable-expert-parallel \
+    --tokenizer-mode deepseek_v4 \
+    --reasoning-parser deepseek_v4 \
+    --max-model-len auto \
+    --max-num-seqs 512 \
+    --max-num-batched-tokens 512 \
+    --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":512,"compile_ranges_endpoints":[512]}' \
+    --no-disable-hybrid-kv-cache-manager \
+    --disable-uvicorn-access-log \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+  ```
+
+  **[Router](https://github.com/vllm-project/router)**:
+
+  ```bash
+  pip install vllm-router
+
+  vllm-router --policy round_robin \
+    --vllm-pd-disaggregation \
+    --prefill http://localhost:8000 \
+    --decode http://localhost:8001 \
+    --host 127.0.0.1 \
+    --port 30000 \
+    --intra-node-data-parallel-size 4 \
+    --kv-connector nixl
+  ```

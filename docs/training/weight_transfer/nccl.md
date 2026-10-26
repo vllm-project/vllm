@@ -130,6 +130,84 @@ pass — this is the invariant to test first.
     IPC does not read `metadata()` at all: it derives the update info from
     iteration as it goes, so it cannot observe a divergence.
 
+### Metadata is sent once, then reused
+
+Every `update_weights` call needs the list of parameters it carries: `names`,
+`dtype_names` and `shapes`. For a large model that list is long (about 19,000
+entries for Qwen3-30B-A3B), yet an RL trainer sends the same parameters every
+round. So the worker remembers the list:
+
+| `update_info` you send | What the worker loads |
+| ---------------------- | --------------------- |
+| `names`, `dtype_names`, `shapes` filled in | Exactly these parameters. The worker also saves this list. |
+| All three lists empty (or `{}`) | The list saved by the previous `update_weights` call on the same model. |
+| All three lists empty, nothing saved yet | Nothing. |
+
+Rules to remember:
+
+- **The first round must send the full list.** After that, send empty lists
+  whenever the parameters are the same as last round.
+- **Send the full list again whenever anything changes**: a parameter added,
+  removed, renamed, reordered, re-dtyped or reshaped. The worker does not check
+  that empty-list rounds still match what the trainer sends; a mismatch hangs in
+  NCCL or loads wrong values.
+- **The target model and the draft model keep separate lists.** A
+  `/start_draft_weight_update` round reuses only the draft's list.
+- **`init_weight_transfer_engine` clears every saved list**, so the first round
+  after a re-init must send the full list again.
+
+`NCCLTrainerWeightTransferEngine.send_weights` follows these rules for you: it
+compares `metadata()` with what the last successful round sent, and sends empty
+lists when they are equal. You only need to think about them if you build
+`update_info` yourself, for example over HTTP without vLLM.
+
+## Trainer Without vLLM over HTTP
+
+A trainer can speak the [HTTP endpoints](README.md#api-endpoints) directly, with
+only PyTorch and an HTTP client. It mints the `ncclUniqueId` itself and is NCCL
+rank 0. Reference: [`rlhf_http_nccl_no_vllm.py`](../../../examples/rl/rlhf_http_nccl_no_vllm.py).
+
+`POST /init_weight_transfer_engine` body `{"init_info": {...}}`:
+
+| Field | Default | Meaning |
+| ----- | ------- | ------- |
+| `nccl_unique_id_b64` | — | Standard (not URL-safe) base64 of the 128-byte `ncclUniqueId`. Replaces `master_address` / `master_port` |
+| `rank_offset` | — | First worker rank; `1` for one trainer rank |
+| `world_size` | — | Trainer ranks + `GET /get_world_size` |
+| `packed` | `false` | Packed broadcasting |
+| `packed_buffer_size_bytes` | 1 GiB | Must match the trainer's chunking |
+| `packed_num_buffers` | 2 | Worker-side receive buffers |
+
+- Worker rank = `rank_offset + dp_index * (TP * PP) + rank`.
+- `/init_weight_transfer_engine` returns only after all ranks join: send it in
+  the background while the trainer calls `ncclCommInitRank(world_size, uid, 0)`.
+  There is no timeout; if the trainer never joins, the workers wait forever.
+- Right after init every worker issues a warm-up `all_reduce` (sum) of
+  `torch.zeros(1)` (one float32 element). The trainer must issue the same one
+  before any other collective.
+
+Each sync: `POST /start_weight_update`, then `POST /update_weights` with
+`{"update_info": {"names", "dtype_names", "shapes"}}` **in the background**
+while rank 0 broadcasts in `names` order, then `POST /finish_weight_update`.
+`dtype_names` are `torch` attribute names (`"bfloat16"`); `shapes` are full
+checkpoint shapes. From the second sync on, send `{"update_info": {}}` if the
+parameters did not change; see
+[Metadata is sent once, then reused](#metadata-is-sent-once-then-reused).
+
+- Unpacked: one broadcast per tensor.
+- Packed: concatenate `t.contiguous().view(-1).view(torch.uint8)` in `names`
+  order; broadcast a chunk as soon as its size **exceeds**
+  `packed_buffer_size_bytes` (the crossing tensor stays in the chunk), then the
+  remainder.
+
+Trainer-side communicators without vLLM:
+
+| Communicator | Status |
+| ------------ | ------ |
+| `torch.distributed.ProcessGroupNCCL` on a private `TCPStore` + `eager_connect_single_device` | Works; the unique id is read from store key `"0"`, a torch implementation detail (used by the example) |
+| `ctypes` against torch's bundled `libnccl.so.2` | Works |
+| `torch.cuda.nccl.init_rank` | Fails on Python 3.10+ (`PY_SSIZE_T_CLEAN` `SystemError`) |
+
 ## Sparse NCCL
 
 Sparse, flat-index weight patches use
@@ -196,6 +274,7 @@ Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still
 ## Examples
 
 - [RLHF with NCCL weight syncing (`vllm serve`, HTTP)](../../../examples/rl/rlhf_http_nccl.py) - **Start here.** Trainer on one GPU, 2x tensor-parallel fp8 server on two others; HTTP control plane, NCCL data plane. Launches and tears down its own server
+- [NCCL weight syncing from a trainer that does not import vLLM](../../../examples/rl/rlhf_http_nccl_no_vllm.py) - `torch` + `requests` only, `nccl_unique_id_b64` rendezvous; see [Trainer Without vLLM over HTTP](#trainer-without-vllm-over-http)
 - [RLHF with NCCL + FSDP2 and expert parallelism](../../../examples/rl/rlhf_nccl_fsdp_ep.py) - Multi-rank trainer: every FSDP rank builds an engine and joins the `full_tensor()` gather while only rank 0 touches the wire
 - [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_sparse_nccl.py) - Qwen3 MoE per-expert checkpoint updates with one trainer GPU and two TP2/EP2 inference GPUs
 - [RLHF with async weight syncing (offline, Ray)](../../../examples/rl/rlhf_async_new_apis.py) - Async generation with mid-flight pause, weight sync, resume, and validation against a fresh model; uses an in-process `AsyncLLMEngine` with `RayVLLMWeightSyncClient`

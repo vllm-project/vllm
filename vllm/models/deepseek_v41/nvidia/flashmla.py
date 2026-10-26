@@ -22,6 +22,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     DeepseekV41SparseSWAMetadataBuilder,
 )
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
@@ -42,6 +43,10 @@ class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekV41SparseSWAMetadataBuild
 
 
 class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_builder_cls() -> type[DeepseekSparseSWAFlashMLAMetadataBuilder]:
         return DeepseekSparseSWAFlashMLAMetadataBuilder
@@ -59,6 +64,15 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             self._o_proj_block_size
         )
         register_dsv41_o_proj_warmup(self)
+        self._prefill_num_heads = self._get_prefill_num_heads()
+
+    def _get_prefill_num_heads(self) -> int:
+        return (
+            self.n_local_heads
+            if current_platform.is_device_capability_family(90)
+            and self.n_local_heads in (8, 16, 32)
+            else self.padded_heads
+        )
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return dsv41_o_proj(self, attn_out, positions)
@@ -132,6 +146,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         )
         assert swa_metadata is not None
 
+        if self.use_pcp:
+            num_tokens = (
+                swa_metadata.num_decode_tokens + swa_metadata.num_prefill_tokens
+            )
+            output[num_tokens:].zero_()
+            if num_tokens == 0:
+                return
+
         swa_only = self.compress_ratio == 0
         # SWA-only layers (compress_ratio == 0) don't have their own KV cache
         # allocation; consumers read the kv source's cache, which is bound on
@@ -140,11 +162,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         swa_kv_cache = self.swa_cache_layer.kv_cache
 
         # Split prefill and decode
-        num_decodes = swa_metadata.num_decodes
-        num_prefills = swa_metadata.num_prefills
         num_decode_tokens = swa_metadata.num_decode_tokens
 
-        if num_prefills > 0:
+        if swa_metadata.num_prefill_tokens > 0:
             self._forward_prefill(
                 q=q[num_decode_tokens:],
                 positions=positions[num_decode_tokens:],
@@ -154,7 +174,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 attn_metadata=flashmla_metadata,
                 swa_metadata=swa_metadata,
             )
-        if num_decodes > 0:
+        # Trimming can leave request entries with no query tokens.
+        if num_decode_tokens > 0:
             self._forward_decode(
                 q=q[:num_decode_tokens],
                 kv_cache=self_kv_cache,
@@ -349,11 +370,11 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 out=(combined_indices_out, combined_lens_out),
             )
             flash_mla_sparse_fwd(
-                q=q[query_start:query_end],
+                q=q[query_start:query_end, : self._prefill_num_heads],
                 kv=kv.view(-1, 1, q.shape[-1]),
                 indices=combined_indices.unsqueeze(1),
                 sm_scale=self.scale,
-                attn_sink=self.attn_sink,
+                attn_sink=self.attn_sink[: self._prefill_num_heads],
                 topk_length=combined_lens,
-                out=output[query_start:query_end],
+                out=output[query_start:query_end, : self._prefill_num_heads],
             )

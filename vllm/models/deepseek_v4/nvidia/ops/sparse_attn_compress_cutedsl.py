@@ -436,7 +436,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
             rope_head_dim=hf_config.qk_rope_head_dim,
             enabled=(
                 cache_config.block_size > 0
-                and 4 in hf_config.compress_ratios
+                and "compressed_sparse_attention" in hf_config.layer_types
                 and cache_config.cache_dtype == "fp8_ds_mla"
             ),
             _when=lambda *, enabled: enabled,
@@ -934,7 +934,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
             rope_head_dim=hf_config.qk_rope_head_dim,
             enabled=(
                 cache_config.block_size > 0
-                and 4 in hf_config.compress_ratios
+                and "compressed_sparse_attention" in hf_config.layer_types
                 and cache_config.cache_dtype != "fp8_ds_mla"
             ),
             _when=lambda *, enabled: enabled,
@@ -1366,7 +1366,7 @@ class SparseAttnCompressC128Block8Kernel(
         return self._trace_dispatch(self.dispatch)(
             head_size=hf_config.head_dim,
             state_width=hf_config.head_dim,
-            enabled=128 in hf_config.compress_ratios,
+            enabled="heavily_compressed_attention" in hf_config.layer_types,
             _when=lambda *, enabled: enabled,
         )
 
@@ -2040,7 +2040,7 @@ class SparseAttnNormRopeStoreFullKernel(
             rope_head_dim=hf_config.qk_rope_head_dim,
             enabled=(
                 cache_config.block_size > 0
-                and 128 in hf_config.compress_ratios
+                and "heavily_compressed_attention" in hf_config.layer_types
                 and cache_config.cache_dtype != "fp8_ds_mla"
             ),
             _when=lambda *, enabled: enabled,

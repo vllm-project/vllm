@@ -78,12 +78,15 @@ def _build_chat_request(*, tool_choice: str | dict[str, Any]) -> ChatCompletionR
 
 
 def _build_responses_request(
-    *, tool_choice: str | dict[str, Any], include: list[str] | None = None
+    *,
+    tool_choice: str | dict[str, Any],
+    include: list[str] | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> ResponsesRequest:
     return ResponsesRequest(
         model="poolside-test",
         input=[{"role": "user", "content": "write the file"}],
-        tools=[_responses_write_file_tool()],
+        tools=tools if tools is not None else [_responses_write_file_tool()],
         tool_choice=tool_choice,
         stream=True,
         max_output_tokens=200,
@@ -138,6 +141,19 @@ def test_named_skips_structured_outputs_responses() -> None:
     # type than the ChatCompletion named choice; both must be handled.
     request = _build_responses_request(
         tool_choice={"type": "function", "name": "write_file"}
+    )
+    PoolsideV1ToolParser(_StubTokenizer()).adjust_request(request)
+
+    assert request.text is None
+    assert request.skip_special_tokens is False
+
+
+def test_named_custom_tool_choice_skips_structured_outputs_responses() -> None:
+    # A named custom choice parses to ToolChoiceCustom; custom tools ride the
+    # function shim, so it must route like ToolChoiceFunction.
+    request = _build_responses_request(
+        tools=[{"type": "custom", "name": "emit_command"}],
+        tool_choice={"type": "custom", "name": "emit_command"},
     )
     PoolsideV1ToolParser(_StubTokenizer()).adjust_request(request)
 

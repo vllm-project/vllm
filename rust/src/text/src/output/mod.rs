@@ -31,6 +31,7 @@ pub struct CollectedTextOutput {
     pub token_ids: Vec<u32>,
     pub finish_reason: FinishReason,
     pub usage: vllm_llm::TokenUsage,
+    pub timestamps: vllm_llm::RequestTimestamps,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
     /// Connector-specific encoder cache transfer parameters for disaggregated
@@ -89,8 +90,9 @@ impl<T: TextOutputStream> T {
                                 prompt_logprobs: prompt_logprobs.take(),
                                 logprobs: delta_logprobs,
                                 token_ids: delta_token_ids,
-                                finish_reason: FinishReason::Error,
+                                finish_reason: FinishReason::Error(None),
                                 usage: vllm_llm::TokenUsage::default(),
+                                timestamps: vllm_llm::RequestTimestamps::default(),
                                 kv_transfer_params: None,
                                 ec_transfer_params: None,
                                 sampling_mask: None,
@@ -101,8 +103,11 @@ impl<T: TextOutputStream> T {
                             let mut collected = collected.unwrap();
                             collected.finish_reason = finished.finish_reason;
                             collected.usage = finished.usage;
-                            collected.kv_transfer_params = finished.kv_transfer_params;
-                            collected.ec_transfer_params = finished.ec_transfer_params;
+                            collected.timestamps = finished.timestamps;
+                            collected.kv_transfer_params =
+                                finished.kv_transfer_params.map(|value| *value);
+                            collected.ec_transfer_params =
+                                finished.ec_transfer_params.map(|value| *value);
                             collected.sampling_mask = finished.sampling_mask;
                             return Ok(collected);
                         }
@@ -179,6 +184,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: Default::default(),
                 })),
             }),
         ]);
@@ -302,6 +308,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    timestamps: Default::default(),
                 })),
             }),
         ]);

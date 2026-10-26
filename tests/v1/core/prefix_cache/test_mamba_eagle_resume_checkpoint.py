@@ -38,9 +38,7 @@ def _manager(
     num_prefill_lookahead=0,
 ):
     init_none_hash(sha256)
-    config = _make_hybrid_kv_cache_config(
-        block_size, num_blocks, ["full", "mamba_align"]
-    )
+    config = _make_hybrid_kv_cache_config(block_size, num_blocks, ["full", "mamba"])
     if eagle_group is not None:
         groups = list(config.kv_cache_groups)
         groups[eagle_group] = replace(groups[eagle_group], is_eagle_group=True)
@@ -73,6 +71,7 @@ def _stub(manager, block_size, hash_block_size, *, block_drop=True):
         # The EAGLE adjustments key on the block-drop bit, not plain use_eagle:
         # they exist only to compensate for the drop.
         use_eagle_block_drop=block_drop,
+        num_hash_lookahead_tokens=0,
         hash_block_size=hash_block_size,
         mamba_has_prefill_checkpoint_blocks=False,  # forced False under eagle
         mamba_partial_cache_hit=partial_hit,

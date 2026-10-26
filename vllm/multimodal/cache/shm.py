@@ -170,9 +170,12 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
     @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
-        """Touch the item in shared memory cache to prevent eviction.
-        Increments writer_flag on sender side."""
+        """Touch the item in shared memory cache to prevent eviction."""
         self._shm_cache.touch(mm_hash)
+
+    @override
+    def release_sender_touches(self) -> None:
+        self._shm_cache.release_touches()
 
     @override
     def validate_input_item(
@@ -305,8 +308,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         mm_hash: str,
         mm_item: MultiModalKwargsItem | None = None,
     ) -> None:
-        """Touch the item in shared memory cache to prevent eviction.
-        Increments reader_count on receiver side."""
+        """Validate the item's handle in shared memory cache."""
         assert mm_item is not None
         if (handle := _get_shm_handle(mm_item)) is not None:
             address, monotonic_id, signature = handle

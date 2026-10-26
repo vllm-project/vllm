@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
@@ -23,6 +23,10 @@ from ..common.qsa_cache import (
     QSAKeyStateCache,
     canonical_qsa_rope_positions,
 )
+from .ops.qsa_prepare import qsa_prepare, supports_fused_pre_indexer
+
+if TYPE_CHECKING:
+    from .qsa import Qwen4ExpQSAAttention
 
 
 def apply_qsa_rope(
@@ -98,6 +102,12 @@ class QSAIndexer(nn.Module):
         self.token_topk = int(config.indexer_budget)
         self.compress_ratio = int(config.indexer_compress_ratio)
         self.rotary_emb = rotary_emb
+        self.use_fused_pre_indexer = supports_fused_pre_indexer(
+            rotary_emb,
+            self.index_head_dim,
+            self.index_kv_heads,
+            self.compress_ratio,
+        )
         self.prefix = prefix
         # MTP step 0 selects the target-aligned rows; later steps reuse them
         # while continuing to update the QSA side cache.
@@ -143,20 +153,27 @@ class QSAIndexer(nn.Module):
     def output_width(self) -> int:
         return self.token_topk + self.compress_ratio - 1
 
-    def project_qk(
+    def project(
         self,
         hidden_states: torch.Tensor,
-        positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Project replicated Q/K, normalize+rotate Q, and preserve raw K."""
+        """Project replicated Q/K and split, leaving both operands unrotated."""
         qk, _ = self.index_qk_proj(hidden_states)
-        q_raw, token_k = qk.split(
+        return qk.split(
             (
                 self.index_n_heads * self.index_head_dim,
                 self.index_kv_heads * self.index_head_dim,
             ),
             dim=-1,
         )
+
+    def project_qk(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project replicated Q/K, normalize+rotate Q, and preserve raw K."""
+        q_raw, token_k = self.project(hidden_states)
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
         q = apply_qsa_rmsnorm(
             self.q_layernorm,
@@ -251,6 +268,66 @@ class QSAIndexer(nn.Module):
                 position_rows,
             )
 
+    def _fused_prepare(
+        self,
+        projected_q: torch.Tensor,
+        raw_keys: torch.Tensor,
+        positions: torch.Tensor,
+        raw_metadata: QSAForwardMetadata,
+        compressed_metadata: QSAForwardMetadata,
+        attn: Qwen4ExpQSAAttention,
+        qkv: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        gate_out: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Prepare the indexer and ``attn``'s main attention in one launch.
+
+        Normalizes and rotates the index Q, compresses K and writes both side
+        caches, which replaces ``project_qk``'s norm/RoPE half and the whole of
+        ``_update_and_compress``. The same launch applies ``attn``'s QK-norm and
+        RoPE, copies its gate and writes its K/V into ``attn.kv_cache``,
+        replacing ``_project_qkv_gate`` and ``do_kv_cache_update``. Both halves
+        must stay numerically interchangeable with what they replace.
+        """
+        num_tokens = raw_metadata.num_actual_tokens
+        raw_key_cache = self.raw_key_cache
+        q = projected_q.new_empty(num_tokens, self.index_n_heads, self.index_head_dim)
+        main_outputs = qsa_prepare(
+            projected_q,
+            raw_keys,
+            positions,
+            self.rotary_emb.cos_sin_cache,
+            self.q_layernorm.weight,
+            self.k_layernorm.weight,
+            self.q_layernorm.variance_epsilon,
+            q,
+            raw_key_cache.kv_cache,
+            raw_metadata.slot_mapping,
+            raw_metadata.block_table,
+            raw_metadata.query_start_loc,
+            raw_metadata.logical_positions,
+            self.compressed_key_cache.kv_cache,
+            compressed_metadata.slot_mapping,
+            compressed_metadata.k_work_metadata,
+            compress_ratio=self.compress_ratio,
+            mrope_section=getattr(self.rotary_emb, "mrope_section", None),
+            rope_pos_offset=(
+                raw_key_cache.rope_position_offset
+                if raw_key_cache.cache_rope_positions
+                else None
+            ),
+            main_qkv=qkv[:num_tokens],
+            main_q_norm_weight=attn.q_norm.weight,
+            main_k_norm_weight=attn.k_norm.weight,
+            main_eps=attn.q_norm.variance_epsilon,
+            main_kv_cache=attn.kv_cache.transpose(1, 2),
+            main_slot_mapping=slot_mapping[:num_tokens],
+            main_k_scale=attn._k_scale_float,
+            main_v_scale=attn._v_scale_float,
+            main_gate_out=None if gate_out is None else gate_out[:num_tokens],
+        )
+        return q, main_outputs
+
     def _select(
         self,
         q: torch.Tensor,
@@ -276,13 +353,25 @@ class QSAIndexer(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Return fixed-width request-relative token indices padded with ``-1``."""
+        *,
+        attn: Qwen4ExpQSAAttention,
+        qkv: torch.Tensor | None = None,
+        slot_mapping: torch.Tensor | None = None,
+        gate_out: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+        """Return fixed-width request-relative token indices padded with ``-1``.
+
+        With ``attn.use_fused_qsa_prepare``, the same launch also writes
+        ``attn``'s K/V into ``attn.kv_cache`` at ``slot_mapping`` and prepares
+        its Q and gate from ``qkv``, returned as the second element (None
+        otherwise). The gate is written into ``gate_out`` when given. ``qkv``,
+        ``slot_mapping`` and ``gate_out`` are only read in that mode.
+        """
         metadata = self._metadata()
         if metadata is None:
             # Preserve step-0 indices when later MTP steps reuse the buffer.
             if self.skip_topk and out is not None:
-                return out
+                return out, None
             result = torch.full(
                 (hidden_states.shape[0], self.output_width),
                 -1,
@@ -291,24 +380,41 @@ class QSAIndexer(nn.Module):
             )
             if out is not None:
                 out.copy_(result)
-                return out
-            return result
+                return out, None
+            return result, None
         raw_metadata, compressed_metadata = metadata
         num_tokens = raw_metadata.num_actual_tokens
-        q, token_k = self.project_qk(
-            hidden_states[:num_tokens], positions[..., :num_tokens]
-        )
-        self._update_and_compress(
-            token_k,
-            positions[..., :num_tokens],
-            raw_metadata,
-            compressed_metadata,
-        )
+        hidden_states = hidden_states[:num_tokens]
+        positions = positions[..., :num_tokens]
+        main_outputs: tuple[torch.Tensor, torch.Tensor] | None = None
+        if attn.use_fused_qsa_prepare:
+            if qkv is None or slot_mapping is None:
+                raise ValueError("fused QSA prepare requires qkv and slot_mapping")
+            projected_q, raw_keys = self.project(hidden_states)
+            q, main_outputs = self._fused_prepare(
+                projected_q,
+                raw_keys,
+                positions,
+                raw_metadata,
+                compressed_metadata,
+                attn,
+                qkv,
+                slot_mapping,
+                gate_out,
+            )
+        else:
+            q, token_k = self.project_qk(hidden_states, positions)
+            self._update_and_compress(
+                token_k,
+                positions,
+                raw_metadata,
+                compressed_metadata,
+            )
         if self.skip_topk:
             if out is None:
                 raise RuntimeError("QSA top-k reuse requires an output buffer")
-            return out
-        return self._select(q, compressed_metadata, out)
+            return out, main_outputs
+        return self._select(q, compressed_metadata, out), main_outputs
 
 
 __all__ = ["QSAIndexer", "apply_qsa_rope"]

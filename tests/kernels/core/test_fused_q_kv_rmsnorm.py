@@ -19,9 +19,11 @@ from vllm.models.common.ops.fused_qk_rmsnorm import (
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="fused_q_kv_rmsnorm requires a CUDA/ROCm device",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="fused_q_kv_rmsnorm requires a CUDA/ROCm/XPU device",
 )
+
+DEVICE = current_platform.device_type
 
 
 def _ref_rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
@@ -35,7 +37,7 @@ def _ref_rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_fused_q_kv_rmsnorm_correctness(num_tokens: int, dtype: torch.dtype):
     torch.manual_seed(0)
-    device = "cuda"
+    device = DEVICE
     q_size, kv_size = 192, 576
     qr = torch.randn(num_tokens, q_size, dtype=dtype, device=device)
     kv = torch.randn(num_tokens, kv_size, dtype=dtype, device=device)
@@ -63,7 +65,7 @@ def test_fused_q_kv_rmsnorm_outputs_are_packed(num_tokens: int):
     qr_out with row stride q_size + kv_size. Downstream dispatchers that
     require packed row-major inputs then reject the tensor and silently fall
     back to a slower GEMM path on every decode step."""
-    device = "cuda"
+    device = DEVICE
     dtype = torch.bfloat16
     q_size, kv_size = 192, 576
     fused = torch.randn(num_tokens, q_size + kv_size, dtype=dtype, device=device)
@@ -89,7 +91,7 @@ def test_fused_q_kv_rmsnorm_launches_past_grid_y_cap(num_tokens: int):
     """Regression guard: grid used to be (2, num_tokens), hitting CUDA's
     65535 grid-y cap at num_tokens >= 65536. The new grid (num_tokens, 2)
     lifts that bound to 2**31-1."""
-    device = "cuda"
+    device = DEVICE
     dtype = torch.bfloat16
     q_size, kv_size = 192, 576
     qr = torch.randn(num_tokens, q_size, dtype=dtype, device=device)
@@ -131,12 +133,12 @@ def test_fused_q_kv_rmsnorm_quant_matches_separate(num_tokens, q_size, dtype):
 
     torch.manual_seed(0)
     kv_size = 512
-    x = torch.randn(num_tokens, q_size + kv_size, device="cuda", dtype=dtype)
+    x = torch.randn(num_tokens, q_size + kv_size, device=DEVICE, dtype=dtype)
     x[:1] = 0
     x[1:2] *= 1e-30
     qr, kv = x.split([q_size, kv_size], -1)
-    qw = torch.randn(q_size, device="cuda", dtype=x.dtype)
-    kvw = torch.randn(kv_size, device="cuda", dtype=x.dtype)
+    qw = torch.randn(q_size, device=DEVICE, dtype=x.dtype)
+    kvw = torch.randn(kv_size, device=DEVICE, dtype=x.dtype)
     eps = 1e-20
     result = fused_q_kv_rmsnorm_quant(qr, kv, qw, kvw, eps)
     assert result[0].orig_dtype == dtype
@@ -233,7 +235,7 @@ def test_shared_query_quant_preserves_projection(
         torch.nn.Module.__init__(linear)
         linear.bias = (
             torch.nn.Parameter(
-                torch.randn(output_size, device="cuda", dtype=torch.bfloat16)
+                torch.randn(output_size, device=DEVICE, dtype=torch.bfloat16)
             )
             if bias
             else None
@@ -242,7 +244,7 @@ def test_shared_query_quant_preserves_projection(
         linear.return_bias = projection == "indexer"
         linear.gather_output = False
         w, ws = mxfp8_e4m3_quantize(
-            torch.randn(output_size, 1280, device="cuda", dtype=torch.bfloat16)
+            torch.randn(output_size, 1280, device=DEVICE, dtype=torch.bfloat16)
         )
         linear.weight = torch.nn.Parameter(w, requires_grad=False)
         linear.weight_scale = torch.nn.Parameter(ws, requires_grad=False)
@@ -264,10 +266,10 @@ def test_shared_query_quant_preserves_projection(
         kernel.process_weights_after_loading(linear)
         expose_input_quant_key(linear, kernel)
         assert can_fuse_query_quant([linear, linear])
-        x = torch.randn(num_tokens, 1792, device="cuda", dtype=torch.bfloat16)
+        x = torch.randn(num_tokens, 1792, device=DEVICE, dtype=torch.bfloat16)
         qr, kv = x.split([1280, 512], -1)
-        qw = torch.randn(1280, device="cuda", dtype=x.dtype)
-        kvw = torch.randn(512, device="cuda", dtype=x.dtype)
+        qw = torch.randn(1280, device=DEVICE, dtype=x.dtype)
+        kvw = torch.randn(512, device=DEVICE, dtype=x.dtype)
         qr_ref, _ = fused_q_kv_rmsnorm(qr, kv, qw, kvw, 1e-20)
         q, _ = fused_q_kv_rmsnorm_quant(qr, kv, qw, kvw, 1e-20)
         owner = cast(Any, SimpleNamespace(wq_b=linear))

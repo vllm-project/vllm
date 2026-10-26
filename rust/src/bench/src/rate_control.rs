@@ -104,9 +104,29 @@ pub fn compute_schedule(
     }
 }
 
+/// Schedule built from trace-recorded arrival offsets (`--self-timed`).
+///
+/// Offsets are clamped at zero so a row anchored before the trace start fires
+/// immediately, as Python's `get_request` does; `Duration::from_secs_f64` in
+/// the dispatch loop would otherwise panic. `rates` carries no meaning here.
+pub fn trace_schedule(timestamps: impl ExactSizeIterator<Item = Option<f64>>) -> RequestSchedule {
+    let rates = vec![0.0; timestamps.len()];
+    RequestSchedule {
+        delays: timestamps.map(|t| t.unwrap_or(0.0).max(0.0)).collect(),
+        rates,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_trace_schedule_uses_offsets_and_clamps_negatives() {
+        let sched = trace_schedule([Some(-3.0), Some(0.0), Some(2.5), None].into_iter());
+        assert_eq!(sched.delays, vec![0.0, 0.0, 2.5, 0.0]);
+        assert_eq!(sched.rates.len(), 4);
+    }
 
     #[test]
     fn test_infinite_rate_all_zero_delays() {

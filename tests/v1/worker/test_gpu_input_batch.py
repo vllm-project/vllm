@@ -84,7 +84,7 @@ def _remove_requests(
 
 def _construct_expected_sampling_metadata(
     reqs: list[CachedRequestState],
-    req_ids_retained: set[int],
+    req_ids_retained: set[str],
     req_id_index_in_input_batch: dict[str, int],
     device: torch.device,
 ) -> SamplingMetadata:
@@ -101,7 +101,7 @@ def _construct_expected_sampling_metadata(
     top_p = [0.0 for _ in range(num_reqs)]
     temperature = [0.0 for _ in range(num_reqs)]
     min_tokens = {}
-    logit_bias = [None] * num_reqs
+    logit_bias: list[dict[int, float] | None] = [None] * num_reqs
     allowed_token_ids_mask = torch.zeros(
         num_reqs, VOCAB_SIZE, dtype=torch.bool, device=device
     )
@@ -109,6 +109,8 @@ def _construct_expected_sampling_metadata(
     for req in reqs:
         if req.req_id not in req_ids_retained:
             continue
+        assert req.prompt_token_ids is not None
+        assert req.sampling_params is not None
         index_in_input_batch = req_id_index_in_input_batch[req.req_id]
         output_token_ids[index_in_input_batch] = req.output_token_ids
         prompt_token_ids[index_in_input_batch] = req.prompt_token_ids
@@ -233,7 +235,6 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         device=torch.device(device),
         vocab_size=1024,
         block_sizes=[1],
-        kernel_block_sizes=[1],
         max_num_blocks_per_req=[1024],
     )
     reqs: list[CachedRequestState] = []
@@ -327,7 +328,6 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
         device=torch.device(device),
         vocab_size=1024,
         block_sizes=[1],
-        kernel_block_sizes=[1],
         max_num_blocks_per_req=[1024],
     )
     ref_input_batch: InputBatch = InputBatch(
@@ -337,7 +337,6 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
         device=torch.device(device),
         vocab_size=1024,
         block_sizes=[1],
-        kernel_block_sizes=[1],
         max_num_blocks_per_req=[1024],
     )
 
@@ -388,7 +387,6 @@ def test_condense_clears_stale_allowed_token_ids_mask(device: str):
         device=torch.device(device),
         vocab_size=VOCAB_SIZE,
         block_sizes=[1],
-        kernel_block_sizes=[1],
         max_num_blocks_per_req=[1024],
     )
 
@@ -446,7 +444,6 @@ def test_swap_states_preserves_allowed_token_ids_mask(device: str):
         device=torch.device(device),
         vocab_size=VOCAB_SIZE,
         block_sizes=[1],
-        kernel_block_sizes=[1],
         max_num_blocks_per_req=[1024],
     )
 
@@ -516,7 +513,6 @@ def test_pooling_prompt_lens_not_aliased(device: str):
         device=torch.device(device),
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
-        kernel_block_sizes=[16],
         max_num_blocks_per_req=[64],
         is_pooling_model=True,
     )
@@ -552,7 +548,6 @@ def test_placeholder_spec_token_ids_written_verbatim():
         device=torch.device("cpu"),
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
-        kernel_block_sizes=[16],
         max_num_blocks_per_req=[1],
     )
     req = CachedRequestState(
@@ -599,7 +594,6 @@ def test_pooling_metadata_token_id_buffers(
         device=torch.device("cpu"),
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
-        kernel_block_sizes=[16],
         max_num_blocks_per_req=[64],
         is_pooling_model=True,
     )
@@ -630,7 +624,6 @@ def _make_input_batch(is_pooling_model: bool = False) -> InputBatch:
         device=torch.device("cpu"),
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
-        kernel_block_sizes=[16],
         max_num_blocks_per_req=[64],
         is_pooling_model=is_pooling_model,
     )

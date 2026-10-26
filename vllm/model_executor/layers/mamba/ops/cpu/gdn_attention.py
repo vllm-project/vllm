@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_fn_cpu as causal_conv1d_torch,
@@ -16,12 +17,15 @@ from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_update_cpu,
 )
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import (
     LayerNameType,
     _resolve_layer_name,
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+logger = init_logger(__name__)
 
 _CPU_GDN_ATTENTION_OPS_REGISTERED = False
 
@@ -155,7 +159,21 @@ def cpu_gdn_attention_core(
     if attn_metadata_i.num_actual_tokens == 0:
         return
 
-    assert mixed_qkv.dtype == torch.bfloat16, "CPU GDN attention requires BF16."
+    # The C++ GDN kernels are BF16-only. fp16 uses the Triton/FLA path in
+    # ``layer._forward_core`` (triton 3.x CPU). Convolution on that path is
+    # the PyTorch CPU conv; the chunk and decode recurrences are Triton.
+    if mixed_qkv.dtype == torch.float16 and HAS_TRITON:
+        logger.info_once(
+            "Routing CPU GDN attention to the Triton/FLA path (dtype=%s).",
+            mixed_qkv.dtype,
+        )
+        layer._forward_core(mixed_qkv, b, a, core_attn_out)
+        return
+
+    assert mixed_qkv.dtype == torch.bfloat16, (
+        "CPU GDN attention requires BF16, or FP16 with triton-cpu installed "
+        f"(got {mixed_qkv.dtype}, HAS_TRITON={HAS_TRITON})."
+    )
 
     # The conv-state cache temporal dim is ``width - 1`` when speculative
     # decoding is disabled, and ``width - 1 + num_spec`` when it is enabled
@@ -508,12 +526,14 @@ def _spec_forward(
     bias = layer.conv1d.bias
     silu = layer.activation == "silu"
 
+    # The native kernel appends the new tokens at the end of the buffer, which
+    # is where the next step expects them only when every row is full-length.
     can_use_native_conv = (
         (is_amx or is_arm_bf16())
         and width == 4
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
-        and int(seq_lens[0].item()) > 0
+        and int(seq_lens[0].item()) == state_len - (width - 2)
     )
     if can_use_native_conv:
         q_i = int(seq_lens[0].item())
@@ -549,11 +569,9 @@ def _spec_forward(
             if silu:
                 out = F.silu(out)
             conv_out[start : start + q_i] = out.transpose(0, 1).to(conv_out.dtype)
-            # Roll the buffer: drop the accepted history from the front, append
-            # the new draft tokens, keep total length == state_len.
-            keep = B[:, offset + 1 : offset + 1 + (state_len - q_i)]
-            new_B = torch.cat([keep, x_seq], dim=-1)
-            B.copy_(new_B)
+            # Same layout as causal_conv1d_update: the next step reads its
+            # history at column ``num_accepted - 1``.
+            B[:, : width - 2 + q_i] = conv_in[0, :, 1:]
 
     # ---- 2. Recurrent (multi-slot SSM state) ----
     # Single fused kernel call: it runs the recurrence over each sequence's

@@ -10,12 +10,11 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 
 import prometheus_client
 import torch
 from pydantic import BaseModel, Field, ValidationError, model_validator
-from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.config import VllmConfig

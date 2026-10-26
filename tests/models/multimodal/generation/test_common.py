@@ -9,14 +9,12 @@ from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
-from packaging.version import Version
 from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
 )
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 from vllm.utils.func_utils import identity
@@ -799,7 +797,6 @@ VLM_TEST_SETTINGS = {
         dtype="half",
         num_logprobs=10,
         patch_hf_runner=model_utils.ovis2_5_patch_hf_runner,
-        hf_model_kwargs={"revision": "refs/pr/5"},
     ),
     "paddleocr_vl": VLMTestInfo(
         models=["PaddlePaddle/PaddleOCR-VL"],
@@ -819,8 +816,7 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.paddleocr_vl_patch_hf_runner,
         image_size_factors=[(0.25,)],
         marks=[
-            pytest.mark.skipif(
-                Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
+            pytest.mark.skip(
                 reason="Model's custom code uses ROPE_INIT_FUNCTIONS"
                 "['default'] which was removed in transformers v5",
             ),

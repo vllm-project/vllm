@@ -26,6 +26,11 @@ def _silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     return F.silu(x[..., :d]) * x[..., d:]
 
 
+def _gelu_tanh_and_mul(x: torch.Tensor) -> torch.Tensor:
+    d = x.shape[-1] // 2
+    return F.gelu(x[..., :d], approximate="tanh") * x[..., d:]
+
+
 def _prepack_experts(w: torch.Tensor) -> torch.Tensor:
     """VNNI-prepack expert weights via ``convert_weight_packed``."""
     return torch.ops._C.convert_weight_packed(w)
@@ -103,6 +108,7 @@ def ref_w8a16_block_fp8_moe(
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
     block_size: list[int],
+    act_fn=_silu_and_mul,
 ) -> torch.Tensor:
     """Reference FP8 W8A16 block-scaled fused MoE in pure torch."""
     B, D = a.shape
@@ -121,7 +127,7 @@ def ref_w8a16_block_fp8_moe(
         mask = topk_ids_flat == i
         if mask.sum():
             ic0 = torch.matmul(a_exp[mask], w1_dq[i].transpose(0, 1))
-            ic1 = _silu_and_mul(ic0)
+            ic1 = act_fn(ic0)
             out[mask] = torch.matmul(ic1, w2_dq[i].transpose(0, 1))
 
     return (
@@ -235,6 +241,54 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
         is_vnni=True,
     )
     torch.testing.assert_close(a_inplace, out, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("M", [1, 64])
+@pytest.mark.parametrize("N,K,E,topk", [(256, 512, 8, 2), (768, 2048, 8, 4)])
+def test_w8a16_block_fp8_cpu_fused_moe_gelu_tanh(M, N, K, E, topk):
+    """Test fused_experts_cpu FP8 W8A16 with GELU-tanh activation."""
+    set_random_seed(0)
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / math.sqrt(K)
+    w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
+
+    score = torch.randn(M, E, dtype=torch.bfloat16)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_out = ref_w8a16_block_fp8_moe(
+        a,
+        w1,
+        w2,
+        w1_s,
+        w2_s,
+        topk_weight,
+        topk_ids,
+        BLOCK_SIZE,
+        act_fn=_gelu_tanh_and_mul,
+    )
+
+    pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
+
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
+        a.clone(),
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        ops.CPUQuantMethod.FP8_W8A16,
+        w1_s,
+        w2_s,
+        None,
+        None,
+        BLOCK_SIZE,
+        is_vnni=True,
+        act_method=ops.CPUActMethod.GELU_TANH_AND_MUL,
+    )
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
 
 def test_w8a16_block_fp8_cpu_fused_moe_small_expert_blocks():
@@ -365,6 +419,7 @@ def ref_mxfp4_fused_moe(
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
     topk: int,
+    act_fn=_silu_and_mul,
 ) -> torch.Tensor:
     """Reference MXFP4 fused MoE with SiLU activation."""
     B, D = a.shape
@@ -379,7 +434,7 @@ def ref_mxfp4_fused_moe(
         token_indices = torch.where(mask)[0]
         source_indices = token_indices // topk
         ic0 = torch.matmul(a_f[source_indices], w1_dq[i].float().T)
-        ic1 = _silu_and_mul(ic0)
+        ic1 = act_fn(ic0)
         out[mask] = torch.matmul(ic1, w2_dq[i].float().T)
 
     return (out.view(B, topk, -1) * topk_weight.unsqueeze(-1)).sum(dim=1).to(a.dtype)
@@ -488,6 +543,58 @@ def test_mxfp4_cpu_fused_moe(M, N, K, E, topk, seed):
         None,  # w1_zero
         None,  # w2_zero
         None,  # block_size
+    )
+
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("M", [1, 32])
+@pytest.mark.parametrize("N,K,E,topk", [(128, 128, 4, 2), (256, 256, 8, 4)])
+def test_mxfp4_cpu_fused_moe_gelu_tanh(M, N, K, E, topk):
+    """Test fused_experts_mxfp4_cpu with GELU-tanh activation."""
+    set_random_seed(0)
+    dtype = torch.bfloat16
+
+    a = torch.randn(M, K, dtype=dtype) / 10
+
+    w1_bf16 = torch.randn(E, 2 * N, K, dtype=dtype) / 10
+    w1q, w1s = MXFP4QuantizeUtil.quantize(w1_bf16)
+    w1s = w1s.reshape(E, 2 * N, K // 32)
+    w1dq = MXFP4QuantizeUtil.dequantize(w1q, dtype, w1s)
+
+    w2_bf16 = torch.randn(E, K, N, dtype=dtype) / 10
+    w2q, w2s = MXFP4QuantizeUtil.quantize(w2_bf16)
+    w2s = w2s.reshape(E, K, N // 32)
+    w2dq = MXFP4QuantizeUtil.dequantize(w2q, dtype, w2s)
+
+    score = torch.randn(M, E, dtype=dtype)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_out = ref_mxfp4_fused_moe(
+        a, w1dq, w2dq, topk_weight, topk_ids, topk, act_fn=_gelu_tanh_and_mul
+    )
+
+    pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
+    pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
+
+    a_in = a.clone()
+    out = torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        ops.CPUQuantMethod.MXFP4,
+        pw1s,  # w1_scale
+        pw2s,  # w2_scale
+        None,  # w1_zero
+        None,  # w2_zero
+        None,  # block_size
+        act_method=ops.CPUActMethod.GELU_TANH_AND_MUL,
     )
 
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
@@ -717,6 +824,7 @@ def test_mxfp4_cpu_fused_moe_bias_swiglu(M, N, K, E, topk, seed):
         w2_bias=w2_b,
         alpha=alpha,
         limit=limit,
+        act_method=ops.CPUActMethod.SWIGLU,
     )
 
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
@@ -763,6 +871,7 @@ def _ref_int4_moe(
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
     group_size: int,
+    act_fn=_silu_and_mul,
 ) -> torch.Tensor:
     """Reference INT4 W4A16 group-quantized fused MoE in pure torch."""
     B = a.shape[0]
@@ -787,7 +896,7 @@ def _ref_int4_moe(
                 ) * w1_s[eid, g, :].float()
 
             ic = torch.matmul(x, w1_dq)  # [1, K] @ [K, 2*N] → [1, 2*N]
-            ic = _silu_and_mul(ic)  # [1, N]
+            ic = act_fn(ic)  # [1, N]
 
             # Dequantize w2: [N, K], groups along N (input dim)
             N_dim = w2_int4.shape[1]
@@ -980,6 +1089,88 @@ def test_int4_w4a16_cpu_fused_moe(M, N, K, E, topk, group_size, quant_algo, seed
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.parametrize("M", [1, 64])
+@pytest.mark.parametrize("N,K,E,topk,group_size", [(256, 512, 8, 2, 128)])
+@pytest.mark.parametrize("quant_algo", [ops.CPUQuantAlgo.GPTQ, ops.CPUQuantAlgo.AWQ])
+def test_int4_w4a16_cpu_fused_moe_gelu_tanh(M, N, K, E, topk, group_size, quant_algo):
+    """Test fused_experts_cpu INT4 W4A16 with GELU-tanh activation."""
+    set_random_seed(0)
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / (0.5 * K**0.5)
+    (
+        w1_int4,
+        w2_int4,
+        w1_packed,
+        w2_packed,
+        w1_zeros,
+        w2_zeros,
+        w1_zeros_packed,
+        w2_zeros_packed,
+        w1_s,
+        w2_s,
+    ) = _make_int4_moe_weights(E, N, K, group_size, quant_algo)
+
+    score = torch.randn(M, E, dtype=torch.bfloat16)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_out = _ref_int4_moe(
+        a,
+        w1_int4,
+        w2_int4,
+        w1_zeros,
+        w2_zeros,
+        w1_s,
+        w2_s,
+        topk_weight,
+        topk_ids,
+        group_size,
+        act_fn=_gelu_tanh_and_mul,
+    )
+
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        prepare_int4_moe_layer_for_cpu,
+    )
+
+    (blocked_w1, blocked_w2, blocked_s1, blocked_s2, blocked_z1, blocked_z2) = (
+        prepare_int4_moe_layer_for_cpu(
+            w1_packed,
+            w2_packed,
+            w1_s,
+            w2_s,
+            quant_algo=quant_algo,
+            w13_zeros=w1_zeros_packed,
+            w2_zeros=w2_zeros_packed,
+        )
+    )
+
+    a_in = a.clone()
+    out = torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
+        blocked_w1,
+        blocked_w2,
+        topk_weight,
+        topk_ids,
+        ops.CPUQuantMethod.INT4_W4A8,
+        blocked_s1,
+        blocked_s2,
+        blocked_z1,
+        blocked_z2,
+        None,  # block_size
+        None,  # w1_bias
+        None,  # w2_bias
+        None,  # alpha
+        None,  # limit
+        True,  # is_vnni
+        None,  # a1_scale
+        ops.CPUActMethod.GELU_TANH_AND_MUL,
+    )
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
+
+
 # ===========================================================================
 # INT8 W8A8 MoE
 # ===========================================================================
@@ -1001,7 +1192,7 @@ def _quantize_per_token(x):
     return x_q, scale.float()
 
 
-def _ref_int8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids):
+def _ref_int8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, act_fn=_silu_and_mul):
     """Reference INT8 W8A8 per-channel fused MoE in pure torch."""
     B, D = a.shape
     topk = topk_ids.size(1)
@@ -1015,7 +1206,7 @@ def _ref_int8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids):
             x_q, x_s = _quantize_per_token(x)
             ic = torch.matmul(x_q.float(), w1[eid].float().t())
             ic = ic * x_s * w1_s[eid].view(1, -1)
-            ic = _silu_and_mul(ic)
+            ic = act_fn(ic)
 
             ic_q, ic_s = _quantize_per_token(ic)
             oc = torch.matmul(ic_q.float(), w2[eid].float().t())
@@ -1114,6 +1305,93 @@ def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
     )
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_int8_w8a8_cpu_fused_moe_small_expert_blocks(dtype):
+    """Test INT8 dispatch at exact and multi-block expert boundaries."""
+    set_random_seed(0)
+    block_sizes = (3, 4, 5, 33)
+    N, K, E = 128, 128, len(block_sizes)
+    M = sum(block_sizes)
+
+    a = torch.randn(M, K, dtype=dtype) / (0.5 * K**0.5)
+    w1_q, w2_q, w1_s, w2_s = _make_int8_moe_weights(E, N, K)
+    topk_weight, topk_ids = _deterministic_expert_routes(block_sizes)
+
+    ref_out = _ref_int8_moe(a, w1_q, w2_q, w1_s, w2_s, topk_weight, topk_ids)
+    pw1, pw2 = _prepack_experts(w1_q), _prepack_experts(w2_q)
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
+        a,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        ops.CPUQuantMethod.INT8_W8A8,
+        w1_s,
+        w2_s,
+        None,
+        None,
+        None,
+        is_vnni=True,
+    )
+
+    torch.testing.assert_close(ref_out, out, atol=2e-1, rtol=2e-1)
+
+
+@pytest.mark.parametrize("M", [1, 64])
+@pytest.mark.parametrize("N,K,E,topk", [(256, 512, 8, 2), (768, 2048, 8, 2)])
+@pytest.mark.parametrize("is_vnni", [False, True])
+def test_int8_w8a8_cpu_fused_moe_gelu_tanh(M, N, K, E, topk, is_vnni):
+    """Test fused_experts_cpu INT8 W8A8 with GELU-tanh activation."""
+    set_random_seed(0)
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / (0.5 * K**0.5)
+    w1_q, w2_q, w1_s, w2_s = _make_int8_moe_weights(E, N, K)
+
+    score = torch.randn(M, E, dtype=torch.bfloat16)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_out = _ref_int8_moe(
+        a, w1_q, w2_q, w1_s, w2_s, topk_weight, topk_ids, act_fn=_gelu_tanh_and_mul
+    )
+
+    w1 = _prepack_experts(w1_q) if is_vnni else w1_q
+    w2 = _prepack_experts(w2_q) if is_vnni else w2_q
+
+    a_in = a.clone()
+    out = torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids,
+        ops.CPUQuantMethod.INT8_W8A8,
+        w1_s,
+        w2_s,
+        None,  # w1_zero
+        None,  # w2_zero
+        None,  # block_size
+        None,  # w1_bias
+        None,  # w2_bias
+        None,  # alpha
+        None,  # limit
+        is_vnni,
+        None,  # a1_scale
+        ops.CPUActMethod.GELU_TANH_AND_MUL,
+    )
+    torch.testing.assert_close(
+        ref_out.bfloat16(),
+        out,
+        atol=2e-1,
+        rtol=2e-1,
+    )
+
+
 # ===========================================================================
 # FP8 W8A8 MoE
 # ===========================================================================
@@ -1199,6 +1477,7 @@ def _ref_fp8_w8a8_moe(
     N: int,
     group_K: int = FP8_W8A8_QUANT_GROUP,
     group_N: int = FP8_W8A8_QUANT_GROUP,
+    act_fn=F.silu,
 ) -> torch.Tensor:
     """Reference implementation: dequantize weights then compute MoE."""
     M, K_hidden = hidden_states.shape
@@ -1223,7 +1502,7 @@ def _ref_fp8_w8a8_moe(
 
             gate = gate_up[:N]
             up = gate_up[N:]
-            act = F.silu(gate) * up  # [N]
+            act = act_fn(gate) * up  # [N]
 
             # Stage 2: act @ w2.T — down projection
             w2_e = w2[expert_id].float()  # [K_hidden, N]
@@ -1308,6 +1587,76 @@ def test_fp8_w8a8_cpu_fused_moe(E: int, N: int, K: int, M: int, top_k: int):
     x_dequant = (x_fp8.float() * x_scales.unsqueeze(1)).bfloat16()
     ref = _ref_fp8_w8a8_moe(
         x_dequant, w13, w13_scale, w2, w2_scale, topk_weights, topk_ids.long(), N
+    )
+    torch.testing.assert_close(output.float(), ref.float(), atol=1e-2, rtol=1e-2)
+
+
+@requires_cpu_fp8_w8a8
+@pytest.mark.parametrize(
+    "E,N,K,M,top_k",
+    [
+        (4, 128, 256, 1, 2),
+        (8, 256, 512, 16, 2),
+    ],
+)
+def test_fp8_w8a8_cpu_fused_moe_gelu_tanh(E: int, N: int, K: int, M: int, top_k: int):
+    """Test fused_experts_cpu FP8_W8A8 with GELU-tanh activation."""
+    set_random_seed(42)
+
+    w13, w13_scale = _make_fp8_w8a8_weight_w13(E, 2 * N, K)
+    w2, w2_scale = _make_fp8_w8a8_weight_w2(E, K, N)
+
+    packed_w13, packed_w13_scale = _pack_fp8_w8a8_w13(w13, w13_scale)
+    packed_w2 = _prepack_experts(w2)
+
+    hidden_states = torch.randn(M, K, dtype=torch.bfloat16) * 0.1
+    x_fp8, x_scales = torch.ops._C.quantize_fp8e4m3_vec(hidden_states, True, None)
+
+    gen = torch.Generator().manual_seed(0)
+    topk_weights = torch.softmax(torch.randn(M, top_k, generator=gen), dim=-1).float()
+    topk_ids = torch.zeros(M, top_k, dtype=torch.int32)
+    for i in range(M):
+        topk_ids[i] = torch.randperm(E, generator=torch.Generator().manual_seed(i))[
+            :top_k
+        ].int()
+
+    output = torch.empty(M, K, dtype=torch.bfloat16)
+    ops.fused_experts_cpu(
+        output,
+        x_fp8,
+        packed_w13,
+        packed_w2,
+        topk_weights,
+        topk_ids,
+        ops.CPUQuantMethod.FP8_W8A8,
+        packed_w13_scale,  # w1_scale: [E, Nc, G, BLOCK_N]
+        w2_scale,  # w2_scale: [E, K//128, N//128]
+        None,  # w1_zero
+        None,  # w2_zero
+        [FP8_W8A8_QUANT_GROUP, FP8_W8A8_QUANT_GROUP],  # block_size
+        None,  # w1_bias
+        None,  # w2_bias
+        None,  # alpha
+        None,  # limit
+        True,  # is_vnni (weights already packed)
+        x_scales,  # a1_scale: per-token FP8 activation scales
+        ops.CPUActMethod.GELU_TANH_AND_MUL,
+    )
+
+    assert not torch.isnan(output).any()
+    assert not torch.isinf(output).any()
+
+    x_dequant = (x_fp8.float() * x_scales.unsqueeze(1)).bfloat16()
+    ref = _ref_fp8_w8a8_moe(
+        x_dequant,
+        w13,
+        w13_scale,
+        w2,
+        w2_scale,
+        topk_weights,
+        topk_ids.long(),
+        N,
+        act_fn=lambda x: F.gelu(x, approximate="tanh"),
     )
     torch.testing.assert_close(output.float(), ref.float(), atol=1e-2, rtol=1e-2)
 

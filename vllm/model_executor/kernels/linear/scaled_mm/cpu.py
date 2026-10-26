@@ -215,8 +215,10 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        x_shape = x.shape
+        x = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
         w_q, w_s, _, _, _ = self._get_layer_params(layer)
-        return torch.ops._C.int8_scaled_mm_with_quant(
+        out = torch.ops._C.int8_scaled_mm_with_quant(
             x,
             w_q,
             w_s,
@@ -224,6 +226,8 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             x.dtype,
             True,
         )
+        out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
+        return out
 
 
 class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
@@ -435,6 +439,67 @@ class CPUFp8PerTensorScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         raise NotImplementedError(
             "CPUFp8PerTensorScaledMMLinearKernel overrides apply_weights directly."
         )
+
+
+class CPUFp8ChannelWiseScaledMMLinearKernel(CPUFp8PerTensorScaledMMLinearKernel):
+    """FP8 W8A16 per-channel-scaled GEMM via AMX BRGEMM on CPU.
+
+    fp8_scaled_mm_cpu only supports block scales whose N extent is a multiple
+    of 32, so the GEMM runs with unit block scales and the per-output-channel
+    weight scale is applied to the output afterwards. Activations stay
+    BF16, regardless of the checkpoint's activation scheme.
+    """
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        if not c.weight_quant_key.scale.group_shape.is_per_channel():
+            return False, "requires a per-channel weight scale."
+        if c.out_dtype != torch.bfloat16:
+            return False, "Only bfloat16 output dtype supported."
+        n = c.weight_shape[0]
+        if n % 32 != 0:
+            return False, f"requires weight output dim (N={n}) to be a multiple of 32."
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        w_name, w_s_name, _, _ = self.layer_param_names
+        weight = getattr(layer, w_name).t().contiguous()
+        n, k = weight.shape
+
+        packed_weight = torch.ops._C.convert_weight_packed(weight)
+        replace_parameter(
+            layer, w_name, torch.nn.Parameter(packed_weight, requires_grad=False)
+        )
+
+        self._block_size_n = n
+        num_k_blocks = -(-k // _BLOCK_SIZE_K)
+        self._unit_block_scale = torch.ones(1, num_k_blocks, dtype=torch.float32)
+        channel_scale = getattr(layer, w_s_name).reshape(-1).to(torch.float32)
+        replace_parameter(
+            layer, w_s_name, torch.nn.Parameter(channel_scale, requires_grad=False)
+        )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        w_name, w_s_name, _, _ = self.layer_param_names
+        x_2d = x.reshape(-1, x.shape[-1]) if x.dim() > 2 else x
+        out = torch.ops._C.fp8_scaled_mm_cpu(
+            x_2d,
+            getattr(layer, w_name),
+            self._unit_block_scale,
+            [self._block_size_n, _BLOCK_SIZE_K],
+            None,
+            x.dtype,
+            True,  # is_vnni (weight already prepacked)
+        )
+        out = (out.float() * getattr(layer, w_s_name)).to(x.dtype)
+        if bias is not None:
+            out += bias
+        return out.reshape(x.shape[:-1] + (out.size(-1),)) if x.dim() > 2 else out
 
 
 class CPUFp8W8A8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):

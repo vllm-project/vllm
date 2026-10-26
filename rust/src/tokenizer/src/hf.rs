@@ -208,7 +208,13 @@ impl HuggingFaceTokenizer {
             Arc::from(ids)
         };
         let byte_level = tokenizer.decoder().is_some_and(is_byte_level_only);
-        let vocab_size = tokenizer.vocab_size();
+        // Added tokens can also be present in the base vocabulary (e.g. Step-5).
+        // Count the merged vocabulary, matching Hugging Face tokenizers.
+        let vocab_size = tokenizer.model().vocab_size()
+            + added_vocab
+                .iter()
+                .filter(|(token, _)| tokenizer.model().token_to_id(token).is_none())
+                .count();
         let backend = if byte_level {
             Backend::FastokensByteLevel(Box::new(tokenizer))
         } else {
@@ -554,6 +560,50 @@ mod tests {
         }
     }
 
+    /// Added tokens store raw text, including whitespace that the GPT-2 byte
+    /// table never emits, so a byte-level decode must pass it through verbatim,
+    /// along with characters the table does emit in the same token (`é`).
+    #[test]
+    fn added_tokens_with_raw_whitespace_decode_verbatim() {
+        const OPEN: &str = "<parameter name=\"";
+        const CLOSE: &str = "\n</parameter>";
+        const MIXED: &str = "\ncafé";
+
+        let mut value = ordinary_test_tokenizer_json(false, false);
+        value["added_tokens"] = json!(
+            [OPEN, CLOSE, MIXED]
+                .iter()
+                .enumerate()
+                .map(|(i, content)| {
+                    json!({
+                        "id": 256 + i,
+                        "content": content,
+                        "single_word": false,
+                        "lstrip": false,
+                        "rstrip": false,
+                        "normalized": false,
+                        "special": false
+                    })
+                })
+                .collect::<Vec<_>>()
+        );
+        let dir = tempdir().expect("create temp dir");
+        let path = write_tokenizer_json(dir.path(), "tokenizer.json", &value);
+        let text = format!("{OPEN}city\">\nParis{CLOSE}{MIXED}");
+
+        let fastokens = HuggingFaceTokenizer::new_fastokens(&path).expect("load fastokens wrapper");
+        assert!(matches!(
+            fastokens.backend,
+            super::Backend::FastokensByteLevel(_)
+        ));
+        let hf = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
+        for wrapper in [fastokens, hf] {
+            let ids = wrapper.encode(&text, false).expect("encode");
+            assert!((256..=258).all(|id| ids.contains(&id)), "ids={ids:?}");
+            assert_eq!(wrapper.decode(&ids, true).expect("decode"), text);
+        }
+    }
+
     #[test]
     fn hf_vocab_size_counts_added_tokens() {
         let mut tokenizer = tiny_bpe_tokenizer();
@@ -566,6 +616,28 @@ mod tests {
 
         let wrapper = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
         assert_eq!(wrapper.vocab_size(), expected);
+    }
+
+    #[test]
+    fn fastokens_vocab_size_counts_overlapping_added_tokens_once() {
+        let mut tokenizer = tiny_bpe_tokenizer();
+        tokenizer.add_special_tokens(&[
+            AddedToken::from("<unk>", true),
+            AddedToken::from("<|im_end|>", true),
+        ]);
+        tokenizer.add_tokens(&[AddedToken::from("hello", false)]);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tokenizer.json");
+        tokenizer.save(&path, false).unwrap();
+
+        let hf = HuggingFaceTokenizer::new_hf(&path).unwrap();
+        let fast = HuggingFaceTokenizer::new_fastokens(&path).unwrap();
+        assert_eq!(fast.vocab_size(), hf.vocab_size());
+        assert_eq!(fast.vocab_size(), 10);
+        assert_eq!(
+            fast.encode("hello<|im_end|>", false).unwrap(),
+            hf.encode("hello<|im_end|>", false).unwrap()
+        );
     }
 
     #[test]

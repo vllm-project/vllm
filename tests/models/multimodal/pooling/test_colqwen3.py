@@ -14,11 +14,11 @@ import pytest
 import torch
 from PIL import Image
 
-from vllm.entrypoints.chat_utils import (
+from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.renderers.chat_utils import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 
 from ....conftest import VllmRunner
 

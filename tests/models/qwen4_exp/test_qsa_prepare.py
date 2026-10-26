@@ -74,13 +74,14 @@ def _make_main_inputs(num_tokens: int, fp8_cache: bool) -> dict:
     slots = torch.randperm(num_blocks * MAIN_PAGE, device="cuda")[:num_tokens]
     slots[-1] = -1
     norm_weights = torch.randn(2, MAIN_D, dtype=torch.bfloat16, device="cuda") * 0.2
+    qkv_width = 2 * (MAIN_HQ + MAIN_HK) * MAIN_D
     return dict(
         main_qkv=torch.randn(
             num_tokens,
-            2 * (MAIN_HQ + MAIN_HK) * MAIN_D,
+            qkv_width + (HQ + 1) * D,
             dtype=torch.bfloat16,
             device="cuda",
-        ),
+        )[:, :qkv_width],
         main_q_norm_weight=norm_weights[0],
         main_k_norm_weight=norm_weights[1],
         main_eps=EPS,
@@ -316,9 +317,12 @@ def test_qsa_fused_prepare_matches_unfused(
     )
     unfused_compressed = fused_compressed.clone()
 
+    # TP=4 QKVG width makes the indexer slice row-strided, as in the merged
+    # projection. The exact width is unimportant; the larger stride is tested.
+    main_qkvg_width = 3584
     projected_qk = torch.randn(
-        num_tokens, (HQ + 1) * D, dtype=torch.bfloat16, device=device
-    )
+        num_tokens, main_qkvg_width + (HQ + 1) * D, dtype=torch.bfloat16, device=device
+    )[:, main_qkvg_width:]
     q_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
     k_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
 

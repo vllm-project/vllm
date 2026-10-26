@@ -2,8 +2,9 @@ group: Attention
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H100) V1 Attention Shard %N"
+- label: ":nvidia: (H100) V1 Attention"
   key: v1-attention-h100-mi300
+  automatic_shard: true
   timeout_in_minutes: 85
   device: h100
   source_file_dependencies:
@@ -12,12 +13,12 @@ steps:
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+    - pytest -v -s v1/attention
   mirror:
     amd:
-      label: ":amd: (MI300) V1 Attention Shard %N"
+      label: ":amd: (MI300) V1 Attention"
       dind: false
+      automatic_shard: true
       device: mi300_1
       timeout_in_minutes: 125
       depends_on:
@@ -30,9 +31,14 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/envs.py
       - vllm/platforms/rocm.py
+      - vllm/models/deepseek_v32/amd/rocm.py
+      commands:
+      - pytest -v -s v1/attention --ignore=v1/attention/test_sparse_mla_backends.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_sparse_mla_backends.py
 
-- label: ":nvidia: (B200) V1 Attention Shard %N"
+- label: ":nvidia: (B200) V1 Attention"
   key: v1-attention-b200
+  automatic_shard: true
   timeout_in_minutes: 80
   device: b200-k8s
   source_file_dependencies:
@@ -41,12 +47,12 @@ steps:
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+    - pytest -v -s v1/attention
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) V1 Attention Shard %N"
+      label: ":amd: (MI355 DPX) V1 Attention"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 125
       depends_on:
@@ -59,6 +65,21 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/envs.py
       - vllm/platforms/rocm.py
+      - vllm/models/deepseek_v32/amd/rocm.py
       commands:
-      - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-      - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py --ignore=v1/attention/test_sparse_mla_backends.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py v1/attention/test_sparse_mla_backends.py
+
+- label: ":nvidia: (DGX Spark) [Nightly] FlashInfer NVFP4 XQA"
+  key: flashinfer-nvfp4-xqa-dgx-spark
+  timeout_in_minutes: 30
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - vllm/v1/attention/backends/flashinfer.py
+  - tests/v1/attention/test_attention_backends.py
+  commands:
+  - pytest -v -s v1/attention/test_attention_backends.py -k test_flashinfer_xqa_nvfp4_decode_correctness

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +11,7 @@ import pybase64 as base64
 import pytest
 import soundfile as sf
 
+import vllm.envs as envs
 from vllm.multimodal.media import AudioMediaIO
 from vllm.multimodal.media import audio as audio_module
 from vllm.multimodal.media.audio import (
@@ -16,6 +19,7 @@ from vllm.multimodal.media.audio import (
     load_audio_soundfile,
     load_audio_torchcodec,
 )
+from vllm.multimodal.media.base import MediaDecodedBudget
 
 from ...conftest import AudioTestAssets
 
@@ -116,6 +120,102 @@ def _make_flac_bytes(frames: int, channels: int, samplerate: int) -> bytes:
     buf = BytesIO()
     sf.write(buf, data, samplerate, format="FLAC")
     return buf.getvalue()
+
+
+@pytest.mark.skip_global_cleanup
+def test_request_budget_rejects_second_decoded_audio_clip(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 384)
+    clip = _make_flac_bytes(frames=64, channels=1, samplerate=16000)
+    audio_io = AudioMediaIO(decoded_budget=MediaDecodedBudget())
+
+    audio_io.load_bytes(clip)
+    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        audio_io.load_bytes(clip)
+
+
+@pytest.mark.skip_global_cleanup
+def test_request_budget_allows_parallel_audio_decodes(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 512)
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_DECODE_BYTES", 256)
+    budget = MediaDecodedBudget()
+    audio_io = AudioMediaIO(decoded_budget=budget)
+    decoding = threading.Barrier(2)
+
+    def decode(*args, **kwargs):
+        assert kwargs["max_decode_bytes"] == 256
+        decoding.wait(timeout=5)
+        return np.zeros(32, dtype=np.float32), 16000
+
+    with (
+        patch.object(audio_module, "load_audio", side_effect=decode),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        results = list(pool.map(audio_io.load_bytes, [b"a", b"b"]))
+
+    assert len(results) == 2
+    assert budget.used == 256
+
+
+@pytest.mark.skip_global_cleanup
+def test_request_budget_waits_for_inflight_audio_decode(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 256)
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_DECODE_BYTES", 256)
+    budget = MediaDecodedBudget()
+    audio_io = AudioMediaIO(decoded_budget=budget)
+    decoding = threading.Event()
+    finish_decoding = threading.Event()
+    second_reservation = threading.Event()
+    reserve = budget.reserve
+    decode_calls = 0
+
+    def track_reservation(max_bytes):
+        if decoding.is_set():
+            second_reservation.set()
+        return reserve(max_bytes)
+
+    def decode(*args, **kwargs):
+        nonlocal decode_calls
+        decode_calls += 1
+        decoding.set()
+        assert finish_decoding.wait(timeout=5)
+        return np.zeros(64, dtype=np.float32), 16000
+
+    with (
+        patch.object(budget, "reserve", side_effect=track_reservation),
+        patch.object(audio_module, "load_audio", side_effect=decode),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        first = pool.submit(audio_io.load_bytes, b"a")
+        assert decoding.wait(timeout=5)
+        second = pool.submit(audio_io.load_bytes, b"b")
+        try:
+            assert second_reservation.wait(timeout=5)
+        finally:
+            finish_decoding.set()
+        first.result(timeout=5)
+        with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+            second.result(timeout=5)
+
+    assert decode_calls == 1
+    assert budget.used == 256
+
+
+@pytest.mark.skip_global_cleanup
+def test_request_budget_releases_failed_audio_reservation(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 256)
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_DECODE_BYTES", 256)
+    budget = MediaDecodedBudget()
+    audio_io = AudioMediaIO(decoded_budget=budget)
+    audio = (np.zeros(64, dtype=np.float32), 16000)
+
+    with patch.object(
+        audio_module, "load_audio", side_effect=[ValueError("invalid audio"), audio]
+    ):
+        with pytest.raises(ValueError, match="invalid audio"):
+            audio_io.load_bytes(b"a")
+        assert audio_io.load_bytes(b"b")[0].nbytes == 256
+
+    assert budget.used == 256
 
 
 def test_small_file_passes_memory_guard():

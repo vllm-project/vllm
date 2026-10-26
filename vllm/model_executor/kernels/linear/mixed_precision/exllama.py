@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -99,9 +100,7 @@ class ExllamaLinearKernel(MPLinearKernel):
                     "inference"
                 )
             zeros = pack_quantized_values_into_int32(zeros, c.weight_type, packed_dim=1)
-            setattr(
-                layer, self.w_zp_name, torch.nn.Parameter(zeros, requires_grad=False)
-            )
+            replace_parameter(layer, self.w_zp_name, zeros)
 
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)

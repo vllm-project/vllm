@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 import ray
 import torch
@@ -33,7 +33,6 @@ from torch.multiprocessing.reductions import (
     rebuild_cuda_tensor,
     reduce_tensor,
 )
-from typing_extensions import Self
 
 from vllm.distributed.weight_transfer.base import (
     ParamMeta,
@@ -927,7 +926,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         # nothing orders the two. Without this sync it packs bytes the copy has
         # not written yet -- silent corruption, and only for ring-packed tensors.
         if slot.is_cuda:
-            torch.cuda.current_stream(slot.device).synchronize()
+            torch.accelerator.current_stream(slot.device).synchronize()
         return {sid: reduce_args}, views, refs
 
     def _publish_async(self, group_idx: int, entries):

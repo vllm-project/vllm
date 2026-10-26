@@ -256,6 +256,7 @@ class Qwen3MoeAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         dual_chunk_attention_config: dict[str, Any] | None = None,
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -303,6 +304,7 @@ class Qwen3MoeAttention(nn.Module):
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
+            mrope_positions_factor=mrope_positions_factor,
         )
         attention_kwargs: dict[str, Any] = {}
         if dual_chunk_attention_config:
@@ -351,6 +353,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         is_fused_checkpoint_transposed: bool = False,
+        mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
 
@@ -376,6 +379,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             dual_chunk_attention_config=dual_chunk_attention_config,
+            mrope_positions_factor=mrope_positions_factor,
         )
 
         # `mlp_only_layers` in the config.

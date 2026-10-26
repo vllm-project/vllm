@@ -35,7 +35,6 @@ thiserror-ext.workspace = true
 tls-listener.workspace = true
 tokio.workspace = true
 tokio-openssl.workspace = true
-tokio-stream.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true

@@ -285,7 +285,7 @@ async def test_wait_timeout_completes_requests():
             sigterm_sent.set()
 
             await asyncio.wait_for(request_task, timeout=_SHUTDOWN_DETECTION_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         finally:
             state.stop_requesting = True
@@ -463,7 +463,7 @@ async def test_abort_timeout_fails_inflight_requests():
 
         try:
             await asyncio.wait_for(request_task, timeout=5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         finally:
             state.stop_requesting = True
@@ -592,7 +592,7 @@ async def test_multi_api_server_shutdown():
 
         try:
             await asyncio.wait_for(request_task, timeout=_SHUTDOWN_DETECTION_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         finally:
             state.stop_requesting = True

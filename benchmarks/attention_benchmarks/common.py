@@ -284,8 +284,10 @@ class BenchmarkConfig:
     torch_profile_iters: int = 3
     warmup_ms: int | None = None
 
-    # "auto" or "fp8"
+    # Any CacheDType: "auto", "fp8", "int8_per_token_head", ...
     kv_cache_dtype: str = "auto"
+    # Model whose config the backend sees (dtype, rotary dims, ...)
+    model: str = "meta-llama/Meta-Llama-3-8B"
 
     # MLA-specific
     prefill_backend: str | None = None

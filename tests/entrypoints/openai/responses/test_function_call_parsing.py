@@ -86,6 +86,7 @@ def test_mixed_input_types_with_function_calls():
     request = ResponsesRequest(**request_data)
 
     # Verify mixed types are handled correctly
+    assert isinstance(request.input, list)
     assert len(request.input) == 3
     # First item should be validated as Message
     assert request.input[0]["type"] == "message"
