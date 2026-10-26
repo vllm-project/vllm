@@ -27,18 +27,18 @@ To serve these models efficiently, our [KVCacheManager][vllm.v1.core.kv_cache_ma
 3. **block size**: number of tokens inside a block
 4. **page size**: the physical memory size of a block, defined as:
 
-    $$
-    \text{num_layers} \times \text{block_size} \times \text{kv_hidden_size}
-    $$
+    ```
+    page_size = num_layers * block_size * kv_hidden_size
+    ```
 
     `num_layers` doesn't mean the total number of layers in the model. The exact number depends on the context in this doc.
 
     !!! note
         This is different from `KVCacheSpec.page_size_bytes` in the code, which is defined as:
 
-        $$
-        \text{block_size} \times \text{kv_hidden_size}
-        $$
+    ```
+        page_size_bytes = block_size * kv_hidden_size
+    ```
 
 ## Allocation
 
@@ -48,9 +48,9 @@ We use a single memory pool for all layer types. The memory pool is split into m
 
 The core challenge is ensuring every layer type uses the same **page size**.  For full-attention-only models, the page size is straightforward, defined as:
 
-$$
-\text{page_size} = \text{block_size} \times \text{num_hidden_layers} \times \text{kv_hidden_size}
-$$
+```
+page_size = block_size * num_hidden_layers * kv_hidden_size
+```
 
 However, in hybrid models, `num_hidden_layers` varies by attention type, which would normally produce mismatched page sizes. The cases below show how we unify them.
 
@@ -60,9 +60,9 @@ Let's start with a toy example: a model has 1 full attention layer and 3 sliding
 
 We let each block to hold `block_size` tokens for one layer, so:
 
-$$
-\text{page_size} = \text{kv_hidden_size} \times \text{block_size}
-$$
+```
+page_size = kv_hidden_size * block_size
+```
 
 [KVCacheManager][vllm.v1.core.kv_cache_manager.KVCacheManager] allocates a different number of blocks to each layer.
 
@@ -79,9 +79,9 @@ The grouping is feasible because there is usually a beautiful ratio between the 
 
 Our example can be regarded as 2 sw : 1 full. We can allocate blocks as if there are 2 sw and 1 full in the model, and repeat the result by 10 times to generate the `block_ids` for the 30 layers. The page size becomes:
 
-$$
-10 \times \text{kv_hidden_size} \times \text{block_size}
-$$
+```
+10 * kv_hidden_size * block_size
+```
 
 Assume `block_size` 16, sliding window size 32, request length 112, then for the above example model, we need to allocate 11 blocks (0-6 for full, 7-8 for sw group 1, 9-10 for sw group 2).
 
@@ -102,9 +102,9 @@ Our example model is divided into 3 KV cache groups:
 
 Obviously, it satisfies rule 1. For rule 2, all 3 groups have
 
-$$
-10 \times \text{kv_hidden_size} \times \text{block_size}
-$$
+```
+10 * kv_hidden_size * block_size
+```
 
 as their page size.
 
