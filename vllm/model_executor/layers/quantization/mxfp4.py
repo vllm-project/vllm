@@ -504,6 +504,13 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
     )
 
 
+# The gfx942 int4 requant unpacks MXFP4 to f32 and peaks above 20 GiB per rank
+# if all experts convert at once, so it converts in chunks. Chunks are sized by
+# unpacked values rather than experts so that pure TP, which holds every expert
+# at 1/tp width, runs as many chunks as EP.
+_K3_INT4_CONVERT_CHUNK_VALUES = 1 << 28
+
+
 def _mxfp4_experts_to_int4_gfx942(
     weight: torch.nn.Parameter,
     scale: torch.nn.Parameter,
@@ -526,21 +533,18 @@ def _mxfp4_experts_to_int4_gfx942(
     fp4_dtype = torch.float4_e2m1fn_x2
     e8m0_dtype = torch.float8_e8m0fnu
 
-    # mxfp4_to_f32 grows the packed weight 8x and peaks above 20 GiB per
-    # rank if all experts convert at once. Convert 8 experts at a time.
-    _CONVERT_CHUNK = 8
-
     w_all = weight.data.view(fp4_dtype)
     s_all = scale.data.view(e8m0_dtype)
-    num_experts = w_all.shape[0]
+    num_experts, rows, packed_cols = w_all.shape
+    chunk = max(1, _K3_INT4_CONVERT_CHUNK_VALUES // (rows * packed_cols * 2))
 
     # Write chunks into a preallocated output. torch.cat of a list
     # would hold the full result twice at the join.
     out_packed: torch.Tensor | None = None
     out_scale: torch.Tensor | None = None
     scale_stride = 0
-    for lo in range(0, num_experts, _CONVERT_CHUNK):
-        hi = min(lo + _CONVERT_CHUNK, num_experts)
+    for lo in range(0, num_experts, chunk):
+        hi = min(lo + chunk, num_experts)
         weight_f32 = fp4_utils.mxfp4_to_f32(w_all[lo:hi])
         scale_f32 = fp4_utils.e8m0_to_f32(s_all[lo:hi])
         chunk_experts, output_size, input_size = weight_f32.shape
@@ -585,8 +589,9 @@ def _mxfp4_experts_to_int4_gfx942(
         assert out_scale is not None
         out_packed[lo:hi].copy_(chunk_packed)
         out_scale[lo * scale_stride : hi * scale_stride].copy_(chunk_scale)
+        # No empty_cache() here: the next chunk reuses these cached
+        # blocks, while releasing them costs a hipFree per temporary.
         del weight_packed, weight_scale, chunk_packed, chunk_scale
-        torch.accelerator.empty_cache()
 
     del w_all, s_all
     assert out_packed is not None
