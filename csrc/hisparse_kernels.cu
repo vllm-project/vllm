@@ -852,29 +852,30 @@ __global__ void hisparse_gather_compact_kernel(
     const int32_t* __restrict__ miss_counts, const int64_t host_rows,
     const int64_t hot_rows, const int64_t row_bytes,
     const int64_t hot_block_stride, const int32_t hot_block_size,
-    const int32_t top_k) {
+    const int32_t top_k, const int32_t num_rows) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
-  const int row = blockIdx.x;
   const int warp_id = threadIdx.x / kWarpSize;
   const int lane_id = threadIdx.x % kWarpSize;
-  const int miss_count = min(max(miss_counts[row], 0), top_k);
   const int col_start = blockIdx.y * NUM_WARPS + warp_id;
   const int col_stride = gridDim.y * NUM_WARPS;
-  const int64_t base = static_cast<int64_t>(row) * top_k;
-  for (int col = col_start; col < miss_count; col += col_stride) {
-    const int32_t g = miss_global_indices[base + col];
-    const int32_t dst = miss_hot_indices[base + col];
-    if (g < 0 || dst < 0 || dst >= hot_rows) {
-      continue;
-    }
-    if (g < host_rows) {
-      copy_row_warp(lane_id, host_cache + static_cast<int64_t>(g) * row_bytes,
-                    cache_row_ptr(hot_cache, dst, hot_block_size,
-                                  hot_block_stride, row_bytes),
-                    row_bytes);
-    } else {
-      zero_cache_row_warp(lane_id, hot_cache, dst, hot_block_size,
-                          hot_block_stride, row_bytes);
+  for (int row = blockIdx.x; row < num_rows; row += gridDim.x) {
+    const int miss_count = min(max(miss_counts[row], 0), top_k);
+    const int64_t base = static_cast<int64_t>(row) * top_k;
+    for (int col = col_start; col < miss_count; col += col_stride) {
+      const int32_t g = miss_global_indices[base + col];
+      const int32_t dst = miss_hot_indices[base + col];
+      if (g < 0 || dst < 0 || dst >= hot_rows) {
+        continue;
+      }
+      if (g < host_rows) {
+        copy_row_warp(lane_id, host_cache + static_cast<int64_t>(g) * row_bytes,
+                      cache_row_ptr(hot_cache, dst, hot_block_size,
+                                    hot_block_stride, row_bytes),
+                      row_bytes);
+      } else {
+        zero_cache_row_warp(lane_id, hot_cache, dst, hot_block_size,
+                            hot_block_stride, row_bytes);
+      }
     }
   }
 }
@@ -1465,7 +1466,8 @@ void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
   constexpr int kBlockSize = 512;
   constexpr int kTargetBlocks = 64;
   const int num_chunks = std::min(8, std::max(1, kTargetBlocks / num_rows));
-  const dim3 grid(num_rows, num_chunks);
+  // Keep copy occupancy bounded when speculative verification adds more rows.
+  const dim3 grid(std::min(num_rows, kTargetBlocks), num_chunks);
   const int32_t hot_block_size = static_cast<int32_t>(hot_cache.size(1));
   const int64_t hot_rows = hot_cache.size(0) * hot_block_size;
   const int64_t hot_block_stride =
@@ -1479,5 +1481,5 @@ void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
       miss_global_indices.const_data_ptr<int32_t>(),
       miss_hot_indices.const_data_ptr<int32_t>(),
       miss_counts.const_data_ptr<int32_t>(), host_rows, hot_rows, row_bytes,
-      hot_block_stride, hot_block_size, top_k);
+      hot_block_stride, hot_block_size, top_k, num_rows);
 }

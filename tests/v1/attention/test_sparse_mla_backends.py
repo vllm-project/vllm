@@ -69,6 +69,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SharedTopkIndicesBuffer,
+    SparseMLACommonMetadata,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import current_stream
@@ -2864,6 +2865,218 @@ def test_hisparse_swap_in_preserves_rows_across_eviction(row_width, kv_dtype):
 
 
 @requires_hisparse_ops
+@pytest.mark.parametrize(
+    "num_rows,row_bytes,padded",
+    [
+        (1, 32, False),
+        (8, 576, True),
+        (63, 32, False),
+        (64, 576, True),
+        (65, 32, False),
+        (129, 576, True),
+    ],
+)
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_hisparse_compact_gather_preserves_strided_payload(
+    num_rows, row_bytes, padded, use_graph
+):
+    """A bounded copy grid must cover every row and preserve untouched bytes."""
+    device = torch.device(DEVICE_TYPE)
+    top_k, block_size, sentinel = 37, 64, 77
+    host_rows = num_rows * top_k
+    host = (
+        torch.arange(host_rows * row_bytes)
+        .remainder_(251)
+        .to(torch.uint8)
+        .view(host_rows, row_bytes)
+        .pin_memory()
+    )
+    num_blocks = cdiv(host_rows, block_size)
+    shape = (num_blocks, block_size + (3 if padded else 0), row_bytes)
+    backing = torch.full(shape, sentinel, dtype=torch.uint8, device=device)
+    hot = backing[:, :block_size]
+    hot_rows = num_blocks * block_size
+    destination = torch.arange(host_rows, dtype=torch.int32).view(num_rows, top_k)
+    source = destination.flip(1).contiguous()
+    source[:, 0] = -1
+    source[:, 1] = host_rows + 1
+    destination[:, 2] = -1
+    destination[:, 3] = hot_rows + 1
+    counts = torch.tensor(
+        [[top_k + 5, 0, -3, top_k // 2][row % 4] for row in range(num_rows)],
+        dtype=torch.int32,
+    )
+    active = torch.arange(top_k)[None, :] < counts.clamp(0, top_k)[:, None]
+    active &= (source >= 0) & (destination >= 0) & (destination < hot_rows)
+    expected = torch.full(shape, sentinel, dtype=torch.uint8)
+    for copy_from_host in (False, True):
+        selected = active & ((source < host_rows) == copy_from_host)
+        slots = destination[selected].to(torch.long)
+        payload = host[source[selected].to(torch.long)] if copy_from_host else 0
+        expected[slots // block_size, slots % block_size] = payload
+    source_gpu = source.to(device)
+    destination_gpu = destination.to(device)
+    counts_gpu = counts.to(device)
+
+    def run():
+        torch.ops._C_cache_ops.hisparse_gather_compact(
+            host, hot, source_gpu, destination_gpu, counts_gpu
+        )
+
+    run()
+    graph = None
+    if use_graph:
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+        graph.replay()
+    torch.testing.assert_close(backing.cpu(), expected, rtol=0, atol=0)
+
+    # Replay must consume fresh miss counts, including a completely empty plan.
+    backing.fill_(sentinel)
+    counts_gpu.zero_()
+    if graph is not None:
+        graph.replay()
+    else:
+        run()
+    torch.testing.assert_close(
+        backing.cpu(), torch.full(shape, sentinel, dtype=torch.uint8), rtol=0, atol=0
+    )
+
+
+@requires_hisparse_ops
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_hisparse_speculative_prefetch_preserves_current_resident_kv(use_graph):
+    """Prefetch historical misses before a follower writes verification KV."""
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_width, query_len, top_k = 64, 8, 4, 4
+    source_table = torch.tensor([[1, 2]], dtype=torch.int32, device=device)
+    resident_table = torch.tensor([[0, 1]], dtype=torch.int32, device=device)
+    request_ids = torch.zeros(query_len, dtype=torch.int32, device=device)
+    slots = torch.arange(block_size, block_size + query_len, device=device)
+    metadata = SparseMLACommonMetadata(
+        num_reqs=1,
+        max_query_len=query_len,
+        max_seq_len=block_size + query_len,
+        num_actual_tokens=query_len,
+        query_start_loc=torch.tensor([0, query_len], dtype=torch.int32, device=device),
+        slot_mapping=slots,
+        block_table=source_table,
+        req_id_per_token=request_ids,
+        num_decodes=1,
+        num_decode_tokens=query_len,
+        num_prefills=0,
+    )
+    caches: list[HiSparseCacheHandle] = []
+    hosts: list[torch.Tensor] = []
+    current_rows: list[torch.Tensor] = []
+    for layer in range(2):
+        runtime = _make_hisparse_runtime(
+            top_k=top_k,
+            device_buffer_size=query_len * top_k,
+            max_union_rows=query_len * top_k,
+            max_num_reqs=1,
+            row_width=row_width,
+            block_size=block_size,
+            max_swap_rows=query_len,
+            index_group=caches[0].runtime.index_group if caches else None,
+        )
+        host = (
+            torch.arange(3 * block_size * row_width, dtype=torch.float32)
+            .view(3, block_size, row_width)
+            .add_(layer * 10000)
+            .pin_memory()
+        )
+        runtime.bind_source_cache(host)
+        cache = HiSparseCacheHandle(runtime)
+        cache.bind_cache(
+            runtime.hot_backing,
+            byte_offset=0,
+            block_stride=block_size * row_width * torch.float32.itemsize,
+            num_blocks=2,
+            block_size=block_size,
+            block_table=resident_table,
+            slot_mapping=slots,
+        )
+        cache.all_context_pages_resident = False
+        caches.append(cache)
+        hosts.append(host.view(-1, row_width))
+        current_rows.append(
+            torch.arange(query_len * row_width, device=device, dtype=torch.float32)
+            .view(query_len, row_width)
+            .add_(20000 + layer * 10000)
+        )
+    leader, follower = caches
+    leader.index_group_caches = caches
+    logical = torch.tensor(
+        [[0, 1, 64, -1], [2, 3, 65, -1], [4, 5, 66, -1], [6, 7, 67, -1]],
+        dtype=torch.int32,
+        device=device,
+    )
+    valid_rows = _valid_rows(query_len)
+
+    def run():
+        leader.prepare_group_for_batch(metadata)
+        for cache in caches:
+            assert cache.view is not None
+            assert cache.prefetch_decode_group and not cache.decode_batch
+            assert cache.host_mirror_required
+        assert leader.view is not None
+        leader.view.cache[1, :query_len].copy_(current_rows[0])
+        leader_result = leader.swap_in(
+            request_ids,
+            source_table,
+            logical,
+            block_size=block_size,
+            num_valid_rows=valid_rows,
+        )
+        assert follower.runtime._swap_staged
+        assert (
+            follower.runtime._layer_ready_event is not leader.runtime._layer_ready_event
+        )
+        # The follower produces its current KV after the leader starts prefetch.
+        assert follower.view is not None
+        follower.view.cache[1, :query_len].copy_(current_rows[1])
+        follower_result = follower.swap_in(
+            request_ids,
+            source_table,
+            logical,
+            block_size=block_size,
+            num_valid_rows=valid_rows,
+        )
+        return leader_result, follower_result
+
+    results = run()
+    if use_graph:
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            results = run()
+        logical[:, :2].add_(8)
+        graph.replay()
+    torch.accelerator.synchronize()
+
+    for cache, host, current, physical in zip(caches, hosts, current_rows, results):
+        assert isinstance(physical, torch.Tensor)
+        assert cache.view is not None
+        selected = cache.view.attention_cache.view(-1, row_width)
+        expected = host[block_size + logical[:, :2].cpu().to(torch.long)]
+        torch.testing.assert_close(
+            selected[physical[:, :2].to(torch.long)].cpu(), expected
+        )
+        torch.testing.assert_close(selected[physical[:, 2].to(torch.long)], current)
+        assert torch.all(physical[:, 3] == -1)
+    assert not follower.runtime._swap_staged
+    metadata.num_decode_tokens = 2
+    leader.prepare_group_for_batch(metadata)
+    assert all(not cache.prefetch_decode_group for cache in caches)
+    assert all(cache.host_mirror_required for cache in caches)
+    leader.prepare_group_for_batch(None)
+    assert all(not cache.prefetch_decode_group for cache in caches)
+
+
+@requires_hisparse_ops
 def test_hisparse_multi_step_swaps_match_independent():
     """The shared LRU must retain every speculative step until followers run."""
     device = torch.device(DEVICE_TYPE)
@@ -4310,6 +4523,7 @@ def test_hisparse_mixed_single_token_batch_is_not_decode_only():
         runtime=SimpleNamespace(
             begin_forward=lambda: None,
             eager_host_mirror=True,
+            max_swap_rows=4,
         ),
     )
     metadata = SimpleNamespace(
