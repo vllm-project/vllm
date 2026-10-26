@@ -124,7 +124,6 @@ disable_error_code = ["arg-type", "assignment"]
 enable_error_code = ["method-assign"]
 
 [[tool.mypy.overrides]]
-# TokenSpeed MLA's vendored FP8 decode kernel
 module = [
     "vllm.models.kimi_k3.nvidia.kv_balanced_mla.kernel",
     "vllm.models.kimi_k3.nvidia.kv_balanced_mla.helpers",
@@ -212,7 +211,6 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "rust/src/text/src/output/decoded.rs",
     "rust/src/tokenizer/src/incremental.rs",
     "recipes/models/*",
-    # TokenSpeed MLA's vendored FP8 decode kernel
     "vllm/models/kimi_k3/nvidia/kv_balanced_mla/kernel.py",
     "vllm/models/kimi_k3/nvidia/kv_balanced_mla/helpers.py"]
 ignore-hidden = false
