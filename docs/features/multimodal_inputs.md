@@ -1148,7 +1148,7 @@ Then, you can use the OpenAI client as follows:
         base_url=openai_api_base,
     )
 
-    # Any format supported by soundfile/PyAV is supported
+    # Use a self-contained audio format supported by soundfile/PyAV.
     audio_url = AudioAsset("winning_call").url
     audio_base64 = encode_base64_content_from_url(audio_url)
 
