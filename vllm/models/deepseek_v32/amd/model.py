@@ -8,7 +8,7 @@ from itertools import islice
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -71,6 +71,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             topk_indices_buffer=topk_indices_buffer,
         )
 
+        self.zero_mlp_output = False
         if (
             config.n_routed_experts is not None
             and layer_idx >= config.first_k_dense_replace
@@ -82,7 +83,15 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            self.mlp.experts.moe_config.skip_final_all_reduce = True
+            moe_cfg = self.mlp.experts.moe_config
+            pc = moe_cfg.moe_parallel_config
+            # Validated on MoRI only. DeepEP, pplx and the other combines
+            # keep the previous always-skip behavior.
+            if pc.use_mori_kernels:
+                # Combine is already all-reduced; the next fused norm sums TP.
+                self.zero_mlp_output = get_tensor_model_parallel_rank() > 0
+            else:
+                moe_cfg.skip_final_all_reduce = True
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
@@ -116,6 +125,8 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual, self.post_attention_layernorm
         )
         hidden_states = self.mlp(hidden_states)
+        if self.zero_mlp_output:
+            hidden_states = torch.zeros_like(hidden_states)
         return hidden_states, residual
 
 
@@ -247,7 +258,12 @@ class DeepseekV32Model(torch.nn.Module):
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
+        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
+        # weight/scale pair across load_weights() calls; keep the pending
+        # buffer on the model so pairs survive the call boundary.
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue

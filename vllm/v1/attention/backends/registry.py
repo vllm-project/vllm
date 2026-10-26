@@ -117,6 +117,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.models.deepseek_v41.nvidia.flashinfer_sparse."
         "DeepseekV4FlashInferMLASparseBackend"
     )
+    ROCM_FLASHMLA_SPARSE_DSV41 = (
+        "vllm.models.deepseek_v41.amd.rocm.DeepseekV41ROCMAiterMLASparseBackend"
+    )
     FLASHMLA_MEGA_ATTN_DSV41 = (
         "vllm.models.deepseek_v41.sparse_mla.FlashMLAMegaAttnBackend"
     )
@@ -140,6 +143,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.models.minimax_m3.nvidia.sparse_attention_msa."
         "MiniMaxM3SparseTritonBackend"
     )
+    STEP5_DSA = "vllm.models.step5.nvidia.sparse_attention.Step5DSAAttentionBackend"
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
     # HPC Attention Backend:
@@ -156,6 +160,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     CPU_MLA = "vllm.v1.attention.backends.mla.cpu_mla.CPUMLABackend"
     AMX_MLA = "vllm.v1.attention.backends.mla.amx_mla.AMXMLABackend"
     TURBOQUANT = "vllm.v1.attention.backends.turboquant_attn.TurboQuantAttentionBackend"
+    ROCM_OCTAVE = (
+        "vllm.v1.attention.backends.rocm_octave_attn.RocmOctaveAttentionBackend"
+    )
     ULTRAQUANT = "vllm.v1.attention.backends.ultraquant_attn.UltraQuantAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
     # set to None to avoid alias with other backend, whose value is an empty string
