@@ -17,6 +17,7 @@ Limitations:
 """
 
 __all__ = [
+    "abort_layerwise_reload",
     "record_metadata_for_reloading",
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
@@ -26,6 +27,7 @@ __all__ = [
 ]
 
 from .layerwise import (
+    abort_layerwise_reload,
     finalize_layerwise_processing,
     finalize_layerwise_reload,
     initialize_layerwise_reload,

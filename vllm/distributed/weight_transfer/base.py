@@ -29,6 +29,11 @@ TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")
 TTrainerInitInfo = TypeVar("TTrainerInitInfo", bound="TrainerInitInfo")
 WeightTransferUpdatePayload = dict[str, Any] | list[dict[str, Any]]
 
+
+class RetryableWeightUpdateError(RuntimeError):
+    """The worker reset its update state; retry without rebuilding transport."""
+
+
 # A trainer supplies its parameters as a `WeightSource` (defined below): a
 # re-iterable stream of materialized `(name, tensor)` pairs plus a `metadata()`
 # channel. The built-in `ModuleSource` uses `materialize_full_tensor`.
