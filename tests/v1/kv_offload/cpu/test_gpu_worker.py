@@ -78,10 +78,16 @@ def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
         calls.append("load")
         return True
 
+    def record_expedited_load_shutdown() -> bool:
+        calls.append("expedited_load")
+        return True
+
     store_handler = MagicMock()
     load_handler = MagicMock()
+    expedited_load_handler = MagicMock()
     store_handler.shutdown.side_effect = record_store_shutdown
     load_handler.shutdown.side_effect = record_load_shutdown
+    expedited_load_handler.shutdown.side_effect = record_expedited_load_shutdown
 
     def record_region_cleanup(**_: bool) -> bool:
         calls.append("region")
@@ -91,11 +97,12 @@ def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._expedited_load_handler = expedited_load_handler
     worker._mmap_region = mmap_region
 
     worker.shutdown()
 
-    assert calls == ["store", "load", "region"]
+    assert calls == ["store", "load", "expedited_load", "region"]
     store_handler.shutdown.assert_called_once_with()
     load_handler.shutdown.assert_called_once_with()
     mmap_region.cleanup.assert_called_once_with()
@@ -146,6 +153,7 @@ def test_worker_logs_handler_error_and_cleans_region(
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._expedited_load_handler = MagicMock()
     worker._mmap_region = mmap_region
 
     with caplog_vllm.at_level(
@@ -223,6 +231,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._expedited_load_handler = MagicMock()
     worker._mmap_region = mmap_region
 
     with caplog_vllm.at_level(
