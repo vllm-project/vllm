@@ -1045,6 +1045,8 @@ def main():
                 pbar.update(1)
 
         if args.ncu_profile:
+            if any(not result.success for result in all_results):
+                raise SystemExit(1)
             return
 
         # Display decode vs prefill results
@@ -1445,6 +1447,9 @@ def main():
             formatter.save_csv(all_results, args.output_csv)
         if args.output_json:
             formatter.save_json(all_results, args.output_json)
+
+    if any(not result.success for result in all_results):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

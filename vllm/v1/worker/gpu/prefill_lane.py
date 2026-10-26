@@ -102,11 +102,7 @@ class PrefillLaneRunner(GPUModelRunner):
             self.device,
             draft_layer_names=draft_layer_names,
         )
-        self.block_tables = BlockTables(
-            device=self.device,
-            kernel_block_sizes=self.kernel_block_sizes,
-            **main.block_table_kwargs,
-        )
+        self.block_tables = BlockTables(**main.block_table_kwargs)
         self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,

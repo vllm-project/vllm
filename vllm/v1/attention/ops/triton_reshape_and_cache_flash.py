@@ -19,7 +19,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import is_quantized_kv_cache
 
 # ---------------------------------------------------------------------------
 # Backwards-compat re-exports
@@ -32,7 +31,7 @@ from vllm.v1.attention.ops.triton_quant_kv._hadamard import (  # noqa: E402, F40
     fast_hadamard_transform,
     single_rht,
 )
-from vllm.v1.kv_cache_interface import KVQuantMode
+from vllm.v1.kv_cache_interface import KVQuantMode, is_quantized_kv_cache
 
 _NATIVE_KV_CACHE_DTYPES = {"auto", "float16", "bfloat16", "float32", "half", "float"}
 
@@ -72,6 +71,9 @@ def reshape_and_cache_kernel_flash(
     block_size: tl.constexpr,
     x: tl.constexpr,
     USE_HEAD_MAJOR_LAYOUT: tl.constexpr,
+    # >0 writes V interleaved as [Block, Head, Slot//kx, Dim, kx] (head-major
+    # layout only); 0 keeps the standard [Block, Head, Dim, Slot] V layout.
+    INTERLEAVED_V_PACK_FACTOR: tl.constexpr,
     # FP8 flags
     FP8_KV_CACHE: tl.constexpr,
     # INT8 per-tensor flag
@@ -101,13 +103,25 @@ def reshape_and_cache_kernel_flash(
         # Decompose the tile index back into head and dim coordinates.
         cur_head = tile_pos // head_size
         cur_dim = tile_pos % head_size
-        # Value addressing (4D): [Block, Head, Dim, Slot]
-        tgt_idx_v = (
-            block_idx * block_stride
-            + cur_head * head_stride
-            + cur_dim * dim_stride_v
-            + block_offset * 1
-        )
+        # Value addressing: standard 4D [Block, Head, Dim, Slot], or the
+        # interleaved 5D [Block, Head, Slot//kx, Dim, kx] the fused AITER
+        # writer emits and the interleaved read path expects.
+        if INTERLEAVED_V_PACK_FACTOR > 0:
+            tgt_idx_v = (
+                block_idx * block_stride
+                + cur_head * head_stride
+                + (block_offset // INTERLEAVED_V_PACK_FACTOR)
+                * (head_size * INTERLEAVED_V_PACK_FACTOR)
+                + cur_dim * INTERLEAVED_V_PACK_FACTOR
+                + (block_offset % INTERLEAVED_V_PACK_FACTOR)
+            )
+        else:
+            tgt_idx_v = (
+                block_idx * block_stride
+                + cur_head * head_stride
+                + cur_dim * dim_stride_v
+                + block_offset * 1
+            )
         # Key addressing (5D): [Block, Head, Dim//8, Slot, 8]
         tgt_idx_k = (
             block_idx * block_stride
@@ -196,11 +210,18 @@ def triton_reshape_and_cache_flash(
     kv_cache_dtype: str,  # "auto", "fp8"
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
+    interleaved_v_pack_factor: int = 0,  # >0: interleave V (head-major); 0: standard
 ):
     num_heads = key.shape[1]
     head_size = key.shape[2]
 
     use_head_major_layout = key_cache.ndim == 5
+    if interleaved_v_pack_factor and not use_head_major_layout:
+        raise NotImplementedError(
+            "Interleaved V-cache write is only implemented for the head-major "
+            "(5D) cache layout; got a non-head-major cache with "
+            f"interleaved_v_pack_factor={interleaved_v_pack_factor}."
+        )
     if use_head_major_layout:
         block_size = key_cache.shape[3]
         x = key_cache.shape[4]
@@ -288,6 +309,7 @@ def triton_reshape_and_cache_flash(
         block_size=block_size,
         x=x,
         USE_HEAD_MAJOR_LAYOUT=use_head_major_layout,
+        INTERLEAVED_V_PACK_FACTOR=interleaved_v_pack_factor,
         FP8_KV_CACHE=FP8_KV_CACHE,
         INT8_KV_CACHE=INT8_KV_CACHE,
         IS_ROCM=current_platform.is_rocm(),

@@ -20,6 +20,7 @@
 // attention output is rotated back in the reduce kernel.
 
 #include <cstdint>
+#include <string>
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -953,11 +954,21 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        int64_t num_kv_splits, int64_t fmt,
                        const std::optional<torch::Tensor>& indices,
                        const int* qpos, const int* wtags, int wmask,
-                       const int* stags, int smask, int window);
+                       const int* stags, int smask, int window,
+                       int64_t query_group);
+
+bool octave_reduce_mfma(torch::Tensor out, torch::Tensor mid_o,
+                        torch::Tensor v_signs, int num_splits,
+                        cudaStream_t stream);
 
 static void launch_reduce(torch::Tensor out, torch::Tensor mid_o,
                           torch::Tensor v_signs, int num_splits,
                           cudaStream_t stream) {
+  static const bool cdna3 =
+      std::string(at::cuda::getCurrentDeviceProperties()->gcnArchName)
+          .rfind("gfx942", 0) == 0;
+  if (cdna3 && octave_reduce_mfma(out, mid_o, v_signs, num_splits, stream))
+    return;
   dim3 grid(out.size(0), out.size(1));
   if (out.dtype() == at::kBFloat16)
     reduce_kernel<__hip_bfloat16><<<grid, 256, 0, stream>>>(
@@ -995,11 +1006,11 @@ void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
   const bool bf = query.dtype() == at::kBFloat16;
   // Fast tier when the device and shapes allow it, else the portable kernel.
   const int wmma_splits =
-      use_wmma
-          ? octave_decode_wmma(query, cache, block_table, q_to_req, q_to_klen,
-                               mid_o, k_signs, sm_scale, num_kv_splits, fmt,
-                               std::nullopt, nullptr, nullptr, 0, nullptr, 0, 0)
-          : 0;
+      use_wmma ? octave_decode_wmma(query, cache, block_table, q_to_req,
+                                    q_to_klen, mid_o, k_signs, sm_scale,
+                                    num_kv_splits, fmt, std::nullopt, nullptr,
+                                    nullptr, 0, nullptr, 0, 0, qg)
+               : 0;
   if (wmma_splits > 0) {
     ns = wmma_splits;
   } else {
@@ -1065,9 +1076,9 @@ void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
       win ? num_kv_splits - 1 : num_kv_splits, fmt, indices,
       win ? positions->data_ptr<int>() : nullptr,
       win ? wtags->data_ptr<int>() : nullptr, wmask,
-      win ? stags->data_ptr<int>() : nullptr, smask, (int)window);
+      win ? stags->data_ptr<int>() : nullptr, smask, (int)window, 4);
   TORCH_CHECK(ns > 0,
-              "octave_decode_sparse: needs the WMMA tier (gfx11, head size "
+              "octave_decode_sparse: needs the WMMA tier (gfx1100, head size "
               "256, GQA group <= 8)");
   if (!win) {
     launch_reduce(out, mid_o, v_signs, ns, stream);

@@ -8,12 +8,26 @@ import math
 import pytest
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.rocm_octave_attn import RocmOctaveAttentionBackend
 from vllm.v1.attention.ops import rocm_octave as sq
+from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+
+
+def _arch() -> str | None:
+    if not current_platform.is_rocm():
+        return None
+    from vllm.platforms.rocm import get_cdna_version, get_rdna_version
+
+    if get_rdna_version() == 3:
+        return "rdna3"
+    return "cdna3" if get_cdna_version() == 3 else None
+
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm() or not hasattr(torch.ops._C, "octave_decode"),
-    reason="Octave kernels are ROCm-only",
+    _arch() is None or not hasattr(torch.ops._C, "octave_decode"),
+    reason="Octave kernels need RDNA3 or CDNA3",
 )
 
 HEAD, ROPE, BLOCK = 256, 64, 16
@@ -251,6 +265,109 @@ def test_prefill_matches_reference(cache_dtype, query_lens):
     assert _rel(out, ref) < 2e-2
 
 
+def _decode(cache, q, block_table, q_to_req, q_to_klen, signs, fmt, use_wmma):
+    out = torch.zeros_like(q)
+    mid = torch.empty(*q.shape[:2], 8, HEAD + 2, dtype=torch.float32, device=q.device)
+    torch.ops._C.octave_decode(
+        out,
+        q,
+        cache,
+        block_table,
+        q_to_req,
+        q_to_klen,
+        mid,
+        signs,
+        signs,
+        1 / 16,
+        8,
+        fmt.kernel_code,
+        1,
+        use_wmma,
+    )
+    return out
+
+
+def _prefill(cache, q, k, v, block_table, qsl, seq_lens, signs, fmt):
+    out = torch.empty_like(q)
+    torch.ops._C.octave_prefill(
+        out,
+        q,
+        k,
+        v,
+        cache,
+        block_table,
+        qsl,
+        seq_lens,
+        int((qsl[1:] - qsl[:-1]).max()),
+        1 / 16,
+        fmt.kernel_code,
+    )
+    return out
+
+
+@pytest.mark.parametrize(
+    "layout", RocmOctaveAttentionBackend.supported_kv_cache_layouts()
+)
+def test_kernels_follow_declared_cache_layouts(layout):
+    """Store, decode and prefill on the cache view vLLM allocates for each
+    declared layout match a contiguous cache bit for bit. Two KV heads, so the
+    head and token strides differ between layouts."""
+    torch.manual_seed(4)
+    dev, cache_dtype = "cuda", "octave_k3v3"
+    fmt, hkv, group, nblk = _format(cache_dtype), 2, 6, 80
+    signs = sq.sign_bits(HEAD).to(dev)
+    sq.register_rope_dim(HEAD, ROPE)
+    spec = RocmOctaveAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=BLOCK,
+            num_kv_heads=hkv,
+            head_size=HEAD,
+            dtype=torch.uint8,
+            kv_quant_mode=get_kv_quant_mode(cache_dtype),
+        )
+    )
+    raw = torch.zeros(nblk * spec.page_size_bytes, dtype=torch.int8, device=dev)
+    cache = dense_kv_cache_views(raw, spec, nblk, 1, layout)[0]
+    dense = torch.zeros(nblk, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
+    assert cache.shape == dense.shape and cache.dtype == dense.dtype
+
+    seq_lens, query_lens = [700, 300], [100, 300]
+    max_blocks = max(math.ceil(n / BLOCK) for n in seq_lens)
+    block_table = torch.zeros(len(seq_lens), max_blocks, dtype=torch.int32, device=dev)
+    free, used, ks, vs = torch.randperm(nblk, device=dev), 0, [], []
+    for i, n in enumerate(seq_lens):
+        nb = math.ceil(n / BLOCK)
+        block_table[i, :nb] = free[used : used + nb].int()
+        used += nb
+        ks.append(torch.randn(n, hkv, HEAD, device=dev).half())
+        vs.append(torch.randn(n, hkv, HEAD, device=dev).half())
+        for c in (cache, dense):
+            _fill(c, block_table[i, :nb], ks[i], vs[i], signs, signs, fmt)
+    assert torch.equal(cache, dense)
+
+    q_to_req = torch.arange(len(seq_lens), dtype=torch.int32, device=dev)
+    q_to_klen = torch.tensor(seq_lens, dtype=torch.int32, device=dev)
+    q = torch.randn(len(seq_lens), hkv * group, HEAD, device=dev).half()
+    for use_wmma in (True, False):
+        out, ref = (
+            _decode(c, q, block_table, q_to_req, q_to_klen, signs, fmt, use_wmma)
+            for c in (cache, dense)
+        )
+        assert out.abs().sum() > 0
+        assert torch.equal(out, ref)
+
+    qsl = torch.tensor([0, *query_lens], device=dev).cumsum(0).int()
+    q = torch.randn(int(qsl[-1]), hkv * group, HEAD, device=dev).half()
+    ctx = [n - m for n, m in zip(seq_lens, query_lens)]
+    k = torch.cat([x[c:] for x, c in zip(ks, ctx)])
+    v = torch.cat([x[c:] for x, c in zip(vs, ctx)])
+    out, ref = (
+        _prefill(c, q, k, v, block_table, qsl, q_to_klen, signs, fmt)
+        for c in (cache, dense)
+    )
+    assert torch.equal(out, ref)
+
+
 def _window_tables(entries, hkv, dev):
     return (
         torch.zeros(entries, hkv, 2 * HEAD, dtype=torch.float16, device=dev),
@@ -259,6 +376,7 @@ def _window_tables(entries, hkv, dev):
     )
 
 
+@pytest.mark.skipif(_arch() != "rdna3", reason="sparse decode is RDNA3-only")
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("hkv,group", [(1, 6), (2, 6)])
 @pytest.mark.parametrize(

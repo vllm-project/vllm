@@ -127,33 +127,35 @@ naming what is missing. The kernels in this tree are HIP; a FlyDSL kernel
 (for example a CDNA prefill) must keep the same signature and semantics, pass
 the same tests, and report a clear error when `flydsl` is not installed.
 
-Every AMD target vLLM builds (gfx906, gfx908, gfx90a, gfx942, gfx950, gfx1030,
-gfx11xx, gfx12xx, gfx1250) compiles every Octave source; architecture-specific
-code is guarded and the portable tier uses only 32-lane shuffles, so it is
-correct on wave64 (CDNA) as well as wave32 (RDNA).
+Octave is enabled only on RDNA3 and CDNA3, validated on gfx1100 and gfx942
+(MI300). The backend rejects any other family at selection
+(`supports_compute_capability`, via `get_rdna_version()` and
+`get_cdna_version()`), and the kernel tests skip elsewhere. CMake builds the
+Octave sources and registers the ops only when the target list includes
+gfx1100 or gfx942; other targets in the same build compile the
+architecture-specific kernels as empty stubs, and the kernel dispatch reports
+any other RDNA3 chip as not validated.
 
-| Piece | gfx1100-1103 (RDNA3) | gfx1150/1151 (RDNA3.5), gfx12 (RDNA4) | gfx90a / gfx942 / gfx950 (MI200/MI300/MI350) | gfx1030 (RDNA2) |
-| --- | --- | --- | --- | --- |
-| int8 dot4 (`octave_arch.cuh`) | `v_dot4_i32_iu8` | `v_dot4_i32_iu8` | `v_dot4_i32_i8` | `v_dot4_i32_i8` |
-| Codebook lookup (`octave_format.cuh`) | `v_perm_b32` | `v_perm_b32` | `v_perm_b32` | `v_perm_b32` |
-| Cache store, reduce, rotate | portable | portable | portable | portable |
-| Decode | WMMA tier | portable dot4 tier | portable dot4 tier | portable dot4 tier |
-| Prefill | WMMA | **missing** | **missing** | **missing** |
+| Piece | gfx1100 (RDNA3) | gfx942 (MI300) |
+| --- | --- | --- |
+| int8 dot4 (`octave_arch.cuh`) | `v_dot4_i32_iu8` | `v_dot4_i32_i8` |
+| Codebook lookup (`octave_format.cuh`) | `v_perm_b32` | `v_perm_b32` |
+| Cache store, reduce, rotate | portable | portable (decode reduce: gfx942 kernel) |
+| Decode | WMMA | MFMA (`v_mfma_i32_16x16x32_i8`) |
+| Prefill | WMMA | MFMA |
 
-The WMMA kernels are compiled for gfx1100-1103 only; elsewhere they are
-empty stubs, so `_ARCH_TIERS` selects them only there. gfx1150/1151 have the
-same WMMA instructions and likely need only wider guards, but are untested.
+The portable dot4 decode stays as the reference tier the tests compare the
+native tiers against.
 
 To add an architecture:
 
 1. Implement `octave_prefill` for it, in HIP or FlyDSL (same signature and semantics as
    `octave_prefill_rdna3.cu`: phase-1 partials over the packed prefix, phase-2
-   chunk attention and merge, rotated space in and out). On CDNA the natural
-   building blocks are `v_mfma_i32_16x16x32_i8` (gfx942/gfx950) or
-   `v_mfma_f32_16x16x16f16` (gfx90a) in place of the WMMA calls.
-2. Optionally add a decode tier (the portable dot4 kernel already works).
-3. Register the tiers in `_ARCH_TIERS` in
-   `vllm/v1/attention/backends/rocm_octave_attn.py`.
+   chunk attention and merge, rotated space in and out).
+2. Add a decode tier, or validate the portable dot4 kernel there.
+3. Add the architecture to the CMake guard, to `_kernel_tier` and
+   `supports_compute_capability` in
+   `vllm/v1/attention/backends/rocm_octave_attn.py`, and to the test gate.
 4. Run `tests/kernels/attention/test_rocm_octave.py`: every kernel is checked
    against the PyTorch reference, and `test_decode_matches_reference` runs
    both the fast and the portable decode tier.

@@ -23,10 +23,7 @@ namespace octave {
 __device__ __forceinline__ int dot4_i8(int a, int b, int c) {
 #if defined(__GFX11__) || defined(__GFX12__)
   return __builtin_amdgcn_sudot4(true, a, true, b, c, false);
-#elif defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__) ||  \
-    defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || \
-    defined(__gfx1033__) || defined(__gfx1034__) || defined(__gfx1035__) || \
-    defined(__gfx1036__)
+#elif defined(__gfx942__)
   return __builtin_amdgcn_sdot4(a, b, c, false);
 #else
   #pragma unroll

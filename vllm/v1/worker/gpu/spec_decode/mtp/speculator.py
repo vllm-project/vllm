@@ -3,14 +3,14 @@
 
 import torch.nn as nn
 
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-    AutoRegressiveSpeculator,
-)
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.gpu.spec_decode.mtp.draft_vocab import maybe_install_draft_vocab
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
+)
 
 
-class MTPSpeculator(AutoRegressiveSpeculator):
+class MTPSpeculator(TargetDependentARSpeculator):
     share_mtp_topk_indices: bool = False
 
     def load_draft_model(
