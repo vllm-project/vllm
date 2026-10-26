@@ -932,6 +932,19 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     return max_model_len * (576 * 2 // 132) * factor
 
 
+def dense_logits_rows(max_seqlen_k: int, max_logits_bytes: int | None = None) -> int:
+    """Query rows per dense MQA-logits call whose fp32 [rows, max_seqlen_k]
+    logits fit max_logits_bytes (default: VLLM_SPARSE_INDEXER_MAX_LOGITS_MB).
+
+    The prefill chunk planner sub-chunks requests with it; the indexers split
+    the rows of fused-planned chunks (not bounded by the budget) that take the
+    dense path.
+    """
+    if max_logits_bytes is None:
+        max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    return max(1, max_logits_bytes // (4 * max(1, max_seqlen_k)))
+
+
 def _supports_varlen_paged_mqa_logits() -> bool:
     return (
         current_platform.is_cuda()
@@ -1443,7 +1456,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             req_slice = slice(start + request_offset, end + request_offset)
             max_q = (
-                max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
+                dense_logits_rows(chunk_n, max_logits_bytes)
+                if chunk_n > 0
+                else max(1, chunk_m)
             )
             if fused(chunk_n):
                 max_q = FUSED_MQA_TOPK_MAX_ROWS

@@ -16,8 +16,10 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_min_keys,
     use_fused_mqa_topk,
 )
-from vllm.model_executor.layers.sparse_attn_indexer import dense_logits_rows
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadataBuilder,
+    dense_logits_rows,
+)
 
 LOGITS_BUDGET = 512 * 1024**2
 

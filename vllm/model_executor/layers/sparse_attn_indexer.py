@@ -61,6 +61,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
+    dense_logits_rows,
     tp_prefill_row_sharding_supported,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
@@ -306,18 +307,6 @@ def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.cons
         mask = offs < end
         vals = tl.load(src_ptr + offs, mask=mask)
         tl.store(dst_ptr + offs, vals.to(tl.float32), mask=mask)
-
-
-def dense_logits_rows(max_seqlen_k: int) -> int:
-    """Query rows per dense MQA-logits call that keep its fp32 [rows,
-    max_seqlen_k] logits within VLLM_SPARSE_INDEXER_MAX_LOGITS_MB.
-
-    Chunks the planner bounded by the logits budget already fit in one call;
-    chunks planned for the fused kernel (not bounded by it) are split when they
-    take the dense path.
-    """
-    budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-    return max(1, budget // (4 * max(1, max_seqlen_k)))
 
 
 def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:

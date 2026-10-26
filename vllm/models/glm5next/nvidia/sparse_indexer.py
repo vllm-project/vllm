@@ -24,7 +24,6 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     _merge_dcp_topk_global,
     _reserve_row_shard_exchange_transient,
     as_fp32_logits,
-    dense_logits_rows,
 )
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
@@ -52,6 +51,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
+    dense_logits_rows,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
