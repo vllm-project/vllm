@@ -21,11 +21,37 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.utils.b12x import B12xWarmupUnit
 from vllm.utils.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
     has_flashinfer_b12x_moe,
     has_flashinfer_b12x_w4a16_moe,
 )
+from vllm.utils.math_utils import round_up
+
+# Eager (non-CUDA-graph) batches above the graph capture range are bucketed
+# to this granularity so the W4A16 kernels compile a bounded set of shapes.
+_W4A16_LARGE_BATCH_BUCKET = 128
+
+
+def w4a16_padded_num_tokens(num_tokens: int, max_num_tokens: int) -> int:
+    """Round a token count up to the W4A16 compile bucket.
+
+    FlashInfer's SM12x W4A16 MoE kernels are JIT-specialized on the exact
+    token count (~1-3 s per new shape), so every distinct batch size seen while
+    serving would trigger a recompile.  Buckets mirror vLLM's default CUDA graph
+    capture sizes (1-8, then multiples of 8 up to 256 and of 16 up to 512) so
+    captured shapes are unchanged, and coarsen above that.
+    """
+    if num_tokens <= 8:
+        padded = num_tokens
+    elif num_tokens <= 256:
+        padded = round_up(num_tokens, 8)
+    elif num_tokens <= 512:
+        padded = round_up(num_tokens, 16)
+    else:
+        padded = round_up(num_tokens, _W4A16_LARGE_BATCH_BUCKET)
+    return min(padded, max(max_num_tokens, num_tokens))
 
 
 class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
@@ -109,6 +135,9 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             # 1/w_gs into the FP8 block scales would re-round them and lose
             # precision the W4A16 path is meant to preserve.
             self._fc2_input_scale = None
+            # Pre-compile the bucketed W4A16 shapes in b12x_warmup so they
+            # are not JIT-compiled during serving.
+            layer.b12x_warmup_provider = self
         else:
             # Normalise block scales to absorb the per-expert weight global
             # scale (w_gs).  vLLM's NVFP4 convention stores:
@@ -293,9 +322,34 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             "process_weights_after_loading must run before FlashInferB12xExperts.apply"
         )
 
+        output.copy_(self._run(hidden_states, w1, w2, topk_weights, topk_ids))
+
+    def _run(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
         self._ensure_wrapper()
         wrapper = self._wrapper
         assert wrapper is not None
+
+        num_tokens = hidden_states.shape[0]
+        topk_ids = topk_ids.to(torch.int32)
+        padded_num_tokens = (
+            w4a16_padded_num_tokens(num_tokens, self.max_num_tokens)
+            if self.use_a16
+            else num_tokens
+        )
+        if padded_num_tokens != num_tokens:
+            pad = padded_num_tokens - num_tokens
+            # Padding rows route to expert 0 with zero weight, so they cost a
+            # little extra MoE work but contribute nothing to the output.
+            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, pad))
+            topk_ids = torch.nn.functional.pad(topk_ids, (0, 0, 0, pad))
+            topk_weights = torch.nn.functional.pad(topk_weights, (0, 0, 0, pad))
 
         wrapper_output = wrapper.run(
             x=hidden_states,
@@ -306,7 +360,58 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             w2_weight=w2,
             w2_weight_sf=self.w2_sf_mma,
             w2_alpha=self.g2_alphas,
-            token_selected_experts=topk_ids.to(torch.int32),
+            token_selected_experts=topk_ids,
             token_final_scales=topk_weights,
         )
-        output.copy_(wrapper_output)
+        return wrapper_output[:num_tokens]
+
+    def get_b12x_warmup_unit(
+        self,
+        layer: torch.nn.Module,
+        token_counts: tuple[int, ...],
+        output_dtype: torch.dtype,
+    ) -> B12xWarmupUnit:
+        """Compile every W4A16 shape bucket serving can hit (see
+        ``w4a16_padded_num_tokens``): the padded form of each provided
+        count plus the coarse buckets above the CUDA graph range."""
+        w1 = layer.w13_weight
+        w2 = layer.w2_weight
+        max_tokens = max(self.max_num_tokens, *token_counts, 1)
+        counts = {w4a16_padded_num_tokens(t, max_tokens) for t in token_counts if t > 0}
+        counts.update(
+            range(
+                round_up(512 + 1, _W4A16_LARGE_BATCH_BUCKET),
+                max_tokens,
+                _W4A16_LARGE_BATCH_BUCKET,
+            )
+        )
+        counts.add(max_tokens)
+
+        def compile() -> None:
+            for tokens in sorted(counts):
+                hidden = torch.zeros(
+                    (tokens, self.hidden_dim), dtype=output_dtype, device=w1.device
+                )
+                topk_ids = torch.zeros(
+                    (tokens, self.topk), dtype=torch.int32, device=w1.device
+                )
+                topk_weights = torch.zeros(
+                    (tokens, self.topk), dtype=torch.float32, device=w1.device
+                )
+                self._run(hidden, w1, w2, topk_weights, topk_ids)
+
+        return B12xWarmupUnit(
+            name="FlashInfer W4A16 MoE",
+            key=(
+                type(self),
+                w1.device,
+                self.global_num_experts,
+                self.topk,
+                self.hidden_dim,
+                self.intermediate_size_per_partition,
+                self._activation_str,
+                output_dtype,
+                tuple(sorted(counts)),
+            ),
+            compile=compile,
+        )
