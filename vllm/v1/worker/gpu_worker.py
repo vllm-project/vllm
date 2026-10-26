@@ -1343,13 +1343,6 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        # Wait for the previous step's sends so this forward pass cannot
-        # overwrite buffers they are still reading.
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
-
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
@@ -1387,14 +1380,13 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        # Non-blocking send of the intermediate tensors. The metadata handle
-        # is reaped lazily by the GroupCoordinator; the device handles are
-        # waited at the top of the next step.
-        handles = get_pp_group().isend_tensor_dict(
-            output.tensors,
+        # Send copies: the next forward may overwrite the outputs (CUDA graph
+        # outputs are static), and the group coordinator keeps the copies
+        # alive until their sends complete, so nothing waits here.
+        get_pp_group().isend_tensor_dict(
+            {k: v.clone() for k, v in output.tensors.items()},
             all_gather_group=get_tp_group(),
         )
-        self._pp_send_work = handles[1:]
 
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore
