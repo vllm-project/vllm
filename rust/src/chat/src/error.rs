@@ -44,6 +44,8 @@ pub enum Error {
     UnsupportedMultimodalContent(&'static str),
     #[error("`{0}` content parts are not supported by this chat renderer")]
     UnsupportedContentPart(&'static str),
+    #[error("unsupported input_audio format `{format}`; expected `wav` or `mp3`")]
+    UnsupportedInputAudioFormat { format: String },
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
@@ -147,6 +149,7 @@ impl Error {
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
             | Self::UnsupportedContentPart(_)
+            | Self::UnsupportedInputAudioFormat { .. }
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::MmLimitExceeded { .. } => true,
