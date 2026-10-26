@@ -468,8 +468,9 @@ def test_init_warmup_forward_is_exact_on_grid_inputs(
 
 
 @pytest.mark.parametrize("backend", BACKENDS, ids=("cutedsl", "deep_gemm"))
+@pytest.mark.parametrize("defer_finalize", [False, True])
 def test_adapter_kwargs_match_installed_flashinfer(
-    monkeypatch: pytest.MonkeyPatch, backend: str
+    monkeypatch: pytest.MonkeyPatch, backend: str, defer_finalize: bool
 ):
     """The adapter's kwargs construct the installed FlashInfer's config types.
 
@@ -478,6 +479,8 @@ def test_adapter_kwargs_match_installed_flashinfer(
     index and the DeepGEMM import.
     """
     moe_ep = pytest.importorskip("flashinfer.moe_ep")
+    if defer_finalize and backend == FLASHINFER_MOE_EP_DEEP_GEMM:
+        pytest.skip("DeepGEMM does not support deferred finalization")
     layer_args: list[tuple] = []
 
     class FakeMegaLayer:
@@ -486,6 +489,9 @@ def test_adapter_kwargs_match_installed_flashinfer(
 
         def destroy(self) -> None:
             pass
+
+        def forward_unfinalized(self, *args, **kwargs):
+            raise AssertionError("This test only constructs the adapter")
 
     monkeypatch.setattr(moe_ep, "MoEEpMegaLayer", FakeMegaLayer)
     monkeypatch.setattr(fi_ep, "_expose_deep_gemm_to_flashinfer", lambda: None)
@@ -506,7 +512,7 @@ def test_adapter_kwargs_match_installed_flashinfer(
         max_num_tokens=MAX_TOKENS_PER_RANK,
         swiglu_limit=10.0,
         routing_method=_routing_method(backend),
-        use_deferred_moe_finalize=False,
+        use_deferred_moe_finalize=defer_finalize,
         sp_size=1,
         moe_parallel_config=SimpleNamespace(pcp_size=1),
     )
@@ -514,7 +520,7 @@ def test_adapter_kwargs_match_installed_flashinfer(
     FlashInferMoeEp(
         moe,
         FlashInferMoeEpWeights(w13=weight, w2=weight),
-        apply_topk_in_fc1=apply_topk_in_fc1(moe),
+        apply_topk_in_fc1=False if defer_finalize else apply_topk_in_fc1(moe),
     )
 
     ((_, _, _, mega_config),) = layer_args
@@ -524,3 +530,10 @@ def test_adapter_kwargs_match_installed_flashinfer(
         else moe_ep.DeepGemmMegaMoeConfig
     )
     assert isinstance(mega_config.megakernel, expected)
+    if backend == FLASHINFER_MOE_EP_CUTEDSL:
+        assert mega_config.megakernel.finalize_mode is (
+            moe_ep.FinalizeMode.NONE if defer_finalize else moe_ep.FinalizeMode.AUTO
+        )
+        assert mega_config.megakernel.apply_routing_weights_before_fc2 is (
+            False if defer_finalize else apply_topk_in_fc1(moe)
+        )
