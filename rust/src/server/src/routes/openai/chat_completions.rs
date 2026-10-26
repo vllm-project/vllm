@@ -33,7 +33,8 @@ use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error,
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
-    ChatCompletionStreamChoice, ChatCompletionStreamResponse, ChatMessageDelta,
+    ChatCompletionStreamChoice, ChatCompletionStreamResponse, ChatCompletionStreamUsage,
+    ChatMessageDelta,
 };
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
@@ -95,6 +96,7 @@ pub async fn chat_completions(
             prepared.request_id,
             prepared.response_model,
             created,
+            state.chat.reasoning_parser_name().is_some(),
             api_server_options,
             prepared.options,
         );
@@ -268,6 +270,7 @@ async fn chat_completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    include_reasoning_tokens_details: bool,
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
@@ -311,7 +314,11 @@ async fn chat_completion_chunk_stream(
         ($chunk:expr) => {{
             let mut chunk = $chunk;
             if include_continuous_usage {
-                chunk.usage = Some(continuous_usage.to_usage());
+                chunk.usage = Some(ChatCompletionStreamUsage::new(
+                    continuous_usage.to_usage(),
+                    include_reasoning_tokens_details,
+                    false,
+                ));
             }
             y.yield_ok(chunk).await;
         }};
@@ -333,16 +340,18 @@ async fn chat_completion_chunk_stream(
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 let mut chunk = start_chunk(&envelope);
                 if return_token_ids {
-                    chunk.prompt_token_ids = Some(prompt_token_ids.to_vec());
+                    chunk.prompt_token_ids = Some(Some(prompt_token_ids.to_vec()));
                 }
                 yield_chunk!(chunk);
                 // When echo=true, emit the last assistant message content as a delta chunk.
                 if let Some(echo_text) = &echo {
-                    yield_chunk!(block_delta_chunk(
-                        &envelope,
-                        AssistantBlockKind::Text,
-                        echo_text.clone(),
-                    ));
+                    let mut chunk =
+                        block_delta_chunk(&envelope, AssistantBlockKind::Text, echo_text.clone());
+                    chunk.kv_transfer_params = None;
+                    for choice in &mut chunk.choices {
+                        choice.token_ids = None;
+                    }
+                    yield_chunk!(chunk);
                 }
             }
             Ok(ChatEvent::BlockDelta {
@@ -504,6 +513,7 @@ async fn chat_completion_chunk_stream(
                         &envelope,
                         Usage::from_token_usage(final_usage, enable_prompt_tokens_details),
                         metrics,
+                        include_reasoning_tokens_details,
                     ))
                     .await;
                 }
@@ -526,9 +536,14 @@ fn usage_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
     metrics: Option<PerRequestMetrics>,
+    include_reasoning_tokens_details: bool,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
-    chunk.usage = Some(usage);
+    chunk.usage = Some(ChatCompletionStreamUsage::new(
+        usage,
+        include_reasoning_tokens_details,
+        true,
+    ));
     chunk.metrics = metrics.map(Into::into);
     chunk
 }
@@ -619,10 +634,11 @@ impl PendingChatChunk {
         }
 
         let mut chunk = ChatCompletionStreamResponse::new(envelope);
+        chunk.kv_transfer_params = Some(None);
         chunk.choices.push(ChatCompletionStreamChoice {
             delta: self.take_delta(),
             logprobs,
-            token_ids,
+            token_ids: Some(token_ids),
             ..Default::default()
         });
         Some(chunk)
@@ -701,9 +717,12 @@ fn done_sse_event() -> Event {
 /// protocol.
 fn start_chunk(envelope: &Arc<StreamResponseEnvelope>) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
+    chunk.prompt_token_ids = Some(None);
+    chunk.prompt_text = Some(None);
     chunk.choices.push(ChatCompletionStreamChoice {
         delta: ChatMessageDelta {
             role: Some(AssistantRole),
+            content: Some(String::new()),
             ..Default::default()
         },
         ..Default::default()
@@ -732,8 +751,10 @@ fn block_delta_chunk(
     };
 
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
+    chunk.kv_transfer_params = Some(None);
     chunk.choices.push(ChatCompletionStreamChoice {
         delta,
+        token_ids: Some(None),
         ..Default::default()
     });
     chunk
@@ -746,6 +767,7 @@ fn tool_call_start_chunk(
     name: String,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
+    chunk.kv_transfer_params = Some(None);
     chunk.choices.push(ChatCompletionStreamChoice {
         delta: ChatMessageDelta {
             tool_calls: Some(vec![ToolCallDelta {
@@ -759,6 +781,7 @@ fn tool_call_start_chunk(
             }]),
             ..Default::default()
         },
+        token_ids: Some(None),
         ..Default::default()
     });
     chunk
@@ -770,6 +793,7 @@ fn tool_call_arguments_chunk(
     delta: String,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
+    chunk.kv_transfer_params = Some(None);
     chunk.choices.push(ChatCompletionStreamChoice {
         delta: ChatMessageDelta {
             tool_calls: Some(vec![ToolCallDelta {
@@ -783,6 +807,7 @@ fn tool_call_arguments_chunk(
             }]),
             ..Default::default()
         },
+        token_ids: Some(None),
         ..Default::default()
     });
     chunk
@@ -793,8 +818,10 @@ fn logprobs_only_chunk(
     logprobs: ChatLogProbs,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
+    chunk.kv_transfer_params = Some(None);
     chunk.choices.push(ChatCompletionStreamChoice {
         logprobs: Some(logprobs),
+        token_ids: Some(None),
         ..Default::default()
     });
     chunk
@@ -816,9 +843,12 @@ fn final_chunk(
     );
 
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
+    chunk.kv_transfer_params = Some(None);
     chunk.choices.push(ChatCompletionStreamChoice {
         finish_reason: Some(finish_reason.to_string()),
-        stop_reason,
+        stop_reason: Some(stop_reason),
+        token_ids: Some(None),
+        weight_versions: Some(None),
         ..Default::default()
     });
     Ok(chunk)
@@ -921,7 +951,7 @@ mod tests {
         .expect("finish reason is valid");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
-        assert_eq!(chunk.choices[0].stop_reason, Some(json!("stop")));
+        assert_eq!(chunk.choices[0].stop_reason, Some(Some(json!("stop"))));
     }
 
     #[test]
@@ -930,7 +960,7 @@ mod tests {
             .expect("finish reason is valid");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
-        assert_eq!(chunk.choices[0].stop_reason, None);
+        assert_eq!(chunk.choices[0].stop_reason, Some(None));
     }
 
     #[test]
@@ -939,7 +969,7 @@ mod tests {
             .expect("abort is a valid finish reason");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
-        assert_eq!(chunk.choices[0].stop_reason, None);
+        assert_eq!(chunk.choices[0].stop_reason, Some(None));
     }
 
     #[test]
@@ -1008,6 +1038,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            true,
             ApiServerOptions {
                 enable_prompt_tokens_details: true,
                 enable_per_request_metrics: true,
@@ -1093,6 +1124,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            true,
             ApiServerOptions::default(),
             ResponseOptions {
                 requested_logprobs: true,
@@ -1148,6 +1180,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            true,
             ApiServerOptions::default(),
             ResponseOptions::default(),
         )
@@ -1229,6 +1262,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            true,
             ApiServerOptions::default(),
             ResponseOptions {
                 requested_logprobs: true,
@@ -1245,14 +1279,17 @@ mod tests {
         assert_eq!(chunks.len(), 3);
         let choice = &chunks[1].choices[0];
         assert_eq!(choice.delta.content.as_deref(), Some("answer"));
-        assert_eq!(choice.token_ids.as_deref(), Some(&[22][..]));
+        assert_eq!(
+            choice.token_ids.as_ref().and_then(Option::as_deref),
+            Some(&[22][..])
+        );
         let logprobs = choice.logprobs.as_ref().expect("answer logprobs");
         let content = logprobs.content.as_ref().expect("logprobs content");
         assert_eq!(content[0].token, "answer");
         assert!(chunks.iter().all(|chunk| {
             chunk.choices.iter().all(|choice| {
                 choice.delta.reasoning.is_none()
-                    && choice.token_ids.as_deref() != Some(&[11][..])
+                    && choice.token_ids.as_ref().and_then(Option::as_deref) != Some(&[11][..])
                     && choice
                         .logprobs
                         .as_ref()
@@ -1362,6 +1399,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            true,
             ApiServerOptions::default(),
             ResponseOptions {
                 requested_logprobs: true,
@@ -1378,7 +1416,10 @@ mod tests {
         assert_eq!(chunks.len(), 3);
         let choice = &chunks[1].choices[0];
         assert_eq!(choice.delta.content.as_deref(), Some("answer"));
-        assert_eq!(choice.token_ids.as_deref(), Some(&[22][..]));
+        assert_eq!(
+            choice.token_ids.as_ref().and_then(Option::as_deref),
+            Some(&[22][..])
+        );
         let logprobs = choice.logprobs.as_ref().expect("answer logprobs");
         let content = logprobs.content.as_ref().expect("logprobs content");
         assert_eq!(content[0].token, "answer");
@@ -1388,6 +1429,7 @@ mod tests {
                     && !choice
                         .token_ids
                         .as_ref()
+                        .and_then(Option::as_ref)
                         .is_some_and(|ids| matches!(ids.as_slice(), [11] | [12] | [13]))
                     && choice
                         .logprobs
@@ -1441,6 +1483,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            true,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_reasoning: true,
@@ -1476,7 +1519,9 @@ mod tests {
         chunk
             .usage
             .as_ref()
-            .map(|usage| usage.completion_tokens_details.reasoning_tokens)
+            .and_then(|usage| usage.completion_tokens_details.as_ref())
+            .and_then(Option::as_ref)
+            .map(|details| details.reasoning_tokens)
     }
 
     #[tokio::test]
@@ -1525,6 +1570,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            true,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_usage: true,
@@ -1597,6 +1643,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            true,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_usage: true,
@@ -1621,11 +1668,11 @@ mod tests {
         assert_eq!(chunk_reasoning_tokens(&chunks[0]), Some(0));
         let final_usage = chunks.last().unwrap().usage.as_ref().expect("final usage chunk");
         assert_eq!(final_usage.completion_tokens, Some(2));
-        assert_eq!(final_usage.completion_tokens_details.reasoning_tokens, 2);
+        assert_eq!(chunk_reasoning_tokens(chunks.last().unwrap()), Some(2));
     }
 
     #[tokio::test]
-    async fn chunk_stream_reports_zero_reasoning_tokens_without_reasoning() {
+    async fn chunk_stream_reports_zero_reasoning_tokens_with_idle_reasoning_parser() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
@@ -1652,6 +1699,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            true,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_usage: true,
@@ -1665,11 +1713,11 @@ mod tests {
         .collect::<Result<Vec<_>, _>>()
         .expect("stream chunks");
 
-        // Reasoning-token details are always reported; a stream without
-        // reasoning simply reports 0 on every usage payload.
+        // A configured reasoning parser reports zero even when the output
+        // contains no reasoning.
         for chunk in &chunks {
             let usage = chunk.usage.as_ref().expect("usage");
-            assert_eq!(usage.completion_tokens_details.reasoning_tokens, 0);
+            assert_eq!(chunk_reasoning_tokens(chunk), Some(0));
             let json = serde_json::to_value(usage).expect("usage serializes");
             assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
         }

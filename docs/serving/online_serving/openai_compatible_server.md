@@ -174,6 +174,24 @@ see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more 
 
 Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../../examples/basic/online_serving/openai_chat_completion_client.py)
 
+#### Streaming responses
+
+Set `stream: true` on `/v1/chat/completions` to receive server-sent events.
+The Rust frontend follows the Python frontend's streaming JSON conventions:
+the first delta includes `role: "assistant"` and `content: ""`, and choices
+include `logprobs: null` and `finish_reason: null` until those values are
+available. The first chunk includes `prompt_token_ids` and `prompt_text` as
+`null` when they are unset. Other optional fields depend on the chunk type;
+for example, the terminal choice includes `stop_reason: null` when no stop
+token or stop string is reported.
+
+With `stream_options: {"include_usage": true}`, a final usage chunk has an
+empty `choices` array and omits unset usage details. In particular,
+`completion_tokens_details` is present when a reasoning parser is configured.
+With `continuous_usage_stats: true` in `stream_options`, earlier chunks also
+include usage; their `completion_tokens_details` is `null` when no reasoning
+parser is configured. The stream ends with `data: [DONE]`.
+
 #### Extra parameters
 
 The following [sampling parameters](../../api/README.md#inference-parameters) are supported.

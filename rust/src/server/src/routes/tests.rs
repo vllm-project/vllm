@@ -4476,9 +4476,10 @@ async fn include_usage_adds_final_usage_chunk_before_done() {
     let usage_chunk: serde_json::Value =
         serde_json::from_str(payloads[usage_index]).expect("usage chunk json");
     assert_eq!(usage_chunk["choices"], json!([]));
-    assert_eq!(usage_chunk["usage"]["prompt_tokens"], 22);
-    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
-    assert_eq!(usage_chunk["usage"]["total_tokens"], 25);
+    assert_eq!(
+        usage_chunk["usage"],
+        json!({"prompt_tokens": 22, "completion_tokens": 3, "total_tokens": 25})
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4520,6 +4521,15 @@ async fn stream_continuous_usage_stats_adds_usage_to_chat_chunks() {
         payloads.iter().all(|payload| payload.get("usage").is_some()),
         "{text}"
     );
+    for chunk in &payloads {
+        let usage = chunk["usage"].as_object().expect("usage object");
+        assert!(!usage.contains_key("prompt_tokens_details"), "{chunk}");
+        if chunk["choices"] == json!([]) {
+            assert!(!usage.contains_key("completion_tokens_details"), "{chunk}");
+        } else {
+            assert_eq!(usage.get("completion_tokens_details"), Some(&json!(null)));
+        }
+    }
     assert!(
         payloads.iter().any(|payload| {
             payload["choices"].as_array().is_some_and(|choices| !choices.is_empty())
@@ -4537,7 +4547,7 @@ async fn stream_continuous_usage_stats_adds_usage_to_chat_chunks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn stream_without_include_usage_keeps_existing_shape() {
+async fn stream_chat_preserves_null_fields_by_chunk_kind() {
     let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
     let response = app
         .clone()
@@ -4568,6 +4578,135 @@ async fn stream_without_include_usage_keeps_existing_shape() {
     assert!(!text.contains("\"usage\":"), "{text}");
     assert!(text.contains("\"finish_reason\":\"stop\""), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+
+    let mut chunks = sse_json_payloads(&text);
+    for chunk in &mut chunks {
+        let fields = chunk.as_object_mut().expect("chunk object");
+        for envelope_field in ["id", "object", "created", "model"] {
+            fields.remove(envelope_field);
+        }
+        chunk.sort_all_objects();
+    }
+    let payloads = chunks
+        .iter()
+        .map(|chunk| serde_json::to_string(chunk).expect("chunk JSON"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    expect_test::expect![[r#"
+        {"choices":[{"delta":{"content":"","role":"assistant"},"finish_reason":null,"index":0,"logprobs":null}],"prompt_text":null,"prompt_token_ids":null}
+        {"choices":[{"delta":{"content":"h"},"finish_reason":null,"index":0,"logprobs":null,"token_ids":null}],"kv_transfer_params":null}
+        {"choices":[{"delta":{"content":"i"},"finish_reason":null,"index":0,"logprobs":null,"token_ids":null}],"kv_transfer_params":null}
+        {"choices":[{"delta":{},"finish_reason":"stop","index":0,"logprobs":null,"stop_reason":null,"token_ids":null,"weight_versions":null}],"kv_transfer_params":null}"#]].assert_eq(&payloads);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stream_chat_echo_preserves_requested_token_ids() {
+    let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "echo": true,
+                        "return_token_ids": true,
+                        "messages": [{"role": "assistant", "content": "Echo: "}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let chunks = sse_json_payloads(&text);
+
+    assert!(
+        chunks.iter().all(|chunk| chunk.get("error").is_none()),
+        "{text}"
+    );
+    assert!(!chunks[0]["prompt_token_ids"].as_array().expect("prompt token IDs").is_empty());
+    assert_eq!(chunks[0].get("prompt_text"), Some(&json!(null)));
+    let echo = chunks
+        .iter()
+        .find(|chunk| chunk["choices"][0]["delta"]["content"] == "Echo: ")
+        .expect("echo chunk");
+    assert_eq!(
+        echo["choices"],
+        json!([{
+            "index": 0,
+            "delta": {"content": "Echo: "},
+            "logprobs": null,
+            "finish_reason": null
+        }])
+    );
+    assert!(echo.get("kv_transfer_params").is_none());
+    let content = chunks
+        .iter()
+        .find(|chunk| chunk["choices"][0]["delta"]["content"] == "h")
+        .expect("content chunk");
+    assert_eq!(content["choices"][0]["token_ids"], json!([u32::from(b'h')]));
+    assert!(chunks.iter().skip(1).all(|chunk| chunk.get("prompt_token_ids").is_none()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stream_chat_usage_includes_configured_reasoning_parser_details() {
+    let (app, engine_task) = test_app_with_chat_and_engine_request_check(
+        |llm| {
+            ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new()))
+                .with_reasoning_parser(ParserSelection::Explicit("qwen3".to_string()))
+        },
+        |_| {},
+    )
+    .await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "stream_options": {
+                            "include_usage": true,
+                            "continuous_usage_stats": true
+                        },
+                        "chat_template_kwargs": {"enable_thinking": false},
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let chunks = sse_json_payloads(&text);
+    assert!(chunks.len() > 1, "{text}");
+    assert_eq!(chunks.last().expect("usage chunk")["choices"], json!([]));
+    for chunk in &chunks {
+        assert_eq!(
+            chunk["usage"]["completion_tokens_details"],
+            json!({"reasoning_tokens": 0})
+        );
+        assert!(chunk["usage"].get("prompt_tokens_details").is_none());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -17,10 +17,10 @@ use vllm_text::TruncationSide;
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, FunctionCallResponse, Normalizable, PromptLogprobs, ReasoningEffort,
-    StreamOptions, StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta,
-    ToolChoice, Usage, default_true, deserialize_request_top_k, validate_messages, validate_stop,
-    validate_top_p_value,
+    ChatLogProbs, ChatMessage, CompletionTokenUsageInfo, FunctionCallResponse, Normalizable,
+    PromptLogprobs, PromptTokenUsageInfo, ReasoningEffort, StreamOptions, StreamResponseEnvelope,
+    StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, Usage, default_true,
+    deserialize_request_top_k, validate_messages, validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -441,9 +441,12 @@ pub(super) struct ChatCompletionStreamResponse {
     #[serde(flatten)]
     pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<ChatCompletionStreamChoice>,
-    pub usage: Option<Usage>,
+    pub usage: Option<ChatCompletionStreamUsage>,
     pub metrics: Option<StreamPerRequestMetrics>,
-    pub prompt_token_ids: Option<Vec<u32>>,
+    // Outer None omits a field; Some(None) emits an explicit null.
+    pub prompt_token_ids: Option<Option<Vec<u32>>>,
+    pub prompt_text: Option<Option<String>>,
+    pub kv_transfer_params: Option<Option<Value>>,
 }
 
 impl ChatCompletionStreamResponse {
@@ -455,6 +458,39 @@ impl ChatCompletionStreamResponse {
             usage: None,
             metrics: None,
             prompt_token_ids: None,
+            prompt_text: None,
+            kv_transfer_params: None,
+        }
+    }
+}
+
+/// Streaming usage follows Python's recursive null omission on usage-only chunks.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ChatCompletionStreamUsage {
+    pub prompt_tokens: usize,
+    pub total_tokens: usize,
+    pub completion_tokens: Option<usize>,
+    pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
+    pub completion_tokens_details: Option<Option<CompletionTokenUsageInfo>>,
+}
+
+impl ChatCompletionStreamUsage {
+    /// Preserve explicit nulls on continuous usage; omit them on usage-only chunks.
+    pub fn new(usage: Usage, include_reasoning_tokens_details: bool, exclude_none: bool) -> Self {
+        let completion_tokens_details = if include_reasoning_tokens_details {
+            Some(Some(usage.completion_tokens_details))
+        } else if exclude_none {
+            None
+        } else {
+            Some(None)
+        };
+        Self {
+            prompt_tokens: usage.prompt_tokens,
+            total_tokens: usage.total_tokens,
+            completion_tokens: usage.completion_tokens,
+            prompt_tokens_details: usage.prompt_tokens_details,
+            completion_tokens_details,
         }
     }
 }
@@ -465,10 +501,13 @@ impl ChatCompletionStreamResponse {
 pub(super) struct ChatCompletionStreamChoice {
     pub index: u32,
     pub delta: ChatMessageDelta,
+    #[serialize_always]
     pub logprobs: Option<ChatLogProbs>,
+    #[serialize_always]
     pub finish_reason: Option<String>,
-    pub stop_reason: Option<Value>,
-    pub token_ids: Option<Vec<u32>>,
+    pub stop_reason: Option<Option<Value>>,
+    pub token_ids: Option<Option<Vec<u32>>>,
+    pub weight_versions: Option<Option<Vec<WeightVersionSpan>>>,
 }
 
 /// Mirrors the Python vLLM `DeltaMessage` class.
