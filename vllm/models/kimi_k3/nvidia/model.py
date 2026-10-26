@@ -523,8 +523,13 @@ class KimiMoE(nn.Module):
                     f"EP size {ep_size}."
                 )
             num_local_experts = num_experts // ep_size
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            if use_sequence_parallel:
+                # The layer only sees this rank's shard of the batch.
+                max_num_tokens = cdiv(max_num_tokens, self.tp_size)
             self.experts = DeepGemmMegaMoEExperts(
                 vllm_config,
+                max_num_tokens=max_num_tokens,
                 num_experts=num_experts,
                 num_local_experts=num_local_experts,
                 experts_start_idx=ep_rank * num_local_experts,
