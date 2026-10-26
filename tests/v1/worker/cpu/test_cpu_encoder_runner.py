@@ -18,6 +18,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.cpu.encoder_cache import EncoderCache
 from vllm.v1.worker.cpu.encoder_runner import EncoderRunner
+from vllm.v1.worker.cpu.model_states.default import DefaultModelState
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cpu() or HAS_TRITON,
@@ -203,6 +204,56 @@ def vllm_config(tmp_path) -> VllmConfig:
         model_config=model_config,
         scheduler_config=scheduler_config,
     )
+
+
+def test_model_state_caches_encoder_output_without_gathering(
+    vllm_config: VllmConfig,
+) -> None:
+    model = _EncoderModel()
+    cache = EncoderCache()
+    cache.add_request(
+        "req0",
+        [
+            _feature("encoded", 0, 1, data=_item(7)),
+            _feature("not-encoded", 1, 1),
+        ],
+    )
+    state = DefaultModelState(
+        vllm_config,
+        model,
+        cache,
+        torch.device("cpu"),
+    )
+
+    state.execute_mm_encoder({"req0": [0, 1]})
+
+    assert model.batches == [[7]]
+    assert set(cache.encoder_outputs) == {"encoded"}
+    torch.testing.assert_close(
+        cache.encoder_outputs["encoded"],
+        torch.full((1, HIDDEN_SIZE), 7.0),
+    )
+
+
+def test_model_state_empty_encoder_schedule_is_a_noop(
+    vllm_config: VllmConfig,
+) -> None:
+    model = _EncoderModel()
+    cache = EncoderCache()
+    cached = torch.ones(1, HIDDEN_SIZE)
+    cache.encoder_outputs["existing"] = cached
+    state = DefaultModelState(
+        vllm_config,
+        model,
+        cache,
+        torch.device("cpu"),
+    )
+
+    state.execute_mm_encoder({})
+
+    assert model.batches == []
+    assert set(cache.encoder_outputs) == {"existing"}
+    assert cache.encoder_outputs["existing"] is cached
 
 
 def test_encoder_timing_stats_registry() -> None:

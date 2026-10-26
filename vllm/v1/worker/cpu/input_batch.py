@@ -4,12 +4,15 @@
 """CPU implementations for Model Runner V2 input-batch kernels."""
 
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.cpu.attn_utils import FastPrefillBatchMetadata
 
 
 class InputBuffers:
@@ -95,11 +98,12 @@ class InputBatch:
     max_query_len: int | None = None
 
     # Arms the KV-sharing fast prefill path for this step.
-    fast_prefill: object | None = None
+    fast_prefill: "FastPrefillBatchMetadata | None" = None
 
     # [num_reqs] prefilling rows that schedule one new prompt token over
     # existing context and so compute exactly like decodes.
     prefill_runs_as_decode_np: np.ndarray | None = None
+
 
 class BatchReqState(NamedTuple):
     """CPU request state for a scheduled batch, in batch (sorted) order."""
