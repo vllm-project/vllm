@@ -196,18 +196,17 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
                 i,
                 has_w13_bias,
             )
-            layer.w13_weight = torch.nn.Parameter(
-                layer.w13_weight.data[:, perm, :].contiguous(),
-                requires_grad=False,
+            replace_parameter(
+                layer, "w13_weight", layer.w13_weight.data[:, perm, :].contiguous()
             )
-            layer.w13_weight_scale = torch.nn.Parameter(
+            replace_parameter(
+                layer,
+                "w13_weight_scale",
                 layer.w13_weight_scale.data[:, perm].contiguous(),
-                requires_grad=False,
             )
             if has_w13_bias:
-                layer.w13_bias = torch.nn.Parameter(
-                    layer.w13_bias.data[:, perm].contiguous(),
-                    requires_grad=False,
+                replace_parameter(
+                    layer, "w13_bias", layer.w13_bias.data[:, perm].contiguous()
                 )
 
         w13, w2 = convert_to_int8_moe_kernel_format(
@@ -291,4 +290,5 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )

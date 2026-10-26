@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Async scheduling for diffusion requests.
-
-These rules live here so Scheduler.schedule() and AsyncScheduler stay
-unchanged. VllmConfig selects this class for a diffusion model under async
-scheduling. A sync scheduler creates no output placeholders, which both rules
-read.
-"""
+"""Canvas-width handling and async read deferral for diffusion requests."""
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.request import Request
 
 
@@ -38,7 +34,22 @@ def _read_in_flight(request: Request, width: int) -> bool:
     return request.num_output_placeholders >= steps * width
 
 
-class DiffusionAsyncScheduler(AsyncScheduler):
+class DiffusionScheduler(Scheduler):
+    def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
+        for i, (req_id, token_ids) in enumerate(
+            zip(draft_token_ids.req_ids, draft_token_ids.draft_token_ids)
+        ):
+            request = self.requests.get(req_id)
+            if request is None:
+                continue
+            width = diffusion_canvas_width(request, self.num_spec_tokens)
+            # Remove padded positions before the base scheduler validates grammar.
+            if len(token_ids) > width:
+                draft_token_ids.draft_token_ids[i] = token_ids[:width]
+        super().update_draft_token_ids(draft_token_ids)
+
+
+class DiffusionAsyncScheduler(DiffusionScheduler, AsyncScheduler):
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         for request in self.running:
             width = diffusion_canvas_width(request, self.num_spec_tokens)
