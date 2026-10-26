@@ -337,6 +337,9 @@ class KvBalancedMla:
         requests = seq_lens.numel()
         assert cache.shape[-1] == LATENT + ROPE, cache.shape
         assert workspace.numel() >= self.workspace_bytes
+        # The kernel takes Int32 sizes: pass only this decode's part of a larger
+        # shared workspace.
+        workspace = workspace[: self.workspace_bytes]
         query = query.view(requests, self.q, self.heads, LATENT + ROPE)
         out = query.new_empty(
             (requests, self.q, self.heads, LATENT), dtype=torch.bfloat16

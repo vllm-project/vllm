@@ -106,7 +106,8 @@ def _run(query, cache, block_table, local, totals, causal, cp=(1, 0, 1)):
     core = KvBalancedMla(heads, q, max_requests=8, causal=causal, device=device)
     counts = torch.zeros(core.max_requests, dtype=torch.int32, device=device)
     work = torch.zeros(core.list_len, dtype=torch.int32, device=device)
-    workspace = torch.empty(core.workspace_bytes, dtype=torch.int8, device=device)
+    # A shared workspace larger than the kernel's Int32 sizes allow.
+    workspace = torch.empty(2**31 + 1024, dtype=torch.int8, device=device)
     core.plan(local, counts, work)
     lse = torch.empty(requests, q, heads, dtype=torch.float32, device=device)
     out = core.decode(
