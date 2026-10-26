@@ -117,7 +117,7 @@ models:
       ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
       tp: "--gpu-memory-utilization 0.85"
-      ep: "--gpu-memory-utilization 0.75 --enforce-eager"
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"PIECEWISE","custom_ops":["+quant_fp8"]}'
 
   - model: GLM-5.2-FP8
     env:
