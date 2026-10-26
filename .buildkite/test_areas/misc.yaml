@@ -144,25 +144,128 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors Shard %N"
-  device: h200_35gb
-  key: v1-kv-connectors
-  timeout_in_minutes: 45
-  parallelism: 4
-  source_file_dependencies: *v1-core-kv-metrics-deps
+# Disabled until the KV connectors installation is locked.
+# - label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
+#   device: h200_35gb
+#   key: v1-kv-connectors
+#   automatic_shard: true
+#   timeout_in_minutes: 45
+#   source_file_dependencies: *v1-core-kv-metrics-deps
+#   commands:
+#     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+#     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+#     - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
+#   mirror:
+#     amd:
+#       label: ":amd: (MI355 DPX) V1 KV Connectors"
+#       automatic_shard: true
+#       dind: false
+#       device: mi355_dpx
+#       timeout_in_minutes: 60
+#       depends_on:
+#       - image-build-amd
+
+# The shared KV Connectors steps above exclude vllm/distributed/kv_transfer/ from
+# their triggers, and CUDA skips MoRIIO's mori/aiter-gated tests. Run the whole
+# MoRIIO suite on ROCm whenever the connector or its tests change.
+# Disabled until the KV connectors installation is locked.
+# - label: ":amd: (MI355 DPX) MoRIIO Connector Unit Tests"
+#   key: amd-moriio-connector-unit-mi355
+#   dind: false
+#   device: mi355_dpx
+#   num_devices: 1
+#   timeout_in_minutes: 30
+#   working_dir: /vllm-workspace/tests
+#   depends_on:
+#   - image-build-amd
+#   source_file_dependencies:
+#   - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
+#   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+#   - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
+#   - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
+#   - tests/v1/kv_connector/unit/test_moriio_
+#   - tests/v1/kv_connector/unit/utils.py
+#   - requirements/kv_connectors_rocm.txt
+#   commands:
+#   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#   - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
+
+# UMBP is built on mori, so its tests skip on CUDA. Run them on MI355 whenever
+# the connector or its tests change.
+- label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
+  key: amd-umbp-connector-unit-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/kv_cache_interface.py
+  - tests/v1/kv_connector/unit/test_umbp_
+  - tests/v1/kv_connector/umbp_test_utils.py
   commands:
-    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) V1 KV Connectors Shard %N"
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 60
-      depends_on:
-      - image-build-amd
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
+
+# Single-node MoRIIO P/D on dummy weights, WRITE and READ mode: prefill and
+# decode on separate GPUs over xGMI, compared exactly against a direct serve.
+# Disabled until the KV connectors installation is locked.
+# - label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight E2E Shard %N"
+#   key: amd-moriio-write-dummy-e2e-mi355
+#   dind: false
+#   device: mi355_2
+#   num_devices: 2
+#   # ~3.5-5 min per case; pytest-shard hashes test ids, so with 28 cases the
+#   # largest of 6 shards holds 7 (~32 min on MI355). Every case picks free ports
+#   # for its servers and proxy and its own compile-cache dir.
+#   parallelism: 6
+#   timeout_in_minutes: 45
+#   working_dir: /vllm-workspace/tests
+#   depends_on:
+#   - image-build-amd
+#   source_file_dependencies:
+#   - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
+#   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+#   - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
+#   - vllm/model_executor/model_loader/dummy_loader.py
+#   - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
+#   - tests/v1/kv_connector/moriio_integration/
+#   - requirements/kv_connectors_rocm.txt
+#   commands:
+#   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#   - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k "not heterogeneous_tp" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+# The same P/D between different TP sizes (WRITE TP2 -> TP1, READ of MLA
+# TP1 <-> TP2), which needs 3 GPUs: 8 cases, ~36 min on MI355.
+# Disabled until the KV connectors installation is locked.
+# - label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight Heterogeneous TP"
+#   key: amd-moriio-write-dummy-hetero-tp-mi355
+#   dind: false
+#   device: mi355_4
+#   num_devices: 4
+#   timeout_in_minutes: 45
+#   working_dir: /vllm-workspace/tests
+#   depends_on:
+#   - image-build-amd
+#   source_file_dependencies:
+#   - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
+#   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+#   - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
+#   - vllm/model_executor/model_loader/dummy_loader.py
+#   - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
+#   - tests/v1/kv_connector/moriio_integration/
+#   - requirements/kv_connectors_rocm.txt
+#   commands:
+#   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#   - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k heterogeneous_tp
 
 - label: ":nvidia: (H200 MIG 35GB) V1 Metrics + LM Eval"
   device: h200_35gb
@@ -221,6 +324,7 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
+    - pytest -v -s v1/worker/test_gpu_worker.py::test_cpu_worker_without_triton
     - pytest -v -s v1/worker/test_cpu_worker_kv_budget.py
     - pytest -v -s v1/test_kv_cache_spec_registry.py
     - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
@@ -309,37 +413,38 @@ steps:
       - tests/v1/kv_connector/extract_hidden_states_integration/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 18GB) Regression"
-  key: regression
-  timeout_in_minutes: 30
-  device: h200_18gb
-  source_file_dependencies:
-  - vllm/config/
-  - vllm/distributed/
-  - "!vllm/distributed/kv_transfer/"
-  - vllm/engine/
-  - vllm/inputs/
-  - vllm/model_executor/
-  - vllm/multimodal/
-  - vllm/platforms/
-  - vllm/sampling_params.py
-  - vllm/transformers_utils/
-  - vllm/utils/
-  - vllm/v1/
-  - tests/test_regression
-  commands:
-  - pip install 'modelscope<1.38'
-  - pytest -v -s test_regression.py
-  working_dir: "/vllm-workspace/tests" # optional
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Regression"
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 25
-      depends_on:
-      - image-build-amd
-      working_dir: /vllm-workspace/tests
+# Disabled until the modelscope installation is locked.
+# - label: ":nvidia: (H200 MIG 18GB) Regression"
+#   key: regression
+#   timeout_in_minutes: 30
+#   device: h200_18gb
+#   source_file_dependencies:
+#   - vllm/config/
+#   - vllm/distributed/
+#   - "!vllm/distributed/kv_transfer/"
+#   - vllm/engine/
+#   - vllm/inputs/
+#   - vllm/model_executor/
+#   - vllm/multimodal/
+#   - vllm/platforms/
+#   - vllm/sampling_params.py
+#   - vllm/transformers_utils/
+#   - vllm/utils/
+#   - vllm/v1/
+#   - tests/test_regression
+#   commands:
+#   - pip install 'modelscope<1.38'
+#   - pytest -v -s test_regression.py
+#   working_dir: "/vllm-workspace/tests" # optional
+#   mirror:
+#     amd:
+#       label: ":amd: (MI355 DPX) Regression"
+#       dind: false
+#       device: mi355_dpx
+#       timeout_in_minutes: 25
+#       depends_on:
+#       - image-build-amd
+#       working_dir: /vllm-workspace/tests
 
 - label: ":nvidia: (H200 MIG 35GB) Examples"
   device: h200_35gb
@@ -387,45 +492,46 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (L4) Metrics, Tracing"
-  key: metrics-tracing-2-gpus
-  timeout_in_minutes: 25
-  device: l4
-  num_devices: 2
-  source_file_dependencies:
-  - vllm/config/
-  - vllm/distributed/
-  - "!vllm/distributed/kv_transfer/"
-  - vllm/engine/
-  - vllm/inputs/
-  - vllm/model_executor/
-  - vllm/multimodal/
-  - vllm/platforms/
-  - vllm/sampling_params.py
-  - vllm/tracing/
-  - vllm/transformers_utils/
-  - vllm/utils/
-  - vllm/v1/
-  - tests/v1/tracing
-  - tests/tracing/
-  commands:
-  - "pip install \
-      'opentelemetry-sdk>=1.26.0' \
-      'opentelemetry-api>=1.26.0' \
-      'opentelemetry-exporter-otlp>=1.26.0' \
-      'opentelemetry-semantic-conventions-ai>=0.4.1'"
-  - pytest -v -s v1/tracing
-  - pytest -v -s tracing
-  mirror:
-    amd:
-      label: ":amd: (MI300) Metrics, Tracing"
-      dind: false
-      device: mi300_2
-      timeout_in_minutes: 30
-      depends_on:
-      - image-build-amd
+# Disabled until the tracing packages installation is locked.
+# - label: ":nvidia: (L4) Metrics, Tracing"
+#   key: metrics-tracing-2-gpus
+#   timeout_in_minutes: 25
+#   device: l4
+#   num_devices: 2
+#   source_file_dependencies:
+#   - vllm/config/
+#   - vllm/distributed/
+#   - "!vllm/distributed/kv_transfer/"
+#   - vllm/engine/
+#   - vllm/inputs/
+#   - vllm/model_executor/
+#   - vllm/multimodal/
+#   - vllm/platforms/
+#   - vllm/sampling_params.py
+#   - vllm/tracing/
+#   - vllm/transformers_utils/
+#   - vllm/utils/
+#   - vllm/v1/
+#   - tests/v1/tracing
+#   - tests/tracing/
+#   commands:
+#   - "pip install \
+#       'opentelemetry-sdk>=1.26.0' \
+#       'opentelemetry-api>=1.26.0' \
+#       'opentelemetry-exporter-otlp>=1.26.0' \
+#       'opentelemetry-semantic-conventions-ai>=0.4.1'"
+#   - pytest -v -s v1/tracing
+#   - pytest -v -s tracing
+#   mirror:
+#     amd:
+#       label: ":amd: (MI300) Metrics, Tracing"
+#       dind: false
+#       device: mi300_2
+#       timeout_in_minutes: 30
+#       depends_on:
+#       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Python-only Installation"
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] Python-only Installation"
   key: python-only-installation
   depends_on: ~
   optional: true
@@ -449,7 +555,7 @@ steps:
       - setup.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 18GB) Python 3.14 Smoke Nightly"
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] Python 3.14 Smoke"
   key: python-314-smoke-nightly
   depends_on: ~
   optional: true
@@ -501,8 +607,129 @@ steps:
       - pytest -v -s multimodal/test_cache.py::test_sleep_wake_preserves_mm_cache_consistency
       - pytest -v -s utils_
 
-- label: ":computer: (CPU) Params, Env, Tokenizers, Parser"
-  key: cpu-params-env-tokenizers-parser
+# Disabled until the cmake installation is locked.
+# - label: ":computer: (CPU) Params, Env, Tokenizers, Parser"
+#   key: cpu-params-env-tokenizers-parser
+#   depends_on:
+#   - image-build-cpu
+#   timeout_in_minutes: 35
+#   source_file_dependencies: &cpu-async-engine-deps
+#   - vllm/assets/
+#   - vllm/config/
+#   - vllm/device_allocator/
+#   - vllm/connections.py
+#   - vllm/engine/arg_utils.py
+#   - vllm/renderers/chat_utils/
+#   - vllm/entrypoints/mcp/
+#   - vllm/entrypoints/openai/chat_completion/protocol.py
+#   - vllm/entrypoints/openai/completion/protocol.py
+#   - vllm/entrypoints/openai/responses/protocol.py
+#   - vllm/entrypoints/generate/base/protocol.py
+#   - vllm/env_override.py
+#   - vllm/envs.py
+#   - vllm/exceptions.py
+#   - vllm/inputs/
+#   - vllm/logging_utils/
+#   - vllm/logprobs.py
+#   - vllm/model_executor/layers/quantization/quark/
+#   - vllm/model_executor/model_loader/tensorizer.py
+#   - vllm/models/muse_spark/
+#   - vllm/multimodal/
+#   - vllm/outputs.py
+#   - vllm/parser/
+#   - vllm/platforms/
+#   - vllm/pooling_params.py
+#   - vllm/ray/
+#   - vllm/reasoning/
+#   - vllm/renderers/
+#   - vllm/sampling_params.py
+#   - vllm/scalar_type.py
+#   - vllm/tokenizers/
+#   - vllm/tool_parsers/
+#   - vllm/transformers_utils/
+#   - vllm/triton_utils/
+#   - vllm/utils/
+#   - vllm/v1/
+#   - vllm/version.py
+#   - cmake/utils.cmake
+#   - cmake/hipify.py
+#   - tests/test_uvicorn_logging.py
+#   - tests/test_attention_backend_registry.py
+#   - tests/test_audio_media_size_precheck.py
+#   - tests/test_cmake_utils.py
+#   - tests/test_connections.py
+#   - tests/test_embedded_commit.py
+#   - tests/test_envs.py
+#   - tests/test_force_first_config.py
+#   - tests/test_fxgraphcache_pickle_patch.py
+#   - tests/test_logprobs.py
+#   - tests/test_outputs.py
+#   - tests/test_pcp_dp.py
+#   - tests/test_pooling_params.py
+#   - tests/test_quantization_revision_pin.py
+#   - tests/test_ray_env.py
+#   - tests/test_ray_env_utils.py
+#   - tests/test_request_input_bounds.py
+#   - tests/test_sampling_params.py
+#   - tests/test_scalartype.py
+#   - tests/test_tensorizer_revision_pin.py
+#   - tests/test_triton_utils.py
+#   - tests/test_version.py
+#   - tests/test_zen_cpu_platform_detection.py
+#   - tests/multimodal
+#   - tests/renderers
+#   - tests/standalone_tests/lazy_imports.py
+#   - tests/standalone_tests/test_precompiled_wheel.py
+#   - setup.py
+#   - tests/reasoning
+#   - tools/pre_commit/check_test_tethering.py
+#   - tools/pre_commit/test_tethering_allowlist.txt
+#   - tests/tools/test_check_test_tethering.py
+#   - tools/pre_commit/check_agent_files.py
+#   - tests/tools/test_check_agent_files.py
+#   - tools/pre_commit/check_trust_remote_code.py
+#   - tests/tools/test_check_trust_remote_code.py
+#   - tests/tool_parsers
+#   - tests/tokenizers_
+#   - tests/parser
+#   - tests/transformers_utils
+#   - tests/config
+#   - tests/device_allocator
+#   device: cpu-small
+#   commands:
+#   - pip install cmake # test_cmake_utils.py shells out to cmake; the CPU image has none
+#   - python3 standalone_tests/lazy_imports.py
+#   - python3 standalone_tests/test_precompiled_wheel.py
+#   - pytest -v -s device_allocator
+#   - pytest -v -s test_uvicorn_logging.py
+#   - pytest -v -s test_attention_backend_registry.py
+#   - pytest -v -s test_audio_media_size_precheck.py
+#   - pytest -v -s test_cmake_utils.py
+#   - pytest -v -s test_connections.py
+#   - pytest -v -s test_embedded_commit.py
+#   - pytest -v -s test_envs.py
+#   - pytest -v -s test_force_first_config.py
+#   - pytest -v -s test_fxgraphcache_pickle_patch.py
+#   - pytest -v -s test_logprobs.py
+#   - pytest -v -s test_outputs.py
+#   - pytest -v -s test_pcp_dp.py
+#   - pytest -v -s test_pooling_params.py
+#   - pytest -v -s test_quantization_revision_pin.py
+#   - pytest -v -s test_ray_env.py
+#   - pytest -v -s test_ray_env_utils.py
+#   - pytest -v -s test_request_input_bounds.py
+#   - pytest -v -s test_sampling_params.py
+#   - pytest -v -s test_scalartype.py
+#   - pytest -v -s test_tensorizer_revision_pin.py
+#   - pytest -v -s test_triton_utils.py
+#   - pytest -v -s test_version.py
+#   - pytest -v -s test_zen_cpu_platform_detection.py
+#   - pytest -v -s tokenizers_
+#   - pytest -v -s parser
+#   - pytest -v -s transformers_utils
+
+- label: ":computer: (CPU) Multimodal + Config"
+  key: cpu-multimodal-config
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
@@ -512,7 +739,7 @@ steps:
   - vllm/device_allocator/
   - vllm/connections.py
   - vllm/engine/arg_utils.py
-  - vllm/entrypoints/chat_utils.py
+  - vllm/renderers/chat_utils/
   - vllm/entrypoints/mcp/
   - vllm/entrypoints/openai/chat_completion/protocol.py
   - vllm/entrypoints/openai/completion/protocol.py
@@ -526,6 +753,7 @@ steps:
   - vllm/logprobs.py
   - vllm/model_executor/layers/quantization/quark/
   - vllm/model_executor/model_loader/tensorizer.py
+  - vllm/models/muse_spark/
   - vllm/multimodal/
   - vllm/outputs.py
   - vllm/parser/
@@ -544,6 +772,7 @@ steps:
   - vllm/v1/
   - vllm/version.py
   - cmake/utils.cmake
+  - cmake/hipify.py
   - tests/test_uvicorn_logging.py
   - tests/test_attention_backend_registry.py
   - tests/test_audio_media_size_precheck.py
@@ -578,6 +807,8 @@ steps:
   - tests/tools/test_check_test_tethering.py
   - tools/pre_commit/check_agent_files.py
   - tests/tools/test_check_agent_files.py
+  - tools/pre_commit/check_trust_remote_code.py
+  - tests/tools/test_check_trust_remote_code.py
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
@@ -586,49 +817,11 @@ steps:
   - tests/device_allocator
   device: cpu-small
   commands:
-  - pip install cmake # test_cmake_utils.py shells out to cmake; the CPU image has none
-  - python3 standalone_tests/lazy_imports.py
-  - python3 standalone_tests/test_precompiled_wheel.py
-  - pytest -v -s device_allocator
-  - pytest -v -s test_uvicorn_logging.py
-  - pytest -v -s test_attention_backend_registry.py
-  - pytest -v -s test_audio_media_size_precheck.py
-  - pytest -v -s test_cmake_utils.py
-  - pytest -v -s test_connections.py
-  - pytest -v -s test_embedded_commit.py
-  - pytest -v -s test_envs.py
-  - pytest -v -s test_force_first_config.py
-  - pytest -v -s test_fxgraphcache_pickle_patch.py
-  - pytest -v -s test_logprobs.py
-  - pytest -v -s test_outputs.py
-  - pytest -v -s test_pcp_dp.py
-  - pytest -v -s test_pooling_params.py
-  - pytest -v -s test_quantization_revision_pin.py
-  - pytest -v -s test_ray_env.py
-  - pytest -v -s test_ray_env_utils.py
-  - pytest -v -s test_request_input_bounds.py
-  - pytest -v -s test_sampling_params.py
-  - pytest -v -s test_scalartype.py
-  - pytest -v -s test_tensorizer_revision_pin.py
-  - pytest -v -s test_triton_utils.py
-  - pytest -v -s test_version.py
-  - pytest -v -s test_zen_cpu_platform_detection.py
-  - pytest -v -s tokenizers_
-  - pytest -v -s parser
-  - pytest -v -s transformers_utils
-
-- label: ":computer: (CPU) Multimodal + Config"
-  key: cpu-multimodal-config
-  depends_on:
-  - image-build-cpu
-  timeout_in_minutes: 35
-  source_file_dependencies: *cpu-async-engine-deps
-  device: cpu-small
-  commands:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s config
   - pytest -v -s tools/test_check_test_tethering.py
   - pytest -v -s tools/test_check_agent_files.py
+  - pytest -v -s tools/test_check_trust_remote_code.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
@@ -651,148 +844,151 @@ steps:
   commands:
   - pytest -v -s tool_parsers
 
-- label: ":nvidia: (A100) Batch Invariance"
-  key: batch-invariance-a100
-  timeout_in_minutes: 60
-  device: a100
-  source_file_dependencies:
-    - vllm/v1/attention
-    - vllm/model_executor/layers
-    - vllm/model_executor/kernels/linear
-    - vllm/model_executor/determinism
-    - tests/v1/determinism/
-  commands:
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pip install pytest-timeout pytest-forked
-    - pytest -v -s v1/determinism/test_batch_invariance.py
-    - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
-  mirror:
-    amd:
-      label: ":amd: (MI250) Batch Invariance"
-      dind: false
-      device: mi250_1
-      timeout_in_minutes: 60
-      env:
-        VLLM_GPU_MEMORY_UTILIZATION: "0.8"
-        VLLM_TEST_CLEAN_GPU_MEMORY: "1"
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - vllm/v1/attention
-      - vllm/model_executor/layers
-      - vllm/model_executor/kernels/linear
-      - vllm/model_executor/determinism
-      - tests/v1/determinism/
-      - vllm/_aiter_ops.py
-      - vllm/platforms/rocm.py
+# Disabled until the pytest plugins installation is locked.
+# - label: ":nvidia: (A100) Batch Invariance"
+#   key: batch-invariance-a100
+#   timeout_in_minutes: 60
+#   device: a100
+#   source_file_dependencies:
+#     - vllm/v1/attention
+#     - vllm/model_executor/layers
+#     - vllm/model_executor/kernels/linear
+#     - vllm/model_executor/determinism
+#     - tests/v1/determinism/
+#   commands:
+#     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#     - pip install pytest-timeout pytest-forked
+#     - pytest -v -s v1/determinism/test_batch_invariance.py
+#     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+#   mirror:
+#     amd:
+#       label: ":amd: (MI250) Batch Invariance"
+#       dind: false
+#       device: mi250_1
+#       timeout_in_minutes: 60
+#       env:
+#         VLLM_GPU_MEMORY_UTILIZATION: "0.8"
+#         VLLM_TEST_CLEAN_GPU_MEMORY: "1"
+#       depends_on:
+#       - image-build-amd
+#       source_file_dependencies:
+#       - vllm/v1/attention
+#       - vllm/model_executor/layers
+#       - vllm/model_executor/kernels/linear
+#       - vllm/model_executor/determinism
+#       - tests/v1/determinism/
+#       - vllm/_aiter_ops.py
+#       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H100) Batch Invariance"
-  key: batch-invariance-h100
-  automatic_shard: true
-  timeout_in_minutes: 60
-  device: h100
-  source_file_dependencies:
-    - vllm/v1/attention
-    - vllm/model_executor/layers
-    - vllm/lora/ops/triton_ops
-    - vllm/model_executor/kernels/linear
-    - vllm/model_executor/determinism
-    - tests/v1/determinism/
-  commands:
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pip install pytest-timeout pytest-forked
-    - pytest -v -s v1/determinism/test_batch_invariance.py
-    - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
-    - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
-    - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
-    - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
-  mirror:
-    amd:
-      label: ":amd: (MI300) Batch Invariance"
-      dind: false
-      automatic_shard: true
-      device: mi300_1
-      timeout_in_minutes: 60
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - vllm/v1/attention
-      - vllm/model_executor/layers
-      - vllm/lora/ops/triton_ops
-      - vllm/model_executor/kernels/linear
-      - vllm/model_executor/determinism
-      - tests/v1/determinism/
-      - vllm/_aiter_ops.py
-      - vllm/platforms/rocm.py
-      commands:
-      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - pip install pytest-timeout pytest-forked
-      - pytest -v -s v1/determinism/test_batch_invariance.py
-      - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
-      - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
-      - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
-      - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
-      - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
-      - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
+# Disabled until the pytest plugins installation is locked.
+# - label: ":nvidia: (H100) Batch Invariance"
+#   key: batch-invariance-h100
+#   automatic_shard: true
+#   timeout_in_minutes: 60
+#   device: h100
+#   source_file_dependencies:
+#     - vllm/v1/attention
+#     - vllm/model_executor/layers
+#     - vllm/lora/ops/triton_ops
+#     - vllm/model_executor/kernels/linear
+#     - vllm/model_executor/determinism
+#     - tests/v1/determinism/
+#   commands:
+#     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#     - pip install pytest-timeout pytest-forked
+#     - pytest -v -s v1/determinism/test_batch_invariance.py
+#     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+#     - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+#     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+#     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
+#   mirror:
+#     amd:
+#       label: ":amd: (MI300) Batch Invariance"
+#       dind: false
+#       automatic_shard: true
+#       device: mi300_1
+#       timeout_in_minutes: 60
+#       depends_on:
+#       - image-build-amd
+#       source_file_dependencies:
+#       - vllm/v1/attention
+#       - vllm/model_executor/layers
+#       - vllm/lora/ops/triton_ops
+#       - vllm/model_executor/kernels/linear
+#       - vllm/model_executor/determinism
+#       - tests/v1/determinism/
+#       - vllm/_aiter_ops.py
+#       - vllm/platforms/rocm.py
+#       commands:
+#       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#       - pip install pytest-timeout pytest-forked
+#       - pytest -v -s v1/determinism/test_batch_invariance.py
+#       - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+#       - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+#       - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
+#       - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
+#       - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+#       - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
 
-- label: ":nvidia: (B200) Batch Invariance"
-  key: batch-invariance-b200
-  automatic_shard: true
-  timeout_in_minutes: 45
-  device: b200-k8s
-  source_file_dependencies:
-    - vllm/v1/attention
-    - vllm/model_executor/layers
-    - vllm/lora/ops/triton_ops
-    - vllm/model_executor/kernels/linear
-    - vllm/model_executor/determinism
-    - tests/v1/determinism/
-  commands:
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pip install pytest-timeout pytest-forked
-    - pytest -v -s v1/determinism/test_batch_invariance.py
-    - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
-    - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
-    - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
-    - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
-    - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
-    - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
-    - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
-    - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
-    - pytest -v -s v1/determinism/test_online_batch_invariance.py
-  mirror:
-    amd:
-      label: ":amd: (MI355) Batch Invariance"
-      dind: false
-      device: mi355_1
-      timeout_in_minutes: 60
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - vllm/v1/attention
-      - vllm/model_executor/layers
-      - vllm/lora/ops/triton_ops
-      - vllm/model_executor/kernels/linear
-      - vllm/model_executor/determinism
-      - tests/v1/determinism/
-      - vllm/_aiter_ops.py
-      - vllm/platforms/rocm.py
-      commands:
-      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - pip install pytest-timeout pytest-forked
-      - pytest -v -s v1/determinism/test_batch_invariance.py
-      - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
-      - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
-      - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
-      - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
-      - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
-      - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
-      - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
-      - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
-      - pytest -v -s v1/determinism/test_online_batch_invariance.py
-      - pytest -v -s v1/determinism/test_mx_linear_batch_invariant.py
+# Disabled until the pytest plugins installation is locked.
+# - label: ":nvidia: (B200) Batch Invariance"
+#   key: batch-invariance-b200
+#   automatic_shard: true
+#   timeout_in_minutes: 45
+#   device: b200-k8s
+#   source_file_dependencies:
+#     - vllm/v1/attention
+#     - vllm/model_executor/layers
+#     - vllm/lora/ops/triton_ops
+#     - vllm/model_executor/kernels/linear
+#     - vllm/model_executor/determinism
+#     - tests/v1/determinism/
+#   commands:
+#     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#     - pip install pytest-timeout pytest-forked
+#     - pytest -v -s v1/determinism/test_batch_invariance.py
+#     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+#     - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+#     - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
+#     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+#     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
+#     - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
+#     - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
+#     - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
+#     - pytest -v -s v1/determinism/test_online_batch_invariance.py
+#   mirror:
+#     amd:
+#       label: ":amd: (MI355) Batch Invariance"
+#       dind: false
+#       device: mi355_1
+#       timeout_in_minutes: 60
+#       depends_on:
+#       - image-build-amd
+#       source_file_dependencies:
+#       - vllm/v1/attention
+#       - vllm/model_executor/layers
+#       - vllm/lora/ops/triton_ops
+#       - vllm/model_executor/kernels/linear
+#       - vllm/model_executor/determinism
+#       - tests/v1/determinism/
+#       - vllm/_aiter_ops.py
+#       - vllm/platforms/rocm.py
+#       commands:
+#       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#       - pip install pytest-timeout pytest-forked
+#       - pytest -v -s v1/determinism/test_batch_invariance.py
+#       - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+#       - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+#       - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
+#       - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+#       - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
+#       - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
+#       - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
+#       - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
+#       - pytest -v -s v1/determinism/test_online_batch_invariance.py
+#       - pytest -v -s v1/determinism/test_mx_linear_batch_invariant.py
 
-- label: ":nvidia: (H100) Batch Invariance (Distributed)"
+- label: ":nvidia: (H100) [Nightly] Batch Invariance (Distributed)"
   key: batch-invariance-distributed-4xh100
   automatic_shard: true
   timeout_in_minutes: 45
@@ -835,7 +1031,7 @@ steps:
       - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
       - VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
 
-- label: ":nvidia: (H200 MIG 35GB) Acceptance Length (Large Models)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Acceptance Length (Large Models)"
   device: h200_35gb
   key: acceptance-length-test-large-models
   timeout_in_minutes: 20
