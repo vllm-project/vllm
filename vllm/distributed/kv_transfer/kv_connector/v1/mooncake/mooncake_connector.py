@@ -875,6 +875,12 @@ class MooncakeXferMetadata(
     # peer did not send the field, so the run must not be promoted.
     registered_row_offsets: list[int] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
+    # Physical blocks per logical block, as this worker's cache packs them.
+    # Only a reader that plans the copy itself needs this.
+    physical_blocks_per_logical: int = 1
+    # Whether the sending worker's KV cache is replicated across its TP ranks.
+    # Only a reader that plans the copy itself needs this.
+    producer_cache_replicated: bool = False
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
@@ -900,6 +906,9 @@ class MooncakeXferResponse(
     ok_reqs: list[ReqId] | None = None
     err_reqs: list[ReqId] | None = None
     err_msg: str | None = None
+    # A pull answer: the prefiller's regions when the reader asked for them,
+    # and the blocks it resolved for this wave.
+    metadata: MooncakeXferMetadata | None = None
     # The pull's layout_id once P holds that layout. D omits the layout only
     # after seeing it, so a P that predates this field always gets it.
     layout_id: int = 0
@@ -2993,6 +3002,10 @@ class MooncakeConnectorWorker:
                 remote_tp_size=self.tp_size,
                 remote_tp_rank=self.tp_rank,
                 remote_pp_size=self.pp_size,
+                physical_blocks_per_logical=(
+                    self._physical_blocks_per_logical_kv_block
+                ),
+                producer_cache_replicated=self._producer_cache_is_replicated(),
                 layout_id=self._kv_layout_id,
                 req_blocks=req_blocks,
                 kv_caches_base_addr=[],
@@ -3005,6 +3018,8 @@ class MooncakeConnectorWorker:
             remote_tp_size=self.tp_size,
             remote_tp_rank=self.tp_rank,
             remote_pp_size=self.pp_size,
+            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+            producer_cache_replicated=self._producer_cache_is_replicated(),
             layout_id=self._kv_layout_id,
             req_blocks=req_blocks,
             kv_caches_base_addr=self.kv_caches_base_addr,
