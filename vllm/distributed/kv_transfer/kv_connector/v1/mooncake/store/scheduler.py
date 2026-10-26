@@ -786,8 +786,9 @@ class MooncakeStoreScheduler:
         self._last_boundary_stats_log = now
         self._logged_boundary_drops = stats.dropped
         logger.info(
-            "Mooncake declined %d of %d mamba boundary-state hand-offs; those "
-            "states are not persisted and cannot be hit later (%s)",
+            "Mooncake declined %d of %d boundary-state and partial-tail "
+            "hand-offs; those blocks are not persisted and cannot be hit later "
+            "(%s)",
             stats.dropped,
             stats.published,
             stats.summary(),

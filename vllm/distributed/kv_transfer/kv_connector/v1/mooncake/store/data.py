@@ -898,17 +898,21 @@ class StoreResidency:
 
 @dataclass
 class BoundaryStoreStats:
-    """Cumulative counters for the mamba boundary-state hand-offs.
+    """Cumulative counters for boundary-state and partial-tail hand-offs.
 
     ``store_mask`` keeps mamba groups out of the positional save, so a hand-off
-    is the only way a mamba state is ever persisted. Every branch that declines
-    one is silent: the state is simply not written and a later request misses on
-    that group, with nothing in the logs. Each decline reason is counted here so
-    that a lower hit rate can be attributed.
+    is the only way a mamba state is ever persisted; a finish-time partial tail
+    is the other hand-off, and declining one leaves those blocks out of the Store
+    the same way. Every branch that declines one is silent: the state is simply
+    not written and a later request misses on that group, with nothing in the
+    logs. Each decline reason is counted here so that a lower hit rate can be
+    attributed.
 
     Counters are in hand-off entries as offered by the core, not in store keys:
     rank striping drops a key on every rank but one, and a sub-block tail entry
-    contributes keys for every group. Never cleared.
+    contributes keys for every group. A finish-time hand-off is accepted or
+    declined as one batch, so a declined batch is charged in full to the reason
+    that declined it. Never cleared.
     """
 
     published: int = 0
