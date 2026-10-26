@@ -34,15 +34,18 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.models.deepseek_v41.common.ops import (
     MXFP4_BLOCK_SIZE,
+    compute_global_topk_indices_and_lens,
     fused_indexer_q_rope_quant,
     indexer_k_norm_rope_store,
 )
+from vllm.models.deepseek_v41.cross_layer import get_cross_layer_runtime
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
     from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
         RocmSparseMQAIndexer,
     )
+    from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadata
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
@@ -1238,6 +1241,48 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         assert self.compressed_cache_prefix is not None
         source = self._static_forward_context[self.compressed_cache_prefix]
         return source.kv_cache
+
+    def _cross_layer_decode_key(self) -> tuple[int, int]:
+        assert self.index_source_layer_id is not None
+        return (self.index_source_layer_id, self.compress_ratio)
+
+    def _cross_layer_prefill_key(self) -> tuple[int, int, str]:
+        assert self.index_source_layer_id is not None
+        assert self.compressed_cache_prefix is not None
+        return (
+            self.index_source_layer_id,
+            self.compress_ratio,
+            self.compressed_cache_prefix,
+        )
+
+    def _decode_global_topk(
+        self,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        attn_metadata: "DeepseekV4FlashMLAMetadata",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Global top-k slots shared by every consumer of one index source."""
+        assert self.index_source_layer_id is not None
+        assert self.topk_indices_buffer is not None
+        assert swa_metadata.is_valid_token is not None
+        assert swa_metadata.token_to_req_indices is not None
+
+        runtime = get_cross_layer_runtime()
+        key = self._cross_layer_decode_key()
+        cached = runtime.reuse_decode_topk(key, self.is_index_source)
+        if cached is not None:
+            assert len(cached) == 2
+            return cast(tuple[torch.Tensor, torch.Tensor], cached)
+
+        num_decode_tokens = swa_metadata.num_decode_tokens
+        result = compute_global_topk_indices_and_lens(
+            self.topk_indices_buffer[:num_decode_tokens],
+            swa_metadata.token_to_req_indices,
+            attn_metadata.block_table[: swa_metadata.num_decodes],
+            attn_metadata.block_size // self.compress_ratio,
+            swa_metadata.is_valid_token[:num_decode_tokens],
+        )
+        runtime.cache_decode_topk(key, result)
+        return result
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
