@@ -703,7 +703,7 @@ class BaseRenderer(ABC, Generic[_T]):
         special_tokens_mask = prompt.pop("prompt_special_tokens_mask", None)
         if special_tokens_mask is None:
             return token_ids
-        # TokenizeParams may append padding to token_ids without extending this mask.
+        # TokenizeParams truncates both token_ids and the mask, but pads only token_ids.
         # IDs beyond the mask are therefore padding tokens.
         return [
             token_id
