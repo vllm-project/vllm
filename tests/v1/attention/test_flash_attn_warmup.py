@@ -26,12 +26,13 @@ def config():
 @pytest.mark.skipif(
     not flash_attn.current_platform.is_cuda(), reason="requires native FA4"
 )
+@pytest.mark.parametrize("max_num_seqs", [256, 512])
 @pytest.mark.parametrize("num_qo_heads", [1, 8])
 @pytest.mark.parametrize("page_size, num_pages", [(128, 64), (16384, 1)])
 def test_dense_warmup_populates_native_forward_cache(
-    monkeypatch, config, num_qo_heads, page_size, num_pages
+    monkeypatch, config, max_num_seqs, num_qo_heads, page_size, num_pages
 ):
-    """Exercise native scheduler dispatch, not just the representative shapes."""
+    """Each warmup key compiles one distinct kernel that served shapes reuse."""
     capability = flash_attn.current_platform.get_device_capability()
     if capability is None or capability.major not in (10, 11):
         pytest.skip("requires Blackwell FA4")
@@ -40,20 +41,22 @@ def test_dense_warmup_populates_native_forward_cache(
 
     compile_from_specs = flash_attn.compile_flash_attn_varlen_func_from_specs
     assert compile_from_specs is not None
-    monkeypatch.setattr(interface._flash_attn_fwd, "compile_cache", JITCache())
+    forward_cache = JITCache()
+    monkeypatch.setattr(interface._flash_attn_fwd, "compile_cache", forward_cache)
+    config.scheduler_config.max_num_seqs = max_num_seqs
     spec = FullAttentionSpec(
         block_size=page_size, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
     )
-    flash_attn.FA4DenseAttentionKernel().warmup(
+    kernel = flash_attn.FA4DenseAttentionKernel()
+    keys = kernel.get_warmup_keys(
         vllm_config=config, kv_cache_spec=spec, num_qo_heads=num_qo_heads
     )
+    kernel.compile_many(keys)
+    warm_kernels = set(forward_cache.cache)
+    assert len(warm_kernels) == len(keys)
 
-    def unexpected_compile(*args, **kwargs):
-        pytest.fail("FA4 forward compilation after dense warmup")
-
-    monkeypatch.setattr(interface.cute, "compile", unexpected_compile)
     for batch, query_len, splits in product(
-        (1, 16, 512), (1, 17, 33, 129, 162, 257, 1611), (1, 2)
+        (1, 16, max_num_seqs), (1, 17, 33, 129, 162, 257, 1611), (1, 2)
     ):
         compile_from_specs(
             q_shape=(batch * query_len, num_qo_heads, 128),
@@ -70,3 +73,4 @@ def test_dense_warmup_populates_native_forward_cache(
             fa_version=4,
             return_softmax_lse=False,
         )
+        assert set(forward_cache.cache) == warm_kernels, (batch, query_len, splits)
