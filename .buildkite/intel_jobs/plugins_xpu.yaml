@@ -160,6 +160,6 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pip install vllm-bnb-plugin\>=0.0.1 || true &&
+    'pip install --no-deps bitsandbytes\>=0.48.1 vllm-bnb-plugin\>=0.0.1 || true &&
     cd tests &&
     pytest --continue-on-collection-errors -v -s plugins_tests/bitsandbytes -m distributed(num_gpus=2) || true'
