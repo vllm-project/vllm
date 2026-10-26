@@ -452,6 +452,7 @@ def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
     # Set by the handshake callback even when one of the targets failed.
     worker.write_ready_flags = {"10.0.0.1:2": True}
     worker._handshake_lock = threading.Lock()
+    worker._handshake_futures = {}
     worker._ready_requests = queue.Queue()
     worker.moriio_config = SimpleNamespace(transfer_timeout=0.01)
     worker.handshakes = []
@@ -463,6 +464,10 @@ def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
         lambda req_id, meta, layer_name, kv_layer: worker.writes.append(req_id)
     )
     return worker
+
+
+def _dp_sessions(engine_id: str, dp_size: int = 16) -> set[str]:
+    return {f"{engine_id}_dp{dp}" for dp in range(dp_size)}
 
 
 def test_fanout_write_retries_handshake_after_one_target_failed():
@@ -477,7 +482,9 @@ def test_fanout_write_retries_handshake_after_one_target_failed():
 
 
 def test_fanout_write_proceeds_once_every_target_session_exists():
-    worker = _fanout_save_worker({"10.0.0.1:2_dp0_tp0", "10.0.0.1:2_dp0_tp1"})
+    worker = _fanout_save_worker(
+        {f"10.0.0.1:2_dp{dp}_tp{tp}" for dp in range(16) for tp in (0, 1)}
+    )
     metadata = MoRIIOConnectorMetadata()
     metadata.reqs_to_save["req"] = _req_meta(tp_size=2)
 
@@ -485,6 +492,69 @@ def test_fanout_write_proceeds_once_every_target_session_exists():
 
     assert worker.handshakes == []
     assert worker.writes == ["req"]
+
+
+def test_write_waits_for_every_decode_dp_rank_not_just_dp0():
+    # Decode picks the DP rank after allocation, so dp0 alone is not enough.
+    worker = _fanout_save_worker({"10.0.0.1:2_dp0"})
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_save["req"] = _req_meta()
+
+    worker.save_kv_layer(metadata, "layer0", kv_layer=None, attn_metadata=None)
+
+    assert worker.handshakes == ["req"]
+    assert worker.writes == []
+
+
+def test_new_decode_engine_is_written_in_the_same_layer_once_handshaked():
+    # xPyD: engine A is known, engine B is met for the first time and listed
+    # first. B's request must wait for B, not be released by A's readiness.
+    worker = _fanout_save_worker(_dp_sessions("10.0.0.1:2"))
+    worker.moriio_config = SimpleNamespace(transfer_timeout=5.0)
+
+    def handshake(req_id, remote_engine_id, meta):
+        worker.handshakes.append(req_id)
+        keys = _dp_sessions(remote_engine_id)
+        worker._handshake_futures.update(dict.fromkeys(keys))
+
+        def finish():
+            time.sleep(0.05)
+            with worker._handshake_lock:
+                for key in keys:
+                    worker._handshake_futures.pop(key)
+                    worker._remote_agents[key] = {"agent"}
+
+        threading.Thread(target=finish).start()
+
+    worker._background_moriio_handshake = handshake  # type: ignore[method-assign]
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_save["req-b"] = _req_meta(transfer_id="tB", remote_host="10.0.0.2")
+    metadata.reqs_to_save["req-a"] = _req_meta()
+
+    worker.save_kv_layer(metadata, "layer0", kv_layer=None, attn_metadata=None)
+
+    assert worker.handshakes == ["req-b"]
+    assert worker.writes == ["req-a", "req-b"]
+
+
+def test_in_flight_handshake_is_not_resubmitted_on_every_layer():
+    worker = _fanout_save_worker(set())
+    worker._background_moriio_handshake = (  # type: ignore[method-assign]
+        lambda req_id, remote_engine_id, meta: (
+            worker.handshakes.append(req_id),
+            worker._handshake_futures.update(
+                dict.fromkeys(_dp_sessions(remote_engine_id))
+            ),
+        )
+    )
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_save["req"] = _req_meta()
+
+    for layer_name in ("layer0", "layer1"):
+        worker.save_kv_layer(metadata, layer_name, kv_layer=None, attn_metadata=None)
+
+    assert worker.handshakes == ["req"]
+    assert worker.writes == []
 
 
 def test_rank_with_nothing_to_write_does_not_wait_for_a_handshake():

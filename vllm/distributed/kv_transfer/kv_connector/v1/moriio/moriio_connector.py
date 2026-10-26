@@ -2304,7 +2304,9 @@ class MoRIIOConnectorWorker:
 
         def request_ready(_f: Future[Any], entry=(req_id, meta)):
             logger.info("MoRIIO handshake done for request %s", req_id)
-            self._ready_requests.put(entry)
+            # The WRITE producer re-checks its deferred requests itself.
+            if not (self.mode == MoRIIOMode.WRITE and self.is_producer):
+                self._ready_requests.put(entry)
             self.load_ready_flag[remote_engine_id] = True
             self.write_ready_flags[remote_engine_id] = True
 
@@ -2349,6 +2351,8 @@ class MoRIIOConnectorWorker:
                     target_tp_rank,
                 )
                 fut_list.append(future)
+                # Registered before the callback, which may run immediately.
+                self._handshake_futures[target_engine_id] = future
 
                 def done_callback(f: Future[set[str]], eid=target_engine_id):
                     with self._handshake_lock:
@@ -2359,7 +2363,6 @@ class MoRIIOConnectorWorker:
                             logger.exception("Handshake with %s failed", eid)
 
                 future.add_done_callback(done_callback)
-                self._handshake_futures[target_engine_id] = future
 
         # fut = fut_list
         def wait_all_dp():
@@ -3052,10 +3055,10 @@ class MoRIIOConnectorWorker:
             return
         if self.mode == MoRIIOMode.READ:
             return
-        remote_engine_id = None
 
+        # Decode engines met for the first time -> (session keys, deferred reqs).
+        pending: dict[EngineId, tuple[list[str], list[tuple[ReqId, ReqMeta]]]] = {}
         for req_id, meta in metadata.reqs_to_save.items():
-            # we only need to check if dp0 in rank
             remote_engine_id = (
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
             )
@@ -3063,61 +3066,74 @@ class MoRIIOConnectorWorker:
             meta.remote_engine_id = remote_engine_id
 
             write_targets = self._write_tp_mapping(int(meta.tp_size)).target_tp_ranks
-            is_fanout = len(write_targets) > 1
-            dp0_remote_engine_id = self.get_engine_name_with_dp(remote_engine_id, 0)
             if not write_targets:
                 # Another producer rank writes everything this one holds: no
                 # session is needed, and waiting for a handshake that never
                 # starts would stall this rank, and its TP peers, every layer.
-                self.write_ready_flags[remote_engine_id] = True
-            # A failed target handshake must be retried, so check every target
-            # session rather than write_ready_flags, which is set either way.
-            handshake_ready = (
-                all(
-                    self.get_engine_name_with_dp_tp(remote_engine_id, 0, tp_rank)
-                    in self._remote_agents
-                    for tp_rank in write_targets
+                self._write_blocks_for_req(req_id, meta, layer_name, kv_layer)
+                continue
+            if remote_engine_id not in pending:
+                # Decode picks the DP rank only after allocation, so the write
+                # may target any of them: every DP rank needs a session.
+                dp_ranks = range(int(meta.remote_dp_size))
+                session_keys = (
+                    [
+                        self.get_engine_name_with_dp_tp(remote_engine_id, dp, tp)
+                        for dp in dp_ranks
+                        for tp in write_targets
+                    ]
+                    if len(write_targets) > 1
+                    else [
+                        self.get_engine_name_with_dp(remote_engine_id, dp)
+                        for dp in dp_ranks
+                    ]
                 )
-                if is_fanout
-                else not write_targets or dp0_remote_engine_id in self._remote_agents
-            )
-            if not handshake_ready:
-                # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
-                        self._background_moriio_handshake(
-                            req_id, remote_engine_id, meta
-                        )
+                    if self._write_sessions_ready(session_keys):
+                        ready = True
+                    else:
+                        ready = False
+                        # A failed handshake leaves no live future, so it is
+                        # retried here.
+                        if not self._write_handshake_in_flight(session_keys):
+                            self._background_moriio_handshake(
+                                req_id, remote_engine_id, meta
+                            )
+                if ready:
+                    self._write_blocks_for_req(req_id, meta, layer_name, kv_layer)
+                    continue
+                pending[remote_engine_id] = (session_keys, [])
+            pending[remote_engine_id][1].append((req_id, meta))
 
-                        continue
-            self._write_blocks_for_req(req_id, meta, layer_name, kv_layer)
-
-        if remote_engine_id is None:
-            return
-        _deadline = time.monotonic() + self.moriio_config.transfer_timeout
-        while True:
-            if (
-                self._ready_requests.empty()
-                and remote_engine_id not in self.write_ready_flags
-            ):
-                if time.monotonic() > _deadline:
-                    logger.warning(
-                        "Timed out waiting for write_ready_flags[%s]; "
-                        "adjust with kv_connector_extra_config.transfer_timeout",
-                        remote_engine_id,
-                    )
+        # Block this layer only for engines still handshaking, so their
+        # requests are written from the first layer on.
+        deadline = time.monotonic() + self.moriio_config.transfer_timeout
+        for remote_engine_id, (session_keys, reqs) in pending.items():
+            while True:
+                with self._handshake_lock:
+                    ready = self._write_sessions_ready(session_keys)
+                    in_flight = self._write_handshake_in_flight(session_keys)
+                if ready or not in_flight or time.monotonic() > deadline:
                     break
                 time.sleep(0.001)
-                continue
-            elif not self._ready_requests.empty() and (
-                remote_engine_id in self.write_ready_flags
-            ):
-                self._write_blocks_for_req(
-                    *self._ready_requests.get_nowait(), layer_name, kv_layer
+            if not ready:
+                logger.warning(
+                    "MoRIIO WRITE handshake with %s incomplete (%s); deferring "
+                    "%d request(s). Adjust with "
+                    "kv_connector_extra_config.transfer_timeout",
+                    remote_engine_id,
+                    "in flight" if in_flight else "failed",
+                    len(reqs),
                 )
-                break
-            else:
-                break
+                continue
+            for req_id, meta in reqs:
+                self._write_blocks_for_req(req_id, meta, layer_name, kv_layer)
+
+    def _write_sessions_ready(self, session_keys: list[str]) -> bool:
+        return all(key in self._remote_agents for key in session_keys)
+
+    def _write_handshake_in_flight(self, session_keys: list[str]) -> bool:
+        return any(key in self._handshake_futures for key in session_keys)
 
     def get_engine_name_with_dp(self, engine_name, dp_rank):
         return f"{engine_name}_dp{dp_rank}"
