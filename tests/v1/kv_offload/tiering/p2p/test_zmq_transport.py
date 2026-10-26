@@ -10,6 +10,7 @@ import time
 import pytest
 import zmq
 
+from vllm.v1.kv_offload.tiering.p2p.control import zmq as zmq_module
 from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
     ZmqConnection,
     ZmqTransport,
@@ -230,6 +231,21 @@ class TestZmqTransportConnectivity:
         transport.close()
         transport.close()  # should not raise
 
+    def test_send_raises_instead_of_blocking_when_queue_full(self, monkeypatch):
+        """A peer that never reads fills the queue; send() raises, not blocks."""
+        monkeypatch.setattr(zmq_module, "_SNDHWM", 2)
+        transport, _ = _make_transport()
+        try:
+            # Nothing listens on this port, so queued messages never drain.
+            conn = transport.connect(f"127.0.0.1:{_free_port()}")
+            start = time.monotonic()
+            with pytest.raises(ConnectionError, match="send queue"):
+                for _ in range(10):
+                    conn.send({"type": "test"})
+            assert time.monotonic() - start < 1.0
+        finally:
+            transport.close()
+
 
 class TestZmqReconnect:
     """Reconnecting to a peer whose connection died (real ZMQ sockets).
@@ -335,4 +351,48 @@ class TestZmqReconnect:
             assert msgs == [{"type": "connect", "seq": 2}]
         finally:
             transport_a.close()
+            transport_b.close()
+
+
+class TestExpandedMonitorEvents:
+    """The monitor mask includes EVENT_DISCONNECTED and EVENT_CLOSED so
+    both are treated as fatal."""
+
+    def test_fatal_events_include_disconnected_and_closed(self):
+        from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
+            _FATAL_MONITOR_EVENTS,
+        )
+
+        assert zmq.EVENT_DISCONNECTED in _FATAL_MONITOR_EVENTS
+        assert zmq.EVENT_CLOSED in _FATAL_MONITOR_EVENTS
+
+    def test_monitor_mask_covers_fatal_events(self):
+        from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
+            _FATAL_MONITOR_EVENTS,
+            _MONITOR_EVENT_MASK,
+        )
+
+        for ev in _FATAL_MONITOR_EVENTS:
+            assert _MONITOR_EVENT_MASK & ev == ev
+
+    def test_disconnect_detected_after_peer_shutdown(self):
+        """When a peer's transport closes, the outbound connection is
+        eventually marked dead by the monitor."""
+        transport_a, port_a = _make_transport()
+        transport_b, _ = _make_transport()
+
+        try:
+            conn_out = transport_b.connect(f"127.0.0.1:{port_a}")
+            conn_out.send({"type": "hello"})
+            _wait_for_inbound(transport_a)
+
+            transport_a.close()
+
+            end = time.monotonic() + 15
+            while conn_out.alive and time.monotonic() < end:
+                transport_b.poll()
+                time.sleep(0.05)
+
+            assert not conn_out.alive
+        finally:
             transport_b.close()
