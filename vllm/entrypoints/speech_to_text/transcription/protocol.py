@@ -24,7 +24,12 @@ from vllm.sampling_params import (
 )
 from vllm.utils import random_uuid
 
-from ..base.protocol import _LONG_INFO, TranscriptionResponseFormat
+from ..base.protocol import (
+    _LONG_INFO,
+    _VAD_MAX_DURATION_MS,
+    TranscriptionResponseFormat,
+    validate_vad_config,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -153,6 +158,7 @@ class TranscriptionRequest(OpenAIBaseModel):
         default=_DEFAULT_VAD_CONFIG.min_speech_duration_ms,
         alias="vad_config.min_speech_duration_ms",
         ge=0,
+        le=_VAD_MAX_DURATION_MS,
     )
     vad_max_speech_duration_s: float = Field(
         default=_DEFAULT_VAD_CONFIG.max_speech_duration_s,
@@ -163,16 +169,19 @@ class TranscriptionRequest(OpenAIBaseModel):
         default=_DEFAULT_VAD_CONFIG.min_silence_duration_ms,
         alias="vad_config.min_silence_duration_ms",
         ge=0,
+        le=_VAD_MAX_DURATION_MS,
     )
     vad_speech_pad_ms: int = Field(
         default=_DEFAULT_VAD_CONFIG.speech_pad_ms,
         alias="vad_config.speech_pad_ms",
         ge=0,
+        le=_VAD_MAX_DURATION_MS,
     )
     vad_min_silence_at_max_speech_ms: int = Field(
         default=_DEFAULT_VAD_CONFIG.min_silence_at_max_speech_ms,
         alias="vad_config.min_silence_at_max_speech_ms",
         ge=0,
+        le=_VAD_MAX_DURATION_MS,
     )
     vad_use_max_poss_sil_at_max_speech: bool = Field(
         default=_DEFAULT_VAD_CONFIG.use_max_poss_sil_at_max_speech,
@@ -272,6 +281,11 @@ class TranscriptionRequest(OpenAIBaseModel):
             min_silence_at_max_speech_ms=self.vad_min_silence_at_max_speech_ms,
             use_max_poss_sil_at_max_speech=(self.vad_use_max_poss_sil_at_max_speech),
         )
+
+    @model_validator(mode="after")
+    def validate_vad_options(self):
+        validate_vad_config(self.build_vad_config())
+        return self
 
     def to_beam_search_params(
         self,
