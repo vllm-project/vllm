@@ -980,7 +980,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             if num_gpu_blocks is None
             else num_gpu_blocks * kv_cache_spec.page_size_bytes
         )
-        self._supports_fused_gather = self._kv_cache_dtype_str != "fp8_ds_mla"
+        from vllm.platforms.rocm import on_gfx950
+
+        self._supports_fused_gather = (
+            self._kv_cache_dtype_str != "fp8_ds_mla" and on_gfx950()
+        )
         # MLAAttention quantizes decode Q to FP8 before calling this backend
         # whenever the KV cache is FP8 and supports_quant_query_input is true.
         q_dtype = (

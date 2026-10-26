@@ -31,6 +31,19 @@ pytestmark = pytest.mark.skipif(
     reason="needs ROCm and AITER",
 )
 
+
+def _on_gfx950() -> bool:
+    if not _fused_gather_available():
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
+requires_gfx950 = pytest.mark.skipif(
+    not _on_gfx950(), reason="the fused gather is only enabled on gfx950"
+)
+
 KV_LORA_RANK = 512  # gather_kv_b_proj asserts KV_CDim == 4 * 128
 QK_NOPE_HEAD_DIM = 128
 QK_ROPE_HEAD_DIM = 64
@@ -182,6 +195,7 @@ def _reference_chunk_kv_indices(prefill, chunk) -> torch.Tensor:
     return torch.cat(rows).to(torch.int32)
 
 
+@requires_gfx950
 @pytest.mark.parametrize("context_lens", [SINGLE_CHUNK_CONTEXTS, MULTI_CHUNK_CONTEXTS])
 def test_context_chunk_kv_indices_follow_the_block_table(context_lens):
     """The builder's per-token indices match a block-table walk per chunk."""
@@ -197,6 +211,7 @@ def test_context_chunk_kv_indices_follow_the_block_table(context_lens):
         assert torch.equal(kv_indices[chunk.index], expected)
 
 
+@requires_gfx950
 @pytest.mark.parametrize(
     ("context_lens", "expected_chunks"),
     [(SINGLE_CHUNK_CONTEXTS, 1), (MULTI_CHUNK_CONTEXTS, 2)],
