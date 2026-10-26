@@ -52,8 +52,8 @@ def test_dense_warmup_populates_native_forward_cache(
         pytest.fail("FA4 forward compilation after dense warmup")
 
     monkeypatch.setattr(interface.cute, "compile", unexpected_compile)
-    for batch, query_len, splits, causal in product(
-        (1, 16, 512), (1, 17, 33, 129, 162, 257, 1611), (1, 2), (True, False)
+    for batch, query_len, splits in product(
+        (1, 16, 512), (1, 17, 33, 129, 162, 257, 1611), (1, 2)
     ):
         compile_from_specs(
             q_shape=(batch * query_len, num_qo_heads, 128),
@@ -65,7 +65,7 @@ def test_dense_warmup_populates_native_forward_cache(
             page_table_shape=(batch, num_pages),
             max_seqlen_q=query_len,
             max_seqlen_k=8192,
-            causal=causal,
+            causal=True,
             num_splits=splits,
             fa_version=4,
             return_softmax_lse=False,

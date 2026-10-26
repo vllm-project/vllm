@@ -95,7 +95,7 @@ FA4_DENSE_MAX_SEQLEN_K = 8192
 
 
 class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"]):
-    """Warm paged FA4 on Blackwell and Hopper."""
+    """Warm paged, causal FA4 on Blackwell and Hopper."""
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -109,7 +109,6 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         softcap: float
         batch_size: int
         num_splits: int
-        causal: bool
 
     @staticmethod
     def kernel(*args: Any, **kwargs: Any) -> Any:
@@ -129,7 +128,6 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         softcap: float,
         batch_size: int = 1,
         num_splits: int = 1,
-        causal: bool = True,
     ) -> CompileKey:
         return self.CompileKey(
             max_seqlen_q=max_seqlen_q,
@@ -142,7 +140,6 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             softcap=softcap,
             batch_size=batch_size,
             num_splits=num_splits,
-            causal=causal,
         )
 
     def get_warmup_keys(
@@ -175,7 +172,6 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             )
             or 0
         )
-        causal_modes = WarmupChoices(True)
         if (
             major in (10, 11)
             and uses_fa4_hd256_kernel(head_dim)
@@ -195,7 +191,6 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             # Large batches use a separate varlen batch-lookup specialization.
             batch_sizes = WarmupChoices(2, vllm_config.scheduler_config.max_num_seqs)
             split_counts = WarmupChoices(1, 2)
-            causal_modes = WarmupChoices(True, False)
         elif (
             major == 9 and head_dim == 512 and window_size == (-1, -1) and softcap == 0
         ):
@@ -211,7 +206,6 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             max_seqlen_q=query_lengths,
             batch_size=batch_sizes,
             num_splits=split_counts,
-            causal=causal_modes,
             dtype=vllm_config.model_config.dtype,
             num_qo_heads=num_qo_heads,
             num_kv_heads=kv_cache_spec.num_kv_heads,
@@ -256,7 +250,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             ),
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=FA4_DENSE_MAX_SEQLEN_K,
-            causal=compile_key.causal,
+            causal=True,
             window_size=[
                 1 if compile_key.has_window_left else -1,
                 1 if compile_key.has_window_right else -1,
