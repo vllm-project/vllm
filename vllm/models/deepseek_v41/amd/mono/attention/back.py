@@ -518,7 +518,9 @@ def stage_combine(c, unit):
     h = hg * COMB_HEADS + wave
     nchunk = c["nchunk"]
     ck = chunk_keys(d, s)
-    kv_len = ld_i32(a["klen"], t)
+    if const_expr("krdy" in c):
+        await_flags(c, c["krdy"], 1, lambda u: t)
+    kv_len = ld_i32(a["klen"], t, CM_DEV if const_expr("krdy" in c) else 0)
     nlive = (kv_len + ck - 1) // ck
     pos = ld_i32(a["pos"], 2 * t)
     sink = ld_f32(a["sink"], h) * fx.Float32(LOG2E)
