@@ -127,6 +127,15 @@ def test_non_pure_decode_batches_use_the_generic_path(
     assert _run(layer, _make_metadata(**meta_kwargs)) == "generic"
 
 
+@pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
+def test_ds_conv_state_uses_the_generic_path(gqa_interleaved_layout: bool) -> None:
+    layer = _make_layer(gqa_interleaved_layout)
+    with patch.object(
+        qwen_gdn_linear_attn, "is_conv_state_dim_first", return_value=True
+    ):
+        assert _run(layer, _make_metadata()) == "generic"
+
+
 def _prefill_reference(q, k, v, g, beta, initial_state, lengths):
     """Independent token-wise recurrence in the layer's [value, key] layout."""
     q, k, v, g, beta, initial_state = (
