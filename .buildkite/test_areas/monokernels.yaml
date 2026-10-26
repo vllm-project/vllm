@@ -193,6 +193,12 @@ steps:
   working_dir: /vllm-workspace/
   source_file_dependencies:
   - vllm/models/deepseek_v4/
+  - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/model_loader/dummy_loader.py
+  - vllm/config/compilation.py
+  - vllm/config/kernel.py
+  - vllm/forward_context.py
   - vllm/platforms/rocm.py
   - vllm/_aiter_ops.py
   - docker/Dockerfile.rocm_base
