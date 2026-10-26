@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_checksum.checksum import KVChecksumScheduled
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -263,6 +263,13 @@ class SchedulerOutput:
     # list of mm_hash strings associated with the encoder outputs to be
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
+
+    # Request-local CPU payload updates: None releases a consumed input; a
+    # payload restores it for re-encoding after KV-load rollback. GPU embeddings
+    # and the feature's identifier/placeholder metadata are unaffected.
+    encoder_input_updates: dict[str, dict[int, "MultiModalKwargsItem | None"]] = field(
+        default_factory=dict
+    )
 
     scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
 
