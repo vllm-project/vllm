@@ -183,6 +183,14 @@ def test_models(
         # builder and layer consistent and preserves the L4 test path.
         vllm_kwargs["attention_config"] = {"flash_attn_version": 2}
 
+    if (
+        current_platform.is_xpu()
+        and model == "EleutherAI/pythia-70m"
+        and use_prompt_embeds
+    ):
+        # Avoid batch variance in the XPU Pythia prompt-embeds comparison.
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+
     with vllm_runner(
         model,
         tokenizer_name=model_info.tokenizer or model,
