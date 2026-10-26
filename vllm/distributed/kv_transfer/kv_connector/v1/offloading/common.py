@@ -62,6 +62,8 @@ class TransferJob:
     req_id: ReqId
     src_spec: LoadStoreSpec
     dst_spec: LoadStoreSpec
+    # Load only: completed before this step's forward pass.
+    sync: bool = False
 
 
 @dataclass
