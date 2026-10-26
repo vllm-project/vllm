@@ -384,6 +384,40 @@ def get_rdna_version() -> int:
     return 0
 
 
+def _maybe_default_dsv4_mxfp4_indexer(vllm_config: "VllmConfig") -> None:
+    """Default DeepSeek-V4's sparse indexer K cache to MXFP4 on CDNA4.
+
+    aiter's paged MXFP4 indexer is faster than FP8 on MI350/MI355 (lower
+    TTFT/TPOT, ~9% more KV cache) with near-lossless accuracy. Only rewrite
+    "auto" and fall back to FP8 silently when the MXFP4 path can't run, so
+    configs that worked before never start failing.
+    """
+    hf_config = getattr(vllm_config.model_config, "hf_config", None)
+    if getattr(hf_config, "model_type", None) != "deepseek_v4":
+        return
+    attention_config = vllm_config.attention_config
+    parallel_config = vllm_config.parallel_config
+    if (
+        attention_config.indexer_kv_dtype != "auto"
+        or attention_config.indexer_sparse_logits
+        or get_cdna_version() != 4
+        # The MXFP4 indexer metadata builder rejects DCP/PCP.
+        or parallel_config.decode_context_parallel_size > 1
+        or parallel_config.prefill_context_parallel_size > 1
+    ):
+        return
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_enabled():
+        return
+    attention_config.indexer_kv_dtype = "mxfp4"
+    logger.info_once(
+        "DeepSeek-V4 on ROCm CDNA4: using aiter's paged MXFP4 sparse indexer "
+        "K cache by default. Pass --attention-config "
+        '\'{"indexer_kv_dtype": "fp8"}\' to use the FP8 indexer cache.'
+    )
+
+
 @cache
 def get_rocm_version() -> tuple[int, ...] | None:
     """Return the installed ROCm release as (major, minor, patch), or None."""
@@ -1167,6 +1201,8 @@ class RocmPlatform(Platform):
                 "with multimodal-bidirectional attention."
             )
             scheduler_config.disable_chunked_mm_input = True
+
+        _maybe_default_dsv4_mxfp4_indexer(vllm_config)
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

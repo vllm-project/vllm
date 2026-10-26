@@ -34,7 +34,6 @@ use axum::{Json, Router};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
-use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
 use crate::middleware;
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 use crate::state::AppState;
@@ -269,7 +268,10 @@ fn build_router_with_options(
     let enable_api_key_auth = state.has_api_keys();
     let mut router = router
         .with_state(state.clone())
-        .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
+        .layer(match state.api_server_options.request_body_limit_bytes {
+            Some(limit) => DefaultBodyLimit::max(limit),
+            None => DefaultBodyLimit::disable(),
+        })
         .layer(middleware::request_runtime_layer(state.clone()))
         .layer(from_fn_with_state(
             state.clone(),
