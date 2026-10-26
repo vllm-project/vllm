@@ -811,6 +811,19 @@ The **Maximum Throughput** pattern (`--request-rate=inf --max-concurrency=<limit
 
 This pattern helps determine optimal concurrency settings for your production load balancer configuration.
 
+!!! note "TTFT in this pattern"
+    With `--request-rate=inf --max-concurrency=N`, the first N requests are sent
+    at once and every finished request is replaced immediately. If all requests do
+    the same work (for example, the `random` dataset with its default
+    `--random-range-ratio 0.0` and `--ignore-eos`), they tend to finish together,
+    so the run proceeds in synchronized waves: N prefills, then the decode steps,
+    then N prefills again. The TTFT of each request then includes the prefill of
+    the whole wave and grows with N. This is a property of the load pattern, not of
+    the server: with staggered arrivals, new requests join a running batch one or a
+    few at a time. To measure TTFT under staggered arrivals, use a finite
+    `--request-rate` that does not saturate `--max-concurrency`, or vary the
+    lengths with `--random-range-ratio`.
+
 To effectively configure load patterns, especially for **Capacity Planning** and **SLA Validation** use cases, you need to understand your system's resource limits. During startup, vLLM reports KV cache configuration that directly impacts your load testing parameters:
 
 ```text
