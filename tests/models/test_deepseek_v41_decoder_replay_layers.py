@@ -99,6 +99,40 @@ def test_run_gathers_states():
     assert outputs[0][1:173].abs().sum() == 0
 
 
+def test_layer_before_replay_finalizes_moe_in_replay_steps():
+    """The replay batch gathers rows of the encoder output, so in its steps the
+    last encoder layer finalizes its MoE, even for batches that would defer it."""
+    from types import SimpleNamespace
+
+    from vllm.models.deepseek_v41.nvidia.model import DeepseekV4Model
+
+    calls = []
+
+    def layer(idx):
+        def forward(hidden_states, *args, finalize_moe=False, **kwargs):
+            calls.append((idx, finalize_moe))
+            return (hidden_states,) * 5 + (None,)
+
+        return forward
+
+    replay = SimpleNamespace(replay_batch=None)
+    model = SimpleNamespace(
+        layers=[layer(i) for i in range(4)],
+        decoder_replay_start=2,
+        decoder_replay_layers=replay,
+        aux_hidden_state_layers=set(),
+        use_sequence_parallel=False,
+        _mega_gate_metadata=lambda input_ids: None,
+    )
+    x = torch.zeros(3, HIDDEN, device=DEVICE)
+    for replay_batch, finalized in ((None, False), (object(), True)):
+        replay.replay_batch = replay_batch
+        calls.clear()
+        DeepseekV4Model._run_layers(model, range(2), x, x, None, x, x, x, x, {})
+        DeepseekV4Model._run_layers(model, range(2, 4), x, x, None, x, x, x, x, {})
+        assert calls == [(0, False), (1, finalized), (2, False), (3, False)]
+
+
 def test_no_replay_batch_runs_the_whole_batch():
     seen = {}
 

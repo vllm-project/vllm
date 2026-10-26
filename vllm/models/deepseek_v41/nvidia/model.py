@@ -497,6 +497,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         *,
         capture_previous_aux: bool = False,
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
+        finalize_moe: bool = False,
     ) -> tuple[
         torch.Tensor | MoEOutput,
         torch.Tensor,
@@ -652,7 +653,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             stream=mhc_stream,
             reduce_results=self.fuse_mhc_all_reduce,
         )
-        if self.fuse_mhc_all_reduce and self.ffn.defers_finalize(x.shape[0]):
+        if (
+            self.fuse_mhc_all_reduce
+            and not finalize_moe
+            and self.ffn.defers_finalize(x.shape[0])
+        ):
             # The next layer's first boundary finalizes it with the all-reduce.
             x = self.ffn.forward_unfinalized(x, input_ids)
         else:
@@ -1195,6 +1200,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # hidden states are read back from there instead of recomputed.
         full_num_tokens = positions.shape[0]
         mega_gate_metadata = self._mega_gate_metadata(input_ids)
+        # The replay batch gathers rows of a tensor, so the layer it follows
+        # finalizes its MoE (short replay batches would otherwise defer it).
+        replay = self.decoder_replay_layers
+        finalized_layer = (
+            self.decoder_replay_start - 1
+            if replay is not None and replay.replay_batch is not None
+            else None
+        )
         for idx in layer_ids:
             hidden_states, residual, post_mix, res_mix, pre_mix, previous_aux = (
                 self.layers[idx](
@@ -1209,6 +1222,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     engram_mask,
                     capture_previous_aux=idx in self.aux_hidden_state_layers,
                     mega_gate_metadata=mega_gate_metadata,
+                    finalize_moe=idx == finalized_layer,
                 )
             )
             if previous_aux is not None:
