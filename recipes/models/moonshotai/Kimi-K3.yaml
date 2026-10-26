@@ -444,51 +444,51 @@ presets:
       UCX_MEMTYPE_REG_WHOLE: "n"
     json_args:
       "--compilation-config": { cudagraph_mode: "FULL_AND_PIECEWISE" }
-    # Client concurrency points: K is num_speculative_tokens (K4 in args), S is
+    # Concurrency points: K is num_speculative_tokens (K4 in args), S is
     # --max-num-seqs; every graph list ends with the shared 256..8192 tail.
     points:
       c1:
-        label: "C1"
+        label: "1"
         concurrency: 1
         args: ["--max-num-seqs", "2"]
         json_args:
           "--speculative-config": { num_speculative_tokens: 7 }
           "--compilation-config": { cudagraph_capture_sizes: [8, 16, 64, 128, 256, 512, 1024, 2048, 4096, 8192] }
       c4:
-        label: "C4"
+        label: "4"
         concurrency: 4
         args: ["--max-num-seqs", "8"]
         json_args:
           "--speculative-config": { num_speculative_tokens: 7 }
           "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 128, 256, 512, 1024, 2048, 4096, 8192] }
       c8:
-        label: "C8"
+        label: "8"
         concurrency: 8
         args: ["--max-num-seqs", "16"]
         json_args:
           "--speculative-config": { num_speculative_tokens: 7 }
           "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 40, 56, 64, 80, 104, 128, 256, 512, 1024, 2048, 4096, 8192] }
       c24:
-        label: "C24"
+        label: "24"
         concurrency: 24
         args: ["--max-num-seqs", "48"]
         json_args:
           "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 40, 56, 64, 80, 104, 128, 256, 512, 1024, 2048, 4096, 8192] }
       c32:
-        label: "C32"
+        label: "32"
         concurrency: 32
         default: true
         args: ["--max-num-seqs", "64"]
         json_args:
           "--compilation-config": { cudagraph_capture_sizes: [1, 7, 18, 34, 53, 64, 75, 100, 128, 256, 512, 1024, 2048, 4096, 8192] }
       c48:
-        label: "C48"
+        label: "48"
         concurrency: 48
         args: ["--max-num-seqs", "96"]
         json_args:
           "--compilation-config": { cudagraph_capture_sizes: [1, 7, 18, 34, 53, 64, 75, 100, 128, 256, 512, 1024, 2048, 4096, 8192] }
       c56:
-        label: "C56"
+        label: "56"
         concurrency: 56
         args: ["--max-num-seqs", "112"]
         json_args:
@@ -635,20 +635,20 @@ presets:
     # to a 320-token cap and 0.90 above it.
     points:
       c16:
-        label: "C16"
+        label: "16"
         concurrency: 16
         default: true
         roles:
           prefill: { args: ["--max-num-seqs", "32"] }
           decode: { args: ["--gpu-memory-utilization", "0.92", "--max-num-seqs", "32", "--max-cudagraph-capture-size", "160"] }
       c32:
-        label: "C32"
+        label: "32"
         concurrency: 32
         roles:
           prefill: { args: ["--max-num-seqs", "64"] }
           decode: { args: ["--gpu-memory-utilization", "0.92", "--max-num-seqs", "64", "--max-cudagraph-capture-size", "320"] }
       c48:
-        label: "C48"
+        label: "48"
         concurrency: 48
         roles:
           prefill: { args: ["--max-num-seqs", "96"] }
@@ -1009,7 +1009,7 @@ presets:
       - "--trust-remote-code"
     points:
       tp16:
-        label: "C1 · TP16 (4 trays)"
+        label: "1 (TP16, 4 trays)"
         concurrency: 1
         default: true
         select: { nodes: 4 }
@@ -1018,7 +1018,7 @@ presets:
           "--speculative-config": { num_speculative_tokens: 5 }
           "--compilation-config": { cudagraph_mode: "FULL_AND_PIECEWISE", cudagraph_capture_sizes: [5, 6, 10, 12, 20, 24, 40, 48] }
       tp8:
-        label: "C2-C4 · TP8 (2 trays)"
+        label: "2–4 (TP8, 2 trays)"
         concurrency: 4
         select: { nodes: 2 }
         args: ["--decode-context-parallel-size", "8", "--max-cudagraph-capture-size", "64"]
@@ -1121,7 +1121,7 @@ presets:
     # cells use Simple with 224.875 GB of host DRAM per rank and a fixed hash seed.
     points:
       r1:
-        label: "C1 · resident"
+        label: "1 (resident)"
         concurrency: 1
         select: { kv_offload: "off" }
         args:
@@ -1135,7 +1135,7 @@ presets:
         json_args:
           "--compilation-config": {mode: 3, cudagraph_mode: "FULL_AND_PIECEWISE", max_cudagraph_capture_size: 16, cudagraph_capture_sizes: [2, 4, 6, 8, 10, 12, 14, 16]}
       r4:
-        label: "C4 · resident"
+        label: "4 (resident)"
         concurrency: 4
         select: { kv_offload: "off" }
         args:
@@ -1150,7 +1150,7 @@ presets:
         json_args:
           "--compilation-config": {mode: 3, cudagraph_mode: "FULL_AND_PIECEWISE", max_cudagraph_capture_size: 64, cudagraph_capture_sizes: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64]}
       o4:
-        label: "C4 · offload"
+        label: "4 (offload)"
         concurrency: 4
         select: { kv_offload: simple }
         args:
@@ -1168,7 +1168,7 @@ presets:
           "--compilation-config": {mode: 3, cudagraph_mode: "FULL_AND_PIECEWISE", max_cudagraph_capture_size: 48, cudagraph_capture_sizes: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48]}
           "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 224875000000 } }
       o10:
-        label: "C10 · offload"
+        label: "10 (offload)"
         concurrency: 10
         select: { kv_offload: simple }
         args:
@@ -1186,7 +1186,7 @@ presets:
           "--compilation-config": {mode: 3, cudagraph_mode: "FULL_AND_PIECEWISE", max_cudagraph_capture_size: 100, cudagraph_capture_sizes: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94, 96, 98, 100]}
           "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 224875000000 } }
       o16:
-        label: "C16 · offload"
+        label: "16 (offload)"
         concurrency: 16
         select: { kv_offload: simple }
         args:
@@ -1204,7 +1204,7 @@ presets:
           "--compilation-config": {mode: 3, cudagraph_mode: "FULL_AND_PIECEWISE", max_cudagraph_capture_size: 160, cudagraph_capture_sizes: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126, 128, 130, 132, 134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 154, 156, 158, 160]}
           "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 224875000000 } }
       o24:
-        label: "C24 · offload"
+        label: "24 (offload)"
         concurrency: 24
         select: { kv_offload: simple }
         args:
@@ -1222,7 +1222,7 @@ presets:
           "--compilation-config": {mode: 3, cudagraph_mode: "FULL_AND_PIECEWISE", max_cudagraph_capture_size: 240, cudagraph_capture_sizes: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126, 128, 130, 132, 134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 154, 156, 158, 160, 162, 164, 166, 168, 170, 172, 174, 176, 178, 180, 182, 184, 186, 188, 190, 192, 194, 196, 198, 200, 202, 204, 206, 208, 210, 212, 214, 216, 218, 220, 222, 224, 226, 228, 230, 232, 234, 236, 238, 240]}
           "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 224875000000 } }
       o32:
-        label: "C32 · offload"
+        label: "32 (offload)"
         concurrency: 32
         select: { kv_offload: simple }
         args:
@@ -1240,7 +1240,7 @@ presets:
           "--compilation-config": {mode: 3, cudagraph_mode: "FULL_AND_PIECEWISE", max_cudagraph_capture_size: 320, cudagraph_capture_sizes: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126, 128, 130, 132, 134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 154, 156, 158, 160, 162, 164, 166, 168, 170, 172, 174, 176, 178, 180, 182, 184, 186, 188, 190, 192, 194, 196, 198, 200, 202, 204, 206, 208, 210, 212, 214, 216, 218, 220, 222, 224, 226, 228, 230, 232, 234, 236, 238, 240, 242, 244, 246, 248, 250, 252, 254, 256, 258, 260, 262, 264, 266, 268, 270, 272, 274, 276, 278, 280, 282, 284, 286, 288, 290, 292, 294, 296, 298, 300, 302, 304, 306, 308, 310, 312, 314, 316, 318, 320]}
           "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 224875000000 } }
       o48:
-        label: "C48 · offload"
+        label: "48 (offload)"
         concurrency: 48
         select: { kv_offload: simple }
         args:
@@ -1258,7 +1258,7 @@ presets:
           "--compilation-config": {mode: 3, cudagraph_mode: "FULL_AND_PIECEWISE", max_cudagraph_capture_size: 480, cudagraph_capture_sizes: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126, 128, 130, 132, 134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 154, 156, 158, 160, 162, 164, 166, 168, 170, 172, 174, 176, 178, 180, 182, 184, 186, 188, 190, 192, 194, 196, 198, 200, 202, 204, 206, 208, 210, 212, 214, 216, 218, 220, 222, 224, 226, 228, 230, 232, 234, 236, 238, 240, 242, 244, 246, 248, 250, 252, 254, 256, 258, 260, 262, 264, 266, 268, 270, 272, 274, 276, 278, 280, 282, 284, 286, 288, 290, 292, 294, 296, 298, 300, 302, 304, 306, 308, 310, 312, 314, 316, 318, 320, 322, 324, 326, 328, 330, 332, 334, 336, 338, 340, 342, 344, 346, 348, 350, 352, 354, 356, 358, 360, 362, 364, 366, 368, 370, 372, 374, 376, 378, 380, 382, 384, 386, 388, 390, 392, 394, 396, 398, 400, 402, 404, 406, 408, 410, 412, 414, 416, 418, 420, 422, 424, 426, 428, 430, 432, 434, 436, 438, 440, 442, 444, 446, 448, 450, 452, 454, 456, 458, 460, 462, 464, 466, 468, 470, 472, 474, 476, 478, 480]}
           "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 224875000000 } }
       o52:
-        label: "C52 · offload"
+        label: "52 (offload)"
         concurrency: 52
         select: { kv_offload: simple }
         args:
@@ -1276,7 +1276,7 @@ presets:
           "--compilation-config": {mode: 3, cudagraph_mode: "FULL_AND_PIECEWISE", max_cudagraph_capture_size: 520, cudagraph_capture_sizes: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126, 128, 130, 132, 134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 154, 156, 158, 160, 162, 164, 166, 168, 170, 172, 174, 176, 178, 180, 182, 184, 186, 188, 190, 192, 194, 196, 198, 200, 202, 204, 206, 208, 210, 212, 214, 216, 218, 220, 222, 224, 226, 228, 230, 232, 234, 236, 238, 240, 242, 244, 246, 248, 250, 252, 254, 256, 258, 260, 262, 264, 266, 268, 270, 272, 274, 276, 278, 280, 282, 284, 286, 288, 290, 292, 294, 296, 298, 300, 302, 304, 306, 308, 310, 312, 314, 316, 318, 320, 322, 324, 326, 328, 330, 332, 334, 336, 338, 340, 342, 344, 346, 348, 350, 352, 354, 356, 358, 360, 362, 364, 366, 368, 370, 372, 374, 376, 378, 380, 382, 384, 386, 388, 390, 392, 394, 396, 398, 400, 402, 404, 406, 408, 410, 412, 414, 416, 418, 420, 422, 424, 426, 428, 430, 432, 434, 436, 438, 440, 442, 444, 446, 448, 450, 452, 454, 456, 458, 460, 462, 464, 466, 468, 470, 472, 474, 476, 478, 480, 482, 484, 486, 488, 490, 492, 494, 496, 498, 500, 502, 504, 506, 508, 510, 512, 514, 516, 518, 520]}
           "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: 224875000000 } }
       o60:
-        label: "C60 · offload"
+        label: "60 (offload)"
         concurrency: 60
         select: { kv_offload: simple }
         args:
