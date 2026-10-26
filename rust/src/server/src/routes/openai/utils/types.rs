@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::slice;
 
+use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -709,7 +710,9 @@ mod usage_tests {
 pub struct LogProbs {
     pub tokens: Vec<String>,
     pub token_logprobs: Vec<Option<f32>>,
-    pub top_logprobs: Vec<Option<HashMap<String, f32>>>,
+    /// Each position's candidates in the engine's order (the sampled token
+    /// first), serialized in that order like Python's dict.
+    pub top_logprobs: Vec<Option<IndexMap<String, f32>>>,
     pub text_offset: Vec<u32>,
 }
 

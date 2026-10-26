@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
-
+use indexmap::IndexMap;
 use itertools::Itertools as _;
 use vllm_text::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
@@ -231,10 +230,13 @@ fn format_token(entry: &DecodedTokenLogprob, as_token_id: bool) -> String {
     }
 }
 
+/// Collecting keeps each key at its first position and the last value for it,
+/// like Python's dict, so a sampled token repeated among the top-k candidates,
+/// or two tokens decoding to the same string, yield one entry in Python's place.
 fn position_top_logprobs_map(
     position: &DecodedPositionLogprobs,
     return_tokens_as_token_ids: bool,
-) -> HashMap<String, f32> {
+) -> IndexMap<String, f32> {
     position
         .entries
         .iter()
@@ -301,7 +303,9 @@ pub fn clamp_logprob(logprob: f32) -> f32 {
 mod tests {
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
-    use super::{decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps};
+    use super::{
+        decoded_logprobs_to_openai, decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
+    };
 
     #[test]
     fn prompt_logprobs_maps_reject_missing_multi_token_payload() {
@@ -356,6 +360,23 @@ mod tests {
                 ],
             }],
         }
+    }
+
+    #[test]
+    fn completion_top_logprobs_keep_engine_order() {
+        // Sampled `C` is the rank-3 token: the engine row is `[C, A, B, C]`.
+        // Python's dict keeps `C` first and once, then the rest in rank order.
+        let mut logprobs = sample_logprobs();
+        let sampled = logprobs.positions[0].entries[2].clone();
+        logprobs.positions[0].entries.insert(0, sampled);
+
+        let top_logprobs = |as_token_ids| {
+            let logprobs = decoded_logprobs_to_openai(&logprobs, 0, as_token_ids).unwrap();
+            serde_json::to_string(&logprobs.top_logprobs).unwrap()
+        };
+        expect_test::expect![[r#"[{"C":-2.0,"A":-0.1,"B":-1.0}]"#]].assert_eq(&top_logprobs(false));
+        expect_test::expect![[r#"[{"token_id:3":-2.0,"token_id:1":-0.1,"token_id:2":-1.0}]"#]]
+            .assert_eq(&top_logprobs(true));
     }
 
     fn chat_top_logprobs_len(top_logprobs: i32) -> usize {
