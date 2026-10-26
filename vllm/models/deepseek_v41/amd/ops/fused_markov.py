@@ -25,16 +25,16 @@ bias value can differ in its last bf16 bit. That changes only which tokens
 the draft proposes, not the target's output, because the rejection sampler
 verifies every draft token against the target's own distribution.
 
-It runs on gfx942 with --monokernel (``ops.enabled()``). The speculator asks
-the draft model's ``sample_sequential`` (dspark.py) before its loop, and that
-calls ``sample_sequential`` here.
+It runs on gfx942 and gfx950 with --monokernel (``ops.fused_markov_enabled()``).
+The speculator asks the draft model's ``sample_sequential`` (dspark.py)
+before its loop, and that calls ``sample_sequential`` here.
 tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py compares it with vLLM's loop.
 """
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.models.deepseek_v41.amd.ops import enabled
+from vllm.models.deepseek_v41.amd.ops import fused_markov_enabled
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 
@@ -50,6 +50,8 @@ NUM_WARPS = 4
 # The step launch unrolls its loop over the rows (requests) of a step, so it
 # is built for at most this many. A larger step takes vLLM's loop.
 MAX_ROWS = 8
+# gfx950: vLLM's loop is faster from 6 rows, where its Markov GEMV leaves wvSplitK.
+MAX_ROWS_GFX950 = 5
 
 
 @triton.jit
@@ -217,7 +219,10 @@ def _why_not(spec, num_reqs: int) -> str | None:
         return "the confidence head"
     if spec.acceptance_estimator is not None:
         return "the acceptance estimator"
-    if not 1 <= num_reqs <= MAX_ROWS:
+    from vllm.platforms.rocm import get_cdna_version
+
+    max_rows = MAX_ROWS_GFX950 if get_cdna_version() == 4 else MAX_ROWS
+    if not 1 <= num_reqs <= max_rows:
         return f"{num_reqs} requests"
     w1 = head.markov_w1.weight
     w2 = head.markov_w2.weight
@@ -235,7 +240,7 @@ def _why_not(spec, num_reqs: int) -> str | None:
 def sample_sequential(spec, num_reqs: int, head_hidden: torch.Tensor) -> bool:
     """DSparkSpeculator._sample_sequential with the fused launches. Returns
     False, having done nothing, when this step takes vLLM's loop."""
-    if not enabled():
+    if not fused_markov_enabled():
         return False
     why = _why_not(spec, num_reqs)
     if why is not None:
