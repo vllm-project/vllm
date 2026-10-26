@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from copy import deepcopy
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import regex as re
 import torch
@@ -82,20 +82,50 @@ def override_config(config: AutoGPTQConfig, prefix: str):
     config.quant_type = config.TYPE_MAP[(config.weight_bits, config.is_sym)]
 
 
+_WRAPPER_SWAPS: Final = {
+    "model.language_model.": ("model.", "language_model.model."),
+    "model.": ("model.language_model.", "language_model.model."),
+    "language_model.model.": ("model.language_model.", "model."),
+}
+
+def _dynamic_name_variants(layer_name: str) -> list[str]:
+    """Return the name forms one module can take across vLLM naming spaces.
+
+    Multimodal-wrapped checkpoints (e.g. Qwen3.5-VL-family text models) name a
+    tensor ``model.language_model.layers.0.self_attn.q_proj`` on disk, the
+    model's ``hf_to_vllm_mapper`` rewrites it to ``model.layers.0...`` at load
+    time, while the constructed module tree carries
+    ``language_model.model.layers.0...``. Dynamic quantization patterns are
+    authored against checkpoint names (the GPTQModel convention), but
+    ``get_dynamic_override`` is called with the module-tree name, so a pattern
+    written in any one form silently fails to match in the other two.
+    """
+    variants = [layer_name]
+    for prefix, alternates in _WRAPPER_SWAPS.items():
+        if layer_name.startswith(prefix):
+            rest = layer_name[len(prefix):]
+            variants.extend(alt + rest for alt in alternates)
+            break
+    seen: set[str] = set()
+    unique = [v for v in variants if not (v in seen or seen.add(v))]
+    return unique
+
+
 def get_dynamic_override(
     config: AutoGPTQConfig,
     layer_name: str,
     key: str | None = None,
     default_value: int | bool | None = None,
 ) -> dict | int | bool | None:
+    variants = _dynamic_name_variants(layer_name)
     for pattern, pattern_dict in config.dynamic.items():
         # Negative match: matched modules are excluded from quantized init
         if pattern.startswith("-:"):
-            if re.match(pattern.removeprefix("-:"), layer_name):
+            if any(re.match(pattern.removeprefix("-:"), v) for v in variants):
                 return False
         # Positive match: matched modules have quant properties overrides
         # base quant config
-        elif re.match(pattern.removeprefix("+:"), layer_name):
+        elif any(re.match(pattern.removeprefix("+:"), v) for v in variants):
             if key is None:
                 return pattern_dict
             else:
