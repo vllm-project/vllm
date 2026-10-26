@@ -130,6 +130,37 @@ pass — this is the invariant to test first.
     IPC does not read `metadata()` at all: it derives the update info from
     iteration as it goes, so it cannot observe a divergence.
 
+### Metadata is sent once, then reused
+
+Every `update_weights` call needs the list of parameters it carries: `names`,
+`dtype_names` and `shapes`. For a large model that list is long (about 19,000
+entries for Qwen3-30B-A3B), yet an RL trainer sends the same parameters every
+round. So the worker remembers the list:
+
+| `update_info` you send | What the worker loads |
+| ---------------------- | --------------------- |
+| `names`, `dtype_names`, `shapes` filled in | Exactly these parameters. The worker also saves this list. |
+| All three lists empty (or `{}`) | The list saved by the previous `update_weights` call on the same model. |
+| All three lists empty, nothing saved yet | Nothing. |
+
+Rules to remember:
+
+- **The first round must send the full list.** After that, send empty lists
+  whenever the parameters are the same as last round.
+- **Send the full list again whenever anything changes**: a parameter added,
+  removed, renamed, reordered, re-dtyped or reshaped. The worker does not check
+  that empty-list rounds still match what the trainer sends; a mismatch hangs in
+  NCCL or loads wrong values.
+- **The target model and the draft model keep separate lists.** A
+  `/start_draft_weight_update` round reuses only the draft's list.
+- **`init_weight_transfer_engine` clears every saved list**, so the first round
+  after a re-init must send the full list again.
+
+`NCCLTrainerWeightTransferEngine.send_weights` follows these rules for you: it
+compares `metadata()` with what the last successful round sent, and sends empty
+lists when they are equal. You only need to think about them if you build
+`update_info` yourself, for example over HTTP without vLLM.
+
 ## Trainer Without vLLM over HTTP
 
 A trainer can speak the [HTTP endpoints](README.md#api-endpoints) directly, with
@@ -159,7 +190,9 @@ Each sync: `POST /start_weight_update`, then `POST /update_weights` with
 `{"update_info": {"names", "dtype_names", "shapes"}}` **in the background**
 while rank 0 broadcasts in `names` order, then `POST /finish_weight_update`.
 `dtype_names` are `torch` attribute names (`"bfloat16"`); `shapes` are full
-checkpoint shapes.
+checkpoint shapes. From the second sync on, send `{"update_info": {}}` if the
+parameters did not change; see
+[Metadata is sent once, then reused](#metadata-is-sent-once-then-reused).
 
 - Unpacked: one broadcast per tensor.
 - Packed: concatenate `t.contiguous().view(-1).view(torch.uint8)` in `names`
