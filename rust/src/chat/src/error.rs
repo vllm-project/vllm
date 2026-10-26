@@ -42,6 +42,8 @@ pub enum Error {
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
     UnsupportedMultimodalContent(&'static str),
+    #[error("unsupported input_audio format `{format}`; expected `wav` or `mp3`")]
+    UnsupportedInputAudioFormat { format: String },
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
@@ -138,6 +140,7 @@ impl Error {
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
+            | Self::UnsupportedInputAudioFormat { .. }
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::MmLimitExceeded { .. } => true,
