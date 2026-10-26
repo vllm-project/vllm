@@ -27,8 +27,8 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    pytest --continue-on-collection-errors -v -s models/language -m 'core_model and (not slow_test)' || true'
+    "cd tests &&
+    pytest --continue-on-collection-errors -v -s models/language -m 'core_model and (not slow_test)' || true"
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Extra Standard) Shard %N'
   key: language-models-tests-extra-standard
   device: intel_gpu
