@@ -317,7 +317,6 @@ class BailingMoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        router_logits = router_logits.to(hidden_states.dtype)
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
