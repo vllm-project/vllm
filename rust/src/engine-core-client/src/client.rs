@@ -996,6 +996,7 @@ impl EngineCoreClient {
         profile_prefix: Option<&str>,
         delay_iterations: Option<u64>,
         max_iterations: Option<u64>,
+        profiler_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<()> {
         let mut active = self.profile_active.lock().await;
         if *active {
@@ -1008,7 +1009,13 @@ impl EngineCoreClient {
         if let Err(error) = self
             .call_utility::<(), _>(
                 "profile",
-                (true, profile_prefix, delay_iterations, max_iterations),
+                (
+                    true,
+                    profile_prefix,
+                    delay_iterations,
+                    max_iterations,
+                    profiler_kwargs,
+                ),
             )
             .await
         {
