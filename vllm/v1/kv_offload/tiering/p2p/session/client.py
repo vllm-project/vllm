@@ -146,6 +146,9 @@ class ClientRole:
         # Per-request progress deadlines. Only newly resolved probes extend
         # them; additional keys and repeated scheduler polls do not.
         self._lookup_deadlines: dict[str, float] = {}
+        # First load whose AbortAck never arrived. Sticky: the peer has
+        # stopped confirming that its WRITEs ended, so the session faults it.
+        self._expired_abort_ack: tuple[str, int] | None = None
 
     # ------------------------------------------------------------------
     # State helpers
@@ -189,6 +192,11 @@ class ClientRole:
             if now >= deadline:
                 return req_id, now - deadline + _LOOKUP_TIMEOUT_S
         return None
+
+    @property
+    def expired_abort_ack(self) -> tuple[str, int] | None:
+        """The first ``(kv_request_id, round_seq)`` whose AbortAck timed out."""
+        return self._expired_abort_ack
 
     # ------------------------------------------------------------------
     # Public API
@@ -485,7 +493,8 @@ class ClientRole:
         Loads past their load timeout (``_P2P_LOAD_TIMEOUT_S`` or
         ``_PD_LOAD_TIMEOUT_S``) get an AbortFetchMsg sent and
         enter the aborting phase. Aborting loads past
-        ``_ABORT_ACK_TIMEOUT_S`` are surfaced as failed.
+        ``_ABORT_ACK_TIMEOUT_S`` are surfaced as failed and recorded in
+        ``expired_abort_ack``.
         """
         now = time.monotonic()
         to_remove: list[tuple[str, int]] = []
@@ -512,6 +521,8 @@ class ClientRole:
                 else:
                     if now - load.aborted_at >= _ABORT_ACK_TIMEOUT_S:
                         to_remove.append((req_id, round_seq))
+                        if self._expired_abort_ack is None:
+                            self._expired_abort_ack = (req_id, round_seq)
                         self._completed_loads.append(
                             LoadResult(
                                 job_id=load.job_id,

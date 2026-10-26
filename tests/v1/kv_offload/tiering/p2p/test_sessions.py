@@ -855,6 +855,41 @@ class TestClientFlows:
         assert loads == [LoadResult(job_id=7, kv_request_id="req-7", success=False)]
         assert "req-7" not in session._client._requests
 
+    def test_load_abort_ack_timeout_disconnects_peer(self):
+        """A missed AbortAck faults the peer, so later fetches skip it.
+
+        The peer has stopped confirming that its WRITEs ended; keeping the
+        session would make every later load wait out both timeouts again.
+        Loads still in flight on the session fail through close().
+        """
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=7, kv_request_id="req-7", keys=[OffloadKey(b"k")], block_ids=[0]
+        )
+        session.request_blocks(
+            job_id=8, kv_request_id="req-8", keys=[OffloadKey(b"j")], block_ids=[1]
+        )
+        _client_load(session, "req-7").submitted_at = (
+            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+        )
+        session.poll()
+        assert session.alive
+
+        _client_load(session, "req-7").aborted_at = (
+            time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
+        )
+        loads = session.poll().loads
+        assert loads == [LoadResult(job_id=7, kv_request_id="req-7", success=False)]
+        assert not session.alive
+        assert session.death_reason == "abort ack timed out"
+        assert session.data_plane_fault == "abort ack timed out"
+        assert conn._sent[-1][TYPE_KEY] == DisconnectMsg.TYPE
+
+        result = session.close()
+        assert result.failed_jobs == [8]
+        assert result.failed_req_ids == ["req-8"]
+
     def test_load_abort_ack_clears_request(self):
         """After load timeout sends AbortFetch, an arriving AbortAckMsg from
         the peer surfaces the failure cleanly and removes the request from
@@ -882,6 +917,8 @@ class TestClientFlows:
         loads = session.poll().loads
         assert loads == [LoadResult(job_id=8, kv_request_id="req-8", success=False)]
         assert "req-8" not in session._client._requests
+        assert session.alive
+        assert session.data_plane_fault is None
 
 
 # ---------------------------------------------------------------------------
