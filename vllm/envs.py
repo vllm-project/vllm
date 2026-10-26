@@ -399,12 +399,15 @@ def use_mega_aot_artifact():
 
 
 def compile_on_one_rank() -> bool:
-    from vllm.platforms import current_platform
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
+    from torch.compiler import config as compiler_config
 
+    from vllm.platforms import current_platform
+
+    if not hasattr(compiler_config, "compile_on_one_rank"):
+        return False
     # Inductor implements the mode for CUDA/ROCm and XPU only.
     supported = current_platform.is_cuda_alike() or current_platform.is_xpu()
-    default_value = "1" if supported and is_torch_equal_or_newer("2.14.0") else "0"
+    default_value = "1" if supported else "0"
     return os.environ.get("VLLM_COMPILE_ON_ONE_RANK", default_value) == "1"
 
 

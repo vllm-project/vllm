@@ -967,22 +967,3 @@ def _patch_inductor_pattern_matcher() -> None:
 # https://github.com/pytorch/pytorch/pull/196013.
 if not is_torch_equal_or_newer("2.16.0.dev"):
     _patch_inductor_pattern_matcher()
-
-
-# ============================================================
-# torch >= 2.14 compile-on-one-rank (device-neutral compile caches)
-# ============================================================
-# The compile cache is keyed by rank, but a rank's device is not fixed
-# (--device-ids), so the compiled code must not bake in a device index.
-# VLLM_COMPILE_ON_ONE_RANK is authoritative so the cache key always matches
-# what was compiled.
-def _apply_compile_on_one_rank():
-    from torch.compiler import config as compiler_config
-
-    import vllm.envs as envs
-
-    if hasattr(compiler_config, "compile_on_one_rank"):
-        compiler_config.compile_on_one_rank = envs.VLLM_COMPILE_ON_ONE_RANK
-
-
-_apply_compile_on_one_rank()

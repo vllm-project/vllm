@@ -143,12 +143,14 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/compile/test_wrapper.py
+  - tests/compile/test_aot_compile.py
   - tests/entrypoints/llm/test_collective_rpc.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_wrapper.py
+  - pytest -v -s ./compile/test_aot_compile.py::test_load_on_another_device
   mirror:
     amd:
       label: ":amd: (MI355) Distributed Compile + RPC"
