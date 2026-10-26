@@ -79,6 +79,9 @@ class RoutedExperts(PluggableLayer):
     - Executing routed experts via quant_method.apply()
     """
 
+    # Hash-routing table, owned by the gate.
+    hash_indices_table: torch.Tensor | None = None
+
     def __init__(
         self,
         layer_name: str,
@@ -107,6 +110,7 @@ class RoutedExperts(PluggableLayer):
         swiglu_beta: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
+        hash_indices_table: torch.Tensor | None = None,
     ):
         super().__init__()
         self.layer_name = layer_name
@@ -152,6 +156,8 @@ class RoutedExperts(PluggableLayer):
         # Set by bind_routed_experts_capturer for monolithic kernels.
         self.routing_sink: RoutedExpertsSink | None = None
         self.apply_router_weight_on_input = apply_router_weight_on_input
+        # The gate owns this Parameter: keep it out of this module's parameters.
+        object.__setattr__(self, "hash_indices_table", hash_indices_table)
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
         self._fused_shared_expert_quantizer = self._get_fused_shared_expert_quantizer()
@@ -1324,6 +1330,13 @@ class RoutedExperts(PluggableLayer):
             )
 
         weights = list(self.named_parameters())
+
+        # EPLB must use shards when original weight storage has been released.
+        # Use explicit metadata: some tensor subclasses lack untyped_storage().
+        localized_freed = getattr(self, "localized_freed_full_weight_names", ())
+        if localized_freed:
+            weights = [(name, p) for name, p in weights if name not in localized_freed]
+
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
         # `w13_input_scale` and `w2_input_scale` are global per-tensor

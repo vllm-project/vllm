@@ -885,9 +885,11 @@ def invoke_fused_moe_triton_kernel(
         C.stride(2),
         A_scale.stride(0) if A_scale is not None and A_scale.ndim == 2 else 0,
         A_scale.stride(1) if A_scale is not None and A_scale.ndim == 2 else 0,
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(0) if B_scale is not None else 0,
         B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(1)
+        if B_scale is not None and B_scale.ndim >= 2 and B_scale.size(1) > 1
+        else 0,
         B_bias.stride(0) if B_bias is not None else 0,
         B_bias.stride(1) if B_bias is not None else 0,
         0 if block_shape is None else block_shape[0],
@@ -1416,6 +1418,51 @@ def get_default_config(
     return config
 
 
+def _moe_config_shape(w2_shape: tuple[int, ...], dtype: str | None) -> tuple[int, int]:
+    """(E, N) as used by both the tuned-config lookup and the default heuristic."""
+    E, _, N = w2_shape
+    if dtype == "int4_w4a16":
+        N = N * 2
+    return E, N
+
+
+def _get_configured_moe_config(
+    w2_shape: tuple[int, ...],
+    dtype: str | None,
+    M: int,
+    block_shape: list[int] | None = None,
+) -> dict[str, int] | None:
+    """Config from an override or a tuned file, or None if neither applies."""
+    from vllm.model_executor.layers.fused_moe import get_config
+
+    override_config = get_config()
+    if override_config:
+        return override_config
+
+    E, N = _moe_config_shape(w2_shape, dtype)
+    block_n = block_shape[0] if block_shape else 0
+    block_k = block_shape[1] if block_shape else 0
+    configs = get_moe_configs(E, N, dtype, block_n, block_k)
+    if configs:
+        # Pick the config tuned for the closest batch size
+        return configs[min(configs.keys(), key=lambda x: abs(x - M))]
+    return None
+
+
+def has_configured_moe_config(
+    w2_shape: tuple[int, ...],
+    dtype: str | None,
+    M: int,
+    block_shape: list[int] | None = None,
+) -> bool:
+    """Whether try_get_optimal_moe_config resolves to an override or a tuned config.
+
+    False means it falls back to get_default_config, so a caller whose layout that
+    heuristic does not model may adjust the tiles it returns.
+    """
+    return _get_configured_moe_config(w2_shape, dtype, M, block_shape) is not None
+
+
 def try_get_optimal_moe_config(
     w1_shape: tuple[int, ...],
     w2_shape: tuple[int, ...],
@@ -1424,27 +1471,10 @@ def try_get_optimal_moe_config(
     M: int,
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
-    from vllm.model_executor.layers.fused_moe import get_config
-
-    override_config = get_config()
-    if override_config:
-        config = override_config
-    else:
-        # First try to load optimal config from the file
-        E, _, N = w2_shape
-        if dtype == "int4_w4a16":
-            N = N * 2
-        block_n = block_shape[0] if block_shape else 0
-        block_k = block_shape[1] if block_shape else 0
-        configs = get_moe_configs(E, N, dtype, block_n, block_k)
-
-        if configs:
-            # If an optimal configuration map has been found, look up the
-            # optimal config
-            config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
-        else:
-            # Else use the default config
-            config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
+    config = _get_configured_moe_config(w2_shape, dtype, M, block_shape)
+    if config is None:
+        E, N = _moe_config_shape(w2_shape, dtype)
+        config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
     return config
 
 
@@ -1538,6 +1568,12 @@ direct_register_custom_op(
 )
 
 
+def _weights_host_resident(*weights: torch.Tensor) -> bool:
+    """True when any of the expert weights is read from host memory in place,
+    as UVA weight offloading (``--offload-backend uva``) leaves them."""
+    return any(getattr(w, "_vllm_is_uva_offloaded", False) for w in weights)
+
+
 def _prepare_expert_assignment(
     topk_ids: torch.Tensor,
     config: dict[str, Any],
@@ -1550,14 +1586,18 @@ def _prepare_expert_assignment(
     use_int4_w4a16: bool = False,
     block_shape: list[int] | None = None,
     ignore_invalid_experts: bool = False,
+    weights_host_resident: bool = False,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Prepare expert assignments for the aligned and low-latency Triton paths."""
     # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
     # activates only a small fraction of total experts
     # Skips moe_align_block_size and activates the `sorted_token_ids is None`
-    # path of the fused_moe_kernel kernel
+    # path of the fused_moe_kernel kernel, which reads an expert's weights once
+    # per (token, expert) pair. Not for weights in host memory: there every
+    # repeated read crosses PCIe, so group each expert's tokens instead.
     naive_block_assignment = (
         expert_map is None
+        and not weights_host_resident
         and num_tokens * top_k_num * 4 <= global_num_experts
         and not (
             (use_int8_w8a16 or use_int4_w4a16)
@@ -1782,6 +1822,7 @@ def fused_experts_impl(
         use_int4_w4a16=use_int4_w4a16,
         block_shape=block_shape,
         ignore_invalid_experts=True,
+        weights_host_resident=_weights_host_resident(w1, w2),
     )
 
     dispatch_fused_moe_kernel(
