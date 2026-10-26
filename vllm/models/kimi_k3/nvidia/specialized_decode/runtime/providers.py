@@ -6,6 +6,7 @@ the helpers ``SpecializedDecode.build_providers`` uses."""
 from typing import Any
 
 import torch
+
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
     shape_dynamic_skinny_gemm,
