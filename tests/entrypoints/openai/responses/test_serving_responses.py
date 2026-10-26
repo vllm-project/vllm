@@ -36,7 +36,6 @@ from openai.types.responses.tool import (
 from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role
 from pydantic import ValidationError
-from transformers import AutoTokenizer
 
 import vllm.envs as envs
 from tests.entrypoints.openai.chat_completion.test_serving_chat import MockModelConfig
@@ -2525,6 +2524,8 @@ async def test_streaming_parallel_tool_calls(
 
 @pytest.fixture(scope="module")
 def harmony_logprobs_tokenizer():
+    from transformers import AutoTokenizer
+
     return AutoTokenizer.from_pretrained("openai/gpt-oss-20b")
 
 
