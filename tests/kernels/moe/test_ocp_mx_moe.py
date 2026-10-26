@@ -2170,6 +2170,51 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
         mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
 
 
+def test_get_priority_backends_for_gpt_oss_does_not_leak_rocm_backends_on_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """On CUDA, _get_priority_backends_for_gpt_oss() must not include ROCm/AITER
+    or EMULATION backends, preventing cross-vendor diagnostic leaks (#61854).
+    """
+    import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda _: False
+    )
+
+    backends = mxfp4_oracle._get_priority_backends_for_gpt_oss()
+    backend_names = [b.value for b in backends]
+
+    assert not any("AITER" in name for name in backend_names), (
+        f"Found ROCm AITER backend on CUDA: {backend_names}"
+    )
+    assert mxfp4_oracle.Mxfp4MoeBackend.EMULATION.value not in backend_names, (
+        f"Found EMULATION backend on CUDA: {backend_names}"
+    )
+
+
+def test_get_priority_backends_for_gpt_oss_returns_rocm_backends_on_rocm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """On ROCm, _get_priority_backends_for_gpt_oss() returns ROCm backends (#61854)."""
+    import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+
+    backends = mxfp4_oracle._get_priority_backends_for_gpt_oss()
+    backend_names = [b.value for b in backends]
+
+    assert any("AITER" in name for name in backend_names)
+    assert mxfp4_oracle.Mxfp4MoeBackend.EMULATION.value in backend_names
+    assert not any("FLASHINFER" in name for name in backend_names)
+
+
 @pytest.mark.parametrize(
     "moe_backend,w4a4,supported,expected",
     [
