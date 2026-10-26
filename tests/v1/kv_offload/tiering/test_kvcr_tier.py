@@ -194,6 +194,7 @@ def _make_tier(
     control_ports: list[int] | None = None,
     data_parallel_rank_local: int | None = None,
     backpressure: dict[str, Any] | None = None,
+    demote_served_chunks: bool = False,
 ) -> KVCRSecondaryTierManager:
     def make_control(_bind_host, bind_port, advertise_host):
         return _StubControlChannel(f"tcp://{advertise_host}:{int(bind_port)}")
@@ -226,6 +227,7 @@ def _make_tier(
         "g3": g3,
         "local_dram_backend": "UCX",
         "remote_fw_dram_backend": "UCX",
+        "demote_served_chunks": demote_served_chunks,
     }
     if backpressure is not None:
         tier_config["backpressure"] = backpressure
@@ -555,6 +557,57 @@ def test_kvcr_tier_serves_primary_pin_request(
 
     assert polls == 1
     assert list(tier.get_finished_jobs()) == [JobResult(11, True)]
+
+
+@pytest.mark.parametrize("demote_served_chunks", [False, True])
+def test_kvcr_tier_demotes_served_chunks_when_enabled(
+    monkeypatch, demote_served_chunks
+):
+    """Demote the primary copies of served chunks only when configured to."""
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr, demote_served_chunks=demote_served_chunks)
+    keys = (BlockKey(b"k0"), BlockKey(b"k1"), BlockKey(b"k2"))
+    hit_keys = (keys[0], keys[2])
+    calls: list[tuple[str, tuple[OffloadKey, ...]]] = []
+
+    class Parent:
+        def on_new_request(self, req_context):
+            calls.append(("new", ()))
+            return SimpleNamespace()
+
+        def lookup(self, key, req_context):
+            return LookupResult.HIT if key in hit_keys else LookupResult.MISS
+
+        def create_store_job(self, requested_keys, req_context):
+            calls.append(("pin", tuple(requested_keys)))
+            return TransferJob(
+                job_id=7,
+                keys=requested_keys,
+                chunk_ids=np.arange(len(requested_keys)),
+                is_promotion=False,
+                req_context=req_context,
+            )
+
+        def demote(self, served_keys):
+            calls.append(("demote", tuple(served_keys)))
+            return len(served_keys)
+
+        def on_request_finished(self, req_context):
+            calls.append(("finished", ()))
+
+    bindings = kvcr.constructor_bindings
+    assert bindings is not None
+    bindings.request_pin(keys)
+    tier.serve_external_requests(Parent())
+
+    [(_, result)] = bindings.poll_pin_results()
+    assert result is not None
+    served = tuple(OffloadKey(bytes(key)) for key in hit_keys)
+    expected = [("new", ()), ("pin", served)]
+    if demote_served_chunks:
+        expected.append(("demote", served))
+    expected.append(("finished", ()))
+    assert calls == expected
 
 
 def test_kvcr_telemetry_is_opt_in_and_namespaced_at_vllm_boundary(monkeypatch):

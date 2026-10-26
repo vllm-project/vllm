@@ -230,6 +230,61 @@ def test_tiering_manager_aggregates_secondary_stats():
     assert MetricsSecondaryTierManager.MY_TIER_METRIC not in second_stats.data["data"]
 
 
+def test_chunks_served_to_a_peer_leave_the_primary_tier_first():
+    mock_region = _mock_mmap_region(3)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_chunks=3, mmap_region=mock_region
+    )
+    tier = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="test_serve",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier, secondary_tiers=[tier]
+    )
+
+    def finish_tier_jobs(jobs: Iterable[TransferJob]) -> None:
+        tier.finished_jobs.extend(JobResult(job.job_id, True) for job in jobs)
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        )
+
+    def evicted_by_storing(int_id: int) -> list[OffloadKey]:
+        ctx = ReqContext(req_id=f"store-{int_id}")
+        manager.on_new_request(ctx)
+        output = manager.prepare_store(to_keys([int_id]), ctx)
+        assert output is not None
+        return output.evicted_keys
+
+    keys = to_keys([1, 2, 3])
+    local_ctx = ReqContext(req_id="local")
+    manager.on_new_request(local_ctx)
+    assert manager.prepare_store(keys, local_ctx) is not None
+    manager.complete_store(keys, local_ctx)
+    manager.on_request_finished(local_ctx)
+    finish_tier_jobs(tier.submitted_stores)  # LRU order: 3, 2, 1
+
+    reader_ctx = ReqContext(req_id="reader")
+    manager.on_new_request(reader_ctx)
+    manager.prepare_load(keys[:1], reader_ctx)
+
+    # A peer reads chunks 1 and 2; chunk 1 has a local reader and stays put.
+    parent = manager._tier_parents[tier]
+    serve_ctx = ReqContext(req_id="peer")
+    parent.on_new_request(serve_ctx)
+    assert all(parent.lookup(key, serve_ctx) is LookupResult.HIT for key in keys[:2])
+    job = parent.create_store_job(keys[:2], serve_ctx)
+    assert parent.demote(job.keys) == 1
+    parent.on_request_finished(serve_ctx)
+    manager.complete_load(keys[:1], reader_ctx)
+
+    # The serve job still holds chunk 2, so it can't go yet.
+    assert evicted_by_storing(4) == to_keys([3])
+    finish_tier_jobs([job])
+    assert evicted_by_storing(5) == to_keys([2])
+
+
 class TestExampleSecondaryTierManager:
     """Tests for ExampleSecondaryTierManager implementation."""
 

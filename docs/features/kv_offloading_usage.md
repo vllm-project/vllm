@@ -193,6 +193,8 @@ context provides each key's token position through `get_offload_key_position(key
 so a policy can establish prefix ordering during insertion. Policies that do not
 use request-specific insertion ordering can accept and ignore `req_context`.
 
+A policy can also override `demote(keys)`, a hint that cached chunks are unlikely to be reused locally (see [KVCR](#kvcr)). The default ignores it.
+
 `eviction_policy` is checked against the built-in registry first; if it isn't a registered name, vLLM imports `cache_policy_module_path` and looks up `eviction_policy` as a class name in that module — the same fallback `spec_module_path` provides for a custom `OffloadingSpec`. No import or registration call needs to run before the server starts.
 
 ### Registering a friendly short name (in-process only)
@@ -406,6 +408,12 @@ Runtime handshake for a P2P (or P/D) pull, once the orchestrator has set the key
 7. On `get_finished`, hits are loaded into GPU as ordinary cache hits; misses are recomputed by the engine.
 
 In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
+
+### KVCR
+
+A `kvcr` tier serves chunks of this instance's CPU tier to peers through [KVCR](https://github.com/ai-dynamo/kvcr). The peer stores its own copy of each chunk it fetches. Set `"demote_served_chunks": true` to move the local copy of every served chunk to the evict-first end of the CPU tier.
+
+The demoted chunks stay cached. A later local request that reuses one restores its normal rank, and a chunk that another local request is reading keeps its place. The built-in `lru` policy honors the demotion; `arc` and custom policies that do not override `CachePolicy.demote()` ignore it.
 
 ### Out-of-Tree Secondary Tiers
 

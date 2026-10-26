@@ -128,6 +128,19 @@ class ParentManager(ABC):
         req_context: ReqContext,
     ) -> TransferJob: ...
 
+    def demote(self, keys: Collection[OffloadKey]) -> int:
+        """Demote primary copies that a store job hands to a peer.
+
+        Optional, between steps 3 and 4: call it with keys of a job from
+        create_store_job() whose destination keeps its own copy (a peer's
+        tier). The primary tier moves those chunks to the front of its
+        eviction order, so they leave first once the job releases them.
+        Chunks pinned by another reader keep their place.
+
+        Returns the number of chunks demoted. The default demotes none.
+        """
+        return 0
+
     @abstractmethod
     def on_request_finished(self, req_context: ReqContext) -> None: ...
 

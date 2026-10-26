@@ -198,6 +198,9 @@ class _SecondaryTierFacingParent(ParentManager):
     ) -> TransferJob:
         return self._m.create_store_job(keys, req_context, self._origin_idx)
 
+    def demote(self, keys: Collection[OffloadKey]) -> int:
+        return self._m.demote_served(keys)
+
     def on_request_finished(self, req_context: ReqContext) -> None:
         return self._m.on_request_finished(
             req_context, exclude_tier_idx=self._origin_idx
@@ -1009,6 +1012,14 @@ class TieringOffloadingManager(OffloadingManager):
         )
         self._register_job(job_metadata, tier_idx)
         return job_metadata
+
+    def demote_served(self, keys: Collection[OffloadKey]) -> int:
+        """Demote primary chunks that a secondary tier serves to a peer.
+
+        The keys must belong to a live job from create_store_job(), which
+        holds one read pin on each. Returns the number of chunks demoted.
+        """
+        return self.primary_tier.demote(keys, pins_held=1)
 
     @override
     def on_new_request(

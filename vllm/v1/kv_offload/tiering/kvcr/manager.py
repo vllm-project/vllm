@@ -146,8 +146,13 @@ def _kvcr_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
 class _FrameworkPinAdapter:
     """Adapt KVCR framework pin callbacks to primary-tier store jobs."""
 
-    def __init__(self, tier: "KVCRSecondaryTierManager") -> None:
+    def __init__(
+        self, tier: "KVCRSecondaryTierManager", demote_served: bool = False
+    ) -> None:
         self._tier = tier
+        # The peer keeps its own copy of every chunk served to it, so the
+        # local copy can go first when the primary tier needs room.
+        self._demote_served = demote_served
         self._next_request_id = 0
         self._next_pin_request_id = 0
         self._pending_pins: dict[PinRequestId, tuple[BlockKey, ...]] = {}
@@ -212,6 +217,8 @@ class _FrameworkPinAdapter:
             make_descriptor = self._tier._make_descriptor
             for key, chunk_id in zip(job_keys, job.chunk_ids.tolist()):
                 descriptors[BlockKey(key)] = [make_descriptor(chunk_id)]
+            if self._demote_served:
+                parent.demote(job_keys)
             pin_handle = f"kvcr-job-{job.job_id}"
             self._pin_jobs[pin_handle] = job.job_id
             return pin_handle, descriptors
@@ -307,6 +314,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         g3: dict[str, Any] | None = None,
         local_dram_backend: str = "UCX",
         remote_fw_dram_backend: str = "UCX",
+        demote_served_chunks: bool = False,
         backpressure_detector: "BackpressureDetector | None" = None,
     ) -> None:
         super().__init__(
@@ -411,7 +419,9 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             g3_values["paths"] = tuple(Path(path) for path in g3_values["paths"])
             g3_config = G3Options(**g3_values)
         nixl_agent_name = f"KVCR-{uuid.uuid4()}"
-        self._framework_pin_adapter = _FrameworkPinAdapter(self)
+        self._framework_pin_adapter = _FrameworkPinAdapter(
+            self, demote_served=demote_served_chunks
+        )
         self._inventory_events: list[OffloadingEvent] = []
 
         try:
