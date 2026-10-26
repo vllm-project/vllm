@@ -143,13 +143,6 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 Code example: [examples/basic/online_serving/openai_completion_client.py](../../../examples/basic/online_serving/openai_completion_client.py)
 
-When `echo=true` is combined with `truncate_prompt_tokens` and an explicit
-`truncation_side`, the echoed prefix reflects the retained prompt content.
-For text prompts, tokenizer-added special tokens such as BOS are excluded from
-the echo, while special tokens in the input text are preserved. This applies to
-both streaming and non-streaming responses, including an empty echoed prefix
-when truncation retains no user content.
-
 #### Extra parameters
 
 The following [sampling parameters](../../api/README.md#inference-parameters) are supported.

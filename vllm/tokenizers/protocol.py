@@ -79,6 +79,7 @@ class TokenizerLike(Protocol):
         add_special_tokens: bool = True,
         truncation: bool = False,
         max_length: int | None = None,
+        *,
         return_special_tokens_mask: bool = False,
     ) -> "BatchEncoding":
         raise NotImplementedError
