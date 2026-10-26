@@ -14,6 +14,9 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
+    rocm_mxfp8_block32_gemm,
+)
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
@@ -57,6 +60,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_inverse_rope_mxfp8_rows,
     rocm_inverse_rope_rows_,
     rocm_mxfp8_wo_a_bmm,
+    rocm_mxfp8_wo_a_bmm_mxfp8,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
@@ -932,6 +936,21 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self, attn_out: torch.Tensor | QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
         if isinstance(attn_out, QuantizedActivation):
+            if self._wo_b_takes_wo_a_mxfp8():
+                q, q_scale = rocm_mxfp8_wo_a_bmm_mxfp8(
+                    attn_out.data,
+                    attn_out.scale,
+                    self.wo_a,
+                    self.n_local_groups,
+                    self.o_lora_rank,
+                )
+                return rocm_mxfp8_block32_gemm(
+                    q,
+                    q_scale,
+                    self.wo_b.weight,
+                    self.wo_b.weight_scale,
+                    attn_out.orig_dtype,
+                )
             z = rocm_mxfp8_wo_a_bmm(
                 attn_out.data,
                 attn_out.scale,
@@ -953,6 +972,29 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             inverse_rope=False,
         )
         return self._wo_b_after_wo_a(z.flatten(1))
+
+    def _wo_b_takes_wo_a_mxfp8(self) -> bool:
+        """Whether wo_b's linear runs exactly a block32 MXFP8 GEMM on the
+        MXFP8-quantized wo_a output, so wo_a can hand that over directly:
+        32x32 block-scaled e4m3 weight, no bias, no tensor-parallel reduce."""
+        if self._wo_b_scale is not None:
+            return False
+        w = getattr(self.wo_b, "weight", None)
+        ws = getattr(self.wo_b, "weight_scale", None)
+        return (
+            w is not None
+            and ws is not None
+            and w.dtype == torch.float8_e4m3fn
+            and ws.dtype == torch.uint8
+            and w.dim() == 2
+            and ws.dim() == 2
+            and ws.shape[0] != w.shape[0]
+            and getattr(self.wo_b, "bias", None) is None
+            and (
+                not getattr(self.wo_b, "reduce_results", False)
+                or getattr(self.wo_b, "tp_size", 1) == 1
+            )
+        )
 
     def _wo_b_after_wo_a(self, zf: torch.Tensor) -> torch.Tensor:
         if self._wo_b_scale is not None and zf.dim() == 2:

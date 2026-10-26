@@ -332,7 +332,7 @@ def _packed(bm, bn, bk, k_pack, warps, stages, nonkdim, waves, fused=1) -> _Conf
 
 
 # (N, K) -> [(max M, config), ...] for the DeepSeek-V4.1-Flash MXFP8 linears at
-# TP2/TP4, tuned on MI355X under HIP graphs with weights cold in the LLC. A
+# TP1/TP2/TP4, tuned on MI355X under HIP graphs with weights cold in the LLC. A
 # tier serves every M up to its bound; larger M reuse the last tier.
 _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
     # shared expert gate_up, TP4
@@ -426,6 +426,20 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
         (4096, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
         (8192, _tiled(128, 128, 128, 1, True, 4, 2, 16, 0)),
     ],
+    # shared expert gate_up, TP1 (DP attention), tuned at the CUDA graph sizes 48-4096
+    (4608, 5120): [
+        (8, _packed(8, 16, 256, 2, 2, 3, 16, 0)),
+        (32, _packed(32, 32, 256, 1, 2, 3, 16, 0)),
+        (64, _tiled(64, 64, 512, 1, False, 4, 2, 32, 0, 2)),
+        (96, _tiled(32, 64, 512, 1, True, 8, 2, 16, 2)),
+        (128, _tiled(64, 64, 256, 1, False, 4, 2, 32, 2, 2)),
+        (192, _tiled(64, 64, 512, 1, True, 4, 2, 32, 2)),
+        (448, _tiled(64, 64, 256, 1, True, 4, 2, 32, 2)),
+        (896, _tiled(128, 128, 256, 1, True, 4, 2, 16, 0)),
+        (1792, _tiled(128, 128, 128, 1, True, 4, 2, 32, 2)),
+        (2560, _tiled(128, 128, 256, 1, True, 8, 2, 32, 0)),
+        (8192, _tiled(128, 128, 128, 1, True, 4, 2, 32, 2)),
+    ],
     # shared expert down, TP4
     (5120, 576): [
         (8, _packed(8, 32, 256, 2, 2, 2, 16, 1)),
@@ -483,6 +497,20 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
         (4096, _tiled(128, 128, 128, 1, True, 8, 2, 32, 1)),
         (8192, _tiled(128, 128, 128, 1, True, 2, 2, 32, 1)),
     ],
+    # shared expert down, TP1 (DP attention), tuned at the CUDA graph sizes 48-4096
+    (5120, 2304): [
+        (8, _packed(8, 16, 256, 2, 2, 3, 16, 0)),
+        (32, _packed(32, 32, 256, 1, 2, 3, 16, 0)),
+        (64, _tiled(64, 64, 256, 1, True, 8, 3, 16, 0, 4)),
+        (96, _tiled(32, 64, 512, 1, True, 8, 3, 16, 2)),
+        (192, _tiled(64, 64, 512, 1, True, 4, 2, 32, 2)),
+        (288, _tiled(64, 64, 256, 1, True, 4, 2, 32, 2)),
+        (384, _tiled(128, 64, 256, 1, True, 8, 2, 32, 0)),
+        (768, _tiled(128, 128, 256, 1, True, 8, 2, 32, 2)),
+        (2048, _tiled(128, 128, 128, 1, True, 4, 2, 32, 2)),
+        (3072, _tiled(128, 256, 128, 1, True, 8, 3, 32, 2)),
+        (8192, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
+    ],
     # wo_b, TP2
     (5120, 4096): [
         (4, _packed(4, 32, 512, 4, 2, 2, 16, 0)),
@@ -504,6 +532,23 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
         (3072, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
         (4096, _tiled(128, 128, 128, 1, True, 8, 2, 16, 1)),
         (8192, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
+    ],
+    # wo_b, TP1 (DP attention), tuned at the CUDA graph sizes 48-4096
+    (5120, 8192): [
+        (8, _packed(8, 16, 256, 2, 2, 3, 16, 0)),
+        (32, _packed(32, 32, 256, 1, 2, 3, 16, 0)),
+        (48, _tiled(64, 64, 256, 1, True, 4, 2, 16, 2, 4)),
+        (64, _tiled(64, 64, 512, 1, True, 4, 2, 32, 2, 2)),
+        (96, _tiled(32, 64, 512, 1, True, 8, 2, 16, 0)),
+        (128, _tiled(64, 64, 256, 1, True, 4, 2, 32, 0, 2)),
+        (192, _tiled(64, 64, 512, 1, True, 4, 2, 16, 0)),
+        (384, _tiled(128, 128, 256, 2, True, 4, 2, 16, 0)),
+        (768, _tiled(128, 128, 256, 1, True, 4, 2, 16, 0)),
+        (1024, _tiled(128, 128, 256, 2, True, 4, 2, 16, 0)),
+        (1536, _tiled(128, 128, 256, 1, True, 8, 2, 32, 0)),
+        (2048, _tiled(128, 128, 256, 1, True, 8, 2, 32, 2)),
+        (3072, _tiled(128, 128, 128, 1, True, 4, 2, 16, 0)),
+        (8192, _tiled(128, 128, 256, 1, True, 8, 2, 32, 2)),
     ],
     # wq_b, TP4
     (8192, 1280): [
@@ -538,6 +583,20 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
         (1024, _tiled(128, 128, 128, 1, True, 8, 2, 32, 1)),
         (2048, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
         (8192, _tiled(128, 256, 128, 1, True, 2, 2, 32, 0)),
+    ],
+    # wq_b, TP1 (DP attention), tuned at the CUDA graph sizes 48-4096
+    (32768, 1280): [
+        (8, _packed(8, 16, 256, 2, 2, 3, 16, 0)),
+        (32, _packed(32, 32, 256, 1, 2, 3, 16, 0)),
+        (56, _tiled(64, 64, 256, 1, True, 4, 2, 32, 2)),
+        (64, _tiled(64, 64, 256, 1, True, 4, 2, 16, 2)),
+        (128, _tiled(128, 128, 256, 1, False, 8, 2, 32, 0)),
+        (160, _tiled(128, 128, 128, 1, True, 8, 2, 32, 0)),
+        (224, _tiled(128, 128, 128, 1, True, 4, 2, 32, 2)),
+        (288, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
+        (448, _tiled(128, 128, 128, 1, True, 8, 2, 32, 0)),
+        (1280, _tiled(128, 128, 128, 1, True, 4, 2, 32, 0)),
+        (8192, _tiled(128, 128, 128, 1, True, 4, 2, 32, 2)),
     ],
 }
 

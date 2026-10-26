@@ -117,11 +117,15 @@ def test_rocm_mxfp8_linear_handles_extreme_magnitudes():
     assert (out[0] == 0).all(), "an all-zero activation row must give a zero row"
 
 
-# (name, N, K) of the DeepSeek-V4.1-Flash MXFP8 linears at TP=2 and TP=4. The
+# (name, N, K) of the DeepSeek-V4.1-Flash MXFP8 linears at TP=1, 2 and 4. The
 # checkpoint stores their scales in 32x32 blocks; shared_down at TP=4 has
 # K % 128 != 0, which only the block-scaled GEMM runs natively.
 V41_BLOCK32_SHAPES = [
     ("fused_wqa_wkv", 1280 + 512, 5120),
+    ("wq_b_tp1", 64 * 512, 1280),
+    ("wo_b_tp1", 5120, 8192),
+    ("shared_gate_up_tp1", 2 * 2304, 5120),
+    ("shared_down_tp1", 5120, 2304),
     ("wq_b_tp2", 64 * 512 // 2, 1280),
     ("indexer_wq_b", 32 * 128, 1280),
     ("wo_b_tp2", 5120, 8192 // 2),
