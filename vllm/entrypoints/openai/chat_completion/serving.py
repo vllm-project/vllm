@@ -4,7 +4,7 @@
 import asyncio
 import itertools
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
 from typing import Any, Final, cast
@@ -71,6 +71,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
+from vllm.v1.engine.detokenizer import ContentFilter
 
 logger = init_logger(__name__)
 
@@ -239,6 +240,28 @@ class OpenAIServingChat(GenerateBaseServing):
         """
         return chat_template_kwargs
 
+    def _stop_string_content_filter_factory(
+        self,
+        request: ChatCompletionRequest,
+        sampling_params: SamplingParams,
+        parser: Parser | None,
+        tokenizer: TokenizerLike,
+        chat_template_kwargs: dict[str, Any],
+        prompt_token_ids: list[int] | None,
+    ) -> Callable[[], ContentFilter] | None:
+        if not sampling_params.stop or parser is None:
+            return None
+        may_call_tools = (
+            parser.tool_parser is not None
+            and bool(request.tools)
+            and request.tool_choice != "none"
+        )
+        if parser.reasoning_parser is None and not may_call_tools:
+            return None
+        return lambda: self._make_parser(
+            request, tokenizer, chat_template_kwargs
+        ).stop_string_content_filter(request, prompt_token_ids)
+
     def _engine_reasoning_kwargs(
         self,
         request: ChatCompletionRequest,
@@ -405,6 +428,14 @@ class OpenAIServingChat(GenerateBaseServing):
                     **self._engine_reasoning_kwargs(
                         request, parser, chat_template_kwargs, prompt_token_ids
                     ),
+                    content_filter_factory=self._stop_string_content_filter_factory(
+                        request,
+                        sampling_params,
+                        parser,
+                        tokenizer,
+                        chat_template_kwargs,
+                        prompt_token_ids,
+                    )
                 )
 
             generators.append(generator)

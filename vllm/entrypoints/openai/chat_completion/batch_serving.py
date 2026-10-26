@@ -178,6 +178,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 if self.parser_cls is not None
                 else None
             )
+            prompt_token_ids = self._extract_prompt_components(engine_prompt).token_ids
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,
@@ -192,8 +193,16 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         single_request,
                         parser,
                         chat_template_kwargs,
-                        self._extract_prompt_components(engine_prompt).token_ids,
+                        prompt_token_ids,
                     ),
+                    content_filter_factory=self._stop_string_content_filter_factory(
+                        single_request,
+                        sampling_params,
+                        parser,
+                        tokenizer,
+                        chat_template_kwargs,
+                        prompt_token_ids,
+                    )
                 )
             )
 
