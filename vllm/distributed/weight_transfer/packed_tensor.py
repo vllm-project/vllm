@@ -227,7 +227,7 @@ def packed_nccl_broadcast_consumer(
         [] for _ in range(num_buffers)
     ]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
-    caller_stream = torch.cuda.current_stream()
+    caller_stream = torch.accelerator.current_stream()
     prev_received: torch.Event | None = None
 
     def receive_and_load(buffer_idx: int) -> None:
@@ -351,7 +351,7 @@ def packed_ipc_producer(
 
         if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
             # Drain queued copies so the consumer sees a fully-written buffer.
-            torch.cuda.current_stream().synchronize()
+            torch.accelerator.current_stream().synchronize()
             yield PackedIpcChunk(
                 names=names,
                 shapes=shapes,
@@ -372,7 +372,7 @@ def packed_ipc_producer(
         total_bytes += flat.numel()
 
     if total_bytes:
-        torch.cuda.current_stream().synchronize()
+        torch.accelerator.current_stream().synchronize()
         yield PackedIpcChunk(
             names=names,
             shapes=shapes,

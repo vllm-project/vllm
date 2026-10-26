@@ -57,6 +57,10 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_3BIT_NC = 9
     NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
     ULTRAQUANT_4BIT = 11  # packed FP4 values + UE8M0 group scales
+    # Hadamard-rotated Lloyd-Max codes, packed K+V per slot (ROCm).
+    OCTAVE_K3V4 = 12
+    OCTAVE_K3V3 = 13
+    OCTAVE_K3V3_COMPACT = 14
 
     # Backend self-manages kernel dispatch. Reads as quantized but matches no
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
@@ -77,6 +81,15 @@ class KVQuantMode(IntEnum):
     def is_nvfp4(self) -> bool:
         """True for NVFP4 packed quantization mode."""
         return self == KVQuantMode.NVFP4
+
+    @property
+    def is_octave(self) -> bool:
+        """True for any Octave quantization mode."""
+        return self in (
+            KVQuantMode.OCTAVE_K3V4,
+            KVQuantMode.OCTAVE_K3V3,
+            KVQuantMode.OCTAVE_K3V3_COMPACT,
+        )
 
     @property
     def is_turboquant(self) -> bool:
@@ -126,6 +139,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
+        return KVQuantMode[kv_cache_dtype.upper()]
+    if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("octave_"):
         return KVQuantMode[kv_cache_dtype.upper()]
     if kv_cache_dtype == "ultraquant_4bit":
         return KVQuantMode.ULTRAQUANT_4BIT
@@ -1155,11 +1170,16 @@ def get_mamba_prefill_checkpoint_position(
     num_tokens: int,
     hash_block_size: int,
     drop_eagle_block: bool,
+    num_hash_lookahead_tokens: int = 0,
 ) -> int:
     """Return the reusable Mamba checkpoint boundary for a prefill."""
-    # Without EAGLE, leave one token to recompute on resend.
+    # Leave tokens for logits recomputation and the checkpoint's hash.
     # EAGLE's block drop already leaves tokens to recompute.
-    proof_limit = num_tokens if drop_eagle_block else num_tokens - 1
+    proof_limit = (
+        num_tokens
+        if drop_eagle_block
+        else num_tokens - max(1, num_hash_lookahead_tokens)
+    )
     checkpoint_position = proof_limit // hash_block_size * hash_block_size
     if drop_eagle_block:
         checkpoint_position -= hash_block_size

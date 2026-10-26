@@ -66,8 +66,7 @@ def _get_tuned_standalone_max_size(
     max_size_mb = FI_MNNVL_ALLREDUCE_MAX_SIZE_MB.get(
         (capability.to_int(), world_size, _node_count(group))
     )
-    # Tuned cutoffs are exclusive; store the largest accepted size.
-    return None if max_size_mb is None else int(max_size_mb * MiB) - 1
+    return None if max_size_mb is None else int(max_size_mb * MiB)
 
 
 def _create_workspace(

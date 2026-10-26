@@ -817,10 +817,10 @@ class HfRunner:
 
         # convert to dict
         seq_logprobs_lst: list[dict[int, float]] = []
-        for tok_idx, tok_logprobs in enumerate(seq_logprobs):
-            # drop prompt logprobs
-            if tok_idx == 0:
-                tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
+        for tok_logprobs in seq_logprobs:
+            # Keep only the last position: the first step (and every step when
+            # use_cache=False) also returns logprobs for the preceding tokens.
+            tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
             topk = tok_logprobs.topk(num_logprobs)
 
             tok_logprobs_dct = {}

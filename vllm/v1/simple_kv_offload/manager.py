@@ -38,6 +38,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -384,6 +385,15 @@ class SimpleCPUOffloadScheduler:
                 self.block_size,
             )
             return 0, False
+
+        # Suffix-relative chunk boundaries must match absolute token positions.
+        for group_id in self.prefix_cacheable_group_ids:
+            spec = self.cpu_kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+            if (
+                isinstance(spec, ChunkedLocalAttentionSpec)
+                and num_computed_tokens % spec.attention_chunk_size
+            ):
+                return 0, False
 
         num_skipped_hashes = num_computed_tokens // self.hash_block_size
         remaining_hashes = request.block_hashes[num_skipped_hashes:]
@@ -769,16 +779,19 @@ class SimpleCPUOffloadScheduler:
                 state.block_ids = tuple([] for _ in range(num_groups))
                 state.num_stored_blocks = [0] * num_groups
 
-        for req_id, new_block_id_groups, _ in yield_req_data(scheduler_output):
+        for req_id, block_id_groups, is_full_table in yield_req_data(scheduler_output):
             state = self._reqs_to_store.get(req_id)
             if state is None or state.finished:
                 continue
 
-            if new_block_id_groups:
-                for g in range(min(num_groups, len(new_block_id_groups))):
-                    if new_block_id_groups[g] is not None:
+            if is_full_table:
+                state.block_ids = tuple([] for _ in range(num_groups))
+
+            if block_id_groups:
+                for g in range(min(num_groups, len(block_id_groups))):
+                    if block_id_groups[g] is not None:
                         # Accumulate new block IDs.
-                        state.block_ids[g].extend(new_block_id_groups[g])
+                        state.block_ids[g].extend(block_id_groups[g])
 
             num_new_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
             if num_new_tokens == 0:

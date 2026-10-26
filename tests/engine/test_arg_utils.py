@@ -4,6 +4,7 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from typing import Annotated, Literal
 
 import pytest
@@ -819,6 +820,27 @@ def test_ir_op_priority():
             ir_op_priority=ir_op_priority,
             kernel_config=KernelConfig(ir_op_priority=ir_op_priority),
         ).create_engine_config()
+
+
+def test_ir_op_priority_deprecation_warning(caplog_vllm, disable_log_dedup):
+    """Setting ir_op_priority warns users because vLLM IR is being removed."""
+    from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
+
+    msg = "ir_op_priority (--ir-op-priority) is deprecated"
+
+    # Platform defaults fill ir_op_priority; copying the config must not warn.
+    cfg = EngineArgs().create_engine_config()
+    replace(cfg.kernel_config, moe_backend="triton")
+    assert msg not in caplog_vllm.text
+
+    ir_op_priority = IrOpPriorityConfig(rms_norm=["vllm_c"])
+    EngineArgs(ir_op_priority=ir_op_priority).create_engine_config()
+    assert msg in caplog_vllm.text
+
+    caplog_vllm.clear()
+    kernel_config = KernelConfig(ir_op_priority=ir_op_priority)
+    EngineArgs(kernel_config=kernel_config).create_engine_config()
+    assert msg in caplog_vllm.text
 
 
 @pytest.mark.parametrize(

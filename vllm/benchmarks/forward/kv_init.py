@@ -51,10 +51,13 @@ def touched_kv_views(
     batch: BenchBatch,
     num_blocks: int,
     dcp_size: int,
+    lookahead: int = 0,
 ) -> list[torch.Tensor]:
     """Views of the KV blocks a step may write: each request's last
     ceil(scheduled / block_size) + 2 blocks, in every group."""
-    scheduled_tokens = [batch.expected[req_id][0] for req_id in batch.req_ids]
+    scheduled_tokens = [
+        batch.expected[req_id][0] + lookahead for req_id in batch.req_ids
+    ]
     views = []
     for group, ranges in zip(kv_cache_groups, batch.group_block_ranges):
         block_size = kv_block_size(group.kv_cache_spec, dcp_size)

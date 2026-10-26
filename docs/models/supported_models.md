@@ -391,6 +391,8 @@ th {
 | `DeepseekV3ForCausalLM` | DeepSeek-V3 | `deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-R1`, `deepseek-ai/DeepSeek-V3.1`, etc. | ✅︎ | ✅︎ |
 | `DeepseekV32ForCausalLM` | DeepSeek-V3.2 | `deepseek-ai/DeepSeek-V3.2`, etc. | ✅︎ | ✅︎ |
 | `DeepseekV4ForCausalLM` | DeepSeek-V4 | `deepseek-ai/DeepSeek-V4-Flash`, `deepseek-ai/DeepSeek-V4-Pro`, etc. | | ✅︎ |
+| `DomynEdgeForCausalLM` | Domyn Edge | `domyn/Domyn-Edge-Base`, `domyn/Domyn-Edge-SFT`, etc. | | |
+| `DoryForCausalLM` | Dory | `nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16` | | |
 | `DotsOCRForCausalLM` | dots_ocr | `rednote-hilab/dots.ocr` | ✅︎ | ✅︎ |
 | `Ernie4_5ForCausalLM` | Ernie4.5 | `baidu/ERNIE-4.5-0.3B-PT`, etc. | ✅︎ | ✅︎ |
 | `Ernie4_5_MoeForCausalLM` | Ernie4.5MoE | `baidu/ERNIE-4.5-21B-A3B-PT`, `baidu/ERNIE-4.5-300B-A47B-PT`, etc. | ✅︎ | ✅︎ |
@@ -607,6 +609,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `MossTranscribeDiarizeForConditionalGeneration` | MOSS-Transcribe-Diarize | T + A | `OpenMOSS-Team/MOSS-Transcribe-Diarize` | | ✅︎ |
 | `Moondream3ForCausalLM` | Moondream3 | T + I | `moondream/moondream3-preview` | | ✅︎ |
 | `MuseGlimmerForCausalLM`, `MuseGlimmerForConditionalGeneration` | Muse Glimmer | T + I<sup>+</sup> + V<sup>+</sup> | `meta-models/Muse-Glimmer-30B` | ✅︎ | ✅︎ |
+| `MuseSparkForConditionalGeneration` | Muse Spark Open | T + I<sup>+</sup> + V<sup>+</sup> + A<sup>+</sup> | `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`, etc. | ✅︎ | ✅︎ |
 | `NemotronH_Nano_Omni_Reasoning_V3`, `NemotronH_Nano_VL_V2` | Nemotron Nano 3 Omni, Nemotron Nano V2 VL | T + I<sup>E+</sup> + V<sup>+</sup> + A<sup>*</sup> | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` | ✅︎ | |
 | `RadioMBartPrefixForCausalLM` | Nemotron Parse 3.5 | T + I | `nvidia/Nemotron-3.5-Parse` | | |
 | `NVLM_D_Model` | NVLM-D 1.0 | T + I<sup>+</sup> | `nvidia/NVLM-D-72B`, etc. | | ✅︎ |

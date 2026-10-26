@@ -30,6 +30,7 @@ use vllm_chat::GenerationConfigMode;
 use vllm_chat::ToolStrictLevel;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
@@ -271,6 +272,12 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub tool_strict_level: Option<ToolStrictLevel>,
+    /// Structured outputs configuration as a JSON object. The Rust frontend
+    /// reads `backend`, which compiles every constraint (default xgrammar);
+    /// the other fields are forwarded to the engine.
+    #[arg(long, value_parser = parse_json::<StructuredOutputsConfig>, value_name = "JSON")]
+    #[serde(default)]
+    pub structured_outputs_config: Option<StructuredOutputsConfig>,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
@@ -582,6 +589,23 @@ impl SharedRuntimeArgs {
             .expect("profiler config serialization should not fail")
     }
 
+    /// Return the backend that compiles every structured-output constraint.
+    pub fn structured_outputs_backend(&self) -> StructuredOutputBackend {
+        self.structured_outputs_config
+            .as_ref()
+            .map(|config| config.backend)
+            .unwrap_or_default()
+    }
+
+    /// Return the structured outputs config JSON for managed Python engine
+    /// forwarding.
+    pub fn structured_outputs_config_json(&self) -> Option<String> {
+        self.structured_outputs_config.as_ref().map(|config| {
+            serde_json::to_string(config)
+                .expect("structured outputs config serialization should not fail")
+        })
+    }
+
     /// Return the per-modality limits as JSON for managed Python engine
     /// forwarding, or `None` when nothing is configured.
     ///
@@ -642,6 +666,7 @@ impl SharedRuntimeArgs {
         let cors = self.cors_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
+        let structured_outputs_backend = self.structured_outputs_backend();
         let ModelFileSources {
             model,
             tokenizer,
@@ -673,6 +698,7 @@ impl SharedRuntimeArgs {
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
+            structured_outputs_backend,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
@@ -721,6 +747,7 @@ impl SharedRuntimeArgs {
         let cors = self.cors_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
+        let structured_outputs_backend = self.structured_outputs_backend();
         let ModelFileSources {
             model,
             tokenizer,
@@ -749,6 +776,7 @@ impl SharedRuntimeArgs {
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
+            structured_outputs_backend,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
@@ -832,6 +860,21 @@ pub struct ProfilerConfig {
     #[serde(default)]
     pub profiler: Option<String>,
     /// Additional Python profiler config fields consumed by the engine layer.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// Structured outputs configuration parsed from `--structured-outputs-config`.
+///
+/// Only `backend` is read by the Rust frontend. All other fields are accepted
+/// but ignored — they are consumed by the Python engine layer.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct StructuredOutputsConfig {
+    /// Backend that compiles every structured-output constraint.
+    #[serde(default)]
+    pub backend: StructuredOutputBackend,
+    /// Additional Python structured outputs config fields consumed by the
+    /// engine layer.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }
@@ -1039,6 +1082,7 @@ impl ServeArgs {
             handshake_port,
             self.runtime.limit_mm_per_prompt_json(),
             hf_overrides,
+            self.runtime.structured_outputs_config_json(),
         )
     }
 }

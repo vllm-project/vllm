@@ -123,7 +123,7 @@ async def _serve(
     async def handler(request: web.Request) -> web.StreamResponse:
         if seen is not None:
             seen["payload"] = await request.json()
-            seen["headers"] = dict(request.headers)
+            seen["headers"] = request.headers.copy()
         if status != 200:
             return web.Response(status=status, reason="Bad Request")
 

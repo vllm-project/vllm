@@ -6,8 +6,8 @@
 import pytest
 import torch
 
-from vllm.models.muse_spark.common.moe import MuseSpark1xRouter
 from vllm.models.muse_spark.common.ops.fused_routing import fused_musespark1x_routing
+from vllm.models.muse_spark.nvidia.muse_moe_runner import MuseSpark1xRouter
 
 LOGITS = torch.tensor(
     [

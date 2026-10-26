@@ -34,7 +34,7 @@ steps:
   - benchmarks/attention_benchmarks/
   - vllm/v1/attention/
   commands:
-  - python3 benchmarks/attention_benchmarks/benchmark.py --backends flash flashinfer --batch-specs "8q1s1k"
+  - python3 benchmarks/attention_benchmarks/benchmark.py --backends FLASH_ATTN FLASHINFER --batch-specs "8q1s1k"
   mirror:
     amd:
       label: ":amd: (MI355) Attention Benchmark Smoke"

@@ -18,6 +18,7 @@ from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMe
 from vllm.model_executor.layers.mamba.kda_checkpoint import (
     FlashKDAPrefillCheckpointExporter,
 )
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
@@ -45,6 +46,7 @@ from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
 from vllm.models.kimi_k3.nvidia.ops import recoverssm as recoverssm_ops
 from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
     KDARecoverSSMCommitContext,
+    KDARecoverSSMRecords,
     kda_recoverssm_verify,
 )
 from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
@@ -134,16 +136,15 @@ def test_kda_recoverssm_config_state_layout():
         speculative_config=SimpleNamespace(num_speculative_tokens=2),
     )
 
+    # The verify records are kept outside the KV cache: the Mamba page holds the
+    # stock conv and SSM state.
     assert KimiLinearForCausalLM.get_mamba_state_dtype_from_config(vllm_config) == (
         torch.bfloat16,
         torch.float32,
-        torch.float32,
-        torch.bfloat16,
     )
-    assert KimiLinearForCausalLM.get_mamba_state_shape_from_config(vllm_config)[2:] == (
-        (4, 3, 32),
-        (4, 3, 64),
-    )
+    assert KimiLinearForCausalLM.get_mamba_state_shape_from_config(
+        vllm_config
+    ) == MambaStateShapeCalculator.kda_state_shape(1, 4, 32, num_spec=2)
 
 
 @torch.inference_mode()
@@ -799,29 +800,17 @@ def test_kda_recoverssm_verify_and_group_commit(
             else (num_blocks, history_len + query_len - 1, conv_dim)
         )
         conv_state = torch.randn(conv_shape, dtype=torch.bfloat16, device=DEVICE)
-        correction_cache = torch.empty(
-            num_blocks,
+        records = KDARecoverSSMRecords.allocate(
+            global_num_accepted.shape[0],
             num_heads,
             query_len,
             dim,
-            dtype=torch.float32,
-            device=DEVICE,
-        )
-        kg_cache = torch.empty(
-            num_blocks,
-            num_heads,
-            query_len,
-            2 * dim,
-            dtype=torch.bfloat16,
-            device=DEVICE,
+            torch.bfloat16,
+            DEVICE,
         )
         layer = SimpleNamespace(
-            kv_cache=(
-                conv_state,
-                checkpoint,
-                correction_cache,
-                kg_cache,
-            ),
+            kv_cache=(conv_state, checkpoint),
+            recoverssm_records=records,
             A_log=A_log,
             dt_bias=dt_bias,
             local_num_heads=num_heads,
@@ -842,8 +831,7 @@ def test_kda_recoverssm_verify_and_group_commit(
             dt_bias=dt_bias,
             lower_bound=lower_bound,
             checkpoint_state=checkpoint,
-            correction_cache=correction_cache,
-            kg_cache=kg_cache,
+            records=records,
             query_start_loc=query_start_loc,
             state_indices=state_indices,
             spec_query_len=query_len,

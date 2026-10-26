@@ -1414,13 +1414,14 @@ async def test_e2e_harmony_plain_roundtrip(harmony_client, harmony_tokenizer):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("tool_choice", ["auto", "none"])
 async def test_e2e_harmony_tool_choice_none_drops_tool_calls(
-    harmony_client, harmony_tokenizer, tool_choice
+    harmony_client, harmony_tokenizer, tool_choice, stream
 ):
     """HarmonyParser extracts tool calls whatever the tool_choice, so
-    /derender must drop them for "none", like coupled chat. "auto" checks
-    the tokens really parse as a tool call."""
+    /derender must drop them for "none", like coupled chat, batch and
+    streaming alike. "auto" checks the tokens really parse as a tool call."""
     messages = [{"role": "user", "content": "Weather in Paris?"}]
     gen_req = await _e2e_render_chat(harmony_client, HARMONY_MODEL, messages)
 
@@ -1440,23 +1441,32 @@ async def test_e2e_harmony_tool_choice_none_drops_tool_calls(
     if "get_weather" not in harmony_tokenizer.decode(output_ids):
         pytest.skip("Harmony template did not render the tool call")
 
-    resp = await harmony_client.post(
-        "/v1/chat/completions/derender",
-        json={
+    body: dict = {
+        "model": HARMONY_MODEL,
+        "prompt_tokens": len(gen_req["token_ids"]),
+        "prompt_token_ids": gen_req["token_ids"],
+        "chat_request": {
             "model": HARMONY_MODEL,
-            "generate_response": _e2e_generate_response(output_ids),
-            "prompt_tokens": len(gen_req["token_ids"]),
-            "chat_request": {
-                "model": HARMONY_MODEL,
-                "messages": messages,
-                "tools": _E2E_TOOLS,
-                "tool_choice": tool_choice,
-            },
+            "messages": messages,
+            "tools": _E2E_TOOLS,
+            "tool_choice": tool_choice,
         },
-    )
+    }
+    if stream:
+        body["stream"] = True
+        body["generate_chunk"] = _e2e_generate_response(output_ids)
+    else:
+        body["generate_response"] = _e2e_generate_response(output_ids)
+
+    resp = await harmony_client.post("/v1/chat/completions/derender", json=body)
     assert resp.status_code == 200, resp.text
-    choice = resp.json()["choices"][0]
-    assert bool(choice["message"].get("tool_calls")) == (tool_choice == "auto")
+    if stream:
+        choice = resp.json()["chunk"]["choices"][0]
+        tool_calls = choice["delta"].get("tool_calls")
+    else:
+        choice = resp.json()["choices"][0]
+        tool_calls = choice["message"].get("tool_calls")
+    assert bool(tool_calls) == (tool_choice == "auto")
     assert choice["finish_reason"] == (
         "tool_calls" if tool_choice == "auto" else "stop"
     )

@@ -14,6 +14,10 @@ from vllm.utils.math_utils import cdiv
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
     from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.pcp_manager import PCPBatchMetadata
+    from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
+        AdmittedDraftCounts,
+    )
 
 
 class InputBuffers:
@@ -115,13 +119,17 @@ class InputBatch:
     # (cudagraph capture) batches, which run the KV-sharing layers in full.
     fast_prefill: "FastPrefillBatchMetadata | None" = None
 
-    # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
-    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+    # Set only on a PCP rank-local batch.
+    pcp: "PCPBatchMetadata | None" = None
 
     # [num_reqs] prefilling rows that schedule one new prompt token (excluding
     # drafts) over existing context and so compute exactly like decodes.
     # None if there are no prefills.
     prefill_runs_as_decode_np: np.ndarray | None = None
+
+    # [num_reqs] admitted draft counts in flight to the host. Set only under
+    # adaptive verification with batch-sharded sampling, when the budget binds.
+    num_admitted_draft_tokens: "AdmittedDraftCounts | None" = None
 
     @classmethod
     def make_dummy(
