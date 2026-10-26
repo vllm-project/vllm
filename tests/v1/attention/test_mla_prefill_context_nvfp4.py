@@ -14,6 +14,7 @@ chunk must then see bit-identical Q, K and V.
 """
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -200,7 +201,9 @@ def test_nvfp4_prefill_context_matches_dequantized_cache() -> None:
     ).to(q_data_type)
 
     backend = _RecordingPrefillBackend()
-    out, lse = _Impl(kv_b_proj, "nvfp4_ds_mla")._compute_prefill_context(
+    out, lse = cast(
+        MLACommonBaseImpl, _Impl(kv_b_proj, "nvfp4_ds_mla")
+    )._compute_prefill_context(
         q,
         nvfp4_cache,
         SimpleNamespace(
@@ -209,7 +212,9 @@ def test_nvfp4_prefill_context_matches_dequantized_cache() -> None:
         scale,
     )
     ref_backend = _RecordingPrefillBackend()
-    ref_out, ref_lse = _Impl(kv_b_proj, "auto")._compute_prefill_context(
+    ref_out, ref_lse = cast(
+        MLACommonBaseImpl, _Impl(kv_b_proj, "auto")
+    )._compute_prefill_context(
         q,
         bf16_cache,
         SimpleNamespace(
