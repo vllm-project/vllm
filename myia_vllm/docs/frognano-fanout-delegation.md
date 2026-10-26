@@ -98,6 +98,17 @@ condition de ne jamais accepter une sortie sans `comm`/grep. Corollaire pratique
 marqueurs multiples, prévoir **2 shards de plus que de besoin** et le repli grep comme issue de
 secours normale, pas comme échec.
 
+### Cinquième mesure — logger thermique, 4e succès consécutif (26/10, vigie 21:03 locale)
+
+Rejeu de la classe sur les **50 dernières lignes** de `_logs/gpu-thermal.log` (fenêtre 25/10 13:03 →
+26/10 21:03 locale), 2 shards de 25/25, mission « recopie EXACTEMENT chaque ligne contenant WARN ».
+Attendu **11 / 6 = 17** ; obtenu **11 / 6 = 17, `missed=0 extra=0`** sur les deux shards — **4e succès
+consécutif et 2e premier passage sans retry**, `model_used: frognano-4b` confirmé (aucun
+`fallback_from`, cf. piège de routage). Les 17 WARN sont tous de type RAM hôte ; **aucun WARN
+thermique** (max 24 h 40 °C), et le corpus confirme `engine=off` à 23:03:56 locale le 25/10, ce qui
+recoupe le `StartedAt` conteneur de 22:07:32Z. Le corpus étant déjà connu, cette passe vaut comme
+**contrôle de stabilité du protocole**, pas comme nouvelle preuve de généralisation.
+
 ### Deuxième démo — sweep entropie docs (25/10 soir, `mini-sweeper`)
 
 Sweep de `myia_vllm/docs/` (74 fichiers, 152 appels mini) pour marqueurs d'état périmé
