@@ -967,14 +967,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
-        verify_route = envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY.lower()
-        asm_dcp_verify_config = (
-            _asm_dcp_verify_configured(
-                parallel_config.decode_context_parallel_size,
-                parallel_config.cp_kv_cache_interleave_size,
-                multi_token_decode=vllm_config.speculative_config is not None,
-            )
-            and verify_route != "segmented"
+        asm_dcp_verify_config = _asm_dcp_verify_configured(
+            parallel_config.decode_context_parallel_size,
+            parallel_config.cp_kv_cache_interleave_size,
+            multi_token_decode=vllm_config.speculative_config is not None,
         )
         super().__init__(
             kv_cache_spec,
@@ -998,17 +994,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             if self._asm_dcp_verify_heads:
                 self._asm_dcp_verify = True
-            elif verify_route == "asm" or not supports_segmented_dcp_verify:
+            elif not supports_segmented_dcp_verify:
                 raise ValueError(
-                    f"VLLM_ROCM_AITER_MLA_DCP_VERIFY={verify_route}, but the "
-                    "round-robin asm decode has no kernel for "
-                    f"{self.num_heads * self.dcp_world_size} DCP-gathered heads "
-                    f"(native counts: {_NATIVE_CPRR_HEADS}). "
-                    + (
-                        "Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented."
-                        if supports_segmented_dcp_verify
-                        else "This AITER build also lacks segmented MLA decode."
-                    )
+                    "ROCM_AITER_MLA DCP multi-token verify has no kernel for "
+                    f"{self.num_heads * self.dcp_world_size} DCP-gathered heads: "
+                    "the round-robin asm decode only has native counts "
+                    f"{_NATIVE_CPRR_HEADS}, and this AITER build lacks segmented "
+                    "MLA decode."
                 )
         self._supports_segmented_dcp_verify = (
             supports_segmented_dcp_verify
