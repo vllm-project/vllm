@@ -67,9 +67,9 @@ class _Shape:
 _SHAPES: dict[tuple[int, int, bool], _Shape] = {}
 
 
-class KvBalancedMqa:
-    """``forward_mqa`` of one Kimi K3 MLA layer on the KV-balanced kernel;
-    ``__call__`` returns None to defer to the attention backend."""
+class TokenspeedKvBalancedMqa:
+    """``forward_mqa`` of one Kimi K3 MLA layer on the KV-balanced kernel, with the
+    TOKENSPEED_MLA backend's ``forward_mqa`` for the steps the kernel doesn't run."""
 
     def __init__(self, layer: "MultiHeadLatentAttention"):
         from . import core
@@ -162,7 +162,21 @@ class KvBalancedMqa:
         layer: "MultiHeadLatentAttention",
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         attn_metadata: "MLACommonMetadata",
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        out = self._decode(layer, q, attn_metadata)
+        if out is None:
+            out = layer.impl.forward_mqa(  # type: ignore[attr-defined]
+                q, layer._attn_read_kv_cache(), attn_metadata, layer
+            )
+        return out
+
+    def _decode(
+        self,
+        layer: "MultiHeadLatentAttention",
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        attn_metadata: "MLACommonMetadata",
     ) -> tuple[torch.Tensor, torch.Tensor | None] | None:
+        """The kernel's decode, or None for a step it doesn't run."""
         if isinstance(q, tuple) or q.dtype != torch.float8_e4m3fn:
             return None
         decode = attn_metadata.decode
@@ -235,11 +249,11 @@ class KvBalancedMqa:
         return out, (lse.view(-1, self.heads) if lse is not None else None)
 
 
-def make_kv_balanced_mqa(layer: "MultiHeadLatentAttention") -> KvBalancedMqa | None:
-    """The KV-balanced decode of ``layer`` when ``mla_decode_backend`` is "kv_balanced",
-    else None. Raises if the layer can't run it."""
+def use_tokenspeed_kv_balanced_mqa(layer: "MultiHeadLatentAttention") -> bool:
+    """Whether ``layer`` decodes on the KV-balanced kernel: ``mla_decode_backend``
+    is "kv_balanced". Raises if the layer can't run it."""
     if mla_decode_backend(get_current_vllm_config()) != KV_BALANCED:
-        return None
+        return False
     backend = layer.attn_backend.get_name()
     unsupported = [
         reason
@@ -267,4 +281,4 @@ def make_kv_balanced_mqa(layer: "MultiHeadLatentAttention") -> KvBalancedMqa | N
         raise RuntimeError(
             "mla_decode_backend=kv_balanced requires " + "; ".join(unsupported)
         )
-    return KvBalancedMqa(layer)
+    return True

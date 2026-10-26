@@ -190,7 +190,7 @@ def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
     monkeypatch, workspace_init
 ):
     """The per-layer dispatch: the first layer of a forward plans and later layers
-    reuse it; steps the kernel can't run return None for the backend decode."""
+    reuse it; steps the kernel can't run use the backend decode."""
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla import core, layer
 
     torch.manual_seed(0)
@@ -228,6 +228,8 @@ def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
         _k_scale_float=1.0,
         _attn_read_kv_cache=lambda: cache,
     )
+    # The backend decode that the kernel defers to.
+    impl.forward_mqa = lambda *args: "backend"
     metadata = SimpleNamespace(
         decode=SimpleNamespace(
             seq_lens=lens, block_table=block_table, dcp_tot_seq_lens=None
@@ -239,7 +241,7 @@ def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
     query = (torch.randn(len(lengths) * q, heads, LATENT + ROPE, device=device) / 2).to(
         torch.float8_e4m3fn
     )
-    mqa = layer.KvBalancedMqa(mla)
+    mqa = layer.TokenspeedKvBalancedMqa(mla)
 
     out, lse = mqa(mla, query, metadata)
     assert lse is None
@@ -253,12 +255,12 @@ def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
     mqa(mla, query, metadata)
     assert len(plans) == 2
 
-    assert mqa(mla, query.to(torch.bfloat16), metadata) is None
+    assert mqa(mla, query.to(torch.bfloat16), metadata) == "backend"
     many = SimpleNamespace(
         **{**vars(metadata), "num_decodes": 5, "num_decode_tokens": 25}
     )
-    assert mqa(mla, _cat([query] * 3)[:25], many) is None
+    assert mqa(mla, _cat([query] * 3)[:25], many) == "backend"
     longer = SimpleNamespace(
         **{**vars(metadata), "num_decode_tokens": len(lengths) * (q + 1)}
     )  # more query rows per request than the reserved buffers hold
-    assert mqa(mla, _cat([query, query[: len(lengths)]]), longer) is None
+    assert mqa(mla, _cat([query, query[: len(lengths)]]), longer) == "backend"
