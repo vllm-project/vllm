@@ -172,7 +172,10 @@ def test_registry_inspect_does_not_init_cuda(model_arch):
         ("NemotronHForCausalLM", True),
         ("NemotronH_Nano_VL_V2", True),
         ("NemotronH_Omni_Reasoning_V3", True),
-        ("KimiLinearForCausalLM", not current_platform.is_rocm()),
+        (
+            "KimiLinearForCausalLM",
+            not (current_platform.is_rocm() or current_platform.is_xpu()),
+        ),
         ("KimiK3ForConditionalGeneration", not current_platform.is_rocm()),
         ("Mamba2ForCausalLM", False),
         ("Zamba2ForCausalLM", False),
