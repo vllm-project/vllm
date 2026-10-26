@@ -59,21 +59,43 @@ logger = init_logger(__name__)
 # callers only iterate / membership-test / equality-check.
 _EMPTY_POLL_RESULT: PollResult = PollResult(done=(), failed=())
 
+# Consecutive transfer-scope failures, with no success between, that fault
+# a peer (see "Failure model" in data/base.py).
+_MAX_CONSECUTIVE_TRANSFER_FAILURES = 3
 
-def _is_remote_disconnect(exc: Exception) -> bool:
-    """True if a NIXL state check failed because the peer disconnected.
+# NIXL errors that fault the peer's registration at once, even when raised
+# at submission, by exception name → status: the remote endpoint is gone,
+# or the remote agent is unknown.
+_PEER_FAULT_ERRORS = {
+    "nixlRemoteDisconnectError": "NIXL_ERR_REMOTE_DISCONNECT",
+    "nixlNotFoundError": "NIXL_ERR_NOT_FOUND",
+}
 
-    NIXL raises ``nixlRemoteDisconnectError`` (NIXL_ERR_REMOTE_DISCONNECT)
-    from ``check_xfer_state`` once the target endpoint is gone, e.g. after
-    the peer process died, instead of reporting an ``"ERR"`` state. Matched
-    by name and status code so the bindings need not be imported here; an
-    unrecognized error keeps the transfer inflight, the conservative side.
+
+def _peer_fault_status(exc: Exception) -> str | None:
+    """The NIXL status of *exc* if it is a peer-scope failure, else None.
+
+    Matched by name and status string so the bindings need not be imported.
     """
-    return type(
-        exc
-    ).__name__ == "nixlRemoteDisconnectError" or "NIXL_ERR_REMOTE_DISCONNECT" in str(
-        exc
-    )
+    status = _PEER_FAULT_ERRORS.get(type(exc).__name__)
+    if status is not None:
+        return status
+    text = str(exc)
+    return next((s for s in _PEER_FAULT_ERRORS.values() if s in text), None)
+
+
+def _is_terminal_state_error(exc: Exception) -> bool:
+    """True if a failed NIXL state check ends the transfer.
+
+    Only ``nixlRemoteDisconnectError`` does: NIXL raises it once the target
+    endpoint is gone, so nothing more can land. Any other raise says nothing
+    about the WRITE itself; #59790 measured a WRITE that kept landing after
+    ``remove_remote_agent`` while its handle raised ``nixlNotFoundError``.
+    Such a transfer stays inflight, so its pins and the peer's destination
+    blocks are not reused under it. The raise still faults its peer (see
+    ``_record_state_check_failure``), which bounds how long it stays.
+    """
+    return _peer_fault_status(exc) == "NIXL_ERR_REMOTE_DISCONNECT"
 
 
 class _Inflight(NamedTuple):
@@ -81,10 +103,13 @@ class _Inflight(NamedTuple):
 
     ``peer_id`` lets poll() scope to a single owning session, since the
     transport is shared across all peer sessions of the engine.
+    ``struck`` is set once the transfer has counted against its peer, so a
+    state check that keeps raising charges it once, not once per poll.
     """
 
     peer_id: str
     handle: object
+    struck: bool = False
 
 
 class NixlTransport(DataTransport):
@@ -115,6 +140,10 @@ class NixlTransport(DataTransport):
         # transfer_id → _Inflight(peer_id, handle).
         self._inflight: dict[int, _Inflight] = {}
         self._next_id = itertools.count()
+        # peer_id → transfer-scope failures since its last success.
+        self._peer_strikes: dict[str, int] = {}
+        # peer_id → fault cause; reported by poll(peer_id) until removal.
+        self._peer_faults: dict[str, str] = {}
         # Registration is O(num_blocks) NIXL work — add_remote_agent plus a
         # prep_xfer_dlist over every block of the peer's region — so it runs
         # off the scheduler thread, mirroring the NIXL connector's
@@ -152,15 +181,22 @@ class NixlTransport(DataTransport):
                 self._backends,
             )
         else:
-            cfg = _NixlAgentConfig(
-                num_threads=self._num_threads, capture_telemetry=True
-            )
+            cfg = _NixlAgentConfig(backends=[], capture_telemetry=True)
             logger.info(
                 "NixlTransport %s: NIXL backends=[UCX] num_threads=%d",
                 self._agent_name,
                 self._num_threads,
             )
         self._agent = _NixlAgent(self._agent_name, cfg)
+        if not non_ucx_backends:
+            # The tier moves host memory only. UCX otherwise also wires up
+            # rc_gda GPU lanes to every peer, and their connect fails after a
+            # peer stalls or is replaced, leaving that peer unreachable until
+            # restart. UCX_* env vars win over engine_config.
+            params = {"engine_config": "TLS=^rc_gda"}
+            if self._num_threads > 0:
+                params["num_threads"] = str(self._num_threads)
+            self._agent.create_backend("UCX", params)
 
         total_size = self._num_blocks * self._block_len
         reg_descs = [(self._base_addr, total_size, 0, "")]
@@ -192,11 +228,9 @@ class NixlTransport(DataTransport):
         num_blocks: int,
         block_len: int,
     ) -> None:
-        gen = self._begin_registration(peer_id)
-        nixl_name, remote_dlist = self._build_peer_handles(
-            agent_metadata, base_addr, num_blocks, block_len
-        )
-        self._publish_peer(peer_id, gen, nixl_name, remote_dlist)
+        self.add_remote_peer_async(
+            peer_id, agent_metadata, base_addr, num_blocks, block_len
+        ).result()
 
     def add_remote_peer_async(
         self,
@@ -210,7 +244,7 @@ class NixlTransport(DataTransport):
 
         def register() -> None:
             nixl_name, remote_dlist = self._build_peer_handles(
-                agent_metadata, base_addr, num_blocks, block_len
+                peer_id, agent_metadata, base_addr, num_blocks, block_len
             )
             if not self._publish_peer(peer_id, gen, nixl_name, remote_dlist):
                 raise RuntimeError(
@@ -227,6 +261,8 @@ class NixlTransport(DataTransport):
             self._peer_gen[peer_id] = self._peer_gen.get(peer_id, 0) + 1
             nixl_name = self._peer_nixl_names.pop(peer_id, None)
             dlist = self._remote_dlists.pop(peer_id, None)
+        self._peer_strikes.pop(peer_id, None)
+        self._peer_faults.pop(peer_id, None)
         if self._agent is not None:
             self._release_remote_handles(peer_id, dlist, nixl_name)
 
@@ -239,6 +275,7 @@ class NixlTransport(DataTransport):
 
     def _build_peer_handles(
         self,
+        peer_id: str,
         agent_metadata: bytes,
         base_addr: int,
         num_blocks: int,
@@ -246,16 +283,25 @@ class NixlTransport(DataTransport):
     ) -> tuple[str, Any]:
         """The expensive half: agent wireup plus one descriptor per block.
 
-        Touches no shared state, so it runs unlocked — holding the peer
-        lock across it would stall the scheduler thread for exactly as
-        long as the registration it is meant to move off that thread.
+        Holding the peer lock across native registration would stall the
+        scheduler thread for exactly as long as the registration it is
+        meant to move off that thread.
         """
         nixl_name = self._agent.add_remote_agent(agent_metadata)
-        block_descs = [
-            (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)
-        ]
-        xfer_dlist = self._agent.get_xfer_descs(block_descs, mem_type="DRAM")
-        remote_dlist = self._agent.prep_xfer_dlist(nixl_name, xfer_dlist)
+        try:
+            block_descs = [
+                (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)
+            ]
+            xfer_dlist = self._agent.get_xfer_descs(block_descs, mem_type="DRAM")
+            remote_dlist = self._agent.prep_xfer_dlist(nixl_name, xfer_dlist)
+        except Exception:
+            # All builds run on the single-worker _reg_executor, so another
+            # registration cannot acquire this name between check and release.
+            with self._peer_lock:
+                published = nixl_name in self._peer_nixl_names.values()
+            if not published:
+                self._release_remote_handles(peer_id, None, nixl_name)
+            raise
         return nixl_name, remote_dlist
 
     def _publish_peer(
@@ -331,8 +377,9 @@ class NixlTransport(DataTransport):
     ) -> int | None:
         """Submit a WRITE transfer to *peer_id*.
 
-        Returns a transfer ID, or None if the peer is not registered.
-        The ID is returned via poll() when the transfer completes or fails.
+        Returns a transfer ID, or None if the peer is not registered or
+        submission fails. The ID is returned via poll() when the transfer
+        completes or fails.
         """
         remote_dlist = self._remote_dlists.get(peer_id)
         if remote_dlist is None:
@@ -350,14 +397,27 @@ class NixlTransport(DataTransport):
             peer_id,
             len(local_idxs),
         )
-        handle = self._agent.make_prepped_xfer(
-            "WRITE",
-            self._local_dlist,
-            np.asarray(local_idxs, dtype=np.int32),
-            remote_dlist,
-            np.asarray(remote_idxs, dtype=np.int32),
-        )
-        self._agent.transfer(handle)
+        local_arr = np.asarray(local_idxs, dtype=np.int32)
+        remote_arr = np.asarray(remote_idxs, dtype=np.int32)
+        handle = None
+        try:
+            handle = self._agent.make_prepped_xfer(
+                "WRITE", self._local_dlist, local_arr, remote_dlist, remote_arr
+            )
+            # transfer() reports a failed post as "ERR" instead of raising.
+            if self._agent.transfer(handle) == "ERR":
+                raise RuntimeError("transfer() posted with status ERR")
+        except Exception as exc:
+            logger.warning(
+                "NixlTransport %s: write_blocks failed for peer=%s: %s",
+                self._agent_name,
+                peer_id,
+                exc,
+            )
+            if handle is not None:
+                self._release_handles([handle])
+            self._record_failure(peer_id, exc)
+            return None
         transfer_id = next(self._next_id)
         self._inflight[transfer_id] = _Inflight(peer_id, handle)
         return transfer_id
@@ -370,14 +430,20 @@ class NixlTransport(DataTransport):
         an unscoped poll by one session would consume and discard siblings'
         completions. *peer_id* None polls every peer (shutdown drain only).
 
-        Returns PollResult(done=..., failed=...) with transfer IDs.
-        Completed handles are released automatically.
+        Returns PollResult(done=..., failed=..., peer_fault=...) with
+        transfer IDs. Completed handles are released automatically.
+        ``peer_fault`` is set on a scoped poll once *peer_id* is faulted.
         """
         if not self._inflight:
-            return _EMPTY_POLL_RESULT
+            return self._poll_result(peer_id, None, None)
 
         done_ids: list[int] | None = None
         failed_ids: list[int] | None = None
+        # Strikes are applied once the batch is classified: poll() sees
+        # completions, not their order, so a DONE anywhere in the batch is
+        # the success "between" its peer's earlier failures.
+        succeeded: set[str] | None = None
+        failures: list[tuple[str, str]] | None = None
 
         for transfer_id, entry in self._inflight.items():
             if peer_id is not None and entry.peer_id != peer_id:
@@ -385,26 +451,45 @@ class NixlTransport(DataTransport):
             try:
                 state = self._agent.check_xfer_state(entry.handle)
             except Exception as exc:
-                logger.warning(
+                # A check that keeps raising warns once, then at debug.
+                (logger.debug if entry.struck else logger.warning)(
                     "NixlTransport %s: check_xfer_state failed for transfer_id=%d: %s",
                     self._agent_name,
                     transfer_id,
                     exc,
                 )
-                if not _is_remote_disconnect(exc):
+                if not entry.struck:
+                    self._record_state_check_failure(entry.peer_id, exc)
+                    entry = self._inflight[transfer_id] = entry._replace(struck=True)
+                if not _is_terminal_state_error(exc):
+                    # Kept: the WRITE may still be landing. Its peer is now
+                    # faulted, so the session disconnects once this drains
+                    # or at its drain cap, and the teardown reclaims it.
                     continue
                 state = "ERR"
             if state == "DONE":
                 if done_ids is None:
                     done_ids = []
                 done_ids.append(transfer_id)
+                if succeeded is None:
+                    succeeded = set()
+                succeeded.add(entry.peer_id)
             elif state not in ("PROC", "PEND"):
                 if failed_ids is None:
                     failed_ids = []
                 failed_ids.append(transfer_id)
+                if not entry.struck:
+                    if failures is None:
+                        failures = []
+                    failures.append((entry.peer_id, f"state {state}"))
+
+        for pid in succeeded or ():
+            self._peer_strikes.pop(pid, None)
+        for pid, cause in failures or ():
+            self._record_transfer_failure(pid, cause)
 
         if done_ids is None and failed_ids is None:
-            return _EMPTY_POLL_RESULT
+            return self._poll_result(peer_id, None, None)
 
         handles_to_release = []
         for tid in done_ids or ():
@@ -413,9 +498,21 @@ class NixlTransport(DataTransport):
             handles_to_release.append(self._inflight.pop(tid).handle)
         self._release_handles(handles_to_release)
 
+        return self._poll_result(peer_id, done_ids, failed_ids)
+
+    def _poll_result(
+        self,
+        peer_id: str | None,
+        done_ids: list[int] | None,
+        failed_ids: list[int] | None,
+    ) -> PollResult:
+        fault = self._peer_faults.get(peer_id) if peer_id is not None else None
+        if done_ids is None and failed_ids is None and fault is None:
+            return _EMPTY_POLL_RESULT
         return PollResult(
             done=done_ids if done_ids is not None else _EMPTY_POLL_RESULT.done,
             failed=failed_ids if failed_ids is not None else _EMPTY_POLL_RESULT.failed,
+            peer_fault=fault,
         )
 
     def cancel(
@@ -431,8 +528,9 @@ class NixlTransport(DataTransport):
         the request without cancelling RMA, and the bytes keep landing. So
         PROC/PEND transfers, and those whose state check or
         ``release_xfer_handle`` raises, stay in ``self._inflight`` for a
-        later ``poll()`` to observe. A state check that fails because the
-        peer disconnected counts as terminal.
+        later ``poll()`` to observe. A state check that raises faults the
+        peer; only a remote disconnect also counts as terminal (see
+        ``_is_terminal_state_error``).
         """
         if mode == "immediate":
             handles = [
@@ -458,7 +556,8 @@ class NixlTransport(DataTransport):
                     tid,
                     exc,
                 )
-                if not _is_remote_disconnect(exc):
+                self._record_state_check_failure(entry.peer_id, exc)
+                if not _is_terminal_state_error(exc):
                     still_inflight.append(tid)
                     continue
                 # The handle may no longer be releasable; it is terminal
@@ -508,6 +607,49 @@ class NixlTransport(DataTransport):
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _record_failure(self, peer_id: str, exc: Exception) -> None:
+        """Classify a NIXL exception: a peer fault, or one strike."""
+        status = _peer_fault_status(exc)
+        if status is not None:
+            self._set_peer_fault(peer_id, status)
+        else:
+            self._record_transfer_failure(peer_id, f"{type(exc).__name__}: {exc}")
+
+    def _record_state_check_failure(self, peer_id: str, exc: Exception) -> None:
+        """Fault *peer_id* for a ``check_xfer_state`` that raised.
+
+        The bindings raise for every NIXL error status (only success and
+        in-progress are returned), so a raise is a failure NIXL reported,
+        not a flaky check. A peer whose transfer state can't be trusted is
+        torn down rather than given strikes: with strikes, successes to the
+        same peer could keep resetting them while the transfer stays
+        inflight, holding its pins, for good.
+        """
+        self._set_peer_fault(
+            peer_id,
+            _peer_fault_status(exc)
+            or f"check_xfer_state raised {type(exc).__name__}: {exc}",
+        )
+
+    def _record_transfer_failure(self, peer_id: str, cause: str) -> None:
+        strikes = self._peer_strikes.get(peer_id, 0) + 1
+        self._peer_strikes[peer_id] = strikes
+        if strikes >= _MAX_CONSECUTIVE_TRANSFER_FAILURES:
+            self._set_peer_fault(
+                peer_id, f"{strikes} consecutive transfer failures (last: {cause})"
+            )
+
+    def _set_peer_fault(self, peer_id: str, cause: str) -> None:
+        if peer_id in self._peer_faults:
+            return
+        self._peer_faults[peer_id] = cause
+        logger.warning(
+            "NixlTransport %s: registration for peer=%s judged unusable: %s",
+            self._agent_name,
+            peer_id,
+            cause,
+        )
 
     def _release_handles(self, handles: list[object]) -> None:
         if self._agent is None:

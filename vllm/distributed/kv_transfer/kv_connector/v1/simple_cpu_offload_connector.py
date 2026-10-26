@@ -63,6 +63,20 @@ _DISK_ONLY_KEYS = (
 )
 
 
+def _find_simple_cpu_offload_connector(
+    connector: KVConnectorBase_V1,
+) -> "SimpleCPUOffloadConnector | None":
+    if isinstance(connector, SimpleCPUOffloadConnector):
+        return connector
+    child_connectors = getattr(connector, "_connectors", None)
+    if child_connectors:
+        for child in child_connectors:
+            found = _find_simple_cpu_offload_connector(child)
+            if found is not None:
+                return found
+    return None
+
+
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache offloading with custom kernel transfers and BlockPool LRU."""
 
@@ -100,6 +114,16 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                     cpu_capacity_per_rank / (1024**3),
                 )
             cpu_capacity_per_rank = explicit
+
+        # When set, num_cpu_blocks overrides automatic pool sizing from byte budgets
+        # (including cpu_bytes_to_use and cpu_bytes_to_use_per_rank), allowing ranks
+        # with different KV layouts (e.g. PP stages) to use the same pool size.
+        # Byte budgets still bound capacity.
+        num_cpu_blocks = extra_config.get("num_cpu_blocks")
+        if num_cpu_blocks is not None and (
+            type(num_cpu_blocks) is not int or num_cpu_blocks <= 0
+        ):
+            raise ValueError("num_cpu_blocks must be a positive integer")
 
         lazy_offload = bool(extra_config.get("lazy_offload", False))
 
@@ -160,6 +184,12 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             kv_offload_backend,
             disk_path or "none",
         )
+        if num_cpu_blocks is not None:
+            logger.info(
+                "Using explicit num_cpu_blocks=%d for offload pool sizing "
+                "instead of automatic sizing from byte budgets.",
+                num_cpu_blocks,
+            )
 
         if role == KVConnectorRole.SCHEDULER:
             from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
@@ -167,6 +197,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             assert kv_cache_config is not None
             scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
                 kv_cache_config, vllm_config
+            )
+            aligned_num_cpu_blocks = (
+                vllm_config.cache_config.simple_cpu_offload_num_blocks
             )
             self.scheduler_manager = SimpleCPUOffloadScheduler(
                 vllm_config,
@@ -177,6 +210,8 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 lazy_offload=lazy_offload,
                 disk_capacity_bytes=disk_capacity_bytes if disk_mode else 0,
                 use_page_cache=use_page_cache if disk_mode else False,
+                num_cpu_blocks=num_cpu_blocks,
+                aligned_num_cpu_blocks=aligned_num_cpu_blocks,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
@@ -188,6 +223,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_capacity_bytes=disk_capacity_bytes,
                 disk_buffer_slots=disk_buffer_slots,
                 use_page_cache=use_page_cache,
+                num_cpu_blocks=num_cpu_blocks,
             )
 
     # --- Worker-side methods ---
@@ -195,6 +231,12 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.worker_handler is not None:
             self.worker_handler.register_kv_caches(kv_caches)
+
+    def get_aligned_num_cpu_blocks(self) -> int | None:
+        if self.worker_handler is None:
+            return None
+        num_cpu_blocks = self.worker_handler.num_cpu_blocks
+        return num_cpu_blocks if num_cpu_blocks > 0 else None
 
     def bind_connector_metadata(
         self,

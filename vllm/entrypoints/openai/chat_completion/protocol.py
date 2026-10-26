@@ -40,7 +40,14 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.outputs import WeightVersionSpan
+from vllm.renderers import (
+    ChatParams,
+    ReasoningEffort,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -129,6 +136,8 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
+    # Contiguous weight version spans over output-token indexes.
+    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -168,6 +177,8 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     stop_reason: int | str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     token_ids: list[int] | None = None
+    # Set on the final chunk only; covers the whole output.
+    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
@@ -186,6 +197,10 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     # ``return_prompt_text=True`` on the request); only sent on the first chunk.
     prompt_text: str | None = None
     metrics: PerRequestMetrics | None = None
+    # vLLM-specific: KV transfer params returned with the final chunk
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
@@ -249,9 +264,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: (
-        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
-    ) = Field(
+    reasoning_effort: ReasoningEffort | None = Field(
         default=None,
         description=(
             "Constrains effort on reasoning for reasoning models. "
@@ -280,7 +293,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
-    skip_special_tokens: bool = True
+    skip_special_tokens: bool | None = None
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
     truncation_side: Literal["left", "right"] | None = Field(
@@ -428,6 +441,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "only in the first chunk, and token_ids contains the delta tokens "
             "for each chunk. This is useful for debugging or when you "
             "need to map generated text back to input tokens."
+        ),
+    )
+    return_weight_versions: bool = Field(
+        default=False,
+        description=(
+            "If true, each choice includes weight_versions: the weight-version "
+            "label that sampled each half-open range of its output tokens. "
+            "When streaming, only the last chunk of each choice includes it. "
+            "Beam search does not return it."
         ),
     )
     routed_experts_prompt_start: int = Field(
@@ -622,12 +644,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
+        reasoning_effort_map: dict[str, str] | None = None,
     ) -> ChatParams:
+        reasoning_effort = map_reasoning_effort(
+            self.reasoning_effort, reasoning_effort_map
+        )
+
         extra_kwargs: dict[str, Any] = dict(
             add_generation_prompt=self.add_generation_prompt,
             continue_final_message=self.continue_final_message,
             documents=self.documents,
-            reasoning_effort=self.reasoning_effort,
+            reasoning_effort=reasoning_effort,
         )
 
         # When reasoning is requested, activate thinking for models whose
@@ -635,8 +662,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         # enable_thinking to false). For templates that don't declare the
         # variable, resolve_chat_template_kwargs filters it out harmlessly.
         user_kwargs = self.chat_template_kwargs or {}
-        if self.reasoning_effort is not None and "enable_thinking" not in user_kwargs:
-            extra_kwargs["enable_thinking"] = self.reasoning_effort != "none"
+        if reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+            extra_kwargs["enable_thinking"] = reasoning_effort != "none"
 
         return ChatParams(
             chat_template=self.chat_template or default_template,
@@ -664,7 +691,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            max_output_tokens=max_output_tokens or 0,
+            max_output_tokens=max_output_tokens,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             truncation_side=self.truncation_side,
             add_special_tokens=self.add_special_tokens,
@@ -694,15 +721,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
             )
 
+        if (skip_special_tokens := self.skip_special_tokens) is None:
+            skip_special_tokens = default_sampling_params.get(
+                "skip_special_tokens", True
+            )
+
         return BeamSearchParams(
             beam_width=n,
+            allowed_token_ids=self.allowed_token_ids,
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            skip_special_tokens=self.skip_special_tokens,
+            skip_special_tokens=skip_special_tokens,
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
@@ -726,6 +759,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             )
             for name, default in self._DEFAULT_SAMPLING_PARAMS.items()
         }
+        if (skip_special_tokens := self.skip_special_tokens) is None:
+            skip_special_tokens = default_sampling_params.get(
+                "skip_special_tokens", True
+            )
 
         # Merge server-default stop_token_ids (e.g., model-specific tokens
         # like </call> for gpt-oss) with any request-specified ones
@@ -767,7 +804,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
-            skip_special_tokens=self.skip_special_tokens,
+            skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
             output_kind=(
