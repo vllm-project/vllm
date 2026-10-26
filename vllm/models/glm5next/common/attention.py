@@ -298,8 +298,8 @@ class Indexer(nn.Module):
             tail_cache=self.tail_cache,
         )
         # When every context fits index_topk, the kpool op fills each decode row
-        # with its causal indices without reading q, so forward skips the q side.
-        # The V2 runner captures decode graphs for this bound.
+        # with its causal indices without reading q, so a FULL graph captured for
+        # such batches skips the q side. The V2 runner captures them for this bound.
         self.cudagraph_seq_len_bound = (
             self.topk_tokens
             if self.rope_dim == 0
@@ -309,9 +309,16 @@ class Indexer(nn.Module):
         )
 
     def _skips_scoring(self) -> bool:
-        if self.cudagraph_seq_len_bound is None or in_piecewise_cudagraph():
-            # A piecewise graph would keep this choice while the op, an eager
-            # break, re-decides on each replay's metadata.
+        # Only a FULL graph capture skips. Eager steps, including the warm-up run
+        # before each capture, score as before, so the warm-up compiles and
+        # autotunes everything a capture runs: a piecewise capture scores (its
+        # eager-break op re-decides on each replay's metadata) even when its
+        # warm-up batch fits the bound.
+        if (
+            self.cudagraph_seq_len_bound is None
+            or in_piecewise_cudagraph()
+            or not torch.cuda.is_current_stream_capturing()
+        ):
             return False
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
