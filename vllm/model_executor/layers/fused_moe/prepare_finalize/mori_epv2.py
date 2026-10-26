@@ -51,14 +51,16 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if fused_experts.moe_config.in_dtype != torch.bfloat16:
             raise ValueError(
                 "MORI EPv2 only dispatches BF16 activations; got "
-                f"{fused_experts.moe_config.in_dtype}"
+                f"{fused_experts.moe_config.in_dtype}. Set VLLM_MORI_EP_V2=0 to "
+                "use MORI EPv1."
             )
         quant_dtype = fused_experts.quant_config.quant_dtype
         if quant_dtype is not None and not fused_experts.expects_unquantized_inputs:
             raise ValueError(
                 "MORI EPv2 dispatches unquantized BF16 activations, but "
                 f"{type(fused_experts).__name__} expects {quant_dtype} "
-                "activations quantized before dispatch"
+                "activations quantized before dispatch. Set VLLM_MORI_EP_V2=0 to "
+                "use MORI EPv1."
             )
 
         # AITER computes only the first expert_num_tokens rows.

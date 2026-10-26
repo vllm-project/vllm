@@ -206,9 +206,11 @@ def _unique_id_worker(rank, init_method):
     # With PP=2 and DP=2 the EP groups are [0, 2] and [1, 3].
     groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
     group = groups[rank % 2]
-    All2AllManagerBase.__init__ = lambda self, g: self.__dict__.update(
-        rank=g.rank(), world_size=g.size(), cpu_group=g
-    )
+
+    def fake_init(self, g):
+        self.__dict__.update(rank=g.rank(), world_size=g.size(), cpu_group=g)
+
+    All2AllManagerBase.__init__ = fake_init  # type: ignore[method-assign]
     communicator = Mock()
     communicator.get_unique_id.return_value = f"uid-of-rank-{rank}"
     communicator.init.return_value.create_dev_comm.return_value = Mock(lsa_size=2)
@@ -271,7 +273,7 @@ def test_experts_it_cannot_feed_are_rejected(
     if ok:
         prepare_finalize.post_init_setup(experts)
     else:
-        with pytest.raises(ValueError, match="MORI EPv2"):
+        with pytest.raises(ValueError, match="VLLM_MORI_EP_V2=0"):
             prepare_finalize.post_init_setup(experts)
 
 
