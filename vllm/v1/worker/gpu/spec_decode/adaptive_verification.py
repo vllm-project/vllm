@@ -203,6 +203,36 @@ class AdaptiveVerificationManager:
         for slot in self._stale_confidences:
             slot.np.fill(1.0)
 
+    def warmup(self) -> None:
+        """Compile the budget kernel ahead of serving.
+
+        Dynamo specializes on a full batch (duck-sizing it to the per-slot
+        confidence buffer), on a single request and on a budget of 1, so each
+        would otherwise compile on the first trimmed step that hits it. Runs on
+        the real buffers with prepare_inputs' int64 idx_mapping, as guards also
+        check dispatch keys and dtypes; add_request resets each confidence slot
+        before use.
+        """
+        max_num_reqs = self.req_states.max_num_reqs
+        num_steps = self.num_speculative_steps
+        self._confidence_probs.fill_(1.0)
+        capacities = self._batch_draft_capacity
+        for num_reqs in sorted({1, max(max_num_reqs - 1, 1), max_num_reqs}):
+            idx_mapping = torch.arange(
+                num_reqs, dtype=torch.int64, device=capacities.device
+            )
+            for draft_budget in (1, 2):
+                if draft_budget >= num_reqs * num_steps:
+                    continue
+                capacities[:num_reqs].fill_(num_steps)
+                _assign_draft_token_budget_compiled(
+                    self._confidence_probs,
+                    idx_mapping,
+                    capacities[:num_reqs],
+                    draft_budget,
+                    num_steps,
+                )
+
     def add_request(self, req_idx: int) -> None:
         self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
         self._pending_resets.append(req_idx)
