@@ -90,11 +90,10 @@ impl HfSpecialTokens {
 /// This intentionally supports only the layouts we currently care about in
 /// the Rust frontend:
 /// - pure text models that keep text metadata at the top level
-/// - composite models that expose a single nested `text_config` or its
-///   `llm_config` alias (used by Nemotron)
-/// - Qwen omni-style models (Qwen2.5-Omni, Qwen3-Omni, Qwen3-ASR) that keep
-///   the text config under `thinker_config.text_config`, matching their
-///   Python `get_text_config()` overrides
+/// - composite models that expose a nested `text_config`, its `llm_config`
+///   alias (used by Nemotron), or a `thinker_config` whose own `text_config`
+///   holds the text config (Qwen2.5-Omni, Qwen3-Omni, Qwen3-ASR, matching
+///   their Python `get_text_config()` overrides)
 ///
 /// We do not support additional entry points such as `decoder`, `generator`, or
 /// `text_encoder`.
@@ -109,9 +108,8 @@ pub struct ModelConfig {
     n_routed_experts: Option<OneOrManyExpertCount>,
     num_local_experts: Option<OneOrManyExpertCount>,
     block_configs: Vec<BlockConfig>,
-    #[serde(alias = "llm_config")]
+    #[serde(alias = "llm_config", alias = "thinker_config")]
     text_config: Option<Box<ModelConfig>>,
-    thinker_config: Option<Box<ModelConfig>>,
 }
 
 /// Minimal subset of `generation_config.json`.
@@ -199,29 +197,19 @@ impl ModelConfig {
     /// Return the config that the Rust frontend treats as the text/LLM config.
     ///
     /// This is deliberately narrower than Python/transformers: we only support
-    /// the top-level config itself, a nested `text_config`, or the text config
-    /// of a nested `thinker_config`.
+    /// the top-level config itself or the innermost of nested text configs.
     fn effective_text_config(&self) -> &Self {
-        match self.nested_config() {
-            Some(nested) => nested.effective_text_config(),
-            None => self,
-        }
-    }
-
-    /// Return the nested config to descend into: `text_config` (or its
-    /// `llm_config` alias), else `thinker_config`.
-    fn nested_config(&self) -> Option<&Self> {
-        self.text_config.as_deref().or(self.thinker_config.as_deref())
+        self.text_config.as_deref().map_or(self, Self::effective_text_config)
     }
 
     /// Return the effective Hugging Face `model_type` used by the Rust
     /// frontend.
     ///
     /// This follows the same simplified text-config selection as the rest of
-    /// this type: the top-level config wins, otherwise the nested config may
-    /// provide the value.
+    /// this type: the top-level config wins, otherwise a nested `text_config`
+    /// may provide the value.
     pub fn model_type(&self) -> Option<&str> {
-        self.model_type.as_deref().or_else(|| self.nested_config()?.model_type())
+        self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
     }
 
     /// Return the effective model vocabulary size, following the same
@@ -229,8 +217,8 @@ impl ModelConfig {
     pub fn vocab_size(&self) -> Result<u32> {
         if let Some(vocab_size) = self.vocab_size {
             Ok(vocab_size)
-        } else if let Some(nested) = self.nested_config() {
-            nested.vocab_size()
+        } else if let Some(text_config) = self.text_config.as_deref() {
+            text_config.vocab_size()
         } else {
             Err(Error::Tokenizer(
                 "the model config does not define `vocab_size`".to_string(),
@@ -243,8 +231,8 @@ impl ModelConfig {
     pub(super) fn eos_token_ids(&self) -> &[u32] {
         if let Some(eos_token_id) = self.eos_token_id.as_ref() {
             eos_token_id.as_slice()
-        } else if let Some(nested) = self.nested_config() {
-            nested.eos_token_ids()
+        } else if let Some(text_config) = self.text_config.as_deref() {
+            text_config.eos_token_ids()
         } else {
             &[]
         }
@@ -254,8 +242,8 @@ impl ModelConfig {
     /// config.
     ///
     /// The only intentional simplification here is how we pick the text config:
-    /// Rust only looks at the top level, `text_config` (including its
-    /// `llm_config` alias), or `thinker_config.text_config`, not the broader
+    /// Rust only looks at the top level or nested `text_config`s (including
+    /// the `llm_config` and `thinker_config` aliases), not the broader
     /// transformers composite-config surface.
     fn num_experts_from_block_configs(&self) -> u32 {
         self.effective_text_config()
