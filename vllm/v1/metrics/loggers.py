@@ -1110,6 +1110,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     self.labelname_running_lora_adapters,
                 ],
             )
+            # Last lora_requests_info state exposed by each engine.
+            self._lora_info_last_labelvalues: dict[int, tuple] = {}
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
@@ -1233,6 +1235,25 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     self.labelname_waiting_lora_adapters: waiting_lora_adapters,
                     self.labelname_max_lora: self.max_lora,
                 }
+                labelvalues = (
+                    self.max_lora,
+                    waiting_lora_adapters,
+                    running_lora_adapters,
+                )
+                prev = self._lora_info_last_labelvalues.get(engine_idx)
+                self._lora_info_last_labelvalues[engine_idx] = labelvalues
+                # prometheus_client keeps every label combination it has
+                # ever seen in the exposition forever, so drop the state
+                # this engine moved away from, unless a data-parallel
+                # sibling still reports it.
+                if (
+                    prev is not None
+                    and prev != labelvalues
+                    and not any(
+                        v == prev for v in self._lora_info_last_labelvalues.values()
+                    )
+                ):
+                    self.gauge_lora_info.remove(*prev)
                 self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
 
         if mm_cache_stats is not None:
