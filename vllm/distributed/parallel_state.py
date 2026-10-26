@@ -91,7 +91,7 @@ class _RetainedHandle:
     ``wait`` must be idempotent: gloo ``Work.wait()`` is single-shot for
     point-to-point operations — calling it a second time on an already
     completed send blocks forever (verified empirically). Both the worker's
-    top-of-step drain of ``_pp_send_work`` and ``_reap_completed_isends``
+    top-of-step drain of the PP send handles and ``_reap_completed_isends``
     may wait the same entry's metadata handle, so the second caller must
     not re-wait the underlying works.
     """
