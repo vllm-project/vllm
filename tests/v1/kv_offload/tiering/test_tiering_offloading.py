@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.kv_offload.conftest import make_offloading_config
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -39,6 +40,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -1665,8 +1667,10 @@ if __name__ == "__main__":
 def test_tiering_manager_reports_one_config_info_series_for_each_tier():
     """The info metric holds one series for each tier, and the tier label tells
     the series apart. A tier cannot know its own index, so the manager adds the
-    label. A tier fills the names it owns only, so the CPU primary tier fills
-    its cpu_ labels on its own series alone."""
+    label. A tier fills the names it owns only. The primary tier here gets no
+    configuration, so it adds no label of its own. See
+    test_tiering_primary_tier_publishes_the_cpu_labels in test_factory.py for
+    the labels it adds with one."""
     mock_region = _mock_mmap_region(5)
     primary_tier = CPUPrimaryTierOffloadingManager(
         num_chunks=5, mmap_region=mock_region
@@ -1685,7 +1689,7 @@ def test_tiering_manager_reports_one_config_info_series_for_each_tier():
     )
 
     assert manager.config_info() == [
-        {"tier": "0:primary", "cpu_num_chunks": 5},
+        {"tier": "0:primary"},
         {"tier": "1:test_metrics", "path": "/mnt/test_metrics"},
         {"tier": "2:test_metrics", "path": "/mnt/test_metrics"},
     ]
@@ -1703,7 +1707,7 @@ def test_tiering_manager_reports_the_primary_series_with_no_secondary_tier():
         secondary_tiers=[],
     )
 
-    assert manager.config_info() == [{"tier": "0:primary", "cpu_num_chunks": 5}]
+    assert manager.config_info() == [{"tier": "0:primary"}]
 
 
 def test_tiering_manager_rejects_a_primary_tier_with_two_info_mappings():
@@ -1766,7 +1770,13 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
     mock_region = _mock_mmap_region(5)
     manager = TieringOffloadingManager(
         primary_tier=CPUPrimaryTierOffloadingManager(
-            num_chunks=5, mmap_region=mock_region
+            num_chunks=5,
+            mmap_region=mock_region,
+            info=CPUOffloadingInfo.from_config(
+                make_offloading_config(blocks_per_chunk=2, max_model_len=1024),
+                num_chunks=5,
+                kv_bytes_per_chunk=4096,
+            ),
         ),
         secondary_tiers=[
             MetricsSecondaryTierManager(
@@ -1785,7 +1795,14 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
     ):
         keys = TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
 
-    assert keys == ("cpu_num_chunks", "tier", "path")
+    assert keys == (
+        "cpu_num_chunks",
+        "cpu_blocks_per_chunk",
+        "cpu_kv_cache_size_bytes",
+        "cpu_kv_cache_size_tokens",
+        "tier",
+        "path",
+    )
     filled: set[str] = set()
     for info in manager.config_info():
         assert set(info) <= set(keys)

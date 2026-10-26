@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
+    get_sliding_window_size_in_chunks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -34,7 +35,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
     _create_req_context,
-    get_sliding_window_size_in_chunks,
 )
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -70,6 +70,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadingManager,
+    OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
@@ -122,7 +123,11 @@ def test_swa_offload_window_covers_unaligned_hit(
         config=SimpleNamespace(
             groups=tuple(
                 SimpleNamespace(
-                    group_id=i, tokens_per_block=group.kv_cache_spec.block_size
+                    group_id=i,
+                    tokens_per_block=group.kv_cache_spec.block_size,
+                    sliding_window_size_in_chunks=get_sliding_window_size_in_chunks(
+                        group.kv_cache_spec, group.kv_cache_spec.block_size * 4
+                    ),
                 )
                 for i, group in enumerate(groups)
             )
@@ -2393,6 +2398,58 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+def test_sliding_window_chunk_with_null_block_is_not_stored(
+    request_runner, async_scheduling: bool
+):
+    block_size = 4
+    spec_kwargs: dict[str, Any] = dict(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    kv_cache_groups = [
+        KVCacheGroupSpec(["layer0"], FullAttentionSpec(**spec_kwargs)),
+        KVCacheGroupSpec(
+            ["layer1"],
+            SlidingWindowSpec(**spec_kwargs, sliding_window=2 * block_size),
+        ),
+    ]
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        blocks_per_chunk=2,
+        kv_cache_groups=kv_cache_groups,
+    )
+
+    stored_keys: set[OffloadKey] = set()
+
+    def store(keys, req_context):
+        stored_keys.update(keys)
+        return generate_store_output(keys)
+
+    runner.manager.lookup.side_effect = lambda key, req_context: (
+        LookupResult.HIT if key in stored_keys else LookupResult.MISS
+    )
+
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+    runner.new_request(token_ids=[0] * (3 * block_size))
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    # B's GPU hit leaves sliding-window block 0 null, inside chunk 0.
+    runner.manager.prepare_store.side_effect = store
+    runner.new_request(token_ids=[0] * (3 * block_size) + [1])
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=((0, 0), (0, 1)))
+
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * (2 * block_size) + [2] * (block_size + 1))
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=((0, 0), (0, 1), (1, 0), (1, 1)),
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool):
     tokens_per_hash = 4
     num_gpu_blocks = 100
@@ -3543,6 +3600,46 @@ def test_pending_transfer_defers_prefix_lookup():
     assert is_async is False
     assert group_state.block_ids == []
     _as_mock(scheduler.manager.lookup).assert_not_called()
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_prefix_cache_reset_preserves_same_step_offload_reload(
+    request_runner, async_scheduling: bool
+):
+    """A new load after reset must survive the same batch's preemption notice."""
+    runner = request_runner(
+        block_size=4, num_gpu_blocks=100, async_scheduling=async_scheduling
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.new_request(token_ids=[0] * 8)
+    runner.run(decoded_tokens=[0, 0], expected_stored=(0, 1))
+
+    request = runner.scheduler.requests["0"]
+    req_status = runner.connector_scheduler._req_status["0"]
+    assert request.status == RequestStatus.RUNNING
+    assert not req_status.transfer_jobs
+    assert runner.scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert request.status == RequestStatus.PREEMPTED
+
+    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 2
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+    runner.run(decoded_tokens=[], complete_transfers=False)
+
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert len(req_status.transfer_jobs) == 1
+    (job_id,) = req_status.transfer_jobs
+    assert not runner.connector_scheduler._jobs[job_id].is_store
+    assert job_id in runner.offloading_spec.handler.waiting_jobs
+    runner.manager.complete_load.assert_not_called()
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(0, 1))
+    runner.manager.complete_load.assert_called_once()
+    assert not runner.connector_scheduler._jobs
+    assert not runner.scheduler.requests
 
 
 def test_async_preempt_readmit_before_transfer_output_is_deferred(request_runner):
