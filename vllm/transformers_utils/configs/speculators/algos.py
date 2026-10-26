@@ -149,6 +149,99 @@ def update_dflash2(config_dict: dict, pre_trained_config: dict) -> None:
             pre_trained_config["dflash_config"][key] = config_dict[key]
 
 
+@register_speculator("dspine")
+def update_dspine(config_dict: dict, pre_trained_config: dict) -> None:
+    """Apply DSpine specific configuration transformations to the `dict` used
+    to construct the Transformers PreTrainedConfig.
+    """
+    update_dflash(config_dict, pre_trained_config)
+    pre_trained_config["architectures"] = ["DSpineDraftModel"]
+    pre_trained_config["is_causal"] = True
+    if config_dict.get("block_size") is not None:
+        pre_trained_config["block_size"] = config_dict["block_size"]
+
+    dflash_config = pre_trained_config["dflash_config"]
+    if isinstance(config_dict.get("dflash_config"), dict):
+        dflash_config.update(config_dict["dflash_config"])
+
+    dflash_config["causal"] = True
+    dflash_config["draft_block_causal"] = config_dict.get(
+        "draft_block_causal", dflash_config.get("draft_block_causal", True)
+    )
+    dflash_config["selected_prefix_terminal"] = config_dict.get(
+        "selected_prefix_terminal",
+        dflash_config.get("selected_prefix_terminal", False),
+    )
+    dflash_config["selected_prefix_feature_write_mode"] = config_dict.get(
+        "selected_prefix_feature_write_mode",
+        dflash_config.get("selected_prefix_feature_write_mode", "independent"),
+    )
+    dflash_config["selected_prefix_feature_writes"] = config_dict.get(
+        "selected_prefix_feature_writes",
+        dflash_config.get("selected_prefix_feature_writes", True),
+    )
+    if config_dict.get("selected_prefix_feature_layers") is not None:
+        dflash_config["selected_prefix_feature_layers"] = config_dict[
+            "selected_prefix_feature_layers"
+        ]
+    elif "selected_prefix_feature_layers" not in dflash_config:
+        num_layers = int(pre_trained_config.get("num_hidden_layers", 5))
+        dflash_config["selected_prefix_feature_layers"] = list(range(1, num_layers + 1))
+
+    dspine_cfg = config_dict.get("dspine_config") or {}
+    if config_dict.get("selected_prefix_code_bridge") is not None:
+        dflash_config["selected_prefix_code_bridge"] = config_dict[
+            "selected_prefix_code_bridge"
+        ]
+    elif "selected_prefix_code_bridge" not in dflash_config:
+        code_size = (
+            config_dict.get("code_size")
+            or config_dict.get("transfer_dim")
+            or dspine_cfg.get("transfer_rank")
+        )
+        rank = (
+            config_dict.get("rank")
+            or config_dict.get("message_dim")
+            or dspine_cfg.get("message_size")
+        )
+        if code_size is not None and rank is not None:
+            dflash_config["selected_prefix_code_bridge"] = {
+                "code_size": int(code_size),
+                "rank": int(rank),
+                "eps": float(
+                    config_dict.get(
+                        "bridge_eps",
+                        dspine_cfg.get(
+                            "eps", pre_trained_config.get("rms_norm_eps", 1e-6)
+                        ),
+                    )
+                ),
+            }
+
+    if config_dict.get("selected_prefix_last_write_refine") is not None:
+        dflash_config["selected_prefix_last_write_refine"] = config_dict[
+            "selected_prefix_last_write_refine"
+        ]
+    elif "selected_prefix_last_write_refine" not in dflash_config:
+        top_k = (
+            config_dict.get("head_topk")
+            or config_dict.get("transition_top_k")
+            or config_dict.get("dspine_top_k")
+            or dspine_cfg.get("top_k")
+        )
+        if top_k is not None:
+            dflash_config["selected_prefix_last_write_refine"] = {
+                "kind": "exact_sender",
+                "head_topk": int(top_k),
+                "version": 1,
+                "weight": 1.0,
+            }
+    if config_dict.get("code_bridge_second_pass") is not None:
+        pre_trained_config["code_bridge_second_pass"] = config_dict[
+            "code_bridge_second_pass"
+        ]
+
+
 @register_speculator("dspark")
 def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     """Apply DSpark specific configuration transformations to the `dict` used to
