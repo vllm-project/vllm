@@ -3049,7 +3049,7 @@ def test_computed_blocks_not_evicted():
 
 @pytest.mark.parametrize(
     "start,prompt_logprobs,for_connector,expected_hit",
-    [(0, None, False, 0), (5, None, False, 4), (5, 0, False, 0), (5, None, True, 4)],
+    [(0, None, False, 0), (5, None, False, 4), (5, 0, False, 4), (5, None, True, 4)],
 )
 def test_fixed_token_scores_reuse_only_unscored_prefix(
     start, prompt_logprobs, for_connector, expected_hit
@@ -3086,6 +3086,32 @@ def test_fixed_token_scores_reuse_only_unscored_prefix(
     if expected_hit:
         assert lookup(scoring, max_cache_hit_length=len(tokens))[1] == expected_hit
         assert lookup(scoring, max_cache_hit_length=block_size - 1)[1] == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected_limit",
+    [
+        ({}, None),
+        ({"skip_reading_prefix_cache": True}, 0),
+        # Prompt scoring skips cache reads by default.
+        ({"prompt_logprobs": 1, "prompt_logprob_start": 5}, 0),
+        ({"prompt_logprobs": 1, "skip_reading_prefix_cache": False}, 0),
+        (
+            {
+                "prompt_logprobs": 1,
+                "prompt_logprob_start": 5,
+                "skip_reading_prefix_cache": False,
+            },
+            5,
+        ),
+    ],
+)
+def test_prefix_cache_hit_limit(kwargs, expected_limit):
+    request = make_request(
+        "req", list(range(16)), 4, sha256, sampling_params=SamplingParams(**kwargs)
+    )
+    assert request.prefix_cache_hit_limit == expected_limit
+    assert request.skip_reading_external_kv == (expected_limit is not None)
 
 
 def test_basic_prefix_caching_disabled():

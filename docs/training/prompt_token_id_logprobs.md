@@ -55,12 +55,16 @@ lists of Python ints are much slower to copy and serialize. With a logits
 - The longest row at most `--max-logprobs` candidates.
 - No `--kv-sharing-fast-prefill`.
 
+`prompt_logprob_start` also applies to `prompt_logprobs` (top-K prompt
+logprobs, V2 model runner only): positions up to and including
+`prompt_logprob_start` get `None`, and later positions are scored as usual.
+
 Scoring requests skip prefix-cache reads by default. Set
 `skip_reading_prefix_cache=False` to reuse locally cached KV for the rows before
 `prompt_logprob_start`; every scored row is still computed, and the hit is
-block-aligned, so reuse can end a few rows earlier. Requests that also set
-`prompt_logprobs` have no unscored prefix and reuse nothing. With a KV connector,
-scoring requests always recompute the whole prompt.
+block-aligned, so reuse can end a few rows earlier. Without
+`prompt_logprob_start`, every row is scored and nothing is reused. KV connector
+hits are not used for scoring requests; only the local prefix cache is reused.
 
 ## Limitations
 

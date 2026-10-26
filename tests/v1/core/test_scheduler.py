@@ -3531,7 +3531,7 @@ def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring):
     )
     admission = []
     scheduler.connector.on_new_request = lambda req: admission.append(
-        req.skip_reading_prefix_cache
+        req.skip_reading_external_kv
     )
     scheduler.add_request(plain)
     scheduler.add_request(scoring)
@@ -3539,7 +3539,10 @@ def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring):
 
     output = scheduler.schedule()
     assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
-    assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
+    # No external hit; suffix scoring still reuses the local blocks plain just
+    # loaded, up to prompt_logprob_start.
+    expected = BLOCK_SIZE * 3 if suffix_scoring else BLOCK_SIZE * 4
+    assert output.num_scheduled_tokens[scoring.request_id] == expected
 
 
 @pytest.mark.parametrize("is_async", [False, True])

@@ -498,8 +498,12 @@ def test_prompt_logprob_token_ids_validation():
     with pytest.raises(VLLMValidationError, match="at most 15 scored rows"):
         verify(prompt_logprob_token_ids=[[]] * 15 + [[1]])
     # prompt_logprob_start alone is a caller mistake, not a silent no-op.
-    with pytest.raises(VLLMValidationError, match="requires prompt_logprob_token_ids"):
+    with pytest.raises(VLLMValidationError, match="requires prompt_logprobs or"):
         verify(prompt_logprob_start=3)
+    # It also offsets top-K prompt logprobs.
+    verify(prompt_logprobs=1, prompt_logprob_start=3)
+    with pytest.raises(VLLMValidationError, match="non-negative"):
+        verify(prompt_logprobs=1, prompt_logprob_start=-1)
 
 
 def test_prompt_logprob_token_ids_require_v2_model_runner():
@@ -528,6 +532,14 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
         InputProcessor._validate_params(processor, params, ("generate",))
         processor.vllm_config.cache_config.kv_sharing_fast_prefill = True
         with pytest.raises(VLLMValidationError, match="fast-prefill"):
+            InputProcessor._validate_params(processor, params, ("generate",))
+
+        # Top-K prompt logprobs only honor prompt_logprob_start on the V2 runner.
+        processor.vllm_config.cache_config.kv_sharing_fast_prefill = False
+        params = SamplingParams(prompt_logprobs=1, prompt_logprob_start=2)
+        InputProcessor._validate_params(processor, params, ("generate",))
+        processor.vllm_config.use_v2_model_runner = False
+        with pytest.raises(VLLMValidationError, match="V2 model runner"):
             InputProcessor._validate_params(processor, params, ("generate",))
 
 
@@ -1533,7 +1545,8 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
 
 
 def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch):
-    """Prefix reuse preserves every requested suffix score."""
+    """Prefix reuse preserves every requested suffix score, for both fixed-ID
+    scores and top-K prompt logprobs offset by prompt_logprob_start."""
     start = 17
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # Cached and uncached prefills have different execution shapes; batch
@@ -1555,6 +1568,7 @@ def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch)
         sampling_params = SamplingParams(
             temperature=0.0,
             max_tokens=1,
+            prompt_logprobs=2,
             prompt_logprob_start=start,
             prompt_logprob_token_ids=np.tile(
                 [10, 100, 1000], (len(token_ids) - 1 - start, 1)
@@ -1565,6 +1579,12 @@ def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch)
         first = vllm_model.llm.generate([prompt], sampling_params)[0]
         assert first.prompt_token_id_logprobs is not None
         assert math.isfinite(float(first.prompt_token_id_logprobs.min()))
+        # Top-K prompt logprobs start at the same row: position p is predicted
+        # by row p - 1, so positions up to and including start are None.
+        assert first.prompt_logprobs is not None
+        assert len(first.prompt_logprobs) == len(token_ids)
+        assert all(lp is None for lp in first.prompt_logprobs[: start + 1])
+        assert all(first.prompt_logprobs[start + 1 :])
 
         sampling_params.skip_reading_prefix_cache = False
         second = vllm_model.llm.generate([prompt], sampling_params)[0]
@@ -1573,6 +1593,7 @@ def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch)
         np.testing.assert_array_equal(
             second.prompt_token_id_logprobs, first.prompt_token_id_logprobs
         )
+        assert second.prompt_logprobs == first.prompt_logprobs
 
 
 @large_gpu_mark(min_gb=24)

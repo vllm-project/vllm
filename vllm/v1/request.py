@@ -229,7 +229,6 @@ class Request:
         self._block_hasher: Callable[[Request], list[BlockHash]] | None = block_hasher
         self.update_block_hashes()
 
-        self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
         self.prefix_cache_hit_limit = self.get_prefix_cache_hit_limit()
 
         # Used for streaming
@@ -312,39 +311,32 @@ class Request:
     def has_encoder_inputs(self) -> bool:
         return self.num_encoder_inputs > 0
 
-    @property
-    def max_cache_hit_length(self) -> int:
+    def get_max_cache_hit_length(self, bound: int | None = None) -> int:
+        """Longest prefix cache hit allowed, optionally tightened by bound."""
         # The last token is always recomputed to produce logits.
-        max_length = self.num_tokens - 1
-        if self.prefix_cache_hit_limit is not None:
-            max_length = min(max_length, self.prefix_cache_hit_limit)
-        return max_length
+        limits = (self.num_tokens - 1, self.prefix_cache_hit_limit, bound)
+        return min(limit for limit in limits if limit is not None)
+
+    @property
+    def skip_reading_external_kv(self) -> bool:
+        # KV connector hits are not bounded by prefix_cache_hit_limit, so a
+        # bounded request reuses only the local prefix cache.
+        return self.prefix_cache_hit_limit is not None
 
     def get_prefix_cache_hit_limit(self) -> int | None:
-        """First prompt row that must be computed rather than read from the
-        cache, i.e. the first scored row; None when no prompt rows are scored.
+        """Number of leading tokens that may be read from the prefix cache:
+        0 when the request skips cache reads, the first scored prompt row for
+        prompt scoring, or None when unbounded.
         See docs/training/prompt_token_id_logprobs.md."""
-        params = self.sampling_params
-        if params is None:
-            return None
-        if params.prompt_logprobs is not None:
+        params = self.sampling_params or self.pooling_params
+        if params is not None and params.skip_reading_prefix_cache:
             return 0
-        if params.prompt_logprob_token_ids is not None:
-            return params.prompt_logprob_start or 0
+        sp = self.sampling_params
+        if sp is not None and (
+            sp.prompt_logprobs is not None or sp.prompt_logprob_token_ids is not None
+        ):
+            return sp.prompt_logprob_start or 0
         return None
-
-    def get_skip_reading_prefix_cache(self) -> bool:
-        if (
-            self.sampling_params is not None
-            and self.sampling_params.skip_reading_prefix_cache is not None
-        ):
-            return self.sampling_params.skip_reading_prefix_cache
-        elif (
-            self.pooling_params is not None
-            and self.pooling_params.skip_reading_prefix_cache is not None
-        ):
-            return self.pooling_params.skip_reading_prefix_cache
-        return False
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)

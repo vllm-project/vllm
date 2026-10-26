@@ -360,9 +360,10 @@ class SamplingParams(
     prompt_logprob_start + i + 1, so the last prompt row is excluded.
     See docs/training/prompt_token_id_logprobs.md."""
     prompt_logprob_start: int | None = None
-    """First causal prompt row to score; defaults to the first row.
-    Set skip_reading_prefix_cache=False to reuse local cached rows before it
-    when prompt_logprobs is not requested."""
+    """First causal prompt row to score with prompt_logprobs and
+    prompt_logprob_token_ids; defaults to the first row. Earlier prompt
+    positions get None prompt logprobs. Set skip_reading_prefix_cache=False to
+    reuse local cached rows before it."""
     logprob_token_ids: list[int] | None = None
     """Specific token IDs to return logprobs for. More efficient than
     logprobs=-1 when you only need logprobs for a small set of tokens.
@@ -1037,18 +1038,21 @@ class SamplingParams(
                 )
             # In-vocab IDs fit int32, like the runner's other token ID buffers.
             self.prompt_logprob_token_ids = np.ascontiguousarray(ids, dtype=np.int32)
-            if self.prompt_logprob_start is not None and self.prompt_logprob_start < 0:
+
+        if self.prompt_logprob_start is not None:
+            if ids is None and self.prompt_logprobs is None:
+                raise VLLMValidationError(
+                    "prompt_logprob_start requires prompt_logprobs or "
+                    "prompt_logprob_token_ids.",
+                    parameter="prompt_logprob_start",
+                    value=self.prompt_logprob_start,
+                )
+            if self.prompt_logprob_start < 0:
                 raise VLLMValidationError(
                     "prompt_logprob_start must be non-negative.",
                     parameter="prompt_logprob_start",
                     value=self.prompt_logprob_start,
                 )
-        elif self.prompt_logprob_start is not None:
-            raise VLLMValidationError(
-                "prompt_logprob_start requires prompt_logprob_token_ids.",
-                parameter="prompt_logprob_start",
-                value=self.prompt_logprob_start,
-            )
 
     def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
         """Validate stop_token_ids are within vocabulary range."""
