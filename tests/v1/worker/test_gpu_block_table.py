@@ -79,6 +79,7 @@ def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
         assert not block_table._staged_write_starts
         assert not block_table._staged_write_contents
         assert not block_table._staged_write_cu_lens
+        assert block_table._staged_write_max_len == 0
 
     block_tables.append_block_ids(
         req_index=0,
@@ -103,6 +104,25 @@ def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
     assert block_tables.num_blocks.np[0, 0] == 3
     assert block_tables.num_blocks.np[1, 0] == 3
     assert block_tables.num_blocks.np[2, 0] == 1
+
+
+def test_block_tables_fused_write_spans_multiple_chunks():
+    """A fused write longer than one 1024-element chunk is fully copied."""
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[16, 32],
+        max_num_reqs=2,
+        max_num_batched_tokens=16,
+        max_num_blocks_per_group=[4, 4096],
+        device=device,
+    )
+    long_ids = list(range(1, 2501))
+    block_tables.append_block_ids(0, ([7], long_ids), overwrite=True)
+    block_tables.apply_staged_writes()
+    torch.accelerator.synchronize()
+
+    assert block_tables.block_tables[0].gpu[0, :1].tolist() == [7]
+    assert block_tables.block_tables[1].gpu[0, :2500].tolist() == long_ids
 
 
 def test_block_tables_apply_staged_writes_single_group():

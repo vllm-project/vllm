@@ -388,7 +388,9 @@ def test_deepseek_v41_nvfp4_export_keeps_ignored_experts_mxfp4(
         "get_current_vllm_config",
         lambda: SimpleNamespace(model_config=model_config),
     )
-    monkeypatch.setattr(dsv41_qc, "Mxfp4MoEMethod", lambda moe_config: "mxfp4")
+    monkeypatch.setattr(
+        dsv41_qc, "Mxfp4MoEMethod", lambda moe_config, **kwargs: "mxfp4"
+    )
     monkeypatch.setattr(modelopt, "ModelOptNvFp4FusedMoE", lambda **kwargs: "nvfp4")
 
     config = dsv41_qc.DeepseekV4FP8Config.from_config(

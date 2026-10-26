@@ -93,8 +93,9 @@ class AttentionConfig:
     indexer_kv_dtype: IndexerKVDType | str = "auto"
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
-    indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
-    support in the backend."""
+    indexer, mxfp4 for DeepSeek-V4 on ROCm CDNA4 with aiter). Quantized
+    formats (fp8, mxfp4, nvfp4) require indexer kernel support in the
+    backend."""
 
     indexer_sparse_logits: bool = False
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
@@ -117,7 +118,10 @@ class AttentionConfig:
     indexer context-parallel at decode. Each rank reads 1/TP of the index
     cache, scores every index head on it, and per-head top-k candidates are
     exchanged and merged, so the selected blocks match the default path.
-    Requires a bf16 index cache (`indexer_kv_dtype` "auto" or "bf16")."""
+    `indexer_kv_dtype` picks the kernels that do it: a bf16 index cache ("auto"
+    or "bf16") runs the Triton CP indexer, an fp8 e4m3 one the AITER MSA CP
+    indexer on gfx950. This shards indexer *work* and not the KV cache, so it
+    is not `decode_context_parallel_size` and requires that to be 1."""
 
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
@@ -175,13 +179,19 @@ class AttentionConfig:
             # The alias selects only MiniMax's sparse decode kernel. Dense
             # layers still use the platform's normal automatic backend.
             self.backend = None
-        # Checked here rather than at indexer selection: an fp8 index cache is
-        # served by the AITER indexer, which never reaches it. This also
-        # excludes the fused decode path, which needs fp8.
-        if self.minimax_m3_indexer_cp and self.indexer_kv_dtype not in ("auto", "bf16"):
+        # Checked here rather than at indexer selection, which the two CP
+        # backends reach separately: bf16 goes to the Triton indexer and fp8
+        # to the AITER MSA one, so neither ever sees the other's dtype and
+        # neither can speak for the dtypes that have no CP indexer at all.
+        if self.minimax_m3_indexer_cp and self.indexer_kv_dtype not in (
+            "auto",
+            "bf16",
+            "fp8",
+            "fp8_e4m3",
+        ):
             raise ValueError(
-                "minimax_m3_indexer_cp requires a bf16 index cache "
-                "(indexer_kv_dtype 'auto' or 'bf16'), got "
+                "minimax_m3_indexer_cp requires a bf16 or fp8 e4m3 index cache "
+                "(indexer_kv_dtype 'auto', 'bf16', 'fp8' or 'fp8_e4m3'), got "
                 f"{self.indexer_kv_dtype!r}"
             )
 
