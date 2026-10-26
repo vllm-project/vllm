@@ -103,10 +103,10 @@ def backend_to_kernel_cls(
         return [CPUExpertsInt4]
     elif backend == WNA16MoEBackend.ZEN_CPU:
         from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
-            ZentorchExpertsInt4,
+            ZentorchExpertsWNA16,
         )
 
-        return [ZentorchExpertsInt4]
+        return [ZentorchExpertsWNA16]
     elif backend == WNA16MoEBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
             Int4EmulationTritonExperts,
@@ -141,6 +141,26 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         WNA16MoEBackend.EMULATION,
     ]
     return prioritize_humming(backends)
+
+
+# int4 runs as DA8W4 and int8 as DA8W8. The op infers which from the pack factor
+# K // weight.size(-1), so the decode below has to land on the exact layout.
+_ZEN_CPU_NUM_BITS = (4, 8)
+
+
+def _zen_cpu_num_bits(
+    quant_config: QuantizationConfig | QuantizationArgs,
+) -> int | None:
+    """Weight bit width for the Zen CPU path, or None for a checkpoint format
+    it cannot read one from; AWQ and GPTQ call it weight_bits."""
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+
+    if isinstance(quant_config, AutoAWQConfig | AutoGPTQConfig):
+        return quant_config.weight_bits
+    if isinstance(quant_config, QuantizationArgs):
+        return quant_config.num_bits
+    return None
 
 
 def _backend_incompatibility_reason(
@@ -184,9 +204,12 @@ def _backend_incompatibility_reason(
             and quant_config.actorder == "group"
         ):
             return "group activation ordering is not supported"
+        num_bits = _zen_cpu_num_bits(quant_config)
+        if num_bits not in _ZEN_CPU_NUM_BITS:
+            return f"unsupported weight width W{num_bits}A16"
         group_size = getattr(quant_config, "group_size", None)
         if group_size is None or group_size <= 0:
-            return "DA8W4 requires group-quantized weights"
+            return "the dynamic-quant path requires group-quantized weights"
         # AOCL sym_quant requires the group size to be a multiple of 4.
         if group_size % 4 != 0:
             return f"group size {group_size} is not a multiple of 4"
@@ -435,12 +458,12 @@ def make_wna16_moe_kernel(
         XPUExpertsWNA16,
     )
     from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
-        ZentorchExpertsInt4,
+        ZentorchExpertsWNA16,
     )
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
     # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4,
-    # ZentorchExpertsInt4, the Humming grouped/indexed experts, and
+    # ZentorchExpertsWNA16, the Humming grouped/indexed experts, and
     # Int4EmulationTritonExperts
     allowed_experts: tuple[type[mk.FusedMoEExperts], ...] = (
         MarlinExperts,
@@ -449,7 +472,7 @@ def make_wna16_moe_kernel(
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
-        ZentorchExpertsInt4,
+        ZentorchExpertsWNA16,
         Int4EmulationTritonExperts,
         Rdna3WNA16Experts,
     )
@@ -1073,8 +1096,12 @@ def _process_weights_cpu(
     )
 
 
-def _zen_repack_s4(packed: torch.Tensor, in_features: int) -> torch.Tensor:
-    """Repack CT int4 ``[E, N, K//8]`` into zentorch s4 ``[E, N, K//8]``."""
+def _zen_decode_weight(
+    packed: torch.Tensor, in_features: int, num_bits: int
+) -> torch.Tensor:
+    """Decode a CT ``[E, N, K//pack_factor]`` weight into the layout the op
+    reads: packed s4 ``[E, N, K//8]`` for int4, plain s8 ``[E, N, K]`` for
+    int8. The trailing dim is what makes the op pick DA8W4 over DA8W8."""
     from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
         _import_unpack_from_int32,
     )
@@ -1083,11 +1110,13 @@ def _zen_repack_s4(packed: torch.Tensor, in_features: int) -> torch.Tensor:
     # packed_dim indexes the 2D expert slice, which is N-first, so K is dim 1.
     unpacked = _import_unpack_from_int32()(
         packed,
-        4,
+        num_bits,
         torch.Size([num_experts, out_features, in_features]),
         packed_dim=1,
     )
     # CT is already N-first, which is what the repack consumes.
+    if num_bits == 8:
+        return unpacked.to(torch.int8).contiguous()
     repack_op = torch.ops.zentorch.zentorch_woq_repack_weight.default
     return torch.stack([repack_op(w) for w in unpacked])
 
@@ -1099,6 +1128,7 @@ def _process_weights_zen_cpu(
     w2_scale: torch.Tensor,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    num_bits: int = 4,
 ) -> tuple[
     torch.Tensor,  # w13_qweight
     torch.Tensor,  # w2_qweight
@@ -1111,15 +1141,15 @@ def _process_weights_zen_cpu(
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
-    """Zen CPU INT4 DA8W4 (W4A8) weight post-processing."""
+    """Zen CPU DA8W4 (W4A8) / DA8W8 (W8A8) weight post-processing."""
     # CT WNA16 buffers are N-first, so the scales are [E, N, G].
     hidden_size = w2_scale.shape[1]
     intermediate_size = w13_scale.shape[1] // 2
 
     # The kernel reads per-group scales as [E, G, N], so N-first needs a swap.
     return (
-        _zen_repack_s4(w13.data, hidden_size),
-        _zen_repack_s4(w2.data, intermediate_size),
+        _zen_decode_weight(w13.data, hidden_size, num_bits),
+        _zen_decode_weight(w2.data, intermediate_size, num_bits),
         w13_scale.data.transpose(1, 2).to(torch.bfloat16).contiguous(),
         w2_scale.data.transpose(1, 2).to(torch.bfloat16).contiguous(),
         None,  # w13_qzeros (symmetric)
@@ -1682,6 +1712,9 @@ def convert_to_wna16_moe_kernel_format(
             w2_bias,
         )
     elif backend == WNA16MoEBackend.ZEN_CPU:
+        # Backend selection already rejected widths outside _ZEN_CPU_NUM_BITS.
+        zen_num_bits = _zen_cpu_num_bits(quant_config)
+        assert zen_num_bits is not None
         return _process_weights_zen_cpu(
             w13,
             w2,
@@ -1689,6 +1722,7 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             w13_bias,
             w2_bias,
+            num_bits=zen_num_bits,
         )
     elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return _process_weights_flashinfer(

@@ -236,6 +236,19 @@ class CPURouter(BaseRouter):
                 hash_indices_table=self._hash_indices_table,
             )
         elif self.custom_routing_function is None:
+            if self.scoring_func == "sigmoid":
+                # One expert group makes the group masking a no-op, leaving the
+                # plain sigmoid top-k that MiniMax2 routing asks for.
+                return _grouped_topk(
+                    gating_output=router_logits,
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    num_expert_group=1,
+                    topk_group=1,
+                    scoring_func=self.scoring_func,
+                    routed_scaling_factor=self.routed_scaling_factor,
+                    e_score_correction_bias=self.e_score_correction_bias,
+                )
             assert self.scoring_func == "softmax"
             return _softmax_topk(router_logits, self.top_k, self.renormalize)
         else:

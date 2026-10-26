@@ -54,15 +54,19 @@ def _repack_s4(unpacked: torch.Tensor) -> torch.Tensor:
 
 
 def _quantize_per_group(
-    weight: torch.Tensor, group_size: int
+    weight: torch.Tensor, group_size: int, num_bits: int = 4
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Symmetric int4 per-group quantization -> (int8 in [-8, 7], scale [N, G])."""
+    """Symmetric per-group quantization -> (int8 holding one s{num_bits} value
+    per element, scale [N, G])."""
+    qmax = 1 << (num_bits - 1)
     out_features, in_features = weight.shape
     grouped = weight.float().reshape(
         out_features, in_features // group_size, group_size
     )
-    scale = grouped.abs().amax(dim=-1) / 8.0
-    quantized = (grouped / scale.unsqueeze(-1)).round().clamp(-8, 7).to(torch.int8)
+    scale = grouped.abs().amax(dim=-1) / qmax
+    quantized = (
+        (grouped / scale.unsqueeze(-1)).round().clamp(-qmax, qmax - 1).to(torch.int8)
+    )
     return quantized.reshape(out_features, in_features), scale.to(torch.bfloat16)
 
 
@@ -393,20 +397,21 @@ HIDDEN = 256
 INTERMEDIATE = 128
 
 
-def _make_moe_weights(group_size: int = 32):
-    """Build CT-layout MoE weights: w13 [E, 2I, H//8], w2 [E, H, I//8]."""
+def _make_moe_weights(group_size: int = 32, num_bits: int = 4):
+    """Build CT-layout MoE weights: w13 [E, 2I, H//pack], w2 [E, H, I//pack],
+    with pack = 32 // num_bits values per int32 word."""
     torch.manual_seed(0)
     w13_q, w13_s, w2_q, w2_s = [], [], [], []
     for _ in range(NUM_EXPERTS):
         w13 = torch.randn(2 * INTERMEDIATE, HIDDEN, dtype=torch.bfloat16)
-        q13, s13 = _quantize_per_group(w13, group_size)
-        # CT is N-first and packs along the input dim: [N, K//8] per expert.
-        w13_q.append(pack_to_int32(q13, 4, packed_dim=1))
+        q13, s13 = _quantize_per_group(w13, group_size, num_bits)
+        # CT is N-first and packs along the input dim: [N, K//pack] per expert.
+        w13_q.append(pack_to_int32(q13, num_bits, packed_dim=1))
         w13_s.append(s13)
 
         w2 = torch.randn(HIDDEN, INTERMEDIATE, dtype=torch.bfloat16)
-        q2, s2 = _quantize_per_group(w2, group_size)
-        w2_q.append(pack_to_int32(q2, 4, packed_dim=1))
+        q2, s2 = _quantize_per_group(w2, group_size, num_bits)
+        w2_q.append(pack_to_int32(q2, num_bits, packed_dim=1))
         w2_s.append(s2)
     return (
         torch.stack(w13_q),
@@ -463,16 +468,78 @@ def test_zen_cpu_repack_is_value_exact(mock_zentorch_ops):
         )
 
 
+def test_zen_cpu_int8_decode_keeps_full_width_values(mock_zentorch_ops):
+    """Grouped W8A16 decodes to full-width s8, which is the trailing dim that
+    makes the op read it as DA8W8; CT packs biased unsigned fields, so the
+    values have to survive as two's complement."""
+    group_size = 32
+    weight = torch.randn(2 * INTERMEDIATE, HIDDEN, dtype=torch.bfloat16)
+    quantized, scale = _quantize_per_group(weight, group_size, num_bits=8)
+    w13 = torch.stack([pack_to_int32(quantized, 8, packed_dim=1)] * NUM_EXPERTS)
+    w13_scale = torch.stack([scale] * NUM_EXPERTS)
+    _, w2, _, w2_scale = _make_moe_weights(group_size, num_bits=8)
+
+    w13_out = int_wna16._process_weights_zen_cpu(
+        w13, w2, w13_scale, w2_scale, num_bits=8
+    )[0]
+
+    assert w13_out.shape == (NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN)
+    assert w13_out.dtype == torch.int8
+    for expert in range(NUM_EXPERTS):
+        torch.testing.assert_close(w13_out[expert], quantized)
+
+
+def _ct_quant_args(num_bits: int = 4, group_size: int | None = 128):
+    """A real compressed-tensors config: the Zen gate reads the width by
+    checkpoint format, so a duck-typed stub reads as an unknown format."""
+    from compressed_tensors.quantization import QuantizationArgs
+
+    if group_size is None or group_size <= 0:
+        return QuantizationArgs(num_bits=num_bits, strategy="channel", symmetric=True)
+    return QuantizationArgs(
+        num_bits=num_bits, group_size=group_size, strategy="group", symmetric=True
+    )
+
+
+@pytest.mark.parametrize(
+    "num_bits,expected_ok",
+    [(8, True), (2, False)],
+)
+def test_zen_cpu_num_bits_gating(num_bits, expected_ok):
+    reason = int_wna16._backend_incompatibility_reason(
+        WNA16MoEBackend.ZEN_CPU,
+        moe_config=None,
+        quant_config=_ct_quant_args(num_bits=num_bits),
+        may_have_zp=False,
+        may_have_bias=False,
+        allow_tile_padding=True,
+    )
+    assert (reason is None) == expected_ok
+
+
+def test_zen_cpu_rejects_unknown_checkpoint_format():
+    """No recognised width means no safe decode, so selection has to decline
+    and leave the layer to another backend."""
+    reason = int_wna16._backend_incompatibility_reason(
+        WNA16MoEBackend.ZEN_CPU,
+        moe_config=None,
+        quant_config=type("Args", (), {"group_size": 128, "num_bits": 4})(),
+        may_have_zp=False,
+        may_have_bias=False,
+        allow_tile_padding=True,
+    )
+    assert reason is not None
+
+
 @pytest.mark.parametrize(
     "group_size,expected_ok",
     [(32, True), (128, True), (-1, False), (2, False)],
 )
 def test_zen_cpu_group_size_gating(group_size, expected_ok):
-    quant_config = type("Args", (), {"group_size": group_size})()
     reason = int_wna16._backend_incompatibility_reason(
         WNA16MoEBackend.ZEN_CPU,
         moe_config=None,
-        quant_config=quant_config,
+        quant_config=_ct_quant_args(group_size=group_size),
         may_have_zp=False,
         may_have_bias=False,
         allow_tile_padding=True,
@@ -487,11 +554,10 @@ def test_zen_cpu_group_size_gating(group_size, expected_ok):
 def test_zen_cpu_rejects_zero_points_but_takes_bias(
     may_have_zp, may_have_bias, expected_ok
 ):
-    quant_config = type("Args", (), {"group_size": 128})()
     reason = int_wna16._backend_incompatibility_reason(
         WNA16MoEBackend.ZEN_CPU,
         moe_config=None,
-        quant_config=quant_config,
+        quant_config=_ct_quant_args(),
         may_have_zp=may_have_zp,
         may_have_bias=may_have_bias,
         allow_tile_padding=True,
@@ -524,11 +590,10 @@ def test_zen_cpu_rejects_moe_wna16_layout():
 
 def test_zen_cpu_disabled_by_env(monkeypatch):
     monkeypatch.setattr(int_wna16.envs, "VLLM_CPU_INT4_W4A8", False)
-    quant_config = type("Args", (), {"group_size": 128})()
     reason = int_wna16._backend_incompatibility_reason(
         WNA16MoEBackend.ZEN_CPU,
         moe_config=None,
-        quant_config=quant_config,
+        quant_config=_ct_quant_args(),
         may_have_zp=False,
         may_have_bias=False,
         allow_tile_padding=True,
@@ -538,11 +603,11 @@ def test_zen_cpu_disabled_by_env(monkeypatch):
 
 def test_zen_cpu_backend_maps_to_experts_class():
     from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
-        ZentorchExpertsInt4,
+        ZentorchExpertsWNA16,
     )
 
     assert int_wna16.backend_to_kernel_cls(WNA16MoEBackend.ZEN_CPU) == [
-        ZentorchExpertsInt4
+        ZentorchExpertsWNA16
     ]
 
 
@@ -552,44 +617,51 @@ def test_zen_experts_support_predicates():
     )
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
-        ZentorchExpertsInt4,
+        ZentorchExpertsWNA16,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kInt4Static,
         kInt4Static32,
+        kInt8Static,
         kInt8StaticChannelSym,
     )
 
-    assert ZentorchExpertsInt4._supports_quant_scheme(kInt4Static, None)
-    assert ZentorchExpertsInt4._supports_quant_scheme(kInt4Static32, None)
-    assert not ZentorchExpertsInt4._supports_quant_scheme(kInt8StaticChannelSym, None)
+    assert ZentorchExpertsWNA16._supports_quant_scheme(kInt4Static, None)
+    assert ZentorchExpertsWNA16._supports_quant_scheme(kInt4Static32, None)
+    assert ZentorchExpertsWNA16._supports_quant_scheme(kInt8Static, None)
+    # Grouped int8 only; a per-channel int8 weight has no group scales to match.
+    assert not ZentorchExpertsWNA16._supports_quant_scheme(kInt8StaticChannelSym, None)
     for act in MoEActivation:
         expected = act.value in _ZENTORCH_MOE_ACTIVATIONS
-        assert ZentorchExpertsInt4._supports_activation(act) == expected
-    assert ZentorchExpertsInt4.requires_interleaved_w13
-    assert not ZentorchExpertsInt4._supports_no_act_and_mul()
-    assert ZentorchExpertsInt4._supports_parallel_config(
+        assert ZentorchExpertsWNA16._supports_activation(act) == expected
+    assert ZentorchExpertsWNA16.requires_interleaved_w13
+    assert not ZentorchExpertsWNA16._supports_no_act_and_mul()
+    assert ZentorchExpertsWNA16._supports_parallel_config(
         type("Par", (), {"use_ep": False})()
     )
-    assert not ZentorchExpertsInt4._supports_parallel_config(
+    assert not ZentorchExpertsWNA16._supports_parallel_config(
         type("Par", (), {"use_ep": True})()
     )
 
 
-def test_zen_experts_take_custom_routing():
-    """Models with their own router (gemma-4) reach select_experts through the
-    config captured off the layer, since apply() cannot be handed the callable."""
+def test_zen_experts_take_routing_config_off_the_layer():
+    """Models with their own router (gemma-4) or a non-softmax scoring function
+    (Laguna) reach select_experts through the config captured off the layer,
+    since apply() cannot be handed either."""
     from types import SimpleNamespace
 
     from tests.kernels.moe.test_cpu_fused_moe import _StubMoELayer
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
     from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
-        ZentorchExpertsInt4,
+        ZentorchExpertsWNA16,
     )
 
-    assert ZentorchExpertsInt4._supports_routing_method(
+    assert ZentorchExpertsWNA16._supports_routing_method(
         RoutingMethodType.Custom, None, None
+    )
+    assert ZentorchExpertsWNA16._supports_routing_method(
+        RoutingMethodType.MiniMax2, None, None
     )
 
     def routing_fn(**kwargs):
@@ -601,13 +673,17 @@ def test_zen_experts_take_custom_routing():
         MoEActivation.SILU,
     )
     layer.renormalize = True
+    layer.scoring_func = "sigmoid"
     layer.custom_routing_function = routing_fn
 
-    experts = SimpleNamespace(renormalize=False, custom_routing_function=None)
-    ZentorchExpertsInt4.process_weights_after_loading(experts, layer)
+    experts = SimpleNamespace(
+        renormalize=False, scoring_func="softmax", custom_routing_function=None
+    )
+    ZentorchExpertsWNA16.process_weights_after_loading(experts, layer)
 
     assert experts.custom_routing_function is routing_fn
     assert experts.renormalize is True
+    assert experts.scoring_func == "sigmoid"
 
 
 def _swigluoai_perm(activation, experts_cls=None):
@@ -615,11 +691,11 @@ def _swigluoai_perm(activation, experts_cls=None):
         swigluoai_w13_interleave_perm,
     )
     from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
-        ZentorchExpertsInt4,
+        ZentorchExpertsWNA16,
     )
 
     return swigluoai_w13_interleave_perm(
-        experts_cls or ZentorchExpertsInt4,
+        experts_cls or ZentorchExpertsWNA16,
         activation,
         2 * INTERMEDIATE,
         torch.device("cpu"),

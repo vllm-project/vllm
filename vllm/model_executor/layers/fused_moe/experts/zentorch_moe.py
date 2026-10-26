@@ -24,11 +24,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt4Static,
     kInt4Static32,
+    kInt8Static,
 )
 
 
-class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
-    """DA8W4 (W4A8) group-quantized monolithic MoE experts."""
+class ZentorchExpertsWNA16(mk.FusedMoEExpertsMonolithic):
+    """Group-quantized W4A16/W8A16 monolithic MoE experts. The op dynamically
+    quantizes the bf16 activation to s8, so a weight-only checkpoint executes as
+    DA8W4 or DA8W8, chosen from the weight layout the oracle prepared."""
 
     # swiglu_oai_mul reads gate/up interleaved, not in the half-split order the
     # weight loader leaves behind.
@@ -45,12 +48,14 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
         )
+        self.scoring_func = "softmax"
         self.custom_routing_function: Callable | None = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Capture the router config that the monolithic apply() signature
         cannot carry; Custom routing has no other source for it."""
         self.renormalize = layer.renormalize
+        self.scoring_func = layer.scoring_func
         self.custom_routing_function = layer.custom_routing_function
 
     @property
@@ -107,9 +112,13 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        # The bf16 activation is quantized at runtime, hence no activation key.
+        # Both widths share the op, which picks DA8W4 or DA8W8 from the weight
+        # layout the oracle prepared.
         return (weight_key, activation_key) in [
             (kInt4Static, None),
             (kInt4Static32, None),
+            (kInt8Static, None),
         ]
 
     @staticmethod
@@ -123,6 +132,7 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.Custom,
+            RoutingMethodType.MiniMax2,
         ]
 
     @staticmethod
@@ -155,7 +165,7 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
     ) -> torch.Tensor:
         if apply_router_weight_on_input:
             raise NotImplementedError(
-                "ZentorchExpertsInt4 does not support "
+                "ZentorchExpertsWNA16 does not support "
                 "apply_router_weight_on_input=True."
             )
 
@@ -164,7 +174,7 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
             and self.custom_routing_function is None
         ):
             raise RuntimeError(
-                "ZentorchExpertsInt4 needs the model's custom_routing_function "
+                "ZentorchExpertsWNA16 needs the model's custom_routing_function "
                 "for RoutingMethodType.Custom."
             )
 
@@ -177,7 +187,7 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             custom_routing_function=self.custom_routing_function,
-            scoring_func="softmax",
+            scoring_func=self.scoring_func,
             routed_scaling_factor=(
                 routed_scaling_factor if routed_scaling_factor is not None else 1.0
             ),
@@ -202,4 +212,4 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
         return output
 
 
-__all__ = ["ZentorchExpertsInt4"]
+__all__ = ["ZentorchExpertsWNA16"]
