@@ -8,6 +8,7 @@ from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
+from torch.nn import Parameter
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config_or_none
@@ -82,6 +83,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_nvfp4_moe_weights,
+    dequantize_to_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
@@ -180,6 +182,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
     FusedMoEMethodCls: type = FusedMoEMethodBase
     KVCacheMethodCls: type = BaseKVCacheMethod
+    EmbeddingMethodCls: type | None = None
 
     def __init__(
         self,
@@ -260,6 +263,11 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             if getattr(quant_method, "backend", "") == "marlin":
                 quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
+        elif (
+            isinstance(layer, VocabParallelEmbedding)
+            and self.EmbeddingMethodCls is not None
+        ):
+            return self.EmbeddingMethodCls(self)
 
         return None
 
@@ -424,6 +432,9 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         self.kv_cache_quant_method = kv_cache_quant_method
 
+        if self.quant_method == "FP8":
+            self.EmbeddingMethodCls = ModelOptFp8EmbeddingMethod
+
         # Validate the quant_algo; resolve() maps it to a QuantSpec at dispatch.
         supported = algos_owned_by("modelopt")
         if self.quant_method not in supported:
@@ -476,6 +487,77 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
             kv_cache_quant_method,
             exclude_modules,
         )
+
+
+def _check_embedding_weight_tying() -> None:
+    config = get_current_vllm_config_or_none()
+    if (
+        config is not None
+        and config.model_config is not None
+        and config.model_config.hf_text_config.tie_word_embeddings
+    ):
+        raise ValueError(
+            "ModelOpt quantized embeddings require tie_word_embeddings=False."
+        )
+
+
+class ModelOptFp8EmbeddingMethod(QuantizeMethodBase):
+    """Gather row-major FP8 weights and dequantize to the model dtype."""
+
+    def __init__(self, quant_config: ModelOptFp8Config) -> None:
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if not self.quant_config.is_checkpoint_fp8_serialized:
+            raise ValueError("FP8 embedding requires a serialized FP8 checkpoint.")
+        _check_embedding_weight_tying()
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.register_parameter(
+            "weight",
+            ModelWeightParameter(
+                data=torch.empty(
+                    sum(output_partition_sizes),
+                    input_size_per_partition,
+                    dtype=torch.float8_e4m3fn,
+                ),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            ),
+        )
+        # Accept input_scale from exporters; lookup has no activation to quantize.
+        for name in ("weight_scale", "input_scale"):
+            layer.register_parameter(
+                name,
+                PerTensorScaleParameter(
+                    data=torch.full(
+                        (1,), torch.finfo(torch.float32).min, dtype=torch.float32
+                    ),
+                    weight_loader=weight_loader,
+                ),
+            )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Embeddings have a single vocabulary partition, not fused projections.
+        layer.weight = Parameter(layer.weight.data, requires_grad=False)
+        layer.weight_scale = Parameter(layer.weight_scale.max(), requires_grad=False)
+        layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias=None):
+        raise NotImplementedError("FP8 embeddings do not support linear projection.")
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        rows = torch.embedding(layer.weight, input_)
+        return (rows.float() * layer.weight_scale).to(layer.params_dtype)
 
 
 class ModelOptFp8MoEMethod(FusedMoEMethodBase):
@@ -755,6 +837,9 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         # Validate the quant_algo; resolve() maps it to a QuantSpec at dispatch.
         # NVFP4       -> W4A4: cutlass NVFP4 GEMM with input quantization
         # W4A16_NVFP4 -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
+        if self.quant_method == "NVFP4":
+            self.EmbeddingMethodCls = ModelOptNvFp4EmbeddingMethod
+
         supported = algos_owned_by("modelopt_fp4")
         if quant_method not in supported:
             raise ValueError(
@@ -835,6 +920,80 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             group_size,
             quantization_args=original_config.get("_online_quantization_args"),
         )
+
+
+class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
+    """Dequantize gathered NVFP4 rows without GEMM-specific weight repacking."""
+
+    def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if not self.quant_config.is_checkpoint_nvfp4_serialized:
+            raise ValueError("NVFP4 embedding requires a serialized NVFP4 checkpoint.")
+        _check_embedding_weight_tying()
+        if input_size_per_partition % self.quant_config.group_size:
+            raise ValueError(
+                "NVFP4 embedding hidden size must be divisible by group size."
+            )
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        for name, width, dtype in (
+            ("weight", input_size_per_partition // 2, torch.uint8),
+            (
+                "weight_scale",
+                input_size_per_partition // self.quant_config.group_size,
+                torch.float8_e4m3fn,
+            ),
+        ):
+            layer.register_parameter(
+                name,
+                ModelWeightParameter(
+                    data=torch.empty(sum(output_partition_sizes), width, dtype=dtype),
+                    input_dim=1,
+                    output_dim=0,
+                    weight_loader=weight_loader,
+                ),
+            )
+        # input_scale is loaded for checkpoint compatibility, but never applied.
+        for name in ("weight_scale_2", "input_scale"):
+            layer.register_parameter(
+                name,
+                PerTensorScaleParameter(
+                    data=torch.ones(1, dtype=torch.float32),
+                    weight_loader=weight_loader,
+                ),
+            )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.weight_global_scale = Parameter(
+            layer.weight_scale_2.max(), requires_grad=False
+        )
+        del layer.weight_scale_2
+        layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        flat = input_.flatten()
+        rows = dequantize_to_dtype(
+            torch.index_select(layer.weight, 0, flat),
+            torch.index_select(layer.weight_scale, 0, flat),
+            layer.weight_global_scale,
+            dtype=layer.params_dtype,
+            block_size=self.quant_config.group_size,
+            swizzle=False,
+        )
+        return rows.view(*input_.shape, layer.embedding_dim)
+
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias=None):
+        raise NotImplementedError("NVFP4 embeddings do not support linear projection.")
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
@@ -1909,6 +2068,15 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                     quant_config=self.mxfp8_config,
                     moe_config=layer.moe_config,
                 )
+            return None
+
+        if isinstance(layer, VocabParallelEmbedding):
+            if quant_algo == "FP8":
+                return ModelOptFp8EmbeddingMethod(self.fp8_config)
+            if quant_algo == "NVFP4":
+                return ModelOptNvFp4EmbeddingMethod(self.nvfp4_config)
+            if quant_algo == "W4A16_NVFP4":
+                return ModelOptNvFp4EmbeddingMethod(self.w4a16_nvfp4_config)
             return None
 
         return None

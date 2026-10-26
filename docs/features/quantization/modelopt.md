@@ -26,6 +26,27 @@ following `quantization.quant_algo` values:
 For per-tensor `FP8`, vLLM converts E4M3FN weights and scales to E4M3FNUZ
 when required by the GPU, for example on AMD MI300.
 
+### Token embedding quantization
+
+ModelOpt token embeddings (`embed_tokens`) support weight-only lookup with
+per-tensor `FP8` or packed `NVFP4` weights. Mixed-precision checkpoints can also
+select `W4A16_NVFP4` for embeddings through `quantized_layers`. vLLM keeps the
+table quantized and dequantizes only the selected rows to the model dtype.
+Embedding lookup does not quantize activations or use a GEMM backend.
+
+Support is enabled automatically by the checkpoint quantization configuration.
+For a mixed-precision checkpoint, include the embedding's full module name,
+such as `model.embed_tokens`, in `quantized_layers` and remove it from
+`exclude_modules`. Excluded embeddings and embeddings absent from a
+mixed-precision policy retain their original precision. Uniform
+`FP8_PER_CHANNEL_PER_TOKEN`, `FP8_PB_WO`, and `W4A16_NVFP4` configurations
+leave embeddings unquantized. The output `lm_head` uses the linear
+quantization path independently of the input embedding.
+
+Quantized input embeddings require `tie_word_embeddings=False`. Tying a packed
+embedding table to an output projection is unsupported and raises an error
+at load time; keep tied embeddings unquantized.
+
 For Qwen3-based DFlash and DSpark drafts, `quantized_layers` and exclusion lists
 use the exported checkpoint's module names. vLLM maps these names to the draft's
 module prefix and decoder layer indices before constructing quantized layers.

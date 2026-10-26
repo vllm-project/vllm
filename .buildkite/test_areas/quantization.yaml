@@ -53,6 +53,18 @@ steps:
 #       - pytest -v -s rocm/test_moe_weight_replay.py
 #       - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s rocm/test_moe_padding.py
 
+- label: ":nvidia: (H200 MIG 35GB) ModelOpt Embeddings"
+  device: h200_35gb
+  key: modelopt-embeddings
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - tests/quantization/test_modelopt.py
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/vocab_parallel_embedding.py
+  - vllm/model_executor/models/llama.py
+  commands:
+    - pytest -v -s quantization/test_modelopt.py -k embedding
+
 - label: ":nvidia: (H200 MIG 35GB) Quantized Fusions"
   device: h200_35gb
   key: quantized-fusions

@@ -1605,3 +1605,261 @@ def test_modelopt_block_quant_loads_expert_blocks_with_aligned_tp_slices(
             "w2",
             0,
         )
+
+
+@pytest.mark.parametrize("algorithm", ["FP8", "NVFP4", "W4A16_NVFP4"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("shape", [(6,), (2, 3), (), (0,)])
+def test_modelopt_embedding_lookup(dist_init, algorithm, dtype, shape):
+    """Real embedding loading preserves lookup values, padding, shape and dtype."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8EmbeddingMethod,
+        ModelOptNvFp4EmbeddingMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+        dequantize_to_dtype,
+    )
+
+    config = _mixed_precision_config(
+        {"model.embed_tokens": {"quant_algo": algorithm, "group_size": 16}}
+    )
+    vocab, hidden = 65, 64
+    with torch.device("cuda"):
+        layer = VocabParallelEmbedding(
+            vocab,
+            hidden,
+            params_dtype=dtype,
+            quant_config=config,
+            prefix="model.embed_tokens",
+        )
+        if algorithm == "FP8":
+            weight = torch.arange(vocab * hidden).reshape(vocab, hidden)
+            weight = ((weight % 31 - 15).float() / 4).to(torch.float8_e4m3fn)
+            scale = torch.tensor(0.137, dtype=torch.float32)
+            expected = (weight.float() * scale).to(dtype)
+            parameters = {"weight": weight, "weight_scale": scale}
+            assert isinstance(layer.quant_method, ModelOptFp8EmbeddingMethod)
+        else:
+            weight = (torch.arange(vocab * hidden // 2) % 256).to(torch.uint8)
+            weight = weight.reshape(vocab, hidden // 2)
+            scale = torch.full((vocab, hidden // 16), 0.5).to(torch.float8_e4m3fn)
+            global_scale = torch.tensor(0.137, dtype=torch.float32)
+            expected = dequantize_to_dtype(
+                weight,
+                scale,
+                global_scale,
+                dtype=dtype,
+                swizzle=False,
+            )
+            parameters = {
+                "weight": weight,
+                "weight_scale": scale,
+                "weight_scale_2": global_scale,
+            }
+            assert isinstance(layer.quant_method, ModelOptNvFp4EmbeddingMethod)
+        # input_scale is deliberately non-unit: an embedding must ignore it.
+        parameters["input_scale"] = torch.tensor(7.0)
+        for name, value in parameters.items():
+            layer.weight_loader(getattr(layer, name), value)
+        layer.quant_method.process_weights_after_loading(layer)
+        ids = torch.tensor([0, 5, 64, 1, 1, 32])
+        if shape == ():
+            ids = ids[0]
+        elif shape == (0,):
+            ids = ids[:0]
+        else:
+            ids = ids.reshape(shape)
+        result = layer(ids)
+        torch.testing.assert_close(result, expected[ids], rtol=0, atol=0)
+        assert result.shape == (*shape, hidden)
+        assert result.dtype == dtype
+        assert result.device == weight.device
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    ["FP8", "FP8_PER_CHANNEL_PER_TOKEN", "FP8_PB_WO", "NVFP4", "W4A16_NVFP4"],
+)
+@pytest.mark.parametrize("excluded", [False, True])
+def test_modelopt_embedding_uniform_formats(dist_init, algorithm, excluded):
+    """Only serialized per-tensor FP8/NVFP4 opt into uniform embedding quantization."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8EmbeddingMethod,
+        ModelOptNvFp4EmbeddingMethod,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        UnquantizedEmbeddingMethod,
+    )
+
+    if algorithm.startswith("FP8"):
+        config = ModelOptFp8Config(algorithm, True, None, [])
+    else:
+        config = ModelOptNvFp4Config(algorithm, True, None, [])
+    if excluded:
+        config.exclude_modules = ["model.embed_*"]
+    layer = VocabParallelEmbedding(
+        65,
+        64,
+        params_dtype=torch.bfloat16,
+        quant_config=config,
+        prefix="model.embed_tokens",
+    )
+    expected = UnquantizedEmbeddingMethod
+    if not excluded and algorithm == "FP8":
+        expected = ModelOptFp8EmbeddingMethod
+    elif not excluded and algorithm == "NVFP4":
+        expected = ModelOptNvFp4EmbeddingMethod
+    assert isinstance(layer.quant_method, expected)
+
+
+@pytest.mark.parametrize("algorithm", [None, "FP8", "NVFP4", "W4A16_NVFP4"])
+@pytest.mark.parametrize("excluded", [False, True])
+def test_modelopt_mixed_embedding_and_lm_head(dist_init, algorithm, excluded):
+    """Missing/excluded embeddings fall back; LM heads retain linear methods."""
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        UnquantizedEmbeddingMethod,
+    )
+
+    layers = (
+        {}
+        if algorithm is None
+        else {
+            "model.embed_tokens": {"quant_algo": algorithm, "group_size": 16},
+            "lm_head": {"quant_algo": algorithm, "group_size": 16},
+        }
+    )
+    config = _mixed_precision_config(layers)
+    if excluded:
+        config.exclude_modules = ["model.embed_*", "lm_head"]
+    embed = VocabParallelEmbedding(
+        65,
+        64,
+        params_dtype=torch.bfloat16,
+        quant_config=config,
+        prefix="model.embed_tokens",
+    )
+    head = ParallelLMHead(
+        65,
+        64,
+        params_dtype=torch.bfloat16,
+        quant_config=config,
+        prefix="lm_head",
+    )
+    assert isinstance(embed.quant_method, UnquantizedEmbeddingMethod) == (
+        excluded or algorithm is None
+    )
+    expected = (
+        UnquantizedLinearMethod
+        if excluded or algorithm is None
+        else ModelOptLinearMethod
+    )
+    assert isinstance(head.quant_method, expected)
+
+
+@pytest.mark.parametrize("algorithm", ["FP8", "NVFP4", "W4A16_NVFP4"])
+def test_modelopt_embedding_rejects_tied_weights(
+    dist_init, default_vllm_config, tmp_path, algorithm
+):
+    """A packed input table cannot be shared with the output projection."""
+    from transformers import LlamaConfig
+
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        tie_word_embeddings=True,
+        **_TINY_MODEL_CONFIG,
+    ).save_pretrained(tmp_path)
+    default_vllm_config.model_config = ModelConfig(
+        model=str(tmp_path), skip_tokenizer_init=True
+    )
+    config = _mixed_precision_config(
+        {"model.embed_tokens": {"quant_algo": algorithm, "group_size": 16}}
+    )
+    with pytest.raises(ValueError, match="require tie_word_embeddings=False"):
+        VocabParallelEmbedding(
+            128,
+            128,
+            params_dtype=torch.bfloat16,
+            quant_config=config,
+            prefix="model.embed_tokens",
+        )
+
+
+@pytest.mark.parametrize("algorithm", ["FP8", "NVFP4", "W4A16_NVFP4"])
+def test_modelopt_embedding_checkpoint(tmp_path, monkeypatch, vllm_runner, algorithm):
+    """Quantized embeddings load and generate exactly like their BF16 dequantization."""
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from vllm import SamplingParams
+    from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+        dequantize_to_dtype,
+    )
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    config = LlamaConfig(num_hidden_layers=1, **_TINY_MODEL_CONFIG)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        model = LlamaForCausalLM(config).to(torch.bfloat16)
+    weights = dict(model.state_dict())
+    name = "model.embed_tokens"
+    original = weights[f"{name}.weight"]
+    if algorithm == "FP8":
+        _pack_fp8_weight(weights, name, algorithm)
+        dequantized = (
+            weights[f"{name}.weight"].float() * weights[f"{name}.weight_scale"]
+        ).to(torch.bfloat16)
+    else:
+        # Every nibble represents a finite FP4 value; the control uses the same
+        # saved table, fully dequantized, while inference must gather packed rows.
+        packed = (torch.arange(original.numel() // 2) % 256).to(torch.uint8)
+        packed = packed.reshape(original.shape[0], original.shape[1] // 2)
+        scale = torch.full((original.shape[0], original.shape[1] // 16), 0.5)
+        scale = scale.to(torch.float8_e4m3fn)
+        global_scale = torch.tensor(0.01)
+        weights.update(
+            {
+                f"{name}.weight": packed,
+                f"{name}.weight_scale": scale,
+                f"{name}.weight_scale_2": global_scale,
+            }
+        )
+        dequantized = dequantize_to_dtype(
+            packed,
+            scale,
+            global_scale,
+            dtype=torch.bfloat16,
+            swizzle=False,
+        )
+    metadata: dict[str, Any] = {
+        "quant_method": "modelopt",
+        "quant_algo": "MIXED_PRECISION",
+        "kv_cache_quant_algo": None,
+        "exclude_modules": [],
+        "quantized_layers": {name: {"quant_algo": algorithm, "group_size": 16}},
+    }
+    outputs = []
+    for quantized in (False, True):
+        model_path = tmp_path / ("quantized" if quantized else "control")
+        if quantized:
+            model.config.quantization_config = metadata
+            state = dict(weights)
+        else:
+            state = dict(model.state_dict())
+            state[f"{name}.weight"] = dequantized
+        model.save_pretrained(model_path, state_dict=state)
+        with vllm_runner(
+            str(model_path),
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+            enable_flashinfer_autotune=False,
+            max_model_len=32,
+            max_num_seqs=1,
+            kv_cache_memory_bytes=16 << 20,
+        ) as llm:
+            outputs.append(
+                llm.generate(
+                    [[1, 2, 3]],
+                    SamplingParams(temperature=0, max_tokens=4, ignore_eos=True),
+                )[0][0][0]
+            )
+    assert len(outputs[0]) == 7
+    assert outputs[1] == outputs[0]
