@@ -1,8 +1,11 @@
-# SPDX-License-Identifier: MIT
-# SPDX-FileCopyrightText: Copyright (c) 2026 LightSeek Foundation
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa
+
 # Vendored from TokenSpeed MLA 2.0.3 (tokenspeed_mla/mla_helpers.py, MIT, see below)
-# for the Kimi K3 work-list MLA decode; adds MLAWorkListTileScheduler.
+# for the Kimi K3 KV-balanced MLA decode; adds MLAWorkListTileScheduler.
+#
+# SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LightSeek Foundation
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -362,7 +365,7 @@ def create_mla_static_tile_scheduler(
 
 class MLAWorkListTileScheduler:
     """Persistent tile scheduler over a device work list (added for the Kimi K3
-    work-list MLA decode). CTA ``i`` of the grid walks clusters ``i // cluster``,
+    KV-balanced MLA decode). CTA ``i`` of the grid walks clusters ``i // cluster``,
     then every ``grid / cluster`` further; entry ``c`` of the list is
     ``(q_tile * B + batch) << 8 | split``, or < 0. The valid entries are a prefix
     followed by at least one wave of negative entries, so every walk ends inside

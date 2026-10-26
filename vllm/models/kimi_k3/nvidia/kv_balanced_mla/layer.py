@@ -11,12 +11,14 @@ of that forward reuses it. Under DCP the kernel reads this rank's KV shard, mask
 causally in global positions and returns the log2 LSE that the DCP combine merges,
 like TokenSpeed.
 
-Each layer reserves its plan buffers and the split-KV scratch (the decode workspace
-TokenSpeed also uses) when it is built, so the KV cache is sized around them. A step
-the kernel does not run uses the backend's decode: a query of fewer than 128 rows
-per request (the kernel needs the 2-CTA M128 tiles), more requests than its partials
-can address, a micro-batch lane first seen after the workspace is locked, or the
-first call for a shape inside CUDA graph capture (the eager warmup runs first).
+The layers share one set of plan buffers per micro-batch lane, reserved with the
+split-KV scratch (the decode workspace TokenSpeed also uses) when the layers are
+built, so the KV cache is sized around them. A step the kernel does not run uses the
+backend's decode: a shape TokenSpeed runs on its M64 tiles (64 query rows or fewer
+per request; the kernel needs the 2-CTA M128 tiles), more requests than its partials
+can address, a strided query, a micro-batch lane first seen after the workspace is
+locked, or the first call for a shape inside CUDA graph capture (the eager warmup
+runs first).
 """
 
 from typing import TYPE_CHECKING, cast
@@ -53,18 +55,12 @@ def mla_decode_backend(vllm_config: VllmConfig) -> str:
     return backend
 
 
-class _Shape:
-    """One decode shape's kernel and, per plan buffer, the (forward context, KV
-    lengths) whose plan it holds. The context is held so that its identity can't
-    be reused by a later forward."""
-
-    def __init__(self, core: "KvBalancedMla | None"):
-        self.core = core
-        self.planned_for: dict[int, tuple[object, int]] = {}
-
-
-# Per (heads, q, causal): the target verify and the DSpark draft. None: unsupported.
-_SHAPES: dict[tuple[int, int, bool], _Shape] = {}
+# The kernel per (heads, q, causal): the target verify and the DSpark draft. None:
+# unsupported.
+_SHAPES: dict[tuple[int, int, bool], "KvBalancedMla | None"] = {}
+# Per plan buffer (``work``): the (forward context, KV lengths, kernel) of the plan it
+# holds. The context is held so that its identity can't be reused by a later forward.
+_PLANNED: dict[int, tuple[object, int, "KvBalancedMla"]] = {}
 
 
 class TokenspeedKvBalancedMqa:
@@ -85,8 +81,13 @@ class TokenspeedKvBalancedMqa:
         device = torch.device(current_platform.device_type, torch.cuda.current_device())
         if not core.supports(self.heads, self.max_q, device):
             raise RuntimeError(
-                "mla_decode_backend=kv_balanced needs at least 128 query rows per "
+                "mla_decode_backend=kv_balanced needs more than 64 query rows per "
                 f"request (heads x query length), got {self.heads} x {self.max_q}"
+            )
+        if config.attention_config.tokenspeed_mla_min_split_kv > 1:
+            logger.warning_once(
+                "Kimi K3 KV-balanced MLA decode plans its own KV splits; "
+                "tokenspeed_mla_min_split_kv applies only to the backend decode"
             )
         max_seqs = config.scheduler_config.max_num_seqs
         self.max_requests = min(
@@ -107,6 +108,12 @@ class TokenspeedKvBalancedMqa:
         self._workspace_bytes = core.workspace_bytes(
             self.heads, self.max_q, self.max_requests
         )
+        logger.info_once(
+            "Kimi K3 KV-balanced MLA decode: %.0f MiB of split-KV scratch for %d "
+            "requests",
+            self._workspace_bytes / 2**20,
+            self.max_requests,
+        )
         self._buffers()
 
     def _buffers(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -122,10 +129,9 @@ class TokenspeedKvBalancedMqa:
         workspace = manager.get_simultaneous(((self._workspace_bytes,), torch.int8))[0]
         return counts, work, workspace
 
-    def _shape(self, heads: int, qlen: int, causal: bool) -> _Shape | None:
+    def _core(self, heads: int, qlen: int, causal: bool) -> "KvBalancedMla | None":
         key = (heads, qlen, causal)
-        shape = _SHAPES.get(key)
-        if shape is None:
+        if key not in _SHAPES:
             if torch.cuda.is_current_stream_capturing():
                 logger.warning_once(
                     "Kimi K3 KV-balanced MLA decode: first call for heads=%d q=%d "
@@ -145,7 +151,7 @@ class TokenspeedKvBalancedMqa:
                 if supports(heads, qlen, device)
                 else None
             )
-            shape = _SHAPES[key] = _Shape(core)
+            _SHAPES[key] = core
             logger.info(
                 "Kimi K3 KV-balanced MLA decode: heads=%d q=%d causal=%s %s",
                 heads,
@@ -155,7 +161,7 @@ class TokenspeedKvBalancedMqa:
                 if core is not None
                 else "unsupported, using the backend decode",
             )
-        return shape
+        return _SHAPES[key]
 
     def __call__(
         self,
@@ -191,14 +197,14 @@ class TokenspeedKvBalancedMqa:
             or q.shape[0] != tokens
             or q.shape[1] != self.heads
             or q.shape[-1] != LATENT + ROPE
+            or not q.is_contiguous()
         ):
             return None
         qlen = tokens // requests
         causal = bool(attn_metadata.causal)
-        shape = self._shape(self.heads, qlen, causal)
-        if shape is None or shape.core is None:
+        core = self._core(self.heads, qlen, causal)
+        if core is None:
             return None
-        core = shape.core
         try:
             counts, work, workspace = self._buffers()
         except AssertionError:
@@ -209,15 +215,22 @@ class TokenspeedKvBalancedMqa:
             )
             return None
 
-        # One plan per forward, made by its first MLA layer of this shape.
+        # One plan per forward, made by its first MLA layer.
         context, lens = get_forward_context(), decode.seq_lens.data_ptr()
-        held = shape.planned_for.get(work.data_ptr())
-        if held is None or held[0] is not context or held[1] != lens:
+        held = _PLANNED.get(work.data_ptr())
+        if (
+            held is None
+            or held[0] is not context
+            or held[1] != lens
+            or held[2] is not core
+        ):
             core.plan(decode.seq_lens, counts, work)
-            shape.planned_for[work.data_ptr()] = (context, lens)
+            _PLANNED[work.data_ptr()] = (context, lens, core)
 
         impl = layer.impl
         dcp = impl.dcp_world_size
+        # Under DCP the causal mask needs the global lengths.
+        assert dcp == 1 or decode.dcp_tot_seq_lens is not None
         lse = (
             torch.empty(
                 (requests, qlen, self.heads), dtype=torch.float32, device=q.device

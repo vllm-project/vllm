@@ -59,9 +59,18 @@ def _paged(rows_per_request, device):
     return cache.to(torch.float8_e4m3fn), block_table
 
 
-def _reference(query, cache, block_table, local, lengths, causal, dcp):
+def _shard_len(n, cp):
+    """Tokens of a length-``n`` request on rank ``rank`` of ``cp`` = (world, rank,
+    interleave): rank r holds the interleave-sized chunks r, r + world, ..."""
+    world, rank, interleave = cp
+    chunks, tail = divmod(n, interleave * world)
+    return chunks * interleave + min(max(tail - rank * interleave, 0), interleave)
+
+
+def _reference(query, cache, block_table, local, lengths, causal, cp=(1, 0, 1)):
     """FP32 latent output and log2 LSE of each query row; an empty request gives a
     zero output and an LSE of -inf."""
+    world, rank, interleave = cp
     q, heads = query.shape[1], query.shape[2]
     outs, lses = [], []
     for b, n in enumerate(local.tolist()):
@@ -75,7 +84,12 @@ def _reference(query, cache, block_table, local, lengths, causal, dcp):
         if causal:
             # Row i of a request sees global positions up to length - q + i.
             visible = int(lengths[b]) - q + torch.arange(q, device=kv.device)
-            position = torch.arange(n, device=kv.device) * dcp
+            local_pos = torch.arange(n, device=kv.device)
+            position = (
+                local_pos // interleave * interleave * world
+                + rank * interleave
+                + local_pos % interleave
+            )
             scores = scores.masked_fill(
                 position[None, None, :] > visible[:, None, None], float("-inf")
             )
@@ -84,7 +98,7 @@ def _reference(query, cache, block_table, local, lengths, causal, dcp):
     return torch.stack(outs), torch.stack(lses)
 
 
-def _run(query, cache, block_table, local, totals, causal, dcp):
+def _run(query, cache, block_table, local, totals, causal, cp=(1, 0, 1)):
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import KvBalancedMla
 
     requests, q, heads, _ = query.shape
@@ -106,8 +120,8 @@ def _run(query, cache, block_table, local, totals, causal, dcp):
         work,
         workspace,
         lse=lse,
-        causal_lens=totals if dcp > 1 else None,
-        cp=(dcp, 0, 1),
+        causal_lens=totals if cp[0] > 1 else None,
+        cp=cp,
     )
     # Every nonempty request has 1 .. 8 splits, and the list ends in empty entries.
     planned = counts[:requests]
@@ -130,18 +144,21 @@ def _check(out, lse, ref_out, ref_lse, tolerance=0.03):
 
 @requires_sm100
 @pytest.mark.parametrize(
-    ("lengths", "heads", "q", "causal", "dcp"),
+    ("lengths", "heads", "q", "causal", "cp"),
     [
-        ([130, 4097, 30000], 96, 5, True, 1),  # DEP verify, unequal lengths
-        ([64, 20000, 0, 900, 9000, 70000, 7], 96, 5, True, 1),  # with an empty row
-        ([5000, 16000], 64, 4, False, 1),  # DSpark draft block
-        ([2000, 64000, 12345], 96, 5, True, 8),  # DCP8 shard
+        ([130, 4097, 30000], 96, 5, True, (1, 0, 1)),  # DEP verify, unequal lengths
+        ([64, 20000, 0, 900, 9000, 70000, 7], 96, 5, True, (1, 0, 1)),  # empty row
+        ([5000, 16000], 64, 4, False, (1, 0, 1)),  # DSpark draft block
+        ([2000, 64000, 12345], 96, 5, True, (8, 0, 1)),  # DCP8 shard of rank 0
+        # Rank 5 of 8, interleave 64: the first three requests end inside one of its
+        # chunks, so the causal mask cuts its last keys.
+        ([5443, 51580, 330, 2000], 96, 5, True, (8, 5, 64)),
     ],
 )
-def test_kv_balanced_decode_matches_reference(lengths, heads, q, causal, dcp):
+def test_kv_balanced_decode_matches_reference(lengths, heads, q, causal, cp):
     torch.manual_seed(0)
     device = torch.device("cuda")
-    local = [-(-n // dcp) for n in lengths]
+    local = [_shard_len(n, cp) for n in lengths]
     cache, block_table = _paged(
         [torch.randn(n, LATENT + ROPE, device=device) / 2 for n in local], device
     )
@@ -150,9 +167,9 @@ def test_kv_balanced_decode_matches_reference(lengths, heads, q, causal, dcp):
     )
     as_tensor = lambda x: torch.tensor(x, dtype=torch.int32, device=device)  # noqa: E731
     local_t, totals = as_tensor(local), as_tensor(lengths)
-    out, lse = _run(query, cache, block_table, local_t, totals, causal, dcp)
+    out, lse = _run(query, cache, block_table, local_t, totals, causal, cp)
     ref_out, ref_lse = _reference(
-        query, cache, block_table, local_t, totals, causal, dcp
+        query, cache, block_table, local_t, totals, causal, cp
     )
     _check(out, lse, ref_out, ref_lse)
 
@@ -180,9 +197,124 @@ def test_kv_balanced_decode_keeps_small_probabilities():
     query[..., LATENT:] = 1.0
     query = query.to(torch.float8_e4m3fn)
     local = torch.tensor(lengths, dtype=torch.int32, device=device)
-    out, lse = _run(query, cache, block_table, local, local, False, 1)
-    ref_out, ref_lse = _reference(query, cache, block_table, local, local, False, 1)
+    out, lse = _run(query, cache, block_table, local, local, False)
+    ref_out, ref_lse = _reference(query, cache, block_table, local, local, False)
     _check(out, lse, ref_out, ref_lse)
+
+
+@requires_sm100
+def test_kv_balanced_plan_replays_in_cuda_graph():
+    """A captured plan and decode follow KV lengths changed in place."""
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import KvBalancedMla
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    heads, q, capacity = 96, 5, [40000, 9000, 70000]
+    cache, block_table = _paged(
+        [torch.randn(n, LATENT + ROPE, device=device) / 2 for n in capacity], device
+    )
+    query = (torch.randn(len(capacity), q, heads, LATENT + ROPE, device=device) / 2).to(
+        torch.float8_e4m3fn
+    )
+    core = KvBalancedMla(heads, q, max_requests=8, causal=True, device=device)
+    counts = torch.zeros(core.max_requests, dtype=torch.int32, device=device)
+    work = torch.zeros(core.list_len, dtype=torch.int32, device=device)
+    workspace = torch.empty(core.workspace_bytes, dtype=torch.int8, device=device)
+    lens = torch.tensor([100, 9000, 1500], dtype=torch.int32, device=device)
+
+    def step():
+        core.plan(lens, counts, work)
+        return core.decode(
+            query.view(-1, heads, LATENT + ROPE),
+            cache,
+            block_table,
+            lens,
+            SCALE,
+            1.0,
+            counts,
+            work,
+            workspace,
+        )
+
+    step()  # compile outside the capture
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = step()
+    for lengths in ([100, 9000, 1500], [40000, 64, 70000], [0, 2048, 33333]):
+        lens.copy_(torch.tensor(lengths, dtype=torch.int32))
+        graph.replay()
+        ref_out, _ = _reference(query, cache, block_table, lens, lens, True)
+        got = out.view(len(capacity), q, heads, LATENT).float()
+        assert (got - ref_out).norm() / ref_out.norm() < 0.03, lengths
+
+
+def _layer(monkeypatch, lengths, cp, lse):
+    """A KV-balanced MLA layer over random shards of ``lengths`` on rank ``cp[1]``,
+    with the backend decode returning "backend"."""
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla import layer
+
+    device = torch.device("cuda")
+    heads, q = 96, 5
+    world, rank, interleave = cp
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=world, cp_kv_cache_interleave_size=interleave
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=4),
+        attention_config=SimpleNamespace(tokenspeed_mla_min_split_kv=1),
+    )
+    monkeypatch.setattr(layer, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(layer, "max_decode_query_len", lambda _: q)
+    monkeypatch.setattr(layer, "_SHAPES", {})
+    monkeypatch.setattr(layer, "_PLANNED", {})
+    local = [_shard_len(n, cp) for n in lengths]
+    cache, block_table = _paged(
+        [torch.randn(n, LATENT + ROPE, device=device) / 2 for n in local], device
+    )
+    as_tensor = lambda x: torch.tensor(x, dtype=torch.int32, device=device)  # noqa: E731
+    impl = SimpleNamespace(
+        scale=SCALE,
+        dcp_world_size=world,
+        dcp_rank=rank,
+        need_to_return_lse_for_decode=lse,
+        forward_mqa=lambda *args: "backend",
+    )
+    mla = SimpleNamespace(
+        num_local_heads=heads // world,
+        impl=impl,
+        _q_scale_float=1.0,
+        _k_scale_float=1.0,
+        _attn_read_kv_cache=lambda: cache,
+    )
+    metadata = SimpleNamespace(
+        decode=SimpleNamespace(
+            seq_lens=as_tensor(local),
+            block_table=block_table,
+            dcp_tot_seq_lens=as_tensor(lengths) if world > 1 else None,
+        ),
+        num_decodes=len(lengths),
+        num_decode_tokens=len(lengths) * q,
+        causal=True,
+    )
+    query = (torch.randn(len(lengths) * q, heads, LATENT + ROPE, device=device) / 2).to(
+        torch.float8_e4m3fn
+    )
+    mqa = layer.TokenspeedKvBalancedMqa(mla)
+
+    def reference():
+        decode = metadata.decode
+        totals = decode.seq_lens if world == 1 else decode.dcp_tot_seq_lens
+        return _reference(
+            query.view(len(lengths), q, heads, -1),
+            cache,
+            block_table,
+            decode.seq_lens,
+            totals,
+            True,
+            cp,
+        )
+
+    return mla, mqa, metadata, query, reference
 
 
 @requires_sm100
@@ -194,16 +326,10 @@ def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla import core, layer
 
     torch.manual_seed(0)
-    device = torch.device("cuda")
-    heads, q, lengths = 96, 5, [3000, 21000]
-    config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            decode_context_parallel_size=1, cp_kv_cache_interleave_size=1
-        ),
-        scheduler_config=SimpleNamespace(max_num_seqs=4),
+    q = 5
+    mla, mqa, metadata, query, reference = _layer(
+        monkeypatch, [3000, 21000], (1, 0, 1), lse=False
     )
-    monkeypatch.setattr(layer, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(layer, "max_decode_query_len", lambda _: q)
     context = [object()]
     monkeypatch.setattr(layer, "get_forward_context", lambda: context[0])
     plans = []
@@ -214,40 +340,9 @@ def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
         lambda self, *args: plans.append(1) or plan(self, *args),
     )
 
-    cache, block_table = _paged(
-        [torch.randn(n, LATENT + ROPE, device=device) / 2 for n in lengths], device
-    )
-    lens = torch.tensor(lengths, dtype=torch.int32, device=device)
-    impl = SimpleNamespace(
-        scale=SCALE, dcp_world_size=1, dcp_rank=0, need_to_return_lse_for_decode=False
-    )
-    mla = SimpleNamespace(
-        num_local_heads=heads,
-        impl=impl,
-        _q_scale_float=1.0,
-        _k_scale_float=1.0,
-        _attn_read_kv_cache=lambda: cache,
-    )
-    # The backend decode that the kernel defers to.
-    impl.forward_mqa = lambda *args: "backend"
-    metadata = SimpleNamespace(
-        decode=SimpleNamespace(
-            seq_lens=lens, block_table=block_table, dcp_tot_seq_lens=None
-        ),
-        num_decodes=len(lengths),
-        num_decode_tokens=len(lengths) * q,
-        causal=True,
-    )
-    query = (torch.randn(len(lengths) * q, heads, LATENT + ROPE, device=device) / 2).to(
-        torch.float8_e4m3fn
-    )
-    mqa = layer.TokenspeedKvBalancedMqa(mla)
-
     out, lse = mqa(mla, query, metadata)
     assert lse is None
-    ref_out, _ = _reference(
-        query.view(len(lengths), q, heads, -1), cache, block_table, lens, lens, True, 1
-    )
+    ref_out, _ = reference()
     assert (out.view_as(ref_out).float() - ref_out).norm() / ref_out.norm() < 0.03
     mqa(mla, query, metadata)  # a later layer of the same forward
     assert len(plans) == 1
@@ -255,12 +350,32 @@ def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
     mqa(mla, query, metadata)
     assert len(plans) == 2
 
+    requests = metadata.num_decodes
     assert mqa(mla, query.to(torch.bfloat16), metadata) == "backend"
     many = SimpleNamespace(
-        **{**vars(metadata), "num_decodes": 5, "num_decode_tokens": 25}
+        **{**vars(metadata), "num_decodes": 5, "num_decode_tokens": 5 * q}
     )
-    assert mqa(mla, _cat([query] * 3)[:25], many) == "backend"
+    assert mqa(mla, _cat([query] * 3)[: 5 * q], many) == "backend"
     longer = SimpleNamespace(
-        **{**vars(metadata), "num_decode_tokens": len(lengths) * (q + 1)}
+        **{**vars(metadata), "num_decode_tokens": requests * (q + 1)}
     )  # more query rows per request than the reserved buffers hold
-    assert mqa(mla, _cat([query, query[: len(lengths)]]), longer) == "backend"
+    assert mqa(mla, _cat([query, query[:requests]]), longer) == "backend"
+    # The heads of a wider (padded) query buffer: not packed.
+    wide = torch.cat([query.view(torch.uint8)] * 2, dim=1).view(torch.float8_e4m3fn)
+    assert mqa(mla, wide[:, : query.shape[1]], metadata) == "backend"
+
+
+@requires_sm100
+def test_kv_balanced_mqa_dcp_shard(monkeypatch, workspace_init):
+    """Under DCP the layer passes this rank's shard, the global lengths and the
+    interleave to the kernel and returns the log2 LSE for the DCP combine."""
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla import layer
+
+    torch.manual_seed(0)
+    monkeypatch.setattr(layer, "get_forward_context", lambda: object())
+    mla, mqa, metadata, query, reference = _layer(
+        monkeypatch, [3000, 21000, 700], (4, 2, 64), lse=True
+    )
+    out, lse = mqa(mla, query, metadata)
+    ref_out, ref_lse = reference()
+    _check(out.view_as(ref_out).float(), lse.view_as(ref_lse), ref_out, ref_lse)

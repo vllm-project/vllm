@@ -1,8 +1,9 @@
-# SPDX-License-Identifier: MIT
-# SPDX-FileCopyrightText: Copyright (c) 2026 LightSeek Foundation
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa
+
 # Vendored from TokenSpeed MLA 2.0.3 (tokenspeed_mla/mla_decode_fp8.py, MIT, see
-# below) for the Kimi K3 work-list MLA decode. Changes from 2.0.3:
+# below) for the Kimi K3 KV-balanced MLA decode. Changes from 2.0.3:
 # - ``work_list``: one wave of persistent clusters walks a device work list of
 #   (query tile, request, split) entries instead of launching the split grid, and a
 #   request with a single split stores its final output, skipped by the reduction;
@@ -10,6 +11,8 @@
 #   probabilities do not flush to zero, and the LSE removes the factor;
 # - ``reg_split``: the per-warpgroup register split can be set;
 # - helpers come from the vendored ``helpers.py``; the benchmark harness is removed.
+#
+# SPDX-License-Identifier: MIT
 # Copyright (c) 2026 LightSeek Foundation
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy

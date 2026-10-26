@@ -252,7 +252,7 @@ def _compile(
 
 
 def supports(heads: int, q: int, device: torch.device) -> bool:
-    """Whether the work list runs this shape: it needs the 2-CTA M128 kernel."""
+    """Whether the kernel runs this shape: it needs the 2-CTA M128 tiles."""
     arch = torch.cuda.get_device_capability(device)
     tiler, _ = select_mla_decode_tilers(heads, q, is_fp8=True, compute_capability=arch)
     return tiler[0] == ROWS
