@@ -2737,3 +2737,59 @@ condensation failure; coordination tooling to be checked before closure.
 
 **Host commit 93.4 %** (369.1/395.3 GB, margin 26.1 GB), fifth consecutive
 rise. No heavy host work. No WSL/Docker remediation without user GO.
+
+### 26/10 11:41Z — the cold set warms back toward cruise; rewrites dominate again
+
+Window 09:45 -> 11:44:41Z (1 h 59m41s). Read-only cycle; no engine/config change.
+The evening patch window (user GO) remains after the EPF classes.
+
+| metric | cumulative at 11:44Z | delta 1 h 59m41s |
+|---|---|---|
+| fs writes | **148.848 GB** | **+16.903 GB = 8.47 GB/h** |
+| prompt tokens | 259.947 M | +36.433 M = 18.26 M tok/h |
+| fs reads | 86.563 GB | +13.701 GB = 6.87 GB/h |
+| cached by source | device 154.547 M / host 74.658 M / disk 6.265 M | window: device 69.8 % / host 21.0 % / disk **1.80 %** |
+| computed prefill | — | 2.691 M = **7.4 %** of window prompt |
+| preemptions | **27** | **+2**, both before 10:06Z; flat for the last ~1 h 40 |
+| fs chunk hits | 3,179 | +412 |
+| fs tier size | **251G** (`du`) | at the 250 GiB LRU cap, pruner active |
+
+**Write ratio: 16.903 GB / 36.433 M prompt tokens = 0.464 KB/token = div 3.66**
+vs the 1.7 KB/token baseline — between the cold-window div 1.51 (09:45Z) and the
+overnight cruise div 9.3 (07:41Z). The 30-min birth-time scan confirms the warm-up
+from the rewrite side: 78 touched files = **12 NEW / 0.31 GB + 66 REWRITES /
+1.73 GB** (84.8 % rewrites, 2.04 GB/30 min) — the exact residual PR #211
+addresses tonight.
+
+**Disk-serving gate: marginal PASS** — window disk share 1.80 % vs the 1.76 %
+floor (cumulative 2.41 %, cached share cumulative 90.6 %). Honest reading: one
+rounding step from the floor; the GPU tier now serves ~70 % of the window's
+prompt again, so the fs tier is reverting toward cruise behavior (restart/cold
+insurance) rather than active serving.
+
+Engine health: StartedAt still 21:48:52Z, RC=0, OOM=false, 0 OOM lines, 0
+tiering asserts/tracebacks in the last 20k lines, three containers up, health
+200 in 5.0 ms. WEDGE `fail 1/2` at 10:03, 10:06 and 11:39Z, **0 x fail 2/2**,
+no watchdog restart. VRAM GPU0 **22,747** / GPU1 21,508 MiB (253 MiB under the
+23,000 line, alert threshold not crossed); GPU2 10,301 = expected CoursIA.
+`/dev/shm` 25G/63G (39 %). Live scheduler sample: KV 59.8 %, 4 running,
+0 waiting.
+
+Traffic census (2 h, 447 req): 428 x 200, 19 x 401, **0 x 400** — no new
+window+1 signature this window (no attribution claimed without claudish
+confirming the hub recreate). 218 bodies in 100K-1M (Bun hub clients), spread
+1-9 per 10 min, no retry-loop signature. Security: **new unclaimed mobile IP
+`92.184.146.46`, 2 x 200** (10:01/10:08Z, OpenAI/JS, key `be312daf7c1c` =
+MEDIUM, bodies 33K/54K) -> **Q40** opened in the registry for claim;
+all other 200-holders known (hairpin + internal no-XFF). nbaudit healthy at
+11:06Z (Image/ wave 2). G: write OK. Condensation nominal (heartbeats only;
+the 06:15-06:51Z `roosync_dashboard SLOW` warnings are RSM-side).
+
+**Host commit 88.7 %** (350.6/395.3 GB, margin 44.7 GB) — down from 93.4/93.6 %
+at 09:45Z, natural relief; still above the 85 % heavy-work threshold, so no
+heavy job from this lane.
+
+Coordination: Maintenance's Docker-image qualification (Maintenance#165)
+answered as owner: `vllm/vllm-openai:v0.31.0` retirable (rollback is stock
+v0.32.0, not v0.31), `hyperqwen:latest` kept until a preservation tar exists
+(mutable tag), K2 overlay decision grouped with its layer sibling.
