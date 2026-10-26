@@ -2954,3 +2954,66 @@ threshold; no heavy job from this lane. Deployment plan confirmed: engine-first
 patch window tonight after EPF (PR #211 merge + deploy, gates, then GO/NO-GO to
 claudish for the hub recreate), targeting the ~21:41Z cycle unless the user
 signals earlier.
+
+### 26/10 19:55Z — PATCH ANTI-RÉÉCRITURE DÉPLOYÉ EN PROD (PR #211) — écritures réelles ≈ 0
+
+User GO (« tu as mon Go »), fenêtre ouverte après les cours EPF. Séquence tenue :
+moteur d'abord, gates, puis GO/NO-GO au hub claudish.
+
+**Déploiement.** PR #211 (`vllm/fs-skip-rewrite`) relue (diff complet, 0 commentaire,
+0 review) puis mergée sur `main` (`fc8a0d1180`). Le patch vit dans
+`myia_vllm/kv_tier/lru_fs_tier.py`, **bind-monté** dans le moteur
+(`/opt/kv_tier`, `PYTHONPATH=/middleware:/opt/kv_tier`) → **aucun rebuild d'image,
+aucun recreate** : un simple `docker restart` recharge le module. Image
+(`vllm-openai-v0320-fsadmit:v1`), env, volumes et compile-cache **inchangés**.
+6/6 tests unitaires verts dans le conteneur avant restart. Kill switch
+`MYIA_FS_SKIP_REWRITE=0` (lu à l'import → recreate requis pour l'inverser).
+
+**Boot.** StartedAt `19:54:57Z`, health 200 à `19:58:22Z` (**3 min 25 s**, warm,
+compile-cache conservé), KV **831 723 tokens identique**, `RC=0`, OOM=false,
+0 assert / 0 traceback / 0 « Chunk not found in cache », tier chargé depuis
+`lru_fs_tier` (`Loading out-of-tree secondary tier 'TouchOnHitFsTier'`),
+génération réelle OK (« OK », `enable_thinking:false`). `/dev/shm` : 48G → **24G**
+après purge des orphelins antérieurs au StartedAt (le vieux `vllm_offload_*.mmap`
+du boot précédent = 25,7 Go).
+
+**Gates 19:55→20:27Z (32 min).**
+
+| mesure | valeur |
+|---|---|
+| **écritures fs réelles** | **≈ 0** — 5,98 Go *soumis* au boot, **0 fichier `.bin` né**, aucun processus > 1 Mo écrit sur disque |
+| fs lu | 10,0 Go (chunk hits fs 381, primary 421) |
+| prefix cache | queries 8,895 M / hits 7,523 M = **84,6 %** (remontée post-restart) |
+| disk-servi | 478 464 tokens (host 0 : le tier RAM se remplit) |
+| préemptions | **0** |
+| VRAM | GPU0 22 867 / GPU1 21 734 MiB, GPU2 99 (libre) |
+| health | 200 à 4,8 ms |
+
+**⚠️ Changement de métrique (important pour tous les cycles suivants).**
+`vllm:kv_offload_tiering_write_bytes_total` est incrémenté par
+`metrics.py::_observe_finished_job_stats` avec `transfer_size = len(job.keys) ×
+chunk_size` : ce sont des **octets SOUMIS, pas écrits**. Upstream écrivait tout ce
+qu'il soumettait ⇒ avant le patch, compteur = volume disque ; **après le patch il
+surestime**. Références correctes désormais : (1) **date de naissance** des
+fichiers du tier (une vraie écriture passe par `.tmp` + `os.replace()` ⇒ inode
+neuf, naissance récente), (2) `write_bytes` des processus, (3)
+`kv_offload_store_bytes` pour le tier RAM. Conséquence : la cible « ÷5 » de #198
+doit se lire en **octets réellement écrits / token prompt** ; les ratios publiés
+les 26/10 (÷8,7 / ÷19,4 / ÷132) restent valides *avant* le patch seulement.
+
+*Note de méthode* : `ctime` ne distingue pas une réécriture d'un `utime` (le touch
+LRU met aussi `ctime` à jour) — seule la date de naissance le fait.
+
+**Conséquence pour #198** : le cas ciblé (réécrire un bloc déjà présent) est
+**supprimé** — mesuré au boot (5,98 Go soumis, 0 écrit). La fenêtre froide reste
+à mesurer sur le prochain restart. Commentaire publié sur l'issue (#198,
+c.6426561040).
+
+**Indisponibilité** : 19:54:57→19:58:22Z (3 min 25 s) — la clé externe
+`external-vllm` (cap 2, zéro repli cloud) a pu rendre des 502 chez Jamin/Candy ;
+annoncé à claudish.
+
+**GO/NO-GO hub** : GO envoyé à `myia-po-2025:claudish`
+(`vllm-gos-fs-patch-20261026T2030Z`, 20:27Z) — moteur sain, patch actif,
+middleware `x-claudish-client`/`x-claudish-machine` recâblé côté moteur, leur
+recreate hub autorisé.
