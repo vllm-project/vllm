@@ -666,6 +666,24 @@ class OffloadingConnectorScheduler:
             for config in self.config.kv_group_configs
             if config.requires_cow_source
         )
+        # Most chunks a lookup may bring in at its boundary beyond the
+        # full-attention prefix: each windowed group's window, rounded out to
+        # whole chunks at both edges, an EAGLE group's extra chunk, and a
+        # partial tail's bridge chunk and block per group. Room for one more
+        # covers the chunk at which _fit_load_to_capacity() stops.
+        boundary_lookup_chunks = sum(
+            (
+                0
+                if config.sliding_window_size_in_chunks is None
+                else (config.load_window_size_in_chunks(1) or 0) + 1
+            )
+            + int(config.is_eagle_group)
+            + (2 if self.config.supports_partial_tail else 0)
+            for config in self.config.kv_group_configs
+        )
+        self._boundary_lookup_chunks = boundary_lookup_chunks + bool(
+            boundary_lookup_chunks
+        )
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
@@ -922,6 +940,14 @@ class OffloadingConnectorScheduler:
                 max_hit_size_tokens = round_down(
                     max_hit_size_tokens, self._mamba_align_size
                 )
+        load_cap = self._fit_load_to_capacity(req_status, max_hit_size_tokens)
+        if load_cap is not None:
+            max_hit_size_tokens = min(max_hit_size_tokens, load_cap)
+            if self._mamba_align_size is not None:
+                max_hit_size_tokens = round_down(
+                    max_hit_size_tokens, self._mamba_align_size
+                )
+        round_to_chunks = req_status.max_load_tokens is not None or load_cap is not None
 
         num_hit_tokens: int = 0
         defer_lookup = False
@@ -958,7 +984,7 @@ class OffloadingConnectorScheduler:
                 max_hit_size_tokens = min(
                     max_hit_size_tokens, len(offload_keys) * tokens_per_chunk
                 )
-                if req_status.max_load_tokens is not None:
+                if round_to_chunks:
                     max_hit_size_tokens = round_down(
                         max_hit_size_tokens, tokens_per_chunk
                     )
@@ -1106,6 +1132,76 @@ class OffloadingConnectorScheduler:
         )
 
         return num_hit_tokens, full_attention_hit_boundary
+
+    def _fit_load_to_capacity(
+        self, req_status: RequestOffloadState, max_hit_size_tokens: int
+    ) -> int | None:
+        """Return the tokens up to which a load fits in the space that
+        lookups may still fill, or None if any hit up to
+        ``max_hit_size_tokens`` fits.
+
+        Lookups may bring secondary-tier hits into a bounded tier before a
+        load reads them. Looked up one group after another, a large hit
+        lets the first group take all that space, so the others miss and
+        nothing loads. This walks the full-attention groups together by
+        token position instead and stops at the first chunk the space left
+        cannot take, keeping room for what the other groups look up at the
+        boundary. The regular lookup then runs up to the returned boundary.
+        """
+        capacity = self.manager.get_load_capacity()
+        if capacity is None:
+            return None
+        retention_interval = self.config.retention_interval
+        if self._sliding_window_groups and retention_interval == 0:
+            # Windowed and recurrent groups keep their state only at the
+            # replay boundary, so a shorter load finds none.
+            return None
+        num_computed_tokens = req_status.num_locally_computed_tokens
+        chunks: list[tuple[int, int, int, OffloadKey]] = []
+        for order, group_idx in enumerate(self._full_attention_groups):
+            tokens_per_chunk = self.config.kv_group_configs[group_idx].tokens_per_chunk
+            offload_keys = req_status.group_states[group_idx].offload_keys
+            end_chunk_idx = min(
+                cdiv(max_hit_size_tokens, tokens_per_chunk), len(offload_keys)
+            )
+            for chunk_idx in range(
+                num_computed_tokens // tokens_per_chunk, end_chunk_idx
+            ):
+                chunks.append(
+                    (
+                        (chunk_idx + 1) * tokens_per_chunk,
+                        order,
+                        chunk_idx * tokens_per_chunk,
+                        offload_keys[chunk_idx],
+                    )
+                )
+        # Each chunk takes at most one slot, so a hit this small always fits.
+        if len(chunks) + self._boundary_lookup_chunks <= capacity:
+            return None
+        chunks.sort(key=lambda chunk: chunk[:2])
+        # Chunks whose lookup is still pending; each may take a slot later.
+        num_pending = 0
+        for _, _, start_token, key in chunks:
+            # A lookup takes a slot only for a chunk that is not on its way to
+            # the bounded tier yet; it misses if no slot is left.
+            result = self.manager.lookup(key, req_status.req_context)
+            if result is LookupResult.MISS:
+                # The hit ends here, within the space left.
+                return None
+            new_capacity = self.manager.get_load_capacity()
+            assert new_capacity is not None
+            took_room = new_capacity < capacity or result is LookupResult.RETRY
+            num_pending += result is LookupResult.RETRY
+            capacity = new_capacity
+            # Chunks already on their way take no room; once the boundary's
+            # lookups are left too little, stop before this chunk.
+            if took_room and capacity - num_pending < self._boundary_lookup_chunks:
+                # This chunk took room that the boundary needs. Windowed and
+                # recurrent groups keep state only every retention_interval.
+                if self._sliding_window_groups and retention_interval:
+                    return round_down(start_token, retention_interval)
+                return start_token
+        return None
 
     def _make_boundary_key(
         self,

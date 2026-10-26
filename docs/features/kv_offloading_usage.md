@@ -97,6 +97,8 @@ vllm serve <model> \
 
 Secondary tiers are not supported yet on engines whose workers span several nodes; such an engine fails at startup.
 
+A secondary-tier hit is loaded through the CPU tier. When the hit is larger than the space left there, the load is shortened to a prefix that fits and the rest is recomputed. Sliding-window and Mamba groups keep their state only at retained checkpoints, so for such models a shorter load needs `--prefix-cache-retention-interval` set to a positive multiple of the offloaded block size; with the default of `0`, a hit larger than the CPU tier loads nothing.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
