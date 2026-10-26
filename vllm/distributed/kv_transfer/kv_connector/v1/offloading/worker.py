@@ -101,14 +101,9 @@ class OffloadingConnectorWorker:
                 page = layer_kv_cache_spec.page_size_bytes
                 elem_size = ref.element_size()
                 byte_offset = ref.storage_offset() * elem_size
-                # Packed layouts (e.g. DSv4) interleave layers per block, so the
-                # attention tensor's stride(0) (the manager-block stride) exceeds
-                # page_size_bytes; other layouts have stride(0) == page_size_bytes.
-                block_stride_bytes = (
-                    ref.stride(0) * elem_size
-                    if isinstance(layer_kv_cache_spec, AttentionSpec)
-                    else page
-                )
+                # Packed layouts interleave layers per block, so a layer's
+                # manager-block stride can exceed its page size.
+                block_stride_bytes = ref.stride(0) * elem_size
                 tensors_per_block[layer_name] = (
                     torch.tensor([], dtype=torch.int8, device=ref.device).set_(
                         ref.untyped_storage(),

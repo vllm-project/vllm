@@ -9,10 +9,22 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.v1.kv_offload.conftest import make_offloading_config
 from vllm import _custom_ops as ops
+from vllm.config import ModelConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
+    OffloadingConnectorWorker,
+)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheLayout,
+    KVCacheTensor,
+    MambaSpec,
+)
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
@@ -20,10 +32,13 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     TransferResult,
 )
+from vllm.v1.kv_offload.config import OffloadingGroupConfig
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.worker.utils import allocate_kv_cache
 
 NUM_GPU_BLOCKS = [64]
 NUM_CPU_CHUNKS = [256]
@@ -35,6 +50,85 @@ DEVICE_TYPE = current_platform.device_type
 DEVICES = [f"{DEVICE_TYPE}:0"]
 NUM_MAPPINGS = [3]
 NUM_MAPPINGS_PER_GROUP = [2]
+
+
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
+@pytest.mark.parametrize("padding", [0, 128])
+@torch.inference_mode()
+def test_mamba_registered_cache_roundtrip(
+    default_vllm_config, dist_init, layout: KVCacheLayout, padding: int
+) -> None:
+    """Restore every Mamba state byte without touching other physical blocks."""
+    num_blocks = 8
+    layer_names = [f"mamba.{i}" for i in range(3)]
+    state_spec = MambaSpec(
+        block_size=16,
+        shapes=((4, 4), (4, 4)),
+        dtypes=(torch.float32, torch.float32),
+        page_size_padded=128 + padding,
+    )
+    page = state_spec.page_size_bytes
+    row = len(layer_names) * page
+    kv_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * row,
+                layers=layer_names,
+                layer_stride=page if layout.is_block_outermost else num_blocks * page,
+                block_stride=row if layout.is_block_outermost else page,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names, state_spec)],
+    )
+    device = torch.device(DEVICE_TYPE, 0)
+    caches = allocate_kv_cache(kv_config, device, layout)
+    for index, cache in enumerate(caches.values()):
+        pattern = torch.arange(cache.numel(), device=device).remainder(97)
+        cache.copy_((pattern + 13 * index).reshape(cache.shape))
+    backing = torch.empty(0, dtype=torch.int8, device=device).set_(
+        caches[layer_names[0]].untyped_storage(), 0, (num_blocks * row,), (1,)
+    )
+    original = backing.cpu().clone()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(model="state-spaces/mamba-130m-hf")
+    )
+    spec = CPUOffloadingSpec(
+        make_offloading_config(
+            engine_id=str(uuid.uuid4()),
+            worker_kv_bytes_per_block=row,
+            groups=(OffloadingGroupConfig(16, tuple(layer_names), 0, 1),),
+            cpu_bytes_to_use=num_blocks
+            * round_up(row, SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT),
+        )
+    )
+    connector = OffloadingConnectorWorker(spec, vllm_config, kv_config)
+    connector.register_kv_caches(caches)
+    worker = connector.worker
+    assert worker is not None
+    block_ids = [1, 4, 6]
+    gpu = GPULoadStoreSpec(block_ids, group_sizes=(3,), block_indices=(0,))
+    cpu = CPULoadStoreSpec([1, 3, 5])
+    try:
+        assert worker.submit_store(1, gpu, cpu)
+        worker.wait({1})
+        completed = worker.get_finished()
+        for cache in caches.values():
+            for block_id in block_ids:
+                cache[block_id].fill_(-1)
+        assert worker.submit_load(2, cpu, gpu)
+        worker.wait({2})
+        completed += worker.get_finished()
+        torch.testing.assert_close(backing.cpu(), original, rtol=0, atol=0)
+        transfer_bytes = len(block_ids) * (
+            row if layout.is_block_outermost else len(layer_names) * 128
+        )
+        assert [(r.job_id, r.success, r.transfer_size) for r in completed] == [
+            (1, True, transfer_bytes),
+            (2, True, transfer_bytes),
+        ]
+    finally:
+        worker.shutdown()
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")

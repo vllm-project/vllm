@@ -129,11 +129,39 @@ steps:
   device: h200_35gb
   key: v1-kv-offload
   timeout_in_minutes: 45
-  source_file_dependencies: *v1-core-kv-metrics-deps
+  source_file_dependencies:
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/engine/
+    - vllm/entrypoints/pooling/
+    - vllm/inputs/
+    - vllm/lora/
+    - vllm/model_executor/
+    - vllm/multimodal/
+    - vllm/outputs.py
+    - vllm/platforms/
+    - vllm/pooling_params.py
+    - vllm/profiler/
+    - vllm/sampling_params.py
+    - vllm/tokenizers/
+    - vllm/transformers_utils/
+    - vllm/utils/
+    - vllm/v1/
+    - tests/v1/core
+    - tests/v1/executor
+    - tests/v1/kv_offload
+    - tests/v1/simple_kv_offload
+    - tests/v1/worker
+    - tests/v1/streaming_input
+    - tests/v1/kv_connector/unit
+    - tests/v1/ec_connector/unit
+    - tests/v1/metrics
+    - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - bash /vllm-workspace/.buildkite/scripts/install-kv-offload.sh
     - pytest -v -s v1/kv_offload
+    - pytest -v -s v1/kv_connector/unit/test_offloading_connector.py::test_mamba_packed_layout_cpu_reload
     - pytest -v -s v1/simple_kv_offload
   mirror:
     amd:
