@@ -997,12 +997,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 // self.compress_ratio
             )
             M = N + self.window_size + self.max_num_batched_tokens
-            shapes = (
-                []
-                if self._use_aiter_sparse_mla
-                else self._prefill_workspace_shapes(M, self.max_num_batched_tokens, q)
-            )
-            if shapes:
+            if not self._use_aiter_sparse_mla:
+                shapes = self._prefill_workspace_shapes(
+                    M, self.max_num_batched_tokens, q
+                )
                 current_workspace_manager().get_simultaneous(*shapes)
             if mxfp8_out is None:
                 output.zero_()
