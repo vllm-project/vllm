@@ -877,6 +877,22 @@ fn serve_passes_return_tokens_as_token_ids_into_config() {
 }
 
 #[test]
+fn serve_rejects_log_outputs_without_log_requests() {
+    let config = |flags: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string())
+    };
+
+    let error = config(&["--enable-log-outputs"]).validate().unwrap_err();
+    assert!(format!("{error:#}").contains("--enable-log-outputs requires --enable-log-requests"));
+    assert!(config(&["--enable-log-outputs", "--enable-log-requests"]).validate().is_ok());
+}
+
+#[test]
 fn serve_resolves_output_logging_from_log_flags() {
     let log_outputs = |flags: &[&str]| {
         let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(flags))

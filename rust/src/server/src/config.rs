@@ -363,6 +363,11 @@ impl Config {
                 "--enable-per-request-metrics requires engine statistics logging; remove --disable-log-stats"
             );
         }
+        if self.api_server_options.log_outputs.logs_complete()
+            && !self.api_server_options.enable_log_requests
+        {
+            bail!("--enable-log-outputs requires --enable-log-requests");
+        }
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
         if matches!(
             self.tool_strict_level,

@@ -390,7 +390,7 @@ pub struct SharedRuntimeArgs {
 
     /// If set to True, log model outputs (generations). Output text and
     /// finish reasons are logged at INFO, while output token IDs are logged at
-    /// DEBUG. Unlike Python, it does not require `--enable-log-requests`.
+    /// DEBUG. Requires `--enable-log-requests`.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     #[serde(default)]
     pub enable_log_outputs: bool,
