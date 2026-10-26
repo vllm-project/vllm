@@ -87,6 +87,18 @@ bool on_gfx1151() {
   return result;
 }
 
+// gfx1150, gfx1152 and gfx1153: 1024 VGPRs a lane and a 128-bit memory bus.
+bool on_gfx1150_class() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx1150") != std::string::npos ||
+           device_arch.find("gfx1152") != std::string::npos ||
+           device_arch.find("gfx1153") != std::string::npos;
+  }();
+  return result;
+}
+
 #if defined(NDEBUG)
   #undef NDEBUG
   #include <assert.h>
@@ -1214,28 +1226,38 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size() / 2;
 
-#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N)                     \
+// WVSPLITK_CFG_AC arguments are: (THRDS, WVPRGRP, YTILE, UNRL, N, A_CHUNK).
+//   THRDS   = wavefront width (32 on GFX11/GFX12, 64 on GFX9)
+//   WVPRGRP = waves per group
+//   YTILE   = output rows per thread tile
+//   UNRL    = K-loop unroll factor
+//   N       = batch size (passed through from the switch in wvSplitK)
+//   A_CHUNK = elements per thread per load; above 8 it needs K % A_CHUNK == 0
+#define WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, _AC)             \
   {                                                                           \
     dim3 block(_THRDS, _WVPRGRP);                                             \
     int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);                 \
     if ((Kbp_in * N_in <= max_lds_len) && (M_in % _YTILE == 0))               \
-      wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>        \
+      wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>      \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
     else if (Kbp_in * N_in <= max_lds_len * 1.2)                              \
-      wvSplitK_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>            \
+      wvSplitK_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>          \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
     else                                                                      \
-      wvSplitK_hf_big_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>        \
+      wvSplitK_hf_big_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>      \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
   }
 
-#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)     \
+#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N) \
+  WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, 8)
+
+#define WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N) \
   {                                                       \
     bool fit_lds = (Kbp_in * N_in <= max_lds_len);        \
     if (_sYT <= 1)                                        \
@@ -1250,43 +1272,39 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
       WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)           \
   }
 
-// WVSPLITK_CFG arguments are: (THRDS, WVPRGRP, YTILE, UNRL, N).
-//   THRDS  = wavefront width (32 on GFX11/GFX12, 64 on GFX9)
-//   WVPRGRP= waves per group (always 16)
-//   YTILE  = output rows per thread tile
-//   UNRL   = K-loop unroll factor
-//   N      = batch size (passed through from the switch in wvSplitK)
-#define WVSPLIT_TILE(_sYT, __N)                                             \
-  {                                                                         \
-    if (on_gfx1151()) {                                                     \
-      bool fit_lds = (Kbp_in * N_in <= max_lds_len);                        \
-      if (_sYT <= 1)                                                        \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/4, \
-                     __N)                                                   \
-      else if ((K_in % 1024 == 512) && K_in >= 1536 &&                      \
-               (_sYT >= 40 || K_in >= 4096))                                \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/4, /*UNRL=*/1, \
-                     __N)                                                   \
-      else if (K_in < 1024)                                                 \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/2, /*UNRL=*/4, \
-                     __N)                                                   \
-      else if (K_in <= 2048 && (__N >= 2 || _sYT <= 26))                    \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/4, \
-                     __N)                                                   \
-      else if (__N >= 2 && !fit_lds)                                        \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/4, \
-                     __N)                                                   \
-      else if (__N == 1)                                                    \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/2, \
-                     __N)                                                   \
-      else                                                                  \
-        WVSPLITK_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, /*YTILE=*/1, /*UNRL=*/1, \
-                     __N)                                                   \
-    } else if (on_gfx1x()) { /* gfx1100/gfx1150/GFX12, wave32 */            \
-      WVSPLIT_TILE_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, _sYT, __N)             \
-    } else { /* GFX9, wave64 */                                             \
-      WVSPLIT_TILE_CFG(/*THRDS=*/64, /*WVPRGRP=*/16, _sYT, __N)             \
-    }                                                                       \
+// gfx1151 and the gfx1150 class take the tile that a sweep of every
+// non-spilling (YTILE, UNRL, A_CHUNK, WVPRGRP) found within ~1% of the best
+// one for nearly every (M, K, N) on that arch: 99.3-99.5% of the per-shape
+// best on average (benchmarks/kernels/sweep_bf16_kernel.py). The other archs
+// keep the generic rows.
+#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)      \
+  {                                                        \
+    if constexpr (_THRDS == 32) {                          \
+      if (on_gfx1151()) {                                  \
+        if (K_in < 1024 || K_in % 16 != 0)                 \
+          WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 4, __N)        \
+        else                                               \
+          WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 1, 4, __N, 16) \
+      } else if (on_gfx1150_class()) {                     \
+        if (K_in % 16 != 0)                                \
+          WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)        \
+        else if (_sYT <= 8)                                \
+          WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 1, 2, __N, 16) \
+        else                                               \
+          WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 2, 1, __N, 16) \
+      } else                                               \
+        WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N)  \
+    } else                                                 \
+      WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N)    \
+  }
+
+#define WVSPLIT_TILE(_sYT, __N)                                 \
+  {                                                             \
+    if (on_gfx1x()) { /* gfx11/GFX12, wave32 */                 \
+      WVSPLIT_TILE_CFG(/*THRDS=*/32, /*WVPRGRP=*/16, _sYT, __N) \
+    } else { /* GFX9, wave64 */                                 \
+      WVSPLIT_TILE_CFG(/*THRDS=*/64, /*WVPRGRP=*/16, _sYT, __N) \
+    }                                                           \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitK", [&] {
