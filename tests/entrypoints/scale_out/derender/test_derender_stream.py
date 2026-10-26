@@ -112,6 +112,15 @@ def _merge_fake_deltas(
     return accumulated
 
 
+class _FakeToolParser:
+    """Tool parser slot filler so `tool_choice="auto"` keeps tool calls."""
+
+    engine_based_streaming = True
+
+    def __init__(self, tokenizer, tools):
+        pass
+
+
 class _FakeParser(Parser):
     """Deterministic `Parser` stub for unit testing the replay/merge/pin
     mechanics of `OnlineDerenderer._derender_chat_stream_parsed` in
@@ -131,6 +140,8 @@ class _FakeParser(Parser):
       it happened.
     - Anything else emits nothing.
     """
+
+    tool_parser_cls = _FakeToolParser  # type: ignore[assignment]
 
     TOOL_START = 9
     TOOL_ARG = 10
@@ -306,6 +317,7 @@ def parsed_derenderer(tokenizer):
         request_logger=None,
         chat_template=None,
         chat_template_content_format="string",
+        enable_auto_tools=True,
     )
     dr.parser = _FakeParser
     return dr
@@ -1590,7 +1602,10 @@ class TestDerenderChatStreamParsed:
                     ids, logprobs=_generate_logprobs(ids)
                 ),
                 state=state,
-                chat_request=_chat_request(),
+                chat_request=_chat_request(
+                    tools=[{"type": "function", "function": {"name": "get_weather"}}],
+                    tool_choice="auto",
+                ),
                 prompt_token_ids=[1, 2],
             )
             choice = chunk.choices[0]
