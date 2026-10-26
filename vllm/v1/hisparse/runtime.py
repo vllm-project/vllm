@@ -665,7 +665,7 @@ def _create_shared_topk_state(
 
 
 def _create_copy_stream(device: torch.device) -> torch.Stream:
-    return get_hisparse_backend().create_stream(device, generic=True)
+    return get_hisparse_backend().create_stream(device)
 
 
 class HiSparseIndexGroup:
@@ -701,7 +701,6 @@ class HiSparseIndexGroup:
         )
         self.logical_topk_ready = logical_topk_ready
         self.followers: list[HiSparseRuntime] = []
-        self.backend_state: Any = None
         stats_dtype = get_hisparse_backend().stats_dtype
         self.swap_stats = torch.zeros(2, dtype=stats_dtype, device=device)
         self.swap_stats_host = torch.empty(
@@ -1038,7 +1037,7 @@ class HiSparseRuntime:
             group.copy_stream.wait_event(group.logical_topk_ready)
         else:
             group.copy_stream.wait_stream(compute_stream)
-        with self.backend.stream_context(group.copy_stream, generic=True):
+        with self.backend.stream_context(group.copy_stream):
             # CUDA-graph padding rows past the batch's tokens map to request 0;
             # mark them -1 so residency resolution skips them.
             num_tokens = logical_topk_indices.shape[0]
@@ -1072,7 +1071,7 @@ class HiSparseRuntime:
         group = self.index_group
         compute_stream = self.backend.current_stream()
         group.copy_stream.wait_stream(compute_stream)
-        with self.backend.stream_context(group.copy_stream, generic=True):
+        with self.backend.stream_context(group.copy_stream):
             self._swap_rows(shared_rows)
             if self._layer_ready_event is None:
                 self._layer_ready_event = self.backend.create_event()

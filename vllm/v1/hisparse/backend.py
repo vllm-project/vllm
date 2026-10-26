@@ -48,7 +48,7 @@ class HiSparseBackend:
         Backends must not put per-step metadata or transfers in this hook.
         """
 
-    def create_stream(self, device: torch.device, *, generic: bool = False) -> Any:
+    def create_stream(self, device: torch.device) -> Any:
         raise NotImplementedError
 
     def create_lru_init(self, size: int, device: torch.device) -> torch.Tensor:
@@ -87,7 +87,7 @@ class HiSparseBackend:
     def current_stream(self) -> Any:
         raise NotImplementedError
 
-    def stream_context(self, stream: Any, *, generic: bool = False) -> Any:
+    def stream_context(self, stream: Any) -> Any:
         raise NotImplementedError
 
     def is_current_stream_capturing(self) -> bool:
@@ -134,10 +134,8 @@ class CUDAHiSparseBackend(HiSparseBackend):
     def create_cache_ops(self, runtime: HiSparseRuntime) -> Any:
         return torch.ops._C_cache_ops
 
-    def create_stream(self, device: torch.device, *, generic: bool = False) -> Any:
-        if generic:
-            return torch.Stream(device=device)
-        return torch.cuda.Stream(device=device)
+    def create_stream(self, device: torch.device) -> Any:
+        return torch.Stream(device=device)
 
     def create_event(self, *, interprocess: bool = False) -> Any:
         if interprocess:
@@ -190,10 +188,8 @@ class CUDAHiSparseBackend(HiSparseBackend):
 
         return current_stream()
 
-    def stream_context(self, stream: Any, *, generic: bool = False) -> Any:
-        if generic:
-            return stream
-        return torch.cuda.stream(stream)
+    def stream_context(self, stream: Any) -> Any:
+        return stream
 
     def is_current_stream_capturing(self) -> bool:
         return torch.cuda.is_current_stream_capturing()

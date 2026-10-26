@@ -2011,6 +2011,27 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int, reuse_buffers
         assert torch.all(result[row, num_valid:] == -1)
 
 
+def test_hisparse_backend_stream_orders_ipc_event():
+    """Generic copy streams must record IPC events and restore the compute stream."""
+    from vllm.v1.hisparse.backend import CUDAHiSparseBackend
+
+    backend = CUDAHiSparseBackend()
+    compute_stream = backend.current_stream()
+    copy_stream = backend.create_stream(torch.device(DEVICE_TYPE))
+    values = torch.arange(8, dtype=torch.float32, device=DEVICE_TYPE)
+    input_ready = backend.create_event()
+    input_ready.record(compute_stream)
+    copy_stream.wait_event(input_ready)
+    output_ready = backend.create_event(interprocess=True)
+    with backend.stream_context(copy_stream):
+        values.add_(1)
+        output_ready.record(copy_stream)
+    assert torch.cuda.current_stream().stream_id == compute_stream.stream_id
+    compute_stream.wait_event(output_ready)
+
+    torch.testing.assert_close(values.cpu(), torch.arange(8, dtype=torch.float32) + 1)
+
+
 def test_sparse_mla_index_group_converts_decode_indices_once(monkeypatch):
     def unexpected_hisparse_backend():
         pytest.fail("Sparse attention without HiSparse must not resolve its backend")
@@ -4736,6 +4757,7 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
 def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 
+    monkeypatch.setattr(index_group_module, "get_hisparse_backend", CUDAHiSparseBackend)
     compute_stream = object()
     prefill_stream = MagicMock()
     gather = MagicMock()
@@ -4750,7 +4772,6 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
         view=SimpleNamespace(cache=resident_cache, block_size=4),
         block_table=torch.tensor([[2, 3]], dtype=torch.int32),
         runtime=SimpleNamespace(
-            backend=CUDAHiSparseBackend(),
             request_state_indices=torch.tensor([0], dtype=torch.int32),
         ),
     )

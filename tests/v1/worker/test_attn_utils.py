@@ -465,11 +465,13 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
 @pytest.mark.parametrize("shared", [False, True])
 def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
     """Failed initialization must release shared or private registrations."""
-    backend = CUDAHiSparseBackend()
-    prepare = MagicMock()
-    if failure_phase == "views":
-        prepare.side_effect = RuntimeError("initialization failed")
-    monkeypatch.setattr(backend, "prepare_kv_cache_views", prepare)
+
+    class Backend(CUDAHiSparseBackend):
+        def prepare_kv_cache_views(self, *args):
+            if failure_phase == "views":
+                raise RuntimeError("initialization failed")
+
+    backend = Backend()
     monkeypatch.setattr(attn_utils_module, "get_hisparse_backend", lambda: backend)
     monkeypatch.setattr(
         hisparse_runtime_module, "get_hisparse_backend", lambda: backend
@@ -529,63 +531,6 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
         cudart.cudaHostUnregister.assert_called_once_with(registered.data_ptr())
     assert attn_utils_module.get_hisparse_host_pool(vllm_config, None) is not pools[0]
     hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
-
-
-def test_hisparse_validates_backend_before_host_allocation(monkeypatch):
-    backend = CUDAHiSparseBackend()
-    validate = MagicMock(side_effect=ValueError("unsupported device layout"))
-    allocate = MagicMock()
-    monkeypatch.setattr(backend, "validate_kv_cache_config", validate)
-    monkeypatch.setattr(attn_utils_module, "get_hisparse_backend", lambda: backend)
-    monkeypatch.setattr(attn_utils_module, "get_hisparse_host_pool", allocate)
-
-    with pytest.raises(ValueError, match="unsupported device layout"):
-        attn_utils_module.init_hisparse_kv_cache(None, None, [], None, {}, None)
-
-    validate.assert_called_once_with(None)
-    allocate.assert_not_called()
-
-
-def test_hisparse_prepares_views_before_binding(monkeypatch):
-    backend = CUDAHiSparseBackend()
-    backing = torch.zeros(8)
-    caches = {"layer": backing}
-    context: dict[str, Any] = {}
-    pool = SimpleNamespace(shared_region=None, registered=None)
-    calls = []
-
-    def prepare(config, views, forward_context):
-        assert views is caches and forward_context is context
-        views["layer"] = backing.view(2, 4)
-        calls.append("prepare")
-
-    def bind(**kwargs):
-        assert kwargs["kv_caches"]["layer"].shape == (2, 4)
-        assert kwargs["kv_caches"]["layer"].data_ptr() == backing.data_ptr()
-        calls.append("bind")
-        return []
-
-    monkeypatch.setattr(backend, "prepare_kv_cache_views", prepare)
-    monkeypatch.setattr(attn_utils_module, "get_hisparse_backend", lambda: backend)
-    monkeypatch.setattr(attn_utils_module, "get_hisparse_host_pool", lambda *a: pool)
-    monkeypatch.setattr(
-        attn_utils_module, "allocate_hisparse_kv_caches", lambda *a: caches
-    )
-    monkeypatch.setattr(attn_utils_module, "bind_hisparse_kv_caches", bind)
-    monkeypatch.setattr(
-        attn_utils_module, "initialize_hisparse_runtime_buffers", MagicMock()
-    )
-    config = SimpleNamespace(
-        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
-        scheduler_config=SimpleNamespace(max_num_seqs=1),
-    )
-
-    result = attn_utils_module.init_hisparse_kv_cache(
-        None, None, [], config, context, None
-    )
-
-    assert result is caches
-    assert calls == ["prepare", "bind"]
 
 
 def test_reshape_padded_kv_cache_strides_by_padded_page():

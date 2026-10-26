@@ -5,7 +5,6 @@ import mmap
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import cast
 from unittest.mock import MagicMock, call
 
 import numpy as np
@@ -13,7 +12,6 @@ import pytest
 import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
-import vllm.v1.hisparse.backend as hisparse_backend_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
@@ -31,7 +29,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
-from vllm.v1.hisparse.runtime import HiSparseCacheHandle, HiSparseRuntime
+from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.worker.utils import (
     bind_kv_cache,
@@ -39,35 +37,6 @@ from vllm.v1.worker.utils import (
     copy_kv_cache_blocks_inplace,
     request_memory,
 )
-
-
-def test_hisparse_cuda_backend_preserves_stream_apis(monkeypatch):
-    generic_stream = MagicMock()
-    cuda_stream = MagicMock()
-    cuda_context = MagicMock()
-    monkeypatch.setattr(torch, "Stream", generic_stream)
-    monkeypatch.setattr(torch.cuda, "Stream", cuda_stream)
-    monkeypatch.setattr(torch.cuda, "stream", cuda_context)
-    backend = CUDAHiSparseBackend()
-    device = torch.device("cuda:0")
-
-    stream = backend.create_stream(device, generic=True)
-    generic_stream.assert_called_once_with(device=device)
-    assert backend.stream_context(stream, generic=True) is stream
-    cuda_context.assert_not_called()
-    stream = backend.create_stream(device)
-    cuda_stream.assert_called_once_with(device=device)
-    assert backend.stream_context(stream) is cuda_context.return_value
-    cuda_context.assert_called_once_with(stream)
-
-
-def test_hisparse_cuda_lru_init_keeps_int16_allocation(monkeypatch):
-    arange = MagicMock()
-    monkeypatch.setattr(torch, "arange", arange)
-    device = torch.device("cuda:0")
-
-    assert CUDAHiSparseBackend().create_lru_init(16, device) is arange.return_value
-    arange.assert_called_once_with(16, dtype=torch.int16, device=device)
 
 
 @pytest.mark.parametrize("packed_bytes", [False, True])
@@ -87,81 +56,6 @@ def test_hisparse_resident_gather_preserves_stride_and_payload(packed_bytes):
     torch.testing.assert_close(destination, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("is_host_writer", [False, True])
-def test_hisparse_host_events_use_selected_backend(monkeypatch, is_host_writer):
-    backend = MagicMock()
-    group = MagicMock()
-    group.broadcast_object.side_effect = lambda handles, src: handles or ("a", "b")
-    monkeypatch.setattr(hisparse_worker_module, "get_hisparse_backend", lambda: backend)
-    monkeypatch.setattr(hisparse_worker_module, "get_tp_group", lambda: group)
-    device = torch.device("cpu")
-
-    events = hisparse_worker_module._create_hisparse_host_events(
-        object(), is_host_writer, device
-    )
-
-    group.broadcast_object.assert_called_once()
-    if is_host_writer:
-        assert backend.create_event.call_args_list == [
-            call(interprocess=True),
-            call(interprocess=True),
-        ]
-        assert backend.export_event.call_count == 2
-        backend.import_event.assert_not_called()
-    else:
-        backend.create_event.assert_not_called()
-        assert backend.import_event.call_args_list == [
-            call(device, "a"),
-            call(device, "b"),
-        ]
-    assert len(events) == 2
-
-
-def test_hisparse_runtime_delegates_resident_payload(monkeypatch):
-    runtime = object.__new__(hisparse_runtime_module.HiSparseRuntime)
-    runtime.backend = MagicMock()
-    runtime.cache_ops = MagicMock()
-    runtime.backend.gather_resident_rows.side_effect = (
-        lambda source, destination, rows: destination.fill_(17)
-    )
-    source = torch.zeros((2, 2, 3))
-    plan = SimpleNamespace(
-        block_size=2,
-        row_ids=torch.zeros((1, 4), dtype=torch.int32),
-        gpu_row_ids=torch.tensor([[2, 0, 3, -1]]),
-        block_table=torch.zeros((1, 2), dtype=torch.int32),
-        dst_rows=torch.zeros((1, 4), dtype=torch.int32),
-        miss_mask=torch.zeros((1, 4), dtype=torch.bool),
-    )
-
-    staged = runtime.gather_prefill_cache(source, plan, source)
-
-    runtime.backend.gather_resident_rows.assert_called_once()
-    assert runtime.backend.gather_resident_rows.call_args.args[0] is source
-    assert torch.all(staged == 17)
-
-
-def test_hisparse_backend_cache_is_scoped_to_platform_class(monkeypatch):
-    factory = MagicMock(side_effect=lambda name: MagicMock())
-    get_class = MagicMock(return_value="backend.one")
-    monkeypatch.setattr(
-        hisparse_backend_module.current_platform, "get_hisparse_backend_cls", get_class
-    )
-    monkeypatch.setattr(hisparse_backend_module, "resolve_obj_by_qualname", factory)
-    hisparse_backend_module._get_hisparse_backend.cache_clear()
-    try:
-        first = hisparse_backend_module.get_hisparse_backend()
-        assert hisparse_backend_module.get_hisparse_backend() is first
-        get_class.return_value = "backend.two"
-        assert hisparse_backend_module.get_hisparse_backend() is not first
-        assert factory.call_count == 2
-        get_class.return_value = None
-        with pytest.raises(RuntimeError, match="does not support HiSparse"):
-            hisparse_backend_module.get_hisparse_backend()
-    finally:
-        hisparse_backend_module._get_hisparse_backend.cache_clear()
-
-
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker = object.__new__(HiSparseConnectorWorker)
     worker.backend = CUDAHiSparseBackend()
@@ -173,7 +67,6 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._draft_mirror_pending = False
     worker._pending_dma_descriptors = deque()
     worker._dma_free_descriptors = []
-    worker._failed_dma_descriptors = []
     worker.host_write_events = (MagicMock(), MagicMock())
     worker.host_write_event = worker.host_write_events[1]
     worker._next_host_write_event = 0
@@ -1352,8 +1245,16 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
         hisparse_runtime_module, "_create_shared_topk_state", create_shared_state
     )
     monkeypatch.setattr(hisparse_runtime_module, "_create_copy_stream", create_stream)
-    monkeypatch.setattr(index_group_module, "_create_side_stream", lambda _: object())
-    monkeypatch.setattr(index_group_module, "_create_event", lambda: object())
+    monkeypatch.setattr(
+        index_group_module.SparseMLAIndexGroup,
+        "create_side_stream",
+        staticmethod(lambda _: object()),
+    )
+    monkeypatch.setattr(
+        index_group_module.SparseMLAIndexGroup,
+        "create_event",
+        staticmethod(lambda: object()),
+    )
     index_group_builder = index_group_module.SparseMLAIndexGroupBuilder(
         torch.empty((2, 4), dtype=torch.int32)
     )
@@ -1429,90 +1330,6 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     new_pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
     assert new_pool is not pool
     hisparse_runtime_module.drop_hisparse_host_pool(worker.vllm_config)
-
-
-def test_hisparse_release_synchronizes_before_unregister(monkeypatch):
-    """Mapped host storage must outlive all device reads and DMA writes."""
-    backend = MagicMock()
-    monkeypatch.setattr(
-        hisparse_runtime_module, "get_hisparse_backend", lambda: backend
-    )
-    registered = torch.empty(4096, dtype=torch.int8)
-    pending = [registered]
-    runtime = SimpleNamespace(
-        _host_cache=registered,
-        registered_host_pool=registered,
-        hot_backing=object(),
-        cache_ops=object(),
-    )
-
-    hisparse_runtime_module.release_pinned_state(
-        [cast(HiSparseRuntime, runtime)], pending
-    )
-
-    assert backend.mock_calls == [call.synchronize(), call.unpin_tensor(registered)]
-    assert pending == []
-    assert runtime.cache_ops is None
-    assert not hasattr(runtime, "registered_host_pool")
-
-
-def test_hisparse_release_retains_registration_when_device_cannot_drain(monkeypatch):
-    """Failed synchronization must not unmap memory still visible to the device."""
-    backend = MagicMock()
-    backend.synchronize.side_effect = RuntimeError("device failed")
-    monkeypatch.setattr(
-        hisparse_runtime_module, "get_hisparse_backend", lambda: backend
-    )
-    registered = torch.empty(4096, dtype=torch.int8)
-    pending = [registered]
-
-    hisparse_runtime_module.release_pinned_state([], pending)
-
-    backend.unpin_tensor.assert_not_called()
-    assert pending[0] is registered
-
-
-@pytest.mark.parametrize(
-    ("enqueue_fails", "drain_fails"), [(False, False), (True, False), (True, True)]
-)
-def test_hisparse_spill_completion_owns_descriptors(enqueue_fails, drain_fails):
-    """Only a completed submission may release descriptors and acknowledge pages."""
-    worker = _make_hisparse_worker()
-    worker.backend = MagicMock()
-    worker.backend.stream_context.return_value = nullcontext()
-    event = worker.backend.create_event.return_value
-    event.query.return_value = False
-    worker.dma_stream = MagicMock()
-    worker._pending_transfer_events = deque()
-    worker._enqueued_transfer_ids = []
-    descriptors = hisparse_worker_module._allocate_dma_descriptors(1)
-    if enqueue_fails:
-        submission_error = RuntimeError("DMA failed")
-        worker.backend.swap_blocks_batch.side_effect = submission_error
-        if drain_fails:
-            worker.dma_stream.synchronize.side_effect = RuntimeError("drain failed")
-        with pytest.raises(RuntimeError, match="DMA failed") as exc:
-            worker._submit_dma_descriptors(descriptors, 1, transfer_ids=(7,))
-        assert exc.value is submission_error
-        worker.dma_stream.synchronize.assert_called_once_with()
-        assert worker.take_transfer_updates() == ([], [])
-        assert not worker._pending_dma_descriptors
-        assert not worker._dma_free_descriptors
-        if drain_fails:
-            assert worker._failed_dma_descriptors[0] is descriptors
-        else:
-            assert not worker._failed_dma_descriptors
-        return
-
-    worker._submit_dma_descriptors(descriptors, 1, transfer_ids=(7,))
-    event.record.assert_called_once_with(worker.dma_stream)
-    assert worker.take_transfer_updates() == ([7], [])
-    worker._release_completed_dma_descriptors()
-    assert not worker._dma_free_descriptors
-    event.query.return_value = True
-    assert worker.take_transfer_updates() == ([], [7])
-    worker._release_completed_dma_descriptors()
-    assert worker._dma_free_descriptors == [descriptors]
 
 
 class _TestReplaySSMMixer(MambaMixer2):

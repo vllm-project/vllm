@@ -226,6 +226,8 @@ platform returns `None`; CUDA selects `CUDAHiSparseBackend` in `platforms/cuda.p
 Hardware plugins can provide a `HiSparseBackend` for host registration, cache
 operations, streams, events, and transfers while reusing the common runtime and
 connector. HiSparse validates availability and cache formats before allocation.
+CUDA creates all HiSparse streams with `torch.Stream`; the backend provides the
+stream context without a separate generic/CUDA stream mode.
 Without HiSparse, sparse attention keeps its normal stream and event path.
 ROCm does not currently provide a HiSparse backend.
 

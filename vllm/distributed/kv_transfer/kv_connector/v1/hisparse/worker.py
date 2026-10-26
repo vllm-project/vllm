@@ -21,7 +21,6 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
-from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import get_hisparse_backend
@@ -44,8 +43,6 @@ if TYPE_CHECKING:
         HiSparseConnectorMetadata,
     )
     from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-
-logger = init_logger(__name__)
 
 
 class _DMADescriptors(NamedTuple):
@@ -294,7 +291,7 @@ class HiSparseConnectorWorker:
                 + max_num_reqs * (self.vllm_config.num_lookahead_tokens + 1)
             )
             self._slot_mapping_staging = _SlotMappingStaging(
-                stream=self.backend.create_stream(device, generic=True),
+                stream=self.backend.create_stream(device),
                 event=self.backend.create_event(),
                 slots=torch.empty(
                     max_mirror_rows,
@@ -303,7 +300,6 @@ class HiSparseConnectorWorker:
                 ),
             )
         self._dma_free_descriptors: list[_DMADescriptors] = []
-        self._failed_dma_descriptors: list[_DMADescriptors] = []
         self._pending_dma_descriptors: deque[tuple[torch.Event, _DMADescriptors]] = (
             deque()
         )
@@ -625,26 +621,14 @@ class HiSparseConnectorWorker:
         else:
             stream.wait_event(ready_event)
         completion_event = self.backend.create_event()
-        try:
-            with self.backend.stream_context(stream):
-                self.backend.swap_blocks_batch(
-                    descriptors.src[:descriptor_count],
-                    descriptors.dst[:descriptor_count],
-                    descriptors.sizes[:descriptor_count],
-                )
-                self.host_write_event.record(stream)
-                completion_event.record(stream)
-        except Exception:
-            # A backend may have queued part of a batch before reporting an
-            # error. Keep the descriptors alive until that work has drained.
-            try:
-                stream.synchronize()
-            except Exception:
-                self._failed_dma_descriptors.append(descriptors)
-                logger.exception(
-                    "HiSparse: failed to drain DMA after submission error."
-                )
-            raise
+        with self.backend.stream_context(stream):
+            self.backend.swap_blocks_batch(
+                descriptors.src[:descriptor_count],
+                descriptors.dst[:descriptor_count],
+                descriptors.sizes[:descriptor_count],
+            )
+            self.host_write_event.record(stream)
+            completion_event.record(stream)
         self._pending_dma_descriptors.append((completion_event, descriptors))
         self._dma_submitted = True
         if transfer_ids:
@@ -990,7 +974,6 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.stream.synchronize()
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
-        self._failed_dma_descriptors.clear()
         release_pinned_state(
             [cache.runtime for cache in self.cache_handles],
             self.pinned_host_pools,
