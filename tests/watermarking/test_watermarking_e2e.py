@@ -41,4 +41,3 @@ def test_llm_generated_sequence_is_watermarked(vllm_runner, enforce):
     assert result_use_wm.p_value < recorded_p_value * 10  # tolerance
 
     assert result_no_wm.is_watermarked == enforce, result_no_wm
-    
