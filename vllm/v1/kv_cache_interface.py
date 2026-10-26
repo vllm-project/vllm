@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 import math
 from collections import Counter
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
@@ -20,7 +20,13 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_layout import _DIM_B, _DIM_L, KVCacheLayout
+from vllm.v1.kv_cache_layout import (
+    _DIM_B,
+    _DIM_L,
+    KVCacheAxis,
+    KVCacheLayout,
+    KVCacheTensorLayout,
+)
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
@@ -1557,6 +1563,35 @@ class KVCacheConfig:
 
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
+
+    def get_tensor_layouts(
+        self, layer_names: Iterable[str]
+    ) -> dict[str, KVCacheTensorLayout]:
+        """Describe standardized allocator views for connector registration.
+
+        The standard allocator returns logical [B, H, N, C] views regardless of
+        physical stride order. Raw storage specs are omitted. Custom allocators
+        must describe their own registered views.
+        """
+        standard_layout = KVCacheTensorLayout(
+            (
+                KVCacheAxis.BLOCK,
+                KVCacheAxis.HEAD,
+                KVCacheAxis.STATE,
+                KVCacheAxis.CONTENT,
+            )
+        )
+        described_layers = {
+            name
+            for group in self.kv_cache_groups
+            if all(
+                spec.has_layer_views for spec in iter_layer_specs(group.kv_cache_spec)
+            )
+            for name in group.layer_names
+        }
+        return {
+            name: standard_layout for name in layer_names if name in described_layers
+        }
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:

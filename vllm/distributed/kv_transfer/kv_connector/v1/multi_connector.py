@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_layout import KVCacheTensorLayout
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -260,6 +261,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
+
+    def register_kv_caches_with_layouts(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        layouts: Mapping[str, KVCacheTensorLayout],
+    ) -> None:
+        for connector in self._connectors:
+            connector.register_kv_caches_with_layouts(kv_caches, layouts)
 
     def unregister_kv_caches(self) -> None:
         for c in self._connectors:

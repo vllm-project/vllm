@@ -7051,7 +7051,9 @@ class GPUModelRunner(
 
         if has_kv_transfer_group() and not is_profiling:
             kv_transfer_group = get_kv_transfer_group()
-            kv_transfer_group.register_kv_caches(kv_caches)
+            kv_transfer_group.register_kv_caches_with_layouts(
+                kv_caches, kv_cache_config.get_tensor_layouts(kv_caches)
+            )
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
