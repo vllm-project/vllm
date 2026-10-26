@@ -397,17 +397,14 @@ class HiSparseCoordinator:
             self._unpin_page(request_id, state, page_idx)
 
     def _unpin_after_scheduled_steps(self, blocks: list[KVCacheBlock]) -> None:
-        self.deferred_unpins.append((self.sched_step_seq, blocks))
-        self._drain_deferred_unpins()
-
-    def step_scheduled(self) -> None:
-        self.sched_step_seq += 1
+        if self.sched_step_seq > self.processed_step_seq:
+            self.deferred_unpins.append((self.sched_step_seq, blocks))
+            return
+        assert self.gpu_pool is not None
+        self.gpu_pool.unpin_blocks(blocks, self._on_block_reused)
 
     def step_processed(self) -> None:
         self.processed_step_seq += 1
-        self._drain_deferred_unpins()
-
-    def _drain_deferred_unpins(self) -> None:
         while (
             self.deferred_unpins
             and self.deferred_unpins[0][0] <= self.processed_step_seq

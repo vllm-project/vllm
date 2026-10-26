@@ -159,7 +159,7 @@ class HiSparseConnectorScheduler:
             )
             for request_id, start, count in scheduled_requests
         )
-        self.coordinator.step_scheduled()
+        self.coordinator.sched_step_seq += 1
         command = self.coordinator.build_offload_command()
         host_block_copies = self.coordinator.take_host_block_copies()
         source_group_id = self.coordinator.host_group_id
