@@ -72,9 +72,9 @@
         null
       ],
       "load_eviction_policies": [
-        "",
-        "first",
-        ""
+        "last",
+        "last",
+        "last"
       ],
       "num_warps": 8,
       "num_stages": 8,
@@ -117,8 +117,8 @@
         true
       ],
       "load_eviction_policies": [
-        "first",
-        "first",
+        "last",
+        "last",
         "last"
       ],
       "num_warps": 8,
@@ -388,8 +388,8 @@
       ],
       "load_eviction_policies": [
         "last",
-        "",
-        ""
+        "last",
+        "last"
       ],
       "num_warps": 8,
       "num_stages": 2,
@@ -433,7 +433,7 @@
       ],
       "load_eviction_policies": [
         "last",
-        "",
+        "last",
         "last"
       ],
       "num_warps": 8,
@@ -704,7 +704,7 @@
       "load_eviction_policies": [
         "last",
         "last",
-        "first"
+        "last"
       ],
       "num_warps": 8,
       "num_stages": 3,
@@ -748,8 +748,8 @@
       ],
       "load_eviction_policies": [
         "last",
-        "",
-        ""
+        "last",
+        "last"
       ],
       "num_warps": 8,
       "num_stages": 5,
@@ -1017,9 +1017,9 @@
         false
       ],
       "load_eviction_policies": [
-        "",
-        "",
-        ""
+        "last",
+        "last",
+        "last"
       ],
       "num_warps": 8,
       "num_stages": 6,
@@ -1063,8 +1063,8 @@
       ],
       "load_eviction_policies": [
         "last",
-        "first",
-        ""
+        "last",
+        "last"
       ],
       "num_warps": 8,
       "num_stages": 4,
@@ -1333,8 +1333,8 @@
       ],
       "load_eviction_policies": [
         "last",
-        "",
-        ""
+        "last",
+        "last"
       ],
       "num_warps": 16,
       "num_stages": 7,
@@ -1377,8 +1377,8 @@
         true
       ],
       "load_eviction_policies": [
-        "",
-        "",
+        "last",
+        "last",
         "last"
       ],
       "num_warps": 8,
@@ -1647,9 +1647,9 @@
         true
       ],
       "load_eviction_policies": [
-        "",
-        "first",
-        "first"
+        "last",
+        "last",
+        "last"
       ],
       "num_warps": 8,
       "num_stages": 5,
@@ -1693,7 +1693,7 @@
       ],
       "load_eviction_policies": [
         "last",
-        "",
+        "last",
         "last"
       ],
       "num_warps": 8,
@@ -1962,8 +1962,8 @@
         null
       ],
       "load_eviction_policies": [
-        "",
-        "first",
+        "last",
+        "last",
         "last"
       ],
       "num_warps": 8,
@@ -2007,9 +2007,9 @@
         false
       ],
       "load_eviction_policies": [
-        "",
-        "first",
-        "first"
+        "last",
+        "last",
+        "last"
       ],
       "num_warps": 16,
       "num_stages": 2,
@@ -2277,8 +2277,8 @@
         true
       ],
       "load_eviction_policies": [
-        "",
-        "",
+        "last",
+        "last",
         "last"
       ],
       "num_warps": 8,
@@ -2323,7 +2323,7 @@
       ],
       "load_eviction_policies": [
         "last",
-        "first",
+        "last",
         "last"
       ],
       "num_warps": 16,
@@ -2592,8 +2592,8 @@
         null
       ],
       "load_eviction_policies": [
-        "",
-        "first",
+        "last",
+        "last",
         "last"
       ],
       "num_warps": 8,
@@ -2637,9 +2637,9 @@
         null
       ],
       "load_eviction_policies": [
-        "first",
         "last",
-        ""
+        "last",
+        "last"
       ],
       "num_warps": 8,
       "num_stages": 2,
@@ -2907,9 +2907,9 @@
         null
       ],
       "load_eviction_policies": [
-        "",
-        "first",
-        "first"
+        "last",
+        "last",
+        "last"
       ],
       "num_warps": 1,
       "num_stages": 7,
@@ -2952,8 +2952,8 @@
         null
       ],
       "load_eviction_policies": [
-        "first",
-        "first",
+        "last",
+        "last",
         "last"
       ],
       "num_warps": 4,
@@ -3222,9 +3222,9 @@
         true
       ],
       "load_eviction_policies": [
-        "",
         "last",
-        "first"
+        "last",
+        "last"
       ],
       "num_warps": 2,
       "num_stages": 8,
@@ -3266,9 +3266,9 @@
         true
       ],
       "load_eviction_policies": [
-        "",
-        "first",
-        "first"
+        "last",
+        "last",
+        "last"
       ],
       "num_warps": 8,
       "num_stages": 6,
@@ -3539,8 +3539,8 @@
         false
       ],
       "load_eviction_policies": [
-        "",
-        "",
+        "last",
+        "last",
         "last"
       ],
       "num_warps": 2,
@@ -3584,9 +3584,9 @@
         null
       ],
       "load_eviction_policies": [
-        "",
         "last",
-        ""
+        "last",
+        "last"
       ],
       "num_warps": 8,
       "num_stages": 7,
@@ -4444,9 +4444,9 @@
         false
       ],
       "load_eviction_policies": [
-        "",
         "last",
-        ""
+        "last",
+        "last"
       ],
       "num_warps": 16,
       "num_stages": 2,
@@ -4489,8 +4489,8 @@
         null
       ],
       "load_eviction_policies": [
-        "",
-        "first",
+        "last",
+        "last",
         "last"
       ],
       "num_warps": 8,
@@ -4534,9 +4534,9 @@
         false
       ],
       "load_eviction_policies": [
-        "",
-        "",
-        "first"
+        "last",
+        "last",
+        "last"
       ],
       "num_warps": 8,
       "num_stages": 6,
@@ -4579,7 +4579,7 @@
         false
       ],
       "load_eviction_policies": [
-        "",
+        "last",
         "last",
         "last"
       ],
@@ -4624,9 +4624,9 @@
         false
       ],
       "load_eviction_policies": [
-        "",
         "last",
-        ""
+        "last",
+        "last"
       ],
       "num_warps": 16,
       "num_stages": 2,
@@ -4669,8 +4669,8 @@
         true
       ],
       "load_eviction_policies": [
-        "",
-        "first",
+        "last",
+        "last",
         "last"
       ],
       "num_warps": 16,
@@ -4714,7 +4714,7 @@
         false
       ],
       "load_eviction_policies": [
-        "",
+        "last",
         "last",
         "last"
       ],
@@ -4759,8 +4759,8 @@
         true
       ],
       "load_eviction_policies": [
-        "",
-        "first",
+        "last",
+        "last",
         "last"
       ],
       "num_warps": 16,
@@ -4804,8 +4804,8 @@
         true
       ],
       "load_eviction_policies": [
-        "first",
-        "first",
+        "last",
+        "last",
         "last"
       ],
       "num_warps": 8,
@@ -4849,9 +4849,9 @@
         null
       ],
       "load_eviction_policies": [
-        "",
         "last",
-        ""
+        "last",
+        "last"
       ],
       "num_warps": 2,
       "num_stages": 1,
@@ -4894,9 +4894,9 @@
         true
       ],
       "load_eviction_policies": [
-        "",
         "last",
-        "first"
+        "last",
+        "last"
       ],
       "num_warps": 2,
       "num_stages": 8,
@@ -4939,9 +4939,9 @@
         true
       ],
       "load_eviction_policies": [
-        "",
         "last",
-        "first"
+        "last",
+        "last"
       ],
       "num_warps": 2,
       "num_stages": 8,
