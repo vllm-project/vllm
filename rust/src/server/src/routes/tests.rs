@@ -3100,6 +3100,39 @@ async fn invalid_request_returns_openai_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_completions_with_tools_and_unavailable_auto_parser_returns_400() {
+    let mut app = test_app().await;
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "What is the weather in Taipei?"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }
+                }
+            }]
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "BadRequestError");
+    assert_eq!(
+        json["error"]["message"],
+        "tool parsing is not available for model `test-model`"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn chat_completions_empty_allowed_token_ids_returns_openai_error() {
     let mut app = test_app().await;
     let response = app
