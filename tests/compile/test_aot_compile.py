@@ -197,9 +197,8 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(
-    current_platform.device_count() < 2
-    or not hasattr(torch.compiler.config, "compile_on_one_rank"),
-    reason="requires 2 GPUs and torch compile_on_one_rank",
+    current_platform.device_count() < 2 or not is_torch_equal_or_newer("2.14.0.dev"),
+    reason="requires 2 GPUs and torch 2.14",
 )
 def test_load_on_another_device(monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path):
     # With --device-ids, a rank can load a cache compiled on another device.

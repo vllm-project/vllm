@@ -802,7 +802,7 @@ def set_compile_on_one_rank() -> Generator[None, None, None]:
     # the cache key, rather than torch's own setting.
     from torch.compiler import config as compiler_config
 
-    if not hasattr(compiler_config, "compile_on_one_rank"):
+    if not is_torch_equal_or_newer("2.14.0.dev"):
         yield
         return
     with compiler_config.patch(compile_on_one_rank=envs.VLLM_COMPILE_ON_ONE_RANK):
