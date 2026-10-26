@@ -317,9 +317,7 @@ def _kv_cache_config(num_groups: int) -> KVCacheConfig:
     )
 
 
-def _failed(job_id: int) -> list:
-    from vllm.v1.kv_offload.base import TransferResult
-
+def _failed(job_id: int) -> list[TransferResult]:
     return [TransferResult(job_id=job_id, success=False)]
 
 
@@ -364,6 +362,16 @@ def test_failed_load_fails_its_request():
     assert meta is not None
     assert meta.completed_jobs == {12: 1}
     assert meta.failed_jobs == {12}
+
+
+def test_failed_sync_load_raises():
+    """A sync load's request already ran on the KV it was meant to load."""
+    worker, _ = _make_worker(_kv_cache_config(1))
+    worker.start_kv_transfers(_load_metadata(13, sync=True))
+    worker.worker.get_finished.return_value = _failed(13)
+
+    with pytest.raises(RuntimeError, match="sync load job 13 failed"):
+        worker.get_finished(set())
 
 
 def test_offloading_connector_worker_accepts_plugin_spec_default_layout():
