@@ -485,7 +485,7 @@ def test_varlen_decode_graphs_take_the_decode_cap_as_a_token_budget(monkeypatch)
             if d.max_query_len is not None
         )
 
-    assert varlen_tokens([8, 64]) == varlen_tokens([24]) == [1, 2, 4, 8, 16]
+    assert varlen_tokens([8, 64]) == varlen_tokens([24]) == [1, 2, 4, 8, 10, 12, 14, 16]
 
 
 def test_decode_graphs_stay_within_the_recorded_max(monkeypatch):

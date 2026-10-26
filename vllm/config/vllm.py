@@ -38,6 +38,7 @@ from .compilation import (
     decode_cudagraph_capture_grid,
     decode_cudagraph_capture_shapes,
     prefill_cudagraph_capture_grid,
+    varlen_decode_cudagraph_capture_grid,
 )
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
@@ -736,12 +737,11 @@ class VllmConfig:
     def get_draft_decode_cudagraph_request_sizes(self) -> list[int]:
         """Request counts of the FULL graphs of one-token draft decodes, the
         draft steps after the first of EAGLE, EAGLE3 and single-module MTP: the
-        decode request counts, extended past their widest by the request-count
-        grid up to `max_num_seqs`. The target's decode cap can be far lower:
-        off SM100 its default is 512 / (1 + K) requests, 64 at K=7. Above it
-        the K - 1 draft steps would run eagerly and pay their host launch time
-        on every step, while their graphs are small. Empty without such steps
-        or decode graphs."""
+        request-count grid up to `max_num_seqs`. The target's decode cap can be
+        far lower: off SM100 its default is 512 / (1 + K) requests, 64 at K=7.
+        Above it the K - 1 draft steps would run eagerly and pay their host
+        launch time on every step, while their graphs are small. Empty without
+        such steps or decode graphs."""
         speculative_config = self.speculative_config
         sizes = self.compilation_config.decode_cudagraph_capture_request_sizes
         if (
@@ -755,8 +755,7 @@ class VllmConfig:
             )
         ):
             return []
-        grid = decode_cudagraph_capture_grid(self.scheduler_config.max_num_seqs)
-        return sorted({*sizes, *(n for n in grid if n > max(sizes))})
+        return decode_cudagraph_capture_grid(self.scheduler_config.max_num_seqs)
 
     def get_varlen_decode_cudagraph_token_sizes(
         self, decode_query_len: int
@@ -767,7 +766,7 @@ class VllmConfig:
         of `decode_query_len` tokens each."""
         max_requests = self.compilation_config.max_decode_cudagraph_capture_requests
         assert max_requests is not None
-        return prefill_cudagraph_capture_grid(
+        return varlen_decode_cudagraph_capture_grid(
             min(
                 max_requests * decode_query_len,
                 self.scheduler_config.max_num_batched_tokens,
@@ -2817,13 +2816,11 @@ class VllmConfig:
             decode_sizes, default=0
         )
 
-        # The target's query lengths, and one token per request (draft decodes).
-        query_lens = {**target_query_lens, 1: max_num_seqs}
         token_sizes = set(prefill_sizes)
         token_sizes.update(
             n * q
             for n, q in decode_cudagraph_capture_shapes(
-                decode_sizes, query_lens, max_num_tokens
+                decode_sizes, target_query_lens, max_num_tokens
             )
         )
         token_sizes.update(

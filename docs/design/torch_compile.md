@@ -265,9 +265,9 @@ Then it will only capture cudagraph for the specified sizes. It can be useful to
 With model runner V2, `cudagraph_capture_sizes` and `max_cudagraph_capture_size` are deprecated. Two independent pairs set the graphs instead, and setting one never changes the other:
 
 - `prefill_cudagraph_capture_token_sizes` and `max_prefill_cudagraph_capture_tokens`, in **tokens**: graphs for batches with a prefill, and for any batch whose requests have different query lengths.
-- `decode_cudagraph_capture_request_sizes` and `max_decode_cudagraph_capture_requests`, in **requests**: FULL graphs for uniform decode batches, whose requests all have the same query length `q` (1, or 1 + `num_speculative_tokens`). A graph of `n` requests holds `n * q` tokens.
+- `decode_cudagraph_capture_request_sizes` and `max_decode_cudagraph_capture_requests`, in **requests**: FULL graphs for uniform decode batches, whose requests all have the same query length `q` (1 + `num_speculative_tokens` for the target model; K or K + 1 for DSpark, DFlash and multi-module MTP drafters). A graph of `n` requests holds `n * q` tokens.
 
-One-token draft decodes (the EAGLE, EAGLE3 and MTP draft steps after the first) extend the decode request sizes past their widest, up to `max_num_seqs`: their graphs are small, and an eager draft step costs its host launch time.
+One-token draft decodes (the EAGLE, EAGLE3 and MTP draft steps after the first) take the default request-count grid up to `max_num_seqs`, whatever the decode request sizes are (`[]` still turns them off): their graphs are small, and an eager draft step costs its host launch time.
 
 With adaptive verification, the target model's decode batches mix query lengths, so they take token-keyed graphs. Those graphs reach `max_decode_cudagraph_capture_requests * (1 + num_speculative_tokens)` tokens: only the decode cap counts for them, read as a token budget, and the decode request sizes then set only the draft decode graphs.
 

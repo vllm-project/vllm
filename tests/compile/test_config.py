@@ -25,7 +25,9 @@ from vllm.config import (
 from vllm.config.compilation import (
     CompilationMode,
     PassConfig,
+    decode_cudagraph_capture_grid,
     decode_cudagraph_capture_shapes,
+    prefill_cudagraph_capture_grid,
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -771,7 +773,21 @@ def test_one_token_draft_decodes_cover_max_num_seqs(
 
     draft_sizes = config.get_draft_decode_cudagraph_request_sizes()
     assert max(draft_sizes, default=None) == widest_draft_decode
+    if widest_draft_decode:
+        assert draft_sizes == decode_cudagraph_capture_grid(widest_draft_decode)
     assert compilation_config.max_cudagraph_capture_size == max_capture_size
+
+
+def test_default_grids_capture_fewer_graphs_than_main():
+    """The SM100 default grids reach 8192 tokens and 1024 requests with fewer
+    graphs than main's 1024-token list (83): coarse where step time is flat,
+    finer where it grows with the batch."""
+    prefill = prefill_cudagraph_capture_grid(8192)
+    decode = decode_cudagraph_capture_grid(1024)
+    assert (len(prefill), len(decode)) == (39, 64)
+    assert prefill[:11] == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 768]
+    assert decode[:8] == [1, 2, 3, 4, 5, 6, 8, 10]
+    assert decode[-3:] == [960, 992, 1024]
 
 
 @pytest.mark.usefixtures("off_sm100")

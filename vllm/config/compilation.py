@@ -3,6 +3,7 @@
 
 import bisect
 import enum
+import math
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import field, fields
@@ -68,37 +69,53 @@ def decode_cudagraph_capture_shapes(
     return sorted(shapes, key=lambda shape: (shape[1], shape[0]))
 
 
+def _walk_grid(limit: int, step: Callable[[int], float]) -> list[int]:
+    """Sizes 1, ..., `limit`, each the next multiple of the largest power of two
+    not above `step(size)`."""
+    grid, size = [], 1
+    while size < limit:
+        grid.append(size)
+        stride = 1 << max(0, math.floor(math.log2(max(1.0, step(size)))))
+        size = (size // stride + 1) * stride
+    return [*grid, limit] if limit else []
+
+
 def prefill_cudagraph_capture_grid(max_tokens: int, dense_head: bool = False):
-    """The token-count grid up to `max_tokens`: 1, 2, 4 (every count up to 32
-    with `dense_head`), then every 8 up to 256, 16 up to 1024, 256 up to 4096
-    and 512 beyond. Up to 1024 tokens it matches the default sizes of
-    `VllmConfig._set_cudagraph_sizes`, which step by 16 above it."""
-    head = range(1, 33) if dense_head else (1, 2, 4)
-    grid = {
-        *head,
-        *range(8, 256, 8),
-        *range(256, 1024, 16),
-        *range(1024, 4096, 256),
-        *range(4096, max_tokens, 512),
-    }
+    """The token-count grid up to `max_tokens`: powers of two up to 256 (every
+    count up to 32 with `dense_head`), then every 256 tokens, and every 512 once
+    7% of the size exceeds 512. PIECEWISE step time is flat below about 1-4K
+    tokens and grows linearly above: 39 sizes at 8192."""
+    grid = _walk_grid(max_tokens, lambda t: min(t, 0.07 * max(t, 4096)))
+    if dense_head:
+        grid = sorted({*grid, *(t for t in range(1, 33) if t < max_tokens)})
+    return grid
+
+
+def varlen_decode_cudagraph_capture_grid(
+    max_tokens: int, dense_head: bool = False
+) -> list[int]:
+    """The token-count grid of adaptive verification's decode graphs: 1, 2, 4
+    (every count up to 32 with `dense_head`), then 4 sizes per doubling from 8
+    to 1024, every 128 up to 4096 and every 256 beyond. Adaptive verification
+    picks its verify budget from the captured sizes, so it needs a finer grid
+    than prefill."""
+    grid = set(range(1, 33)) if dense_head else {1, 2, 4}
+    low = 8
+    grid.add(low)
+    while low < 1024:
+        grid.update(range(low + low // 4, 2 * low + 1, low // 4))
+        low *= 2
+    grid.update(range(1024, 4096, 128), range(4096, max_tokens, 256))
     return (
         sorted({s for s in grid if s < max_tokens} | {max_tokens}) if max_tokens else []
     )
 
 
 def decode_cudagraph_capture_grid(max_requests: int) -> list[int]:
-    """The request-count grid up to `max_requests`: every count up to 32, then a
-    step that doubles each time the count doubles (2 up to 64, 4 up to 128...)."""
-    grid = list(range(1, 33))
-    low, step = 32, 2
-    while low < max_requests:
-        grid += range(low + step, 2 * low + 1, step)
-        low, step = 2 * low, 2 * step
-    return (
-        sorted({n for n in grid if n < max_requests} | {max_requests})
-        if max_requests
-        else []
-    )
+    """The request-count grid up to `max_requests`: every count up to 6, then a
+    step of the largest power of two not above 0.65 * n^(2/3) (2 from 8, 4 from
+    16, 8 from 48, 16 from 128, 32 from 352): 64 sizes at 1024."""
+    return _walk_grid(max_requests, lambda n: 0.65 * n ** (2 / 3))
 
 
 class CUDAGraphMode(enum.Enum):
@@ -734,10 +751,11 @@ class CompilationConfig:
     decode_cudagraph_capture_request_sizes: list[int] | None = None
     """Request counts of the FULL CUDA graphs for uniform decode batches, whose
     requests all have the same query length `q`: `1 + num_speculative_tokens`
-    for the target model, 1 for draft decodes. A runner captures `n` requests as
-    `n * q` tokens, for each `n` up to the most requests its batches have and
-    `max_num_batched_tokens // q`. One-token draft decodes (EAGLE, EAGLE3, MTP)
-    extend these past their widest up to `max_num_seqs`. `[]` captures none.
+    for the target model, K or K + 1 for DSpark, DFlash and multi-module MTP
+    drafters. A runner captures `n` requests as `n * q` tokens, for each `n` up
+    to the most requests its batches have and the recorded
+    `max_cudagraph_capture_size // q`. One-token draft decodes (EAGLE, EAGLE3, MTP)
+    take the request-count grid up to `max_num_seqs` instead. `[]` captures none.
     None (default): the request-count grid up to
     `max_decode_cudagraph_capture_requests`.
 

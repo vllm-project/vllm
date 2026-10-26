@@ -577,7 +577,14 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
                     if vllm_config.parallel_config.data_parallel_size == 1
                     else [vllm_config.uniform_decode_query_len]
                 )
-                compilation_config.max_prefill_cudagraph_capture_tokens = 1024
+                # The token sizes the legacy 1024-token cap captures.
+                max_tokens = min(
+                    vllm_config.scheduler_config.max_num_batched_tokens, 1024
+                )
+                sizes = {1, 2, 4, *range(8, 256, 8), *range(256, 1024, 16)}
+                compilation_config.prefill_cudagraph_capture_token_sizes = sorted(
+                    {s for s in sizes if s < max_tokens} | {max_tokens}
+                )
                 compilation_config.max_decode_cudagraph_capture_requests = 1024 // min(
                     query_lens
                 )
