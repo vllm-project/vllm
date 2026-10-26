@@ -34,7 +34,7 @@ FULL, SWA = 0, 1
 def _replay_scheduler(
     *,
     long_prefill_token_threshold: int = 0,
-    use_kv_connector: MockKVConfig | None = None,
+    use_kv_connector: MockKVConfig | str | None = None,
 ) -> Scheduler:
     """A hybrid layout: one prefix-cacheable full-attention group and one
     replayed sliding-window group."""
@@ -272,6 +272,19 @@ def test_kv_load_carrying_window_does_not_replay(is_async, matched):
     assert new_req.num_computed_tokens == matched
     assert new_req.replay_start == 0
     assert out.num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS - matched
+
+
+def test_decode_bench_fill_does_not_replay():
+    """DecodeBenchConnector fills every group like a P/D transfer, so a filled
+    request starts with a one-token decode step, not a replay."""
+    scheduler = _replay_scheduler(use_kv_connector="DecodeBenchConnector")
+    request = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
+    )[0]
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+    assert _new_req_data(out, request).replay_start == 0
+    assert out.num_scheduled_tokens[request.request_id] == 1
 
 
 @pytest.mark.parametrize("via_connector", [False, True])
