@@ -913,6 +913,121 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
     )
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda() and not current_platform.has_device_capability(89),
+    reason="FP8 KV cache in Triton attention needs native fp8e4nv (SM89+)",
+)
+@pytest.mark.parametrize(
+    "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
+)
+@pytest.mark.parametrize("num_heads", [(8, 2), (5, 1)])
+@pytest.mark.parametrize("head_size", [128, 256, 512])
+@pytest.mark.parametrize("sliding_window", [None, 64])
+@pytest.mark.parametrize("soft_cap", [None, 30.0])
+@pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
+@torch.inference_mode()
+def test_triton_unified_attn_fp8_kv_scales_on_scores(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    soft_cap: float | None,
+    seq_threshold_3D: int,
+) -> None:
+    """bf16 Q with an FP8 per-tensor KV cache: k_scale / v_scale are applied to
+    the scores and the output rather than to every K/V element. Compare with an
+    fp32 reference over the exactly dequantized cache, using scales that are not
+    powers of two (so a missing or doubled scale shows up), head size 512, a
+    sliding window and softcap, on the 2D and 3D paths."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+    scale = head_size**-0.5
+    block_size, num_blocks = 16, 2048
+
+    query = torch.randn(
+        sum(query_lens), num_query_heads, head_size, dtype=torch.bfloat16
+    )
+    k_scale, v_scale = 0.37, 0.021
+    key_cache = torch.randn(num_blocks, block_size, num_kv_heads, head_size) * 2.0
+    value_cache = torch.randn_like(key_cache) * 0.05
+    fp8_key_cache = (key_cache / k_scale).clamp(-448, 448).to(FP8_DTYPE)
+    fp8_value_cache = (value_cache / v_scale).clamp(-448, 448).to(FP8_DTYPE)
+
+    scale_shape = (num_seqs, num_kv_heads)
+    k_descale = torch.full(scale_shape, k_scale, dtype=torch.float32)
+    v_descale = torch.full(scale_shape, v_scale, dtype=torch.float32)
+
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_t = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
+
+    output = torch.empty_like(query)
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    scratch_rows = seq_threshold_3D * (
+        max_query_len if max_query_len <= MAX_3D_QUERY_LEN else 1
+    )
+    unified_attention(
+        q=query,
+        k=fp8_key_cache,
+        v=fp8_value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_t,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables,
+        softcap=soft_cap if soft_cap is not None else 0,
+        q_descale=None,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=torch.empty(
+            (scratch_rows, num_query_heads, num_par_softmax_segments, head_size_padded),
+            dtype=torch.float32,
+        ),
+        softmax_segm_max=torch.empty(
+            (scratch_rows, num_query_heads, num_par_softmax_segments),
+            dtype=torch.float32,
+        ),
+        softmax_segm_expsum=torch.empty(
+            (scratch_rows, num_query_heads, num_par_softmax_segments),
+            dtype=torch.float32,
+        ),
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+
+    ref_output = ref_paged_attn(
+        query=query.float(),
+        key_cache=fp8_key_cache.float() * k_scale,
+        value_cache=fp8_value_cache.float() * v_scale,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        sliding_window=sliding_window,
+        soft_cap=soft_cap,
+    )
+    torch.testing.assert_close(output.float(), ref_output, atol=1e-2, rtol=1e-2)
+
+
 @pytest.mark.parametrize(
     "seq_lens",
     [

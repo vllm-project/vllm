@@ -46,14 +46,13 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
     - ``KV_QUANT_MODE == 0`` (NONE) and ``2`` (INT8 per-token-head) and
       ``3`` (FP8 per-token-head): plain cast.  Per-token-head modes apply
       their scales separately on S/P inside the loop.
-    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
-      tensor-wide scale, unless Q is also FP8 and the caller folds the scales
-      into the attention score and output accumulator.
+    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): plain cast as well. The
+      tensor-wide scales are folded into the attention score and the output
+      accumulator by the caller (``USE_FP8_Q_DESCALE`` for an FP8 query,
+      ``KV_SCALE_ON_SCORES`` otherwise). Scaling every K/V element here would
+      make Triton stage the converted tile through shared memory again before
+      the dot.
     """
-    if KV_QUANT_MODE == 1:
-        if Q.dtype.is_fp8():
-            return data.to(Q.dtype)
-        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
     return data.to(Q.dtype)
 
 
@@ -291,12 +290,20 @@ def kernel_unified_attention(
     # instead of letting them override it. Default False preserves the
     # original (causal AND SW) OR mm_prefix behavior for all other models.
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    # FP8 per-tensor KV with a 16-bit query: k_scale is applied to the scores
+    # and v_scale to the output instead of to every K/V element.
+    KV_SCALE_ON_SCORES: tl.constexpr = False,
 ):
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
         KV_QUANT_MODE <= 3
     )
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
+    APPLY_VALUE_SCALE: tl.constexpr = USE_FP8_Q_DESCALE or KV_SCALE_ON_SCORES
+    tl.static_assert(
+        not (USE_FP8_Q_DESCALE and KV_SCALE_ON_SCORES),
+        "KV_SCALE_ON_SCORES is for a 16-bit query; an FP8 query uses q_scale",
+    )
 
     if USE_TD:
         tl.static_assert(
@@ -386,6 +393,11 @@ def kernel_unified_attention(
     value_scale = 1.0
     if USE_FP8_Q_DESCALE:
         score_scale = scale * tl.load(q_scale) * tl.load(k_scale)
+        value_scale = tl.load(v_scale)
+    if KV_SCALE_ON_SCORES:
+        # S is scaled before softcap, masking and biases; the output after the
+        # P @ V sum (once per 3D segment, before reduce_segments).
+        score_scale = scale * tl.load(k_scale)
         value_scale = tl.load(v_scale)
 
     context_len = seq_len - cur_batch_query_len
@@ -600,7 +612,7 @@ def kernel_unified_attention(
 
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:
-        if USE_FP8_Q_DESCALE:
+        if APPLY_VALUE_SCALE:
             acc *= value_scale
         # Store per-segment partials; finalized by ``reduce_segments``.
         if USE_TD_QO:
@@ -657,7 +669,7 @@ def kernel_unified_attention(
         )
     else:
         acc = acc / L[:, None]
-        if USE_FP8_Q_DESCALE:
+        if APPLY_VALUE_SCALE:
             acc *= value_scale
         if USE_FP8:
             acc = acc * tl.load(out_scale)
@@ -1122,6 +1134,23 @@ def unified_attention(
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
 
+    kv_scale_on_scores = (
+        kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+        and q.dtype != current_platform.fp8_dtype()
+    )
+    # SM90: with the FP8 tiles converted in registers, the head-512 2D kernel
+    # sits at the 255-register limit and, with 4 query heads per KV head, spills
+    # inside the KV loop at the default 3 stages. Two stages remove the spill.
+    if (
+        kv_scale_on_scores
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(90)
+        and head_size >= 512
+        and not use_3d
+        and launch_num_stages is None
+    ):
+        launch_num_stages = 2
+
     launch_kwargs: dict[str, int] = {}
     if launch_num_warps is not None:
         launch_kwargs["num_warps"] = launch_num_warps
@@ -1198,6 +1227,7 @@ def unified_attention(
         USE_FP8=output_scale is not None,
         IS_3D=use_3d,
         KV_QUANT_MODE=kv_quant_mode,
+        KV_SCALE_ON_SCORES=kv_scale_on_scores,
         Q_IS_FP8=(q.dtype == current_platform.fp8_dtype()),
         CHUNK_LOOKBACK=chunk_lookback,
         CHUNK_SIZE=chunk_size,
