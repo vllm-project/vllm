@@ -2148,6 +2148,10 @@ def initialize_model_parallel(
     from vllm.config import get_current_vllm_config
 
     config = get_current_vllm_config()
+    if config.parallel_config.pipeline_stage_rank is not None:
+        # This process runs one pipeline stage; the PP group (pp_group_cls)
+        # connects it to the stages in other processes.
+        pipeline_model_parallel_size = 1
     data_parallel_size = config.parallel_config.data_parallel_size
     enable_elastic_ep = config.parallel_config.enable_elastic_ep
     parallel_config = config.parallel_config
