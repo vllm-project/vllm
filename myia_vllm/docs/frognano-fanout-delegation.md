@@ -58,6 +58,23 @@ Détails opérationnels : (1) un shard à vérité vide rend le sentinel « AUCU
 brut compte comme écart — traiter le sentinel explicitement dans le vérificateur ; (2) caveat
 d'honnêteté : ce corpus est 100 % « RAM basse/CRITIQUE » au format très régulier, favorable au
 modèle — le 98,6 % du pilote reste la référence pour un corpus moins régulier.
+(3) **Piège de routage — le nom du modèle n'est pas le nom de l'agent** : `call_agent(agent="frognano-4b")`
+échoue **sans erreur** et sert `analyst` / **swift-1.5-27b sur ai-01** à la place
+(`fallback_from: "frognano-4b"` dans la réponse). Les agents valides du tier mini sont
+`mini-summarizer`, `mini-repo-scan`, `mini-coder-fix`, `mini-web-research`. Un appelant qui croit
+économiser sur le mini peut donc consommer du swift ai-01 sans le voir : **vérifier
+`model_used`/`fallback_from` dans chaque réponse**, et non la seule présence d'une réponse.
+
+### Troisième démo — logger thermique, et A/B FrogNano vs Swift (26/10, vigie 17:03 locale)
+
+Corpus **neuf** (`_logs/gpu-thermal.log`, jamais utilisé par la horde) : 89 lignes du 25/10 00:00
+au 26/10 17:03 locale, **47 WARN**, 3 shards de 30/30/29. Attendu grep **21 / 12 / 14** ;
+obtenu **21 / 12 / 14, `missed=0 extra=0`** sur les trois (byte-exact). Le shard 1 rejoué sur
+`mini-summarizer` rend **21/21 strictement identique** à la production de `analyst`/swift-27B sur
+le même bloc : **égalité parfaite entre le tier mini et le tier medium** sur cette classe. Le
+logger échantillonne à 5 min là où le gouverneur est horaire — il a capté un plancher mémoire
+`free=3 Mo` que la vue horaire avait manqué : un corpus neuf peut révéler ce qu'un corpus familier
+lisse.
 
 ### Deuxième démo — sweep entropie docs (25/10 soir, `mini-sweeper`)
 
