@@ -386,9 +386,6 @@ class RequestOffloadState:
     # Loaded attention keys cover their token positions. Recurrent state
     # supports the whole reused external prefix.
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
-    # Hit boundary proven by the full-attention groups in the latest lookup,
-    # before any sliding-window/Mamba group narrowed it; 0 if not reached.
-    full_attention_hit_boundary: int = 0
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
 
@@ -858,16 +855,19 @@ class OffloadingConnectorScheduler:
         self,
         req_status: RequestOffloadState,
         max_num_new_tokens: int | None = None,
-    ) -> int | None:
+    ) -> tuple[int | None, int | None]:
         """Find how many tokens beyond num_locally_computed_tokens can be loaded.
 
         Iterates full-attention groups first (prefix lookup), then sliding-window
         groups (suffix lookup). Each group may tighten max_hit_size_tokens, which
         can invalidate an earlier group's result, so the loop re-runs when that
         happens until num_hit_tokens converges.
+
+        Returns the number of hit tokens (None to defer) and the hit boundary
+        the full-attention groups proved before any sliding-window/Mamba group
+        narrowed it (None if not reached).
         """
         num_computed_tokens = req_status.num_locally_computed_tokens
-        req_status.full_attention_hit_boundary = 0
         max_hit_size_tokens: int = req_status.req.num_tokens
         if max_num_new_tokens is not None:
             max_hit_size_tokens = min(
@@ -899,8 +899,7 @@ class OffloadingConnectorScheduler:
         # in the current convergence iteration. Reset when a non-eagle group
         # tightens the hit boundary, requiring a fresh pop.
         eagle_verified: set[int] = set()
-        full_attention_confirmed = False
-        full_attention_boundary_recorded = False
+        full_attention_hit_boundary: int | None = None
         while lookup_groups:
             looked_up_sliding_window: bool = False
             groups_iter = iter(lookup_groups)
@@ -931,19 +930,21 @@ class OffloadingConnectorScheduler:
                     )
                 if max_hit_size_tokens - num_computed_tokens < tokens_per_chunk:
                     # We can only load less than a chunk, so skip.
-                    return 0
+                    return 0, full_attention_hit_boundary
 
                 sliding_window_size_in_chunks = (
                     group_config.sliding_window_size_in_chunks
                 )
                 if (
                     sliding_window_size_in_chunks is not None
-                    and not full_attention_boundary_recorded
+                    and full_attention_hit_boundary is None
                 ):
                     # Groups before the first sparse group are full attention.
-                    full_attention_boundary_recorded = True
-                    if full_attention_confirmed and not defer_lookup:
-                        req_status.full_attention_hit_boundary = max_hit_size_tokens
+                    full_attention_hit_boundary = (
+                        max_hit_size_tokens
+                        if self._full_attention_groups and not defer_lookup
+                        else 0
+                    )
 
                 # For eagle groups, query one extra chunk that will be popped.
                 # Widening applies to every group type: without it, the pop
@@ -995,7 +996,7 @@ class OffloadingConnectorScheduler:
                         initial_window + int(is_eagle_unverified),
                     )
                 if num_hit_chunks == 0:
-                    return 0
+                    return 0, full_attention_hit_boundary
 
                 if num_hit_chunks is None:
                     defer_lookup = True
@@ -1008,13 +1009,11 @@ class OffloadingConnectorScheduler:
                         max_hit_size_tokens,
                         tokens_per_chunk * (start_chunk_idx + num_hit_chunks),
                     )
-                    if sliding_window_size_in_chunks is None:
-                        full_attention_confirmed = True
 
                 new_num_hit_tokens = max_hit_size_tokens - num_computed_tokens
                 if new_num_hit_tokens < tokens_per_chunk:
                     # We can only load less than a chunk, so skip.
-                    return 0
+                    return 0, full_attention_hit_boundary
 
                 if new_num_hit_tokens < num_hit_tokens:
                     if not group_config.is_eagle_group:
@@ -1037,7 +1036,7 @@ class OffloadingConnectorScheduler:
                 "Offloading manager delayed request %s as backend requested",
                 req_status.req.request_id,
             )
-            return None
+            return None, full_attention_hit_boundary
 
         # Possibly delay the request if any hit chunk is already being loaded.
         if self._chunks_being_loaded:
@@ -1063,7 +1062,7 @@ class OffloadingConnectorScheduler:
                         " chunks are already being loaded",
                         req_status.req.request_id,
                     )
-                    return None
+                    return None, full_attention_hit_boundary
 
         logger.debug(
             "Request %s hit %s offloaded tokens after %s GPU hit tokens",
@@ -1072,7 +1071,7 @@ class OffloadingConnectorScheduler:
             num_computed_tokens,
         )
 
-        return num_hit_tokens
+        return num_hit_tokens, full_attention_hit_boundary
 
     def _make_boundary_key(
         self,
@@ -1091,7 +1090,25 @@ class OffloadingConnectorScheduler:
         req_status: RequestOffloadState,
         max_num_new_tokens: int | None = None,
     ) -> int | None:
-        complete_hit = self._lookup_complete_chunks(req_status, max_num_new_tokens)
+        complete_hit, full_attention_hit_boundary = self._lookup_complete_chunks(
+            req_status, max_num_new_tokens
+        )
+        num_hit_tokens = self._lookup_partial_tail_hit(
+            req_status, complete_hit, max_num_new_tokens
+        )
+        if num_hit_tokens is not None and full_attention_hit_boundary is not None:
+            self._maybe_register_shared_prefix_junction(
+                req_status, full_attention_hit_boundary, num_hit_tokens
+            )
+        return num_hit_tokens
+
+    def _lookup_partial_tail_hit(
+        self,
+        req_status: RequestOffloadState,
+        complete_hit: int | None,
+        max_num_new_tokens: int | None,
+    ) -> int | None:
+        """Extend a complete-chunk hit with a partial tail, if supported."""
         req_status.partial_tail_boundary = None
         if complete_hit is None or not self.config.supports_partial_tail:
             return complete_hit
@@ -1216,14 +1233,13 @@ class OffloadingConnectorScheduler:
         return True, False
 
     def _maybe_register_shared_prefix_junction(
-        self, req_status: RequestOffloadState, num_hit_tokens: int
+        self, req_status: RequestOffloadState, boundary: int, num_hit_tokens: int
     ) -> None:
         """Pin a shared-prefix junction where a sparse group cut the hit, as
         ``get_computed_blocks`` does for a local hit, so the recompute retains
         the sliding-window/Mamba state at the full-attention hit boundary."""
         if self.config.retention_interval is None:
             return
-        boundary = req_status.full_attention_hit_boundary
         if boundary <= req_status.num_locally_computed_tokens + num_hit_tokens:
             return
         request = req_status.req
@@ -1304,7 +1320,6 @@ class OffloadingConnectorScheduler:
                     req_status.deferred_lookup_start_time = lookup_start
             else:
                 self._maybe_observe_lookup_async_delay(req_status)
-                self._maybe_register_shared_prefix_junction(req_status, num_hit_tokens)
         req_status.update_num_hit_chunks(num_computed_tokens + (num_hit_tokens or 0))
 
         return num_hit_tokens, bool(num_hit_tokens)
