@@ -43,9 +43,9 @@ from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
+    IterationDetails,
     KVConnectorBlockState,
     NewRequestData,
-    ScheduledEncoderInputStats,
     SchedulerOutput,
 )
 from vllm.v1.core.sched.request_queue import (
@@ -692,6 +692,13 @@ class Scheduler(SchedulerInterface):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
+        iteration_details = None
+        if (
+            self.log_stats
+            and self.observability_config.enable_logging_iteration_details
+        ) or self.vllm_config.profiler_config.profiler is not None:
+            iteration_details = IterationDetails()
+
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
@@ -704,6 +711,7 @@ class Scheduler(SchedulerInterface):
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
+        num_scheduled_encoder_inputs = 0
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
@@ -944,6 +952,10 @@ class Scheduler(SchedulerInterface):
                                     for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
+                                if iteration_details is not None:
+                                    num_scheduled_encoder_inputs -= len(
+                                        preempted_encoder_inputs
+                                    )
                     else:
                         preempted_req = self.running.pop()
 
@@ -1005,6 +1017,8 @@ class Scheduler(SchedulerInterface):
             # Encoder-related.
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                if iteration_details is not None:
+                    num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                 encoder_compute_budget = new_encoder_compute_budget
             if encoder_inputs_to_schedule or external_load_encoder_input:
                 self._allocate_encoder_inputs(
@@ -1552,6 +1566,8 @@ class Scheduler(SchedulerInterface):
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                    if iteration_details is not None:
+                        num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                     encoder_compute_budget = new_encoder_compute_budget
                 if encoder_inputs_to_schedule or external_load_encoder_input:
                     self._allocate_encoder_inputs(
@@ -1626,6 +1642,21 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
+                iteration_details=iteration_details,
+            )
+
+        if iteration_details is not None:
+            # Decode requests are counted in _make_cached_request_data()
+            # Other scheduled requests - including new requests - are prefill
+            iteration_details.num_prefill_requests = (
+                len(num_scheduled_tokens) - iteration_details.num_decode_requests
+            )
+            iteration_details.num_prefill_tokens = (
+                total_num_scheduled_tokens - iteration_details.num_decode_tokens
+            )
+            iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
+            iteration_details.num_encoder_output_tokens = (
+                self.max_num_encoder_input_tokens - encoder_compute_budget
             )
 
         # Record the request ids that were scheduled in this step (MRV1-only).
@@ -1671,15 +1702,6 @@ class Scheduler(SchedulerInterface):
                 len(num_scheduled_tokens)
             ]
 
-        scheduled_encoder_input_stats = None
-        if (
-            self.log_stats
-            and self.observability_config.enable_logging_iteration_details
-        ):
-            scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(
-                scheduled_encoder_inputs
-            )
-
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1687,7 +1709,7 @@ class Scheduler(SchedulerInterface):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            scheduled_encoder_input_stats=scheduled_encoder_input_stats,
+            iteration_details=iteration_details,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -1880,6 +1902,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int],
         spec_decode_tokens: dict[str, list[int]],
         req_to_new_blocks: dict[str, KVCacheBlocks],
+        iteration_details: IterationDetails | None = None,
     ) -> CachedRequestData:
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
@@ -1918,9 +1941,12 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
             num_computed_tokens.append(req.num_computed_tokens)
-            num_output_tokens.append(
-                req.num_output_tokens + req.num_output_placeholders
-            )
+            num_outputs = req.num_output_tokens + req.num_output_placeholders
+            num_output_tokens.append(num_outputs)
+            if iteration_details is not None and num_outputs > 0:
+                # Count decode requests here; all other scheduled reqs are prefills
+                iteration_details.num_decode_requests += 1
+                iteration_details.num_decode_tokens += num_scheduled_tokens[req_id]
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -2161,23 +2187,6 @@ class Scheduler(SchedulerInterface):
             external_load_encoder_input,
             duplicate_encoder_inputs,
         )
-
-    def _make_scheduled_encoder_input_stats(
-        self, scheduled_encoder_inputs: dict[str, list[int]]
-    ) -> ScheduledEncoderInputStats | None:
-        stats = ScheduledEncoderInputStats()
-
-        for req_id, input_ids in scheduled_encoder_inputs.items():
-            request = self.requests.get(req_id)
-            if request is None:
-                continue
-
-            for input_id in input_ids:
-                mm_feature = request.mm_features[input_id]
-                stats.num_inputs += 1
-                stats.output_tokens += mm_feature.mm_position.get_num_embeds()
-
-        return stats if stats.num_inputs else None
 
     def get_grammar_bitmask(
         self, scheduler_output: SchedulerOutput
