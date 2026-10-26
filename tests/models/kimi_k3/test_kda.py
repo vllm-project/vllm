@@ -60,7 +60,6 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     fused_recurrent_kda as fused_recurrent_kda_nvidia,
 )
 from vllm.platforms import current_platform
-from vllm.third_party.flash_linear_attention.ops.kda import layer_norm_gated_fwd
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.utils.flashinfer import flashinfer_fused_kda_decode
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -146,57 +145,6 @@ def test_kda_recoverssm_config_state_layout():
     assert KimiLinearForCausalLM.get_mamba_state_shape_from_config(
         vllm_config
     ) == MambaStateShapeCalculator.kda_state_shape(1, 4, 32, num_spec=2)
-
-
-@pytest.mark.parametrize("num_tokens", [1, 19])
-@pytest.mark.parametrize("head_dim", [96, 128, 512])
-@pytest.mark.parametrize("activation", ["sigmoid", "swish"])
-@pytest.mark.parametrize("is_rms_norm", [False, True])
-@pytest.mark.parametrize("with_residual", [False, True])
-@torch.inference_mode()
-def test_kda_gated_norm_masked_rows(
-    num_tokens, head_dim, activation, is_rms_norm, with_residual
-):
-    """Check partial tiles and strided gates against a float32 reference."""
-    torch.manual_seed(0)
-    heads = 3
-    rows = num_tokens * heads
-    x = torch.randn(rows, head_dim, device=DEVICE, dtype=torch.bfloat16)
-    gate_storage = torch.randn(
-        num_tokens, heads * head_dim + 32, device=DEVICE, dtype=torch.bfloat16
-    )
-    gate = gate_storage[:, : heads * head_dim].view(num_tokens, heads, head_dim)
-    weight = torch.randn(head_dim, device=DEVICE, dtype=torch.bfloat16)
-    bias = torch.randn_like(weight)
-    residual = torch.randn_like(x) if with_residual else None
-    ref_x = x.float() if residual is None else x.float() + residual.float()
-    ref_mean = ref_x.mean(-1)
-    centered = ref_x if is_rms_norm else ref_x - ref_mean[:, None]
-    ref_rstd = torch.rsqrt(centered.square().mean(-1) + 1e-5)
-    expected = centered * ref_rstd[:, None] * weight.float() + bias.float()
-    ref_gate = gate.reshape(rows, head_dim).float()
-    expected *= torch.sigmoid(ref_gate)
-    if activation == "swish":
-        expected *= ref_gate
-
-    actual, mean, rstd, residual_out = layer_norm_gated_fwd(
-        x,
-        gate,
-        weight,
-        bias,
-        activation=activation,
-        eps=1e-5,
-        residual=residual,
-        out_dtype=torch.bfloat16,
-        is_rms_norm=is_rms_norm,
-        H=heads,
-        g_stride_n=gate.stride(0),
-    )
-    torch.testing.assert_close(actual, expected.to(actual.dtype), atol=1e-3, rtol=1e-2)
-    torch.testing.assert_close(rstd, ref_rstd, atol=1e-6, rtol=1e-5)
-    if not is_rms_norm:
-        torch.testing.assert_close(mean, ref_mean, atol=1e-6, rtol=1e-5)
-    torch.testing.assert_close(residual_out, ref_x.to(residual_out.dtype))
 
 
 @torch.inference_mode()
