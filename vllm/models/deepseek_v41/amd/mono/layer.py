@@ -111,6 +111,10 @@ class MonoBuild:
             == (EXPERTS, TOPK, 2, WINDOW)
         )
 
+    @property
+    def tuned_front(self) -> bool:
+        return self.tuned or (not GFX942 and not self.generic and self.tp == 4)
+
 
 def _moe_key(key: MonoBuild) -> MoeBuild:
     return MoeBuild(
@@ -135,7 +139,7 @@ def _ffn_symbol_params(key: MonoBuild) -> dict:
 
 def _front_key(key: MonoBuild):
     return mb_front.FrontBuild(
-        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width, key.tuned
+        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width, key.tuned_front
     )
 
 
@@ -164,6 +168,7 @@ def scratch_layout(
     topk: int = TOPK,
     ug_groups: int = 2,
     tuned: bool = False,
+    front: bool | None = None,
 ) -> dict:
     """Every region of step width s's launches -> (byte offset, bytes), disjoint:
     K1's front and seam, K2's back, the MoE's regions, the normed rows and their
@@ -173,6 +178,8 @@ def scratch_layout(
     outlive a step width, are in the epoch buffer. The MoE regions follow the
     runner's routing and FP4 groups of an ug task: with one group a task (the
     DSpark draft's runner) the ug flags take twice the room of two groups."""
+    if front is None:
+        front = tuned
     d = Dims(tp)
     out: dict = {}
     off = 0
@@ -186,7 +193,7 @@ def scratch_layout(
         off = max(off, base + max(o + n for o, n in regions.values()))
         off = -(-off // 256) * 256
 
-    place(front_scratch(s, d, tuned))
+    place(front_scratch(s, d, front))
     place(seam.scratch_layout(s))
     place(back_scratch(s, d, start=0, tuned=tuned))
     mkey = MoeBuild(
@@ -208,9 +215,22 @@ def scratch_bytes(
     topk: int = TOPK,
     ug_groups: int = 2,
     tuned: bool = False,
+    front: bool | None = None,
 ) -> int:
-    layout = scratch_layout(s, tp, experts, topk, ug_groups, tuned)
+    layout = scratch_layout(s, tp, experts, topk, ug_groups, tuned, front)
     return max(o + n for o, n in layout.values())
+
+
+def _layout(key: MonoBuild) -> dict:
+    return scratch_layout(
+        key.tokens,
+        key.tp,
+        key.experts,
+        key.topk,
+        key.ug_groups,
+        key.tuned,
+        key.tuned_front,
+    )
 
 
 def peer_half_bytes(tp: int) -> int:
@@ -267,19 +287,19 @@ def publish_x8(c, t):
 def build_mono_k1(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
+    layout = _layout(key)
     fkey = _front_key(key)
     FrontLds = mb_front.front_lds(s, Dims(tp))
     NORM0 = SLICES  # the norms on the CTAs past the slices: the wqkv waits on them
     GATE0 = SLICES + s
     n_wqkv = mb_front.WQKV_TASKS * mb_front.WQKV_KPARTS
-    if key.tuned and n_wqkv + 2 * s <= BLOCKS:
+    if key.tuned_front and n_wqkv + 2 * s <= BLOCKS:
         GATE0 = n_wqkv + s
     assert GATE0 + s <= BLOCKS
 
     @fx.struct
     class SeamLds:
-        red: fx.Array[fx.Float32, seam.red_words(s, key.tuned), 16]
+        red: fx.Array[fx.Float32, seam.red_words(s, key.tuned_front), 16]
         rl: fx.Array[fx.Float32, s * seam.KT, 16]
         fl: fx.Array[fx.Float32, seam.MIX * seam.KT, 16]
 
@@ -376,7 +396,7 @@ def build_mono_k1(key: MonoBuild):
             "klen": klen,
             "qr_out": qr_out,
         }
-        flayout = {n: layout[n] for n in front_scratch(s, Dims(tp), key.tuned)}
+        flayout = {n: layout[n] for n in front_scratch(s, Dims(tp), key.tuned_front)}
         c = mb_front.front_context(fkey, lds.front.peek(), fargs, scratch, tag, flayout)
         c["index"] = key.index
         amb = Mailbox(tag)
@@ -411,7 +431,7 @@ def build_mono_k1(key: MonoBuild):
             },
             "d": StageDims(tp),
             "fold": key.fold,
-            "tuned": key.tuned,
+            "tuned": key.tuned_front,
         }
         for region in ("lin", "pmix"):
             ca[region] = sreg(scratch, layout[region][0], region)
@@ -420,7 +440,7 @@ def build_mono_k1(key: MonoBuild):
 
         def seam_slice():
             for task in range(first_task(bid, 0), SLICES, BLOCKS):
-                if const_expr(key.tuned and key.fold):
+                if const_expr(key.tuned_front and key.fold):
                     seam.stage_reduce_slice(ca, task, reduce=False)
                 else:
                     seam.stage_slice(ca, task)
@@ -429,7 +449,7 @@ def build_mono_k1(key: MonoBuild):
         def store(*v):
             store_x8(c, *v)
             if const_expr(key.index):
-                store_normed(normed_out, *v, wide=key.tuned)
+                store_normed(normed_out, *v, wide=key.tuned_front)
 
         def seam_rest():
             for t in range(first_task(bid, NORM0), s, BLOCKS):
@@ -588,8 +608,8 @@ def run_ffn(
     # target's or the DSpark draft's. The FFN launch (``part``) always runs on
     # the target's runner, also for a gfx942 draft layer, so it reads the
     # target's layout.
-    if const_expr(part is None):
-        layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
+    if const_expr(part is None):  # noqa: SIM108
+        layout = _layout(key)
     else:
         layout = scratch_layout(s, tp)
     mkey = _moe_key(key)
@@ -744,7 +764,7 @@ def run_ffn(
 def build_mono_k2(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
+    layout = _layout(key)
     bkey = _back_key(key)
     mkey = _moe_key(key)
     rs = route_shape(mkey)
