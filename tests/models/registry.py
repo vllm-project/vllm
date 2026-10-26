@@ -1214,7 +1214,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "meta-models/Muse-Glimmer-30B",
     ),
     "MuseSparkForConditionalGeneration": _HfExamplesInfo(
-        "meta-models/Muse-Spark-1.2-816B-A42B-open",
+        "meta-models/Muse-Spark-Open-816B-A42B-NVFP4",
         is_available_online=False,
     ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
@@ -1589,8 +1589,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     "MuseSparkDSparkModel": _HfExamplesInfo(
-        "meta-models/Muse-Spark-1.2-816B-A42B-open",
-        speculative_model="meta-models/Muse-Spark-1.2-816B-A42B-open",
+        "meta-models/Muse-Spark-Open-816B-A42B-NVFP4",
+        speculative_model="Inferact/Muse-Spark-Open-DSpark",
         is_available_online=False,
     ),
     "Qwen3DSparkModel": _HfExamplesInfo(
