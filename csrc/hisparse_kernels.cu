@@ -20,7 +20,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -1281,9 +1280,7 @@ void hisparse_resolve_residency(
       valid_counts.has_value() ? valid_counts.value().stride(0) : 0;
   auto kernel = hisparse_resolve_residency_kernel;
   if (smem_bytes > 48 * 1024) {
-    static std::mutex configured_mutex;
     static std::vector<size_t> configured_smem_bytes;
-    const std::lock_guard<std::mutex> lock(configured_mutex);
     const size_t device_index = hot_cache.get_device_index();
     if (configured_smem_bytes.size() <= device_index) {
       configured_smem_bytes.resize(device_index + 1, 0);
