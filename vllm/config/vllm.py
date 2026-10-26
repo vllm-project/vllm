@@ -1572,6 +1572,7 @@ class VllmConfig:
                     "supported for MLA models."
                 )
         if self.lora_config is not None:
+            self.lora_config.verify_with_kernel_config(self.kernel_config)
             self.lora_config.verify_with_model_config(self.model_config)
 
         if (
@@ -3222,21 +3223,6 @@ class VllmConfig:
             blockers.append(
                 "return_sampling_mask is set and the batch-sharded gather does "
                 "not forward sampling masks"
-            )
-
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.enable_adaptive_verification
-        ):
-            # Adaptive verification picks the per-request draft split on the GPU,
-            # so cu_num_logits_np is only an upper bound, while the shard plan is
-            # built from that CPU array. The two disagree once the budget binds.
-            # TODO(TheEpicDolphin): Support adaptive verification with batch-sharded
-            # sampling.
-            blockers.append(
-                "it does not yet work with adaptive verification, which decides "
-                "the per-request logits counts on the GPU, where the CPU-side "
-                "shard plan cannot see them"
             )
 
         if blockers:
