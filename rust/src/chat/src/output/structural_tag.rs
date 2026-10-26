@@ -6,7 +6,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 use vllm_engine_core_client::protocol::structured_outputs::{
-    StructuredOutputBackend, StructuredOutputConstraint, StructuredOutputsParams,
+    StructuredOutputConstraint, StructuredOutputsParams,
 };
 use vllm_parser::output_grammar::{BuiltOutputGrammar, GrammarCoverage};
 use vllm_text::TextRequest;
@@ -102,10 +102,8 @@ pub(crate) fn apply_output_grammar(
     })?;
 
     // Overwrite any existing structured output settings with the structural tag constraint.
-    request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
-        backend: StructuredOutputBackend::Xgrammar,
-        ..StructuredOutputsParams::structural_tag(structural_tag)
-    });
+    request.sampling_params.structured_outputs =
+        Some(StructuredOutputsParams::structural_tag(structural_tag));
     request.reasoning_ended = match built.coverage {
         GrammarCoverage::FromTokenZero => Some(true),
         GrammarCoverage::FinalOutputOnly => None,
@@ -214,7 +212,6 @@ mod tests {
 
         assert_eq!(request.reasoning_ended, Some(true));
         let params = request.sampling_params.structured_outputs.unwrap();
-        assert_eq!(params.backend, StructuredOutputBackend::Xgrammar);
         let serialized = params.constraint.as_structural_tag().unwrap();
         let value: serde_json::Value = serde_json::from_str(serialized).unwrap();
         assert_eq!(value["type"], "structural_tag");
