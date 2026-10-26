@@ -52,7 +52,7 @@ th:not(:first-child) {
 | Dense Transformers | ✅ | ✅<sup>1</sup> | ✅ | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | MLA (e.g. DeepSeek-V2/V3) | ✅ | ✅<sup>1</sup> | 🟠<sup>4</sup> | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | Sparse MLA (e.g. DeepSeek-V3.2) | ✅ | ✅<sup>1</sup> | 🟠<sup>4</sup> | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
-| Hybrid SSM / Mamba | ✅ | ❔ | 🚧<sup>5</sup> | ❌ | ✅ | ✅ | ❌<sup>6</sup> |
+| Hybrid SSM / Mamba | ✅ | ❔ | 🟠<sup>5</sup> | ❌ | ✅ | ✅ | ❌<sup>6</sup> |
 | MoE | ✅ | ✅<sup>1</sup> | ✅ | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | Multimodal | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ |
 | Encoder-Decoder | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -67,7 +67,7 @@ what may differ.
 
 <sup>4</sup> MLA KV cache is replicated across TP workers, so heterogeneous TP works but there is no head-splitting. When P TP > D TP, only a single read is executed (redundant ranks are skipped). D TP > P TP also works.
 
-<sup>5</sup> Hybrid SSM (Mamba) models require **homogeneous TP** (`P TP == D TP`). Heterogeneous TP is not yet supported for Mamba layers.
+<sup>5</sup> Hybrid SSM/Mamba models (including GDN) support heterogeneous TP in both directions, provided one TP size is an integer multiple of the other.
 
 <sup>6</sup> HMA (required by hybrid models) does not support different remote block sizes.
 
@@ -103,6 +103,25 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - NixlConnector defaults to **`LBHNC`** (head-major, formerly `HND`) layout for optimal transfer performance (non-MLA models).
 - `LBNHC` (token-major, formerly `NHD`) layout is supported but does **not** allow heterogeneous TP head splitting.
 - Experimental `LBHNC` ↔ `LBNHC` permute: enable via `--kv-transfer-config '{"enable_permute_local_kv": true}'`. Not supported with HMA.
+
+### Pipeline parallelism
+
+The default (pull) NixlConnector does **not** support
+`pipeline-parallel-size > 1` together with a hybrid KV cache (HMA)
+layout: region indices are not a stable identity across the
+prefill/decode layer split, so the connector raises at startup. Use the
+push connector (`NixlPushConnector`) for pipeline parallelism with
+hybrid KV caches — it routes transfers by layer-name (member) identity,
+so a PP-sharded prefiller can write into a `PP=1` decoder. See
+[NIXL push-mode KV transfer](../design/nixl_kv_push_connector.md).
+
+Current push PP + HMA limitations:
+
+- Only the prefiller (producer) may be PP-sharded; decode-side PP is not supported.
+- Hybrid SSM/Mamba layouts are not supported under PP.
+- HMA requires the same block size on P and D.
+- Non-MLA attention-HMA layer routing requires decode TP to be no greater than prefill TP.
+- Packed layouts under PP require MLA caches. Local and remote packed block strides may differ; layer pages must have equal sizes. MLA supports decode TP greater than prefill TP because its KV is replicated.
 
 ### Quantized KV cache
 

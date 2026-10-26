@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, peek, seq};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
@@ -152,15 +153,15 @@ impl Granite4ToolParser {
 }
 
 impl ToolParser for Granite4ToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_granite4_event(input, &mut self.mode)
@@ -222,6 +223,7 @@ fn header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
     const CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Granite4",
         start_marker: "",
+        framed_start_marker: None,
         end_marker: "",
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: None,

@@ -35,6 +35,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.mistral import _DEFAULT_JSON_SCHEMA, MistralParser, mistral_config
@@ -182,10 +183,11 @@ def encode_mistral_output(tokenizer: MistralTokenizer, text: str) -> list[int]:
     ids: list[int] = []
     for part in re.split(r"(\[TOOL_CALLS\]|\[ARGS\])", text):
         if part in marker_ids:
+            marker_id = marker_ids[part]
             # Fall back to text encoding here and the id-based engine path
             # silently stops being exercised while the tests still pass.
-            assert marker_ids[part] is not None, f"{part} missing from vocab"
-            ids.append(marker_ids[part])
+            assert marker_id is not None, f"{part} missing from vocab"
+            ids.append(marker_id)
         elif part:
             ids.extend(tokenizer.encode(part, add_special_tokens=False))
     return ids
@@ -248,6 +250,7 @@ def stream_delta_message_generator(
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=True,
         )
+        assert _parser_cls is not None
         _engine_parser = _parser_cls(mistral_tokenizer, None)
         if reasoning_parser is not None:
             _req_with_tools = ChatCompletionRequest(
@@ -474,17 +477,22 @@ def test_extract_tool_calls_pre_v11_tokenizer(
     assert extracted_tool_calls.content == expected_content
 
 
-def test_extract_tool_calls_pre_v11_multiple_bot_tokens_raises(
+def test_extract_tool_calls_pre_v11_multiple_bot_tokens(
     mistral_pre_v11_tool_parser,
 ):
+    """A second BOT token must not fail the request; like streaming, only the
+    calls after the first BOT token are extracted."""
     model_output = (
         '[TOOL_CALLS] [{"name": "add", "arguments":{"a": 1}}]'
         '[TOOL_CALLS] [{"name": "sub", "arguments":{"b": 2}}]'
     )
-    with pytest.raises(ValueError, match="Only one BOT token"):
-        mistral_pre_v11_tool_parser.extract_tool_calls(
-            model_output, request=_DUMMY_REQUEST
-        )
+    result = mistral_pre_v11_tool_parser.extract_tool_calls(
+        model_output, request=_DUMMY_REQUEST
+    )
+    assert result.tools_called
+    assert [(tc.function.name, tc.function.arguments) for tc in result.tool_calls] == [
+        ("add", '{"a": 1}')
+    ]
 
 
 def test_extract_tool_calls_pre_v11_regex_fallback(
@@ -505,15 +513,126 @@ def test_extract_tool_calls_pre_v11_regex_fallback(
     assert result.tool_calls[0].function.arguments == json.dumps({"a": 1, "b": 2})
 
 
-def test_extract_tool_calls_pre_v11_regex_fallback_fails(
-    mistral_pre_v11_tool_parser,
+@pytest.mark.parametrize(
+    "stringified_tool_calls",
+    ["not json at all", "42", '["add"]', '{"foo": 1}'],
+    ids=["invalid_json", "scalar", "list_of_str", "not_a_call"],
+)
+def test_extract_tool_calls_pre_v11_no_tool_call_returns_content(
+    mistral_pre_v11_tool_parser, stringified_tool_calls
 ):
-    model_output = "[TOOL_CALLS] not json at all"
+    """Output that holds no tool call is returned as content instead of failing
+    the request."""
+    result = mistral_pre_v11_tool_parser.extract_tool_calls(
+        f"[TOOL_CALLS] {stringified_tool_calls}", request=_DUMMY_REQUEST
+    )
+    assert result == ExtractedToolCallInformation(
+        tools_called=False, tool_calls=[], content=stringified_tool_calls
+    )
+
+
+# (model_output, expected (name, arguments), streamed content). Non-streaming
+# drops the text after the calls; streaming returns it as content.
+_PRE_V11_UNUSUAL_CALLS = [
+    pytest.param(
+        '[TOOL_CALLS] {"name": "add", "arguments": {"a": 1}}',
+        [("add", '{"a": 1}')],
+        "",
+        id="bare_object",
+    ),
+    # The next three end the bare object and start the trailing text in the
+    # same token, in each state the object can close from.
+    pytest.param(
+        '[TOOL_CALLS] {"name": "add", "arguments": {"a": 1}}, '
+        '{"name": "sub", "arguments": {"b": 2}}',
+        [("add", '{"a": 1}')],
+        ', {"name": "sub", "arguments": {"b": 2}}',
+        id="bare_object_then_text",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] {"arguments": {"a": 1}, "name": "add"}, '
+        '{"name": "sub", "arguments": {"b": 2}}',
+        [("add", '{"a": 1}')],
+        ', {"name": "sub", "arguments": {"b": 2}}',
+        id="bare_object_name_last_then_text",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] {"name": "add", "arguments": "{\\"a\\": 1}"}, '
+        '{"name": "sub", "arguments": {"b": 2}}',
+        [("add", '{"a": 1}')],
+        ', {"name": "sub", "arguments": {"b": 2}}',
+        id="bare_object_string_arguments_then_text",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] [{"arguments": {"a": 1}}]',
+        [("", '{"a": 1}')],
+        "",
+        id="missing_name",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] [{"name": "add", "arguments": "{\\"a\\": 1}"}, '
+        '{"name": "sub", "arguments": {"b": 2}}]',
+        [("add", '{"a": 1}'), ("sub", '{"b": 2}')],
+        "",
+        id="string_arguments",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] [{"name": "add", "arguments": {"a": 1}}, "junk"]',
+        [("add", '{"a": 1}')],
+        "",
+        id="entry_not_a_call",
+    ),
+    # Mistral-7B-Instruct-v0.3 emits repeated BOT tokens at temperature 0.
+    pytest.param(
+        '[TOOL_CALLS] [TOOL_CALLS] [{"name": "add", "arguments": {"a": 1}}]',
+        [("add", '{"a": 1}')],
+        "",
+        id="consecutive_bot_tokens",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] [TOOL_CALLS] {"name": "add", "arguments": {"a": 1}}',
+        [("add", '{"a": 1}')],
+        "",
+        id="consecutive_bot_tokens_bare_object",
+    ),
+]
+
+
+@pytest.mark.parametrize("model_output,expected,_", _PRE_V11_UNUSUAL_CALLS)
+def test_extract_tool_calls_pre_v11_unusual_calls(
+    mistral_pre_v11_tool_parser, model_output, expected, _
+):
     result = mistral_pre_v11_tool_parser.extract_tool_calls(
         model_output, request=_DUMMY_REQUEST
     )
-    assert result == ExtractedToolCallInformation(
-        tools_called=False, tool_calls=[], content="not json at all"
+    assert result.tools_called
+    assert [
+        (tc.function.name, tc.function.arguments) for tc in result.tool_calls
+    ] == expected
+    assert result.content is None
+
+
+@pytest.mark.parametrize(
+    "model_output,expected,expected_content", _PRE_V11_UNUSUAL_CALLS
+)
+def test_extract_tool_calls_streaming_pre_v11_unusual_calls(
+    mistral_pre_v11_tool_parser,
+    mistral_pre_v11_tokenizer,
+    model_output,
+    expected,
+    expected_content,
+):
+    """Streaming extracts the same calls as the non-streaming path."""
+    _test_extract_tool_calls_streaming(
+        mistral_pre_v11_tool_parser,
+        mistral_pre_v11_tokenizer,
+        model_output,
+        None,
+        [
+            ToolCall(function=FunctionCall(name=name, arguments=arguments))
+            for name, arguments in expected
+        ],
+        expected_content,
     )
 
 
@@ -881,6 +1000,7 @@ def _test_extract_tool_calls_streaming(
             # if a new tool is being called, set up empty arguments
             if tool_call.index != tool_call_idx:
                 tool_call_idx = tool_call.index
+                function_names.append("")
                 function_args_strs.append("")
                 tool_call_ids.append(None)
 
@@ -894,7 +1014,7 @@ def _test_extract_tool_calls_streaming(
                 # IN ENTIRETY, exactly one time.
                 if tool_call.function.name:
                     assert isinstance(tool_call.function.name, str)
-                    function_names.append(tool_call.function.name)
+                    function_names[tool_call.index] = tool_call.function.name
 
                 if tool_call.function.arguments:
                     # make sure they're a string and then add them to the list
@@ -1849,6 +1969,7 @@ def test_adjust_request_unsupported_response_format(
         ),
     )
     result = mistral_tool_parser.adjust_request(request)
+    assert isinstance(result, ChatCompletionRequest)
     assert result.structured_outputs is None
     assert result.response_format == request.response_format
 
@@ -1888,6 +2009,19 @@ def test_adjust_request_structured_outputs_generates_grammar(
     assert result.structured_outputs is not None
     assert isinstance(result.structured_outputs.grammar, str)
     assert len(result.structured_outputs.grammar) > 0
+
+
+def test_adjust_request_deeply_nested_json_string_rejected(
+    mistral_tool_parser: MistralToolParser,
+) -> None:
+    """The schema string is parsed here, before request validation, and
+    json.loads raises RecursionError on a string nested this deeply."""
+    schema = '{"type": "array", "items": ' * 20_000 + "{}" + "}" * 20_000
+    request = _make_request(
+        structured_outputs=StructuredOutputsParams(json=schema),
+    )
+    with pytest.raises(VLLMValidationError, match="nested too deeply"):
+        mistral_tool_parser.adjust_request(request)
 
 
 @pytest.mark.parametrize(
@@ -1994,6 +2128,7 @@ def test_grammar_from_parser_set_by_adjust_request(
 ) -> None:
     request = _make_request()
     result = mistral_tool_parser.adjust_request(request)
+    assert isinstance(result, ChatCompletionRequest)
     assert result._grammar_from_parser is True
 
 
@@ -2045,7 +2180,6 @@ def test_content_tool_calls_transition_emits_reasoning_end(
     reasoning_encoding,
 ):
     """(CONTENT, TOOL_CALLS) must emit REASONING_END when reasoning is enabled."""
-
     cfg = mistral_config(reasoning_encoding=reasoning_encoding)
     engine = StreamingParserEngine(
         config=cfg, tokenizer=mistral_tokenizer, vocab=mistral_tokenizer.get_vocab()
@@ -2199,6 +2333,7 @@ def test_adjust_request_pre_v11_guided_schema_injected(
     schema = result.structured_outputs.json
     if isinstance(schema, str):
         schema = json.loads(schema)
+    assert schema is not None
     assert schema["type"] == "array"
     assert schema["minItems"] == 1
     items = schema["items"]
@@ -2219,7 +2354,7 @@ def test_adjust_request_pre_v11_required_clears_response_format(
     mistral_pre_v11_tool_parser: MistralToolParser,
     response_format: dict,
 ) -> None:
-    """required + response_format must inject the tool schema and clear
+    """Required + response_format must inject the tool schema and clear
     response_format so the tool schema is the sole structured-output
     constraint, matching the base ToolParser (otherwise the request either
     hits the "multiple constraints" engine error or, with no constraint,
@@ -2227,11 +2362,13 @@ def test_adjust_request_pre_v11_required_clears_response_format(
     request = _make_request(tool_choice="required", response_format=response_format)
     result = mistral_pre_v11_tool_parser.adjust_request(request)
 
+    assert isinstance(result, ChatCompletionRequest)
     assert result.response_format is None
     assert result.structured_outputs is not None
     schema = result.structured_outputs.json
     if isinstance(schema, str):
         schema = json.loads(schema)
+    assert schema is not None
     assert schema["type"] == "array"
 
 
@@ -2246,6 +2383,7 @@ def test_adjust_request_non_mistral_tokenizer_required_injects_schema(
     )
     result = non_mistral_parser.adjust_request(request)
 
+    assert isinstance(result, ChatCompletionRequest)
     assert result.response_format is None
     assert result.structured_outputs is not None
     assert result.structured_outputs.json is not None

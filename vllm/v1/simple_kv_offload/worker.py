@@ -16,6 +16,7 @@ from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
+from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_workers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -36,10 +37,12 @@ class SimpleCPUOffloadWorker:
         disk_capacity_bytes: int = 0,
         disk_buffer_slots: int = 2,
         use_page_cache: bool = False,
+        num_cpu_blocks: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.cpu_capacity_bytes = cpu_capacity_bytes
+        self._num_cpu_blocks_override = num_cpu_blocks
         self.disk_path = disk_path
         self.disk_capacity_bytes = disk_capacity_bytes
         self.disk_buffer_slots = disk_buffer_slots
@@ -90,6 +93,7 @@ class SimpleCPUOffloadWorker:
                 tensor (attention layers) or a list of tensors (Mamba layers
                 in hybrid models). All values are included for offloading
                 by resolving to their underlying raw storage.
+
         """
         if not kv_caches:
             logger.warning("No KV caches to offload.")
@@ -100,33 +104,55 @@ class SimpleCPUOffloadWorker:
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
         assert self.kv_cache_config.kv_cache_tensors
-        logical_storage_bytes = self.kv_cache_config.kv_cache_tensors[0].size
 
-        # The DMA backend copies whole blocks as base + block_id * stride(0),
-        # so view each unique allocation as [num_blocks, block_bytes].
+        # The DMA backend copies blocks as base + block_id * stride(0), so every
+        # region is a [num_blocks, block_bytes] view. Block bytes come from each
+        # tensor's placement -- layers in one allocation can differ in page size.
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         seen: set[tuple[torch.device, int]] = set()
-        for name, tensor in kv_caches.items():
-            storage = tensor.untyped_storage()
-            key = (tensor.device, storage.data_ptr())
-            if key in seen:
+        for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
+            name = next((n for n in kv_cache_tensor.layers if n in kv_caches), None)
+            if name is None:
                 continue
-            seen.add(key)
+            num_layers = len(kv_cache_tensor.layers)
+            block_bytes = kv_cache_tensor.block_stride
+            blocks_span = num_blocks * block_bytes
+            layer_outermost = kv_cache_tensor.layer_stride >= blocks_span
+            if layer_outermost:
+                # One region per layer, or per KV head group under LHBNC.
+                start = kv_cache_tensor.offset
+                span = num_layers * kv_cache_tensor.layer_stride
+                layer_names = kv_cache_tensor.layers
+            else:
+                start = 0
+                span = blocks_span
+                layer_names = kv_cache_tensor.layers[:1]
 
-            physical_per_block, remainder = divmod(tensor.shape[0], num_blocks)
+            cache = kv_caches[name]
+            raw = torch.empty(0, dtype=torch.int8, device=cache.device).set_(
+                cache.untyped_storage()
+            )
+            assert raw.numel() >= start + span, (
+                f"KV cache {name!r} storage has {raw.numel()} bytes, smaller than "
+                f"the {span} bytes it places at offset {start}"
+            )
+            regions = raw[start : start + span].view(-1, num_blocks, block_bytes)
+            groups_per_layer, remainder = divmod(len(regions), len(layer_names))
             assert remainder == 0, (
-                f"KV cache {name!r} has {tensor.shape[0]} physical blocks, which "
-                f"is not divisible by {num_blocks} scheduler blocks"
+                f"KV cache {name!r} places {len(layer_names)} layers in "
+                f"{len(regions)} block-strided regions"
             )
-            block_bytes = tensor.stride(0) * tensor.element_size() * physical_per_block
-            raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(storage)
-            assert raw.numel() >= logical_storage_bytes, (
-                f"KV cache {name!r} storage has {raw.numel()} bytes, smaller "
-                f"than the configured {logical_storage_bytes}-byte allocation"
-            )
-            regions = raw[:logical_storage_bytes].view(-1, num_blocks, block_bytes)
             for idx, region in enumerate(regions):
-                key_name = name if len(regions) == 1 else f"{name}.{idx}"
+                key = (region.device, region.data_ptr())
+                if key in seen:
+                    continue
+                seen.add(key)
+                layer_name = layer_names[idx // groups_per_layer]
+                key_name = (
+                    layer_name
+                    if groups_per_layer == 1
+                    else f"{layer_name}.{idx % groups_per_layer}"
+                )
                 unique_gpu_caches[key_name] = region
 
         # Compute per-tensor bytes_per_block. Tensors may have different
@@ -136,7 +162,10 @@ class SimpleCPUOffloadWorker:
         ]
         total_bytes_per_block = sum(per_tensor_bpb)
 
-        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
+        self.num_cpu_blocks = self._resolve_num_cpu_blocks(
+            self.disk_capacity_bytes if self.disk_mode else self.cpu_capacity_bytes,
+            total_bytes_per_block,
+        )
 
         # Use lowest priority so KV cache I/O yields to compute streams.
         low_pri, _ = torch.cuda.Stream.priority_range()
@@ -150,20 +179,29 @@ class SimpleCPUOffloadWorker:
         else:
             self._init_cpu_mode(unique_gpu_caches, total_bytes_per_block, self.device)
 
+    def _resolve_num_cpu_blocks(self, capacity_bytes: int, bytes_per_block: int) -> int:
+        local_capacity = capacity_bytes // bytes_per_block
+        requested = self._num_cpu_blocks_override
+        if requested is None:
+            return sync_num_offload_blocks_across_workers(max(1, local_capacity))
+        if type(requested) is not int or not 0 < requested <= local_capacity:
+            raise ValueError(
+                f"num_cpu_blocks={requested!r} must be between 1 and "
+                f"local offload capacity {local_capacity}"
+            )
+        return requested
+
     def _init_disk_mode(
         self,
         unique_gpu_caches: dict[str, torch.Tensor],
         total_bytes_per_block: int,
         device: torch.device,
     ) -> None:
-        num_disk_slots = max(1, self.disk_capacity_bytes // total_bytes_per_block)
-        self.num_cpu_blocks = num_disk_slots
-
         logger.info(
             "SimpleCPUOffloadWorker [DISK]: %d tensors, %d disk slots (%.2f GB)",
             len(unique_gpu_caches),
-            num_disk_slots,
-            (num_disk_slots * total_bytes_per_block) / (1024**3),
+            self.num_cpu_blocks,
+            (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
         )
 
         assert self.disk_path is not None
@@ -175,7 +213,7 @@ class SimpleCPUOffloadWorker:
             self.load_stream,
             self.store_stream,
             rank_path,
-            num_disk_slots,
+            self.num_cpu_blocks,
             total_bytes_per_block,
             self.disk_buffer_slots,
             self.use_page_cache,
@@ -282,6 +320,7 @@ class SimpleCPUOffloadWorker:
             tuple of (finished_sending, finished_recving).
             - finished_sending: always None (stores use worker metadata).
             - finished_recving: req_ids whose loads have completed.
+
         """
         metadata = self._connector_metadata
         finished_recving: set[str] = set()

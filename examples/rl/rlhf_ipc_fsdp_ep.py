@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-RLHF with FSDP2 training and vLLM expert-parallel inference using **CUDA IPC**
+"""RLHF with FSDP2 training and vLLM expert-parallel inference using **CUDA IPC**
 weight transfer and **packed** tensors.
 
 Multi-rank version of `rlhf_http_ipc.py`: the trainer is 4 FSDP2 Ray actors

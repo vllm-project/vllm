@@ -14,7 +14,7 @@
       "default": "false"
     },
     "NCCL_VERSION": {
-      "default": "2.30.7"
+      "default": "2.31.2"
     },
     "BUILD_BASE_IMAGE": {
       "default": "pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
@@ -35,6 +35,9 @@
       "default": "disabled"
     },
     "INSTALL_KV_CONNECTORS": {
+      "default": "false"
+    },
+    "BUILD_NIXL": {
       "default": "false"
     },
     "SCCACHE_BUCKET_NAME": {
@@ -70,9 +73,6 @@
     "RUN_WHEEL_CHECK": {
       "default": "true"
     },
-    "FLASHINFER_VERSION": {
-      "default": "0.6.18"
-    },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
     },
@@ -84,6 +84,9 @@
     },
     "RUNAI_MODEL_STREAMER_VERSION": {
       "default": ">=0.15.7"
+    },
+    "GGUF_VERSION": {
+      "default": ">=0.19.0"
     }
   }
 }

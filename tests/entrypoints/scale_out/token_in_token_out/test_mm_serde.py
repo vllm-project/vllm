@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Roundtrip tests for multimodal serde used by the
+"""Roundtrip tests for multimodal serde used by the
 token_in_token_out generate endpoint.
 """
 
+import pytest
 import torch
 from pydantic import ValidationError
 
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     extract_mm_features,
     merge_mm_kwargs_items,
@@ -168,6 +172,54 @@ def test_render_extracts_metadata_fields_separately():
     assert torch.equal(full_data["pixel_values"].data, pixel_values.data)
 
 
+def test_extract_without_kwargs_keeps_layout():
+    """Layout-only callers get hashes and placeholders, no serialized tensors."""
+    engine_input, _pixel_values, _image_grid_thw = _image_engine_input()
+
+    full = extract_mm_features(engine_input)
+    layout = extract_mm_features(engine_input, mm_payload="none")
+
+    assert full is not None and layout is not None
+    assert layout.kwargs_data is None
+    assert layout.mm_metadata is None
+    assert layout.mm_hashes == full.mm_hashes
+    assert layout.mm_placeholders == full.mm_placeholders
+
+
+_MESSAGES = [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.parametrize(
+    ("request_cls", "body"),
+    [
+        (ChatCompletionRequest, {"model": "m", "messages": _MESSAGES}),
+        (CompletionRequest, {"model": "m", "prompt": "hi"}),
+        (ResponsesRequest, {"model": "m", "input": "hi"}),
+        (
+            AnthropicMessagesRequest,
+            {"model": "m", "max_tokens": 8, "messages": _MESSAGES},
+        ),
+    ],
+)
+def test_return_mm_kwargs_is_alias_for_mm_payload(request_cls, body):
+    """Clients of the deprecated bool keep getting layout-only responses."""
+    assert request_cls.model_validate(body).mm_payload == "tensors"
+
+    for return_mm_kwargs, expected in [(False, "none"), (True, "tensors")]:
+        request = request_cls.model_validate(
+            {**body, "return_mm_kwargs": return_mm_kwargs}
+        )
+        assert request.mm_payload == expected
+
+    explicit = request_cls.model_validate(
+        {**body, "return_mm_kwargs": False, "mm_payload": "tensors"}
+    )
+    assert explicit.mm_payload == "tensors"
+
+    with pytest.raises(ValidationError):
+        request_cls.model_validate({**body, "mm_payload": "source"})
+
+
 def test_extract_includes_declared_placeholder_metadata_fields():
     """EC placeholder metadata is kept even when keep_on_cpu is unset."""
     engine_input, _pixel_values, image_grid_thw = _image_engine_input(
@@ -239,6 +291,50 @@ def test_metadata_only_generate_requires_ec_transfer_params():
     item = merged["image"][0]
     assert item is not None
     assert set(item) == {"image_grid_thw"}
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+@pytest.mark.parametrize(
+    ("has_metadata", "has_ec"),
+    [(True, False), (True, True), (False, False)],
+    ids=["metadata-without-ec", "metadata-with-ec", "cache-hit-without-ec"],
+)
+def test_mixed_items_require_ec_only_for_metadata_only(
+    modality: str, has_metadata: bool, has_ec: bool
+):
+    """A full item must not bypass the EC requirement for another item."""
+    engine_input, _, image_grid_thw = _image_engine_input()
+    rendered = extract_mm_features(engine_input)
+    assert rendered is not None
+    features = rendered.model_dump()
+    metadata = (
+        encode_mm_kwargs_item(
+            MultiModalKwargsItem({f"{modality}_grid_thw": image_grid_thw})
+        )
+        if has_metadata
+        else None
+    )
+    second_item = {
+        "mm_hashes": "second-item",
+        "mm_placeholders": {"offset": 2, "length": 1},
+        "kwargs_data": None,
+        "mm_metadata": metadata,
+    }
+    for key, value in second_item.items():
+        features[key].setdefault(modality, []).append(value)
+    payload = {
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 1},
+        "features": features,
+    }
+    if has_ec:
+        payload["ec_transfer_params"] = {"second-item": {"peer_host": "10.0.0.1"}}
+
+    if has_metadata and not has_ec:
+        with pytest.raises(ValidationError, match="ec_transfer_params"):
+            GenerateRequest.model_validate(payload)
+    else:
+        GenerateRequest.model_validate(payload)
 
 
 def test_kwargs_and_metadata_generate_does_not_require_ec():

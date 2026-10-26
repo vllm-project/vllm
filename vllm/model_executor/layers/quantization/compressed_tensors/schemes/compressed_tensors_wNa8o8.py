@@ -97,12 +97,8 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         output_size_per_partition = sum(output_partition_sizes)
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
-        # Set for kernels' weight prep; also covers ParallelLMHead, which does
-        # not set these in __init__.
         layer.output_partition_sizes = output_partition_sizes
         layer.params_dtype = params_dtype
-        if not hasattr(layer, "has_bias"):
-            layer.has_bias = False
 
         mp_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
@@ -114,7 +110,6 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
             act_type=params_dtype,  # activation quant applied externally (SRQ)
             group_size=self.group_size,
             zero_points=False,
-            has_g_idx=False,
         )
         self.kernel = choose_mp_linear_kernel(mp_config)(
             mp_config,
@@ -167,7 +162,7 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         # Scale: per-output-channel, or per group along the input dim under TP.
         group_size = self.group_size if self.group_size != -1 else input_size
         partitioned = not marlin_repeat_scales_on_all_ranks(
-            False, self.group_size, input_size != input_size_per_partition
+            self.group_size, input_size != input_size_per_partition
         )
         scales = (input_size_per_partition if partitioned else input_size) // group_size
         scale_data = torch.empty(out, scales, dtype=params_dtype)

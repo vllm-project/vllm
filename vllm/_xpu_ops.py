@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+from vllm_xpu_kernels.rotary import apply_rotary_emb
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
@@ -134,6 +135,46 @@ def _fused_add_gemma_rms_norm_impl(
     torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
 
 
+def _layer_norm_impl(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.layer_norm(out, input, weight, bias, epsilon)
+
+
+def _fused_add_layer_norm_impl(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.fused_add_layer_norm(input, residual, weight, bias, epsilon)
+
+
+def _nemotron_layer_norm_impl(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.nemotron_layer_norm(out, input, weight, bias, epsilon)
+
+
+def _fused_add_nemotron_layer_norm_impl(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.fused_add_nemotron_layer_norm(input, residual, weight, bias, epsilon)
+
+
 def _gdn_attention_core_xpu_impl(
     core_attn_out: torch.Tensor,
     z: torch.Tensor,
@@ -249,6 +290,24 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     return query, key
 
 
+def _xpu_apply_rotary_emb_impl(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    return apply_rotary_emb(x, cos, sin, is_neox_style)
+
+
+def _xpu_apply_rotary_emb_fake(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
 def _xpu_fp8_bmm_impl(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -286,6 +345,7 @@ def _xpu_fp8_bmm_impl(
         This implementation centralizes access to
         ``torch.ops._xpu_C.fp8_bmm``. Both scales must be contiguous, while
         ``a`` and ``b`` may be non-contiguous views.
+
     """
     return torch.ops._xpu_C.fp8_bmm(a, b, out_dtype, a_scale, b_scale, bias)
 
@@ -430,6 +490,7 @@ def _xpu_deepseek_fused_indexer_q_rope_fp8_impl(
         index_weights_out: (T, H) float32 output, preallocated;
             = index_weights * q_scale * softmax_scale * head_scale (the
             per-(token, head) q_scale is folded in here). [written]
+
     """
     torch.ops._xpu_C.deepseek_fused_indexer_q_rope_fp8(
         index_q,
@@ -473,6 +534,7 @@ def _xpu_deepseek_fused_indexer_q_rope_mxfp4_impl(
         index_weights_out: (T, H) float32 output, preallocated;
             = index_weights * softmax_scale * head_scale (no q_scale folded;
             per-block scales live in index_q_scale). [written]
+
     """
     torch.ops._xpu_C.deepseek_fused_indexer_q_rope_mxfp4(
         index_q,
@@ -576,6 +638,37 @@ def _xpu_mxfp4_quantize_fake(
     x_q = x_q.view(torch.float4_e2m1fn_x2)
     x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
     return x_q, x_s
+
+
+def _xpu_fused_input_norm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    visual_dtype: torch.dtype,
+) -> torch.Tensor:
+    patches, size = x.shape
+    out = torch.empty(
+        (patches, size),
+        dtype=visual_dtype,
+        device=x.device,
+    )
+    torch.ops._xpu_C.fused_input_norm(out, x.contiguous(), weight, bias)
+    return out
+
+
+def _xpu_fused_input_norm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    visual_dtype: torch.dtype,
+) -> torch.Tensor:
+    patches, size = x.shape
+    out = torch.empty(
+        (patches, size),
+        dtype=visual_dtype,
+        device=x.device,
+    )
+    return out
 
 
 @triton.jit
@@ -971,7 +1064,11 @@ class xpu_ops:
             "when block_table is disabled, cu_seqlens_k is needed"
         )
         if out is None:
-            out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+            out = torch.empty(
+                q.shape[:-1] + (v.shape[-1],),
+                dtype=q.dtype,
+                device=q.device,
+            )
         real_window_size: tuple[int, int]
         if window_size is None:
             real_window_size = (-1, -1)
@@ -994,8 +1091,8 @@ class xpu_ops:
             block_table=block_table,
             s_aux=s_aux,
             window_size=real_window_size,
-            # alibi_slopes = alibi_slopes,
-            # softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            softcap=softcap,
             return_softmax_lse=return_softmax_lse,
             q_descale=q_descale,
             k_descale=k_descale,
@@ -1215,12 +1312,44 @@ class xpu_ops:
                     mutates_args=["input", "residual"],
                 )
 
+            if hasattr(torch.ops._C, "layer_norm"):
+                direct_register_custom_op(
+                    op_name="xpu_layer_norm",
+                    op_func=_layer_norm_impl,
+                    mutates_args=["out"],
+                )
+
+                direct_register_custom_op(
+                    op_name="xpu_fused_add_layer_norm",
+                    op_func=_fused_add_layer_norm_impl,
+                    mutates_args=["input", "residual"],
+                )
+
+            if hasattr(torch.ops._C, "nemotron_layer_norm"):
+                direct_register_custom_op(
+                    op_name="xpu_nemotron_layer_norm",
+                    op_func=_nemotron_layer_norm_impl,
+                    mutates_args=["out"],
+                )
+
+                direct_register_custom_op(
+                    op_name="xpu_fused_add_nemotron_layer_norm",
+                    op_func=_fused_add_nemotron_layer_norm_impl,
+                    mutates_args=["input", "residual"],
+                )
+
             direct_register_custom_op(
                 op_name="xpu_ops_deepseek_scaling_rope",
                 op_func=_xpu_ops_deepseek_scaling_rope_impl,
                 mutates_args=[],
                 fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_apply_rotary_emb",
+                op_func=_xpu_apply_rotary_emb_impl,
+                fake_impl=_xpu_apply_rotary_emb_fake,
             )
 
             direct_register_custom_op(
@@ -1279,6 +1408,12 @@ class xpu_ops:
                     "index_q_scale",
                     "index_weights_out",
                 ],
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_fused_input_norm",
+                op_func=_xpu_fused_input_norm_impl,
+                fake_impl=_xpu_fused_input_norm_fake,
             )
 
             _OPS_REGISTERED = True

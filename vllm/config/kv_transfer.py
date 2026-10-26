@@ -13,6 +13,40 @@ KVConsumer = Literal["kv_consumer", "kv_both"]
 KVRole = Literal[KVProducer, KVConsumer]
 
 
+def hisparse_host_pool_gib(
+    kv_transfer_config: "KVTransferConfig | None",
+) -> float | None:
+    if kv_transfer_config is None:
+        return None
+    if kv_transfer_config.kv_connector == "MultiConnector":
+        connectors = kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+    else:
+        connectors = [
+            {
+                "kv_connector": kv_transfer_config.kv_connector,
+                "kv_connector_extra_config": (
+                    kv_transfer_config.kv_connector_extra_config
+                ),
+            }
+        ]
+    entries = [
+        connector.get("kv_connector_extra_config", {})
+        for connector in connectors
+        if connector.get("kv_connector") == "HiSparseConnector"
+    ]
+    if len(entries) > 1:
+        raise ValueError("Only one HiSparseConnector may be configured")
+    if not entries:
+        return None
+    host_pool_gib = entries[0].get("host_pool_gib")
+    if host_pool_gib is None:
+        raise ValueError("HiSparseConnector requires host_pool_gib")
+    host_pool_gib = float(host_pool_gib)
+    if host_pool_gib <= 0:
+        raise ValueError("HiSparseConnector host_pool_gib must be positive")
+    return host_pool_gib
+
+
 def kv_buffer_device_default_factory() -> str:
     from vllm.platforms import current_platform
 
@@ -34,24 +68,9 @@ class KVTransferConfig:
     """The device used by kv connector to buffer the KV cache. Choices are
     'cuda', 'cpu' and 'xpu'."""
 
-    kv_buffer_size: float = 1e9
-    """The buffer size for TorchDistributedConnector. Measured in number of
-    bytes. Recommended value: 1e9 (about 1GB)."""
-
     kv_role: KVRole | None = None
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
     are 'kv_producer', 'kv_consumer', and 'kv_both'."""
-
-    kv_rank: int | None = None
-    """The rank of this vLLM instance in the KV cache transfer. Typical value:
-    0 for prefill instance, 1 for decode instance.
-    Currently only 1P1D is supported."""
-
-    kv_parallel_size: int = 1
-    """The number of parallel instances for KV cache transfer."""
-
-    kv_ip: str = "127.0.0.1"
-    """The KV connector ip, used to build distributed connection."""
 
     kv_port: int = 14579
     """The KV connector port, used to build distributed connection."""
@@ -72,8 +91,7 @@ class KVTransferConfig:
     'fail': immediately fail the request with an error finish reason (default)"""
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
