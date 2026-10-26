@@ -7,8 +7,10 @@ import torch
 
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 compute_w_fold = KimiK3MultiHeadLatentAttentionWrapper._compute_w_fold
+split_fold_output = KimiK3MultiHeadLatentAttentionWrapper._split_fold_output
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="Kimi-K3 AMD MLA fold requires ROCm"
@@ -19,9 +21,9 @@ LQ, L, P, R = 1536, 512, 128, 64
 
 
 def _weights(num_heads: int) -> tuple[torch.Tensor, torch.Tensor]:
-    gen = torch.Generator(device="cuda").manual_seed(0)
-    w_qb = torch.randn(num_heads * (P + R), LQ, device="cuda", generator=gen) * 0.02
-    w_uk = torch.randn(L, num_heads, P, device="cuda", generator=gen) * 0.02
+    set_random_seed(0)
+    w_qb = torch.randn(num_heads * (P + R), LQ, device="cuda") * 0.02
+    w_uk = torch.randn(L, num_heads, P, device="cuda") * 0.02
     return w_qb.to(torch.bfloat16), w_uk.to(torch.bfloat16)
 
 
@@ -38,11 +40,7 @@ def _split_fold_output(
     y: torch.Tensor, num_heads: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The views _fused_decode takes on the fold GEMM output."""
-    b = y.shape[0]
-    return (
-        y[:, : num_heads * L].view(b, num_heads, L),
-        y[:, num_heads * L :].view(b, num_heads, R),
-    )
+    return split_fold_output(y, num_heads, L, R)
 
 
 @pytest.mark.parametrize("num_heads", [12, 24, 96])

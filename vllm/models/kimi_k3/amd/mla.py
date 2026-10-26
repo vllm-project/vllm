@@ -126,6 +126,16 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             .contiguous()
         )
 
+    @staticmethod
+    def _split_fold_output(
+        y: torch.Tensor,
+        num_heads: int,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        B, N, L = y.shape[0], num_heads, kv_lora_rank
+        return y[:, : N * L].view(B, N, L), y[:, N * L :].view(B, N, qk_rope_head_dim)
+
     @torch.no_grad()
     def _build_w_fold(self) -> None:
         assert self.q_b_proj is not None
@@ -173,10 +183,10 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             from aiter.ops.triton.gemm.basic.gemm_a16w16 import gemm_a16w16
 
             assert self._w_fold is not None
-            B, N, L = q.shape[0], self.num_heads, self.kv_lora_rank
             y = gemm_a16w16(q, self._w_fold)
-            ql_nope = y[:, : N * L].view(B, N, L)
-            q_pe = y[:, N * L :].view(B, N, self.qk_rope_head_dim)
+            ql_nope, q_pe = self._split_fold_output(
+                y, self.num_heads, self.kv_lora_rank, self.qk_rope_head_dim
+            )
         else:
             q_nope, q_pe = q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
@@ -202,8 +212,6 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
                 L = attn.W_UK_T.shape[-1]
                 ql_nope = q_nope_t.new_empty((B, N, L))
                 torch.bmm(q_nope_t, attn.W_UK_T, out=ql_nope.transpose(0, 1))
-            # Densify the bmm's transposed view, as the unfused path always has.
-            ql_nope = ql_nope.contiguous()
 
         if self._identity_rope is None:
             # cos = 1, sin = 0 makes the kernel's RoPE the identity, which is
