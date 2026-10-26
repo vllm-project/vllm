@@ -3,6 +3,7 @@
 
 use std::ops::Deref;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures::stream::FusedStream;
@@ -30,6 +31,7 @@ enum State {
 pub struct EngineCoreStreamOutput {
     pub engine_index: u32,
     pub timestamp: f64,
+    pub weight_version: Option<Arc<str>>,
     pub output: EngineCoreOutput,
 }
 
@@ -173,7 +175,10 @@ impl Stream for EngineCoreOutputStream {
                         // come. Only the last output of a delivery can be terminal.
                         let output = delivery.last();
                         if output.finished() {
-                            if output.finish_reason == Some(EngineCoreFinishReason::Error) {
+                            // A retryable error (e.g. a paused engine's rejection) is expected.
+                            if output.finish_reason == Some(EngineCoreFinishReason::Error)
+                                && !output.error.as_ref().is_some_and(|error| error.retryable)
+                            {
                                 error!(
                                     self.request_id,
                                     "request failed with an internal error during generation"

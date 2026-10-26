@@ -22,6 +22,7 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
@@ -35,6 +36,9 @@ from vllm.v1.worker.utils import AttentionGroup
 
 
 class _TestSpeculator(TargetDependentARSpeculator):
+    # Set by each test to the draft model `load_draft_model` should hand back.
+    test_draft_model: torch.nn.Module
+
     def load_draft_model(self, target_model, target_attn_layer_names):
         return self.test_draft_model
 
@@ -84,7 +88,10 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
 
     speculator = object.__new__(_TestSpeculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
-    speculator.max_model_len = speculator.draft_max_seq_len = 32
+    speculator.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=32)
+    )
+    speculator.draft_max_seq_len = 32
     speculator.draft_is_prefilling = torch.zeros(4, dtype=torch.bool)
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(4, dtype=torch.int64),
@@ -100,7 +107,8 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
     speculator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
     speculator.attn_groups = [
         [
-            SimpleNamespace(
+            # Stand-in group: build_attn_metadata only reads these two members.
+            SimpleNamespace(  # type: ignore[list-item]  # stand-in group
                 get_metadata_builder=lambda _: SimpleNamespace(
                     build=build, supports_update_block_table=False
                 ),
@@ -117,6 +125,7 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
         seq_lens_cpu_upper_bound=torch.tensor([10, 20], dtype=torch.int32),
         step=1,
     )
+    assert metadata is not None
     assert metadata["draft"] == (num_reqs_padded, 0, num_reqs_padded, 0)
 
 
@@ -397,6 +406,52 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
     assert actual_feedback_hidden is hidden
 
 
+@pytest.mark.parametrize("partitioned", [False, True])
+def test_run_model_uses_complete_pcp_padding(monkeypatch, partitioned):
+    hidden = torch.full((4, 3), 1.0)
+    speculator = _make_speculator(monkeypatch, hidden)
+    gathered_is_padding = torch.tensor(
+        [False, False, False, True, False, False, True, True]
+    )
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+        max_num_tokens=4,
+        moe_gathers_tokens=True,
+    )
+    if partitioned:
+        manager.draft_prefill_batch = SimpleNamespace(
+            input_ids=torch.arange(4),
+            positions=torch.arange(4),
+            is_padding=gathered_is_padding,
+        )
+    else:
+        local_is_padding = torch.tensor([False, False, False, True])
+        speculator.input_buffers.is_padding = local_is_padding
+        gathered_is_padding = torch.cat([local_is_padding, local_is_padding])
+    seen = {}
+    monkeypatch.setattr(
+        spec_module,
+        "set_forward_context",
+        lambda *args, **kwargs: (seen.update(kwargs), nullcontext())[1],
+    )
+    speculator.pcp_manager = manager
+
+    speculator._run_model(
+        4,
+        attn_metadata=None,
+        slot_mappings=None,
+        num_tokens_across_dp=None,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+    )
+
+    torch.testing.assert_close(seen["is_padding"], gathered_is_padding)
+    if partitioned:
+        assert seen["is_padding"] is gathered_is_padding
+
+
 @pytest.mark.parametrize(
     (
         "method_name",
@@ -414,6 +469,7 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
     ],
 )
 def test_multi_step_decode_replays_captured_graph_as_expected(
+    monkeypatch,
     method_name,
     cg_mode,
     num_speculative_steps,
@@ -423,8 +479,6 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator = object.__new__(_TestSpeculator)
     speculator.num_speculative_steps = 4
     speculator.current_draft_step = torch.tensor(0)
-    speculator.slot_mapping_observer = None
-    speculator.host_mirror_forward_observer = None
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(2),
         query_start_loc=torch.arange(3),
@@ -433,7 +487,8 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator.attn_groups = []
     speculator.block_tables = SimpleNamespace(input_block_tables=[])
     generate_draft = Mock()
-    speculator._generate_draft = generate_draft
+    # Stub the bound method on a hand-built speculator to count eager draft calls.
+    monkeypatch.setattr(speculator, "_generate_draft", generate_draft)
     run_fullgraph = Mock()
     speculator.decode_cudagraph_manager = SimpleNamespace(run_fullgraph=run_fullgraph)
     batch_desc = BatchExecutionDescriptor(
@@ -460,13 +515,14 @@ def test_fused_full_graph_maps_split_group_block_tables():
     spec = MLAAttentionSpec(
         block_size=1024, num_kv_heads=1, head_size=128, dtype=torch.uint8
     )
+    kernel_block_table = torch.zeros(1, 4, 32, dtype=torch.int32)
     group = AttentionGroup(
         SimpleNamespace(),
         ["layer.0"],
         spec,
         0,
         kernel_block_size=256,
-        kernel_block_table=torch.zeros(1, 4, 32, dtype=torch.int32),
+        kernel_block_table=kernel_block_table,
         kernel_block_offsets=torch.arange(4, dtype=torch.int32),
     )
     speculator = object.__new__(_TestSpeculator)
@@ -481,7 +537,7 @@ def test_fused_full_graph_maps_split_group_block_tables():
     replayed_tables = []
     speculator.decode_cudagraph_manager = SimpleNamespace(
         run_fullgraph=lambda _: replayed_tables.append(
-            group.kernel_block_table[0, :2, :8].tolist()
+            kernel_block_table[0, :2, :8].tolist()
         )
     )
 
@@ -534,11 +590,6 @@ def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
         seq_lens=torch.tensor([5, 6], dtype=torch.int32),
         block_table=torch.zeros((2, 1), dtype=torch.int32),
         slot_mapping=torch.zeros(3, dtype=torch.int32),
-        use_cascade=False,
-        common_prefix_len=0,
-        cu_prefix_query_lens=None,
-        prefix_kv_lens=None,
-        suffix_kv_lens=None,
         max_dcp_context_kv_len=None,
         dcp_context_kv_lens=None,
         num_decode_reqs=2,
@@ -546,7 +597,6 @@ def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
         num_decode_tokens=3,
         num_prefill_tokens=0,
         scheduler_metadata=torch.tensor([-1, -1, -1], dtype=torch.int32),
-        prefix_scheduler_metadata=None,
         max_num_splits=4,
         causal=True,
         mm_prefix_query_range_tensor=None,
@@ -584,11 +634,6 @@ def test_update_draft_decode_metadata_skips_without_scheduler_metadata(monkeypat
         seq_lens=torch.tensor([1], dtype=torch.int32),
         block_table=torch.zeros((1, 1), dtype=torch.int32),
         slot_mapping=torch.zeros(1, dtype=torch.int32),
-        use_cascade=False,
-        common_prefix_len=0,
-        cu_prefix_query_lens=None,
-        prefix_kv_lens=None,
-        suffix_kv_lens=None,
         max_dcp_context_kv_len=None,
         dcp_context_kv_lens=None,
         num_decode_reqs=1,
@@ -596,7 +641,6 @@ def test_update_draft_decode_metadata_skips_without_scheduler_metadata(monkeypat
         num_decode_tokens=1,
         num_prefill_tokens=0,
         scheduler_metadata=None,
-        prefix_scheduler_metadata=None,
         max_num_splits=1,
         causal=True,
         mm_prefix_query_range_tensor=None,
@@ -621,7 +665,7 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator.num_speculative_steps = num_speculative_steps
     speculator.attn_groups = [
         [
-            SimpleNamespace(
+            SimpleNamespace(  # type: ignore[list-item]  # stand-in group
                 supports_draft_decode_metadata_update=True,
                 backend=SimpleNamespace(get_name=lambda: "CAPABLE"),
             )
