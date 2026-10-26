@@ -1,19 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-launch fused FP8 MQA-logits + top-k prefill selection (SM100 family).
-
-One kernel (``torch.ops._C.fused_mqa_topk_prefill``) scores every visible key
-of each query row with the DeepSeek sparse-attention indexer and selects the
-row's top-k keys (k = 512, 1024 or 2048), without materializing the
-``[rows, keys]`` logits matrix that the dense path (``fp8_fp4_mqa_logits`` +
-``top_k_per_row_prefill``) needs.
-
-The kernel is persistent (one CTA per SM); each CTA owns two 8-row candidate
-slots. The scratch (~296 MiB on a 148-SM GPU) is allocated once per device and
-reused by every call, independently of the number of rows or keys. It is tuned
-for the chunks vLLM sends it (rows that see >= fused_mqa_topk_min_keys keys);
-smaller key counts are supported but not optimized.
-"""
+"""Single-launch fused FP8 MQA-logits + top-k prefill selection (SM100 family)"""
 
 import functools
 from dataclasses import dataclass
@@ -26,24 +13,23 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+# Current restrictions of the fused_mqa_topk kernel:
 FUSED_MQA_TOPK_HEADS = 32
 FUSED_MQA_TOPK_HEAD_DIM = 128
 FUSED_MQA_TOPK_TOPKS = (512, 1024, 2048)
-# Largest gathered key range a single call accepts (no row limit: the per-row
-# workspace is sized from the call, see get_fused_mqa_topk_workspace).
+# Most gathered keys (all requests of a chunk) one call accepts: candidates
+# store the key index in 20 bits (kMaxKeys in csrc/fused_mqa_topk/constants.h).
+# Chunks with more keys take the dense path; the planner never packs past it.
 FUSED_MQA_TOPK_MAX_KEYS = 1 << 20
 # Rows per fused_mqa_topk call. The kernel has no row limit, but prefill chunks above
-# 16384 rows (--max-num-batched-tokens > 16384) are not validated end to end,
+# 16384 rows (--max-num-batched-tokens > 16384) are not validated end to end yet,
 # so the chunk planner splits fused_mqa_topk chunks at this many rows.
 FUSED_MQA_TOPK_MAX_ROWS = 16384
 
 
 def fused_mqa_topk_min_keys(topk: int) -> int:
-    """Keys per row below which the dense logits + top-k path is as fast or
-    faster, so callers keep prefill chunks whose longest row sees fewer keys on
-    the dense path. B300 real captures, fused_mqa_topk vs dense: top-512 0.89x at 16K
-    keys and 1.06x at 32K; top-1024 0.93x / 1.01x; top-2048 0.92x at 32K and
-    1.13x at 64K."""
+    """Longest-row key count from which fused_mqa_topk beats the dense path
+    on SM100f (shorter chunks stay dense): 32K, or 64K for top-2048."""
     return 1 << 16 if topk > 1024 else 1 << 15
 
 
@@ -98,11 +84,7 @@ def use_fused_mqa_topk(
     full_context: bool,
     candidate_selection: bool = False,
 ) -> bool:
-    """The one eligibility rule of the fused_mqa_topk kernel, shared by the prefill
-    chunk planner and the indexer layers (each prefill chunk then also needs
-    fused_mqa_topk_chunk).
-
-    query_shape: one token's indexer queries, (heads, head_dim) = (32, 128);
+    """query_shape: one token's indexer queries, (heads, head_dim) = (32, 128);
     topk: the per-row
     top-k (pools for kpool indexers) in {512, 1024, 2048}; fp4_cache: the
     MXFP4 indexer cache (and its FP4 queries) stays dense; full_context: every

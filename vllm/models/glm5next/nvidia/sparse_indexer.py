@@ -152,8 +152,6 @@ def sparse_attn_indexer_kpool(
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
-    # Fused MQA+top-k prefill over the pools for this layer (per chunk:
-    # fused_mqa_topk_chunk). Pure DCP needs the per-shard top-k merge.
     fused_mqa_topk = use_fused_mqa_topk(
         query_shape=q_quant.shape[1:],
         topk=topk_tokens // max(index_kpool, 1),
@@ -394,8 +392,6 @@ def sparse_attn_indexer_kpool(
             elif fused_mqa_topk and fused_mqa_topk_chunk(
                 chunk.max_seqlen_k, k_quant.shape[0], select_k
             ):
-                # Single-launch fused MQA-logits + top-k over the pools: no
-                # logits buffer. It needs DCP = 1, where the merge is a no-op.
                 fused_mqa_topk_prefill(
                     q_slice,
                     k_quant,

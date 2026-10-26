@@ -486,8 +486,6 @@ def sparse_attn_indexer(
         )
         assert candidate_block_size > 0
 
-    # Fused MQA+top-k prefill for this layer (per chunk: fused_mqa_topk_chunk).
-    # Under PCP every rank ranks its rows over the whole (gathered) context.
     fused_mqa_topk = use_fused_mqa_topk(
         query_shape=q_quant.shape[1:],
         topk=topk_tokens,
@@ -720,8 +718,6 @@ def sparse_attn_indexer(
             elif fused_mqa_topk and fused_mqa_topk_chunk(
                 chunk.max_seqlen_k, k_quant.shape[0], topk_tokens
             ):
-                # Single-launch fused MQA-logits + top-k: no logits buffer. It
-                # ranks over the full context (the DCP merge below is a no-op).
                 fused_mqa_topk_prefill(
                     q_slice,
                     k_quant,
