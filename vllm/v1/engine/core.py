@@ -2568,8 +2568,11 @@ class DPEngineCoreProc(EngineCoreProc):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
-        super().profile(is_start, profile_prefix, delay_iterations, max_iterations)
+        super().profile(
+            is_start, profile_prefix, delay_iterations, max_iterations, profiler_kwargs
+        )
         if (
             envs.VLLM_ENABLE_MULTINODE_PROFILING
             and self.has_coordinator

@@ -913,7 +913,7 @@ def test_idle_dp_engine_wakes_peers_for_profile_stop():
     ):
         core.profile(False)
 
-    profile.assert_called_once_with(False, None, None, None)
+    profile.assert_called_once_with(False, None, None, None, None)
     core.output_queue.put_nowait.assert_called_once()
     client_index, output = core.output_queue.put_nowait.call_args.args[0]
     assert client_index == -1
