@@ -150,7 +150,7 @@ _maybe_promote_torch_symbols_for_rocm()
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import is_torch_equal, is_torch_equal_or_newer
+from vllm.utils.torch_version import is_torch_equal, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -526,7 +526,7 @@ def _update_scheduler_patched(self) -> None:
 # For more context, see https://github.com/vllm-project/vllm/issues/30905.
 def _patch_get_raw_stream_if_needed():
     """Workaround for TorchInductor autotune get_raw_stream() bug."""
-    from vllm.utils.torch_utils import is_torch_equal
+    from vllm.utils.torch_version import is_torch_equal
 
     # Only apply the patch for torch 2.9.0 or 2.9.1
     if is_torch_equal("2.9.0") or is_torch_equal("2.9.1"):
@@ -689,7 +689,7 @@ def _apply_fxgraphcache_pickle_patch(pickler_cls, bypass_cls):
 
 def _patch_fxgraphcache_pickle_if_needed():
     """Apply FxGraphCachePickler.dumps ValueError backport when on torch 2.10.x."""
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
+    from vllm.utils.torch_version import is_torch_equal_or_newer
 
     if not is_torch_equal_or_newer("2.10.0") or is_torch_equal_or_newer("2.11.0"):
         return
@@ -986,18 +986,3 @@ def _apply_compile_on_one_rank():
 
 
 _apply_compile_on_one_rank()
-
-# ============================================================
-# Triton Autotuner determinism
-# ============================================================
-# Replace the Autotuner.run so it always pick the first running configuration.
-# Useful to eliminate autotune variability leading to non determinism.
-if os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower() in (
-    "1",
-    "true",
-):
-    from vllm.triton_utils.force_first_config import (
-        install as _install_force_first_config,
-    )
-
-    _install_force_first_config()
