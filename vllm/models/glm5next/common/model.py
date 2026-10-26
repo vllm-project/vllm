@@ -1368,6 +1368,14 @@ def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
     return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
 
 
+def _find_unique_weight_name(params_dict, name):
+    """Resolve a checkpoint weight against the live namespace by exact suffix."""
+    if name in params_dict:
+        return name
+    matches = [candidate for candidate in params_dict if candidate.endswith(f".{name}")]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
     if "indexer.wk." not in name or "wk_weights" in name:
         return False
@@ -1376,6 +1384,11 @@ def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
     if not is_weight and not is_scale:
         return False
     layer_prefix = name.rsplit(".wk.", 1)[0]
+    fused_name = _find_unique_weight_name(
+        params_dict, f"{layer_prefix}.wk_weights_proj.weight"
+    )
+    if fused_name is None:
+        return False
     entry = buf.setdefault(layer_prefix, {})
     entry["weight" if is_weight else "scale"] = tensor
     if "weight" not in entry or "scale" not in entry:
@@ -1391,7 +1404,6 @@ def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
         out_dtype=torch.bfloat16,
     )
 
-    fused_name = f"{layer_prefix}.wk_weights_proj.weight"
     param = params_dict[fused_name]
     param.weight_loader(param, weight_bf16, 0)
     loaded_params.add(fused_name)
@@ -1468,8 +1480,13 @@ def _try_load_fp8_attn_proj(
         return False
 
     layer_prefix = name.rsplit(suffix, 1)[0]
-    target_w = f"{layer_prefix}.{target_base}.weight"
-    target_s = f"{layer_prefix}.{target_base}.weight_scale_inv"
+    target_w = _find_unique_weight_name(
+        params_dict, f"{layer_prefix}.{target_base}.weight"
+    )
+    if target_w is None:
+        return False
+    target_s = target_w.removesuffix(".weight") + ".weight_scale_inv"
+
     # If the model actually kept this projection in FP8, let the normal path
     # handle it (it has a weight_scale_inv param).
     if target_s in params_dict:
