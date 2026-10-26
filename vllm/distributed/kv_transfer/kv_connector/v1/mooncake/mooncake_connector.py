@@ -949,9 +949,7 @@ class MooncakeConnectorScheduler:
         self._reqs_not_processed: set[TransferId] = set()
 
         # Compute sliding window block counts per KV cache group.
-        self.blocks_per_sw = get_sliding_window_blocks_per_group(
-            kv_cache_config, self.block_size
-        )
+        self.blocks_per_sw = get_sliding_window_blocks_per_group(kv_cache_config)
 
     def get_sw_clipped_blocks(
         self,

@@ -137,11 +137,9 @@ class NixlBaseConnectorScheduler:
         self._heartbeat_req_engine: dict[ReqId, tuple[EngineId, ReqId]] = {}
         self._last_heartbeat_time: float = 0.0
 
-        # Blocks per KV cache group the sliding window spans, used to clip the
-        # local attention window.
-        self.blocks_per_sw = get_sliding_window_blocks_per_group(
-            kv_cache_config, self.block_size
-        )
+        # Blocks per KV cache group to transfer for the sliding window (including
+        # retained tokens), used to clip the local attention window.
+        self.blocks_per_sw = get_sliding_window_blocks_per_group(kv_cache_config)
 
         # Trailing scratch slots that mamba managers co-allocate per request
         # for speculative decoding; None for non-SSM groups.

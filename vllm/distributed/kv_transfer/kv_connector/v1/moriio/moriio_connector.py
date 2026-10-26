@@ -629,9 +629,7 @@ class MoRIIOConnectorScheduler:
                     "--disable-hybrid-kv-cache-manager."
                 )
 
-        self.blocks_per_sw = get_sliding_window_blocks_per_group(
-            kv_cache_config, self.block_size
-        )
+        self.blocks_per_sw = get_sliding_window_blocks_per_group(kv_cache_config)
         # Per-group block size over transfer_groups (matching blocks_per_sw and
         # the connector's block payload), used to clamp each full-attention group
         # to its prompt length on the WRITE save path.
