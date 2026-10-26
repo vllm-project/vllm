@@ -31,6 +31,7 @@
 
 #include "common.cuh"
 #include "constants.h"
+
 namespace fused_mqa_topk {
 using CandidateValue = uint16_t;
 constexpr uint32_t kCandidateIndexBits = 20;

@@ -84,13 +84,16 @@ def use_fused_mqa_topk(
     full_context: bool,
     candidate_selection: bool = False,
 ) -> bool:
-    """query_shape: one token's indexer queries, (heads, head_dim) = (32, 128);
-    topk: the per-row
-    top-k (pools for kpool indexers) in {512, 1024, 2048}; fp4_cache: the
-    MXFP4 indexer cache (and its FP4 queries) stays dense; full_context: every
-    rank ranks its rows over the whole context (no DCP, or PCP after the KV
-    all-gather); pure DCP needs the per-shard top-k merge; candidate_selection:
-    v4.1 two-level selection needs the logits.
+    """Whether an indexer may use the fused_mqa_topk kernel: the single
+    eligibility rule of the prefill chunk planner and the indexer layers (each
+    prefill chunk then also needs fused_mqa_topk_chunk).
+
+    query_shape: one token's indexer queries, (heads, head_dim) = (32, 128);
+    topk: the per-row top-k (pools for kpool indexers) in {512, 1024, 2048};
+    fp4_cache: the MXFP4 indexer cache (and its FP4 queries) stays dense;
+    full_context: every rank ranks its rows over the whole context (no DCP, or
+    PCP after the KV all-gather); pure DCP needs the per-shard top-k merge;
+    candidate_selection: v4.1 two-level selection needs the logits.
     """
     return (
         envs.VLLM_USE_FUSED_MQA_TOPK
@@ -103,13 +106,13 @@ def use_fused_mqa_topk(
     )
 
 
-def fused_mqa_topk_chunk(max_seqlen_k: int, keys: int, topk_tokens: int) -> bool:
+def fused_mqa_topk_chunk(max_seqlen_k: int, keys: int, topk: int) -> bool:
     """Whether a prefill chunk of a fused_mqa_topk-eligible layer takes the
     fused_mqa_topk kernel: its longest row sees at least fused_mqa_topk_min_keys
     keys (the dense path is as fast below) and its gathered keys fit the
     kernel."""
     return (
-        max_seqlen_k >= fused_mqa_topk_min_keys(topk_tokens)
+        max_seqlen_k >= fused_mqa_topk_min_keys(topk)
         and keys <= FUSED_MQA_TOPK_MAX_KEYS
     )
 

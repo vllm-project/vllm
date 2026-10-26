@@ -30,61 +30,68 @@ struct RescanBuffers {
 // levels of compact use 256 bins.
 constexpr uint32_t kSegmentBins = 1024, kRadixBins = 256;
 struct alignas(16) RescanShared {
-  float ring[2][8][kSegmentKeys];
-  uint32_t hist[8][padded_bins(kSegmentBins)], gates[8], kept[8];
-  uint32_t work[padded_bins(kRadixBins)], prefix, rank, emit_counts[8];
+  float ring[2][kBlockRows][kSegmentKeys];
+  uint32_t hist[kBlockRows][padded_bins(kSegmentBins)], gates[kBlockRows],
+      kept[kBlockRows];
+  uint32_t work[padded_bins(kRadixBins)], prefix, rank, emit_counts[kMathWarps];
   __device__ void init(uint32_t tid) {
     for (uint32_t j = tid; j < sizeof(hist) / sizeof(uint32_t);
          j += kNumThreads)
       reinterpret_cast<uint32_t*>(hist)[j] = 0;
-    if (tid < 8) {
+    if (tid < kBlockRows) {
       gates[tid] = __float_as_uint(-CUDART_INF_F);
       kept[tid] = 0;
     }
   }
 };
+// What compact_retained's emit pass keeps.
+enum class Emit { kAboveGate, kAboveCode, kTies };
+
 __device__ inline void compact_retained(RescanShared& shared,
-                                        RescanBuffers buffers, uint32_t K,
+                                        RescanBuffers buffers, uint32_t topk,
                                         uint32_t local, uint32_t row,
-                                        uint32_t tid, bool final = false) {
-  constexpr uint32_t Full = 0xffffffffu, kThreads = kMathThreads,
-                     Items = kRetainedPerRow / kThreads;
+                                        uint32_t tid,
+                                        bool compact_to_k = false) {
+  constexpr uint32_t kThreads = kMathThreads,
+                     kItems = kRetainedPerRow / kThreads;
   uint32_t lane = tid & 31, count = shared.kept[local];
   uint64_t base = (uint64_t)row * kRetainedPerRow;
-  float values[Items];
-  int indices[Items];
+  float values[kItems];
+  int indices[kItems];
 #pragma unroll
-  for (uint32_t i = 0; i < Items; ++i) {
+  for (uint32_t i = 0; i < kItems; ++i) {
     uint32_t j = tid + i * kThreads;
     values[i] = j < count ? buffers.retained[base + j] : -CUDART_INF_F;
     indices[i] = j < count ? buffers.retained_indices[base + j] : -1;
   }
-  // mode 0: values >= gate; 1: codes above threshold; 2: codes equal to it.
-  auto emit = [&](float gate, uint32_t threshold, int mode,
+  // Emits the values >= gate, the codes above threshold, or the codes equal
+  // to it (ties, up to K) to the retained set from base_offset on.
+  auto emit = [&](float gate, uint32_t threshold, Emit mode,
                   uint32_t base_offset) {
     const auto passes = [&](float v) {
       return isfinite(v) &&
-             (mode == 0 ? v >= gate
-                        : (mode == 1 ? ordered_code(v) > threshold
-                                     : ordered_code(v) == threshold));
+             (mode == Emit::kAboveGate
+                  ? v >= gate
+                  : (mode == Emit::kAboveCode ? ordered_code(v) > threshold
+                                              : ordered_code(v) == threshold));
     };
     uint32_t total = 0;
 #pragma unroll
-    for (uint32_t i = 0; i < Items; ++i) total += passes(values[i]);
-    uint32_t warp_total = __reduce_add_sync(Full, total);
+    for (uint32_t i = 0; i < kItems; ++i) total += passes(values[i]);
+    uint32_t warp_total = __reduce_add_sync(kFullMask, total);
     if (lane == 0) shared.emit_counts[tid / 32] = warp_total;
     math_wg_sync();
     uint32_t start = base_offset;
     for (uint32_t w = 0; w < tid / 32; ++w) start += shared.emit_counts[w];
     uint32_t all = 0;
-    for (uint32_t w = 0; w < 8; ++w) all += shared.emit_counts[w];
+    for (uint32_t w = 0; w < kMathWarps; ++w) all += shared.emit_counts[w];
 #pragma unroll
-    for (uint32_t i = 0; i < Items; ++i) {
+    for (uint32_t i = 0; i < kItems; ++i) {
       const float v = values[i];
       const bool pass = passes(v);
-      uint32_t mask = __ballot_sync(Full, pass),
+      uint32_t mask = __ballot_sync(kFullMask, pass),
                pos = start + __popc(mask & ((1u << lane) - 1));
-      if (pass && (mode != 2 || pos < K)) {
+      if (pass && (mode != Emit::kTies || pos < topk)) {
         buffers.retained[base + pos] = v;
         buffers.retained_indices[base + pos] = indices[i];
       }
@@ -93,7 +100,7 @@ __device__ inline void compact_retained(RescanShared& shared,
     math_wg_sync();
     return all;
   };
-  if (!final) {
+  if (!compact_to_k) {
     if (tid == 0) {
       shared.rank = 0;
     }
@@ -101,14 +108,14 @@ __device__ inline void compact_retained(RescanShared& shared,
     float gate = __uint_as_float(shared.gates[local]);
     uint32_t kept = 0;
 #pragma unroll
-    for (uint32_t i = 0; i < Items; ++i)
+    for (uint32_t i = 0; i < kItems; ++i)
       kept += isfinite(values[i]) && values[i] >= gate;
-    kept = __reduce_add_sync(Full, kept);
+    kept = __reduce_add_sync(kFullMask, kept);
     if (lane == 0) atomicAdd(&shared.rank, kept);
     math_wg_sync();
     kept = shared.rank;
-    if (kept >= K && kept <= kRetainedPerRow - kSegmentKeys) {
-      emit(gate, 0, 0, 0);
+    if (kept >= topk && kept <= kRetainedPerRow - kSegmentKeys) {
+      emit(gate, 0, Emit::kAboveGate, 0);
       math_wg_sync();
       if (tid == 0) shared.kept[local] = kept;
       math_wg_sync();
@@ -117,7 +124,7 @@ __device__ inline void compact_retained(RescanShared& shared,
   }
   if (tid == 0) {
     shared.prefix = 0;
-    shared.rank = K;
+    shared.rank = topk;
   }
   math_wg_sync();
   for (int shift = 24; shift >= 0; shift -= 8) {
@@ -126,11 +133,11 @@ __device__ inline void compact_retained(RescanShared& shared,
     math_wg_sync();
     uint32_t prefix = shared.prefix;
 #pragma unroll
-    for (uint32_t i = 0; i < Items; ++i) {
+    for (uint32_t i = 0; i < kItems; ++i) {
       uint32_t code = ordered_code(values[i]);
       bool valid = isfinite(values[i]) &&
                    (shift == 24 || (code >> (shift + 8)) == prefix);
-      uint32_t mask = __ballot_sync(Full, valid);
+      uint32_t mask = __ballot_sync(kFullMask, valid);
       if (valid) {
         uint32_t bin = (code >> shift) & 255u,
                  peers = __match_any_sync(mask, bin);
@@ -148,7 +155,7 @@ __device__ inline void compact_retained(RescanShared& shared,
       const uint32_t inclusive = warp_inclusive_scan(sum, lane);
       uint32_t before = inclusive - sum, rank = shared.rank,
                crossing =
-                   __ballot_sync(Full, before < rank && inclusive >= rank),
+                   __ballot_sync(kFullMask, before < rank && inclusive >= rank),
                chosen_lane = __ffs(crossing) - 1, chosen = 0, above = before;
       if (lane == chosen_lane) {
         for (uint32_t j = 0; j < 8; ++j) {
@@ -160,8 +167,8 @@ __device__ inline void compact_retained(RescanShared& shared,
           above += shared.work[padded_bin(bin)];
         }
       }
-      chosen = __shfl_sync(Full, chosen, chosen_lane);
-      above = __shfl_sync(Full, above, chosen_lane);
+      chosen = __shfl_sync(kFullMask, chosen, chosen_lane);
+      above = __shfl_sync(kFullMask, above, chosen_lane);
       __syncwarp();  // every lane read shared.rank above
       if (lane == 0) {
         shared.prefix = (prefix << 8) | chosen;
@@ -171,41 +178,42 @@ __device__ inline void compact_retained(RescanShared& shared,
     math_wg_sync();
   }
   uint32_t threshold = shared.prefix;
-  uint32_t greater = emit(0, threshold, 1, 0);
-  emit(0, threshold, 2, greater);
+  uint32_t greater = emit(0, threshold, Emit::kAboveCode, 0);
+  emit(0, threshold, Emit::kTies, greater);
   if (tid == 0) {
-    shared.kept[local] = K;
+    shared.kept[local] = topk;
     float gate =
         fmaxf(__uint_as_float(shared.gates[local]), ordered_float(threshold));
     atomicExch(shared.gates + local, __float_as_uint(gate));
   }
   math_wg_sync();
 }
+
 __device__ inline void merge_segment(RescanShared& shared,
-                                     RescanBuffers buffers, uint32_t K,
+                                     RescanBuffers buffers, uint32_t topk,
                                      uint32_t local, uint32_t row,
                                      uint32_t segment, uint32_t first,
-                                     uint32_t n, uint32_t tid) {
-  constexpr uint32_t Full = 0xffffffffu, Items = kSegmentKeys / 32;
-  uint32_t lane = tid, bank = segment & 1;
-  float values[Items], gate = __uint_as_float(shared.gates[local]);
+                                     uint32_t n, uint32_t lane) {
+  constexpr uint32_t kItems = kSegmentKeys / 32;
+  const uint32_t bank = segment & 1;
+  float values[kItems], gate = __uint_as_float(shared.gates[local]);
   uint32_t count = 0;
 #pragma unroll
-  for (uint32_t i = 0; i < Items; ++i) {
-    uint32_t j = tid + i * 32;
+  for (uint32_t i = 0; i < kItems; ++i) {
+    uint32_t j = lane + i * 32;
     float v = j < n ? shared.ring[bank][local][j] : -CUDART_INF_F;
     if (v <= gate) v = -CUDART_INF_F;
     values[i] = v;
     bool valid = isfinite(v);
     count += valid;
-    uint32_t mask = __ballot_sync(Full, valid);
+    uint32_t mask = __ballot_sync(kFullMask, valid);
     if (valid) {
       uint32_t bin = half_bin<6>(v), peers = __match_any_sync(mask, bin);
       if (lane == uint32_t(__ffs(peers) - 1))
         atomicAdd(&shared.hist[local][padded_bin(bin)], __popc(peers));
     }
   }
-  count = __reduce_add_sync(Full, count);
+  count = __reduce_add_sync(kFullMask, count);
   __syncwarp();
   if (count) {
     uint32_t sum = 0;
@@ -214,31 +222,33 @@ __device__ inline void merge_segment(RescanShared& shared,
       sum += shared.hist[local][padded_bin((31 - lane) * 32 + j)];
     uint32_t inclusive = warp_inclusive_scan(sum, lane);
     uint32_t before = inclusive - sum,
-             mask = __ballot_sync(Full, before < K && inclusive >= K);
+             mask =
+                 __ballot_sync(kFullMask, before < topk && inclusive >= topk);
     if (mask) {
       uint32_t chosen = __ffs(mask) - 1, group = 31 - chosen,
-               rank = K - __shfl_sync(Full, before, chosen),
+               rank = topk - __shfl_sync(kFullMask, before, chosen),
                bin = group * 32 + 31 - lane;
       sum = shared.hist[local][padded_bin(bin)];
       inclusive = warp_inclusive_scan(sum, lane);
       before = inclusive - sum;
       chosen =
-          __ffs(__ballot_sync(Full, before < rank && inclusive >= rank)) - 1;
-      bin = __shfl_sync(Full, bin, chosen);
+          __ffs(__ballot_sync(kFullMask, before < rank && inclusive >= rank)) -
+          1;
+      bin = __shfl_sync(kFullMask, bin, chosen);
       gate = fmaxf(gate, half_bin_floor<6>(bin));
       if (lane == 0) atomicExch(shared.gates + local, __float_as_uint(gate));
     }
     uint32_t written = shared.kept[local];
     uint64_t base = (uint64_t)row * kRetainedPerRow;
 #pragma unroll
-    for (uint32_t i = 0; i < Items; ++i) {
+    for (uint32_t i = 0; i < kItems; ++i) {
       float v = values[i];
       bool pass = isfinite(v) && v >= gate;
-      uint32_t mask = __ballot_sync(Full, pass),
+      uint32_t mask = __ballot_sync(kFullMask, pass),
                pos = written + __popc(mask & ((1u << lane) - 1));
       if (pass) {
         buffers.retained[base + pos] = v;
-        buffers.retained_indices[base + pos] = first + tid + i * 32;
+        buffers.retained_indices[base + pos] = first + lane + i * 32;
       }
       written += __popc(mask);
     }
@@ -253,19 +263,19 @@ __device__ inline void merge_segment(RescanShared& shared,
 // written to the output.
 struct RescanPolicy {
   static constexpr float kWeightScale = 0.5f;
-  static constexpr uint32_t kSplitsPerSegment = kSegmentKeys / 256;
+  static constexpr uint32_t kSplitsPerSegment = kSegmentKeys / kTileKeys;
   RescanShared& shared;
   RescanBuffers buffers;
   int* out;  // [rows, topk]
   uint32_t topk, query_base, row_base, segment = 0;
-  uint32_t seq_k_start[4], seq_k_end[4];
-  float gate[4];
+  uint32_t seq_k_start[kWgRows], seq_k_end[kWgRows];
+  float gate[kWgRows];
   CUTLASS_DEVICE void begin_block(const Scheduler& sched, uint32_t q_block,
                                   uint32_t base) {
     query_base = base;
     row_base = sched.get_logits_row(q_block, 0);
 #pragma unroll
-    for (uint32_t i = 0; i < 4; ++i) {
+    for (uint32_t i = 0; i < kWgRows; ++i) {
       const uint32_t row = sched.get_logits_row(q_block, base + i);
       gate[i] = -CUDART_INF_F;
       seq_k_start[i] = min(sched.cu_seq_len_k_start[row], sched.num_kv_tokens);
@@ -275,7 +285,7 @@ struct RescanPolicy {
   CUTLASS_DEVICE void begin_split(uint32_t split) {
     if (split % kSplitsPerSegment == 0) {
       __syncwarp();
-      for (uint32_t i = 0; i < 4; ++i)
+      for (uint32_t i = 0; i < kWgRows; ++i)
         gate[i] = __uint_as_float(atomicAdd(shared.gates + query_base + i, 0u));
     }
   }
@@ -284,7 +294,7 @@ struct RescanPolicy {
     const bool valid = kv_offset >= seq_k_start[i] &&
                        kv_offset < seq_k_end[i] && isfinite(bq) && bq > gate[i];
     shared.ring[segment & 1][query_base + i]
-               [(split % kSplitsPerSegment) * 256 + kv_lane] =
+               [(split % kSplitsPerSegment) * kTileKeys + kv_lane] =
         valid ? bq : -CUDART_INF_F;
   }
   CUTLASS_DEVICE void end_split(uint32_t split, uint32_t num_splits,
@@ -293,17 +303,17 @@ struct RescanPolicy {
     __threadfence_block();
     math_wg_sync();
     const uint32_t tid = threadIdx.x;
-    for (uint32_t local = 0; local < 8; ++local)
+    for (uint32_t local = 0; local < kBlockRows; ++local)
       if (shared.kept[local] > kRetainedPerRow - kSegmentKeys)
         compact_retained(shared, buffers, topk, local, row_base + local, tid);
     math_wg_sync();
     const uint32_t local = tid / 32;
     merge_segment(shared, buffers, topk, local, row_base + local, segment,
                   kv_base + (split / kSplitsPerSegment) * kSegmentKeys,
-                  (split % kSplitsPerSegment + 1) * 256, tid % 32);
+                  (split % kSplitsPerSegment + 1) * kTileKeys, tid % 32);
     math_wg_sync();
     if (split + 1 == num_splits)
-      for (uint32_t l = 0; l < 8; ++l)
+      for (uint32_t l = 0; l < kBlockRows; ++l)
         if (shared.kept[l] > topk)
           compact_retained(shared, buffers, topk, l, row_base + l, tid, true);
     math_wg_sync();

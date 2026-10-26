@@ -28,7 +28,17 @@
 
 namespace {
 
+using fused_mqa_topk::kBlockRows;
+using fused_mqa_topk::kCandidatesPerRow;
+using fused_mqa_topk::kHeadDim;
+using fused_mqa_topk::kMaxKeys;
+using fused_mqa_topk::kNumHeads;
+using fused_mqa_topk::kNumThreads;
+using fused_mqa_topk::kRetainedPerRow;
+using fused_mqa_topk::kSlotsPerCta;
+using fused_mqa_topk::kTileKeys;
 using torch::headeronly::ScalarType;
+namespace persist = fused_mqa_topk::persist;
 
 void check_cuda(cudaError_t err) {
   STD_TORCH_CHECK(err == cudaSuccess, cudaGetErrorString(err));
@@ -96,10 +106,10 @@ CUtensorMap make_2d(void* ptr, CUtensorMapDataType dt, int elem_size,
 // always < keys (launch_config sizes `groups` for that).
 CUtensorMap make_strided_kv(void* ptr, uint32_t groups, uint32_t stride) {
   CUtensorMap tm;
-  constexpr uint64_t kRowBytes = fused_mqa_topk::kHeadDim;
+  constexpr uint64_t kRowBytes = kHeadDim;
   const cuuint64_t gdims[3] = {kRowBytes, groups, stride};
   const cuuint64_t gstrides[2] = {kRowBytes * stride, kRowBytes};
-  const cuuint32_t box[3] = {kRowBytes, fused_mqa_topk::kTileKeys, 1};
+  const cuuint32_t box[3] = {kRowBytes, kTileKeys, 1};
   const cuuint32_t estrides[3] = {1, 1, 1};
   CUresult r = encode_tiled()(
       &tm, CU_TENSOR_MAP_DATA_TYPE_UINT8, 3, ptr, gdims, gstrides, box,
@@ -110,18 +120,11 @@ CUtensorMap make_strided_kv(void* ptr, uint32_t groups, uint32_t stride) {
   return tm;
 }
 
-using fused_mqa_topk::kBlockRows;
-using fused_mqa_topk::kCandidatesPerRow;
-using fused_mqa_topk::kHeadDim;
-using fused_mqa_topk::kMaxKeys;
-using fused_mqa_topk::kNumHeads;
-using fused_mqa_topk::kNumThreads;
-using fused_mqa_topk::kRetainedPerRow;
-using fused_mqa_topk::kSlotsPerCta;
-using fused_mqa_topk::kTileKeys;
-namespace persist = fused_mqa_topk::persist;
-
 // -------- launch configuration --------
+// Keys per row above which the long-context instantiations (Interval 64, 128)
+// and gate settings apply.
+constexpr uint32_t kLongContextKeys = 131072;
+
 using PersistentKernel =
     decltype(&persist::fused_mqa_topk_fp8_prefill_kernel<16, 2048>);
 
@@ -129,8 +132,9 @@ using PersistentKernel =
 // smaller key counts are supported but take the same <= 32K configuration.
 template <uint32_t TopK>
 PersistentKernel persistent_kernel(uint32_t keys) {
-  return keys <= 32768    ? persist::fused_mqa_topk_fp8_prefill_kernel<16, TopK>
-         : keys <= 131072 ? persist::fused_mqa_topk_fp8_prefill_kernel<32, TopK>
+  return keys <= 32768 ? persist::fused_mqa_topk_fp8_prefill_kernel<16, TopK>
+         : keys <= kLongContextKeys
+             ? persist::fused_mqa_topk_fp8_prefill_kernel<32, TopK>
          : keys <= 524288
              ? persist::fused_mqa_topk_fp8_prefill_kernel<64, TopK>
              : persist::fused_mqa_topk_fp8_prefill_kernel<128, TopK>;
@@ -149,12 +153,10 @@ struct LaunchConfig {
 // shared memory up to the device's opt-in limit (232448 bytes on SM100; the
 // staged selection uses it all), at least the exact rescan's layout. Sets
 // the opt-in attribute; both are computed once per device and kernel.
-inline cudaError_t kernel_smem(int device, PersistentKernel kernel, int& smem) {
-  // The recovery rescan reuses the same dynamic shared memory with the rescan's
-  // layout.
-  constexpr int kFallbackSmem =
-      int(sizeof(fused_mqa_topk::dense::SharedStorage) +
-          sizeof(persist::RescanShared));
+cudaError_t kernel_smem(int device, PersistentKernel kernel, int& smem) {
+  // The exact rescan reuses the same dynamic shared memory with its own layout.
+  constexpr int kRescanSmem = int(sizeof(fused_mqa_topk::dense::SharedStorage) +
+                                  sizeof(persist::RescanShared));
   constexpr int kMinSmem = int(
       sizeof(persist::KernelSmem) +
       std::max(sizeof(persist::HandoffRing), sizeof(persist::SampleShared)));
@@ -175,8 +177,7 @@ inline cudaError_t kernel_smem(int device, PersistentKernel kernel, int& smem) {
           cudaFuncGetAttributes(&attr, reinterpret_cast<const void*>(kernel));
       e != cudaSuccess)
     return e;
-  const int bytes =
-      std::max(kFallbackSmem, max_smem - int(attr.sharedSizeBytes));
+  const int bytes = std::max(kRescanSmem, max_smem - int(attr.sharedSizeBytes));
   if (bytes < kMinSmem) return cudaErrorInvalidConfiguration;
   if (const cudaError_t e = cudaFuncSetAttribute(
           reinterpret_cast<const void*>(kernel),
@@ -190,8 +191,8 @@ inline cudaError_t kernel_smem(int device, PersistentKernel kernel, int& smem) {
 
 // Picks the kernel instantiation, its shared memory and the gate sample for
 // `keys` keys and top-`topk` rows on `device` (the current device).
-inline cudaError_t launch_config(int device, uint32_t keys, uint32_t topk,
-                                 LaunchConfig& c) {
+cudaError_t launch_config(int device, uint32_t keys, uint32_t topk,
+                          LaunchConfig& c) {
   // The gate aims for `target` candidates per row and sizes the sample so its
   // quantile rank is `rank` (count error ~1/sqrt(rank)); a row whose count
   // falls below the top-k is rescanned exactly. Up to 128K keys the candidate
@@ -208,7 +209,7 @@ inline cudaError_t launch_config(int device, uint32_t keys, uint32_t topk,
       {{1536, 48}, {2048, 48}},  // top-1024
       {{3072, 64}, {4096, 64}},  // top-2048
   };
-  const bool long_ctx = keys > 131072;
+  const bool long_ctx = keys > kLongContextKeys;
   const Gate gate =
       kGates[topk == 512 ? 0 : (topk == 1024 ? 1 : 2)][long_ctx ? 1 : 0];
   c.sample_target = gate.target;
@@ -249,19 +250,23 @@ void check_aligned(const torch::stable::Tensor& t, const char* name) {
 
 }  // namespace
 
-// q [rows,32,128] fp8e4m3, k [keys,128] fp8e4m3, scales [keys] fp32,
-// weights [rows,32] fp32, starts/ends [rows] int32 (visible key range
-// [start,end) of each row), out [rows,K] int32 with K (the top-k) 512, 1024 or
-// 2048: key indices relative to the row's start (key - start, the
-// top_k_per_row_prefill convention), unordered; -1 padded when fewer than K
-// keys are visible. Rows that see at most K keys get them all, in order. 0 <
-// rows < 2^26, 0 < keys <= 1048576 (the last 8-row block may be partial). q, k,
-// scales, weights and out must be 16-byte aligned (TMA / vector stores).
-// starts/ends are expected in [0, keys] with start <= end; they are read as
-// uint32_t and clamped to keys, so a negative value means `keys` and an end
-// before its start means an empty row.
-// The output is exact up to ties: the gated path ranks fp24 score codes (the
-// low 8 mantissa bits dropped), the exact rescan ranks fp32 scores.
+// Inputs: q [rows,32,128] fp8e4m3, k [keys,128] fp8e4m3, scales [keys] fp32,
+// weights [rows,32] fp32, starts/ends [rows] int32 (the visible key range
+// [start,end) of each row), with 0 < rows < 2^26 and 0 < keys <= 1048576 (the
+// last 8-row block may be partial). starts/ends are expected in [0, keys] with
+// start <= end; they are read as uint32_t and clamped to keys, so a negative
+// value means `keys` and an end before its start means an empty row.
+//
+// Output: out [rows,K] int32 with K (the top-k) 512, 1024 or 2048: key indices
+// relative to the row's start (key - start, the top_k_per_row_prefill
+// convention), unordered; -1 padded when fewer than K keys are visible. Rows
+// that see at most K keys get them all, in order. Exact up to ties: the gated
+// path ranks fp24 score codes (the low 8 mantissa bits dropped), the exact
+// rescan ranks fp32 scores.
+//
+// All tensors are contiguous; q, k, scales, weights and out are 16-byte aligned
+// (TMA / vector stores).
+//
 // Workspace (caller-owned, reused across calls), with B = ceil(rows / 8) and
 // S >= 2 slots per CTA of the persistent grid (one CTA per SM):
 //   counter [2] int32 (zero between calls; the kernel leaves it zeroed, so a

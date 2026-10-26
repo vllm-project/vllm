@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
 // Per-row top-K selection of the persistent kernel's candidates, one warp per
-// row (K, the row's top-k: 512, 1024 or 2048, is a runtime value).
+// row (K = topk, the row's top-k: 512, 1024 or 2048, a runtime value).
 //
 // select_staged_row: bracket the K-th largest fp24 code with sampled codes,
 // place the codes above the bracket directly, and resolve the bracket with
@@ -23,7 +23,7 @@
 #include "constants.h"
 
 namespace fused_mqa_topk::selection {
-constexpr uint32_t Full = 0xffffffffu, kBinsLog2 = 10, kBins = 1u << kBinsLog2;
+constexpr uint32_t kBinsLog2 = 10, kBins = 1u << kBinsLog2;
 // Elements each lane keeps in flight.
 constexpr uint32_t kUnroll = 8;
 
@@ -42,7 +42,7 @@ __device__ __forceinline__ uint32_t find_bin_n(const uint32_t* hist,
   const uint32_t inclusive = warp_inclusive_scan(sum, lane);
   const uint32_t before = inclusive - sum;
   const uint32_t winner =
-      __ffs(__ballot_sync(Full, before < rank && inclusive >= rank)) - 1;
+      __ffs(__ballot_sync(kFullMask, before < rank && inclusive >= rank)) - 1;
   uint32_t chosen = 0, acc = before;
   if (lane == winner) {
     for (uint32_t j = 0; j < kPerLane; ++j) {
@@ -54,14 +54,14 @@ __device__ __forceinline__ uint32_t find_bin_n(const uint32_t* hist,
       acc += h;
     }
   }
-  above = __shfl_sync(Full, acc, winner);
-  return __shfl_sync(Full, chosen, winner);
+  above = __shfl_sync(kFullMask, acc, winner);
+  return __shfl_sync(kFullMask, chosen, winner);
 }
 
-// Requires count >= K (callers recover rows with fewer candidates).
+// Requires count >= topk (callers recover rows with fewer candidates).
 __device__ inline void select_row(uint32_t* codes, uint32_t count,
                                   const uint16_t* values, const int32_t* packed,
-                                  int32_t* out, uint32_t K, uint32_t* hist) {
+                                  int32_t* out, uint32_t topk, uint32_t* hist) {
   const uint32_t lane = threadIdx.x & 31;
   uint32_t lo = 0xffffffffu, hi = 0;
   uint32_t j = lane;
@@ -87,13 +87,13 @@ __device__ inline void select_row(uint32_t* codes, uint32_t count,
     lo = min(lo, c);
     hi = max(hi, c);
   }
-  lo = __reduce_min_sync(Full, lo);
-  hi = __reduce_max_sync(Full, hi);
+  lo = __reduce_min_sync(kFullMask, lo);
+  hi = __reduce_max_sync(kFullMask, hi);
   __syncwarp();
 
   // Current bucket: codes in [lo, lo + width). rank = elements still needed
   // from it.
-  uint32_t width = hi - lo + 1, rank = K;
+  uint32_t width = hi - lo + 1, rank = topk;
 #pragma unroll 1
   while (width > 1) {
     const uint32_t spread = (width - 1) >> kBinsLog2;
@@ -129,7 +129,7 @@ __device__ inline void select_row(uint32_t* codes, uint32_t count,
   uint32_t pos = 0;
 #pragma unroll 1
   for (uint32_t tie = 0; tie < 2; ++tie) {
-    for (uint32_t j0 = 0; j0 < count && pos < K; j0 += 32 * kUnroll) {
+    for (uint32_t j0 = 0; j0 < count && pos < topk; j0 += 32 * kUnroll) {
       bool pass[kUnroll];
       int32_t p[kUnroll];
 #pragma unroll
@@ -141,14 +141,15 @@ __device__ inline void select_row(uint32_t* codes, uint32_t count,
       }
 #pragma unroll
       for (uint32_t u = 0; u < kUnroll; ++u) {
-        const uint32_t mask = __ballot_sync(Full, pass[u]),
+        const uint32_t mask = __ballot_sync(kFullMask, pass[u]),
                        at = pos + __popc(mask & lt);
-        if (pass[u] && at < K) out[at] = candidate_decode_index(p[u]);
+        if (pass[u] && at < topk) out[at] = candidate_decode_index(p[u]);
         pos += __popc(mask);
       }
     }
   }
 }
+
 // Register samples per lane for the sampled bracket of select_staged_row.
 constexpr uint32_t kSamplesPerLane = 16;
 // Largest bracket (elements between the two sampled bounds) that
@@ -166,7 +167,8 @@ static_assert(kCandidatesPerRow <= 65536, "candidate ids must fit 16 bits");
 static_assert(768 <= kBins && kMidCap / 2 + kMidBins <= kBins,
               "selection scratch exceeds kBins words");
 
-// r-th largest (1-based) of the 512 register samples for two ranks at once
+// r-th largest (1-based) of the kNumSamples * 32 register samples (kNumSamples
+// per lane) for two ranks at once
 // (r_hi <= r_lo), via a 256-bin hi8 level and two 256-bin lo8 levels. h8: 768
 // words of scratch.
 template <uint32_t kNumSamples = kSamplesPerLane>
@@ -199,6 +201,28 @@ __device__ __forceinline__ void radix_bracket(
   __syncwarp();  // h8 is reused as the output stage
 }
 
+// Brackets the topk-th largest of the `count` staged codes between the hi16
+// codes of sample ranks expect -+ margin, where the kPerLane * 32 samples sit
+// at evenly spaced quantiles and expect is the topk-th largest's expected rank
+// among them.
+template <uint32_t kPerLane>
+__device__ __forceinline__ void sampled_bracket(const uint32_t* codes,
+                                                uint32_t count, uint32_t topk,
+                                                uint32_t margin, uint32_t* hist,
+                                                uint32_t& h_hi,
+                                                uint32_t& h_lo) {
+  constexpr uint32_t kSamples = kPerLane * 32;
+  const uint32_t lane = threadIdx.x & 31;
+  uint32_t smp[kPerLane];
+#pragma unroll
+  for (uint32_t u = 0; u < kPerLane; ++u)
+    smp[u] = codes[((u * 32 + lane) * 2 + 1) * count / (2 * kSamples)] >> 8;
+  const uint32_t expect = (topk * kSamples + count / 2) / count;
+  const uint32_t r_hi = expect > margin ? expect - margin : 1,
+                 r_lo = min(expect + margin, kSamples);
+  radix_bracket<kPerLane>(smp, r_hi, r_lo, hist, h_hi, h_lo);
+}
+
 // find_bin_n with each lane's kPer contiguous bins loaded as 16-byte vectors
 // and searched in registers (needs a 16-byte aligned histogram and kPer % 4 ==
 // 0; find_bin_n reads the bins one at a time and has neither requirement).
@@ -226,7 +250,7 @@ __device__ __forceinline__ uint32_t find_bin_v(const uint32_t* hist,
   const uint32_t inclusive = warp_inclusive_scan(sum, lane);
   const uint32_t before = inclusive - sum;
   const uint32_t winner =
-      __ffs(__ballot_sync(Full, before < rank && inclusive >= rank)) - 1;
+      __ffs(__ballot_sync(kFullMask, before < rank && inclusive >= rank)) - 1;
   // Descending walk inside the lane: bin index Bins - lane * kPer - 1 - j  <->
   // h[kPer - 1 - j].
   uint32_t acc = before, chosen = 0, found = 0, acc_at = before;
@@ -241,14 +265,14 @@ __device__ __forceinline__ uint32_t find_bin_v(const uint32_t* hist,
     }
     acc += x;
   }
-  above = __shfl_sync(Full, acc_at, winner);
-  return __shfl_sync(Full, chosen, winner);
+  above = __shfl_sync(kFullMask, acc_at, winner);
+  return __shfl_sync(kFullMask, chosen, winner);
 }
+
 // One row's global-memory candidates, staged to shared memory as
 // fp24 codes (codes must be 16-byte aligned, i.e. row offsets rounded up to 4).
 // Register budget: ptxas compiles the whole kernel to 168 regs, so every pass
-// keeps <= ~32 regs of arrays live (more spilled into the scan loop: 290K ->
-// 860K cycles/block in a first try).
+// keeps <= ~32 regs of arrays live (more spills into the scan loop).
 // Passes: stage (16-byte global loads of values / packed indices, two chunks of
 // 8 in flight per lane, to fp24 codes); hi16 bracket (radix levels over 512
 // shared-memory samples); count above / inside the bracket (16-byte shared
@@ -259,9 +283,9 @@ __device__ __forceinline__ uint32_t find_bin_v(const uint32_t* hist,
 __device__ __noinline__ inline bool select_staged_row(
     uint32_t* __restrict__ codes, uint32_t count,
     const uint16_t* __restrict__ values, const int32_t* __restrict__ packed,
-    int32_t* __restrict__ out, uint32_t K, uint32_t* hist) {
+    int32_t* __restrict__ out, uint32_t topk, uint32_t* hist) {
   const uint32_t lane = threadIdx.x & 31;
-  if (count <= K) return false;
+  if (count <= topk) return false;
   const uint32_t chunks = (count + 7) / 8;
   constexpr uint32_t kChunksInFlight = 2;
   const uint4* v4p = reinterpret_cast<const uint4*>(values);
@@ -309,33 +333,20 @@ __device__ __noinline__ inline bool select_staged_row(
   // for 10-20% of the rows at 512K-1M: 1024 samples, +-48 (~3 sd), give ~9%.
   constexpr uint32_t kFewCandidates = 3584, kMargin = 40, kWideMargin = 48;
   uint32_t h_hi, h_lo;
-  if (count <= kFewCandidates) {
-    uint32_t smp[kSamplesPerLane];
-#pragma unroll
-    for (uint32_t u = 0; u < kSamplesPerLane; ++u)
-      smp[u] = codes[(((u * 32 + lane) * 2 + 1) * count >> 10)] >> 8;
-    const uint32_t expect = (K * 512 + count / 2) / count;
-    const uint32_t r_hi = expect > kMargin ? expect - kMargin : 1,
-                   r_lo = min(expect + kMargin, 512u);
-    radix_bracket(smp, r_hi, r_lo, hist, h_hi, h_lo);
-  } else {
-    uint32_t smp[2 * kSamplesPerLane];
-#pragma unroll
-    for (uint32_t u = 0; u < 2 * kSamplesPerLane; ++u)
-      smp[u] = codes[(((u * 32 + lane) * 2 + 1) * count >> 11)] >> 8;
-    const uint32_t expect = (K * 1024 + count / 2) / count;
-    const uint32_t r_hi = expect > kWideMargin ? expect - kWideMargin : 1,
-                   r_lo = min(expect + kWideMargin, 1024u);
-    radix_bracket<2 * kSamplesPerLane>(smp, r_hi, r_lo, hist, h_hi, h_lo);
-  }
+  if (count <= kFewCandidates)
+    sampled_bracket<kSamplesPerLane>(codes, count, topk, kMargin, hist, h_hi,
+                                     h_lo);
+  else
+    sampled_bracket<2 * kSamplesPerLane>(codes, count, topk, kWideMargin, hist,
+                                         h_hi, h_lo);
   const uint4* c4p = reinterpret_cast<const uint4*>(codes);
   const uint32_t quads = (count + 3) / 4;
   const uint32_t lt = (1u << lane) - 1u;
   uint16_t* midbuf = reinterpret_cast<uint16_t*>(hist);
   uint32_t* h512 = hist + kMidCap / 2;
   // Collect with warp-ballot placement: passing lanes of one step write
-  // consecutive slots, so the global stores of the above elements are coalesced
-  // (per-lane runs were 4x slower: 32 lines/STG). Writes are bounded; the
+  // consecutive slots, so the global stores of the above elements are
+  // coalesced. Writes are bounded; the
   // bracket check follows (out may be partially written on failure: the
   // fallback select_row rewrites all K slots).
   uint32_t above = 0, mid = 0;
@@ -359,9 +370,10 @@ __device__ __noinline__ inline bool select_staged_row(
         const uint32_t e = 4 * q + k, h = w[k] >> 8;
         const bool valid = e < count;
         const bool a = valid && h > h_hi, m = valid && !a && h >= h_lo;
-        const uint32_t ma = __ballot_sync(Full, a), mm = __ballot_sync(Full, m);
+        const uint32_t ma = __ballot_sync(kFullMask, a),
+                       mm = __ballot_sync(kFullMask, m);
         const uint32_t at = above + __popc(ma & lt), mt = mid + __popc(mm & lt);
-        if (a && at < K) out[at] = candidate_decode_index(int32_t(p[k]));
+        if (a && at < topk) out[at] = candidate_decode_index(int32_t(p[k]));
         if (m && mt < kMidCap) midbuf[mt] = uint16_t(e);
         above += __popc(ma);
         mid += __popc(mm);
@@ -369,7 +381,7 @@ __device__ __noinline__ inline bool select_staged_row(
     }
   }
   __syncwarp();
-  if (above >= K || above + mid < K || mid > kMidCap) return false;
+  if (above >= topk || above + mid < topk || mid > kMidCap) return false;
   // Bracket codes per lane (register-resident).
   constexpr uint32_t kMidPerLane = kMidCap / 32;
   uint32_t mc[kMidPerLane];
@@ -379,7 +391,7 @@ __device__ __noinline__ inline bool select_staged_row(
     mc[u] = 0;
     if (i < mid) mc[u] = codes[midbuf[i]];
   }
-  uint32_t rank = K - above, base = h_lo << 8, top = h_hi << 8 | 0xffu;
+  uint32_t rank = topk - above, base = h_lo << 8, top = h_hi << 8 | 0xffu;
 #pragma unroll 1
   while (top > base) {
     const uint32_t width = top - base + 1, spread = (width - 1) / kMidBins;
@@ -406,7 +418,7 @@ __device__ __noinline__ inline bool select_staged_row(
   {
     // Ballot placement (coalesced stores): greater codes fill [above, K -
     // rank), ties [K - rank, K).
-    uint32_t pg = above, pt = K - rank;
+    uint32_t pg = above, pt = topk - rank;
 #pragma unroll
     for (uint32_t h = 0; h < 2; ++h) {
       if (h * 16 * 32 >= mid) break;
@@ -424,11 +436,11 @@ __device__ __noinline__ inline bool select_staged_row(
         if (u * 32 >= mid) break;
         const bool v = lane + 32 * u < mid;
         const bool g = v && mc[u] > th, tq = v && mc[u] == th;
-        const uint32_t mg = __ballot_sync(Full, g),
-                       mt = __ballot_sync(Full, tq);
+        const uint32_t mg = __ballot_sync(kFullMask, g),
+                       mt = __ballot_sync(kFullMask, tq);
         const uint32_t ag = pg + __popc(mg & lt), at = pt + __popc(mt & lt);
         if (g) out[ag] = candidate_decode_index(pk[j]);
-        if (tq && at < K) out[at] = candidate_decode_index(pk[j]);
+        if (tq && at < topk) out[at] = candidate_decode_index(pk[j]);
         pg += __popc(mg);
         pt += __popc(mt);
       }

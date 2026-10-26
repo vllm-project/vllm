@@ -243,7 +243,8 @@ def test_rescan_scores_only_its_block():
     block v + 4096, with row bounds read outside the rescanned block and output
     written without the relative-index conversion. Block 0 is forced into the
     rescan (a subnormal weight takes the exact path); block 4096 belongs to a
-    second request (nonzero starts, relative=True) and must stay exact.
+    second request (nonzero starts, so its indices are made relative) and must
+    stay exact.
     """
     rows, keys_per_request = 33000, 8192  # 4125 blocks of 8 rows
     split = rows // 2

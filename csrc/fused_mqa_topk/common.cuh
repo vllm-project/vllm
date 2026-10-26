@@ -17,7 +17,10 @@ namespace fused_mqa_topk {
 // Warp roles of both pipelines (persistent kernel and dense rescan): warps 0-7
 // are the math warps (two warpgroups of 4 query rows each), warps 8-11 the
 // producer / UMMA / drain warps.
-constexpr uint32_t kMathThreads = 256, kMathWgThreads = 128;
+constexpr uint32_t kMathThreads = 256, kMathWgThreads = 128,
+                   kMathWarps = kMathThreads / 32;
+// Query rows of a block each math warpgroup scores.
+constexpr uint32_t kWgRows = kBlockRows / 2;
 // Register split: ptxas gives each of the 384 threads 168 registers
 // (65536 / 384, rounded down to a multiple of 8); setmaxnreg moves them from
 // the producer / UMMA / drain warpgroup to the two math warpgroups.
@@ -48,12 +51,15 @@ __device__ __forceinline__ uint32_t padded_bin(uint32_t b) {
   return b + b / 32;
 }
 
+// Mask of all 32 lanes for the warp-synchronous intrinsics.
+constexpr uint32_t kFullMask = 0xffffffffu;
+
 // Inclusive prefix sum of v over the warp's lanes.
 __device__ __forceinline__ uint32_t warp_inclusive_scan(uint32_t v,
                                                         uint32_t lane) {
 #pragma unroll
   for (uint32_t d = 1; d < 32; d *= 2) {
-    const uint32_t u = __shfl_up_sync(0xffffffffu, v, d);
+    const uint32_t u = __shfl_up_sync(kFullMask, v, d);
     if (lane >= d) v += u;
   }
   return v;
@@ -63,6 +69,13 @@ __device__ __forceinline__ void mbar_inval(const void* b) {
   asm volatile("mbarrier.inval.shared::cta.b64 [%0];" ::"r"(
                    static_cast<uint32_t>(__cvta_generic_to_shared(b)))
                : "memory");
+}
+
+// Reads `x` with a volatile load, so the compiler re-reads it from (shared)
+// memory instead of keeping it live in a register.
+template <class T>
+__device__ __forceinline__ T volatile_load(const T& x) {
+  return *reinterpret_cast<const volatile T*>(&x);
 }
 
 // Order-preserving uint32 code of a float (higher code = larger value) and
@@ -91,10 +104,10 @@ __device__ __forceinline__ float half_bin_floor(uint32_t b) {
 }
 
 // Weighted head reduction of one row's 32 head scores s_h in two FFMA2 chains
-// (adapted from DeepGEMM's sm100_fp8_mqa_logits.cuh at 88965b078186)
 // seeded with sum_0 / sum_1: sum_h w_h * |s_h| (kWithLinear = false: the
 // persistent kernel adds the linear part on the tensor core) or
 // sum_h w_h * (s_h + |s_h|) (kWithLinear = true); relu(s) = (s + |s|) / 2.
+// Adapted from DeepGEMM's sm100_fp8_mqa_logits.cuh at 88965b078186.
 template <bool kWithLinear>
 __device__ __forceinline__ float reduce_heads(const float* s, const float* w,
                                               float2 sum_0 = {},

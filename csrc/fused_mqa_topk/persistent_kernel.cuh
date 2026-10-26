@@ -62,8 +62,8 @@ constexpr uint32_t kLinRows = 16;
 constexpr float kLinLoScale = 0x1p-8f;
 // TMEM: one UMMA per math warpgroup and KV half writes 4 rows x 32 heads plus
 // the kLinRows linear-term columns (N = 144). Slots are 160 columns apart (144
-// rounded up to a multiple of 32, kept from the experiments); the 3 slots take
-// 480 of the 512 allocated columns.
+// rounded up to a multiple of 32); the 3 slots take 480 of the 512 allocated
+// columns.
 constexpr uint32_t kUmmaN = 4 * kNumHeads + kLinRows, kSlotCols = 160;
 static_assert(kSlotCols >= kUmmaN && kSlotCols % 32 == 0);
 
@@ -101,14 +101,14 @@ __device__ __forceinline__ void compute_lin_rows(KernelSmem& sm,
                                                  uint32_t lane) {
   const uint8_t* qbytes = reinterpret_cast<const uint8_t*>(sm.q);
 #pragma unroll 1
-  for (uint32_t r = 0; r < 8; ++r) {
+  for (uint32_t r = 0; r < kBlockRows; ++r) {
     float acc[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll 8
-    for (uint32_t h = 0; h < 32; ++h) {
-      const uint32_t off = swizzle128_offset(r * 32 + h, lane * 4u);
+    for (uint32_t h = 0; h < kNumHeads; ++h) {
+      const uint32_t off = swizzle128_offset(r * kNumHeads + h, lane * 4u);
       const uint32_t packed =
           ptx::ld_shared(reinterpret_cast<const uint32_t*>(qbytes + off));
-      const float wv = ptx::ld_shared(sm.weights + r * 32 + h) * 0.5f;
+      const float wv = ptx::ld_shared(sm.weights + r * kNumHeads + h) * 0.5f;
       const __half2_raw lo = __nv_cvt_fp8x2_to_halfraw2(
           static_cast<__nv_fp8x2_storage_t>(packed & 0xffffu), __NV_E4M3);
       const __half2_raw hi = __nv_cvt_fp8x2_to_halfraw2(
@@ -124,7 +124,7 @@ __device__ __forceinline__ void compute_lin_rows(KernelSmem& sm,
                     fmaxf(fabsf(acc[2]), fabsf(acc[3])));
 #pragma unroll
     for (uint32_t o = 16; o > 0; o >>= 1)
-      m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+      m = fmaxf(m, __shfl_xor_sync(kFullMask, m, o));
     int e = -120;  // pow2 scale s >= m / 448, clamped so 1/s stays finite
     if (m > 0.f && isfinite(m)) {
       frexpf(m * (1.0f / 448.0f), &e);
@@ -134,7 +134,7 @@ __device__ __forceinline__ void compute_lin_rows(KernelSmem& sm,
     float res[4];
 #pragma unroll
     for (uint32_t dd = 0; dd < 4; ++dd) res[dd] = acc[dd] * inv_s;
-    uint8_t* lin_base = r < 4 ? sm.lin_lo : sm.lin_hi;
+    uint8_t* lin_base = r < kWgRows ? sm.lin_lo : sm.lin_hi;
 #pragma unroll
     for (uint32_t tt = 0; tt < 4; ++tt) {
       const __nv_fp8x2_storage_t c01 = __nv_cvt_float2_to_fp8x2(
@@ -160,13 +160,24 @@ __device__ __forceinline__ void compute_lin_rows(KernelSmem& sm,
         res[2] *= 1.0f / kLinLoScale;
         res[3] *= 1.0f / kLinLoScale;
       }
-      const uint32_t off = swizzle128_offset((r % 4u) * 4u + tt, lane * 4u);
+      const uint32_t off =
+          swizzle128_offset((r % kWgRows) * 4u + tt, lane * 4u);
       ptx::st_shared(
           reinterpret_cast<uint32_t*>(lin_base + off),
           static_cast<uint32_t>(c01) | (static_cast<uint32_t>(c23) << 16));
     }
     if (lane == 0) sm.lin_scale[r] = s;
   }
+}
+
+// One row's weighted head reduction seeded with its linear-term columns
+// (terms 2, 3 in units of s * 2^-8).
+__device__ __forceinline__ float reduce_heads_with_lin(const float* s,
+                                                       const float* w,
+                                                       const float* lin) {
+  return reduce_heads<false>(s, w, make_float2(lin[0], lin[1]),
+                             __fmul2_rn(make_float2(lin[2], lin[3]),
+                                        make_float2(kLinLoScale, kLinLoScale)));
 }
 
 // Gate sample state: each math warp histograms its row's sampled scores
@@ -188,15 +199,17 @@ __device__ __noinline__ inline void finish_sample_histogram(
     __syncwarp();
     return;
   }
-  // Lane l owns the 64 bins of 32-bin chunks 63-2l and 62-2l (bins descending
-  // with the lane).
-  const uint32_t* const h0 = hist + padded_bin((63 - 2 * lane) * 32);
-  const uint32_t* const h1 = hist + padded_bin((62 - 2 * lane) * 32);
+  // Lane l owns the 64 bins of 32-bin chunks kChunks-1-2l and kChunks-2-2l
+  // (bins descending with the lane).
+  constexpr uint32_t kChunks = kSampleBins / 32;
+  static_assert(kChunks == 2 * 32, "two 32-bin chunks per lane");
+  const uint32_t* const h0 = hist + padded_bin((kChunks - 1 - 2 * lane) * 32);
+  const uint32_t* const h1 = hist + padded_bin((kChunks - 2 - 2 * lane) * 32);
   uint32_t sum = 0;
 #pragma unroll 8
   for (uint32_t j = 0; j < 32; ++j) sum += h0[j] + h1[j];
   const uint32_t incl = warp_inclusive_scan(sum, lane);
-  const uint32_t tot = __shfl_sync(0xffffffffu, incl, 31);
+  const uint32_t tot = __shfl_sync(kFullMask, incl, 31);
   if (tot == 0) {
     if (lane == 0) *gate = -CUDART_INF_F;
     __syncwarp();
@@ -204,20 +217,20 @@ __device__ __noinline__ inline void finish_sample_histogram(
   }
   const uint32_t rank =
       max(1u, min(tot, (tot * target + visible - 1) / visible));
-  const uint32_t w = __ffs(__ballot_sync(0xffffffffu, incl >= rank)) - 1;
-  uint32_t above = __shfl_sync(0xffffffffu, incl - sum, w), chosen = 0;
+  const uint32_t w = __ffs(__ballot_sync(kFullMask, incl >= rank)) - 1;
+  uint32_t above = __shfl_sync(kFullMask, incl - sum, w), chosen = 0;
 #pragma unroll 1
   for (uint32_t cc = 0; cc < 2; ++cc) {
-    const uint32_t c = 63 - 2 * w - cc;
+    const uint32_t c = kChunks - 1 - 2 * w - cc;
     // Lane 0 = highest bin of the chunk.
     const uint32_t v =
         warp_inclusive_scan(hist[padded_bin(c * 32 + 31 - lane)], lane);
-    const uint32_t mask = __ballot_sync(0xffffffffu, above + v >= rank);
+    const uint32_t mask = __ballot_sync(kFullMask, above + v >= rank);
     if (mask) {
       chosen = c * 32 + 31 - (__ffs(mask) - 1);
       break;
     }
-    above += __shfl_sync(0xffffffffu, v, 31);
+    above += __shfl_sync(kFullMask, v, 31);
   }
   if (lane == 0) *gate = half_bin_floor<5>(chosen);
   __syncwarp();
@@ -233,9 +246,9 @@ static_assert(32 * kRingSlots < 65536,
 // Handoff ring: [bank][math warp][row][slot][lane] records, per-lane record
 // counts and the interval's first scan tile.
 struct alignas(16) HandoffRing {
-  uint32_t records[2][8][4][kRingSlots][32];
-  uint32_t num_records[2][8][4][32];
-  uint32_t bases[2][8];
+  uint32_t records[2][kMathWarps][kWgRows][kRingSlots][32];
+  uint32_t num_records[2][kMathWarps][kWgRows][32];
+  uint32_t bases[2][kMathWarps];
 };
 
 // samples: gate sample tiles of the block (0 when no row sees more keys than
@@ -244,7 +257,7 @@ struct ClaimHeader {
   uint32_t vblock, all_short, kv_base, splits, slot, samples;
 };
 struct ClaimEntry : ClaimHeader {
-  uint32_t starts[8], ends[8];
+  uint32_t starts[kBlockRows], ends[kBlockRows];
 };
 
 // Claim k in a producer role (warps 9-11): waits for the entry, copies its
@@ -266,15 +279,16 @@ __device__ __forceinline__ bool consume_claim(uint32_t k, TBar* claim_full,
 struct BarIdx {
   // TMEM slots, shared by the two math warpgroups (WG0 even, WG1 odd
   // positions).
-  static constexpr uint32_t NT = 3;
+  static constexpr uint32_t kTmemSlots = 3;
   static constexpr uint32_t full_q = 0, empty_q = 1, full_kv = 2,
                             empty_kv = 2 + kKVStages,
                             full_tmem = 2 + 2 * kKVStages,
-                            empty_tmem = full_tmem + NT,
-                            claim_full = empty_tmem + NT,
+                            empty_tmem = full_tmem + kTmemSlots,
+                            claim_full = empty_tmem + kTmemSlots,
                             claim_empty = claim_full + 2,
                             sel_done = claim_empty + 2, h_full = sel_done + 1,
-                            h_empty = h_full + 16, full_lin = h_empty + 16,
+                            h_empty = h_full + 2 * kMathWarps,
+                            full_lin = h_empty + 2 * kMathWarps,
                             total = full_lin + 1;
 };
 
@@ -341,7 +355,7 @@ __device__ __forceinline__ void make_relative(int* output, uint32_t topk,
                                               uint32_t t, uint32_t stride,
                                               Skip skip) {
   const uint32_t quads = topk / 4;
-  for (uint32_t i = t; i < 8 * quads; i += stride) {
+  for (uint32_t i = t; i < kBlockRows * quads; i += stride) {
     const uint32_t r = row_base + i / quads;
     if (r >= rows || skip(i / quads)) continue;
     const int s = int(starts_g[r]);
@@ -357,11 +371,13 @@ __device__ __forceinline__ void make_relative(int* output, uint32_t topk,
 }
 
 // Stores one warp's ring records of a handoff interval in its rows' candidate
-// slabs. recs = [4 rows][8 records][32 lanes]; lane l holds n[row] records of
-// each row. Each row's slots are reserved with one atomic on
+// slabs. recs = [4 rows][kRingSlots records][32 lanes]; lane l holds n[row]
+// records of each row. Each row's slots are reserved with one atomic on
 // row_counts[row_base + row]; records past kCandidatesPerRow are dropped (the
 // row's count then exceeds the cap, so its block is rescanned exactly).
 // store(row, slot, record) writes one record.
+// Written for a warpgroup's 4 rows (two 16-bit counts per word in the scan).
+static_assert(kWgRows == 4, "store_ring_records packs 4 row counts");
 template <class Store>
 __device__ __forceinline__ void store_ring_records(const uint32_t* recs,
                                                    const uint32_t (&n)[4],
@@ -372,7 +388,7 @@ __device__ __forceinline__ void store_ring_records(const uint32_t* recs,
   uint32_t my_total = 0;
 #pragma unroll
   for (uint32_t row = 0; row < 4; ++row) {
-    const uint32_t total = __reduce_add_sync(0xffffffffu, n[row]);
+    const uint32_t total = __reduce_add_sync(kFullMask, n[row]);
     if (lane == row) my_total = total;
   }
   uint32_t my_start = 0;
@@ -382,8 +398,8 @@ __device__ __forceinline__ void store_ring_records(const uint32_t* recs,
   uint32_t p01 = n[0] | (n[1] << 16), p23 = n[2] | (n[3] << 16);
 #pragma unroll
   for (int dd = 1; dd < 32; dd *= 2) {
-    const uint32_t a = __shfl_up_sync(0xffffffffu, p01, dd),
-                   b = __shfl_up_sync(0xffffffffu, p23, dd);
+    const uint32_t a = __shfl_up_sync(kFullMask, p01, dd),
+                   b = __shfl_up_sync(kFullMask, p23, dd);
     if (lane >= dd) {
       p01 += a;
       p23 += b;
@@ -392,7 +408,7 @@ __device__ __forceinline__ void store_ring_records(const uint32_t* recs,
   const uint32_t prefix[4] = {p01 & 65535u, p01 >> 16, p23 & 65535u, p23 >> 16};
 #pragma unroll
   for (uint32_t row = 0; row < 4; ++row) {
-    const uint32_t start = __shfl_sync(0xffffffffu, my_start, row);
+    const uint32_t start = __shfl_sync(kFullMask, my_start, row);
     for (uint32_t j = 0; j < n[row]; ++j) {
       const uint32_t slot = start + prefix[row] - n[row] + j;
       const uint32_t record = recs[(row * kRingSlots + j) * 32 + lane];
@@ -424,10 +440,10 @@ __device__ __forceinline__ void drain_handoff(
     HandoffRing& d, TBar* hfull, TBar* hempty, int producer, uint32_t interval,
     uint32_t row_base, int* row_counts, bool skip, Store store) {
   const int lane = threadIdx.x & 31, bank = interval & 1;
-  hfull[bank * 8 + producer].wait((interval >> 1) & 1);
+  hfull[bank * kMathWarps + producer].wait((interval >> 1) & 1);
   __syncwarp();
   if (skip) {  // self-drained by the producer
-    hempty[bank * 8 + producer].arrive();
+    hempty[bank * kMathWarps + producer].arrive();
     return;
   }
   const uint32_t base = d.bases[bank][producer];
@@ -441,7 +457,7 @@ __device__ __forceinline__ void drain_handoff(
                        store(row, slot, record, base, producer * 32 + lane);
                      });
   __syncwarp();
-  hempty[bank * 8 + producer].arrive();
+  hempty[bank * kMathWarps + producer].arrive();
 }
 
 // Interval: scan tiles per candidate handoff to the drain warps.
@@ -461,7 +477,8 @@ __launch_bounds__(kNumThreads, 1) void fused_mqa_topk_fp8_prefill_kernel(
     uint32_t* counter, int* defer_next) {
   // Compile-time: a runtime top-k costs ~0.5% in the scan (codegen).
   constexpr uint32_t topk = TopK;
-  static_assert(BarIdx::NT * kSlotCols <= 512, "TMEM slots exceed 512 columns");
+  static_assert(BarIdx::kTmemSlots * kSlotCols <= 512,
+                "TMEM slots exceed 512 columns");
   // A ring record's low byte holds (tile - interval start) * 2 + half, and the
   // handoff points use `& (Interval - 1)`.
   static_assert((Interval & (Interval - 1)) == 0 && Interval <= 128,
@@ -475,8 +492,9 @@ __launch_bounds__(kNumThreads, 1) void fused_mqa_topk_fp8_prefill_kernel(
   __shared__ alignas(8) uint64_t bar_words[BarIdx::total];
   __shared__ uint32_t tmem_ptr;
   __shared__ ClaimEntry entries[2];
-  __shared__ float gate_s[8];
-  __shared__ uint32_t sel_recover, sel_staged, sel_short, row_offset[9];
+  __shared__ float gate_s[kBlockRows];
+  __shared__ uint32_t sel_recover, sel_staged, sel_short,
+      row_offset[kBlockRows + 1];
   __shared__ uint32_t defer_head, unsafe_rows, pause_req, epoch_kind;
 
   TBar* const bars = reinterpret_cast<TBar*>(bar_words);
@@ -517,7 +535,7 @@ __launch_bounds__(kNumThreads, 1) void fused_mqa_topk_fp8_prefill_kernel(
   // loops in an epoch loop costs ~1.5 percent in the scan: uniform address math
   // is rematerialised every tile). Later epochs only run after a recovery
   // pause.
-  __shared__ uint32_t row_bounds[2][8];
+  __shared__ uint32_t row_bounds[2][kBlockRows];
   bool more = false;
   {
     constexpr uint32_t epoch = 0;

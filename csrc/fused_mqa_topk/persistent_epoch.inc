@@ -15,7 +15,7 @@ if (warp_idx == 9 && cute::elect_one_sync()) {
     full_kv[i].init(kFullKvArrivals);
     empty_kv[i].init(kMathThreads);
   }
-  for (uint32_t i = 0; i < BarIdx::NT; ++i) {
+  for (uint32_t i = 0; i < BarIdx::kTmemSlots; ++i) {
     full_tmem[i].init(1);
     empty_tmem[i].init(kMathWgThreads);
   }
@@ -25,8 +25,8 @@ if (warp_idx == 9 && cute::elect_one_sync()) {
     claim_full[i].init(32);
     claim_empty[i].init(kClaimConsumers * 32);
   }
-  sel_done.init(8);  // one lane per math warp
-  for (uint32_t i = 0; i < 16; ++i) {
+  sel_done.init(kMathWarps);  // one lane per math warp
+  for (uint32_t i = 0; i < 2 * kMathWarps; ++i) {
     h_full[i].init(32);
     h_empty[i].init(32);
   }
@@ -52,7 +52,7 @@ if (warp_idx == 8) {
     uint32_t b = 0;
     if (lane == 0)
       b = atomicOr(&pause_req, 0u) ? kPause : atomicAdd(counter, 1u);
-    b = __shfl_sync(0xffffffffu, b, 0);
+    b = __shfl_sync(kFullMask, b, 0);
     ClaimEntry& e = entries[k & 1];
     if (b >= nblocks) {
       if (lane == 0) {
@@ -77,19 +77,19 @@ if (warp_idx == 8) {
       e.ends[lane] = en;
     }
     const bool all_short =
-        __ballot_sync(0xffffffffu, lane < kBlockRows && en - st > topk) == 0;
+        __ballot_sync(kFullMask, lane < kBlockRows && en - st > topk) == 0;
     const bool gated =
-        __ballot_sync(0xffffffffu,
+        __ballot_sync(kFullMask,
                       lane < kBlockRows && en - st > sample_target) != 0;
     // KV range: rows past the end are clamped to the last valid row (DeepGEMM
     // scheduler).
     const uint32_t src = min(row_base + (lane & 7), rows - 1) - row_base;
-    uint32_t lo = __shfl_sync(0xffffffffu, st, src),
-             hi = __shfl_sync(0xffffffffu, en, src);
+    uint32_t lo = __shfl_sync(kFullMask, st, src),
+             hi = __shfl_sync(kFullMask, en, src);
 #pragma unroll
     for (int d = 4; d >= 1; d >>= 1) {
-      lo = min(lo, __shfl_xor_sync(0xffffffffu, lo, d));
-      hi = max(hi, __shfl_xor_sync(0xffffffffu, hi, d));
+      lo = min(lo, __shfl_xor_sync(kFullMask, lo, d));
+      hi = max(hi, __shfl_xor_sync(kFullMask, hi, d));
     }
     const uint32_t kv_base = lo / 4 * 4,
                    splits = (hi - kv_base + kTileKeys - 1) / kTileKeys;
@@ -120,14 +120,14 @@ if (warp_idx == 8) {
     ++n_blk;
     const int64_t row_delta = slot_row_delta(slot, row_base);
     for (uint32_t base = 0; base < splits; base += Interval, ++drain_interval) {
-      for (uint32_t p = 4; p < 8; ++p)
+      for (uint32_t p = kMathWarps / 2; p < kMathWarps; ++p)
         drain_handoff(hdata, h_full, h_empty, p, drain_interval, row_base + 4,
                       row_counts, base + Interval >= splits,
                       [&](uint32_t row, uint32_t slot2, uint32_t record,
                           uint32_t batch_base, uint32_t source) {
                         store_ring_record(vals, indices, row, row_delta, slot2,
                                           record, kv_base, batch_base,
-                                          source % 128);
+                                          source % kMathWgThreads);
                       });
     }
     cutlass::arch::NamedBarrier(kDrainSyncThreads, kBarDrain).arrive();
@@ -149,9 +149,11 @@ if (warp_idx == 8) {
       if (lane == 0 && n_blk > 0) sel_done.wait((n_blk - 1) & 1);
       __syncwarp();
       const uint32_t center = sample_stride / 2;
-      float pf[8];
+      // Per-key scales of one sample tile, kScalesPerLane per lane.
+      constexpr uint32_t kScalesPerLane = kTileKeys / 32;
+      float pf[kScalesPerLane];
 #pragma unroll
-      for (uint32_t j = 0; j < 8; ++j) {
+      for (uint32_t j = 0; j < kScalesPerLane; ++j) {
         const uint32_t g = j * 32 + lane;
         pf[j] = g < sample_groups ? __ldg(scales + g * sample_stride + center)
                                   : 0.0f;
@@ -161,11 +163,12 @@ if (warp_idx == 8) {
         // Only lane 0's ring state is maintained across blocks (the scan loop
         // runs on lane 0).
         CUTE_TIE_DECL(kv_pipe.advance(), s0, ph);
-        const uint32_t s = __shfl_sync(0xffffffffu, s0, 0);
+        const uint32_t s = __shfl_sync(kFullMask, s0, 0);
         // Every writing lane acquires and releases the stage itself.
-        empty_kv[s].wait(__shfl_sync(0xffffffffu, ph, 0) ^ 1);
+        empty_kv[s].wait(__shfl_sync(kFullMask, ph, 0) ^ 1);
 #pragma unroll
-        for (uint32_t j = 0; j < 8; ++j) sm.sf_kv[s][j * 32 + lane] = pf[j];
+        for (uint32_t j = 0; j < kScalesPerLane; ++j)
+          sm.sf_kv[s][j * 32 + lane] = pf[j];
         // Generic writes before later TMA writes of this stage.
         cutlass::arch::fence_view_async_shared();
         if (lane == 0) {
@@ -175,7 +178,7 @@ if (warp_idx == 8) {
         }
         full_kv[s].arrive();
 #pragma unroll
-        for (uint32_t j = 0; j < 8; ++j) {
+        for (uint32_t j = 0; j < kScalesPerLane; ++j) {
           const uint32_t g = (t + 1) * kTileKeys + j * 32 + lane;
           pf[j] = g < sample_groups ? __ldg(scales + g * sample_stride + center)
                                     : 0.0f;
@@ -203,7 +206,7 @@ if (warp_idx == 8) {
   cutlass::arch::warpgroup_reg_dealloc<kSpecRegs>();
   RingPipeline<1> q_pipe;
   RingPipeline<kKVStages> kv_pipe;
-  RingPipeline<BarIdx::NT> tmem_pipe;
+  RingPipeline<BarIdx::kTmemSlots> tmem_pipe;
   auto instr_desc =
       cute::UMMA::make_instr_desc<cutlass::float_e4m3_t, cutlass::float_e4m3_t,
                                   float, 128, kUmmaN, cute::UMMA::Major::K,
@@ -278,14 +281,14 @@ if (warp_idx == 8) {
     const uint32_t row_base = vblock * kBlockRows;
     const int64_t row_delta = slot_row_delta(slot, row_base);
     for (uint32_t base = 0; base < splits; base += Interval, ++drain_interval) {
-      for (uint32_t p = 0; p < 4; ++p)
+      for (uint32_t p = 0; p < kMathWarps / 2; ++p)
         drain_handoff(hdata, h_full, h_empty, p, drain_interval, row_base,
                       row_counts, base + Interval >= splits,
                       [&](uint32_t row, uint32_t slot2, uint32_t record,
                           uint32_t batch_base, uint32_t source) {
                         store_ring_record(vals, indices, row, row_delta, slot2,
                                           record, kv_base, batch_base,
-                                          source % 128);
+                                          source % kMathWgThreads);
                       });
     }
     cutlass::arch::NamedBarrier(kDrainSyncThreads, kBarDrain).arrive();
@@ -294,10 +297,10 @@ if (warp_idx == 8) {
   // -------- math warps 0-7 --------
   cutlass::arch::warpgroup_reg_alloc<kMathRegs>();
   const uint32_t math_tid = threadIdx.x;
-  const uint32_t query_base = (warp_idx / 4) * 4;
+  const uint32_t query_base = (warp_idx / 4) * kWgRows;  // 4 warps per WG
   RingPipeline<1> q_pipe;
   RingPipeline<kKVStages> kv_pipe;
-  RingPipeline<BarIdx::NT> tmem_pipe;
+  RingPipeline<BarIdx::kTmemSlots> tmem_pipe;
   // Each warpgroup consumes every second TMEM slot position (WG1 starts at 1).
   constexpr uint32_t kTmemStep = 2;
   if (warp_idx >= 4) tmem_pipe.advance(1);
@@ -329,20 +332,20 @@ if (warp_idx == 8) {
     for (uint32_t j = math_tid; j < sizeof(SampleShared) / 16;
          j += kMathThreads)
       reinterpret_cast<uint4*>(sample_smem.hist)[j] = make_uint4(0, 0, 0, 0);
-    float weights[4][32];
-    float row_s[4];  // pow2 row scale of the linear term
-    uint32_t seq_k_start[4], seq_k_end[4];
+    float weights[kWgRows][kNumHeads];
+    float row_s[kWgRows];  // pow2 row scale of the linear term
+    uint32_t seq_k_start[kWgRows], seq_k_end[kWgRows];
 #pragma unroll
-    for (uint32_t i = 0; i < 4; ++i) {
+    for (uint32_t i = 0; i < kWgRows; ++i) {
       seq_k_start[i] = e.starts[query_base + i];
       seq_k_end[i] = e.ends[query_base + i];
       // Weights in units of 1 / s_r (exact: s_r is a power of two).
       row_s[i] = sm.lin_scale[query_base + i];
       const float inv_s = 1.0f / row_s[i];
 #pragma unroll
-      for (uint32_t j = 0; j < 32; j += 4) {
+      for (uint32_t j = 0; j < kNumHeads; j += 4) {
         const float4 w4 = *reinterpret_cast<const float4*>(
-            sm.weights + (query_base + i) * 32 + j);
+            sm.weights + (query_base + i) * kNumHeads + j);
         weights[i][j] = w4.x * 0.5f * inv_s;
         weights[i][j + 1] = w4.y * 0.5f * inv_s;
         weights[i][j + 2] = w4.z * 0.5f * inv_s;
@@ -352,13 +355,13 @@ if (warp_idx == 8) {
     {
       // Weights that are subnormal, or become subnormal or infinite once
       // scaled, take the exact recovery path.
-      const float w = sm.weights[warp_idx * 32 + lane];
+      const float w = sm.weights[warp_idx * kNumHeads + lane];  // lane = head
       // 2^-125: the smallest magnitude whose half is still a normal float.
       constexpr float kMinScalable = 0x1p-125f;
       bool bad_w = w != 0.0f && fabsf(w) < kMinScalable;
       const float wr = w * 0.5f * (1.0f / sm.lin_scale[warp_idx]);
       bad_w |= (wr != 0.0f && fabsf(wr) < kMinScalable) || isinf(wr);
-      const uint32_t bad = __ballot_sync(0xffffffffu, bad_w);
+      const uint32_t bad = __ballot_sync(kFullMask, bad_w);
       if (lane == 0 && bad) atomicOr(&unsafe_rows, 1u << warp_idx);
     }
     math_wg_sync();
@@ -386,26 +389,21 @@ if (warp_idx == 8) {
         // One query row (32 TMEM columns) at a time keeps the sample loop's
         // live registers low enough to carry the scan weights through it.
 #pragma unroll
-        for (uint32_t i = 0; i < 4; ++i) {
-          float acc[32];
+        for (uint32_t i = 0; i < kWgRows; ++i) {
+          float acc[kNumHeads];
           float lin[4];
           ptx::tmem_load_32dp32b<32>(
-              tmem_stage * kSlotCols + heads_col + i * 32,
+              tmem_stage * kSlotCols + heads_col + i * kNumHeads,
               reinterpret_cast<uint32_t*>(acc));
           ptx::tmem_load_32dp32b<4>(tmem_stage * kSlotCols + lin_col + i * 4,
                                     reinterpret_cast<uint32_t*>(lin));
           cutlass::arch::fence_view_async_tmem_load();
-          if (i == 3) {
+          if (i == kWgRows - 1) {
             ptx::tcgen05_before_thread_sync();
             empty_tmem[tmem_stage].arrive();
           }
-          // The linear term seeds the sums (terms 2, 3 in units of s * 2^-8).
-          const float bq =
-              reduce_heads<false>(
-                  acc, weights[i], make_float2(lin[0], lin[1]),
-                  __fmul2_rn(make_float2(lin[2], lin[3]),
-                             make_float2(kLinLoScale, kLinLoScale))) *
-              (row_s[i] * scale_kv);
+          const float bq = reduce_heads_with_lin(acc, weights[i], lin) *
+                           (row_s[i] * scale_kv);
           const bool valid = in_view && kv_offset >= seq_k_start[i] &&
                              kv_offset < seq_k_end[i] && isfinite(bq);
           if (valid) {
@@ -422,19 +420,16 @@ if (warp_idx == 8) {
     math_wg_sync();
     // The block index is re-read from the claim entry (volatile) instead of
     // kept live across the sample loop.
-    const uint32_t scan_row_base =
-        *reinterpret_cast<const volatile uint32_t*>(&e.vblock) * kBlockRows;
+    const uint32_t scan_row_base = volatile_load(e.vblock) * kBlockRows;
 
     // ---- scan tiles ----
     const uint32_t kv_base = e.kv_base, splits = e.splits;
     const int64_t cand_row_delta = slot_row_delta(e.slot, scan_row_base);
-    float gate_score[4];
+    float gate_score[kWgRows];
 #pragma unroll
-    for (uint32_t i = 0; i < 4; ++i) {
+    for (uint32_t i = 0; i < kWgRows; ++i) {
       gate_score[i] = gate_s[query_base + i];
-      if ((*reinterpret_cast<const volatile uint32_t*>(&unsafe_rows) >>
-           (query_base + i)) &
-          1u) {
+      if ((volatile_load(unsafe_rows) >> (query_base + i)) & 1u) {
         // Unsafe weights: no key passes (+inf gate), and a count above the
         // candidate cap sends the block to the exact rescan.
         gate_score[i] = CUDART_INF_F;
@@ -446,12 +441,12 @@ if (warp_idx == 8) {
       // exact).
       gate_score[i] *= 1.0f / row_s[i];
     }
-    uint32_t lane_counts[4] = {};
+    uint32_t lane_counts[kWgRows] = {};
     uint32_t flush_base = 0;
 #pragma unroll 1
     for (uint32_t kv_split_idx = 0; kv_split_idx < splits; ++kv_split_idx) {
       if ((kv_split_idx & (Interval - 1)) == 0) {
-        h_empty[(produce_interval & 1) * 8 + warp_idx].wait(
+        h_empty[(produce_interval & 1) * kMathWarps + warp_idx].wait(
             ((produce_interval >> 1) & 1) ^ 1);
         __syncwarp();
       }
@@ -470,18 +465,20 @@ if (warp_idx == 8) {
           cutlass::arch::fence_view_async_shared();
           empty_kv[kv_stage].arrive();
         }
-        float accum_pair[2][32];
+        float accum_pair[2][kNumHeads];
         float lin_pair[2][4];
-        float bp4[4];  // row scores of the slot, in units of the row scale
+        float
+            bp4[kWgRows];  // row scores of the slot, in units of the row scale
 #pragma unroll
-        for (uint32_t pair = 0; pair < 4; pair += 2) {
+        for (uint32_t pair = 0; pair < kWgRows; pair += 2) {
           const uint32_t slot_base = tmem_stage * kSlotCols;
-          ptx::tmem_load_32dp32b<64>(slot_base + heads_col + pair * 32,
-                                     reinterpret_cast<uint32_t*>(accum_pair));
+          ptx::tmem_load_32dp32b<2 * kNumHeads>(
+              slot_base + heads_col + pair * kNumHeads,
+              reinterpret_cast<uint32_t*>(accum_pair));
           ptx::tmem_load_32dp32b<8>(slot_base + lin_col + pair * 4,
                                     reinterpret_cast<uint32_t*>(lin_pair));
           cutlass::arch::fence_view_async_tmem_load();
-          if (pair + 2 >= 4) {
+          if (pair + 2 >= kWgRows) {
             ptx::tcgen05_before_thread_sync();
             empty_tmem[tmem_stage].arrive();
           }
@@ -489,22 +486,18 @@ if (warp_idx == 8) {
           // 2, 3 in units of s * 2^-8) seeds the sums.
 #pragma unroll
           for (uint32_t r = 0; r < 2; ++r)
-            bp4[pair + r] =
-                reduce_heads<false>(
-                    accum_pair[r], weights[pair + r],
-                    make_float2(lin_pair[r][0], lin_pair[r][1]),
-                    __fmul2_rn(make_float2(lin_pair[r][2], lin_pair[r][3]),
-                               make_float2(kLinLoScale, kLinLoScale))) *
-                scale_kv;
+            bp4[pair + r] = reduce_heads_with_lin(
+                                accum_pair[r], weights[pair + r], lin_pair[r]) *
+                            scale_kv;
         }
         // One warp vote per slot: most keys fail every gate, so the common path
         // is 4 compares + 1 vote + 1 uniform branch.
         const bool any_pass =
             (bp4[0] > gate_score[0]) | (bp4[1] > gate_score[1]) |
             (bp4[2] > gate_score[2]) | (bp4[3] > gate_score[3]);
-        if (__any_sync(0xffffffffu, any_pass)) [[unlikely]] {
+        if (__any_sync(kFullMask, any_pass)) [[unlikely]] {
 #pragma unroll
-          for (uint32_t i = 0; i < 4; ++i) {
+          for (uint32_t i = 0; i < kWgRows; ++i) {
             const float bp = bp4[i];
             // Gate first; range and finiteness only for passing keys.
             if (bp > gate_score[i]) {
@@ -532,18 +525,17 @@ if (warp_idx == 8) {
           }
         }
       }
-      if ((((kv_split_idx + 1) & (Interval - 1)) == 0 ||
-           kv_split_idx + 1 == splits) &&
+      if (((kv_split_idx + 1) & (Interval - 1)) == 0 &&
           kv_split_idx + 1 != splits) {
 #pragma unroll
-        for (uint32_t i = 0; i < 4; ++i) {
+        for (uint32_t i = 0; i < kWgRows; ++i) {
           hdata.num_records[produce_interval & 1][warp_idx][i][lane] =
               lane_counts[i];
           lane_counts[i] = 0;
         }
         if (lane == 0) hdata.bases[produce_interval & 1][warp_idx] = flush_base;
         __syncwarp();
-        h_full[(produce_interval & 1) * 8 + warp_idx].arrive();
+        h_full[(produce_interval & 1) * kMathWarps + warp_idx].arrive();
         ++produce_interval;
         flush_base = kv_split_idx + 1;
       }
@@ -554,16 +546,17 @@ if (warp_idx == 8) {
       // cycle the barriers.
       const uint32_t bank = produce_interval & 1,
                      rbase = scan_row_base + query_base;
-      static_assert(sizeof(hdata.records[0][0]) == 4 * 8 * 32 * 4,
+      static_assert(sizeof(hdata.records[0][0]) ==
+                        kWgRows * kRingSlots * 32 * sizeof(uint32_t),
                     "ring record layout");
       self_drain_last(&hdata.records[bank][warp_idx][0][0][0], lane_counts[0],
                       lane_counts[1], lane_counts[2], lane_counts[3],
                       row_counts, rbase, kv_base + (math_tid % kMathWgThreads),
                       flush_base, cand_row_delta, vals, indices);
 #pragma unroll
-      for (uint32_t row = 0; row < 4; ++row) lane_counts[row] = 0;
+      for (uint32_t row = 0; row < kWgRows; ++row) lane_counts[row] = 0;
       __syncwarp();
-      h_full[bank * 8 + warp_idx].arrive();
+      h_full[bank * kMathWarps + warp_idx].arrive();
       ++produce_interval;
     }
     cutlass::arch::fence_view_async_shared();
@@ -572,8 +565,7 @@ if (warp_idx == 8) {
     cutlass::arch::NamedBarrier(kDrainSyncThreads, kBarDrain).sync();
     // ---- selection ----
     // Re-read as well (not kept live across the scan).
-    const uint32_t sel_vblock =
-                       *reinterpret_cast<const volatile uint32_t*>(&e.vblock),
+    const uint32_t sel_vblock = volatile_load(e.vblock),
                    sel_row_base = sel_vblock * kBlockRows;
     __threadfence_block();
     cutlass::arch::NamedBarrier(kMathThreads, kBarSelect).sync();
@@ -590,17 +582,22 @@ if (warp_idx == 8) {
         row_offset[r + 1] =
             row_offset[r] + (is_short ? 0 : (uint32_t(max(c, 0)) + 3u) & ~3u);
       }
+      // 32-bit byte arithmetic (sizeof is a 64-bit size_t).
+      constexpr uint32_t kWordBytes = sizeof(uint32_t);
       // Stage all 8 rows' candidates at once (1), in two rounds of 4 (2), or,
       // when they exceed the scratch, rescan exactly.
-      const uint32_t half = max(row_offset[4], row_offset[8] - row_offset[4]);
+      const uint32_t half = max(row_offset[kWgRows],
+                                row_offset[kBlockRows] - row_offset[kWgRows]);
       const uint32_t staged =
-          recover
-              ? 0u
-              : (8u * selection::kBins * 4u + row_offset[8] * 4u <= phase_bytes
-                     ? 1u
-                     : (4u * selection::kBins * 4u + half * 4u <= phase_bytes
-                            ? 2u
-                            : 0u));
+          recover ? 0u
+                  : ((kBlockRows * selection::kBins + row_offset[kBlockRows]) *
+                                 kWordBytes <=
+                             phase_bytes
+                         ? 1u
+                         : ((kWgRows * selection::kBins + half) * kWordBytes <=
+                                    phase_bytes
+                                ? 2u
+                                : 0u));
       if (staged == 0) recover = 1;
       if (recover) {
         defer_next[sel_vblock] = int(defer_head);
@@ -623,8 +620,8 @@ if (warp_idx == 8) {
     };
     if (!recover) {
       const int64_t row_delta = slot_row_delta(sel_entry.slot, sel_row_base);
-      const uint32_t per_round = sel_staged == 1 ? 8u : 4u;
-      for (uint32_t round = 0; round < 8 / per_round; ++round) {
+      const uint32_t per_round = sel_staged == 1 ? kBlockRows : kWgRows;
+      for (uint32_t round = 0; round < kBlockRows / per_round; ++round) {
         if (warp_idx < per_round) {
           const uint32_t local = round * per_round + warp_idx,
                          first = round * per_round;
@@ -701,7 +698,7 @@ if (defer_head != kTerm) {
     cur = uint32_t(__ldcg(defer_next + vblock));
     __syncthreads();
   }
-  __syncthreads();
+  // The loop ran at least once and ended with a barrier.
   if (threadIdx.x == 0) {
     defer_head = kTerm;
     pause_req = 0;
