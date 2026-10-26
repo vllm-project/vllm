@@ -292,9 +292,13 @@ def _try_get_processor_chat_template(
         ):
             if isinstance(chat_template, dict) and "default" in chat_template:
                 chat_template = chat_template["default"]
-            if isinstance(chat_template, str):
-                _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
-                return chat_template
+            if not isinstance(chat_template, str):
+                raise TypeError(
+                    "Expected a str or a dict with a 'default' entry, "
+                    f"got {type(chat_template).__name__}"
+                )
+            _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
+            return chat_template
     except Exception:
         logger.debug(
             "Failed to load AutoProcessor chat template for %s",
