@@ -2793,3 +2793,62 @@ Coordination: Maintenance's Docker-image qualification (Maintenance#165)
 answered as owner: `vllm/vllm-openai:v0.31.0` retirable (rollback is stock
 v0.32.0, not v0.31), `hyperqwen:latest` kept until a preservation tar exists
 (mutable tag), K2 overlay decision grouped with its layer sibling.
+
+### 26/10 13:41Z — back to cruise without code change (div 8.7); second mobile IP joins Q40
+
+Window 11:44:41 -> 13:41:09Z (1 h 59m28s). Read-only cycle; no engine/config
+change. Evening patch window (user GO) unchanged, after the EPF classes.
+
+| metric | cumulative at 13:41Z | delta 1 h 59m28s |
+|---|---|---|
+| fs writes | **160.239 GB** | **+11.391 GB = 5.72 GB/h** |
+| prompt tokens | 318.147 M | **+58.199 M = 29.23 M tok/h** |
+| fs reads | 91.366 GB | +4.803 GB = 2.41 GB/h |
+| cached by source | device 208.165 M / host 76.451 M / disk 6.852 M | window: device **92.1 %** / host 3.1 % / disk 1.01 % |
+| computed prefill | — | 2.202 M = **3.78 %** of window prompt |
+| prefix cache | queries 318.223 M / hits 208.165 M | window hit rate **92.4 %** |
+| preemptions | **27** | **+0 for ~3 h 45** |
+| fs chunk hits | 3,362 | +183 |
+| fs tier size | **252G** (`du`) | at the 250 GiB LRU cap |
+
+**Write ratio: 11.391 GB / 58.199 M prompt tokens = 0.196 KB/token = div 8.7**
+— the cold morning set has fully warmed back to cruise on its own, same
+configuration. The 30-min birth-time scan is correspondingly small: 61 touched
+files = **34 NEW / 0.89 GB + 27 REWRITES / 0.71 GB** (1.60 GB/30 min = 3.2
+GB/h; new blocks 55.6 % of a much smaller residual).
+
+**Disk-serving gate: window FAILS the 1.76 % floor (1.01 %), cumulative still
+passes (2.15 %).** This is the documented success-case migration, not a serving
+loss: the GPU tier serves 92.1 % of the window's prompt, computed prefill is
+3.78 %, preemptions have been flat for ~3 h 45, and fs reads still ran at
+2.41 GB/h. The floor was written to catch "the filter killed disk utility";
+hot socles living in GPU/RAM is the intended end-state. `#198` remains open
+pending tonight's measured patch window.
+
+Engine health: StartedAt still 21:48:52Z, RC=0, OOM=false, 0 OOM lines, 0
+tiering asserts/tracebacks, three containers up, health 200 in 4.2 ms. **No new
+WEDGE after 11:44:39Z**, `fail 2/2` count 0, no watchdog restart. VRAM GPU0
+22,479 / GPU1 21,508 MiB; GPU2 10,301 = expected CoursIA. `/dev/shm` 25G/63G
+(39 %). Live scheduler sample: KV 40.7 %, 3 running, 0 waiting.
+
+Traffic census (2 h, 699 req): 676 x 200, 23 x 401, **0 x 400** — no
+window+1 signature for 4+ h (still no recreate attribution claimed without
+claudish confirmation). 424 bodies in 100K-1M, Bun 426 req, no retry-loop
+signature. Security: **second unclaimed mobile IP `92.184.146.254`, 2 x 200**
+(13:04:32Z 18,678 B, 13:05:45Z 55,327 B, OpenAI/JS, key `be312daf7c1c` =
+MEDIUM) — same pool and frappe as `92.184.146.46` 3 h earlier -> **Q40
+extended to both IPs**, one claim likely covers both. All other 200-holders
+known (hairpin + internal no-XFF). nbaudit healthy at 13:06Z (Image/). G:
+write OK, ~608 GB free.
+
+**RSM-side condensation warning (not vLLM):** from 13:31Z, each deferred MCP
+tool call spawns `RooStateManagerServer` instances via `mcp-wrapper.cjs` with
+`OPENAI_BASE_URL`/keys MISSING (burst of server starts at 13:42:22Z, ~20+
+`node` processes created 13:42Z), while the resident process has the correct
+config. Context read with +/- lines before relaying; DM sent to
+`myia-ai-01:roo-extensions` (`vllm-rsm-missing-env-20261026T1341Z`). Engine
+:5002 saw no error and the dashboard tools keep working.
+
+**Host commit 89.6 %** (354.3/395.3 GB, margin 41.0 GB) — up 0.9 pt from
+11:41Z, below the 97 % danger line, above the 85 % heavy-work threshold; no
+heavy job from this lane.
