@@ -550,6 +550,7 @@ def test_flashinfer_cutedsl_w4a16_moe(m: int, workspace_init):
             expert_map=None,
             apply_router_weight_on_input=False,
         )
+        assert isinstance(output, torch.Tensor)
 
         w1_d = torch.stack(
             [
