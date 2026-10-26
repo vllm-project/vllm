@@ -503,8 +503,8 @@ def test_loads_nvfp4_mone_checkpoint_into_compact_experts(tmp_path: Path):
         substitution.novices.cpu(), weights[f"{experts}.novices"].to(torch.bfloat16)
     )
 
-    # A route to the collapsed expert contributes exactly the novice
-    # constant; the redirected physical route carries zero weight.
+    # A route to the collapsed expert is dropped: the redirected physical
+    # route carries zero weight and the novice constant is never evaluated.
     with set_forward_context(None, vllm_config):
         get_forward_context().all_moe_layers = None
         hidden_states = torch.randn(2, 32, dtype=torch.bfloat16, device="cuda")
@@ -513,7 +513,4 @@ def test_loads_nvfp4_mone_checkpoint_into_compact_experts(tmp_path: Path):
         output = routed_experts.forward_modular(
             hidden_states.clone(), topk_weights, topk_ids
         )
-    torch.testing.assert_close(
-        output,
-        weights[f"{experts}.novices"].to(torch.bfloat16).cuda().expand(2, -1),
-    )
+    torch.testing.assert_close(output, torch.zeros_like(output))
