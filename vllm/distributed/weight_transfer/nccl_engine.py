@@ -55,8 +55,9 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     """Trainer-side init info for the dense NCCL weight transfer backend.
 
     The sender opens its endpoint as NCCL rank 0, so it needs no `rank_offset`.
-    `world_size` is the full trainer+worker NCCL group size. `rank` (from
-    `TrainerInitInfo`) identifies this trainer process; rank 0 is the sender.
+    `world_size` is the transfer NCCL group size: the broadcasting trainer
+    ranks plus the inference workers. `rank` (from `TrainerInitInfo`)
+    identifies this trainer process; rank 0 is the sender.
 
     The trainer joins over a TCPStore rendezvous (`master_address` +
     `master_port`). Torch-free trainers (e.g. JAX) that cannot join a TCPStore
@@ -76,6 +77,10 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     master_address: str
     master_port: int
     world_size: int
+    """Size of the transfer NCCL group: the broadcasting trainer ranks plus the
+    inference workers. The broadcasters are rank 0 and every distinct
+    `ParamMeta.owners[0]`; other trainer ranks are not counted. A single-sender
+    source has `1 + num_workers`."""
     packed: bool = True
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
