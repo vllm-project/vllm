@@ -221,11 +221,9 @@ class NixlTransport(DataTransport):
         num_blocks: int,
         block_len: int,
     ) -> None:
-        gen = self._begin_registration(peer_id)
-        nixl_name, remote_dlist = self._build_peer_handles(
+        self.add_remote_peer_async(
             peer_id, agent_metadata, base_addr, num_blocks, block_len
-        )
-        self._publish_peer(peer_id, gen, nixl_name, remote_dlist)
+        ).result()
 
     def add_remote_peer_async(
         self,
@@ -290,6 +288,8 @@ class NixlTransport(DataTransport):
             xfer_dlist = self._agent.get_xfer_descs(block_descs, mem_type="DRAM")
             remote_dlist = self._agent.prep_xfer_dlist(nixl_name, xfer_dlist)
         except Exception:
+            # All builds run on the single-worker _reg_executor, so another
+            # registration cannot acquire this name between check and release.
             with self._peer_lock:
                 published = nixl_name in self._peer_nixl_names.values()
             if not published:

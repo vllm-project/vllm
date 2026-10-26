@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ctypes
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -52,6 +53,50 @@ def registration_transport():
 
 
 class TestNixlRegistrationRollback:
+    def test_failed_registration_keeps_newer_sync_agent(self, registration_transport):
+        """An older rollback must not remove a newer sync registration's agent."""
+        transport, agent, registered = registration_transport
+        old_preparing, release_old = threading.Event(), threading.Event()
+        new_preparing, release_new = threading.Event(), threading.Event()
+
+        def prep_xfer_dlist(*args, **kwargs):
+            if not old_preparing.is_set():
+                old_preparing.set()
+                assert release_old.wait(timeout=5)
+                raise RuntimeError("old registration failed")
+            new_preparing.set()
+            assert release_new.wait(timeout=5)
+            return MagicMock(name="remote_dlist")
+
+        agent.prep_xfer_dlist.side_effect = prep_xfer_dlist
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            try:
+                old = transport.add_remote_peer_async(
+                    "peer:1", b"peer", 0x1000, 8, 1024
+                )
+                assert old_preparing.wait(timeout=5)
+                transport.remove_remote_peer("peer:1")
+                new = caller.submit(
+                    transport.add_remote_peer, "peer:1", b"peer", 0x1000, 8, 1024
+                )
+                # Let an un-serialized sync build reach prep before rollback.
+                # A serialized build waits until the old registration finishes.
+                new_preparing.wait(timeout=1)
+                release_old.set()
+                with pytest.raises(RuntimeError, match="old registration failed"):
+                    old.result(timeout=5)
+                assert new_preparing.wait(timeout=5)
+                release_new.set()
+                new.result(timeout=5)
+
+                assert registered == {"peer"}
+                transfer = transport.write_blocks("peer:1", [0], [1])
+                assert transfer is not None
+                assert transfer in transport.poll().done
+            finally:
+                release_old.set()
+                release_new.set()
+
     @pytest.mark.parametrize("asynchronous", [False, True])
     @pytest.mark.parametrize("stage", ["get_xfer_descs", "prep_xfer_dlist"])
     def test_failed_registration_rolls_back_and_can_retry(
@@ -238,36 +283,47 @@ class TestNixlTransportWithMockedAgent:
         assert worker_threads and caller not in worker_threads
         assert transport.write_blocks("peer:1", [0], [1]) is not None
 
-    def test_registration_landing_after_remove_is_discarded(self):
+    @pytest.mark.parametrize("asynchronous", [False, True])
+    def test_registration_landing_after_remove_is_discarded(
+        self, registration_transport, asynchronous
+    ):
         """A late registration must not revive a peer that was reaped.
 
         The session is torn down and remove_remote_peer runs while the
         worker is still building descriptors; publishing afterwards would
         leave a registered peer with no session and leak its handles.
         """
-        transport = self._make_transport()
+        transport, agent, registered = registration_transport
         building = threading.Event()
         release = threading.Event()
 
         def blocking_prep(*args, **kwargs):
             building.set()
-            release.wait(timeout=5)
+            assert release.wait(timeout=5)
             return MagicMock(name="remote_dlist")
 
-        transport._agent.prep_xfer_dlist.side_effect = blocking_prep
-
-        future = transport.add_remote_peer_async("peer:1", b"meta", 0x1000, 8, 1024)
-        assert building.wait(timeout=5)
-        transport.remove_remote_peer("peer:1")
-        release.set()
-
-        with pytest.raises(RuntimeError, match="superseded"):
-            future.result(timeout=5)
-        assert "peer:1" not in transport._remote_dlists
+        agent.prep_xfer_dlist.side_effect = blocking_prep
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            try:
+                future = (
+                    transport.add_remote_peer_async("peer:1", b"peer", 0x1000, 8, 1024)
+                    if asynchronous
+                    else caller.submit(
+                        transport.add_remote_peer, "peer:1", b"peer", 0x1000, 8, 1024
+                    )
+                )
+                assert building.wait(timeout=5)
+                transport.remove_remote_peer("peer:1")
+                release.set()
+                with pytest.raises(RuntimeError, match="superseded"):
+                    future.result(timeout=5)
+            finally:
+                release.set()
+        assert registered == set()
         assert transport.write_blocks("peer:1", [0], [1]) is None
         # The handles the worker built were released rather than leaked.
-        assert transport._agent.release_dlist_handle.called
-        assert transport._agent.remove_remote_agent.called
+        assert agent.release_dlist_handle.called
+        assert agent.remove_remote_agent.called
 
     def test_write_blocks_returns_none_for_unknown_peer(self):
         """write_blocks returns None if peer not registered."""
