@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
+import pickle
 import struct
+
+import pytest
 
 from vllm import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.token_buffer import TokenBuffer
 
 
 def test_request_decodes_int32_token_bytes_from_rust_frontend():
@@ -42,6 +46,27 @@ def test_request_token_ids_hold_no_int_references():
     for tokens in (request.prompt_token_ids, request._all_token_ids):
         assert not any(isinstance(r, int) for r in gc.get_referents(tokens))
     assert request.all_token_ids.copy() == list(range(1024))
+
+
+@pytest.mark.parametrize("protocol", range(pickle.HIGHEST_PROTOCOL + 1))
+def test_token_buffer_pickles(protocol):
+    tokens = TokenBuffer([1, 70000, 129279])
+    restored = pickle.loads(pickle.dumps(tokens, protocol=protocol))
+    assert type(restored) is TokenBuffer and restored == [1, 70000, 129279]
+
+
+def test_token_buffer_pickles_out_of_band_snapshot():
+    """With protocol 5 the ids go out of band, as a snapshot that can outlive the
+    pickling (zmq sends without copying) while the buffer keeps growing."""
+    tokens = TokenBuffer(range(1000))
+    oob: list[pickle.PickleBuffer] = []
+    data = pickle.dumps(tokens, protocol=5, buffer_callback=oob.append)
+    assert len(oob) == 1 and len(data) < 200
+    held = oob[0].raw()
+    tokens.append(1000)  # Would raise BufferError if `held` were a view of tokens.
+    assert len(held) == 4000
+    restored = pickle.loads(data, buffers=[bytearray(held)])
+    assert type(restored) is TokenBuffer and restored == list(range(1000))
 
 
 def test_request_status_fmt_str():

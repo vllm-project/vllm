@@ -3,7 +3,10 @@
 
 from array import array
 from collections.abc import Iterable
+from pickle import PickleBuffer
 from typing import TYPE_CHECKING
+
+from vllm.utils.collection_utils import as_list
 
 if TYPE_CHECKING:
     # Type-checked as the list it reads like.
@@ -33,7 +36,7 @@ else:
 
         def __eq__(self, other):
             if isinstance(other, (list, tuple)):
-                return len(self) == len(other) and self.tolist() == list(other)
+                return len(self) == len(other) and self.tolist() == as_list(other)
             return array.__eq__(self, other)
 
         def __ne__(self, other):
@@ -43,10 +46,10 @@ else:
         __hash__ = None  # type: ignore[assignment]
 
         def __add__(self, other):
-            return self.tolist() + list(other)
+            return self.tolist() + as_list(other)
 
         def __radd__(self, other):
-            return list(other) + self.tolist()
+            return as_list(other) + self.tolist()
 
         def __iadd__(self, other):
             self.extend(other)
@@ -54,3 +57,21 @@ else:
 
         def copy(self) -> list[int]:
             return self.tolist()
+
+        def __reduce_ex__(self, protocol):
+            # array's own reduction copies the ids into a bytes object that is
+            # then copied into the pickle stream. With protocol 5 a PickleBuffer
+            # lets MessageQueue send large buffers out of band instead. It wraps
+            # a snapshot rather than self: zmq can still hold the buffer after
+            # enqueue returns, and a buffer that is exported cannot be resized.
+            data = self.tobytes()
+            return _rebuild_token_buffer, (
+                PickleBuffer(data) if protocol >= 5 else data,
+            )
+
+    def _rebuild_token_buffer(data) -> TokenBuffer:
+        # data is whatever object pickle was given for the buffer, e.g. bytes,
+        # a bytearray or a zmq.Frame, so copy out of it rather than keep it.
+        tokens = TokenBuffer()
+        tokens.frombytes(data)
+        return tokens
