@@ -35,7 +35,7 @@
 
 import math
 from types import SimpleNamespace
-from typing import Optional, Tuple, Type
+from typing import Optional, Tuple, Type, cast
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -549,17 +549,15 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
 
         # Reinterpret contiguous [B, S_q, H] as [H, S_q, B]
         # Input stride: (S_q*H, H, 1) → Target: (1, H, S_q*H)
-        lse = (
-            cute.make_tensor(
-                lse.iterator,
+        if cutlass.const_expr(not self.skip_lse):
+            lse_in = cast(cute.Tensor, lse)
+            lse = cute.make_tensor(
+                lse_in.iterator,
                 cute.make_layout(
-                    (lse.shape[2], lse.shape[1], lse.shape[0]),
-                    stride=(lse.stride[2], lse.stride[1], lse.stride[0]),
+                    (lse_in.shape[2], lse_in.shape[1], lse_in.shape[0]),
+                    stride=(lse_in.stride[2], lse_in.stride[1], lse_in.stride[0]),
                 ),
             )
-            if not self.skip_lse
-            else None
-        )
 
         o_reduction = o
         lse_reduction = lse
@@ -592,11 +590,16 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 ),
             )
             if cutlass.const_expr(not self.skip_lse):
+                lse_in = cast(cute.Tensor, lse)
                 lse = cute.make_tensor(
-                    lse.iterator,
+                    lse_in.iterator,
                     cute.make_layout(
-                        (m_tile, num_q_tiles, lse.shape[2]),
-                        stride=(lse.stride[0], m_tile * lse.stride[0], lse.stride[2]),
+                        (m_tile, num_q_tiles, lse_in.shape[2]),
+                        stride=(
+                            lse_in.stride[0],
+                            m_tile * lse_in.stride[0],
+                            lse_in.stride[2],
+                        ),
                     ),
                 )
 
@@ -633,15 +636,20 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             o = _fold_sq_4d(o)
             if cutlass.const_expr(not self.skip_lse):
                 # [H, S_q, B] → [H*F, S_q/F, B], where F=fold_sq_factor.
-                fold_groups = lse.shape[1] // self.fold_sq_factor
+                lse_in = cast(cute.Tensor, lse)
+                fold_groups = lse_in.shape[1] // self.fold_sq_factor
                 lse = cute.make_tensor(
-                    lse.iterator,
+                    lse_in.iterator,
                     cute.make_layout(
-                        (lse.shape[0] * self.fold_sq_factor, fold_groups, lse.shape[2]),
+                        (
+                            lse_in.shape[0] * self.fold_sq_factor,
+                            fold_groups,
+                            lse_in.shape[2],
+                        ),
                         stride=(
-                            lse.stride[0],
-                            lse.stride[1] * self.fold_sq_factor,
-                            lse.stride[2],
+                            lse_in.stride[0],
+                            lse_in.stride[1] * self.fold_sq_factor,
+                            lse_in.stride[2],
                         ),
                     ),
                 )
@@ -660,9 +668,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             workspace,
         )
 
-        c_latent_tranpose_layout = cute.select(c_latent.layout, mode=[1, 0, 2])
+        c_latent_transpose_layout = cute.select(c_latent.layout, mode=[1, 0, 2])
         c_latent_transpose = cute.make_tensor(
-            c_latent.iterator, c_latent_tranpose_layout
+            c_latent.iterator, c_latent_transpose_layout
         )
 
         self.q_major_mode = OperandMajorMode.K
@@ -1179,9 +1187,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         kc_rope_smem_layout_staged: cute.ComposedLayout,
         p_smem_layout_staged: cute.ComposedLayout,
         vc_smem_layout_staged: cute.ComposedLayout,
-        kc_latent_smem_layout_for_tma: Optional[cute.ComposedLayout],
-        kc_rope_smem_layout_for_tma: Optional[cute.ComposedLayout],
-        vc_smem_layout_for_tma: Optional[cute.ComposedLayout],
+        kc_latent_smem_layout_for_tma: cute.ComposedLayout,
+        kc_rope_smem_layout_for_tma: cute.ComposedLayout,
+        vc_smem_layout_for_tma: cute.ComposedLayout,
         cta_layout_vmnk: cute.Layout,
         tile_sched_params: MLAStaticTileSchedulerParams,
         work_list: Optional[cute.Tensor],
@@ -1968,7 +1976,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 )
                 if tidx == 0 and d_tile_idx == 0:
                     if cutlass.const_expr(not self.skip_lse):
-                        mLSE[blk_coord[0], blk_coord[1], blk_coord[2]] = global_lse
+                        cast(cute.Tensor, mLSE)[
+                            blk_coord[0], blk_coord[1], blk_coord[2]
+                        ] = global_lse
                 # store the scale to shared memory, including output_scale (0 past local_split_kv)
                 for i in cutlass.range_constexpr(lse_per_thread):
                     split_kv_idx = tidx + i * self.threads_per_warp
@@ -2668,7 +2678,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             )
         # use real tmem ptr for tStS
         tStS_staged = cute.make_tensor(common_params.tmem_ptr, tStS_staged_fake.layout)
-        tOtO_shape = (
+        tO_tmem_shape = (
             common_params.tiled_mma_ws_epi.partition_shape_C(
                 (128, self.mma_pv_tiler[1] // self.warps_in_n)
             )
@@ -2678,20 +2688,20 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             )
         )
         # mma O has 1 stage.
-        tOtO = (
-            common_params.tiled_mma_ws_epi.make_fragment_C(tOtO_shape)
+        tO_tmem = (
+            common_params.tiled_mma_ws_epi.make_fragment_C(tO_tmem_shape)
             if cutlass.const_expr(self.use_m64_ws)
-            else tiled_mma_pv.make_fragment_C(tOtO_shape)
+            else tiled_mma_pv.make_fragment_C(tO_tmem_shape)
         )
-        tOtO_layout = cute.append(
-            tOtO.layout,
+        tO_tmem_layout = cute.append(
+            tO_tmem.layout,
             cute.make_layout(
                 common_params.L // self.mma_pv_tiler[1],
                 stride=self.pv_acc_cols,
             ),
         )
-        tOtO_staged = cute.make_tensor(
-            tStS_staged.iterator + self.tmem_o_offset, tOtO_layout
+        tO_tmem_staged = cute.make_tensor(
+            tStS_staged.iterator + self.tmem_o_offset, tO_tmem_layout
         )
 
         # set more parameters
@@ -2702,7 +2712,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         qk_params.tStS_staged = tStS_staged
         pv_params.tOrP = tOrP
         pv_params.tOrVC = tOrVC
-        pv_params.tOtO_staged = tOtO_staged
+        pv_params.tO_tmem_staged = tO_tmem_staged
 
         # mma O accumulates on K, so the accumulate flag is set to False once before all K blocks.
         tiled_mma_pv.set(tcgen05.Field.ACCUMULATE, False)
@@ -2982,7 +2992,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 tiled_mma_pv.set(tcgen05.Field.ACCUMULATE, accumulate_flag)
                 for p_stage in cutlass.range_constexpr(self.iterations_pv_k):
                     load_v_pipeline.consumer_wait(load_v_consumer_state)
-                    tOtO_m64 = pv_params.tOtO_staged[None, None, None, acc_stage]
+                    tO_tmem_m64 = pv_params.tO_tmem_staged[None, None, None, acc_stage]
                     for k_block in cutlass.range_constexpr(pv_params.tOrP.shape[2]):
                         idesc = (
                             _IDESC_F8E4M3_F32_M64_N256_AK_BMN_1CTA
@@ -2999,7 +3009,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                             pv_params.tOrVC[
                                 None, None, k_block, ((acc_stage, p_stage), 0)
                             ],
-                            tOtO_m64,
+                            tO_tmem_m64,
                             Int32(idesc),
                             Boolean(
                                 accumulate_flag
@@ -3020,11 +3030,11 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 mma_o_pipeline.producer_acquire(mma_o_producer_state)
                 tiled_mma_pv.set(tcgen05.Field.ACCUMULATE, accumulate_flag)
                 for p_stage in range(self.iterations_pv_k):
-                    tOtO = pv_params.tOtO_staged[None, None, None, acc_stage]
+                    tO_tmem = pv_params.tO_tmem_staged[None, None, None, acc_stage]
                     for k_block in cutlass.range_constexpr(pv_params.tOrP.shape[2]):
                         cute.gemm(
                             tiled_mma_pv,
-                            tOtO,
+                            tO_tmem,
                             pv_params.tOrP[
                                 None,
                                 None,
@@ -3034,7 +3044,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                             pv_params.tOrVC[
                                 None, None, k_block, ((acc_stage, p_stage), vc_stage)
                             ],
-                            tOtO,
+                            tO_tmem,
                         )
                         tiled_mma_pv.set(tcgen05.Field.ACCUMULATE, True)
 
@@ -3901,28 +3911,28 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         """
 
         if cutlass.const_expr(self.use_m64_ws):
-            tOtO_shape = common_params.tiled_mma_ws_epi.partition_shape_C(
+            tO_tmem_shape = common_params.tiled_mma_ws_epi.partition_shape_C(
                 (128, self.mma_pv_tiler[1] // self.warps_in_n)
             )
-            tOtO = common_params.tiled_mma_ws_epi.make_fragment_C(tOtO_shape)
+            tO_tmem = common_params.tiled_mma_ws_epi.make_fragment_C(tO_tmem_shape)
         else:
-            tOtO_shape = tiled_mma_pv.partition_shape_C(
+            tO_tmem_shape = tiled_mma_pv.partition_shape_C(
                 cute.select(self.mma_pv_tiler, mode=[0, 1])
             )
-            tOtO = tiled_mma_pv.make_fragment_C(tOtO_shape)
-        tOtO_layout = cute.append(
-            tOtO.layout,
+            tO_tmem = tiled_mma_pv.make_fragment_C(tO_tmem_shape)
+        tO_tmem_layout = cute.append(
+            tO_tmem.layout,
             cute.make_layout(
                 common_params.L // self.mma_pv_tiler[1],
                 stride=self.pv_acc_cols,
             ),
         )
-        tOtO = cute.make_tensor(
-            common_params.tmem_ptr + self.tmem_o_offset, tOtO_layout
+        tO_tmem = cute.make_tensor(
+            common_params.tmem_ptr + self.tmem_o_offset, tO_tmem_layout
         )
-        tOtO = tOtO[None, None, None, iter_n]
+        tO_tmem = tO_tmem[None, None, None, iter_n]
 
-        tAcc = tOtO[(None, None), 0, 0]
+        tAcc = tO_tmem[(None, None), 0, 0]
 
         if cutlass.const_expr(self.use_m64_ws):
             if cutlass.const_expr(self.mma_pv_tiler[1] == 256):
@@ -4289,11 +4299,11 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                     tTR_rAcc.fill(0.0)
 
             if cutlass.const_expr(self.use_m64_ws):
-                num_epi_subtiles = cute.size(tTR_rAcc, mode=[2])
+                num_epi_sub_tiles = cute.size(tTR_rAcc, mode=[2])
                 vec_size = cute.size(cute.select(tTR_rAcc.shape, mode=[0]))
                 tR2G_rO_src = cute.make_fragment_like(tTR_gO, store_dtype)
 
-                for d_sub in cutlass.range_constexpr(num_epi_subtiles):
+                for d_sub in cutlass.range_constexpr(num_epi_sub_tiles):
                     for i in cutlass.range(vec_size, vectorize=True, unroll_full=True):
                         tTR_rAcc[i, 0, d_sub] = tTR_rAcc[i, 0, d_sub] * epi_scale
 
@@ -4459,10 +4469,10 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         Subtiled elementwise + STG: elementwise of subtile N+1 overlaps with STG
         of subtile N via instruction-level parallelism. tTR_rAcc shape:
         ((V, 1), 1, rest_tiles) where rest_tiles = 4, split along mode 2."""
-        num_epi_subtiles = tTR_rAcc.shape[2]
+        num_epi_sub_tiles = tTR_rAcc.shape[2]
         vec_size = cute.size(cute.select(tTR_rAcc.shape, mode=[0]))
         tR2G_rO_src = cute.make_fragment_like(tTR_gO, store_dtype)
-        for d_sub in cutlass.range_constexpr(num_epi_subtiles):
+        for d_sub in cutlass.range_constexpr(num_epi_sub_tiles):
             for i in cutlass.range(vec_size, vectorize=True, unroll_full=True):
                 tTR_rAcc[i, 0, d_sub] = tTR_rAcc[i, 0, d_sub] * scale
             # vectorized load/to/store (scalar f32->fp8 cvt is not supported)

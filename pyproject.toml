@@ -123,13 +123,6 @@ module = "tests.*"
 disable_error_code = ["arg-type", "assignment"]
 enable_error_code = ["method-assign"]
 
-[[tool.mypy.overrides]]
-module = [
-    "vllm.models.kimi_k3.nvidia.kv_balanced_mla.kernel",
-    "vllm.models.kimi_k3.nvidia.kv_balanced_mla.helpers",
-]
-ignore_errors = true
-
 [tool.pytest.ini_options]
 markers = [
     "slow_test",
@@ -210,9 +203,7 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "rust/src/chat/src/renderer/deepseek_v32/fixtures/*", "rust/src/parser/**",
     "rust/src/text/src/output/decoded.rs",
     "rust/src/tokenizer/src/incremental.rs",
-    "recipes/models/*",
-    "vllm/models/kimi_k3/nvidia/kv_balanced_mla/kernel.py",
-    "vllm/models/kimi_k3/nvidia/kv_balanced_mla/helpers.py"]
+    "recipes/models/*"]
 ignore-hidden = false
 
 [tool.typos.default]
