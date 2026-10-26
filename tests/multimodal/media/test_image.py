@@ -325,7 +325,8 @@ def test_image_broken_png_rejected():
             RuntimeError,
         ),
         # BLP2 header with compression 0, which Pillow does not know:
-        # BLPFormatError, a NotImplementedError, from image.load().
+        # BLPFormatError, a NotImplementedError and so a RuntimeError, from
+        # image.load().
         (
             b"BLP2"
             + struct.pack("<i", 0)
