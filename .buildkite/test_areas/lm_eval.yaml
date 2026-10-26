@@ -1191,59 +1191,61 @@ steps:
       commands:
       - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
-- label: ":nvidia: (B200) [Nightly] Qwen3.8-Flash-Next-FP8 Accuracy Eval"
-  key: accuracy-eval-qwen3-8-flash-next-fp8-b200
-  timeout_in_minutes: 60
-  device: b200-k8s
-  optional: true
-  num_devices: 4
-  source_file_dependencies:
-  - csrc/gdn/
-  - tests/evals/qwen4_exp/
-  - vllm/model_executor/layers/mamba/
-  - vllm/models/qwen4_exp/
-  - vllm/v1/attention/backends/short_conv_attn.py
-  commands:
-    - uv pip install --system 'evalscope==1.10.0'
-    - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-b200.txt
+# Disabled until evalscope transitive dependencies are locked.
+# - label: ":nvidia: (B200) [Nightly] Qwen3.8-Flash-Next-FP8 Accuracy Eval"
+#   key: accuracy-eval-qwen3-8-flash-next-fp8-b200
+#   timeout_in_minutes: 60
+#   device: b200-k8s
+#   optional: true
+#   num_devices: 4
+#   source_file_dependencies:
+#   - csrc/gdn/
+#   - tests/evals/qwen4_exp/
+#   - vllm/model_executor/layers/mamba/
+#   - vllm/models/qwen4_exp/
+#   - vllm/v1/attention/backends/short_conv_attn.py
+#   commands:
+#     - uv pip install --system 'evalscope==1.10.0'
+#     - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-b200.txt
 
-- label: ":nvidia: (H200) [Nightly] Qwen3.8-Flash-Next-FP8 Accuracy Eval"
-  key: accuracy-eval-qwen3-8-flash-next-fp8-h200
-  timeout_in_minutes: 60
-  device: h200
-  optional: true
-  num_devices: 4
-  source_file_dependencies:
-  - csrc/gdn/
-  - tests/evals/qwen4_exp/
-  - vllm/model_executor/layers/mamba/
-  - vllm/models/qwen4_exp/
-  - vllm/v1/attention/backends/short_conv_attn.py
-  commands:
-    - uv pip install --system 'evalscope==1.10.0'
-    - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-h200.txt
-  mirror:
-    amd:
-      label: ":amd: (MI355) Qwen3.8-Flash-Next-FP8 Accuracy Eval"
-      dind: false
-      device: mi355_4
-      num_devices: 4
-      timeout_in_minutes: 105
-      working_dir: /vllm-workspace/tests
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - csrc/gdn/
-      - tests/evals/qwen4_exp/
-      - vllm/model_executor/layers/mamba/
-      - vllm/models/qwen4_exp/
-      - vllm/v1/attention/backends/short_conv_attn.py
-      - vllm/platforms/rocm.py
-      env:
-        VLLM_WORKER_MULTIPROC_METHOD: "spawn"
-      commands:
-      - uv pip install --system 'evalscope==1.10.0'
-      - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-rocm.txt
+# Disabled until evalscope transitive dependencies are locked.
+# - label: ":nvidia: (H200) [Nightly] Qwen3.8-Flash-Next-FP8 Accuracy Eval"
+#   key: accuracy-eval-qwen3-8-flash-next-fp8-h200
+#   timeout_in_minutes: 60
+#   device: h200
+#   optional: true
+#   num_devices: 4
+#   source_file_dependencies:
+#   - csrc/gdn/
+#   - tests/evals/qwen4_exp/
+#   - vllm/model_executor/layers/mamba/
+#   - vllm/models/qwen4_exp/
+#   - vllm/v1/attention/backends/short_conv_attn.py
+#   commands:
+#     - uv pip install --system 'evalscope==1.10.0'
+#     - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-h200.txt
+#   mirror:
+#     amd:
+#       label: ":amd: (MI355) Qwen3.8-Flash-Next-FP8 Accuracy Eval"
+#       dind: false
+#       device: mi355_4
+#       num_devices: 4
+#       timeout_in_minutes: 105
+#       working_dir: /vllm-workspace/tests
+#       depends_on:
+#       - image-build-amd
+#       source_file_dependencies:
+#       - csrc/gdn/
+#       - tests/evals/qwen4_exp/
+#       - vllm/model_executor/layers/mamba/
+#       - vllm/models/qwen4_exp/
+#       - vllm/v1/attention/backends/short_conv_attn.py
+#       - vllm/platforms/rocm.py
+#       env:
+#         VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+#       commands:
+#       - uv pip install --system 'evalscope==1.10.0'
+#       - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-rocm.txt
 
 - label: ":nvidia: (DGX Spark) [Nightly] GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-spark
@@ -1326,9 +1328,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
   mirror:
     amd:
-      label: ":amd: (MI300) LM Eval KV-Offload Medium"
+      label: ":amd: (MI355) LM Eval KV-Offload Medium"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
