@@ -170,7 +170,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         root_dir = f"{prefix}/" if prefix else ""
         # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self._file_mapper = FileMapper.from_offloading_spec(
-            root_dir, offloading_spec, parallel_agnostic=True
+            root_dir,
+            offloading_spec,
+            blocks_per_file=offloading_spec.blocks_per_chunk,
+            parallel_agnostic=True,
         )
         self._next_obj_dev_id: int = 1  # dev_id=0 is reserved for _exists() probes
 
