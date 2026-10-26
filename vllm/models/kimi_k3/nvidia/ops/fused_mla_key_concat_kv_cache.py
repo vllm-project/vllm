@@ -20,16 +20,11 @@ The optional ``positions`` / ``cos_sin_cache`` pair enables GPT-J-style RoPE
 inside the epilogue. Omitting both keeps the K3 NoPE fast path. The kernels use
 Programmatic Dependent Launch to overlap the tail of the producing GEMMs on
 sm_90+.
-
-``fused_mla_kv_pack_quant_fp8`` is the chunked-context fp8 pack as the layers
-call it: FlashInfer's ``concat_mla_kv_quant_fp8`` where that has a fused kernel
-(Blackwell), this file's ``fused_mla_kv_concat_quant_fp8`` everywhere else.
 """
-
-import functools
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_concat_mla_kv_quant_fp8
 
 
@@ -220,40 +215,19 @@ def fused_mla_kv_concat_quant_fp8(
     return k_fp8, v_fp8
 
 
-@functools.cache
-def _flashinfer_kv_pack_serves(device: str) -> bool:
-    """FlashInfer's fused K/V pack backends are built for compute capability
-    10.x (the hand-written kernel for every 10.x part, the Cake programs for
-    10.0 and 10.3); elsewhere its API would take a slow composable path."""
-    major, _ = torch.cuda.get_device_capability(torch.device(device))
-    return major == 10
-
-
 def fused_mla_kv_pack_quant_fp8(
     kv_nope: torch.Tensor,  # [T, H, nope + v] bf16/fp16, the kv_b_proj output
     k_pe: torch.Tensor,  # [T, rope] or [T, 1, rope], kv_nope's dtype or fp8
     *,
     nope_dim: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """The chunked-context fp8 K/V pack, ``(k_fp8, v_fp8)`` from the whole
-    ``kv_b_proj`` output, served by FlashInfer where it has a fused kernel.
-
-    ``flashinfer.concat_mla_kv_quant_fp8`` (a hand-written kernel for 12 local
-    heads, generated Cake programs for other head counts) is 1.07x to 1.29x
-    faster than ``fused_mla_kv_concat_quant_fp8`` on GB300 / B200 across
-    chunk sizes and head counts, and produces the same bytes. It is used when
-    FlashInfer exposes it, the inputs are bf16, ``kv_nope`` is contiguous and
-    the device is compute capability 10.x; every other call (fp16 inputs, an
-    fp8 ``k_pe`` gathered from a plain fp8 cache, pre-Blackwell parts, no
-    FlashInfer) runs this file's kernel.
-    """
+    """fp8 ``(k, v)`` context pack; FlashInfer's kernel for bf16 on SM10x."""
     if (
         kv_nope.dtype == torch.bfloat16
         and k_pe.dtype == torch.bfloat16
         and kv_nope.is_contiguous()
-        and kv_nope.is_cuda
+        and current_platform.is_device_capability_family(100)
         and has_flashinfer_concat_mla_kv_quant_fp8()
-        and _flashinfer_kv_pack_serves(str(kv_nope.device))
     ):
         from flashinfer import concat_mla_kv_quant_fp8
 

@@ -312,70 +312,12 @@ def test_decode_epilogue_row_split_boundary(num_tokens: int) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# fused_mla_kv_pack_quant_fp8: FlashInfer's fused pack where it serves, this
-# file's kernel everywhere else; both produce the same bytes.
-# ---------------------------------------------------------------------------
-def _flashinfer_kv_pack_available() -> bool:
-    return (
-        has_flashinfer_concat_mla_kv_quant_fp8()
-        and torch.cuda.get_device_capability()[0] == 10
-    )
-
-
-@pytest.mark.parametrize("num_heads", [3, 12])
-@torch.inference_mode()
-def test_context_kv_pack_routes_to_flashinfer_only_where_it_serves(
-    monkeypatch: pytest.MonkeyPatch, num_heads: int
-) -> None:
-    """bf16 inputs on a served device go to FlashInfer with the nope split; an
-    fp8 ``k_pe`` (plain fp8 cache), or a device FlashInfer does not serve, run
-    vLLM's kernel."""
-    import sys
-    from types import SimpleNamespace
-
-    import vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache as ops
-
-    calls: list[dict] = []
-
-    def fake_concat(kv_nope, k_pe, **kwargs):
-        calls.append(dict(kwargs, k_pe_shape=tuple(k_pe.shape)))
-        k_nope, v = kv_nope.split((kwargs["nope_dim"], 128), dim=-1)
-        return fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
-
-    monkeypatch.setitem(
-        sys.modules, "flashinfer", SimpleNamespace(concat_mla_kv_quant_fp8=fake_concat)
-    )
-    monkeypatch.setattr(ops, "has_flashinfer_concat_mla_kv_quant_fp8", lambda: True)
-    monkeypatch.setattr(ops, "_flashinfer_kv_pack_serves", lambda device: True)
-
-    _, k_pe, _ = _strided_context_inputs(
-        _NUM_TOKENS, num_heads, torch.bfloat16, k_pe_fp8=False
-    )
-    kv_nope = _randn(_NUM_TOKENS, num_heads, 256)
-    k_nope, v = kv_nope.split((128, 128), dim=-1)
-    k_expected, v_expected = fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
-    k, v = fused_mla_kv_pack_quant_fp8(kv_nope, k_pe, nope_dim=128)
-    assert calls == [{"nope_dim": 128, "k_pe_shape": (_NUM_TOKENS, 64)}]
-    torch.testing.assert_close(k.view(torch.uint8), k_expected.view(torch.uint8))
-    torch.testing.assert_close(v.view(torch.uint8), v_expected.view(torch.uint8))
-
-    # An fp8 k_pe is outside FlashInfer's contract: vLLM's kernel, no call.
-    _, k_pe_fp8, _ = _strided_context_inputs(
-        _NUM_TOKENS, num_heads, torch.bfloat16, k_pe_fp8=True
-    )
-    fused_mla_kv_pack_quant_fp8(kv_nope, k_pe_fp8, nope_dim=128)
-    assert len(calls) == 1
-
-    # A device FlashInfer does not serve: vLLM's kernel, no call.
-    monkeypatch.setattr(ops, "_flashinfer_kv_pack_serves", lambda device: False)
-    fused_mla_kv_pack_quant_fp8(kv_nope, k_pe, nope_dim=128)
-    assert len(calls) == 1
-
-
 @pytest.mark.skipif(
-    not _flashinfer_kv_pack_available(),
-    reason="needs a FlashInfer with concat_mla_kv_quant_fp8 on compute capability 10.x",
+    not (
+        current_platform.is_device_capability_family(100)
+        and has_flashinfer_concat_mla_kv_quant_fp8()
+    ),
+    reason="needs FlashInfer's concat_mla_kv_quant_fp8 on SM10x",
 )
 @pytest.mark.parametrize("num_tokens", [1, 257, 2048])
 @pytest.mark.parametrize("num_heads", [3, 12, 24])
@@ -383,8 +325,6 @@ def test_context_kv_pack_routes_to_flashinfer_only_where_it_serves(
 def test_context_kv_pack_flashinfer_route_is_byte_exact(
     num_tokens: int, num_heads: int
 ) -> None:
-    """On hardware FlashInfer serves, its pack must be byte-identical to
-    vLLM's kernel for the real prefill-context layouts."""
     kv_nope = _randn(num_tokens, num_heads, 256)
     _, k_pe, _ = _strided_context_inputs(num_tokens, num_heads, torch.bfloat16, False)
     k_nope, v = kv_nope.split((128, 128), dim=-1)

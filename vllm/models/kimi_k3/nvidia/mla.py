@@ -807,11 +807,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         Per chunk the impl gathers the paged latent, up-projects it, then casts
         and concatenates K (and casts V) in two or three more launches. Here that
         tail is one fused kernel per chunk -- ``fused_mla_kv_concat`` for a bf16
-        query, ``fused_mla_kv_pack_quant_fp8`` when the query is fp8 (FlashInfer's
-        ``concat_mla_kv_quant_fp8`` on Blackwell, vLLM's
-        ``fused_mla_kv_concat_quant_fp8`` elsewhere) -- reading the strided
-        ``kv_b_proj`` output in place and writing a contiguous key, so only the
-        gather and ``kv_b_proj`` remain.
+        query, ``fused_mla_kv_pack_quant_fp8`` when the query is fp8 -- reading
+        the strided ``kv_b_proj`` output in place and writing a contiguous key, so
+        only the gather and ``kv_b_proj`` remain.
 
         The impl's query cast is gone as well: ``q`` already carries
         ``prefill.q_data_type`` because the new-token epilogue quantized it. The

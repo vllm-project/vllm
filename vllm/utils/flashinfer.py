@@ -165,8 +165,7 @@ def has_flashinfer_bf16_gemm() -> bool:
 
 @functools.cache
 def has_flashinfer_concat_mla_kv_quant_fp8() -> bool:
-    """Return whether FlashInfer exposes the fused MLA context K/V pack + fp8
-    cast API (``flashinfer.concat_mla_kv_quant_fp8``)."""
+    """Return whether FlashInfer exposes the MLA K/V pack + fp8 cast API."""
     if not has_flashinfer():
         return False
     mod = _get_submodule("flashinfer")
