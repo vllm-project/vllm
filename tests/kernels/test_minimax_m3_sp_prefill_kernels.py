@@ -53,7 +53,7 @@ def test_quant_pack_unpack(rows: int, world: int):
     assert torch.equal(got_scales, blocks[:, :, d:].reshape(rows, -1))
 
 
-@pytest.mark.parametrize("rows", [7, 2048])
+@pytest.mark.parametrize("rows", [7, 64, 2048])
 @pytest.mark.parametrize("with_residual", [False, True])
 @pytest.mark.parametrize("moe", [False, True])
 def test_rmsnorm_mx(rows: int, with_residual: bool, moe: bool):
@@ -95,3 +95,28 @@ def test_rmsnorm_mx(rows: int, with_residual: bool, moe: bool):
     assert torch.equal(res, res_ref)
     assert torch.equal(q.view(torch.uint8), q_ref.view(torch.uint8))
     assert torch.equal(s, s_ref.view(torch.uint8))
+
+
+def test_mxfp8_kernel_lookup_finds_quark_scheme_kernel():
+    """ModelOpt keeps the MXFP8 kernel on the quant method, Quark on the
+    layer's scheme; the pre-quantized-input paths must find both."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+    from vllm.models.minimax_m3.amd import sp_prefill
+
+    kernel = RocmDotScaledMxfp8LinearKernel(
+        Mxfp8LinearLayerConfig(weight_shape=(256, 256))
+    )
+    quark = SimpleNamespace(
+        quant_method=SimpleNamespace(), scheme=SimpleNamespace(ocp_mx_linear=kernel)
+    )
+    modelopt = SimpleNamespace(quant_method=SimpleNamespace(kernel=kernel))
+    assert sp_prefill._mxfp8_kernel(quark) is kernel
+    assert sp_prefill._mxfp8_kernel(modelopt) is kernel
+    assert sp_prefill._mxfp8_kernel(SimpleNamespace(quant_method=None)) is None
