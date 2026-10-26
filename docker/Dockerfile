@@ -1313,6 +1313,12 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
+# The CUDA base image only requests the `compute,utility` driver
+# capabilities. The NVDEC video decoder (`VLLM_VIDEO_LOADER_BACKEND=
+# pynvvideocodec`, PyNvVideoCodec is installed below) also needs the
+# driver's video libraries (libnvcuvid, libnvidia-encode), which the
+# NVIDIA container runtime mounts only for the `video` capability.
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \
     VLLM_BUILD_PIPELINE=${VLLM_BUILD_PIPELINE:-local} \
     VLLM_BUILD_URL=${VLLM_BUILD_URL:-} \

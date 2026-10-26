@@ -937,6 +937,17 @@ decoders.
     process while model serving runs in the engine process, so multiple CUDA
     processes share the same GPU. Configure and start MPS before starting vLLM.
 
+!!! note
+    NVDEC needs the driver's video libraries (`libnvcuvid`, `libnvidia-encode`).
+    The NVIDIA container runtime mounts them only when the `video` driver
+    capability is requested; the official `vllm/vllm-openai` image sets
+    `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` for this reason. When you
+    build your own image from a CUDA base image (which requests only
+    `compute,utility`), set that variable in the image or pass
+    `-e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` to `docker run`;
+    otherwise decoder creation fails with
+    `Failed to load NVENC library: libnvidia-encode.so.1`.
+
 You must also set a positive `--mm-ipc-gpu-memory-gb` value to reserve VRAM for
 video decoding. vLLM carves this budget out of the memory available to the KV
 cache and uses it to bound concurrent frontend decode allocations. If the
