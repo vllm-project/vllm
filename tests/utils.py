@@ -286,6 +286,13 @@ class RemoteVLLMServer:
                 f"{pre_gb:.2f} GB"
             )
 
+        # A single instantaneous reading can catch a transient
+        # noisy-neighbor VRAM spike on a shared physical GPU. Wait for
+        # the reading to stabilize before handing it to vLLM's startup
+        # free-memory check, and use the stabilized value as the
+        # baseline for the post-shutdown release check too.
+        self._pre_server_gpu_memory = self._wait_for_gpu_memory_stable()
+
         self._start_server(model, vllm_serve_args, env_dict)
         self._register_active_server()
         max_wait_seconds = max_wait_seconds or 480
@@ -587,6 +594,57 @@ class RemoteVLLMServer:
             print(f"[RemoteOpenAIServer] Could not query GPU memory: {e}")
             return None
         return None
+
+    def _wait_for_gpu_memory_stable(
+        self, timeout: float = 30.0, poll_interval: float = 2.0
+    ) -> float | None:
+        """Poll GPU memory until two consecutive readings agree.
+
+        Used right before server start to smooth over a transient
+        noisy-neighbor VRAM spike on a shared physical GPU: a reading
+        taken at a single instant can be an outlier, and feeding that
+        straight into vLLM's hard startup free-memory check causes a
+        spurious failure. This is a best-effort pre-flight smoothing
+        step, not a hard gate -- if the reading never stabilizes within
+        ``timeout``, we just return the last value seen instead of
+        raising (raising here would only convert a flaky failure into a
+        different flaky failure).
+        """
+        used = self._get_gpu_memory_used()
+        if used is None:
+            return None  # Can't query, nothing to do
+
+        # Small absolute tolerance for two readings to be considered
+        # the same; analogous in spirit to the aggregate driver/context
+        # headroom used in `_wait_for_gpu_memory_release`.
+        tolerance_bytes = 0.5 * 1024 * 1024 * 1024
+
+        start = time.time()
+        iterations = 0
+        while time.time() - start < timeout:
+            time.sleep(poll_interval)
+            iterations += 1
+            next_used = self._get_gpu_memory_used()
+            if next_used is None:
+                return used  # Can't query anymore, use last good reading
+
+            if abs(next_used - used) <= tolerance_bytes:
+                if iterations > 1:
+                    print(
+                        f"[{type(self).__name__}] GPU memory stabilized at "
+                        f"{next_used / 1e9:.2f} GB after "
+                        f"{time.time() - start:.1f}s"
+                    )
+                return next_used
+
+            used = next_used
+
+        print(
+            f"[{type(self).__name__}] GPU memory did not stabilize within "
+            f"{timeout:.0f}s, proceeding with last reading: "
+            f"{used / 1e9:.2f} GB"
+        )
+        return used
 
     def _wait_for_gpu_memory_release(
         self, timeout: float = 120.0, log_interval: float = 10.0
