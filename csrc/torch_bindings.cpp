@@ -577,6 +577,22 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? state_indices=None, Tensor? has_initial_state=None) -> ()");
 #endif
 
+#ifdef VLLM_ENABLE_BEAM_KERNELS
+  // Beam's MNNVL all-reduce fused with its norm-residual-norm boundary.
+  ops.def(
+      "beam_allreduce_norm(Tensor input, Tensor residual, "
+      "Tensor? post_weight, Tensor? next_weight, Tensor! hidden, "
+      "Tensor!? normalized, int buffer_ptrs, Tensor! flags, "
+      "int multicast_ptr, int local_ptr, int world, int rank, "
+      "float post_eps, float next_eps, float x_scale, float r_scale, "
+      "bool post_norm, bool next_norm, bool scaled, bool one_shot, "
+      "bool small_batch, Tensor? experts, Tensor? expert_weights, "
+      "Tensor? permutation, float routed_scale) -> ()");
+  ops.def(
+      "beam_allreduce(Tensor input, Tensor! output, int buffer_ptrs, "
+      "Tensor! flags, int multicast_ptr, int world, int rank) -> ()");
+#endif
+
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.def(
       "kimi_k3_attn_res("
@@ -874,6 +890,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("fused_kda_chunk", TORCH_BOX(&fused_kda_chunk));
 #endif
 
+#ifdef VLLM_ENABLE_BEAM_KERNELS
+  ops.impl("beam_allreduce_norm", TORCH_BOX(&beam_allreduce_norm));
+  ops.impl("beam_allreduce", TORCH_BOX(&beam_allreduce));
+#endif
+
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.impl("kimi_k3_attn_res", TORCH_BOX(&kimi_k3_attn_res));
 #endif
@@ -1000,7 +1021,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor! kv_cache,"
       "                     Tensor slot_mapping,"
       "                     str kv_cache_dtype,"
-      "                     Tensor scale) -> ()");
+      "                     Tensor scale,"
+      "                     bool skip_scale=False) -> ()");
 
   // Grouped concat_and_cache_mla across all layers. Each layer's cache base
   // pointer and optional plain-FP8 scale are read from device tensors.
