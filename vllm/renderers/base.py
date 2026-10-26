@@ -679,11 +679,17 @@ class BaseRenderer(ABC, Generic[_T]):
             and params.add_special_tokens
             and params.truncate_prompt_tokens is not None
             and params.truncation_side is not None
-            and tokenizer.num_special_tokens_to_add() > 0
         )
         if want_special_tokens_mask:
             kwargs = {**kwargs, "return_special_tokens_mask": True}
-        encoding = tokenizer(prompt["prompt"], **kwargs)
+        try:
+            encoding = tokenizer(prompt["prompt"], **kwargs)
+        except (TypeError, NotImplementedError):
+            if not want_special_tokens_mask:
+                raise
+            # Custom tokenizers may not support this optional output.
+            kwargs.pop("return_special_tokens_mask")
+            encoding = tokenizer(prompt["prompt"], **kwargs)
         tokenized = self._build_tokens_prompt(
             encoding["input_ids"],
             prompt,
@@ -691,10 +697,12 @@ class BaseRenderer(ABC, Generic[_T]):
         )
         if (
             want_special_tokens_mask
+            and (special_tokens_mask := encoding.get("special_tokens_mask")) is not None
+            and len(special_tokens_mask) == len(tokenized["prompt_token_ids"])
             and params._truncation_slice(tokenizer, len(tokenized["prompt_token_ids"]))
             is not None
         ):
-            tokenized["prompt_special_tokens_mask"] = encoding["special_tokens_mask"]
+            tokenized["prompt_special_tokens_mask"] = special_tokens_mask
         return tokenized
 
     @staticmethod
