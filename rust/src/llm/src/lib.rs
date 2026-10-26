@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::num::NonZeroU32;
+use std::time::Duration;
+
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_metrics::METRICS;
 
 mod error;
 mod inflight;
@@ -14,10 +18,10 @@ mod request_metrics;
 pub use error::{Error, Result};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
-    GenerateOutputStreamExt, GeneratePromptInfo, TokenUsage,
+    GenerateOutputStreamExt, GeneratePromptInfo, TokenUsage, WeightVersionSpan,
 };
 pub use request::GenerateRequest;
-pub use request_metrics::current_unix_timestamp_secs;
+pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 
 use crate::inflight::InflightRequests;
@@ -34,6 +38,7 @@ use crate::request_metrics::RequestMetricsTracker;
 pub struct Llm {
     client: EngineCoreClient,
     randomize_request_id: bool,
+    stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
     inflight: InflightRequests,
 }
@@ -42,25 +47,26 @@ impl Llm {
     /// Create a new minimal LLM facade from an already connected engine-core
     /// client.
     pub fn new(client: EngineCoreClient) -> Self {
+        METRICS.request.set_max_model_len(client.max_model_len());
         Self {
             client,
             randomize_request_id: true,
+            stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
         }
     }
 
-    /// Enable or disable periodic stats logging.
-    pub fn with_log_stats(mut self, enabled: bool) -> Self {
-        if enabled {
-            let stats_logger = StatsLogger::start(
+    /// Enable periodic stats logging at the given interval, or disable it with
+    /// `None`. A zero interval logs as often as the timer allows.
+    pub fn with_log_stats(mut self, interval: Option<Duration>) -> Self {
+        self.stats_logger = interval.map(|interval| {
+            StatsLogger::start(
                 self.client.model_name().to_string(),
                 self.client.engine_indices(),
-            );
-            self.stats_logger = Some(stats_logger);
-        } else {
-            self.stats_logger = None;
-        }
+                interval,
+            )
+        });
         self
     }
 
@@ -68,6 +74,14 @@ impl Llm {
     /// engine-core.
     pub fn with_request_id_randomization(mut self, enabled: bool) -> Self {
         self.randomize_request_id = enabled;
+        self
+    }
+
+    /// Set the frontend-level stream interval: the minimum number of newly
+    /// generated tokens batched into each streamed output after the first one.
+    /// A request's own `stream_interval` can only raise it.
+    pub fn with_stream_interval(mut self, stream_interval: NonZeroU32) -> Self {
+        self.stream_interval = stream_interval;
         self
     }
 
@@ -79,7 +93,16 @@ impl Llm {
 
     /// Submit one tokenized generate request and return a per-request output
     /// stream.
-    pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateOutputStream> {
+    pub async fn generate(&self, mut req: GenerateRequest) -> Result<GenerateOutputStream> {
+        // Clamp the request's stream interval to the frontend-level one, like
+        // Python. Engine-core ignores it; the client batches deliveries by it.
+        let stream_interval = (req.sampling_params.stream_interval)
+            .map_or(self.stream_interval, |interval| {
+                interval.max(self.stream_interval)
+            });
+        req.sampling_params.stream_interval =
+            (stream_interval > NonZeroU32::MIN).then_some(stream_interval);
+
         let prepared = req.prepare(self.randomize_request_id)?;
         let prompt_token_ids = prepared.prompt_token_ids().into();
         let external_request_id = prepared

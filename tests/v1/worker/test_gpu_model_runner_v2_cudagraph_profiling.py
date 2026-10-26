@@ -23,6 +23,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu import cudagraph_utils as cgu
 from vllm.v1.worker.gpu import model_runner as mrv2
+from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
 GLOBAL_POOL = "global-pool"
 THROWAWAY_POOL = "throwaway-pool"
@@ -52,6 +53,7 @@ def _make_profiling_runner(
     cudagraph_mode: CUDAGraphMode,
     *,
     needs_capture: bool = True,
+    encoder_only: bool = False,
     num_full_descs: int = 3,
     piecewise_only: bool = False,
     captured_bytes: int = 7 << 30,
@@ -64,6 +66,10 @@ def _make_profiling_runner(
     )
     runner.vllm_config = SimpleNamespace()
     runner.kv_caches = []
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=encoder_only,
+        encoder_runner=SimpleNamespace(has_cudagraph=lambda: encoder_only),
+    )
 
     events: list[str] = []
     runner.events = events
@@ -119,7 +125,8 @@ def _patch_module(monkeypatch) -> None:
 
 def test_profile_cudagraph_memory_disabled_returns_zero(monkeypatch):
     _patch_module(monkeypatch)
-    runner = _make_profiling_runner(CUDAGraphMode.NONE)
+    runner = _make_profiling_runner(CUDAGraphMode.NONE, needs_capture=False)
+    runner.cudagraph_manager = None
 
     result = cgu.profile_cudagraph_memory(runner)
 
@@ -166,19 +173,36 @@ def test_profile_cudagraph_memory_samples_and_extrapolates(monkeypatch):
     )
 
 
-def test_profile_cudagraph_memory_piecewise_only_returns_measured(monkeypatch):
+@pytest.mark.parametrize(
+    "mode", [CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.NONE, CUDAGraphMode.FULL]
+)
+def test_profile_cudagraph_memory_piecewise_or_encoder_returns_measured(
+    monkeypatch, mode
+):
     _patch_module(monkeypatch)
     captured_bytes = 5 << 30
     runner = _make_profiling_runner(
-        CUDAGraphMode.FULL_AND_PIECEWISE,
-        piecewise_only=True,
+        mode,
+        needs_capture=mode == CUDAGraphMode.FULL_AND_PIECEWISE,
+        encoder_only=mode != CUDAGraphMode.FULL_AND_PIECEWISE,
+        piecewise_only=mode == CUDAGraphMode.FULL_AND_PIECEWISE,
         captured_bytes=captured_bytes,
     )
+    manager = runner.cudagraph_manager
+    runner.cudagraph_manager = None
+
+    def init(r):
+        r.events.append("init")
+        r.cudagraph_manager = manager
+
+    monkeypatch.setattr(cgu, "_init_minimal_kv_cache_for_profiling", init)
 
     result = cgu.profile_cudagraph_memory(runner)
 
     # No FULL graphs to sample or extrapolate: the measured delta is exact.
     assert result == captured_bytes
+    assert runner.events == ["init", "capture", "teardown"]
+    assert _FakePlatform._global_graph_pool == GLOBAL_POOL
 
 
 def test_profile_cudagraph_memory_measures_kv_cache_init_apart(monkeypatch):
@@ -202,9 +226,16 @@ def test_profile_cudagraph_memory_measures_kv_cache_init_apart(monkeypatch):
     assert runner.kv_cache_init_memory == 7 * mib
 
 
-def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
+@pytest.mark.parametrize("encoder_only", [False, True])
+def test_profile_cudagraph_memory_tears_down_on_capture_error(
+    monkeypatch, encoder_only
+):
     _patch_module(monkeypatch)
-    runner = _make_profiling_runner(CUDAGraphMode.FULL)
+    runner = _make_profiling_runner(
+        CUDAGraphMode.NONE if encoder_only else CUDAGraphMode.FULL,
+        needs_capture=not encoder_only,
+        encoder_only=encoder_only,
+    )
 
     def _boom(*, profile_only: bool = False) -> int:
         runner.events.append("capture")
@@ -221,6 +252,7 @@ def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
 
     # Teardown still runs even if capture raises.
     assert runner.events == ["init", "capture", "teardown"]
+    assert _FakePlatform._global_graph_pool == GLOBAL_POOL
 
 
 def test_profile_cudagraph_memory_restores_compilation_counters(monkeypatch):
@@ -246,6 +278,9 @@ def test_profile_cudagraph_memory_restores_compilation_counters(monkeypatch):
 
 def test_model_runner_delegates_to_cudagraph_utils(monkeypatch):
     runner = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.eplb = EPLBController(
+        SimpleNamespace(enable_eplb=False), torch.device("cpu")
+    )
     monkeypatch.setattr(mrv2, "_profile_cudagraph_memory", lambda r: 42)
     assert runner.profile_cudagraph_memory() == 42
 

@@ -377,10 +377,8 @@ def iter_layer_registration_regions(
     )
     region_len = geometry.num_blocks * geometry.regions_per_block * geometry.block_len
     if geometry.regions_per_block == 1:
-        # With padded or interleaved pages the block stride exceeds the
-        # meaningful block_len; register the strided span. The span ends with
-        # the last block's meaningful bytes, not a whole stride, so it never
-        # runs past the backing allocation of a strided layer view.
+        # Padded/interleaved pages stride past block_len: register the strided
+        # span, ending at the last block's bytes so it stays in-allocation.
         block_stride_bytes = geometry.block_stride * kv_cache.element_size()
         region_len = max(
             region_len,
@@ -420,6 +418,31 @@ def merge_contiguous_offsets(
     )
 
 
+def validate_transfer_block_ids(
+    local_block_ids: list[int],
+    remote_block_ids: list[int],
+    local_num_blocks: int,
+    remote_num_blocks: int,
+) -> None:
+    """Check that a block transfer stays inside both sides' caches.
+
+    A shorter or empty local list transfers only what decode allocated (a READ
+    after a partial or full prefix hit); a longer local list is a bug.
+    """
+    if len(local_block_ids) > len(remote_block_ids):
+        raise ValueError(
+            "local_block_ids longer than remote_block_ids: "
+            f"{len(local_block_ids)} > {len(remote_block_ids)}"
+        )
+    for side, block_ids, num_blocks in (
+        ("local", local_block_ids, local_num_blocks),
+        ("remote", remote_block_ids, remote_num_blocks),
+    ):
+        invalid = next((b for b in block_ids if not 0 <= b < num_blocks), None)
+        if invalid is not None:
+            raise ValueError(f"{side} block id {invalid} is outside [0, {num_blocks})")
+
+
 def compute_block_transfer_offsets(
     layer_name: str,
     kv_cache: torch.Tensor,
@@ -431,47 +454,15 @@ def compute_block_transfer_offsets(
         [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
     ] = merge_contiguous_offsets,
 ) -> tuple[list[int], list[int], list[int]]:
-    # A shorter (or empty) local list is the READ-mode "drop the transfer, just
-    # free the prefill blocks" case (full-prefix-hit / aborted-before-scheduled):
-    # decode pulls fewer blocks than the prefill holds. The zip loop below pairs
-    # local[i]<->remote[i] and sizes by len(local), so a short local transfers
-    # only what decode allocated and an empty local is a no-op. A longer local
-    # list is a genuine bug and still fails loudly.
-    if len(local_block_ids) > len(remote_block_ids):
-        raise ValueError(
-            "local_block_ids longer than remote_block_ids: "
-            f"{len(local_block_ids)} > {len(remote_block_ids)}"
-        )
     geometry = cast(
         LayerTransferGeometry,
         get_layer_transfer_geometry(
             layer_name, kv_cache, layer_to_spec, remote_num_blocks
         ),
     )
-    invalid_local = next(
-        (
-            block_id
-            for block_id in local_block_ids
-            if not 0 <= block_id < geometry.num_blocks
-        ),
-        None,
+    validate_transfer_block_ids(
+        local_block_ids, remote_block_ids, geometry.num_blocks, remote_num_blocks
     )
-    if invalid_local is not None:
-        raise ValueError(
-            f"local block id {invalid_local} is outside [0, {geometry.num_blocks})"
-        )
-    invalid_remote = next(
-        (
-            block_id
-            for block_id in remote_block_ids
-            if not 0 <= block_id < remote_num_blocks
-        ),
-        None,
-    )
-    if invalid_remote is not None:
-        raise ValueError(
-            f"remote block id {invalid_remote} is outside [0, {remote_num_blocks})"
-        )
     element_size = kv_cache.element_size()
     transfer_size_byte = geometry.block_len
     per_block = geometry.transfers_per_block
@@ -619,3 +610,315 @@ def compute_mamba_conv_split_count(
     entries ``[count:]`` are the per-slot ssm state (ssm region/session).
     """
     return len(local_slots) * len(split_info.local_conv_offsets)
+
+
+class HeadLayout(NamedTuple):
+    """Byte addressing of one attention layer's KV heads in its region.
+
+    Offsets are relative to the layer's registered region. ``plane_offsets``
+    holds the start of the K and V planes when they are stored apart, or
+    ``(0,)`` when K and V are packed into each head's content.
+    """
+
+    num_heads: int
+    num_tokens: int
+    head_bytes: int
+    block_stride: int
+    head_stride: int
+    token_stride: int
+    plane_offsets: tuple[int, ...]
+
+    @property
+    def is_dense(self) -> bool:
+        """Each block plane is one contiguous run of all its heads and tokens."""
+        hb = self.head_bytes
+        return (
+            self.head_stride == hb and self.token_stride == self.num_heads * hb
+        ) or (self.token_stride == hb and self.head_stride == self.num_tokens * hb)
+
+    def to_wire(self) -> list[int]:
+        return [*self[:6], *self.plane_offsets]
+
+    @classmethod
+    def from_wire(cls, values: list[int]) -> "HeadLayout":
+        heads, tokens, head_bytes, block_stride, head_stride, token_stride, *planes = (
+            values
+        )
+        return cls(
+            heads,
+            tokens,
+            head_bytes,
+            block_stride,
+            head_stride,
+            token_stride,
+            tuple(planes),
+        )
+
+
+def get_layer_head_layout(
+    layer_name: str,
+    kv_cache: torch.Tensor,
+    layer_to_spec: Mapping[str, KVCacheSpec],
+) -> HeadLayout:
+    """Describe where each KV head of a block lives, from the cache strides."""
+    spec = layer_to_spec.get(layer_name)
+    if spec is None:
+        raise ValueError(f"Missing KV cache spec for layer {layer_name}")
+    shape = kv_cache.shape
+    stride = kv_cache.stride()
+    element_size = kv_cache.element_size()
+    if not is_mla_cache_layer(layer_to_spec, layer_name) and len(shape) == 5:
+        if shape[0] == 2:
+            plane_axis, block_axis = 0, 1
+        elif shape[1] == 2:
+            plane_axis, block_axis = 1, 0
+        else:
+            raise ValueError(f"Unsupported K/V cache shape {tuple(shape)}")
+        if shape[2] == spec.block_size:
+            token_axis, head_axis = 2, 3
+        elif shape[3] == spec.block_size:
+            token_axis, head_axis = 3, 2
+        else:
+            raise ValueError(
+                f"MoRIIO cannot slice KV heads of layer {layer_name}: kernel "
+                f"blocks {tuple(shape)} split the {spec.block_size}-token block"
+            )
+        return HeadLayout(
+            num_heads=shape[head_axis],
+            num_tokens=shape[token_axis],
+            head_bytes=shape[4] * element_size,
+            block_stride=stride[block_axis] * element_size,
+            head_stride=stride[head_axis] * element_size,
+            token_stride=stride[token_axis] * element_size,
+            plane_offsets=(0, stride[plane_axis] * element_size),
+        )
+    if (
+        isinstance(spec, AttentionSpec)
+        and len(shape) == 4
+        and shape[1] == spec.num_heads
+        and shape[2] == spec.num_states
+        and shape[3] * element_size == spec.state_content_size_bytes
+    ):
+        return HeadLayout(
+            num_heads=shape[1],
+            num_tokens=shape[2],
+            head_bytes=shape[3] * element_size,
+            block_stride=stride[0] * element_size,
+            head_stride=stride[1] * element_size,
+            token_stride=stride[2] * element_size,
+            plane_offsets=(0,),
+        )
+    raise ValueError(
+        f"MoRIIO cannot slice KV heads of layer {layer_name} with cache shape "
+        f"{tuple(shape)}"
+    )
+
+
+def _head_runs(
+    layout: HeadLayout, first_head: int, num_heads: int
+) -> tuple[str, list[tuple[int, int]]]:
+    """Coarsest (offset in block plane, size) runs covering num_heads heads.
+
+    Returns the run kind with the runs; two layouts can be paired run by run
+    only when their kinds match.
+    """
+    hb = layout.head_bytes
+    heads = range(first_head, first_head + num_heads)
+    if layout.token_stride == hb and layout.head_stride == layout.num_tokens * hb:
+        # Head-major with packed tokens: the heads are one contiguous run.
+        return "block", [
+            (first_head * layout.head_stride, num_heads * layout.head_stride)
+        ]
+    if layout.token_stride == hb:
+        # Head-major: one run of all tokens per head.
+        return "head", [(h * layout.head_stride, layout.num_tokens * hb) for h in heads]
+    if layout.head_stride == hb:
+        # Token-major: one run of adjacent heads per token.
+        return "token", [
+            (t * layout.token_stride + first_head * hb, num_heads * hb)
+            for t in range(layout.num_tokens)
+        ]
+    return "element", _element_runs(layout, first_head, num_heads)
+
+
+def _element_runs(
+    layout: HeadLayout, first_head: int, num_heads: int
+) -> list[tuple[int, int]]:
+    """One run per (token, head), ordered token-major."""
+    return [
+        (t * layout.token_stride + h * layout.head_stride, layout.head_bytes)
+        for t in range(layout.num_tokens)
+        for h in range(first_head, first_head + num_heads)
+    ]
+
+
+def compute_head_slice_offsets(
+    local: HeadLayout,
+    remote: HeadLayout,
+    local_block_ids: list[int],
+    remote_block_ids: list[int],
+    local_head: int,
+    remote_head: int,
+    num_heads: int,
+    merge_fn: Callable[
+        [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
+    ] = merge_contiguous_offsets,
+) -> tuple[list[int], list[int], list[int]]:
+    """Offsets copying ``num_heads`` heads of each local block into a remote one.
+
+    Local heads ``[local_head, local_head + num_heads)`` land on remote heads
+    ``[remote_head, remote_head + num_heads)``; every other remote head is
+    left for the producer rank that holds it.
+    """
+    if (
+        local.num_tokens != remote.num_tokens
+        or local.head_bytes != remote.head_bytes
+        or len(local.plane_offsets) != len(remote.plane_offsets)
+    ):
+        raise ValueError(
+            "MoRIIO head slicing needs the same block size, head size and K/V "
+            f"planes on both sides, got local {local} and remote {remote}"
+        )
+    if not (
+        local_head >= 0
+        and local_head + num_heads <= local.num_heads
+        and remote_head >= 0
+        and remote_head + num_heads <= remote.num_heads
+    ):
+        raise ValueError(
+            f"Head slice local [{local_head}, {local_head + num_heads}) / remote "
+            f"[{remote_head}, {remote_head + num_heads}) is outside "
+            f"{local.num_heads} / {remote.num_heads} heads"
+        )
+    if len(local_block_ids) > len(remote_block_ids):
+        raise ValueError(
+            "local_block_ids longer than remote_block_ids: "
+            f"{len(local_block_ids)} > {len(remote_block_ids)}"
+        )
+    local_kind, local_runs = _head_runs(local, local_head, num_heads)
+    remote_kind, remote_runs = _head_runs(remote, remote_head, num_heads)
+    if local_kind != remote_kind:
+        # The two sides order heads and tokens differently: pair single
+        # (token, head) runs, which merge_fn coalesces where both are adjacent.
+        local_runs = _element_runs(local, local_head, num_heads)
+        remote_runs = _element_runs(remote, remote_head, num_heads)
+
+    offset_local: list[int] = []
+    offset_remote: list[int] = []
+    sizes: list[int] = []
+    for local_plane, remote_plane in zip(local.plane_offsets, remote.plane_offsets):
+        for lb, rb in zip(local_block_ids, remote_block_ids):
+            local_base = local_plane + lb * local.block_stride
+            remote_base = remote_plane + rb * remote.block_stride
+            for (local_off, size), (remote_off, _) in zip(local_runs, remote_runs):
+                offset_local.append(local_base + local_off)
+                offset_remote.append(remote_base + remote_off)
+                sizes.append(size)
+    return merge_fn(offset_local, offset_remote, sizes)
+
+
+class MambaStateLayout(NamedTuple):
+    """Byte addressing of one mamba layer's per-slot conv and SSM state."""
+
+    conv_slot_stride: int
+    ssm_slot_stride: int
+    ssm_bytes: int
+    conv_proj_bytes: tuple[int, ...]
+
+    def to_wire(self) -> list[int]:
+        return [*self[:3], *self.conv_proj_bytes]
+
+    @classmethod
+    def from_wire(cls, values: list[int]) -> "MambaStateLayout":
+        conv_slot_stride, ssm_slot_stride, ssm_bytes, *conv_proj_bytes = values
+        return cls(conv_slot_stride, ssm_slot_stride, ssm_bytes, tuple(conv_proj_bytes))
+
+
+def get_mamba_state_layout(
+    conv: torch.Tensor, ssm: torch.Tensor, split_info: MambaConvSplitInfo
+) -> MambaStateLayout:
+    geom = get_mamba_transfer_geometry(conv, ssm)
+    return MambaStateLayout(
+        conv_slot_stride=geom.conv_slot_stride * geom.conv_element_size,
+        ssm_slot_stride=geom.ssm_slot_stride * geom.ssm_element_size,
+        ssm_bytes=geom.ssm_slot_bytes,
+        conv_proj_bytes=split_info.proj_bytes,
+    )
+
+
+def _state_slice(
+    local_bytes: int,
+    remote_bytes: int,
+    local_slice: int,
+    local_slices: int,
+    remote_slice: int,
+    remote_slices: int,
+) -> tuple[int, int, int]:
+    """(local offset, remote offset, size) of the bytes one target receives."""
+    if local_bytes == remote_bytes:
+        # Equal TP, or a part replicated on both sides (e.g. Mamba2 B/C with
+        # fewer groups than ranks): copy it whole.
+        return 0, 0, local_bytes
+    if local_slices > 1 and local_bytes == local_slices * remote_bytes:
+        return local_slice * remote_bytes, 0, remote_bytes
+    if remote_slices > 1 and remote_bytes == remote_slices * local_bytes:
+        return 0, remote_slice * local_bytes, local_bytes
+    raise ValueError(
+        f"MoRIIO cannot map {local_bytes} local state bytes onto {remote_bytes} "
+        f"remote bytes for slice {local_slice}/{local_slices} -> "
+        f"{remote_slice}/{remote_slices}"
+    )
+
+
+def compute_mamba_slice_offsets(
+    local: MambaStateLayout,
+    remote: MambaStateLayout,
+    local_slots: list[int],
+    remote_slots: list[int],
+    local_slice: int,
+    local_slices: int,
+    remote_slice: int,
+    remote_slices: int,
+) -> tuple[list[int], list[int], list[int], int]:
+    """(local, remote, sizes, n_conv) moving one target's share of the state.
+
+    Entries ``[:n_conv]`` address the conv region; the rest the SSM region.
+    Each conv sub-projection and the SSM state are sharded across TP ranks
+    independently, so each is sliced or gathered on its own.
+    """
+    if len(local_slots) != len(remote_slots):
+        raise ValueError(
+            "local and remote mamba slot counts must match: "
+            f"{len(local_slots)} != {len(remote_slots)}"
+        )
+    if len(local.conv_proj_bytes) != len(remote.conv_proj_bytes):
+        raise ValueError(
+            "local and remote conv states have different sub-projections: "
+            f"{local.conv_proj_bytes} vs {remote.conv_proj_bytes}"
+        )
+    slices = (local_slice, local_slices, remote_slice, remote_slices)
+    conv_parts = []
+    local_base = remote_base = 0
+    for local_bytes, remote_bytes in zip(local.conv_proj_bytes, remote.conv_proj_bytes):
+        local_off, remote_off, size = _state_slice(local_bytes, remote_bytes, *slices)
+        conv_parts.append((local_base + local_off, remote_base + remote_off, size))
+        local_base += local_bytes
+        remote_base += remote_bytes
+    ssm_local, ssm_remote, ssm_size = _state_slice(
+        local.ssm_bytes, remote.ssm_bytes, *slices
+    )
+
+    local_offs: list[int] = []
+    remote_offs: list[int] = []
+    sizes: list[int] = []
+    for ls, rs in zip(local_slots, remote_slots):
+        for local_off, remote_off, size in conv_parts:
+            local_offs.append(ls * local.conv_slot_stride + local_off)
+            remote_offs.append(rs * remote.conv_slot_stride + remote_off)
+            sizes.append(size)
+    n_conv = len(sizes)
+    for ls, rs in zip(local_slots, remote_slots):
+        local_offs.append(ls * local.ssm_slot_stride + ssm_local)
+        remote_offs.append(rs * remote.ssm_slot_stride + ssm_remote)
+        sizes.append(ssm_size)
+    return local_offs, remote_offs, sizes, n_conv
