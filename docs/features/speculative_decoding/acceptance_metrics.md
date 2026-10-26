@@ -51,7 +51,8 @@ A `summary` response's `metrics` looks like:
       "num_spec_steps": 43,
       "num_accepted_draft_tokens": 10,
       "num_draft_tokens": 129,
-      "num_spec_tokens": 3
+      "num_spec_tokens": 3,
+      "num_verified_draft_tokens": 97
     }
   }
 }
@@ -73,6 +74,8 @@ With `detailed`, two ordered arrays are added, one entry per verification step:
 | --- | --- |
 | `per_step_accepted` | Accepted draft count at each step. |
 | `per_step_drafted` | Proposed draft count at each step. Records the effective proposal length per step, so variable-length drafting (e.g. adaptive speculation) is represented without a schema change. |
+
+With adaptive verification (`enable_adaptive_verification=True`), `num_verified_draft_tokens` (total draft positions sent to the target verifier) is added, and `detailed` also adds `per_step_verified` (verified draft count at each step).
 
 `metrics.speculative_decoding` is present whenever `--per-request-spec-decode-metrics`
 is `summary`/`detailed`, speculative decoding is enabled, and `n == 1` (with an
@@ -98,6 +101,7 @@ all-`n == 1` workloads):
 | `num_spec_steps` | `vllm:spec_decode_num_drafts_total` |
 | `num_draft_tokens` | `vllm:spec_decode_num_draft_tokens_total` |
 | `num_accepted_draft_tokens` | `vllm:spec_decode_num_accepted_tokens_total` |
+| `num_verified_draft_tokens` | `vllm:spec_decode_num_verified_draft_tokens_total` |
 
 When adaptive verification is turned on (`enable_adaptive_verification=True`), the metric `vllm:spec_decode_num_verified_draft_tokens_total`
 counts draft-token positions sent to the target verifier for the same requests counted by `num_draft_tokens` (i.e. results for already-finished requests are excluded). It excludes bonus tokens and can be smaller than `num_draft_tokens`, which counts proposals.

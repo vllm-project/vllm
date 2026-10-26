@@ -2125,17 +2125,18 @@ class Scheduler(SchedulerInterface):
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
 
+                num_verified = (
+                    num_verified_tokens[req_index]
+                    if num_verified_tokens is not None
+                    else None
+                )
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted,
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
-                    num_verified_draft_tokens=(
-                        num_verified_tokens[req_index]
-                        if num_verified_tokens is not None
-                        else None
-                    ),
+                    num_verified_draft_tokens=num_verified,
                 )
                 if request.spec_decode_metrics is not None:
                     # Exclude grammar-invalidated drafts from the proposed
@@ -2150,6 +2151,7 @@ class Scheduler(SchedulerInterface):
                         num_draft_tokens=adj_draft_tokens,
                         num_accepted=num_accepted,
                         detailed=self.spec_decode_metrics_level == "detailed",
+                        num_verified_draft_tokens=num_verified,
                     )
 
             # Free encoder inputs only after the step has actually executed.

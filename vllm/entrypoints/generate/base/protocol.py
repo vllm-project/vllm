@@ -104,6 +104,9 @@ class SpeculativeDecodingMetrics(OpenAIBaseModel):
     # Ordered per-verify-step arrays; populated only at the `detailed` level.
     per_step_accepted: list[int] | None = None
     per_step_drafted: list[int] | None = None
+    # Only populated with adaptive verification.
+    num_verified_draft_tokens: int | None = None
+    per_step_verified: list[int] | None = None
 
 
 class PerRequestMetrics(OpenAIBaseModel):
