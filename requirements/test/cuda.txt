@@ -8,7 +8,7 @@ accelerate==1.13.0
     # via peft
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.14.3
+aiohttp==3.14.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -107,8 +107,10 @@ cachetools==5.5.2
     #   google-auth
 cbor2==6.1.2
     # via -r requirements/test/../common.txt
-certifi==2024.8.30
+certifi==2026.10.19
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   httpcore
     #   httpx
     #   requests
@@ -170,11 +172,9 @@ cuda-pathfinder==1.3.3
     # via cuda-bindings
 cuda-toolkit==13.0.3.0
     # via torch
-cupy-cuda12x==13.6.0
-    # via ray
 cycler==0.12.1
     # via matplotlib
-datamodel-code-generator==0.79.0
+datamodel-code-generator==0.86.0
     # via -r requirements/test/cuda.in
 dataproperty==1.0.1
     # via
@@ -255,8 +255,6 @@ fastavro==1.12.2
     # via cohere
 fastparquet==2024.11.0
     # via genai-perf
-fastrlock==0.8.2
-    # via cupy-cuda12x
 fastsafetensors==0.3.3
     # via
     #   -c requirements/cuda.txt
@@ -426,7 +424,7 @@ inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
     # via pytest
-instanttensor==0.1.9
+instanttensor==0.2.2
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
@@ -534,11 +532,11 @@ mbstrdecoder==1.1.3
     #   dataproperty
     #   pytablewriter
     #   typepy
-mcp==2.1.1
+mcp==2.3.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-mcp-types==2.1.1
+mcp-types==2.3.0
     # via mcp
 mdurl==0.1.2
     # via markdown-it-py
@@ -570,8 +568,10 @@ msgspec==0.21.1
     # via -r requirements/test/../common.txt
 mteb==2.8.3
     # via -r requirements/test/cuda.in
-multidict==6.1.0
+multidict==7.1.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   aiohttp
     #   yarl
 multiprocess==0.70.16
@@ -604,7 +604,6 @@ numpy==2.2.6
     #   albumentations
     #   bm25s
     #   contourpy
-    #   cupy-cuda12x
     #   datasets
     #   decord
     #   einx
@@ -635,6 +634,7 @@ numpy==2.2.6
     #   scikit-learn
     #   scipy
     #   segmentation-models-pytorch
+    #   sentence-transformers
     #   soxr
     #   statsmodels
     #   tensorizer
@@ -752,6 +752,8 @@ optuna==3.6.1
     # via genai-perf
 orjson==3.12.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
     #   genai-perf
 oss-harmony==0.0.11
@@ -807,7 +809,7 @@ perceptron==0.1.4
     # via -r requirements/test/cuda.in
 perf-analyzer==0.1.0
     # via genai-perf
-pillow==12.3.0
+pillow==13.0.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -853,7 +855,7 @@ prometheus-fastapi-instrumentator==8.0.2
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-propcache==0.2.0
+propcache==0.5.4
     # via
     #   aiohttp
     #   yarl
@@ -1154,7 +1156,7 @@ scipy==1.13.1
     #   vocos
 segmentation-models-pytorch==0.5.0
     # via -r requirements/test/cuda.in
-sentence-transformers==5.2.0
+sentence-transformers==5.6.0
     # via
     #   -r requirements/test/cuda.in
     #   mteb
@@ -1335,7 +1337,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.19.0
+transformers==5.20.2
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1372,7 +1374,7 @@ typer==0.26.8
     #   transformers
 types-requests==2.33.0.20260712
     # via cohere
-typing-extensions==4.15.0
+typing-extensions==4.16.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1388,6 +1390,7 @@ typing-extensions==4.15.0
     #   azure-storage-blob
     #   chz
     #   cohere
+    #   datamodel-code-generator
     #   fastapi
     #   grpcio
     #   httpx2
@@ -1478,7 +1481,7 @@ xxhash==3.5.0
     # via
     #   datasets
     #   evaluate
-yarl==1.17.1
+yarl==1.25.1
     # via aiohttp
 zipp==3.23.0
     # via importlib-metadata

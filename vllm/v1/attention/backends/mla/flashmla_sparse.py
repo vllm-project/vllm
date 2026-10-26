@@ -25,7 +25,6 @@ from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
     current_stream,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -54,7 +53,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode, is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -103,10 +102,11 @@ For DeepSeek V4.1, each token's KV cache is 528 Bytes, structured as:
 -   **Last 16 bytes:** Scale factors, containing 16 `ue8m0` values, one per 32
     consecutive `float8_e4m3` values (i.e. MXFP8).
 
-The V4 and V4.1 records are not laid out token-by-token within a page: a page
-holds all its data rows first and all its scale rows after, so a page is
-`block_size * bytes_per_token` bytes rounded up to the decode kernel's TMA
-stride (576 B for V4, 512 B for V4.1).
+The V4 record is not laid out token-by-token within a page: a page holds all
+its data rows first and all its scale rows after, so a page is
+`block_size * bytes_per_token` bytes rounded up to the decode kernel's 576 B
+TMA stride. The V4.1 records are interleaved: each token's scales directly
+follow its own data, and the decode kernel's TMA stride is the record width.
 
 In the "nvfp4_ds_mla" format (SM100 only, DeepSeek V3.2 geometry), each
 token's KV cache is 352 Bytes, structured as:
