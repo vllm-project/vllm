@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Iterable
 from itertools import islice
 
@@ -8,10 +9,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import Lfm2Config
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, EncoderOnlyAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -49,6 +52,8 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
 
 
 class Lfm2MLP(nn.Module):
@@ -498,6 +503,14 @@ class Lfm2BidirectionalModel(Lfm2Model):
     is_pooling_model = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        if not envs.VLLM_MOE_SKIP_PADDING:
+            logger.warning_once(
+                "Enabling VLLM_MOE_SKIP_PADDING for Lfm2BidirectionalModel "
+                "because bidirectional convolution requires an accurate "
+                "runtime padding mask."
+            )
+        os.environ["VLLM_MOE_SKIP_PADDING"] = "1"
+
         super().__init__(vllm_config=vllm_config, prefix=prefix, bidirectional=True)
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
