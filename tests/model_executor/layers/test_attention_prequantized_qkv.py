@@ -18,7 +18,7 @@ WORKLOADS = pytest.mark.parametrize(
         pytest.param(1, 16, 2, 256, id="decode-tp1"),
         pytest.param(7, 8, 1, 256, id="mixed-tp2"),
         pytest.param(129, 4, 1, 256, id="mixed-tp4"),
-        pytest.param(2048, 16, 1, 128, id="chunk-ratio16-hd128"),
+        pytest.param(2048, 16, 1, 256, id="chunk-ratio16"),
     ],
 )
 

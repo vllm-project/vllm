@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import ClassVar
 
@@ -78,6 +79,145 @@ def _slice_prequantized_qkv(
         key_descale=prequantized_qkv.key_descale[sequence_slice],
         value_descale=prequantized_qkv.value_descale[sequence_slice],
     )
+
+
+def _rebased_starts(query_start_loc_cpu: torch.Tensor) -> list[int]:
+    """Cumulative token offsets of a phase's sequences, starting at zero."""
+    starts = query_start_loc_cpu.tolist()
+    return [start - starts[0] for start in starts]
+
+
+def _expand_descale(
+    descale: torch.Tensor, num_sequences: int, num_kv_heads: int
+) -> torch.Tensor:
+    """View a descale as (sequences, KV heads): per-sequence, per-head or scalar."""
+    if descale.dim() == 2 and descale.shape[0] >= num_sequences:
+        return descale
+    return descale.reshape(1, -1).expand(num_sequences, num_kv_heads)
+
+
+def _grouped_fp8_varlen_attention(
+    *,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    q_starts: Sequence[int],
+    k_starts: Sequence[int],
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    min_seqlen_q: int,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
+    out_dtype: torch.dtype,
+    softmax_scale: float,
+    causal: bool,
+    window_size: tuple[int, int] | None,
+    alibi_slopes: torch.Tensor | None,
+    sink_ptr: torch.Tensor | None,
+    out: torch.Tensor | None = None,
+    return_lse: bool = False,
+):
+    """FP8 varlen attention with one call per (sequence, KV head).
+
+    The AITER FP8 hd256 varlen kernel reads only ``descale[0, 0]`` whatever the
+    descale shape, so Q/K/V quantized per (sequence, KV head) are scaled
+    correctly only when a call holds a single sequence and a single KV head.
+    A batch with one of each is the ordinary call.
+
+    ``q_starts`` and ``k_starts`` are the host-side cumulative token offsets of
+    the sequences in ``q`` and ``k``. A sequence without keys (an extend with
+    no context in this chunk) gets zero output and a ``-inf`` log-sum-exp,
+    which ``merge_attn_states`` gives no weight.
+    """
+    num_sequences = len(q_starts) - 1
+    num_heads, num_kv_heads = q.shape[1], k.shape[1]
+    q_descale = _expand_descale(q_descale, num_sequences, num_kv_heads)
+    k_descale = _expand_descale(k_descale, num_sequences, num_kv_heads)
+    v_descale = _expand_descale(v_descale, num_sequences, num_kv_heads)
+    if num_sequences == 1 and num_kv_heads == 1:
+        return rocm_aiter_ops.flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            min_seqlen_q=min_seqlen_q,
+            return_lse=return_lse,
+            out=out,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            dropout_p=0.0,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            alibi_slopes=alibi_slopes,
+            sink_ptr=sink_ptr,
+        )
+
+    group = num_heads // num_kv_heads
+    # One host-to-device copy of every sequence's (query, key) boundaries.
+    cu_seqlens = torch.tensor(
+        [
+            [
+                [0, q_starts[i + 1] - q_starts[i]],
+                [0, k_starts[i + 1] - k_starts[i]],
+            ]
+            for i in range(num_sequences)
+        ],
+        dtype=torch.int32,
+    ).to(q.device, non_blocking=True)
+    result = (
+        out
+        if out is not None
+        else torch.zeros(q.shape, dtype=out_dtype, device=q.device)
+    )
+    lse = (
+        torch.full((num_heads, q.shape[0]), float("-inf"), device=q.device)
+        if return_lse
+        else None
+    )
+    for seq in range(num_sequences):
+        q_len = q_starts[seq + 1] - q_starts[seq]
+        k_len = k_starts[seq + 1] - k_starts[seq]
+        if q_len == 0 or k_len == 0:
+            if out is not None:
+                out[q_starts[seq] : q_starts[seq + 1]] = 0
+            continue
+        q_seq = slice(q_starts[seq], q_starts[seq + 1])
+        k_seq = slice(k_starts[seq], k_starts[seq + 1])
+        for kv_head in range(num_kv_heads):
+            heads = slice(kv_head * group, (kv_head + 1) * group)
+            attention = rocm_aiter_ops.flash_attn_varlen_func(
+                q=q[q_seq, heads],
+                k=k[k_seq, kv_head : kv_head + 1],
+                v=v[k_seq, kv_head : kv_head + 1],
+                cu_seqlens_q=cu_seqlens[seq, 0],
+                cu_seqlens_k=cu_seqlens[seq, 1],
+                max_seqlen_q=q_len,
+                max_seqlen_k=k_len,
+                min_seqlen_q=min(min_seqlen_q, q_len),
+                return_lse=return_lse,
+                q_descale=q_descale[seq, kv_head].reshape(1),
+                k_descale=k_descale[seq, kv_head].reshape(1),
+                v_descale=v_descale[seq, kv_head].reshape(1),
+                dropout_p=0.0,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                alibi_slopes=alibi_slopes,
+                sink_ptr=sink_ptr,
+            )
+            call_out, call_lse = attention if return_lse else (attention, None)
+            result[q_seq, heads] = call_out
+            if lse is not None:
+                lse[heads, q_seq] = call_lse
+    return (result, lse) if return_lse else result
 
 
 if current_platform.is_rocm():
@@ -378,6 +518,8 @@ class AiterFlashAttentionPrefillMetadata:
     max_query_len: int
     max_seq_len: int
     query_start_loc: torch.Tensor
+    # Host copy of query_start_loc, for per-sequence FP8 attention calls.
+    query_start_loc_host: list[int] | None = None
 
 
 @dataclass
@@ -400,6 +542,8 @@ class AiterChunkContextMetadata:
     num_chunks: int
     total_token_per_batch: list[int]
     swa_metadata: AiterChunkSlidingWindowMetadata | None
+    # Host copy of cu_seq_lens_chunk, for per-sequence FP8 attention calls.
+    cu_seq_lens_chunk_host: list[list[int]] | None = None
 
 
 @dataclass
@@ -408,6 +552,8 @@ class AiterFlashAttentionChunkPrefillMetadata:
     max_seq_len: int
     query_start_loc: torch.Tensor
     chunk_context_metadata: AiterChunkContextMetadata
+    # Host copy of query_start_loc, for per-sequence FP8 attention calls.
+    query_start_loc_host: list[int] | None = None
 
 
 @dataclass
@@ -755,6 +901,9 @@ class AiterFlashAttentionMetadataBuilder(
                 max_query_len=query_lens_for_prefill.max().item(),
                 max_seq_len=seq_lens[num_decodes + num_extends :].max().item(),
                 query_start_loc=query_start_loc_device - query_start_loc_device[0],
+                query_start_loc_host=_rebased_starts(
+                    query_start_loc_cpu[num_decodes + num_extends :]
+                ),
             )
 
         extend_metadata = None
@@ -856,6 +1005,7 @@ class AiterFlashAttentionMetadataBuilder(
                 num_chunks=num_chunks,
                 total_token_per_batch=cu_seq_lens_cpu[:, -1].tolist(),
                 swa_metadata=swa_metadata,
+                cu_seq_lens_chunk_host=cu_seq_lens_cpu.tolist(),
             )
 
             query_start_loc_device = common_attn_metadata.query_start_loc[
@@ -873,6 +1023,9 @@ class AiterFlashAttentionMetadataBuilder(
                 max_seq_len=seq_lens[num_extends_slice].max().item(),
                 query_start_loc=query_start_loc_device - query_start_loc_device[0],
                 chunk_context_metadata=chunk_context_metadata,
+                query_start_loc_host=_rebased_starts(
+                    query_start_loc_cpu[num_decodes : num_decodes + num_extends + 1]
+                ),
             )
 
         attn_metadata = AiterFlashAttentionMetadata(
@@ -1224,32 +1377,50 @@ class AiterFlashAttentionImpl(AttentionImpl):
         attention_value = (
             prequantized_qkv.value if prequantized_qkv is not None else value
         )
-        out, lse = rocm_aiter_ops.flash_attn_varlen_func(
-            q=attention_query,
-            k=attention_key,
-            v=attention_value,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_q,
-            min_seqlen_q=min_seqlen_q,
-            dropout_p=0.0,
-            softmax_scale=self.scale,
-            causal=True,
-            window_size=self.sliding_window,
-            alibi_slopes=self.alibi_slopes,
-            return_lse=True,
-            sink_ptr=self.sinks,
-            q_descale=(
-                prequantized_qkv.query_descale if prequantized_qkv is not None else None
-            ),
-            k_descale=(
-                prequantized_qkv.key_descale if prequantized_qkv is not None else None
-            ),
-            v_descale=(
-                prequantized_qkv.value_descale if prequantized_qkv is not None else None
-            ),
-        )
+        extend_metadata = attn_metadata.extend_metadata
+        assert extend_metadata is not None
+        extend_starts = extend_metadata.query_start_loc_host or cu_seqlens_q.tolist()
+        if prequantized_qkv is not None:
+            out, lse = _grouped_fp8_varlen_attention(
+                q=attention_query,
+                k=attention_key,
+                v=attention_value,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_q,
+                q_starts=extend_starts,
+                k_starts=extend_starts,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_q,
+                min_seqlen_q=min_seqlen_q,
+                q_descale=prequantized_qkv.query_descale,
+                k_descale=prequantized_qkv.key_descale,
+                v_descale=prequantized_qkv.value_descale,
+                out_dtype=query.dtype,
+                return_lse=True,
+                softmax_scale=self.scale,
+                causal=True,
+                window_size=self.sliding_window,
+                alibi_slopes=self.alibi_slopes,
+                sink_ptr=self.sinks,
+            )
+        else:
+            out, lse = rocm_aiter_ops.flash_attn_varlen_func(
+                q=attention_query,
+                k=attention_key,
+                v=attention_value,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_q,
+                min_seqlen_q=min_seqlen_q,
+                return_lse=True,
+                dropout_p=0.0,
+                softmax_scale=self.scale,
+                causal=True,
+                window_size=self.sliding_window,
+                alibi_slopes=self.alibi_slopes,
+                sink_ptr=self.sinks,
+            )
         assert attn_metadata.extend_metadata is not None
         chunk_context_metadata = attn_metadata.extend_metadata.chunk_context_metadata
         num_chunks = chunk_context_metadata.num_chunks
@@ -1296,39 +1467,53 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 total_tokens=total_token_per_batch[chunk_idx],
             )
 
-            chunk_query = query
-            chunk_key = key_fetched
-            chunk_value = value_fetched
-            chunk_q_descale = chunk_k_descale = chunk_v_descale = None
             if fp8_context_gather:
                 assert prequantized_qkv is not None
-                batch_size = cu_seqlens_q.numel() - 1
-                descale_shape = (batch_size, self.num_kv_heads)
-                chunk_query = prequantized_qkv.query
-                chunk_q_descale = prequantized_qkv.query_descale
-                chunk_k_descale = k_scale.expand(descale_shape)
-                chunk_v_descale = v_scale.expand(descale_shape)
-
-            suf_out, suf_lse = rocm_aiter_ops.flash_attn_varlen_func(
-                q=chunk_query,
-                k=chunk_key,
-                v=chunk_value,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_kv[chunk_idx],
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlens[chunk_idx],
-                min_seqlen_q=min_seqlen_q,
-                dropout_p=0.0,
-                softmax_scale=self.scale,
-                causal=False,
-                window_size=self.sliding_window,
-                alibi_slopes=self.alibi_slopes,
-                return_lse=True,
-                sink_ptr=self.sinks,
-                q_descale=chunk_q_descale,
-                k_descale=chunk_k_descale,
-                v_descale=chunk_v_descale,
-            )
+                chunk_starts_host = (
+                    chunk_context_metadata.cu_seq_lens_chunk_host[chunk_idx]
+                    if chunk_context_metadata.cu_seq_lens_chunk_host is not None
+                    else cu_seqlens_kv[chunk_idx].tolist()
+                )
+                suf_out, suf_lse = _grouped_fp8_varlen_attention(
+                    q=prequantized_qkv.query,
+                    k=key_fetched,
+                    v=value_fetched,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_kv[chunk_idx],
+                    q_starts=extend_starts,
+                    k_starts=chunk_starts_host,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlens[chunk_idx],
+                    min_seqlen_q=min_seqlen_q,
+                    q_descale=prequantized_qkv.query_descale,
+                    k_descale=k_scale,
+                    v_descale=v_scale,
+                    out_dtype=query.dtype,
+                    return_lse=True,
+                    softmax_scale=self.scale,
+                    causal=False,
+                    window_size=self.sliding_window,
+                    alibi_slopes=self.alibi_slopes,
+                    sink_ptr=self.sinks,
+                )
+            else:
+                suf_out, suf_lse = rocm_aiter_ops.flash_attn_varlen_func(
+                    q=query,
+                    k=key_fetched,
+                    v=value_fetched,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_kv[chunk_idx],
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlens[chunk_idx],
+                    min_seqlen_q=min_seqlen_q,
+                    return_lse=True,
+                    dropout_p=0.0,
+                    softmax_scale=self.scale,
+                    causal=False,
+                    window_size=self.sliding_window,
+                    alibi_slopes=self.alibi_slopes,
+                    sink_ptr=self.sinks,
+                )
             if chunked_output is None:
                 chunked_output = suf_out
                 chunked_lse = suf_lse
@@ -1550,26 +1735,57 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 k_descale = prefill_prequantized_qkv.key_descale
                 v_descale = prefill_prequantized_qkv.value_descale
 
-            rocm_aiter_ops.flash_attn_varlen_func(
-                q=prefill_query,
-                k=prefill_key,
-                v=prefill_value,
-                cu_seqlens_q=attn_metadata.prefill_metadata.query_start_loc,
-                cu_seqlens_k=attn_metadata.prefill_metadata.query_start_loc,
-                max_seqlen_q=attn_metadata.prefill_metadata.max_query_len,
-                max_seqlen_k=attn_metadata.prefill_metadata.max_seq_len,
-                min_seqlen_q=1,
-                dropout_p=0.0,
-                softmax_scale=self.scale,
-                causal=attn_metadata.causal,
-                window_size=self.sliding_window,
-                alibi_slopes=self.alibi_slopes,
-                out=output_actual_tokens[num_decode_tokens + num_extend_tokens :],
-                sink_ptr=self.sinks,
-                q_descale=q_descale,
-                k_descale=k_descale,
-                v_descale=v_descale,
-            )
+            prefill_metadata = attn_metadata.prefill_metadata
+            prefill_output = output_actual_tokens[
+                num_decode_tokens + num_extend_tokens :
+            ]
+            if prequantized_qkv is not None:
+                assert q_descale is not None
+                assert k_descale is not None and v_descale is not None
+                starts = (
+                    prefill_metadata.query_start_loc_host
+                    or prefill_metadata.query_start_loc.tolist()
+                )
+                _grouped_fp8_varlen_attention(
+                    q=prefill_query,
+                    k=prefill_key,
+                    v=prefill_value,
+                    cu_seqlens_q=prefill_metadata.query_start_loc,
+                    cu_seqlens_k=prefill_metadata.query_start_loc,
+                    q_starts=starts,
+                    k_starts=starts,
+                    max_seqlen_q=prefill_metadata.max_query_len,
+                    max_seqlen_k=prefill_metadata.max_seq_len,
+                    min_seqlen_q=1,
+                    q_descale=q_descale,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
+                    out_dtype=output.dtype,
+                    out=prefill_output,
+                    softmax_scale=self.scale,
+                    causal=attn_metadata.causal,
+                    window_size=self.sliding_window,
+                    alibi_slopes=self.alibi_slopes,
+                    sink_ptr=self.sinks,
+                )
+            else:
+                rocm_aiter_ops.flash_attn_varlen_func(
+                    q=prefill_query,
+                    k=prefill_key,
+                    v=prefill_value,
+                    cu_seqlens_q=prefill_metadata.query_start_loc,
+                    cu_seqlens_k=prefill_metadata.query_start_loc,
+                    max_seqlen_q=prefill_metadata.max_query_len,
+                    max_seqlen_k=prefill_metadata.max_seq_len,
+                    min_seqlen_q=1,
+                    out=prefill_output,
+                    dropout_p=0.0,
+                    softmax_scale=self.scale,
+                    causal=attn_metadata.causal,
+                    window_size=self.sliding_window,
+                    alibi_slopes=self.alibi_slopes,
+                    sink_ptr=self.sinks,
+                )
 
         # calculate for extends
         if num_extends > 0:
