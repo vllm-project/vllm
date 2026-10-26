@@ -47,11 +47,6 @@ constexpr size_t kFixedSmemLarge =
 // Common helpers
 // ============================================================================
 
-__device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
-  uint32_t bits = __float_as_uint(x);
-  return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
-}
-
 __device__ __forceinline__ auto convert_to_uint8(float x) -> uint8_t {
   __half h = __float2half_rn(x);
   uint16_t bits = __half_as_ushort(h);
@@ -265,8 +260,10 @@ __device__ __noinline__ void histogram_2048_topk(
         const int elem_idx = base_idx + sub;
         uint32_t bin = 0;
         if (vec_valid) bin = reg_bins[item++];
-        const bool is_above = vec_valid && (bin > uthr);
-        const bool is_equal = vec_valid && (bin == uthr);
+        // Lanes past seq_len are -inf padding from the row's last float4.
+        const bool in_range = vec_valid && (elem_idx < seq_len);
+        const bool is_above = in_range && (bin > uthr);
+        const bool is_equal = in_range && (bin == uthr);
 
         const uint32_t above_mask = __ballot_sync(0xffffffff, is_above);
         if (above_mask) {
@@ -325,7 +322,8 @@ __device__ __noinline__ void histogram_2048_topk(
   __syncthreads();
 
   for (int i = tx; i < num_buf0; i += kThreadsPerBlock) {
-    const uint32_t fp32 = convert_to_uint32_v2(logits[bufs[0][i]]);
+    const uint32_t fp32 =
+        topk_histogram_4096::convert_to_uint32_v2(logits[bufs[0][i]]);
     atomicAdd(&refine[0][(fp32 >> 24) & 0xFF], 1);
   }
   __syncthreads();
@@ -370,7 +368,8 @@ __device__ __noinline__ void histogram_2048_topk(
     if (remaining_k == 0) {
       for (int i = tx; i < num_buffered; i += kThreadsPerBlock) {
         const int idx = bufs[src][i];
-        const uint32_t fp32 = convert_to_uint32_v2(logits[idx]);
+        const uint32_t fp32 =
+            topk_histogram_4096::convert_to_uint32_v2(logits[idx]);
         if (((fp32 >> bit_offset) & 0xFF) > static_cast<uint32_t>(ref_thr)) {
           const int pos = atomicAdd(&decode_smem[SBASE + sOUT], 1);
           output_indices[pos] = idx;
@@ -387,7 +386,8 @@ __device__ __noinline__ void histogram_2048_topk(
     for (int i = tx; i < num_buffered; i += kThreadsPerBlock) {
       const int idx = bufs[src][i];
       const float logit_val = logits[idx];
-      const uint32_t fp32 = convert_to_uint32_v2(logit_val);
+      const uint32_t fp32 =
+          topk_histogram_4096::convert_to_uint32_v2(logit_val);
       const int bin = (fp32 >> bit_offset) & 0xFF;
 
       if (bin > ref_thr) {
@@ -511,7 +511,8 @@ __device__ __noinline__ void histogram_256_topk(
       const int buffer_pos = atomicAdd(&shared_buffered_count[0], 1);
       if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
         buffered_indices[0][buffer_pos] = idx;
-        const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
+        const uint32_t fp32_bits =
+            topk_histogram_4096::convert_to_uint32_v2(logit_value);
         const int next_bin = (fp32_bits >> 24) & 0xFF;
         atomicAdd(&shared_histogram[0][next_bin], 1);
       }
@@ -544,8 +545,8 @@ __device__ __noinline__ void histogram_256_topk(
     if (remaining_k == 0) {
       for (int i = thread_id; i < num_buffered; i += kThreadsPerBlock) {
         const int idx = buffered_indices[src_buffer][i];
-        const uint32_t fp32_bits =
-            convert_to_uint32_v2(logits[idx + logits_offset]);
+        const uint32_t fp32_bits = topk_histogram_4096::convert_to_uint32_v2(
+            logits[idx + logits_offset]);
         const int bin = (fp32_bits >> bit_offset) & 0xFF;
         if (bin > threshold_bin) {
           const int output_pos = atomicAdd(&shared_output_count, 1);
@@ -565,7 +566,8 @@ __device__ __noinline__ void histogram_256_topk(
     for (int i = thread_id; i < num_buffered; i += kThreadsPerBlock) {
       const int idx = buffered_indices[src_buffer][i];
       const float logit_value = logits[idx + logits_offset];
-      const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
+      const uint32_t fp32_bits =
+          topk_histogram_4096::convert_to_uint32_v2(logit_value);
       const int bin = (fp32_bits >> bit_offset) & 0xFF;
       if (bin > threshold_bin) {
         const int output_pos = atomicAdd(&shared_output_count, 1);
@@ -677,21 +679,22 @@ __device__ void radix_topk(const float* __restrict__ row_input,
       const float* src = row_input + my_chunk_start + i;
       if constexpr (VEC_SIZE == 4) {
         float4 v = *reinterpret_cast<const float4*>(src);
-        shared_ordered[i] = convert_to_uint32_v2(v.x);
-        shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
-        shared_ordered[i + 2] = convert_to_uint32_v2(v.z);
-        shared_ordered[i + 3] = convert_to_uint32_v2(v.w);
+        shared_ordered[i] = topk_histogram_4096::convert_to_uint32_v2(v.x);
+        shared_ordered[i + 1] = topk_histogram_4096::convert_to_uint32_v2(v.y);
+        shared_ordered[i + 2] = topk_histogram_4096::convert_to_uint32_v2(v.z);
+        shared_ordered[i + 3] = topk_histogram_4096::convert_to_uint32_v2(v.w);
       } else if constexpr (VEC_SIZE == 2) {
         float2 v = *reinterpret_cast<const float2*>(src);
-        shared_ordered[i] = convert_to_uint32_v2(v.x);
-        shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
+        shared_ordered[i] = topk_histogram_4096::convert_to_uint32_v2(v.x);
+        shared_ordered[i + 1] = topk_histogram_4096::convert_to_uint32_v2(v.y);
       } else {
-        shared_ordered[i] = convert_to_uint32_v2(*src);
+        shared_ordered[i] = topk_histogram_4096::convert_to_uint32_v2(*src);
       }
     }
     for (uint32_t i = aligned_size + tx; i < actual_chunk_size;
          i += kThreadsPerBlock) {
-      shared_ordered[i] = convert_to_uint32_v2(row_input[my_chunk_start + i]);
+      shared_ordered[i] = topk_histogram_4096::convert_to_uint32_v2(
+          row_input[my_chunk_start + i]);
     }
   }
   __syncthreads();
@@ -1019,8 +1022,7 @@ struct FilteredTopKTraits<float> {
   }
 
   __device__ __forceinline__ static OrderedType ToOrdered(float x) {
-    uint32_t bits = __float_as_uint(x);
-    return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+    return hist4096::convert_to_uint32_v2(x);
   }
 };
 

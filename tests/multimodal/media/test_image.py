@@ -85,6 +85,24 @@ def test_image_media_io_rgba_custom_background(tmp_path):
     assert green_numpy[0][0][2] == 0  # B
 
 
+@pytest.mark.parametrize("background_color", [(255, 255, 255), (12, 34, 56)])
+def test_image_media_io_rgb_png_transparency(tmp_path, background_color):
+    image = Image.new("RGB", (2, 1), (255, 0, 0))
+    image.putpixel((1, 0), (0, 0, 255))
+    path = tmp_path / "rgb_transparency.png"
+    image.save(path, transparency=(255, 0, 0))
+
+    with Image.open(path) as source:
+        reference = Image.alpha_composite(
+            Image.new("RGBA", source.size, (*background_color, 255)),
+            source.convert("RGBA"),
+        ).convert("RGB")
+
+    image_io = ImageMediaIO(rgba_background_color=background_color)
+    converted = image_io.load_file(path)
+    np.testing.assert_array_equal(np.asarray(converted), np.asarray(reference))
+
+
 def test_image_media_io_no_mode_conversion(tmp_path):
     """image_mode=None skips conversion and preserves the original mode."""
     # RGBA image: opaque black pixel on a fully transparent background
@@ -268,6 +286,23 @@ def test_image_pixel_limit_rejected(monkeypatch):
     image_io = ImageMediaIO()
     with pytest.raises(ValueError, match="exceed"):
         image_io.load_bytes(data)
+
+
+def test_image_broken_png_rejected():
+    """A PNG with a corrupted chunk structure surfaces as a client-side
+    ValueError (Pillow raises SyntaxError, which is not an OSError)."""
+    # Real-world request bytes: stray bytes between the IDAT CRC and the
+    # IEND chunk shift the stream, so Pillow reads a bogus chunk header.
+    data = bytes.fromhex(
+        "89504e470d0a1a0a0000000d4948445200000004000000040806000000a9f19e"
+        "7e000000144944415478da63fccfc0c0c0c0c0c0c0c0c0c000000e0001ff02ab"
+        "ce36890000000049454e44ae426082"
+    )
+
+    image_io = ImageMediaIO()
+    with pytest.raises(ValueError, match="Failed to load image") as exc_info:
+        image_io.load_bytes(data)
+    assert isinstance(exc_info.value.__cause__, SyntaxError)
 
 
 def test_image_pixel_limit_disabled(monkeypatch):

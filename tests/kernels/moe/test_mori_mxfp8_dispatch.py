@@ -254,6 +254,21 @@ def _mori_moe():
 requires_mori = pytest.mark.skipif(not has_mori(), reason="mori is not installed")
 
 
+def _make_mori_dispatch():
+    """Return the MoRI adapter and the buffer args MoRI would be built with."""
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
+        MoriPrepareAndFinalize,
+    )
+
+    manager = _RecordingAll2AllManager()
+    prepare_finalize = maybe_make_prepare_finalize(
+        _mori_moe(), _w4a16_quant(), all2all_manager=manager
+    )
+    assert isinstance(prepare_finalize, MoriPrepareAndFinalize)
+    assert manager.all_to_all_args is not None
+    return prepare_finalize, manager.all_to_all_args
+
+
 @requires_aiter_on_gfx950
 @requires_mori
 def test_mori_buffers_carry_fp8_tokens_and_byte_scales(aiter_moe_env):
@@ -263,17 +278,12 @@ def test_mori_buffers_carry_fp8_tokens_and_byte_scales(aiter_moe_env):
     FP8 dispatches transport, and there is one per 32-element group.
     """
     aiter_moe_env(AITER_BF16_FP8_MOE_BOUND="0")
-
-    manager = _RecordingAll2AllManager()
-    prepare_finalize = maybe_make_prepare_finalize(
-        _mori_moe(), _w4a16_quant(), all2all_manager=manager
-    )
+    prepare_finalize, args = _make_mori_dispatch()
 
     assert prepare_finalize.use_mxfp8_dispatch
     assert not prepare_finalize.use_fp8_dispatch
     assert not prepare_finalize.use_fp4_dispatch
 
-    args = manager.all_to_all_args
     assert args["quant_dtype"] == current_platform.fp8_dtype()
     # MXFP8 is one byte per element and is not packed, so the token buffer
     # stays the full hidden size (unlike the FP4 dispatch's two-per-byte).
@@ -286,13 +296,9 @@ def test_mori_buffers_carry_fp8_tokens_and_byte_scales(aiter_moe_env):
 @requires_mori
 def test_mori_buffers_stay_bf16_when_the_gate_is_off(aiter_moe_env):
     """With the gate off nothing is pre-quantized, so no scales are carried."""
-    manager = _RecordingAll2AllManager()
-    prepare_finalize = maybe_make_prepare_finalize(
-        _mori_moe(), _w4a16_quant(), all2all_manager=manager
-    )
+    prepare_finalize, args = _make_mori_dispatch()
 
     assert not prepare_finalize.use_mxfp8_dispatch
-    args = manager.all_to_all_args
     assert args["quant_dtype"] == torch.bfloat16
     assert args["scale_dim"] == 0
     assert args["scale_type_size"] == 0
@@ -340,8 +346,8 @@ def test_prepare_dispatches_mxfp8_with_e8m0_scales(monkeypatch):
     """prepare() must emit exactly what AITER's stage 1 expects to sort.
 
     An FP8 payload with one E8M0 exponent per 32-element group: AITER sorts
-    those scales instead of running its own quant, so a wrong layout here is
-    silently mis-scaled rather than rejected.
+    those scales instead of running its own quant, so a wrong layout here
+    silently corrupts the scaling rather than being rejected.
     """
     mori_module = _import_mori_prepare_finalize(monkeypatch)
     mori_op = _RecordingMoriOp()
