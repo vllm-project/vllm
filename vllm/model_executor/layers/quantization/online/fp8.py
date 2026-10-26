@@ -252,9 +252,8 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
 
         # Update layer with new values.
         replace_parameter(layer, "weight", qweight.t().data)
-        # Transposed to (K, N); retag so layout-aware kernels see it.
-        layer.weight.input_dim = 0
-        layer.weight.output_dim = 1
+        # Transposed to (K, N); the param keeps its checkpoint dims.
+        layer.processed_weight_dims = (0, 1)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
