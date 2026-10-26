@@ -1352,6 +1352,14 @@ def rocm_aiter_sparse_attn_indexer(
                     torch.float32,
                 ),
             )
+        if candidate_write and candidate_block_size > 0:
+            from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
+                reserve_candidate_scores,
+            )
+
+            nblocks = (max_model_len + candidate_block_size - 1) // candidate_block_size
+            reserve_candidate_scores(decode_rows * nblocks, hidden_states.device)
+
         # Transient logits tensor peak memory, produced by
         # rocm_fp8_mqa_logits (prefill) and rocm_fp8_paged_mqa_logits
         # (decode). Prefill logits are bounded by

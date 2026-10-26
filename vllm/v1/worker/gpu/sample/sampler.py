@@ -84,6 +84,14 @@ class Sampler:
         )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
+        # Logits processing works on an fp32 copy sized by the step's rows. A fresh
+        # copy per step outgrows the allocator's cached blocks while the batch ramps
+        # up, so the copies are taken from one buffer sized for the largest step.
+        self._fp32_logits = torch.empty(
+            (max_num_reqs * (1 + num_speculative_tokens), vocab_size),
+            dtype=torch.float32,
+            device=device,
+        )
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
             not return_sampling_mask and flashinfer_sampler_supported()
@@ -238,8 +246,11 @@ class Sampler:
         if not np.any(self.needs_logits_processing[idx_mapping_np]):
             return logits
 
-        # Copy logits to a new FP32 tensor.
-        logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+        rows, width = logits.shape
+        if rows <= self._fp32_logits.shape[0] and width == self._fp32_logits.shape[1]:
+            logits = self._fp32_logits[:rows].copy_(logits)
+        else:
+            logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         ctx = LogitsContext(
             expanded_idx_mapping=expanded_idx_mapping,
