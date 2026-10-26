@@ -527,27 +527,23 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
 #pragma unroll
     for (int b = 0; b < kSlotBatch; ++b) {
       const int slot = base + b * blockDim.x + tid;
+      // Every lane makes its first probe, then the warp iterates together
+      // until no lane is still probing, so the warp is converged at the
+      // ballot. CUDA 12.8-13.2.1 ptxas can fail to reconverge a per-lane
+      // probe loop before a ballot on sm_100.
       const int32_t g = cached_g[b];
-      bool is_hit = false;
-      bool probing = g >= 0;
-      int h = probing ? hash_slot(g, table_size) : 0;
-      // The whole warp iterates until every lane resolves, so the warp is
-      // converged at the ballot. CUDA 12.8-13.2.1 ptxas can fail to
-      // reconverge a per-lane probe loop nested in divergent code on sm_100.
+      int h = hash_slot(g, table_size);
+      int32_t k = s_hash_keys[h];
+      bool is_hit = g >= 0 && k == g;
+      bool probing = g >= 0 && !is_hit && k != kHashEmpty;
       while (__any_sync(0xFFFFFFFF, probing)) {
-        if (probing) {
-          const int32_t k = s_hash_keys[h];
-          if (k == g) {
-            s_hash_vals[h] = kEntryHit | slot;
-            is_hit = true;
-            probing = false;
-          } else if (k == kHashEmpty) {
-            probing = false;
-          } else {
-            h = next_slot(h, table_size);
-          }
-        }
+        if (probing) h = next_slot(h, table_size);
+        k = probing ? s_hash_keys[h] : kHashEmpty;
+        const bool found = probing && k == g;
+        is_hit |= found;
+        probing = probing && !found && k != kHashEmpty;
       }
+      if (is_hit) s_hash_vals[h] = kEntryHit | slot;
       const unsigned int hit_bits = __ballot_sync(0xFFFFFFFF, is_hit);
       if (lane_id == 0 && slot < hot_size) {
         s_done[slot / kWarpSize] = hit_bits;
