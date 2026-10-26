@@ -108,6 +108,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
+    VLLM_HTTP_MAX_REQUEST_BODY_SIZE: int = 32 * 1024 * 1024  # bytes
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_MAX_STOP_STRINGS: int = 4
@@ -218,6 +219,10 @@ if TYPE_CHECKING:
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_USE_LOCALITY_DOMAINS: bool = False
+    VLLM_MOE_LOCALIZE_BACKFILL: bool = False
+    VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP: bool = True
+    VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
@@ -1135,6 +1140,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
     ),
+    # Maximum request body size in bytes accepted by the HTTP API server; 0
+    # removes the limit. Only enforced by the Rust frontend; the Python
+    # frontend has no limit.
+    "VLLM_HTTP_MAX_REQUEST_BODY_SIZE": lambda: int(
+        os.environ.get("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", str(32 * 1024 * 1024))
+    ),
     # Maximum allowed value for the `n` sampling parameter (number of output
     # sequences per request). Limits resource consumption to prevent
     # denial-of-service via excessively large fan-out. Default: 16384.
@@ -1678,6 +1689,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
+    ),
+    # Split Rubin NVFP4 MoE across locality domains. Requires cuda-bindings >= 13.4,
+    # a PyTorch build with torch.cuda.execute_on_streams, and FlashInfer with
+    # locality-domain MoE support (see vllm/distributed/localization.py).
+    "VLLM_USE_LOCALITY_DOMAINS": lambda: bool(
+        int(os.getenv("VLLM_USE_LOCALITY_DOMAINS", "0"))
+    ),
+    # Give each compute partition an equal share of all SMs, allowing remote SMs.
+    "VLLM_MOE_LOCALIZE_BACKFILL": lambda: bool(
+        int(os.getenv("VLLM_MOE_LOCALIZE_BACKFILL", "0"))
+    ),
+    # FlashInfer CuteDSL NVFP4 MoE only: with locality domains, overlap the
+    # output memset with FC1 on an auxiliary stream.
+    "VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP", "1"))
+    ),
+    # FlashInfer CuteDSL NVFP4 MoE only: with locality domains, release the
+    # full-width weight storage after sharding, disabling the full-width
+    # fallback. EPLB uses the registered shards instead of the originals.
+    "VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS", "0"))
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
@@ -2406,6 +2438,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
+        "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
