@@ -211,14 +211,6 @@ Then set `"eviction_policy": "my_policy"` in `kv_connector_extra_config`, the sa
 
 Each entry in `secondary_tiers` is a dict with a required `type` field plus tier-specific fields.
 
-For a KVCR tier using `kvcr_service_socket_path`, `guard_only_sources` defaults
-to `true`. KVCR then serves remote reads only from READY Guard-owned blocks;
-framework-only CPU blocks are not advertised as remotely fetchable. Set
-`"guard_only_sources": false` to retain framework-backed source acquisition.
-The Guard-only path requires a KVCR version with `RemoteFWDramOptions.guard_only_sources`.
-The Guard startup timeout is 900 seconds in this mode. During engine shutdown,
-KVCR stops idle peer polling after its active transfer jobs finish.
-
 The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store. Both tiers use the coarse-grained wire medium value `STORAGE`; the medium does not distinguish filesystem from object-store storage. To recover location semantics, set the optional `locality` field (`LOCAL` / `REMOTE`) on the tier entry — that field, not the medium, tells consumers whether the tier's blocks are local to the publishing vLLM instance. Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
 
 Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the tier's storage location relative to the publishing vLLM instance. `LOCAL` marks storage local to that instance, while `REMOTE` marks storage that is not local to it. When the setting is omitted, locality is unspecified. vLLM does not infer it from the tier type, so an `obj` tier is not implicitly `REMOTE`. A KV event includes `locality` only when the tier explicitly configures it. This metadata describes the tier property without implying that a consumer can already route requests to its blocks.
