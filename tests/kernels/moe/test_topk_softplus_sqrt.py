@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -325,8 +326,8 @@ def test_fused_topk_softplus_sqrt_hash(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="The DeepSeek V4 fast path is CUDA-only.",
+    not current_platform.is_cuda_alike(),
+    reason="The DeepSeek V4 fast path requires a CUDA-like platform.",
 )
 @pytest.mark.parametrize(
     ("num_tokens", "num_experts", "indices_type"),
@@ -334,6 +335,11 @@ def test_fused_topk_softplus_sqrt_hash(
         (0, 256, torch.int32),
         (17, 256, torch.int32),
         (17, 384, torch.int64),
+        (17, 384, torch.int32),
+        (112, 384, torch.int32),
+        (336, 384, torch.int32),
+        (512, 384, torch.int32),
+        (513, 384, torch.int32),
     ],
 )
 @pytest.mark.parametrize("use_padding", [False, True])
@@ -342,7 +348,7 @@ def test_dsv4_fast_topk(
     num_experts: int,
     indices_type: torch.dtype,
     use_padding: bool,
-    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
 ):
     torch.manual_seed(0)
     gating_output = torch.randn(
@@ -359,24 +365,25 @@ def test_dsv4_fast_topk(
     )
     is_padding = torch.arange(num_tokens, device="cuda") % 2 == 1
     if use_padding:
-        monkeypatch.setattr(
-            "vllm.model_executor.layers.fused_moe.router."
-            "fused_topk_bias_router._get_padding_mask",
-            lambda _: is_padding,
-        )
         gating_output[is_padding] = float("nan")
         topk_weights_ref[is_padding] = 0
         topk_ids_ref[is_padding] = -1
-    topk_weights, topk_ids = fused_topk_bias(
-        gating_output,
-        gating_output,
-        "sqrtsoftplus",
-        correction_bias,
-        6,
-        True,
-        indices_type=indices_type,
-        routed_scaling_factor=1.5,
-    )
+    with set_forward_context(
+        None,
+        default_vllm_config,
+        num_tokens=num_tokens,
+        is_padding=is_padding if use_padding else None,
+    ):
+        topk_weights, topk_ids = fused_topk_bias(
+            gating_output,
+            gating_output,
+            "sqrtsoftplus",
+            correction_bias,
+            6,
+            True,
+            indices_type=indices_type,
+            routed_scaling_factor=1.5,
+        )
 
     assert topk_ids.dtype == indices_type
     torch.testing.assert_close(topk_ids_ref.to(indices_type), topk_ids, atol=0, rtol=0)

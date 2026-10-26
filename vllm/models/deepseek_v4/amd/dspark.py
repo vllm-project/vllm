@@ -25,6 +25,7 @@ import regex as re
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -44,10 +45,17 @@ from vllm.model_executor.models.qwen3_dspark import (
     DSparkMarkovHead,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v4.amd import asm_sparse_mla
 
 from .mega_moe import finalize_mega_moe_weights
 from .model import (
     DeepseekV4DecoderLayer,
+    DeepseekV4MLP,
+)
+from .rocm import (
+    DeepseekV4ROCMAiterMLAAttention,
+    apply_e8m0_linear,
+    prepare_e8m0_linears,
 )
 
 logger = init_logger(__name__)
@@ -142,7 +150,11 @@ class DSparkDeepseekV4Model(nn.Module):
 
         ``aux_hidden_states`` is [T, hidden_size * len(target_layer_ids)].
         """
-        return self.main_norm(self.main_proj(aux_hidden_states))
+        if getattr(self.main_proj, "aiter_e8m0_scale", None) is not None:
+            projected = apply_e8m0_linear(self.main_proj, aux_hidden_states)
+        else:
+            projected = self.main_proj(aux_hidden_states)
+        return self.main_norm(projected)
 
     @torch.inference_mode()
     def precompute_and_store_context_kv(
@@ -170,8 +182,15 @@ class DSparkDeepseekV4Model(nn.Module):
             attn = layer.attn
             # Optimized DSV4 MLA path: wkv part of the fused wq_a|wkv projection
             # (q_lora part discarded), then RoPE/quant/insert via the fused op.
-            qr_kv, _ = attn.fused_wqa_wkv(main_x)
+            qr_kv = attn._fused_wqa_wkv_gemm(main_x)
             kv = qr_kv[..., attn.q_lora_rank :]
+            if asm_sparse_mla.ENABLED:
+                # The aiter insert applies kv_norm itself.
+                if slot_mapping is not None:
+                    asm_sparse_mla.context_kv_insert(
+                        attn, kv, context_positions, slot_mapping
+                    )
+                continue
             kv = attn.kv_norm(kv)
             if slot_mapping is None:
                 continue
@@ -484,6 +503,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def process_weights_after_loading(self) -> None:
         finalize_mega_moe_weights(self)
+        if envs.VLLM_ROCM_USE_AITER_DSV4_FP8_MXSCALE:
+            for module in self.modules():
+                if isinstance(module, DeepseekV4ROCMAiterMLAAttention):
+                    module.prepare_attn_preshuffle()
+                elif isinstance(module, DeepseekV4MLP):
+                    module.prepare_gateup_preshuffle()
+            prepare_e8m0_linears([self.model.main_proj])
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.

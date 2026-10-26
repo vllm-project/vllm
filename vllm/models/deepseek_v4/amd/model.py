@@ -80,7 +80,10 @@ from vllm.models.deepseek_v4.amd.mega_moe import (
     DeepseekV4AiterMegaMoEExperts,
     finalize_mega_moe_weights,
 )
-from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
+from vllm.models.deepseek_v4.amd.rocm import (
+    DeepseekV4ROCMAiterMLAAttention,
+    _maybe_e8m0_scale,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.sequence import IntermediateTensors
@@ -141,6 +144,7 @@ class DeepseekV4MLP(nn.Module):
         self._gateup = rocm_aiter_ops.is_enabled()
         # Block scale for the preshuffled gate_up weight; None = not preshuffled.
         self._gateup_scale: torch.Tensor | None = None
+        self._down_scale: torch.Tensor | None = None
 
     def prepare_gateup_preshuffle(self) -> None:
         # B-preshuffle the gate_up_proj weight in place (single weight).
@@ -164,7 +168,42 @@ class DeepseekV4MLP(nn.Module):
         # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
         if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
             return
-        if ws.dtype == torch.float8_e8m0fnu:
+        e8m0 = None
+        if (
+            w.dtype == torch.float8_e4m3fn
+            and w.shape[0] % 128 == 0
+            and ws.shape == (w.shape[0] // 128, w.shape[1] // 128)
+        ):
+            e8m0 = _maybe_e8m0_scale(ws)
+        if e8m0 is not None:
+            down_weight = self.down_proj.weight
+            down_scale = get_fp8_block_weight_scale(self.down_proj)
+            down_e8m0 = None
+            if (
+                down_weight.dtype == torch.float8_e4m3fn
+                and down_weight.ndim == 2
+                and down_weight.shape[0] % 128 == 0
+                and down_weight.shape[1] % 128 == 0
+                and down_scale is not None
+                and down_scale.shape
+                == (down_weight.shape[0] // 128, down_weight.shape[1] // 128)
+            ):
+                down_e8m0 = _maybe_e8m0_scale(down_scale)
+            if down_e8m0 is not None:
+                if not getattr(self.down_proj, "aiter_bpreshuffled", False):
+                    replace_parameter(
+                        self.down_proj,
+                        "weight",
+                        rocm_aiter_ops.shuffle_weight(
+                            down_weight.data, layout=(16, 16)
+                        ),
+                    )
+                    self.down_proj.aiter_bpreshuffled = True
+                self._down_scale = down_e8m0
+                ws = e8m0
+            else:
+                e8m0 = None
+        if e8m0 is None and ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
         # Skip when the linear kernel already B-preshuffled this weight.
         if not getattr(self.gate_up_proj, "aiter_bpreshuffled", False):
@@ -173,12 +212,23 @@ class DeepseekV4MLP(nn.Module):
                 "weight",
                 rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
             )
+            self.gate_up_proj.aiter_bpreshuffled = True
         self._gateup_scale = ws
 
     def forward(self, x):
+        shape = x.shape
+        if self._down_scale is not None:
+            if x.numel() == 0:
+                return x.new_empty((*shape[:-1], self.down_proj.weight.shape[0]))
+            x = x.reshape(-1, shape[-1])
         if self._gateup_scale is not None and x.dim() == 2:
             # gate_up via fp8 group-quant (col-major) + B-preshuffle GEMM.
-            x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
+            quant = (
+                rocm_aiter_ops.group_e8m0_quant
+                if self._gateup_scale.dtype == torch.float8_e8m0fnu
+                else rocm_aiter_ops.group_fp8_quant
+            )
+            x_fp8, x_scale = quant(x, transpose_scale=True)
             gate_up = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
                 x_fp8,
                 self.gate_up_proj.weight,
@@ -189,6 +239,16 @@ class DeepseekV4MLP(nn.Module):
         else:
             gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
+        if self._down_scale is not None:
+            x_fp8, x_scale = rocm_aiter_ops.group_e8m0_quant(x, transpose_scale=True)
+            x = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                x_fp8,
+                self.down_proj.weight,
+                x_scale,
+                self._down_scale,
+                output_dtype=x.dtype,
+            )
+            return x.reshape(*shape[:-1], x.shape[-1])
         x, _ = self.down_proj(x)
         return x
 

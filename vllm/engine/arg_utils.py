@@ -709,6 +709,10 @@ class EngineArgs:
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
+    dp_prefill_delayer: bool = SchedulerConfig.dp_prefill_delayer
+    dp_prefill_delayer_protected_steps: int = (
+        SchedulerConfig.dp_prefill_delayer_protected_steps
+    )
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1794,6 +1798,13 @@ class EngineArgs:
             **scheduler_kwargs["prefill_schedule_interval"],
         )
         scheduler_group.add_argument(
+            "--dp-prefill-delayer", **scheduler_kwargs["dp_prefill_delayer"]
+        )
+        scheduler_group.add_argument(
+            "--dp-prefill-delayer-protected-steps",
+            **scheduler_kwargs["dp_prefill_delayer_protected_steps"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2666,6 +2677,8 @@ class EngineArgs:
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
+            dp_prefill_delayer=self.dp_prefill_delayer,
+            dp_prefill_delayer_protected_steps=self.dp_prefill_delayer_protected_steps,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

@@ -1,0 +1,42 @@
+{
+  "recorded_unix": 1792953840.2081916,
+  "decision": "Proceed with private canonical performance characterization of this frozen candidate. No production deployment or claim of quality equivalence is approved by this evidence.",
+  "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+  "quality_summary_sha256": "bd051e4753e2b59552478ca3f7f75b9499aa79bf49fdaf8e1a71519c679ab94d",
+  "coverage_sha256": "241da383011c0046db05cb0571751d90af7dee3af2c63b00576ba6c669999a2a",
+  "accounting": "Both arms786scored responses, exact raw-text lineage, zero empty outputs and no evaluator errors.",
+  "GPQA": {
+    "baseline": 338,
+    "candidate": 330,
+    "samples": 396,
+    "baseline_length_limited": 56,
+    "candidate_length_limited": 64,
+    "delta_percentage_points": -2.020202020202011,
+    "paired_cluster_95pct_delta_percentage_points": [
+      -4.797979797979798,
+      0.5050505050505051
+    ],
+    "interpretation": "Observed decline is inconclusive; a meaningful quality regression is not ruled out. Sixteen of18lost outcomes hit the candidate output limit. No changed budget, sample filtering, pass threshold or numerical tolerance was used."
+  },
+  "AIME": {
+    "baseline": 28,
+    "candidate": 30,
+    "samples": 30,
+    "candidate_length_limited": 0
+  },
+  "NIAH": {
+    "baseline": 360,
+    "candidate": 360,
+    "samples_per_arm": 360,
+    "contexts": [
+      32768,
+      131072,
+      262144
+    ],
+    "variants": 3,
+    "actual_high_query_rows_on_all8_ranks": 105
+  },
+  "operator_correctness_passes": 133,
+  "rationale": "Correctness and real model coverage support measuring end-to-end performance. The mixed finite-sample quality findings remain explicit and do not establish model-quality parity or attribution to the final TopK dispatch alone.",
+  "next": "Exact original c64 AgentX3600s/10warmups, Rust/consistent_hash/cache reset/nooffload/goldenAL3.77, same frozen9dbsource. Review actual metrics before selecting further configurations."
+}

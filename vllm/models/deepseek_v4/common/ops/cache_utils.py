@@ -268,6 +268,11 @@ class DequantizeAndGatherKCacheKernel(
         fp8_max: tl.constexpr,
         n_quant_blocks: tl.constexpr,  # 7 real blocks
         use_fnuz: tl.constexpr = False,
+        # aiter ASM sparse MLA layout: 512-byte rows (448 fp8 | 7 UE8M0 scales,
+        # each twice), RoPE in a separate bf16 pool [NB, block, 64].
+        rope_ptr=None,
+        rope_block_stride=0,
+        TWO_BUFF: tl.constexpr = False,
     ):
         batch_idx = tl.program_id(0)
         worker_id = tl.program_id(1)
@@ -303,11 +308,14 @@ class DequantizeAndGatherKCacheKernel(
             token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
 
             # Scale pointer: after all token data
-            token_scale_ptr = (
-                cache_block_ptr
-                + cache_block_size * token_data_size
-                + pos_in_block * scale_dim
-            )
+            if TWO_BUFF:
+                token_scale_ptr = token_data_ptr + fp8_dim
+            else:
+                token_scale_ptr = (
+                    cache_block_ptr
+                    + cache_block_size * token_data_size
+                    + pos_in_block * scale_dim
+                )
 
             # Token data layout: [0:448] fp8, [448:576] bf16
             token_fp8_ptr = token_data_ptr
@@ -340,7 +348,10 @@ class DequantizeAndGatherKCacheKernel(
 
                     # Load and decode UE8M0 scale
                     # UE8M0: scale = 2^(stored_value - 127)
-                    encoded_scale = tl.load(token_scale_ptr + qblock_idx)
+                    if TWO_BUFF:
+                        encoded_scale = tl.load(token_scale_ptr + 2 * qblock_idx)
+                    else:
+                        encoded_scale = tl.load(token_scale_ptr + qblock_idx)
                     exponent = encoded_scale.to(tl.float32) - 127.0
                     scale = tl.exp2(exponent)
 
@@ -356,7 +367,14 @@ class DequantizeAndGatherKCacheKernel(
             bf16_output_offset = fp8_dim  # After 448 elements in output
 
             # Read bf16 from cache
-            bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+            if TWO_BUFF:
+                bf16_cache_ptr = (
+                    rope_ptr
+                    + physical_block_idx.to(tl.int64) * rope_block_stride
+                    + pos_in_block * bf16_dim
+                )
+            else:
+                bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
 
             # Process in chunks of 16
             for j in tl.static_range(bf16_dim // 16):
@@ -510,14 +528,47 @@ def dequantize_and_gather_k_cache(
     block_size: int,
     offset: int,
     use_fnuz: bool = False,
+    rope_cache: torch.Tensor | None = None,
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
+
+    ``rope_cache`` (aiter ASM sparse MLA layout): the cache has 512-byte rows
+    and its RoPE lives in this bf16 [num_blocks, block_size, 64] view.
 
     ``use_fnuz`` MUST match the encoder of the specific cache being read:
     ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
     ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
+    if rope_cache is not None:
+        DequantizeAndGatherKCacheKernel.kernel[
+            (seq_lens.shape[0], DequantizeAndGatherKCacheKernel.NUM_WORKERS)
+        ](
+            out,
+            out.stride(0),
+            out.stride(1),
+            k_cache,
+            seq_lens,
+            block_table,
+            offset,
+            gather_lens,
+            max_blocks_per_seq=block_table.shape[-1],
+            fp8_dim=448,
+            bf16_dim=64,
+            scale_dim=8,
+            quant_block=64,
+            cache_block_size=block_size,
+            token_data_size=512,
+            block_stride=k_cache.stride(0),
+            output_dim=512,
+            fp8_max=448.0,
+            n_quant_blocks=7,
+            use_fnuz=use_fnuz,
+            rope_ptr=rope_cache,
+            rope_block_stride=rope_cache.stride(0),
+            TWO_BUFF=True,
+        )
+        return
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
@@ -604,6 +655,10 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         block_size: tl.constexpr,
         is_valid_token_ptr,
         TRITON_BLOCK_SIZE: tl.constexpr,
+        # > 0: emit the aiter ASM sparse MLA row
+        # block * ROW_BLOCK_STRIDE + offset + ROW_OFFSET instead of the slot id.
+        ROW_BLOCK_STRIDE: tl.constexpr = 0,
+        ROW_OFFSET: tl.constexpr = 0,
     ):
         token_idx = tl.program_id(0)
         is_valid_token = tl.load(is_valid_token_ptr + token_idx)
@@ -628,7 +683,10 @@ class ComputeGlobalTopkIndicesAndLensKernel(
             )
             block_offsets = local_idx % block_size
 
-            slot_ids = block_numbers * block_size + block_offsets
+            if ROW_BLOCK_STRIDE > 0:
+                slot_ids = block_numbers * ROW_BLOCK_STRIDE + block_offsets + ROW_OFFSET
+            else:
+                slot_ids = block_numbers * block_size + block_offsets
             slot_ids = tl.where(is_valid, slot_ids, -1)
             tl.store(
                 global_topk_indices_ptr

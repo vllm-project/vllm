@@ -148,8 +148,10 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
+    VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
+    VLLM_ROCM_USE_AITER_DSV4_FP8_MXSCALE: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
@@ -1351,6 +1353,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "False").lower()
         in ("true", "1")
     ),
+    # Enable native-layout AITER ASM sparse MLA decode with FP8 queries for
+    # DeepSeek V4 on MI355X (gfx950). Requires TP=1, 128 local attention heads
+    # and fp8_ds_mla KV caches (--kv-cache-dtype fp8). Disabled by default.
+    # The BF16 RoPE side pool reduces KV capacity at a fixed GPU memory budget.
+    # KV transfer connectors and CPU KV offload are not supported by this path.
+    "VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA", "False").lower()
+        in ("true", "1")
+    ),
     # Whether to use aiter rope.
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
@@ -1361,6 +1372,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # regardless of the precision the checkpoint asked for.
     "VLLM_ROCM_USE_AITER_FP8BMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "False").lower() in ("true", "1")
+    ),
+    # Use native E8M0 group scales for DeepSeek V4 dense projections
+    # on gfx950 with TP=1 and losslessly representable checkpoint scales.
+    "VLLM_ROCM_USE_AITER_DSV4_FP8_MXSCALE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_DSV4_FP8_MXSCALE", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter triton fp4 bmm kernel for MLA kv_b_proj.
     # By default is disabled, for the same reason as the fp8 variant above.

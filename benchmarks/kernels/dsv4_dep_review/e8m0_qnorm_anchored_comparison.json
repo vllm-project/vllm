@@ -1,0 +1,129 @@
+{
+  "updated_unix": 1792945007.7568922,
+  "rows": [
+    {
+      "concurrency": 64,
+      "requests_per_rank": 8,
+      "vllm_cycles_ms": [
+        38.21759636781609,
+        38.17481879615384
+      ],
+      "ATOM_cycles_ms": [
+        36.708641257751935,
+        36.87131036842105
+      ],
+      "vllm_median_ms": 38.196207581984964,
+      "ATOM_median_ms": 36.78997581308649,
+      "vllm_cycle_latency_above_ATOM_pct": 3.8223231677098957,
+      "vllm_slower_without_observed_range_overlap": true,
+      "range_pct_of_median": {
+        "vllm": 0.11199429045522565,
+        "atom": 0.44215606853226397
+      },
+      "mean_actual_context": {
+        "vllm": 177145.7734375,
+        "atom": 177152.07633807903
+      },
+      "observed_acceptance_lengths": {
+        "vllm": [
+          3.7688876915708813,
+          3.7670372596153845
+        ],
+        "atom": [
+          3.778914380321665,
+          3.7718808740601504
+        ]
+      }
+    },
+    {
+      "concurrency": 96,
+      "requests_per_rank": 12,
+      "vllm_cycles_ms": [
+        44.3237817293666,
+        44.382818309751435
+      ],
+      "ATOM_cycles_ms": [
+        42.626960922053236,
+        42.471966555125725
+      ],
+      "vllm_median_ms": 44.353300019559015,
+      "ATOM_median_ms": 42.54946373858948,
+      "vllm_cycle_latency_above_ATOM_pct": 4.239386639633658,
+      "vllm_slower_without_observed_range_overlap": true,
+      "range_pct_of_median": {
+        "vllm": 0.1331052714427116,
+        "atom": 0.36426867299608645
+      },
+      "mean_actual_context": {
+        "vllm": 177132.1875,
+        "atom": 177154.3172599764
+      },
+      "observed_acceptance_lengths": {
+        "vllm": [
+          3.771253198976327,
+          3.7711719247928617
+        ],
+        "atom": [
+          3.774787251123956,
+          3.7697368421052633
+        ]
+      }
+    },
+    {
+      "concurrency": 128,
+      "requests_per_rank": 16,
+      "vllm_cycles_ms": [
+        47.54306003207547,
+        47.55058109245283
+      ],
+      "ATOM_cycles_ms": [
+        45.52473745920303,
+        45.665007763872495
+      ],
+      "vllm_median_ms": 47.54682056226415,
+      "ATOM_median_ms": 45.59487261153777,
+      "vllm_cycle_latency_above_ATOM_pct": 4.281068986323788,
+      "vllm_slower_without_observed_range_overlap": true,
+      "range_pct_of_median": {
+        "vllm": 0.015818219364442936,
+        "atom": 0.3076449096909389
+      },
+      "mean_actual_context": {
+        "vllm": 177154.56640625,
+        "atom": 177145.2991076879
+      },
+      "observed_acceptance_lengths": {
+        "vllm": [
+          3.768410966981132,
+          3.767202240566038
+        ],
+        "atom": [
+          3.772727272727273,
+          3.769338896780303
+        ]
+      }
+    }
+  ],
+  "matched_input_fingerprint_sha256": "379f7fd2334ea2dc0274aafc611a1c0f44f5fe05873dd58f4480ba60b73fd4ac",
+  "raw_prometheus_and_forward_counts_revalidated": true,
+  "transport_source_versions": {
+    "vllm": {
+      "source": "/var/tmp/fai_dsv4_dep_optimization/probe_counter_decode_anchored.py",
+      "sha256": "ed82db1c33850e02d5b3c7956d320b07f8a949959958dd3b3faa9d1973efdadb"
+    },
+    "atom": {
+      "source": "/var/tmp/fai_dsv4_dep_optimization/probe_counter_decode_anchored.py",
+      "sha256": "ed82db1c33850e02d5b3c7956d320b07f8a949959958dd3b3faa9d1973efdadb"
+    }
+  },
+  "timed_measurement_core_AST_identical": true,
+  "native_text_token_equivalence": "evidence/atom_text_prompt_adapter/manifest.json",
+  "limitations": [
+    "These are full decode cycles including draft, sampling, CPU and communication, not GPU-only kernel timers or AgentX throughput.",
+    "Both frameworks use the current host runtime. ATOM's source is pinned to the published image, but its Torch/ROCm/AITER stack and rebuilt Rust binary differ from that image.",
+    "Uniform request counts remove DP queue skew; expert-token loads retain real routing and are not forced uniform.",
+    "Two ordered measurements per framework do not establish statistical equivalence or eliminate launch/thermal drift.",
+    "Synthetic AL3.77 fixes the acceptance distribution; generated token histories and expert routing are not bitwise replayed across frameworks.",
+    "Published c48-c128 AgentX targets and offload c256/c384 remain separate requirements."
+  ]
+}

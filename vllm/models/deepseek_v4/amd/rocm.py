@@ -3,7 +3,7 @@
 
 import functools
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 
@@ -15,8 +15,21 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import RocmSparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
+from vllm.models.deepseek_v4.amd import asm_sparse_mla
+from vllm.models.deepseek_v4.attention import (
+    DeepseekV4Attention,
+    DeepseekV4Indexer,
+    DeepseekV4IndexerCache,
+)
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
+from vllm.models.deepseek_v4.compressor import CompressorMetadata, DeepseekCompressor
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     DeepseekV4SparseMLABackend,
@@ -27,8 +40,13 @@ from vllm.platforms.rocm import _ON_GFX950, on_gfx1250
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
     CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.mla.indexer import dsa_indexer_uses_fp4
+from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
+    DeepseekV4RocmMxfp4IndexerBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadata,
@@ -42,14 +60,18 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
+from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+    rocm_mxfp4_indexer_k_store,
+    rocm_mxfp4_indexer_q_quant,
+)
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
 
-def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
-    """Normalize checkpoint WO_A scales to raw OCP MX E8M0 bytes.
+def _block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
+    """Normalize checkpoint block scales to raw OCP MX E8M0 bytes.
 
     E8M0 is an unsigned exponent-only scale format with bias 127. A finite
     encoded byte ``b`` in ``[0, 254]`` represents ``2 ** (b - 127)``;
@@ -91,6 +113,97 @@ def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
     return encoded.to(torch.uint8).contiguous()
 
 
+def _maybe_e8m0_scale(scale: torch.Tensor) -> torch.Tensor | None:
+    if not (
+        envs.VLLM_ROCM_USE_AITER_DSV4_FP8_MXSCALE
+        and _ON_GFX950
+        and get_tensor_model_parallel_world_size() == 1
+    ):
+        return None
+    encoded = _block_scale_to_e8m0(scale)
+    return None if encoded is None else encoded.view(torch.float8_e8m0fnu)
+
+
+def prepare_e8m0_linears(linears: list[torch.nn.Module]) -> bool:
+    """Prepare coupled consumers only when every linear supports native scales."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        get_fp8_block_weight_scale,
+    )
+    from vllm.model_executor.utils import replace_parameter
+
+    if not rocm_aiter_ops.is_enabled():
+        return False
+    scales = []
+    for linear in linears:
+        weight = getattr(linear, "weight", None)
+        scale = get_fp8_block_weight_scale(linear)
+        if (
+            weight is None
+            or weight.ndim != 2
+            or weight.dtype != torch.float8_e4m3fn
+            or getattr(linear, "orig_dtype", None) != torch.bfloat16
+            or getattr(linear, "bias", None) is not None
+            or weight.shape[0] % 128
+            or weight.shape[1] % 128
+            or scale is None
+            or scale.shape != (weight.shape[0] // 128, weight.shape[1] // 128)
+        ):
+            return False
+        encoded = _maybe_e8m0_scale(scale)
+        if encoded is None:
+            return False
+        scales.append(encoded)
+    for linear, scale in zip(linears, scales):
+        if not getattr(linear, "aiter_bpreshuffled", False):
+            replace_parameter(
+                linear,
+                "weight",
+                rocm_aiter_ops.shuffle_weight(linear.weight.data, layout=(16, 16)),
+            )
+            linear.aiter_bpreshuffled = True
+        linear.aiter_e8m0_scale = scale
+    return True
+
+
+def apply_e8m0_linear(linear: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    shape = x.shape
+    if x.numel() == 0:
+        return x.new_empty((*shape[:-1], linear.weight.shape[0]))
+    quantized, scale = rocm_aiter_ops.group_e8m0_quant(
+        x.reshape(-1, shape[-1]), transpose_scale=True
+    )
+    out = apply_pre_quantized_block_scaled_mm(linear, quantized, scale)
+    return out.reshape(*shape[:-1], out.shape[-1])
+
+
+def _wo_a_rope_tables(
+    rotary_emb: torch.nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cache = getattr(rotary_emb, "cos_sin_cache_bf16", None)
+    if cache is None:
+        cache = rotary_emb.cos_sin_cache
+    cos_cache = getattr(rotary_emb, "_dsv4_wo_a_cos_cache", None)
+    sin_cache = getattr(rotary_emb, "_dsv4_wo_a_sin_cache", None)
+    shape = (cache.shape[0], cache.shape[1] // 2)
+    if all(
+        table is not None
+        and table.dtype == torch.bfloat16
+        and table.device == cache.device
+        and table.shape == shape
+        and table.is_contiguous()
+        for table in (cos_cache, sin_cache)
+    ):
+        return cos_cache, sin_cache
+    cos_cache, sin_cache = cache.to(dtype=torch.bfloat16).chunk(2, dim=-1)
+    cos_cache, sin_cache = cos_cache.contiguous(), sin_cache.contiguous()
+    rotary_emb.register_buffer("_dsv4_wo_a_cos_cache", cos_cache, persistent=False)
+    rotary_emb.register_buffer("_dsv4_wo_a_sin_cache", sin_cache, persistent=False)
+    return cos_cache, sin_cache
+
+
 def _trust_dsv4_extra_cache_nan_free(
     kv_cache_dtype: str,
     has_kv_transfer: bool,
@@ -108,6 +221,14 @@ def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_triton_sparse_mla_enabled():
+        return False
+    # The Triton kernel reads fp8_ds_mla pages; the ASM path keeps prefill on
+    # the default gather path.
+    if asm_sparse_mla.ENABLED:
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with "
+            "VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA."
+        )
         return False
     # The aiter kernel does not scrub NaNs, so like the trust check above it
     # needs a cache only the canonical writer has touched.
@@ -140,6 +261,20 @@ def apply_pre_quantized_block_scaled_mm(
     the wq_b-style column/replicated linears: their output is the local
     TP shard, so no all-reduce is needed.
     """
+    if x_scale.dtype == torch.float8_e8m0fnu:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        output_dtype = linear.quant_method.fp8_linear.config.out_dtype
+        if x_fp8.shape[0] == 0:
+            return x_fp8.new_empty((0, linear.weight.shape[0]), dtype=output_dtype)
+        return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            x_fp8,
+            linear.weight,
+            x_scale,
+            linear.aiter_e8m0_scale,
+            output_dtype=output_dtype,
+        )
+
     from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
         FP8BlockParams,
     )
@@ -386,6 +521,137 @@ def _pack_global_topk_ragged_kernel(
     block_offsets = local_idx % block_size
     slot_ids = tl.where(valid, block_numbers * block_size + block_offsets, -1)
     tl.store(global_topk_ragged_ptr + out_start + offset, slot_ids, mask=mask)
+
+
+# The strides and the state block size depend on the KV cache layout; keeping
+# them out of the compile key lets one warmup variant serve every deployment.
+@triton.jit(
+    do_not_specialize=[
+        "state_cache_stride0",
+        "state_cache_stride1",
+        "block_table_stride",
+        "block_size",
+        "pooled_k_stride",
+    ]
+)
+def _compress_pool_kernel(
+    state_cache_ptr,
+    state_cache_stride0,
+    state_cache_stride1,
+    token_to_req_indices_ptr,
+    positions_ptr,
+    kv_slot_mapping_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    pooled_k_ptr,
+    pooled_k_stride,
+    HEAD_SIZE: tl.constexpr,
+    STATE_WIDTH: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    OVERLAP: tl.constexpr,
+):
+    """The softmax-gated pooling of `_fused_kv_compress_norm_rope_insert_*`,
+    stopping before the norm: one bf16 row per boundary token."""
+    token_idx = tl.program_id(0)
+    # Pool exactly the rows aiter's writer stores; it skips the same tokens.
+    if tl.load(kv_slot_mapping_ptr + token_idx) < 0:
+        return
+    position = tl.load(positions_ptr + token_idx)
+    if (position + 1) % COMPRESS_RATIO != 0:
+        return
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+
+    start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
+    tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
+    pos = start + tokens
+    mask_pos = pos >= 0
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + pos // block_size,
+        mask=mask_pos,
+        other=0,
+    )
+    head_offset = (tokens >= COMPRESS_RATIO).to(tl.int32) * HEAD_SIZE
+    row_base = (
+        state_cache_ptr
+        + block_numbers.to(tl.int64) * state_cache_stride0
+        + (pos % block_size) * state_cache_stride1
+        + head_offset
+    )
+
+    block = tl.arange(0, HEAD_SIZE)
+    score = tl.load(
+        row_base[:, None] + STATE_WIDTH + block[None, :],
+        mask=mask_pos[:, None],
+        other=float("-inf"),
+    )
+    score = tl.softmax(score, dim=0)
+    kv = tl.load(row_base[:, None] + block[None, :], mask=mask_pos[:, None], other=0.0)
+    compressed_kv = tl.sum(kv * score, axis=0)
+    tl.store(
+        pooled_k_ptr + token_idx.to(tl.int64) * pooled_k_stride + block,
+        compressed_kv.to(tl.bfloat16),
+    )
+
+
+def _compress_pool_warmup_inputs(
+    *, head_dim: int, state_width: int, compress_ratio: int, overlap: bool
+) -> list[dict[str, object]]:
+    # ROCm specializes a pointer on whether its storage is at most 2 GB (see
+    # TritonWarmupTensor.ptr_range_bytes). The state cache is a view of the KV
+    # pool, whose size depends on the deployment and is usually far above
+    # 2 GB, so warm up both variants; the other inputs are small buffers.
+    return [
+        dict(
+            state_cache=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, 1, 2 * state_width),
+                ptr_range_bytes=pool_bytes,
+            ),
+            token_to_req_indices=TritonWarmupTensor(torch.int32),
+            positions=TritonWarmupTensor(torch.int64),
+            kv_slot_mapping=TritonWarmupTensor(torch.int64),
+            block_table=TritonWarmupTensor(torch.int32, shape=(1, 1)),
+            block_size=compress_ratio,
+            pooled_k=TritonWarmupTensor(torch.bfloat16, shape=(1, head_dim)),
+            state_width=state_width,
+            compress_ratio=compress_ratio,
+            overlap=overlap,
+        )
+        for pool_bytes in (0, 1 << 32)
+    ]
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_compress_pool_kernel,
+    warmup_inputs=_compress_pool_warmup_inputs,
+)
+def compress_pool(
+    state_cache: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    positions: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    pooled_k: torch.Tensor,
+    state_width: int,
+    compress_ratio: int,
+    overlap: bool,
+) -> DispatchSpec:
+    """Pool each boundary token's compressor states into a bf16 row of
+    ``pooled_k``, one program per token. Tensor inputs bind to the kernel's
+    ``<name>_ptr`` arguments; the same launch spec drives the JIT warmup."""
+    return (pooled_k.shape[0],), dict(
+        state_cache_stride0=state_cache.stride(0),
+        state_cache_stride1=state_cache.stride(1),
+        block_table_stride=block_table.stride(0),
+        pooled_k_stride=pooled_k.stride(0),
+        HEAD_SIZE=pooled_k.shape[1],
+        STATE_WIDTH=state_width,
+        COMPRESS_RATIO=compress_ratio,
+        OVERLAP=overlap,
+        num_warps=1,
+    )
 
 
 def compute_global_topk_ragged_indices_and_indptr(
@@ -677,6 +943,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
     _use_aiter_sparse_mla = False
 
+    def _get_indexer_cls(self, vllm_config: VllmConfig) -> type[DeepseekV4Indexer]:
+        if dsa_indexer_uses_fp4(vllm_config):
+            # aiter's paged MXFP4 kernels write and score the index K cache.
+            return DeepseekV4RocmMxfp4Indexer
+        return super()._get_indexer_cls(vllm_config)
+
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]
         super().__init__(*args, **kwargs)
@@ -684,7 +956,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
-        self._wo_a_fp8_weight: torch.Tensor | None = None
+        self._q_norm_e8m0 = False
+        self._wo_a_fp8_weight_bpre: torch.Tensor | None = None
         self._wo_a_e8m0_scale: torch.Tensor | None = None
         self._wo_a_cos_cache: torch.Tensor | None = None
         self._wo_a_sin_cache: torch.Tensor | None = None
@@ -923,7 +1196,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
         from vllm.model_executor.utils import replace_parameter
 
-        def _prep(linear) -> torch.Tensor | None:
+        def _prep(linear, mxscale: bool = False) -> torch.Tensor | None:
             w = getattr(linear, "weight", None)
             if w is None or w.dim() != 2:
                 return None
@@ -933,7 +1206,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             ws = get_fp8_block_weight_scale(linear)
             if ws is None:
                 return None
-            if ws.dtype == torch.float8_e8m0fnu:
+            e8m0 = None
+            if (
+                mxscale
+                and w.dtype == torch.float8_e4m3fn
+                and w.shape[0] % 128 == 0
+                and ws.shape == (w.shape[0] // 128, w.shape[1] // 128)
+            ):
+                e8m0 = _maybe_e8m0_scale(ws)
+            if e8m0 is not None:
+                ws = e8m0
+            elif ws.dtype == torch.float8_e8m0fnu:
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
             # Shuffle the weight in place (single weight, no unshuffled copy),
             # unless the linear kernel already B-preshuffled it at load time.
@@ -943,25 +1226,32 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     "weight",
                     rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
                 )
+                linear.aiter_bpreshuffled = True
             return ws
 
-        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
-        self._wo_b_scale = _prep(self.wo_b)
+        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv, mxscale=True)
+        self._wo_b_scale = _prep(self.wo_b, mxscale=True)
+        if asm_sparse_mla.ENABLED:
+            consumers = [self.wq_b]
+            if self.indexer is not None:
+                consumers.append(self.indexer.wq_b)
+            self._q_norm_e8m0 = prepare_e8m0_linears(consumers)
         if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
             self._prepare_fp8_wo_a()
 
     def _prepare_fp8_wo_a(self) -> None:
         try:
             from aiter.ops.batched_gemm_op_a8w8 import (
-                batched_gemm_a8w8_mxscale as mxscale_op,
+                batched_gemm_a8w8_mxscale_bpreshuffle as mxscale_op,
             )
             from aiter.ops.inverse_rope_group_quant import (
                 inverse_rope_group_quant as inverse_quant_op,
             )
         except ImportError:
             logger.warning_once(
-                "The DeepSeek V4 FP8 WO_A path requires AITER >= 0.1.20; "
-                "falling back to BF16 WO_A."
+                "The DeepSeek V4 FP8 WO_A path requires AITER's preshuffled "
+                "MXFP8 batched GEMM and inverse RoPE quantization; falling "
+                "back to BF16 WO_A."
             )
             return
         del mxscale_op, inverse_quant_op
@@ -1015,7 +1305,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             return
 
-        e8m0_scale = _wo_a_block_scale_to_e8m0(scale)
+        e8m0_scale = _block_scale_to_e8m0(scale)
         if e8m0_scale is None:
             logger.warning_once(
                 "DeepSeek V4 FP8 WO_A could not losslessly encode the %s wo_a "
@@ -1024,16 +1314,23 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             return
 
-        self._wo_a_fp8_weight = weight.view(groups, out_per_group, in_features)
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.model_executor.utils import replace_parameter
+
+        if not getattr(self.wo_a, "aiter_bpreshuffled", False):
+            replace_parameter(
+                self.wo_a,
+                "weight",
+                rocm_aiter_ops.shuffle_weight(weight.data, layout=(16, 16)),
+            )
+            self.wo_a.aiter_bpreshuffled = True
+        self._wo_a_fp8_weight_bpre = self.wo_a.weight.view(
+            groups, out_per_group, in_features
+        )
         self._wo_a_e8m0_scale = e8m0_scale.view(
             groups, out_per_group // 128, in_features // 128
         )
-        cache = getattr(self.rotary_emb, "cos_sin_cache_bf16", None)
-        if cache is None:
-            cache = self.rotary_emb.cos_sin_cache.to(dtype=torch.bfloat16)
-        cos_cache, sin_cache = cache.chunk(2, dim=-1)
-        self._wo_a_cos_cache = cos_cache.contiguous()
-        self._wo_a_sin_cache = sin_cache.contiguous()
+        self._wo_a_cos_cache, self._wo_a_sin_cache = _wo_a_rope_tables(self.rotary_emb)
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         if self._fused_compressor_weight is not None:
@@ -1084,7 +1381,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> torch.Tensor:
         from vllm._aiter_ops import rocm_aiter_ops
 
-        x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
+        quant = (
+            rocm_aiter_ops.group_e8m0_quant
+            if scale.dtype == torch.float8_e8m0fnu
+            else rocm_aiter_ops.group_fp8_quant
+        )
+        x_fp8, x_scale = quant(x, transpose_scale=True)
         out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
             x_fp8, weight, x_scale, scale, output_dtype=x.dtype
         )
@@ -1170,6 +1472,23 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         when the aiter linear path is not active.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        if self._q_norm_e8m0 and qr.shape[0] > 0:
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            qr_n, qr_scale = rocm_aiter_ops.rmsnorm_e8m0_quant(
+                qr, self.q_norm.weight, self.eps
+            )
+            return qr_n, qr_scale, kv
+        if asm_sparse_mla.ENABLED:
+            # The 2-buffer insert (aiter fused_qk_norm_rope_group_quant) applies
+            # kv_norm itself, so it takes the pre-norm kv.
+            qr_n, qr_scale, _ = self._split_qkv_and_norm_default(qr_kv, qr, kv)
+            return qr_n, qr_scale, kv
+        return self._split_qkv_and_norm_default(qr_kv, qr, kv)
+
+    def _split_qkv_and_norm_default(
+        self, qr_kv: torch.Tensor, qr: torch.Tensor, kv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         if not (
             qr.dim() == 2
             and qr.shape[0] > 0
@@ -1192,9 +1511,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        if self._wo_a_fp8_weight is not None:
+        if self._wo_a_fp8_weight_bpre is not None:
             from aiter.ops.batched_gemm_op_a8w8 import (
-                batched_gemm_a8w8_mxscale,
+                batched_gemm_a8w8_mxscale_bpreshuffle,
             )
             from aiter.ops.inverse_rope_group_quant import (
                 inverse_rope_group_quant,
@@ -1211,9 +1530,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 quant_group_size=128,
             )
             assert self._wo_a_e8m0_scale is not None
-            zf = batched_gemm_a8w8_mxscale(
+            zf = batched_gemm_a8w8_mxscale_bpreshuffle(
                 o_fp8,
-                self._wo_a_fp8_weight,
+                self._wo_a_fp8_weight_bpre,
                 o_scale,
                 self._wo_a_e8m0_scale,
                 dtype=o.dtype,
@@ -1304,7 +1623,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         # The fp8 wo_a path rotates inside inverse_rope_group_quant, so folding
         # the rotation into the decode reduce would apply it twice. Only the
         # BF16 einsum path hands its rotation off to the decode.
-        fuse_inv_rope = self._wo_a_fp8_weight is None
+        fuse_inv_rope = self._wo_a_fp8_weight_bpre is None
         rotated = 0
         if num_decodes > 0:
             fuse_decode_inv_rope = fuse_inv_rope and not on_gfx1250()
@@ -1351,6 +1670,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         adaptive_splits: bool,
     ) -> int:
         """Returns how many leading rows the decode epilogue inverse-RoPE'd."""
+        if asm_sparse_mla.ENABLED:
+            # aiter v4 nm ASM decode on the 2-buffer pools; inverse RoPE stays
+            # with the caller.
+            asm_sparse_mla.decode(self, output, swa_metadata, attn_metadata, swa_only)
+            return 0
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -1511,6 +1835,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
                     use_fnuz=False,
+                    rope_cache=(
+                        asm_sparse_mla.rope_view(self._v4_geom)
+                        if asm_sparse_mla.ENABLED
+                        else None
+                    ),
                 )
 
             swa_block_table = swa_metadata.block_table[num_decodes:]
@@ -1523,6 +1852,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 block_size=swa_metadata.block_size,
                 offset=chunk_N,
                 use_fnuz=current_platform.is_fp8_fnuz(),
+                rope_cache=(
+                    asm_sparse_mla.rope_view(self.swa_cache_layer._v4_geom)
+                    if asm_sparse_mla.ENABLED
+                    else None
+                ),
             )
 
             query_start = (
@@ -1654,4 +1988,124 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             extra_kv_buffer=compressed_k_cache,
             extra_kv_indptr=topk_indptr,
             extra_kv_indices=topk_indices,
+        )
+
+
+class DeepseekV4RocmMxfp4Compressor(DeepseekCompressor):
+    """The indexer's compressor writing aiter's preshuffled MXFP4 pages: a
+    pooling kernel, then aiter's norm + RoPE + MXFP4 cache op, which owns the
+    page layout its MQA-logits kernel reads."""
+
+    def __init__(self, vllm_config: VllmConfig, **kwargs: Any) -> None:
+        super().__init__(vllm_config, **kwargs)
+        assert self.head_dim == 128 and self.use_fp4_cache
+        self.num_index_heads = vllm_config.model_config.hf_config.index_n_heads
+        if vllm_config.kernel_config.enable_jit_warmup:
+            # Compile at startup instead of on the first boundary token.
+            compress_pool.register_warmup(
+                head_dim=self.head_dim,
+                state_width=self.coff * self.head_dim,
+                compress_ratio=self.compress_ratio,
+                overlap=self.overlap,
+            )
+
+    def _pooled_k(self, num_tokens: int) -> torch.Tensor:
+        # A persistent buffer rather than the shared scratch: in the CSA fork
+        # this runs on an aux stream next to other branches. The indexer
+        # layers run one after another, so they can all share it.
+        scratch = current_workspace_manager().get_persistent(
+            "dsv4_rocm_mxfp4_pooled_k",
+            (self.max_num_batched_tokens, self.head_dim),
+            torch.bfloat16,
+        )
+        assert num_tokens <= scratch.shape[0]
+        return scratch[:num_tokens]
+
+    def forward(
+        self, kv_score: torch.Tensor, positions: torch.Tensor, rotary_emb
+    ) -> None:
+        # Claim the scratch on the profiling run, before the workspace locks.
+        self._pooled_k(0)
+        super().forward(kv_score, positions, rotary_emb)
+
+    def _compress_norm_rope_store(
+        self,
+        state_metadata: CompressorMetadata,
+        state_cache: torch.Tensor,
+        state_width: int,
+        positions: torch.Tensor,
+        rotary_emb,
+        attn_metadata: dict[str, Any],
+        pdl_kwargs: dict,
+    ) -> None:
+        num_tokens = state_metadata.slot_mapping.shape[0]
+        if num_tokens == 0:
+            return
+        k_cache_metadata = attn_metadata[self.k_cache_prefix]
+        kv_slot_mapping = k_cache_metadata.slot_mapping[:num_tokens]
+        kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
+        pooled_k = self._pooled_k(num_tokens)
+        compress_pool(
+            state_cache,
+            state_metadata.token_to_req_indices,
+            positions,
+            kv_slot_mapping,
+            state_metadata.block_table,
+            state_metadata.block_size,
+            pooled_k,
+            state_width,
+            self.compress_ratio,
+            self.overlap,
+        )
+        rocm_mxfp4_indexer_k_store(
+            pooled_k,
+            positions[:num_tokens],
+            rotary_emb.cos_sin_cache,
+            self.norm.weight,
+            self.rms_norm_eps,
+            kv_cache,
+            kv_slot_mapping,
+            self.compress_ratio,
+            self.use_fp4_cache,
+            num_heads=self.num_index_heads,
+        )
+
+
+class DeepseekV4RocmMxfp4IndexerCache(DeepseekV4IndexerCache):
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return DeepseekV4RocmMxfp4IndexerBackend
+
+
+class DeepseekV4RocmMxfp4Indexer(DeepseekV4Indexer):
+    """`DeepseekV4Indexer` on aiter's paged MXFP4 cache, scoring the whole
+    context in place (V4 has no candidate pool)."""
+
+    def _get_cache_cls(self) -> type[DeepseekV4IndexerCache]:
+        return DeepseekV4RocmMxfp4IndexerCache
+
+    def _get_compressor_cls(self) -> type[DeepseekCompressor]:
+        return DeepseekV4RocmMxfp4Compressor
+
+    def _get_attn_cls(self) -> type[SparseAttnIndexer]:
+        return RocmSparseAttnIndexer
+
+    def _register_q_quant_warmup(self) -> None:
+        # The shared MXFP4 Q kernel packs FP4 with CUDA PTX; aiter's op runs here.
+        pass
+
+    def _q_rope_quant(
+        self,
+        positions: torch.Tensor,
+        q: torch.Tensor,
+        rotary_emb: torch.nn.Module,
+        indexer_weights: torch.Tensor,
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+        # aiter's MQA-logits kernel takes fp32 weights with both scales folded.
+        return rocm_mxfp4_indexer_q_quant(
+            positions,
+            q,
+            rotary_emb.cos_sin_cache,
+            indexer_weights,
+            self.softmax_scale,
+            self.n_head**-0.5,
         )

@@ -1,0 +1,1300 @@
+{
+  "updated_unix": 1792953791.9400399,
+  "controller_phase": "complete",
+  "completed_suite_count": 22,
+  "expected_suite_count": 22,
+  "complete_pairs": 11,
+  "expected_pairs": 11,
+  "rows": [
+    {
+      "name": "indexer_topk_quality_baseline_asm_gpqa_seed1",
+      "arm": "baseline_asm",
+      "suite": "gpqa",
+      "context": null,
+      "variant": null,
+      "task": "gpqa_diamond_cot_n_shot",
+      "metric": "exact_match,extract_abcd",
+      "score": 0.8535353535353535,
+      "samples": 396,
+      "response_accounting": {
+        "responses": 396,
+        "choices": 396,
+        "expected_samples": 396,
+        "finish_reasons": {
+          "stop": 340,
+          "length": 56
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 4310892
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 340,
+          "score": 0.9470588235294117
+        },
+        "length": {
+          "samples": 56,
+          "score": 0.2857142857142857
+        }
+      },
+      "source_diff_sha256": "1a1733fac4276cfe117c37f2ded1e7c9982759ab0319a8cdfbf521922b6e539e",
+      "generation_budget": 32768,
+      "seed": 1,
+      "concurrency": 128,
+      "file_sha256": {
+        "task/gpqa_diamond.yaml": "dbd76d5b2d43f60b2e5cef2c15ec8531a40fff42526a71e8eab7d6f2a23caead",
+        "task/utils.py": "ba731597eeda27b71d639518666442996d257831dc70e04cd143cd1a7cec45b0",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_gpqa_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T17-31-35.386511.json",
+      "results_sha256": "b180fab0de5008bd0beeab047fd6883c4fb10f109df1fd0efd81926c16a6c59f",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_gpqa_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_gpqa_diamond_cot_n_shot_2026-10-25T17-31-35.386511.jsonl",
+      "sample_records_sha256": "016f168ca66fbc3546b515368bec1ae0449e2afa23bffa502c78a26c3a3dcc72"
+    },
+    {
+      "name": "indexer_topk_quality_baseline_asm_aime_seed1",
+      "arm": "baseline_asm",
+      "suite": "aime",
+      "context": null,
+      "variant": null,
+      "task": "aime25_cot",
+      "metric": "exact_match,none",
+      "score": 0.9333333333333333,
+      "samples": 30,
+      "response_accounting": {
+        "responses": 30,
+        "choices": 30,
+        "expected_samples": 30,
+        "finish_reasons": {
+          "stop": 29,
+          "length": 1
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 375432
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 29,
+          "score": 0.9655172413793104
+        },
+        "length": {
+          "samples": 1,
+          "score": 0.0
+        }
+      },
+      "source_diff_sha256": "1a1733fac4276cfe117c37f2ded1e7c9982759ab0319a8cdfbf521922b6e539e",
+      "generation_budget": 65536,
+      "seed": 1,
+      "concurrency": 128,
+      "file_sha256": {
+        "task/aime25_cot.yaml": "3ddfe20b7409ce7333d01f5ceb2cac4e3d43010908d5ae86a1b9187c5d064384",
+        "task/utils.py": "e5072ebf08479745698bec6cfa103faa4f3ac5764db09bcbe760953227f9082b",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_aime_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T17-38-37.100137.json",
+      "results_sha256": "da77223ae95c1a1234f8f8c133d1781f5cd94f32c11e81c677e13a7dd14a18ac",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_aime_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_aime25_cot_2026-10-25T17-38-37.100137.jsonl",
+      "sample_records_sha256": "a7a81e5ed5387ebc3a99c326a475f179aa7bb08a9726ba725496129685150d40"
+    },
+    {
+      "name": "indexer_topk_quality_baseline_asm_niah131072_seed1_single_1",
+      "arm": "baseline_asm",
+      "suite": "niah",
+      "context": 131072,
+      "variant": "single_1",
+      "task": "niah_single_1_chat",
+      "metric": "131072,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 3353
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "1a1733fac4276cfe117c37f2ded1e7c9982759ab0319a8cdfbf521922b6e539e",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah131072_seed1_single_1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T17-44-27.109599.json",
+      "results_sha256": "02b27dc011d0e63ab4e31ef82401f4d0d0146e6643102946bcd15a98898ba4eb",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah131072_seed1_single_1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_single_1_chat_2026-10-25T17-44-27.109599.jsonl",
+      "sample_records_sha256": "0378f2328e5d82661b470f937d246ad7a48c45d33631698505cb53f16000b714"
+    },
+    {
+      "name": "indexer_topk_quality_baseline_asm_niah131072_seed1_multikey_2",
+      "arm": "baseline_asm",
+      "suite": "niah",
+      "context": 131072,
+      "variant": "multikey_2",
+      "task": "niah_multikey_2_chat",
+      "metric": "131072,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 5305
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "1a1733fac4276cfe117c37f2ded1e7c9982759ab0319a8cdfbf521922b6e539e",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah131072_seed1_multikey_2/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T17-44-28.590328.json",
+      "results_sha256": "014b338b5f5d04ffcf253f89b83f8ab48d3740f1625b22442a9dc4a89f81cb20",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah131072_seed1_multikey_2/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_2_chat_2026-10-25T17-44-28.590328.jsonl",
+      "sample_records_sha256": "82a0f304523c8e052d202b5e643f1ef93e76790245046956fdd18ee78cd7eeeb"
+    },
+    {
+      "name": "indexer_topk_quality_baseline_asm_niah131072_seed1_multikey_3",
+      "arm": "baseline_asm",
+      "suite": "niah",
+      "context": 131072,
+      "variant": "multikey_3",
+      "task": "niah_multikey_3_chat",
+      "metric": "131072,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 9944
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "1a1733fac4276cfe117c37f2ded1e7c9982759ab0319a8cdfbf521922b6e539e",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah131072_seed1_multikey_3/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T17-44-28.120345.json",
+      "results_sha256": "fbc719402ec6a3a0ca400aa59dd54c9a1eeae13686fc703855f51871e846b4be",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah131072_seed1_multikey_3/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_3_chat_2026-10-25T17-44-28.120345.jsonl",
+      "sample_records_sha256": "5ed327cb6bb6291a70e889a235455e4faccf050472d57382b58f8d685c45a839"
+    },
+    {
+      "name": "indexer_topk_quality_baseline_asm_niah_32768_single_1_seed1",
+      "arm": "baseline_asm",
+      "suite": "niah",
+      "context": 32768,
+      "variant": "single_1",
+      "task": "niah_single_1_chat",
+      "metric": "32768,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 3397
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "1a1733fac4276cfe117c37f2ded1e7c9982759ab0319a8cdfbf521922b6e539e",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_32768_single_1_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T17-45-07.882930.json",
+      "results_sha256": "47f33711f9e093f01542a4e27f191a46255ff27e86d8555d109ef2f25586e1c2",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_32768_single_1_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_single_1_chat_2026-10-25T17-45-07.882930.jsonl",
+      "sample_records_sha256": "3579509ac6e37f9c948ff987da6c00aa7aa89104f7c731fe57deb6d7f98479c6"
+    },
+    {
+      "name": "indexer_topk_quality_baseline_asm_niah_32768_multikey_2_seed1",
+      "arm": "baseline_asm",
+      "suite": "niah",
+      "context": 32768,
+      "variant": "multikey_2",
+      "task": "niah_multikey_2_chat",
+      "metric": "32768,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 4424
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "1a1733fac4276cfe117c37f2ded1e7c9982759ab0319a8cdfbf521922b6e539e",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_32768_multikey_2_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T17-45-52.999372.json",
+      "results_sha256": "0a994249260fd22f86d826ec0a0a8bf411b20736b8acd2c4a3a1a1492d0cb4a2",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_32768_multikey_2_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_2_chat_2026-10-25T17-45-52.999372.jsonl",
+      "sample_records_sha256": "9b94f251562496bf5758f5df3cb2b8f5a5332dfa36fb53f756ff009d0ab93ed5"
+    },
+    {
+      "name": "indexer_topk_quality_baseline_asm_niah_32768_multikey_3_seed1",
+      "arm": "baseline_asm",
+      "suite": "niah",
+      "context": 32768,
+      "variant": "multikey_3",
+      "task": "niah_multikey_3_chat",
+      "metric": "32768,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 8341
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "1a1733fac4276cfe117c37f2ded1e7c9982759ab0319a8cdfbf521922b6e539e",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_32768_multikey_3_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T17-46-34.903982.json",
+      "results_sha256": "6f86e02eb25068916391fa3e76dc4d4d110bc6ebcd1cdec3d1e5c6b31fb3e406",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_32768_multikey_3_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_3_chat_2026-10-25T17-46-34.903982.jsonl",
+      "sample_records_sha256": "e0599327516971040049574118617813ae586979d7249d4fba2170714cb12d1d"
+    },
+    {
+      "name": "indexer_topk_quality_baseline_asm_niah_262144_single_1_seed1",
+      "arm": "baseline_asm",
+      "suite": "niah",
+      "context": 262144,
+      "variant": "single_1",
+      "task": "niah_single_1_chat",
+      "metric": "262144,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 3406
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "1a1733fac4276cfe117c37f2ded1e7c9982759ab0319a8cdfbf521922b6e539e",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "54a21c3dd1ce8665ae60e682c02e1109376d95f1cfbb40e98a5bd416c2e1dc1a",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_262144_single_1_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T17-51-10.268978.json",
+      "results_sha256": "857099475472e8f33b1e52f94abaf0e909e0365742c5b0e105ef6107c9660ce7",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_262144_single_1_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_single_1_chat_2026-10-25T17-51-10.268978.jsonl",
+      "sample_records_sha256": "9fb84861ab683de97fa48807d10950d8690f4ad272f5f8e3a07d230599861ad0"
+    },
+    {
+      "name": "indexer_topk_quality_baseline_asm_niah_262144_multikey_2_seed1",
+      "arm": "baseline_asm",
+      "suite": "niah",
+      "context": 262144,
+      "variant": "multikey_2",
+      "task": "niah_multikey_2_chat",
+      "metric": "262144,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 5434
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "1a1733fac4276cfe117c37f2ded1e7c9982759ab0319a8cdfbf521922b6e539e",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_262144_multikey_2_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T17-56-52.431235.json",
+      "results_sha256": "d42df0e51493af5301c3fd2283feeddd6fbe232fc21acf8a2d0d10f7cb9787d5",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_262144_multikey_2_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_2_chat_2026-10-25T17-56-52.431235.jsonl",
+      "sample_records_sha256": "ab52cb8027862fa6bde2792c7cdc3a61c064e85d8f890f91452a3333e89adf1a"
+    },
+    {
+      "name": "indexer_topk_quality_baseline_asm_niah_262144_multikey_3_seed1",
+      "arm": "baseline_asm",
+      "suite": "niah",
+      "context": 262144,
+      "variant": "multikey_3",
+      "task": "niah_multikey_3_chat",
+      "metric": "262144,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 9922
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "1a1733fac4276cfe117c37f2ded1e7c9982759ab0319a8cdfbf521922b6e539e",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_262144_multikey_3_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-01-12.292843.json",
+      "results_sha256": "e8b59ec512509079e7bf3abe2eb3a965b11a83f9d2829dd82f1009d8813e9ad8",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_baseline_asm_niah_262144_multikey_3_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_3_chat_2026-10-25T18-01-12.292843.jsonl",
+      "sample_records_sha256": "390c065dcdd55aaa8ed1f0944c854f671788909b630097afd8b3907ce02bf58c"
+    },
+    {
+      "name": "indexer_topk_quality_candidate_e8m0_gpqa_seed1",
+      "arm": "candidate_e8m0",
+      "suite": "gpqa",
+      "context": null,
+      "variant": null,
+      "task": "gpqa_diamond_cot_n_shot",
+      "metric": "exact_match,extract_abcd",
+      "score": 0.8333333333333334,
+      "samples": 396,
+      "response_accounting": {
+        "responses": 396,
+        "choices": 396,
+        "expected_samples": 396,
+        "finish_reasons": {
+          "stop": 332,
+          "length": 64
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 4411510
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 332,
+          "score": 0.9518072289156626
+        },
+        "length": {
+          "samples": 64,
+          "score": 0.21875
+        }
+      },
+      "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+      "generation_budget": 32768,
+      "seed": 1,
+      "concurrency": 128,
+      "file_sha256": {
+        "task/gpqa_diamond.yaml": "dbd76d5b2d43f60b2e5cef2c15ec8531a40fff42526a71e8eab7d6f2a23caead",
+        "task/utils.py": "ba731597eeda27b71d639518666442996d257831dc70e04cd143cd1a7cec45b0",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_gpqa_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-15-57.336971.json",
+      "results_sha256": "db42592f35bd269d26eb83adbe97b1c3bce2488fcfe0f60a3e851425da2cf6c2",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_gpqa_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_gpqa_diamond_cot_n_shot_2026-10-25T18-15-57.336971.jsonl",
+      "sample_records_sha256": "adcc75e05ccc35f2f031ccee24dd37f9fb4a572b443e0bc56a2242914807d591"
+    },
+    {
+      "name": "indexer_topk_quality_candidate_e8m0_aime_seed1",
+      "arm": "candidate_e8m0",
+      "suite": "aime",
+      "context": null,
+      "variant": null,
+      "task": "aime25_cot",
+      "metric": "exact_match,none",
+      "score": 1.0,
+      "samples": 30,
+      "response_accounting": {
+        "responses": 30,
+        "choices": 30,
+        "expected_samples": 30,
+        "finish_reasons": {
+          "stop": 30
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 381618
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 30,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+      "generation_budget": 65536,
+      "seed": 1,
+      "concurrency": 128,
+      "file_sha256": {
+        "task/aime25_cot.yaml": "3ddfe20b7409ce7333d01f5ceb2cac4e3d43010908d5ae86a1b9187c5d064384",
+        "task/utils.py": "e5072ebf08479745698bec6cfa103faa4f3ac5764db09bcbe760953227f9082b",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_aime_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-21-33.605473.json",
+      "results_sha256": "52cb7ad508cabbb7b27446464094ed81c7fe83ed96d509d62815019e0dc07b73",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_aime_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_aime25_cot_2026-10-25T18-21-33.605473.jsonl",
+      "sample_records_sha256": "bf236d05ad88494f93bea34d8ba5f0083351cc2a22f1218b0641be65018be5af"
+    },
+    {
+      "name": "indexer_topk_quality_candidate_e8m0_niah131072_seed1_single_1",
+      "arm": "candidate_e8m0",
+      "suite": "niah",
+      "context": 131072,
+      "variant": "single_1",
+      "task": "niah_single_1_chat",
+      "metric": "131072,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 3221
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah131072_seed1_single_1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-26-53.634240.json",
+      "results_sha256": "c11db674e30fb713b669df059f6d257e6304f95a1309674f6a13d897eda38a42",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah131072_seed1_single_1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_single_1_chat_2026-10-25T18-26-53.634240.jsonl",
+      "sample_records_sha256": "5841d1f1e286d5e74f9639eeb7d71a64768bde7ca9152b0a54e1bdb09b1f088e"
+    },
+    {
+      "name": "indexer_topk_quality_candidate_e8m0_niah131072_seed1_multikey_2",
+      "arm": "candidate_e8m0",
+      "suite": "niah",
+      "context": 131072,
+      "variant": "multikey_2",
+      "task": "niah_multikey_2_chat",
+      "metric": "131072,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 5303
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah131072_seed1_multikey_2/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-26-54.702049.json",
+      "results_sha256": "13b7209f037f1ecc4866c9d71b22d6e2d7778ec3bdf25e1ee58e70c9f087de17",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah131072_seed1_multikey_2/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_2_chat_2026-10-25T18-26-54.702049.jsonl",
+      "sample_records_sha256": "00c92aae251bce59300d26af0a47f4fea7185ea4c5b7ec43f1eb15b01d1dbdde"
+    },
+    {
+      "name": "indexer_topk_quality_candidate_e8m0_niah131072_seed1_multikey_3",
+      "arm": "candidate_e8m0",
+      "suite": "niah",
+      "context": 131072,
+      "variant": "multikey_3",
+      "task": "niah_multikey_3_chat",
+      "metric": "131072,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 9509
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah131072_seed1_multikey_3/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-26-54.895877.json",
+      "results_sha256": "2420f9ea57c56a85e11660358f8b908437d590c146d141b9796e3460d7e76ec4",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah131072_seed1_multikey_3/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_3_chat_2026-10-25T18-26-54.895877.jsonl",
+      "sample_records_sha256": "33e075a58217cc802a99cd75aa9490200e30a733ae4077d3d5222312d816349f"
+    },
+    {
+      "name": "indexer_topk_quality_candidate_e8m0_niah_32768_single_1_seed1",
+      "arm": "candidate_e8m0",
+      "suite": "niah",
+      "context": 32768,
+      "variant": "single_1",
+      "task": "niah_single_1_chat",
+      "metric": "32768,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 3328
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_32768_single_1_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-27-54.050805.json",
+      "results_sha256": "877ced3982cb6649fcbff9560c53d374f910a4abdfce0b624c3202e38a160493",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_32768_single_1_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_single_1_chat_2026-10-25T18-27-54.050805.jsonl",
+      "sample_records_sha256": "abaf95befb57dd61c61e6290aed742763bb38f8511f5cf433672d9a3f0d71704"
+    },
+    {
+      "name": "indexer_topk_quality_candidate_e8m0_niah_32768_multikey_2_seed1",
+      "arm": "candidate_e8m0",
+      "suite": "niah",
+      "context": 32768,
+      "variant": "multikey_2",
+      "task": "niah_multikey_2_chat",
+      "metric": "32768,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 4520
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_32768_multikey_2_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-28-35.490205.json",
+      "results_sha256": "efe78a8e70e80b15e422202818e06d276850d6189c61c616ca4aa065f629ea03",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_32768_multikey_2_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_2_chat_2026-10-25T18-28-35.490205.jsonl",
+      "sample_records_sha256": "f36ad92ada1799aed00b4f0899cdc49b20cdfe869b19df03d2008494fe12cfa4"
+    },
+    {
+      "name": "indexer_topk_quality_candidate_e8m0_niah_32768_multikey_3_seed1",
+      "arm": "candidate_e8m0",
+      "suite": "niah",
+      "context": 32768,
+      "variant": "multikey_3",
+      "task": "niah_multikey_3_chat",
+      "metric": "32768,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 8166
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_32768_multikey_3_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-29-14.246254.json",
+      "results_sha256": "82d19e20bb7cfba3f2ea85014ac9563c46e66f65826ed91cc7978e0f8ff38ef0",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_32768_multikey_3_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_3_chat_2026-10-25T18-29-14.246254.jsonl",
+      "sample_records_sha256": "b5f349fb9451b00450e1eb6913124ff9c58dbf05156c3dba64cb2e591a60549a"
+    },
+    {
+      "name": "indexer_topk_quality_candidate_e8m0_niah_262144_single_1_seed1",
+      "arm": "candidate_e8m0",
+      "suite": "niah",
+      "context": 262144,
+      "variant": "single_1",
+      "task": "niah_single_1_chat",
+      "metric": "262144,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 3299
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "54a21c3dd1ce8665ae60e682c02e1109376d95f1cfbb40e98a5bd416c2e1dc1a",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_262144_single_1_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-33-31.946863.json",
+      "results_sha256": "0942b91574ad15d0cc8f223efd320b9442e206a19dacc9e9de220657f2791741",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_262144_single_1_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_single_1_chat_2026-10-25T18-33-31.946863.jsonl",
+      "sample_records_sha256": "255d5967d9ff0c5b5753571acf4bad42d3baa52e70c9f0d004d45bf9bf168b82"
+    },
+    {
+      "name": "indexer_topk_quality_candidate_e8m0_niah_262144_multikey_2_seed1",
+      "arm": "candidate_e8m0",
+      "suite": "niah",
+      "context": 262144,
+      "variant": "multikey_2",
+      "task": "niah_multikey_2_chat",
+      "metric": "262144,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 5206
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_262144_multikey_2_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-38-56.784058.json",
+      "results_sha256": "3f8998eee1c21660c2bbb46f4bd23ef5b2f6747790c88f849555405589f9fdd6",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_262144_multikey_2_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_2_chat_2026-10-25T18-38-56.784058.jsonl",
+      "sample_records_sha256": "b3bfcb05eb3948af590ca141825cf867e4eb009b01051c5db6695f621fb569b9"
+    },
+    {
+      "name": "indexer_topk_quality_candidate_e8m0_niah_262144_multikey_3_seed1",
+      "arm": "candidate_e8m0",
+      "suite": "niah",
+      "context": 262144,
+      "variant": "multikey_3",
+      "task": "niah_multikey_3_chat",
+      "metric": "262144,none",
+      "score": 1.0,
+      "samples": 40,
+      "response_accounting": {
+        "responses": 40,
+        "choices": 40,
+        "expected_samples": 40,
+        "finish_reasons": {
+          "stop": 40
+        },
+        "empty_parsed_outputs": 0,
+        "completion_tokens": 9570
+      },
+      "scored_response_text_multiset_matches_audit": true,
+      "scores_by_response_finish": {
+        "stop": {
+          "samples": 40,
+          "score": 1.0
+        }
+      },
+      "source_diff_sha256": "9db2dd585bd9b7fc9acb3fb5a8ff959f112e73ea57f085f5a84f519e5eb821f9",
+      "generation_budget": 8192,
+      "seed": 1,
+      "concurrency": 40,
+      "file_sha256": {
+        "task/common_utils.py": "972cfcf2fc695c4bdfec1961e15d097885c10cf13ec1e7b2796642e32bffbe8f",
+        "task/cwe_utils.py": "e27159df13850979f262ca2dc1b5eee0501dea6dbcf84f4a0571e3d55d0ab337",
+        "task/essays.py": "f1d9531cdf07e09a860e44a2317a7e68f81424117a14ab413efd7c63233d1075",
+        "task/fwe_utils.py": "f0bb18891e4d68157512c84f6255695ee03a3e3643371ac6b4ff3287eb492ec5",
+        "task/niah_multikey_2_chat.yaml": "e5843245339b56ac0dead41f338887883b312e902de32ea3b6ce9e8d6d1d255c",
+        "task/niah_multikey_3_chat.yaml": "e260ca67f89771d49388c60578215d6a1f73eabf915278ac756cc50ec1ab134f",
+        "task/niah_single_1_chat.yaml": "2baeaf9a7577effd55a526b23d7ee7fd75a7c692bedfbe6c889830d3119776ea",
+        "task/niah_utils.py": "f96a45fdd1c1a1c33d15676726cc48c30126fe25192c2ca5463098bdc6f2fdba",
+        "task/prepare_niah.py": "beb37d90132ce928eca803818e5b4940468d1f9b25fa98f0ede8442ffd099ca3",
+        "task/qa_utils.py": "e12e3220899cb885811cad8593ef03fe08cff8e0a61d774fedd29525c6b5d1c5",
+        "task/vt_utils.py": "9d71679b554751266436b5aef328ae772c2196398eea869988e3f4e51b78fbcb",
+        "compat/sitecustomize.py": "f59218cfcf41c8507265a0f890b9bb3eebc8d3d87f808f776e228010f13d4d01"
+      },
+      "results_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_262144_multikey_3_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/results_2026-10-25T18-42-52.425513.json",
+      "results_sha256": "bb89319790e6bd87db802b3342e53bf14337db9b968df48a23d7a37cba2d31e5",
+      "sample_records_path": "/var/tmp/fai_dsv4_dep_optimization/evals/indexer_topk_quality_candidate_e8m0_niah_262144_multikey_3_seed1/results/deepseek-ai__DeepSeek-V4-Pro-0813/samples_niah_multikey_3_chat_2026-10-25T18-42-52.425513.jsonl",
+      "sample_records_sha256": "259787a45c8018f3de5ee20f30da738f1cdd60c325ba71e7e2e98233911aae6a"
+    }
+  ],
+  "paired_comparisons": [
+    {
+      "suite": "gpqa",
+      "context": null,
+      "variant": null,
+      "samples": 396,
+      "independent_clusters": 198,
+      "baseline_score": 0.8535353535353535,
+      "candidate_score": 0.8333333333333334,
+      "candidate_minus_baseline": -0.02020202020202011,
+      "paired_cluster_bootstrap_95pct_interval": [
+        -0.047979797979797977,
+        0.005050505050505051
+      ],
+      "paired_outcomes": {
+        "control=1.0,candidate=1.0": 320,
+        "control=1.0,candidate=0.0": 18,
+        "control=0.0,candidate=0.0": 48,
+        "control=0.0,candidate=1.0": 10
+      },
+      "interpretation": "A finite sample interval does not establish quality equivalence. Inspect truncation, empty outputs and task coverage."
+    },
+    {
+      "suite": "aime",
+      "context": null,
+      "variant": null,
+      "samples": 30,
+      "independent_clusters": 30,
+      "baseline_score": 0.9333333333333333,
+      "candidate_score": 1.0,
+      "candidate_minus_baseline": 0.06666666666666665,
+      "paired_cluster_bootstrap_95pct_interval": [
+        0.0,
+        0.16666666666666666
+      ],
+      "paired_outcomes": {
+        "control=1,candidate=1": 28,
+        "control=0,candidate=1": 2
+      },
+      "interpretation": "A finite sample interval does not establish quality equivalence. Inspect truncation, empty outputs and task coverage."
+    },
+    {
+      "suite": "niah",
+      "context": 131072,
+      "variant": "single_1",
+      "samples": 40,
+      "independent_clusters": 40,
+      "baseline_score": 1.0,
+      "candidate_score": 1.0,
+      "candidate_minus_baseline": 0.0,
+      "paired_cluster_bootstrap_95pct_interval": [
+        0.0,
+        0.0
+      ],
+      "paired_outcomes": {
+        "control=1.0,candidate=1.0": 40
+      },
+      "interpretation": "A finite sample interval does not establish quality equivalence. Inspect truncation, empty outputs and task coverage."
+    },
+    {
+      "suite": "niah",
+      "context": 131072,
+      "variant": "multikey_2",
+      "samples": 40,
+      "independent_clusters": 40,
+      "baseline_score": 1.0,
+      "candidate_score": 1.0,
+      "candidate_minus_baseline": 0.0,
+      "paired_cluster_bootstrap_95pct_interval": [
+        0.0,
+        0.0
+      ],
+      "paired_outcomes": {
+        "control=1.0,candidate=1.0": 40
+      },
+      "interpretation": "A finite sample interval does not establish quality equivalence. Inspect truncation, empty outputs and task coverage."
+    },
+    {
+      "suite": "niah",
+      "context": 131072,
+      "variant": "multikey_3",
+      "samples": 40,
+      "independent_clusters": 40,
+      "baseline_score": 1.0,
+      "candidate_score": 1.0,
+      "candidate_minus_baseline": 0.0,
+      "paired_cluster_bootstrap_95pct_interval": [
+        0.0,
+        0.0
+      ],
+      "paired_outcomes": {
+        "control=1.0,candidate=1.0": 40
+      },
+      "interpretation": "A finite sample interval does not establish quality equivalence. Inspect truncation, empty outputs and task coverage."
+    },
+    {
+      "suite": "niah",
+      "context": 32768,
+      "variant": "single_1",
+      "samples": 40,
+      "independent_clusters": 40,
+      "baseline_score": 1.0,
+      "candidate_score": 1.0,
+      "candidate_minus_baseline": 0.0,
+      "paired_cluster_bootstrap_95pct_interval": [
+        0.0,
+        0.0
+      ],
+      "paired_outcomes": {
+        "control=1.0,candidate=1.0": 40
+      },
+      "interpretation": "A finite sample interval does not establish quality equivalence. Inspect truncation, empty outputs and task coverage."
+    },
+    {
+      "suite": "niah",
+      "context": 32768,
+      "variant": "multikey_2",
+      "samples": 40,
+      "independent_clusters": 40,
+      "baseline_score": 1.0,
+      "candidate_score": 1.0,
+      "candidate_minus_baseline": 0.0,
+      "paired_cluster_bootstrap_95pct_interval": [
+        0.0,
+        0.0
+      ],
+      "paired_outcomes": {
+        "control=1.0,candidate=1.0": 40
+      },
+      "interpretation": "A finite sample interval does not establish quality equivalence. Inspect truncation, empty outputs and task coverage."
+    },
+    {
+      "suite": "niah",
+      "context": 32768,
+      "variant": "multikey_3",
+      "samples": 40,
+      "independent_clusters": 40,
+      "baseline_score": 1.0,
+      "candidate_score": 1.0,
+      "candidate_minus_baseline": 0.0,
+      "paired_cluster_bootstrap_95pct_interval": [
+        0.0,
+        0.0
+      ],
+      "paired_outcomes": {
+        "control=1.0,candidate=1.0": 40
+      },
+      "interpretation": "A finite sample interval does not establish quality equivalence. Inspect truncation, empty outputs and task coverage."
+    },
+    {
+      "suite": "niah",
+      "context": 262144,
+      "variant": "single_1",
+      "samples": 40,
+      "independent_clusters": 40,
+      "baseline_score": 1.0,
+      "candidate_score": 1.0,
+      "candidate_minus_baseline": 0.0,
+      "paired_cluster_bootstrap_95pct_interval": [
+        0.0,
+        0.0
+      ],
+      "paired_outcomes": {
+        "control=1.0,candidate=1.0": 40
+      },
+      "interpretation": "A finite sample interval does not establish quality equivalence. Inspect truncation, empty outputs and task coverage."
+    },
+    {
+      "suite": "niah",
+      "context": 262144,
+      "variant": "multikey_2",
+      "samples": 40,
+      "independent_clusters": 40,
+      "baseline_score": 1.0,
+      "candidate_score": 1.0,
+      "candidate_minus_baseline": 0.0,
+      "paired_cluster_bootstrap_95pct_interval": [
+        0.0,
+        0.0
+      ],
+      "paired_outcomes": {
+        "control=1.0,candidate=1.0": 40
+      },
+      "interpretation": "A finite sample interval does not establish quality equivalence. Inspect truncation, empty outputs and task coverage."
+    },
+    {
+      "suite": "niah",
+      "context": 262144,
+      "variant": "multikey_3",
+      "samples": 40,
+      "independent_clusters": 40,
+      "baseline_score": 1.0,
+      "candidate_score": 1.0,
+      "candidate_minus_baseline": 0.0,
+      "paired_cluster_bootstrap_95pct_interval": [
+        0.0,
+        0.0
+      ],
+      "paired_outcomes": {
+        "control=1.0,candidate=1.0": 40
+      },
+      "interpretation": "A finite sample interval does not establish quality equivalence. Inspect truncation, empty outputs and task coverage."
+    }
+  ],
+  "limitations": [
+    "No automatic quality pass or promotion. Incomplete coverage remains pending.",
+    "GPQA repeats each of 198 questions twice with different answer ordering; its bootstrap clusters by original question.",
+    "AIME uses30 sampled answers. NIAH uses40 generated prompts per cell; the three128K variants run asone owned120-request wave after exact-prompt cache warmups on both arms. Warmup outputs are not scores.",
+    "Actual large-query128K GPU symbols/shapes, occupancy and cache-hit counters require a separate audit. Requested concurrency120 alone does not prove coverage.",
+    "Sampling uses matched configured seeds and budgets, not bitwise replay of random variates across different batching."
+  ]
+}

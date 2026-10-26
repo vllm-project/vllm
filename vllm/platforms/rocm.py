@@ -611,6 +611,20 @@ class RocmPlatform(Platform):
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
     dist_backend: str = "nccl"
+
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: "VllmConfig") -> str:
+        if (
+            envs.VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA
+            and vllm_config.model_config is not None
+            and vllm_config.model_config.hf_config.model_type == "deepseek_v4"
+        ):
+            return (
+                "vllm.v1.attention.backends.mla.rocm_asm_kv_cache."
+                "AsmKVCacheConfigBuilder"
+            )
+        return super().get_kv_cache_config_builder_cls(vllm_config)
+
     # rocm shares the same device control env var as CUDA
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
     # Set in pre_register_and_update, so it exists only on the driver; Ray

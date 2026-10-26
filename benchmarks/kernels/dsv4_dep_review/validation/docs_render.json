@@ -1,0 +1,28 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "source": "/var/tmp/fai_dsv4_dep_optimization/review_dsv4_dep_proven/docs/configuration/env_vars.md",
+      "rendered": "/var/tmp/fai_dsv4_dep_optimization/evidence/draft_pr_docs_render/env_vars.html",
+      "sha256": "ef02ddbe0bdacb766f8c3e1586c63afedf444b2a7649ae95b7d76d224e31aaa4",
+      "required_terms": [
+        "VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA",
+        "VLLM_ROCM_USE_AITER_DSV4_FP8_MXSCALE",
+        "deepseek_v4_dep.md"
+      ]
+    },
+    {
+      "source": "/var/tmp/fai_dsv4_dep_optimization/review_dsv4_dep_proven/docs/configuration/deepseek_v4_dep.md",
+      "rendered": "/var/tmp/fai_dsv4_dep_optimization/evidence/draft_pr_docs_render/deepseek_v4_dep.html",
+      "sha256": "b24dec6c31bb57b331112c727d341e29927ced7bcebb89ece9db2fac0889d74f",
+      "required_terms": [
+        "VLLM_USE_RUST_FRONTEND",
+        "--dp-prefill-delayer",
+        "disabled by default",
+        "CPU offload",
+        "Quality equivalence"
+      ]
+    }
+  ],
+  "scope": "Markdown rendering and term/link checks; not a full MkDocs build or hosted docs preview"
+}

@@ -1,0 +1,39 @@
+{
+  "complete": true,
+  "rows": [
+    {
+      "concurrency": 64,
+      "parent_FP8_WO_A_ms": 39.820953530156245,
+      "kernel_stack_ms": 39.992419551537,
+      "cycle_reduction_ms": -0.17146602138075195,
+      "cycle_reduction_pct": -0.43059245492678144,
+      "remaining_gap_above_ATOM_pct": 8.704663886490982
+    },
+    {
+      "concurrency": 96,
+      "parent_FP8_WO_A_ms": 45.108718411595184,
+      "kernel_stack_ms": 45.594446358256945,
+      "cycle_reduction_ms": -0.4857279466617612,
+      "cycle_reduction_pct": -1.0767939408735439,
+      "remaining_gap_above_ATOM_pct": 7.156336066595048
+    },
+    {
+      "concurrency": 128,
+      "parent_FP8_WO_A_ms": 49.3013985728587,
+      "kernel_stack_ms": 49.1059244337232,
+      "cycle_reduction_ms": 0.1954741391354986,
+      "cycle_reduction_pct": 0.3964880202062093,
+      "remaining_gap_above_ATOM_pct": 7.700540918491283
+    }
+  ],
+  "comparison_files": {
+    "/var/tmp/fai_dsv4_dep_optimization/evidence/woa_enabled_anchored_comparison.json": "f59193039a40fcb9ccb59959f02d2a32055693476cecd2ed8179a42f88e7ecf5",
+    "/var/tmp/fai_dsv4_dep_optimization/evidence/kernel_stack_anchored_comparison.json": "eccee45ab270b55debb8569ccec844d32b6ce79015d20461ec30fc40813fe10e"
+  },
+  "source_diff_sha256": "48706555fa9f1dce5c09c7d8f5724a15b6dbbcf4ed5637d1a5bb1c03d81b732a",
+  "same_measured_input_fingerprint_sha256": "379f7fd2334ea2dc0274aafc611a1c0f44f5fe05873dd58f4480ba60b73fd4ac",
+  "limitations": [
+    "Two complete ordered repeats of balanced synthetic decode cycles; no formal statistical equivalence or canonical AgentX throughput claim.",
+    "No real model quality result is established here."
+  ]
+}

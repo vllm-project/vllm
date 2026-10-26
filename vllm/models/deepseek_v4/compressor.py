@@ -374,10 +374,7 @@ class DeepseekCompressor(nn.Module):
         state_metadata = cast(
             CompressorMetadata, attn_metadata[self.state_cache.prefix]
         )
-        token_to_req_indices = state_metadata.token_to_req_indices
         slot_mapping = state_metadata.slot_mapping
-        num_actual = slot_mapping.shape[0]
-        block_table = state_metadata.block_table
         block_size = state_metadata.block_size
 
         # [num_blocks, block_size, kv_dim+score_dim], where kv_dim == score_dim
@@ -418,6 +415,34 @@ class DeepseekCompressor(nn.Module):
             and state_metadata.c128_boundary is False
         ):
             return
+
+        self._compress_norm_rope_store(
+            state_metadata,
+            state_cache,
+            state_width,
+            positions,
+            rotary_emb,
+            attn_metadata,
+            pdl_kwargs,
+        )
+
+    def _compress_norm_rope_store(
+        self,
+        state_metadata: CompressorMetadata,
+        state_cache: torch.Tensor,
+        state_width: int,
+        positions: torch.Tensor,
+        rotary_emb,
+        attn_metadata: dict[str, Any],
+        pdl_kwargs: dict,
+    ) -> None:
+        """Compress the saved states and write K to the cache; a platform
+        subclass overrides it to write its own cache layout."""
+        token_to_req_indices = state_metadata.token_to_req_indices
+        slot_mapping = state_metadata.slot_mapping
+        num_actual = slot_mapping.shape[0]
+        block_table = state_metadata.block_table
+        block_size = state_metadata.block_size
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
         # RoPE requirements (kernel applies forward GPT-J style rotation):
@@ -472,6 +497,15 @@ class DeepseekCompressor(nn.Module):
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {}
 
+        geom = getattr(k_cache_layer, "_v4_geom", None)
+        if self.head_dim == 512 and geom is not None:
+            # aiter ASM sparse MLA layout: the RoPE goes to the side pool.
+            from vllm.models.deepseek_v4.amd import asm_sparse_mla
+
+            extra_kwargs = {
+                **extra_kwargs,
+                "rope_cache": asm_sparse_mla.rope_view(geom),
+            }
         compress_norm_rope_store_fn(
             state_cache=state_cache,
             num_actual=num_actual,

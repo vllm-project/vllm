@@ -1,0 +1,85 @@
+{
+  "started_unix": 1792976052.1925886,
+  "source": "/var/tmp/fai_dsv4_dep_optimization/review_dsv4_dep_proven",
+  "groups": [
+    {
+      "label": "cpu",
+      "command": [
+        "/home/fai/vllm/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "--import-mode=importlib",
+        "tests/models/test_deepseek_v4_rocm_wo_a.py",
+        "--junitxml=/var/tmp/fai_dsv4_dep_optimization/evidence/draft_pr_validation_final/cpu.xml"
+      ],
+      "expected": 11,
+      "cases": 11,
+      "returncode": 0,
+      "bad": []
+    },
+    {
+      "label": "layers",
+      "command": [
+        "/home/fai/vllm/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "--import-mode=importlib",
+        "tests/models/test_deepseek_v4_aiter_mega_moe.py::test_e8m0_mlp_matches_dequantized_reference",
+        "tests/models/test_deepseek_v4_aiter_mega_moe.py::test_e8m0_mlp_preserves_leading_dimensions",
+        "tests/models/test_deepseek_v4_aiter_mega_moe.py::test_e8m0_mlp_capture_reuses_packed_weights",
+        "tests/models/test_deepseek_v4_aiter_mega_moe.py::test_e8m0_mlp_compiles_with_encoded_scales",
+        "tests/models/test_deepseek_v4_aiter_mega_moe.py::test_e8m0_qnorm_feeds_both_real_query_linears",
+        "tests/models/test_deepseek_v4_aiter_mega_moe.py::test_e8m0_qnorm_captures_and_compiles",
+        "tests/models/test_deepseek_v4_aiter_mega_moe.py::test_e8m0_qnorm_keeps_both_consumers_on_fallback",
+        "tests/models/test_deepseek_v4_aiter_mega_moe.py::test_e8m0_qnorm_draft_projection_preserves_dimensions",
+        "--junitxml=/var/tmp/fai_dsv4_dep_optimization/evidence/draft_pr_validation_final/layers.xml"
+      ],
+      "expected": 35,
+      "cases": 35,
+      "returncode": 0,
+      "bad": []
+    },
+    {
+      "label": "attention",
+      "command": [
+        "/home/fai/vllm/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "--import-mode=importlib",
+        "tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_sparse_mla_native_asm_matches_quantized_reference",
+        "tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_sparse_mla_fast_decode_graph_reuses_workspace",
+        "tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_sparse_mla_short_rows_address_large_cache_offsets",
+        "tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_sparse_mla_short_rows_resist_cancellation",
+        "tests/kernels/attention/test_rocm_dsv4_mxfp4_indexer.py",
+        "tests/kernels/test_compressor_kv_cache.py::test_sparse_mla_two_buffer_compressor_matches_default",
+        "--junitxml=/var/tmp/fai_dsv4_dep_optimization/evidence/draft_pr_validation_final/attention.xml"
+      ],
+      "expected": 71,
+      "cases": 71,
+      "returncode": 0,
+      "bad": []
+    },
+    {
+      "label": "router",
+      "command": [
+        "/home/fai/vllm/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "--import-mode=importlib",
+        "tests/kernels/moe/test_topk_softplus_sqrt.py::test_dsv4_fast_topk",
+        "--junitxml=/var/tmp/fai_dsv4_dep_optimization/evidence/draft_pr_validation_final/router.xml"
+      ],
+      "expected": 16,
+      "cases": 16,
+      "returncode": 0,
+      "bad": []
+    }
+  ],
+  "complete": true,
+  "finished_unix": 1792976194.294797,
+  "passed": 133
+}

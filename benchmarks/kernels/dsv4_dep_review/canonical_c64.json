@@ -1,0 +1,173 @@
+{
+  "request_metrics": {
+    "qps": {
+      "window_seconds": 1.0,
+      "samples": 3628,
+      "mean": 1.8701764057331862,
+      "p50": 1.0,
+      "p75": 3.0,
+      "p90": 4.0,
+      "p95": 5.0,
+      "std": 1.8551347947515826
+    },
+    "latency": {
+      "ttft": {
+        "mean": 9.398450505318449,
+        "p50": 5.207162201999999,
+        "p75": 7.8307622665,
+        "p90": 20.1128710685,
+        "p95": 34.34012427175,
+        "std": 16.125686490383732
+      },
+      "e2el": {
+        "mean": 24.000888683901707,
+        "p50": 13.852049492999999,
+        "p75": 26.919650324,
+        "p90": 52.327990493499996,
+        "p95": 76.7766246275,
+        "std": 34.77955369638796
+      },
+      "itl": {
+        "mean": 0.013578852274837419,
+        "p50": 0.013096315120377082,
+        "p75": 0.014735446644531249,
+        "p90": 0.016791075775492065,
+        "p95": 0.01952020042651676,
+        "std": 0.005497231551797021
+      },
+      "tpot": {
+        "mean": 0.013578852274837419,
+        "p50": 0.013096315120377082,
+        "p75": 0.014735446644531249,
+        "p90": 0.016791075775492065,
+        "p95": 0.01952020042651676,
+        "std": 0.005497231551797021
+      },
+      "intvty": {
+        "mean": 73.64392658229822,
+        "p50": 76.35735631040673,
+        "p75": 67.86356899274098,
+        "p90": 59.555445605193505,
+        "p95": 51.22898219024295,
+        "std": 18.304177350529553
+      },
+      "e2e_norm_intvty": {
+        "mean": 9.816278012225768,
+        "p50": 39.65742260756985,
+        "p75": 22.98896075674924,
+        "p90": 11.027374864024297,
+        "p95": 5.674324483894523,
+        "std": 19.051531264590157
+      },
+      "full_response_itl": {
+        "mean": 0.013579478148519496,
+        "p50": 0.0130963892893401,
+        "p75": 0.01473554496328125,
+        "p90": 0.016791269257549785,
+        "p95": 0.019520268241336826,
+        "std": 0.005497482728016787
+      },
+      "full_response_intvty": {
+        "mean": 73.6405323579408,
+        "p50": 76.35692387473219,
+        "p75": 67.86311619229888,
+        "p90": 59.554759361051545,
+        "p95": 51.22880421706316,
+        "std": 18.300194636657498
+      }
+    },
+    "tokens": {
+      "input": {
+        "mean": 130137.21043324491,
+        "p50": 82600.5,
+        "p75": 150895.75,
+        "p90": 274716.5,
+        "p95": 513989.25,
+        "std": 148680.19116233737
+      },
+      "output_actual": {
+        "mean": 1006.5109048040083,
+        "p50": 448.5,
+        "p75": 1050.75,
+        "p90": 2288.5,
+        "p95": 3744.25,
+        "std": 2030.4266539925302
+      },
+      "output_expected": {}
+    },
+    "throughput": {
+      "input": {
+        "tokens_per_second": 243301.5138792473
+      },
+      "output": {
+        "tokens_per_second": 1881.7494708817546
+      },
+      "total": {
+        "tokens_per_second": 245183.26335012904
+      },
+      "duration_seconds": 3629.698376798,
+      "per_gpu": {}
+    },
+    "cache": {
+      "theoretical_cache_hit_rate": 0.969560026443802
+    }
+  },
+  "request_accounting": {
+    "records_total": 7493,
+    "records_profiled": 6786,
+    "records_dropped_total": 707,
+    "records_warmup_dropped": 707,
+    "records_error_dropped": 0,
+    "error_categories": {}
+  },
+  "run": "indexer_topk_c64_canonical",
+  "reference_validation": [
+    {
+      "metric": "output_tps",
+      "recomputed": 1984.0417239929154,
+      "published": 1984.04172
+    },
+    {
+      "metric": "ttft_s",
+      "recomputed": 9.147415748160967,
+      "published": 9.14742
+    },
+    {
+      "metric": "tpot_s",
+      "recomputed": 0.011967163601239611,
+      "published": 0.01197
+    }
+  ],
+  "protocol": {
+    "server_run": "indexer_topk_c64_canonical_server",
+    "name": "indexer_topk_c64_canonical",
+    "conc": 64,
+    "duration": 3600,
+    "warmup": 10,
+    "policy": "consistent_hash",
+    "router_binary": "/var/tmp/fai_dsv4_dep_optimization/router_binaries/sticky_least_load_9d6f89c9f2c6ef8e",
+    "reset_prefix_cache": true,
+    "backend_port": 8896,
+    "router_port": 8895
+  },
+  "canonical": true,
+  "reference_target": {
+    "reference": "atom",
+    "conc": 64,
+    "ep": 8,
+    "dp_attention": "true",
+    "offload": "none",
+    "router": null,
+    "output_tps": 1984.04172,
+    "qps": 1.98702,
+    "ttft_s": 9.14742,
+    "tpot_s": 0.01197,
+    "cache_hit": 0.94377,
+    "file": "atom/11928016729/dsv4_tp8_conc64_kvnone_spec-draft_model_fp4_atom_tp8-pp1-dcp1-pcp1-ep8-dpatrue_disagg-false_spec-dr-9552d54d18f0ae679380.json"
+  },
+  "reference_output_tps": 1984.04172,
+  "error_summary": [],
+  "valid_finished_run": true,
+  "fraction_of_reference_output_tps": 0.9484424908573771,
+  "note": "Diagnostic runs with one warmup and1200s are for matched A/B selection; parity requires canonical3600s/ten-warmup validation. InferenceX recomputes throughput from successful request records; the raw AIPerf rate includes cutoff-drain time."
+}

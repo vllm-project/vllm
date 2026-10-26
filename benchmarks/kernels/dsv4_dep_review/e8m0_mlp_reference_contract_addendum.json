@@ -1,0 +1,19 @@
+{
+  "recorded_unix": 1792941103.8386343,
+  "scope": "Correction to newly designed layer reference, before further validation; original numerical failures are retained.",
+  "original_assumption": "Two FP8 GEMMs with an intervening BF16 activation and FP8 requantization can be compared to ideal FP32 GEMMs at the single-op tolerance.",
+  "observed_evidence": "At M84, FP32 and FP64 gate references agree exactly. Old ordinary FP32-scale AITER, native FlyDSL E8M0, and Triton scaled MFMA16/32 all produce exactly the same 958 BF16 differences from that ideal reference. Compound pipeline has 15/43008 failures because requantization crosses boundaries. Operand bytes, encoded scales, manual FP8 decoding and 524288 one-product outputs all match exactly.",
+  "corrected_contract": {
+    "per_projection": "Keep atol=rtol=1e-2 versus independent FP32-dequantized Torch matmul. Both gate and down are checked.",
+    "whole_layer": "Compare native E8M0 packed weights to ordinary unshuffled FP8 GEMM using identical quantized operands and decoded FP32 scales; require exact equality, atol=rtol=0.",
+    "coverage": "Empty and two-byte-offset inputs, 7/48/56/84/112/512 rows, three-dimensional input, repeated preparation, graph replay and torch.compile.",
+    "quality": "Changing activation quantization still requires real model evals; exact scale-format equivalence is not a quality result."
+  },
+  "evidence_sha256": {
+    "evidence/e8m0_mlp_initial_matrix.xml": "3d8f4ebbdb06d21ef753906a6a075a7a19c85c94dd33c1de6b9f8294718bf60e",
+    "evidence/dep_e8m0_mlp_stage_diagnostic.json": "d1f6ee33136c455ddb44bcc90d9d22c01b76ec24d5f9124f3a1d8f2c7a074e2a",
+    "evidence/dep_e8m0_mlp_operands_diagnostic.json": "f9f19fd6a8a66891f419aab2112cd230c9ac146568ab50594201bf817b3fe2eb",
+    "evidence/dep_e8m0_mlp_basis_diagnostic.json": "e4dc0f3adb7d47fbfeffbc203e0cd8c920ea49d57a66de6216d018ce190104cc",
+    "evidence/dep_e8m0_mlp_mfma_bytes_diagnostic.json": "c2e1a1e0f6159ef25179b08953db95f65cb51d4c063163af48c53fe0b336e39a"
+  }
+}

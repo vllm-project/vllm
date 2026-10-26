@@ -1695,6 +1695,153 @@ def test_gfx950_compressed_cache_canonicalizes_nonfinite(writer: str) -> None:
     _assert_nan_free_cache_matches_legacy_scrub(cache, block_size)
 
 
+@pytest.mark.skipif(not _on_gfx950(), reason="native ASM layout requires gfx950")
+@pytest.mark.parametrize(
+    "compress_ratio,two_stage", [(4, False), (128, False), (128, True)]
+)
+@torch.inference_mode()
+def test_sparse_mla_two_buffer_compressor_matches_default(compress_ratio, two_stage):
+    """Both writers preserve cache bytes and prefill gathers across padded pages."""
+    from vllm.models.deepseek_v4.compressor import CompressorMetadata
+
+    torch.manual_seed(42)
+    device, tokens, block_size, state_block = "cuda", 17, 16, 8
+    overlap = compress_ratio == 4
+    width = 512 * (1 + overlap)
+    pages = math.ceil(tokens * compress_ratio / state_block) + 1
+    state = torch.randn(pages, state_block, width * 2, device=device)
+    state_table = torch.randperm(pages, device=device).to(torch.int32)[None]
+    positions = torch.arange(1, tokens + 1, device=device) * compress_ratio - 1
+    requests = torch.zeros(tokens, dtype=torch.int32, device=device)
+    weight = torch.randn(512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(tokens * compress_ratio, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    kv_pages = math.ceil(tokens / block_size)
+    table = torch.randperm(kv_pages, device=device).to(torch.int32)[None]
+    logical = torch.arange(tokens, device=device)
+    slots = table[0, logical // block_size].long() * block_size + logical % block_size
+    slots[3] = -1
+    metadata = CompressorMetadata(table, slots, block_size)
+    old_backing = torch.full(
+        (kv_pages, block_size * 584 + 576), 60, dtype=torch.uint8, device=device
+    )
+    old = old_backing.as_strided(
+        (kv_pages, block_size, 584), (old_backing.stride(0), 584, 1)
+    )
+    new_backing = torch.full(
+        (kv_pages, (block_size + 1) * 512), 60, dtype=torch.uint8, device=device
+    )
+    new = new_backing.as_strided(
+        (kv_pages, block_size, 512), (new_backing.stride(0), 512, 1)
+    )
+    rope_backing = torch.full(
+        (kv_pages, (block_size + 1) * 64), 3, dtype=torch.bfloat16, device=device
+    )
+    rope = rope_backing.as_strided(
+        (kv_pages, block_size, 64), (rope_backing.stride(0), 64, 1)
+    )
+
+    for cache, rope_cache in ((old, None), (new, rope)):
+        if two_stage:
+            _launch_two_stage_sparse_attn_compressor(
+                state,
+                requests,
+                positions,
+                slots,
+                state_table,
+                state_block,
+                width,
+                compress_ratio,
+                cos_sin,
+                cache,
+                slots,
+                weight,
+                1e-6,
+                64,
+                576,
+                8,
+                512,
+                64,
+                tokens,
+                torch.empty(tokens, 512, device=device),
+                rope_cache=rope_cache,
+            )
+        else:
+            compress_norm_rope_store_triton(
+                state_cache=state,
+                num_actual=tokens,
+                token_to_req_indices=requests,
+                positions=positions,
+                slot_mapping=slots,
+                block_table=state_table,
+                block_size=state_block,
+                state_width=width,
+                cos_sin_cache=cos_sin,
+                kv_cache=cache,
+                k_cache_metadata=metadata,
+                pdl_kwargs={},
+                head_dim=512,
+                rope_head_dim=64,
+                compress_ratio=compress_ratio,
+                overlap=overlap,
+                use_fp4_cache=False,
+                rms_norm_weight=weight,
+                rms_norm_eps=1e-6,
+                quant_block=64,
+                token_stride=576,
+                scale_dim=8,
+                rope_cache=rope_cache,
+            )
+    valid = slots >= 0
+    physical = slots[valid]
+    blocks, offsets = physical // block_size, physical % block_size
+    columns = torch.arange(448, device=device)
+    torch.testing.assert_close(
+        new_backing[blocks[:, None], offsets[:, None] * 512 + columns],
+        old_backing[blocks[:, None], offsets[:, None] * 576 + columns],
+        rtol=0,
+        atol=0,
+    )
+    scale_columns = torch.arange(7, device=device)
+    old_scales = old_backing[
+        blocks[:, None], block_size * 576 + offsets[:, None] * 8 + scale_columns
+    ]
+    for duplicate in (0, 1):
+        actual = new_backing[
+            blocks[:, None],
+            offsets[:, None] * 512 + 448 + scale_columns * 2 + duplicate,
+        ]
+        torch.testing.assert_close(actual, old_scales, rtol=0, atol=0)
+    rope_columns = torch.arange(128, device=device)
+    old_rope = (
+        old_backing[blocks[:, None], offsets[:, None] * 576 + 448 + rope_columns]
+        .contiguous()
+        .view(torch.bfloat16)
+    )
+    torch.testing.assert_close(rope[blocks, offsets], old_rope, rtol=0, atol=0)
+    gathered = []
+    for cache, rope_cache in ((old, None), (new, rope)):
+        out = torch.full((1, tokens + 5, 512), 3, dtype=torch.bfloat16, device=device)
+        dequantize_and_gather_k_cache(
+            out,
+            cache,
+            torch.tensor([tokens], dtype=torch.int32, device=device),
+            None,
+            table,
+            block_size,
+            offset=3,
+            rope_cache=rope_cache,
+        )
+        gathered.append(out)
+        assert torch.all(out[:, :3] == 3) and torch.all(out[:, tokens + 3 :] == 3)
+    torch.testing.assert_close(
+        gathered[0][0, 3 : tokens + 3][valid],
+        gathered[1][0, 3 : tokens + 3][valid],
+        rtol=0,
+        atol=0,
+    )
+
+
 @pytest.mark.parametrize(
     ("starts", "query_start_loc", "expected"),
     [

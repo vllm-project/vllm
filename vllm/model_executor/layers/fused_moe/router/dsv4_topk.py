@@ -4,7 +4,7 @@
 import torch
 
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, tldevice, triton
 
 _TOPK = 6
 
@@ -19,8 +19,24 @@ def can_use_dsv4_topk(
     renormalize: bool,
     indices_dtype: torch.dtype,
 ) -> bool:
+    supported_platform = current_platform.is_cuda()
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        supported_platform = (
+            on_gfx950()
+            and gating_output.ndim == 2
+            and (
+                gating_output.shape[0] == 0
+                or (
+                    gating_output.shape[0] <= 512
+                    and gating_output.shape[1] == 384
+                    and indices_dtype == torch.int32
+                )
+            )
+        )
     return (
-        current_platform.is_cuda()
+        supported_platform
         and gating_output.dtype == torch.float32
         and gating_output.ndim == 2
         and gating_output.shape[1] in (256, 384)
@@ -35,7 +51,7 @@ def can_use_dsv4_topk(
     )
 
 
-if current_platform.is_cuda():
+if current_platform.is_cuda_alike():
 
     @triton.jit
     def _dsv4_topk_kernel(
@@ -52,6 +68,7 @@ if current_platform.is_cuda():
         BLOCK_N: tl.constexpr,
         HAS_PADDING: tl.constexpr,
         HAS_VL: tl.constexpr,
+        STABLE_SOFTPLUS: tl.constexpr,
         launch_pdl: tl.constexpr,
     ):
         row = tl.program_id(0)
@@ -82,7 +99,21 @@ if current_platform.is_cuda():
             mask=expert_mask,
             other=0.0,
         ).to(tl.float32)
-        weights = tl.sqrt(tl.where(logits > 20.0, logits, tl.log(1.0 + tl.exp(logits))))
+        if STABLE_SOFTPLUS:
+            weights = tl.sqrt(
+                tl.where(logits > 20.0, logits, tldevice.log1p(tldevice.exp(logits)))
+            )
+            if tl.min(logits, axis=0) < -87.0:
+                # Preserve FP32 subnormal rounding before taking the square root.
+                tiny = logits < -87.0
+                safe_logits = tl.where(tiny, logits, -100.0).to(tl.float64)
+                units = tl.floor(tldevice.exp(safe_logits) * (2.0**149) + 0.5)
+                tiny_weights = tl.sqrt(units.to(tl.float32)) * (2.0**-74.5)
+                weights = tl.where(tiny, tiny_weights, weights)
+        else:
+            weights = tl.sqrt(
+                tl.where(logits > 20.0, logits, tl.log(1.0 + tl.exp(logits)))
+            )
         current = tl.where(expert_mask, weights + bias, -float("inf"))
         current = tl.where(current == current, current, -1e30)
 
@@ -163,6 +194,7 @@ def dsv4_topk(
             BLOCK_N=triton.next_power_of_2(num_experts),
             HAS_PADDING=is_padding is not None,
             HAS_VL=has_vl,
+            STABLE_SOFTPLUS=current_platform.is_rocm(),
             num_warps=1,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )

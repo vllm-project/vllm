@@ -68,8 +68,12 @@ def compress_norm_rope_store_triton(
     quant_block: int,
     token_stride: int,
     scale_dim: int,
+    rope_cache: torch.Tensor | None = None,
 ) -> None:
     """Shared triton launcher for the fused compress+norm+RoPE+insert path.
+
+    ``rope_cache`` (aiter ASM sparse MLA layout, head=512 only): 512-byte rows,
+    the RoPE goes to this bf16 [num_blocks, block_size, 64] view.
 
     Picks one of the three kernels in this module based on ``head_dim`` and
     ``use_fp4_cache``. Identical launch signature for all three.
@@ -78,6 +82,12 @@ def compress_norm_rope_store_triton(
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
         num_warps = 4
         kernel_kwargs = {"SANITIZE_CACHE_NANS": _ON_GFX950}
+        if rope_cache is not None:
+            kernel_kwargs.update(
+                rope_cache_ptr=rope_cache,
+                rope_block_stride=rope_cache.stride(0),
+                TWO_BUFF=True,
+            )
     else:
         _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL(
             state_cache=state_cache,
@@ -184,6 +194,11 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     SCALE_DIM: tl.constexpr,  # 8 for DeepseekV4 (7 real + 1 pad)
     KV_BLOCK_STRIDE: tl.constexpr,
     SANITIZE_CACHE_NANS: tl.constexpr,
+    # aiter ASM sparse MLA layout: 512-byte rows (448 fp8 | 7 UE8M0 scales, each
+    # twice), bf16 RoPE into rope_cache_ptr [NB, block, 64].
+    rope_cache_ptr=None,
+    rope_block_stride=0,
+    TWO_BUFF: tl.constexpr = False,
 ):
     """Fused compress → RMSNorm → FP8 quant (nope) → RoPE → bf16 store (rope).
 
@@ -264,12 +279,16 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     kv_pos_in_block = kv_slot_idx % kv_cache_block_size
 
     cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
-    fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
-    scale_ptr = (
-        cache_block_ptr
-        + kv_cache_block_size * TOKEN_STRIDE
-        + kv_pos_in_block * SCALE_DIM
-    )
+    if TWO_BUFF:
+        fp8_ptr = cache_block_ptr + kv_pos_in_block * 512
+        scale_ptr = fp8_ptr + (HEAD_SIZE - ROPE_HEAD_DIM)
+    else:
+        fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
+        scale_ptr = (
+            cache_block_ptr
+            + kv_cache_block_size * TOKEN_STRIDE
+            + kv_pos_in_block * SCALE_DIM
+        )
 
     NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM  # 448
     HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2  # 32
@@ -302,12 +321,24 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     encoded = exponents + 127.0
     max_encoded: tl.constexpr = 254.0 if SANITIZE_CACHE_NANS else 255.0
     encoded = tl.maximum(tl.minimum(encoded, max_encoded), 0.0)
-    tl.store(
-        scale_ptr + scale_idx,
-        encoded.to(tl.uint8),
-        mask=scale_idx < N_NOPE_BLOCKS,
-    )
-    tl.store(scale_ptr + N_NOPE_BLOCKS, tl.zeros((), dtype=tl.uint8))
+    if TWO_BUFF:
+        tl.store(
+            scale_ptr + 2 * scale_idx,
+            encoded.to(tl.uint8),
+            mask=scale_idx < N_NOPE_BLOCKS,
+        )
+        tl.store(
+            scale_ptr + 2 * scale_idx + 1,
+            encoded.to(tl.uint8),
+            mask=scale_idx < N_NOPE_BLOCKS,
+        )
+    else:
+        tl.store(
+            scale_ptr + scale_idx,
+            encoded.to(tl.uint8),
+            mask=scale_idx < N_NOPE_BLOCKS,
+        )
+        tl.store(scale_ptr + N_NOPE_BLOCKS, tl.zeros((), dtype=tl.uint8))
 
     # Register-based GPT-J RoPE in fp32.
     NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
@@ -333,7 +364,14 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
         result = tl.where(result == result, result, 0.0)
 
     # Store rotated rope portion as bf16 into the cache's bf16 area.
-    bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
+    if TWO_BUFF:
+        bf16_ptr = (
+            rope_cache_ptr
+            + kv_block_idx.to(tl.int64) * rope_block_stride
+            + kv_pos_in_block * ROPE_HEAD_DIM
+        )
+    else:
+        bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
     rope_local = block - NOPE_HEAD_DIM
     is_rope = (block >= NOPE_HEAD_DIM) & mask
     tl.store(bf16_ptr + rope_local, result.to(tl.bfloat16), mask=is_rope)
@@ -460,6 +498,11 @@ def _finalize_norm_rope_quant_store_sparse_attn(
     SCALE_DIM: tl.constexpr,
     KV_BLOCK_STRIDE: tl.constexpr,
     SANITIZE_CACHE_NANS: tl.constexpr,
+    # aiter ASM sparse MLA layout: 512-byte rows (448 fp8 | 7 UE8M0 scales, each
+    # twice), bf16 RoPE into rope_cache_ptr [NB, block, 64].
+    rope_cache_ptr=None,
+    rope_block_stride=0,
+    TWO_BUFF: tl.constexpr = False,
 ):
     """Stage 2: read compressed_kv[512] from scratch buffer, then
     RMSNorm + FP8 quant (nope) + RoPE + bf16 store
@@ -489,12 +532,16 @@ def _finalize_norm_rope_quant_store_sparse_attn(
     kv_block_idx = kv_slot_idx // kv_cache_block_size
     kv_pos_in_block = kv_slot_idx % kv_cache_block_size
     cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
-    fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
-    scale_ptr = (
-        cache_block_ptr
-        + kv_cache_block_size * TOKEN_STRIDE
-        + kv_pos_in_block * SCALE_DIM
-    )
+    if TWO_BUFF:
+        fp8_ptr = cache_block_ptr + kv_pos_in_block * 512
+        scale_ptr = fp8_ptr + (HEAD_SIZE - ROPE_HEAD_DIM)
+    else:
+        fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
+        scale_ptr = (
+            cache_block_ptr
+            + kv_cache_block_size * TOKEN_STRIDE
+            + kv_pos_in_block * SCALE_DIM
+        )
 
     NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
     HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
@@ -519,10 +566,22 @@ def _finalize_norm_rope_quant_store_sparse_attn(
     scale_idx = tl.arange(0, N_QUANT_BLOCKS)
     max_encoded: tl.constexpr = 254.0 if SANITIZE_CACHE_NANS else 255.0
     encoded = tl.maximum(tl.minimum(exponents + 127.0, max_encoded), 0.0)
-    tl.store(
-        scale_ptr + scale_idx, encoded.to(tl.uint8), mask=scale_idx < N_NOPE_BLOCKS
-    )
-    tl.store(scale_ptr + N_NOPE_BLOCKS, tl.zeros((), dtype=tl.uint8))
+    if TWO_BUFF:
+        tl.store(
+            scale_ptr + 2 * scale_idx,
+            encoded.to(tl.uint8),
+            mask=scale_idx < N_NOPE_BLOCKS,
+        )
+        tl.store(
+            scale_ptr + 2 * scale_idx + 1,
+            encoded.to(tl.uint8),
+            mask=scale_idx < N_NOPE_BLOCKS,
+        )
+    else:
+        tl.store(
+            scale_ptr + scale_idx, encoded.to(tl.uint8), mask=scale_idx < N_NOPE_BLOCKS
+        )
+        tl.store(scale_ptr + N_NOPE_BLOCKS, tl.zeros((), dtype=tl.uint8))
 
     NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
     NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
@@ -540,7 +599,14 @@ def _finalize_norm_rope_quant_store_sparse_attn(
     result = tl.interleave(new_even, new_odd)
     if SANITIZE_CACHE_NANS:
         result = tl.where(result == result, result, 0.0)
-    bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
+    if TWO_BUFF:
+        bf16_ptr = (
+            rope_cache_ptr
+            + kv_block_idx.to(tl.int64) * rope_block_stride
+            + kv_pos_in_block * ROPE_HEAD_DIM
+        )
+    else:
+        bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
     rope_local = block - NOPE_HEAD_DIM
     is_rope = (block >= NOPE_HEAD_DIM) & mask
     tl.store(bf16_ptr + rope_local, result.to(tl.bfloat16), mask=is_rope)
@@ -567,8 +633,18 @@ def _launch_two_stage_sparse_attn_compressor(
     rope_head_dim: int,
     num_actual: int,
     compress_scratch: torch.Tensor,
+    rope_cache: torch.Tensor | None = None,
 ) -> None:
     num_splits = _pick_compress_num_splits(num_actual, compress_ratio, head_dim)
+    two_buff_kwargs = (
+        {}
+        if rope_cache is None
+        else dict(
+            rope_cache_ptr=rope_cache,
+            rope_block_stride=rope_cache.stride(0),
+            TWO_BUFF=True,
+        )
+    )
     head_tile = head_dim // num_splits
     scratch = compress_scratch[:num_actual]
     _compress_gather_split_sparse_attn[(num_actual * num_splits,)](
@@ -611,6 +687,7 @@ def _launch_two_stage_sparse_attn_compressor(
         SCALE_DIM=scale_dim,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
         SANITIZE_CACHE_NANS=_ON_GFX950,
+        **two_buff_kwargs,
     )
 
 
@@ -639,6 +716,7 @@ def compress_norm_rope_store_two_stage_triton(
     scale_dim: int,
     num_decode_tokens: int,
     compress_scratch: torch.Tensor,
+    rope_cache: torch.Tensor | None = None,
 ) -> None:
     """Two-stage split compressor dispatch for head=512 cr>=128 (no-overlap).
 
@@ -670,6 +748,7 @@ def compress_norm_rope_store_two_stage_triton(
             rope_head_dim=rope_head_dim,
             num_actual=num_prefills,
             compress_scratch=compress_scratch,
+            rope_cache=rope_cache,
         )
     if num_decodes > 0:
         compress_norm_rope_store_triton(
@@ -695,6 +774,7 @@ def compress_norm_rope_store_two_stage_triton(
             quant_block=quant_block,
             token_stride=token_stride,
             scale_dim=scale_dim,
+            rope_cache=rope_cache,
         )
 
 
@@ -1203,6 +1283,10 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         )
 
         use_fp4_cache = dsa_indexer_uses_fp4(vllm_config)
+        # The MXFP4 variant packs FP4 with CUDA PTX; ROCm writes the MXFP4
+        # indexer cache with aiter's op instead.
+        if use_fp4_cache and current_platform.is_rocm():
+            return []
         head_dim = int(getattr(hf_config, "index_head_dim", 0) or 0)
         rope_head_dim = int(getattr(hf_config, "qk_rope_head_dim", 0) or 0)
         if head_dim <= 0 or rope_head_dim <= 0 or cache_block_size <= 0:

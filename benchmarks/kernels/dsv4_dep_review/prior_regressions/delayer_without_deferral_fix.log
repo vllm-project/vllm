@@ -1,0 +1,65 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+__________ test_scheduler_holds_prefill_without_local_decodes[False] ___________
+
+async_scheduling = False
+
+    @pytest.mark.parametrize("async_scheduling", [False, True])
+    def test_scheduler_holds_prefill_without_local_decodes(async_scheduling: bool):
+        """Unlike the cadence, a HOLD defers prefill on a rank with no running
+        requests, so that it runs with the other ranks' prefill."""
+        scheduler = create_scheduler(
+            dp_prefill_delayer=True, async_scheduling=async_scheduling
+        )
+        (request,) = create_requests(num_requests=1, num_tokens=8, req_ids=["r0"])
+        scheduler.add_request(request)
+
+        output = scheduler.schedule(throttle_prefills=True)
+>       assert "r0" not in output.num_scheduled_tokens
+E       AssertionError: assert 'r0' not in {'r0': 8}
+E        +  where {'r0': 8} = SchedulerOutput(scheduled_new_reqs=[NewRequestData(req_id=r0,prompt_token_ids=[0, 0, 0, 0, 0, 0, 0, 0],prefill_token_i... kv_cache_block_copies=None, kv_connector_block_state=None, num_spec_tokens_to_schedule=0, num_common_prefix_blocks=[]).num_scheduled_tokens
+
+tests/v1/core/test_prefill_delayer.py:136: AssertionError
+----------------------------- Captured stderr call -----------------------------
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]
+Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 2558.02it/s]
+------------------------------ Captured log call -------------------------------
+WARNING  huggingface_hub.utils._http:_http.py:1023 Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+WARNING  vllm.transformers_utils.config:config.py:1516 Could not retrieve safetensors metadata for facebook/opt-125m (Hub fetch failed and the cached snapshot holds no weights yet).
+WARNING  vllm.platforms.cpu:cpu.py:295 CPU backend prefers block_size is multiples of 32, otherwise the performance is not optimized.
+WARNING  vllm.platforms.cpu:cpu.py:316 Reset SSM cache type to float32 for accelerated GDN mamba backend 'none'.
+___________ test_scheduler_holds_prefill_without_local_decodes[True] ___________
+
+async_scheduling = True
+
+    @pytest.mark.parametrize("async_scheduling", [False, True])
+    def test_scheduler_holds_prefill_without_local_decodes(async_scheduling: bool):
+        """Unlike the cadence, a HOLD defers prefill on a rank with no running
+        requests, so that it runs with the other ranks' prefill."""
+        scheduler = create_scheduler(
+            dp_prefill_delayer=True, async_scheduling=async_scheduling
+        )
+        (request,) = create_requests(num_requests=1, num_tokens=8, req_ids=["r0"])
+        scheduler.add_request(request)
+
+        output = scheduler.schedule(throttle_prefills=True)
+>       assert "r0" not in output.num_scheduled_tokens
+E       AssertionError: assert 'r0' not in {'r0': 8}
+E        +  where {'r0': 8} = SchedulerOutput(scheduled_new_reqs=[NewRequestData(req_id=r0,prompt_token_ids=[0, 0, 0, 0, 0, 0, 0, 0],prefill_token_i... kv_cache_block_copies=None, kv_connector_block_state=None, num_spec_tokens_to_schedule=0, num_common_prefix_blocks=[]).num_scheduled_tokens
+
+tests/v1/core/test_prefill_delayer.py:136: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  vllm.platforms.cpu:cpu.py:295 CPU backend prefers block_size is multiples of 32, otherwise the performance is not optimized.
+WARNING  vllm.platforms.cpu:cpu.py:316 Reset SSM cache type to float32 for accelerated GDN mamba backend 'none'.
+=============================== warnings summary ===============================
+../../../../usr/local/lib/python3.12/dist-packages/torch/jit/_script.py:365: 14 warnings
+  /usr/local/lib/python3.12/dist-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/v1/core/test_prefill_delayer.py::test_scheduler_holds_prefill_without_local_decodes[False]
+FAILED tests/v1/core/test_prefill_delayer.py::test_scheduler_holds_prefill_without_local_decodes[True]
+2 failed, 13 deselected, 14 warnings in 1.99s

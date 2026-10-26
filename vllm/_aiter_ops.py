@@ -1636,6 +1636,61 @@ def _rocm_aiter_group_fp8_quant_fake(
     return x_fp8, out_bs
 
 
+def _rocm_aiter_group_e8m0_quant_impl(
+    x: torch.Tensor,
+    group_size: int,
+    transpose_scale: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.quant import per_group_quant_hip
+
+    return per_group_quant_hip(
+        x.contiguous(),
+        quant_dtype=FP8_DTYPE,
+        group_size=group_size,
+        transpose_scale=transpose_scale,
+        scale_type=torch.float8_e8m0fnu,
+    )
+
+
+def _rocm_aiter_group_e8m0_quant_fake(
+    x: torch.Tensor,
+    group_size: int,
+    transpose_scale: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        x.new_empty(x.shape, dtype=FP8_DTYPE),
+        x.new_empty(
+            (x.shape[0], x.shape[-1] // group_size), dtype=torch.float8_e8m0fnu
+        ),
+    )
+
+
+def _rocm_aiter_rmsnorm_e8m0_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter import rmsnorm_quant
+
+    quantized = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
+    scale = torch.empty(
+        (x.shape[0], x.shape[1] // 128),
+        dtype=torch.float8_e8m0fnu,
+        device=x.device,
+    )
+    if x.shape[0] > 0:
+        rmsnorm_quant(quantized, x, scale, weight, epsilon, 128, True)
+    return quantized, scale
+
+
+def _rocm_aiter_rmsnorm_e8m0_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _rocm_aiter_group_e8m0_quant_fake(x, 128, True)
+
+
 def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
     x: torch.Tensor,
     group_size: int,
@@ -3191,6 +3246,16 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_group_fp8_quant_impl,
                 fake_impl=_rocm_aiter_group_fp8_quant_fake,
             )
+            direct_register_custom_op(
+                op_name="rocm_aiter_group_e8m0_quant",
+                op_func=_rocm_aiter_group_e8m0_quant_impl,
+                fake_impl=_rocm_aiter_group_e8m0_quant_fake,
+            )
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_e8m0_quant",
+                op_func=_rocm_aiter_rmsnorm_e8m0_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_e8m0_quant_fake,
+            )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_per_tensor_quant",
@@ -4333,6 +4398,25 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_group_fp8_quant(
             input_2d, group_size, transpose_scale
         )
+
+    @staticmethod
+    def group_e8m0_quant(
+        input_2d: torch.Tensor,
+        group_size: int = 128,
+        transpose_scale: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert group_size == 128, "Group size must be 128"
+        return torch.ops.vllm.rocm_aiter_group_e8m0_quant(
+            input_2d, group_size, transpose_scale
+        )
+
+    @staticmethod
+    def rmsnorm_e8m0_quant(
+        input_2d: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_e8m0_quant(input_2d, weight, epsilon)
 
     @staticmethod
     @functools.cache

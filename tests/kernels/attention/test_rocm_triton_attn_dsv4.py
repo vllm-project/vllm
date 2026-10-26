@@ -53,6 +53,271 @@ ROPE_HEAD_DIM = 64
 HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
 
 
+def _pack_asm_nope_reference(x):
+    nope = x[..., :448].float().reshape(*x.shape[:-1], 7, 64)
+    exponents = (nope.abs().amax(dim=-1) / 448).clamp_min(1e-4).log2().ceil()
+    scales = torch.exp2(exponents)
+    quantized = (nope / scales[..., None]).to(torch.float8_e4m3fn)
+    packed = torch.zeros(*x.shape[:-1], 512, dtype=torch.uint8, device=x.device)
+    packed[..., :448] = quantized.flatten(-2).view(torch.uint8)
+    packed[..., 448:462] = (exponents + 127).to(torch.uint8).repeat_interleave(2, -1)
+    dequantized = torch.cat(
+        ((quantized.float() * scales[..., None]).flatten(-2), x[..., 448:].float()), -1
+    )
+    return packed.view(torch.float8_e4m3fn), dequantized
+
+
+@requires_gfx950
+@pytest.mark.parametrize("requests", [6, 8, 12, 16, 24, 32])
+@pytest.mark.parametrize("kv_length", [2176, 1456, 1152, 1536, 128])
+@torch.inference_mode()
+def test_sparse_mla_native_asm_matches_quantized_reference(requests, kv_length):
+    """K6, 128-head native ASM decode honors ragged and empty query rows."""
+    from vllm.models.deepseek_v4.amd.asm_sparse_mla import MAX_SPLITS, decode_packed
+
+    torch.manual_seed(42)
+    device, heads, rows, capacity = "cuda", 128, requests * 7, 4096
+    q = torch.randn(rows, heads, 512, dtype=torch.bfloat16, device=device)
+    kv = torch.randn(capacity, 512, dtype=torch.bfloat16, device=device)
+    qp, q_ref = _pack_asm_nope_reference(q)
+    kp, kv_ref = _pack_asm_nope_reference(kv)
+    qr, kr = q[..., 448:].contiguous(), kv[..., 448:].contiguous()
+    lengths = [kv_length] * rows
+    lengths[-2:] = [128, 0]
+    if requests >= 12:
+        lengths[-15:] = [
+            1,
+            7,
+            63,
+            64,
+            65,
+            127,
+            128,
+            129,
+            255,
+            256,
+            257,
+            511,
+            512,
+            513,
+            0,
+        ]
+        lengths = [min(n, kv_length) for n in lengths]
+    indptr = torch.zeros(rows + 1, dtype=torch.int32, device=device)
+    torch.cumsum(
+        torch.tensor(lengths, dtype=torch.int32, device=device), dim=0, out=indptr[1:]
+    )
+    indices = torch.cat(
+        [
+            torch.randperm(capacity, device=device, dtype=torch.int32)[:n]
+            for n in lengths
+        ]
+    )
+    sink = torch.randn(heads, device=device)
+    output = torch.full_like(q, float("nan"))
+    qo = torch.arange(rows + 1, dtype=torch.int32, device=device)
+    splits = torch.arange(1, MAX_SPLITS + 1, dtype=torch.int32, device=device)
+    decode_packed(
+        qp,
+        qr,
+        kp,
+        kr,
+        indptr,
+        indices,
+        sink,
+        output,
+        max_kv_len=kv_length,
+        query_indptr=qo,
+        split_table=splits[:, None] * qo[None, :],
+        compress_ratio=0
+        if kv_length == 128
+        else 4
+        if kv_length in (1152, 2176)
+        else 128,
+    )
+    expected = torch.zeros_like(q, dtype=torch.float32)
+    start = 0
+    for row, count in enumerate(lengths):
+        if count:
+            selected = kv_ref[indices[start : start + count].long()]
+            logits = q_ref[row] @ selected.T / (512**0.5)
+            probs = torch.softmax(torch.cat((logits, sink[:, None]), dim=-1), dim=-1)
+            expected[row] = probs[:, :-1] @ selected
+        start += count
+    # Empty graph-padding rows have no defined output in the native ASM API.
+    torch.testing.assert_close(output[:-1].float(), expected[:-1], rtol=1e-2, atol=1e-3)
+
+
+def _packed_mla_reference(q_ref, kv_ref, indices, indptr, sink):
+    expected = torch.zeros_like(q_ref)
+    offsets = indptr.cpu().tolist()
+    for row, (start, end) in enumerate(zip(offsets, offsets[1:])):
+        if end > start:
+            selected = kv_ref[indices[start:end].long()]
+            scores = q_ref[row] @ selected.T / (512**0.5)
+            probabilities = torch.softmax(torch.cat((scores, sink[:, None]), -1), -1)
+            expected[row] = probabilities[:, :-1] @ selected
+    return expected
+
+
+@requires_gfx950
+@pytest.mark.parametrize("requests", [12, 16])
+@pytest.mark.parametrize("kv_length,ratio", [(1152, 4), (1536, 128)])
+@torch.inference_mode()
+def test_sparse_mla_fast_decode_graph_reuses_workspace(requests, kv_length, ratio):
+    """Captured fast decode reads new queries and correctly reuses its workspace."""
+    from vllm.models.deepseek_v4.amd.asm_sparse_mla import MAX_SPLITS, decode_packed
+
+    torch.manual_seed(42)
+    rows, capacity, heads = requests * 7, 4096, 128
+    q_full = torch.randn(rows + 1, heads, 512, dtype=torch.bfloat16, device="cuda")
+    kv_full = torch.randn(capacity + 3, 512, dtype=torch.bfloat16, device="cuda")
+    qp_full, qr_full = _pack_asm_nope_reference(q_full)
+    kp_full, kr_full = _pack_asm_nope_reference(kv_full)
+    qp, kp = qp_full[1:], kp_full[3:]
+    q_rope = q_full[..., 448:].contiguous()[1:]
+    kv_rope = kv_full[..., 448:].contiguous()[3:]
+    lengths = [kv_length] * rows
+    lengths[-3:] = [128, 513, 0]
+    indptr = torch.zeros(rows + 1, dtype=torch.int32, device="cuda")
+    torch.cumsum(
+        torch.tensor(lengths, dtype=torch.int32, device="cuda"), 0, out=indptr[1:]
+    )
+    indices = torch.cat(
+        [
+            torch.randperm(capacity, dtype=torch.int32, device="cuda")[:n]
+            for n in lengths
+        ]
+    )
+    sink = torch.randn(heads, device="cuda")
+    out = torch.full_like(q_full[1:], float("nan"))
+    query_indptr = torch.arange(rows + 1, dtype=torch.int32, device="cuda")
+    split_table = (
+        torch.arange(1, MAX_SPLITS + 1, dtype=torch.int32, device="cuda")[:, None]
+        * query_indptr[None, :]
+    )
+
+    def run():
+        decode_packed(
+            qp,
+            q_rope,
+            kp,
+            kv_rope,
+            indptr,
+            indices,
+            sink,
+            out,
+            max_kv_len=kv_length,
+            query_indptr=query_indptr,
+            split_table=split_table,
+            compress_ratio=ratio,
+        )
+
+    run()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    graph.replay()
+    torch.accelerator.synchronize()
+    expected = _packed_mla_reference(qr_full[1:], kr_full[3:], indices, indptr, sink)
+    torch.testing.assert_close(out[:-1].float(), expected[:-1], atol=1e-3, rtol=1e-2)
+    next_q = torch.randn_like(q_full[1:])
+    next_qp, next_ref = _pack_asm_nope_reference(next_q)
+    qp.copy_(next_qp)
+    q_rope.copy_(next_q[..., 448:])
+    graph.replay()
+    torch.accelerator.synchronize()
+    expected = _packed_mla_reference(next_ref, kr_full[3:], indices, indptr, sink)
+    torch.testing.assert_close(out[:-1].float(), expected[:-1], atol=1e-3, rtol=1e-2)
+    original_indptr = indptr.clone()
+    for length in (128, 129, 256, 257, 512):
+        indptr.copy_(query_indptr * length)
+        graph.replay()
+        torch.accelerator.synchronize()
+        expected = _packed_mla_reference(next_ref, kr_full[3:], indices, indptr, sink)
+        torch.testing.assert_close(out.float(), expected, atol=1e-3, rtol=1e-2)
+    indptr.copy_(original_indptr)
+    graph.replay()
+    torch.accelerator.synchronize()
+    expected = _packed_mla_reference(next_ref, kr_full[3:], indices, indptr, sink)
+    torch.testing.assert_close(out[:-1].float(), expected[:-1], atol=1e-3, rtol=1e-2)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("pool_offset", [3, (1 << 31) // 512 + 3])
+@torch.inference_mode()
+def test_sparse_mla_short_rows_address_large_cache_offsets(pool_offset):
+    """Packed-cache row addressing remains correct beyond a signed32-bit byte offset."""
+    from vllm.models.deepseek_v4.amd.asm_sparse_mla_short import (
+        correct_short_packed_rows,
+    )
+
+    torch.manual_seed(42)
+    q = torch.randn(2, 128, 512, dtype=torch.bfloat16, device="cuda")
+    kv = torch.randn(192, 512, dtype=torch.bfloat16, device="cuda")
+    qp, q_ref = _pack_asm_nope_reference(q)
+    kp, kv_ref = _pack_asm_nope_reference(kv)
+    storage = torch.empty(pool_offset + 192, 512, dtype=kp.dtype, device="cuda")
+    rope_storage = torch.empty(
+        pool_offset + 192, 64, dtype=torch.bfloat16, device="cuda"
+    )
+    storage[pool_offset:].copy_(kp)
+    rope_storage[pool_offset:].copy_(kv[..., 448:])
+    local_indices = torch.arange(191, dtype=torch.int32, device="cuda")
+    indices = local_indices + pool_offset
+    indptr = torch.tensor([0, 63, 191], dtype=torch.int32, device="cuda")
+    sink = torch.randn(128, device="cuda")
+    output = torch.empty_like(q)
+    correct_short_packed_rows(
+        qp,
+        q[..., 448:].contiguous(),
+        storage,
+        rope_storage,
+        indptr,
+        indices,
+        sink,
+        output,
+    )
+    expected = _packed_mla_reference(q_ref, kv_ref, local_indices, indptr, sink)
+    torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=1e-2)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("length", [63, 128, 256, 512])
+@torch.inference_mode()
+def test_sparse_mla_short_rows_resist_cancellation(length):
+    """Near-equal probabilities preserve cancellation between large signed values."""
+    from vllm.models.deepseek_v4.amd.asm_sparse_mla_short import (
+        correct_short_packed_rows,
+    )
+
+    q = torch.zeros(1, 128, 512, dtype=torch.bfloat16, device="cuda")
+    q[0, :, -1] = torch.linspace(0.5, 1.5, 128, device="cuda")
+    kv = torch.zeros(length, 512, dtype=torch.bfloat16, device="cuda")
+    kv[: length // 2, :448] = -64
+    kv[length // 2 :, :448] = 64
+    kv[:, -1] = torch.linspace(-0.25, 0.25, length, device="cuda")
+    qp, q_ref = _pack_asm_nope_reference(q)
+    kp, kv_ref = _pack_asm_nope_reference(kv)
+    indptr = torch.tensor([0, length], dtype=torch.int32, device="cuda")
+    indices = torch.arange(length, dtype=torch.int32, device="cuda")
+    sink = torch.zeros(128, device="cuda")
+    output = torch.empty_like(q)
+    correct_short_packed_rows(
+        qp,
+        q[..., 448:].contiguous(),
+        kp,
+        kv[..., 448:].contiguous(),
+        indptr,
+        indices,
+        sink,
+        output,
+    )
+    expected = _packed_mla_reference(q_ref, kv_ref, indices, indptr, sink)
+    torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=1e-2)
+
+
 @pytest.fixture
 def enable_aiter_mqa(monkeypatch):
     from vllm._aiter_ops import rocm_aiter_ops

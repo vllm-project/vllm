@@ -1,0 +1,43 @@
+ruff check..........................................................................................Passed
+ruff format.........................................................................................Passed
+typos...............................................................................................Passed
+clang-format....................................................................(no files to check)Skipped
+markdownlint-cli2...................................................................................Passed
+Lint GitHub Actions workflow files..............................................(no files to check)Skipped
+shellcheck......................................................................(no files to check)Skipped
+pip-compile.....................................................................(no files to check)Skipped
+pip-compile-rocm................................................................(no files to check)Skipped
+pip-compile-xpu.................................................................(no files to check)Skipped
+pip-compile-cpu.................................................................(no files to check)Skipped
+pip-compile-docs................................................................(no files to check)Skipped
+check json......................................................................(no files to check)Skipped
+reformat test/nightly-torch.txt to be in sync with test/cuda.in.................(no files to check)Skipped
+Check auto-label rules still match real files...................................(no files to check)Skipped
+Check agent instruction files and skills........................................(no files to check)Skipped
+- hook id: check-agent-files
+Check every Buildkite step declares an explicit key.................................................Passed
+Check new tests are wired into Buildkite CI.........................................................Passed
+- hook id: check-test-tethering
+- duration: 2.03s
+Run mypy for the oldest supported Python version....................................................Passed
+Lint PNG exports from excalidraw................................................(no files to check)Skipped
+Check SPDX headers..................................................................................Passed
+Check root lazy imports.............................................................................Passed
+Check for spaces in all filenames...................................................................Passed
+Update Dockerfile dependency graph..................................................................Passed
+Test non-root entrypoint wrapper................................................(no files to check)Skipped
+Check for forbidden imports.........................................................................Passed
+Prevent new 'torch.cuda' APIs call..................................................................Passed
+Validate configuration has default values and that each field has a docstring.......................Passed
+Validate docker/versions.json matches Dockerfile................................(no files to check)Skipped
+Check .dockerignore does not exclude tracked files..................................................Passed
+Check for boolean ops in with-statements............................................................Passed
+Check for hardcoded trust_remote_code=True..........................................................Passed
+Rust - Normalize Cargo manifests with autoinherit...............................(no files to check)Skipped
+Rust - Sort Cargo manifest sections.............................................(no files to check)Skipped
+Rust - Format code..............................................................(no files to check)Skipped
+Suggestion..........................................................................................Passed
+- hook id: suggestion
+- duration: 0s
+
+To bypass all the pre-commit hooks, add --no-verify to git commit. To skip a specific hook, prefix the commit command with SKIP=<hook-id>.

@@ -1,0 +1,38 @@
+[
+  {
+    "path": "prior_regressions/asm_split_before.xml",
+    "original_sha256": "3de230bed8997f28e64a8fc1b07bbcc516c865abcb6b41388534b2c7cd72297f",
+    "published_sha256": "c262bbf25a46abdd5be733fbcf71eb287636e8d892f1c9cf016fdd523c037f40",
+    "change": "Trim trailing line whitespace and extra final blank lines in published copy only."
+  },
+  {
+    "path": "prior_regressions/asm_split_before.log",
+    "original_sha256": "3faec1da94f628b0508ac97db07627bac0eb52882f3ba96b22d6c2327f64a836",
+    "published_sha256": "22cab2505319a7f8eb5d05d6cceb468fbb1b06716dbe2f2ff8bd833c40d086c8",
+    "change": "Trim trailing line whitespace and extra final blank lines in published copy only."
+  },
+  {
+    "path": "prior_regressions/asm_split_fixed.xml",
+    "original_sha256": "5809c49528a69a737bdde2cfc62ea4bbd27362f3e5bb670086ef55b1e036feaf",
+    "published_sha256": "fd7d6d4459b708c0aeb85e5ea559fe0b6467ba8dc5f9fdd19feb03ff4d143485",
+    "change": "Trim trailing line whitespace and extra final blank lines in published copy only."
+  },
+  {
+    "path": "prior_regressions/delayer_without_deferral_fix.log",
+    "original_sha256": "9b05a784a2315e83f638a237dfc4c40ae8e6749f6ae10148968122fce53ef7e1",
+    "published_sha256": "8c53e4d2f69408eeefc4a17401efcf5550d6946951fc19103260ba6f7ff78fa0",
+    "change": "Trim trailing line whitespace and extra final blank lines in published copy only."
+  },
+  {
+    "path": "prior_regressions/delayer_cpu.xml",
+    "original_sha256": "25483a8a41ee30ee19473781aaa10b23948815307fe098250fcf1969c8e9654e",
+    "published_sha256": "92152351b093a2c3b13227b690e9c9de29e89b98b918fee6695c978c0deedad2",
+    "change": "Trim trailing line whitespace and extra final blank lines in published copy only."
+  },
+  {
+    "path": "validation/precommit.log",
+    "original_sha256": "a0029f78d490f452fd54f3e7208b2b1d41533d970da6319284e186db3faba9ba",
+    "published_sha256": "d4ba255f675c5ce139b2b9227079dbf0a8d8419af82a871bb4202b7848fe3519",
+    "change": "Trim trailing line whitespace and extra final blank lines in published copy only."
+  }
+]

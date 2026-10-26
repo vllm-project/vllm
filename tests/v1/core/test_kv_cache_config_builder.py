@@ -218,6 +218,51 @@ class TestProjectionPreservesGroupMetadata:
 class TestBytesPerBlockProbe:
     """The single-block probe must not be polluted by num_gpu_blocks_override."""
 
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize("num_blocks", [1, 97])
+    def test_native_sparse_mla_accounts_rope_without_shrinking_placement(
+        self, num_blocks
+    ):
+        """The separate RoPE pool affects budget accounting, not requested blocks."""
+        import torch
+
+        from vllm.config import CacheConfig, VllmConfig
+        from vllm.v1.attention.backends.mla.rocm_asm_kv_cache import (
+            AsmKVCacheConfigBuilder,
+        )
+        from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+        from vllm.v1.core.kv_cache_planning import (
+            _pool_bytes_per_block,
+            _pool_bytes_per_block_from_builder,
+        )
+        from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+        config = VllmConfig(cache_config=CacheConfig(block_size=16))
+        spec = MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.uint8,
+            state_content_bytes=512,
+            alignment=512,
+            cache_dtype_str="fp8_ds_mla",
+            model_version="deepseek_v4",
+        )
+        resolve_kv_cache_layout(config, [["BLHNC"]], [spec])
+        groups = [KVCacheGroupSpec(["attention"], spec)]
+        builder = AsmKVCacheConfigBuilder()
+        raw_block_bytes = _pool_bytes_per_block(config, groups)
+        total_block_bytes = _pool_bytes_per_block_from_builder(builder, config, groups)
+        assert total_block_bytes == raw_block_bytes * 5 // 4
+        placement = builder.get_kv_cache_config_from_groups(config, groups, num_blocks)
+        assert placement.num_blocks == num_blocks
+        assert len({tensor.size for tensor in placement.kv_cache_tensors}) == 1
+        raw_bytes = placement.kv_cache_tensors[0].size
+        assert raw_bytes == raw_block_bytes * num_blocks
+        budget = total_block_bytes * num_blocks + total_block_bytes - 1
+        assert raw_bytes + raw_bytes // 4 <= budget
+        assert total_block_bytes * (num_blocks + 1) > budget
+
     def test_probe_suppresses_override(self):
         import torch
 

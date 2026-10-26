@@ -416,23 +416,39 @@ steps:
       source_file_dependencies:
       - vllm/models/deepseek_v41/amd/rocm.py
       - vllm/models/deepseek_v41/sparse_mla.py
+      - vllm/models/deepseek_v4/
+      - vllm/v1/core/kv_cache_planning.py
+      - vllm/v1/attention/backends/mla/sparse_swa.py
+      - vllm/v1/attention/backends/mla/rocm_asm_kv_cache.py
+      - vllm/envs.py
+      - tests/kernels/test_compressor_kv_cache.py
       - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+      - vllm/v1/attention/backends/mla/rocm_paged_mxfp4_indexer.py
       - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+      - vllm/v1/attention/ops/rocm_paged_mxfp4_indexer.py
       - vllm/v1/attention/selector.py
       - vllm/platforms/rocm.py
       - vllm/_aiter_ops.py
       - tests/kernels/attention/test_rocm_triton_attn_dsv4.py
+      - tests/kernels/attention/test_rocm_dsv4_mxfp4_indexer.py
+      - tests/kernels/attention/test_rocm_paged_mxfp4_indexer.py
       - tests/kernels/attention/test_rocm_aiter_mla_decode.py
       - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
       - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       commands:
       - amd-smi
+      - pytest -v -s tests/kernels/attention/test_rocm_dsv4_mxfp4_indexer.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
+      - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_sparse_mla_native_asm_matches_quantized_reference
+      - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_sparse_mla_fast_decode_graph_reuses_workspace
+      - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_sparse_mla_short_rows_address_large_cache_offsets
+      - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_sparse_mla_short_rows_resist_cancellation
+      - pytest -v -s tests/kernels/test_compressor_kv_cache.py::test_sparse_mla_two_buffer_compressor_matches_default
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
@@ -1037,6 +1053,11 @@ steps:
   - tests/kernels/moe/test_block_int8.py
   - tests/kernels/moe/test_triton_moe_no_act_mul.py
   - tests/kernels/moe/test_triton_moe_ptpc_fp8.py
+  - tests/kernels/moe/test_topk_softplus_sqrt.py
+  - tests/models/test_deepseek_v4_aiter_mega_moe.py
+  - vllm/models/deepseek_v4/amd/model.py
+  - vllm/models/deepseek_v4/amd/dspark.py
+  - vllm/models/deepseek_v4/amd/rocm.py
   commands:
   - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
@@ -1044,6 +1065,8 @@ steps:
   - pytest -v -s kernels/moe/test_block_int8.py
   - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
   - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
+  - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 VLLM_MOE_SKIP_PADDING=1 pytest -v -s kernels/moe/test_topk_softplus_sqrt.py::test_dsv4_fast_topk
+  - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s models/test_deepseek_v4_aiter_mega_moe.py -k 'e8m0_mlp or e8m0_qnorm'
 
 - label: ":amd: (MI355 DPX) Kernels"
   key: amd-kernels-mi355
