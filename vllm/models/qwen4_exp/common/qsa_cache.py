@@ -717,6 +717,17 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             compress_ratio=self.compress_ratio,
         )
 
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> QSAForwardMetadata:
+        attn_metadata = super().build_for_cudagraph_capture(common_attn_metadata)
+        # The capture batch is a dummy that never writes the state cache, so an
+        # active work item would read uninitialized positions. Mark every item
+        # inactive; replay fills this buffer with the real work.
+        if self.compress_ratio != 1:
+            attn_metadata.k_work_metadata.fill_(-1)
+        return attn_metadata
+
 
 class QSAStateBackend(AttentionBackend):
     """Key-only dummy backend for out-of-band QSA side-cache operations."""
