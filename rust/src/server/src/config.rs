@@ -17,6 +17,7 @@ use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
     ToolStrictLevel,
 };
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
@@ -60,6 +61,9 @@ pub struct ApiServerOptions {
     pub enable_log_requests: bool,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
+    /// Format logprob tokens as `token_id:{id}` unless the request sets
+    /// `return_tokens_as_token_ids` itself.
+    pub default_return_tokens_as_token_ids: bool,
     /// Include request timing metrics in OpenAI chat and completion responses.
     pub enable_per_request_metrics: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
@@ -251,6 +255,10 @@ pub struct Config {
     /// Server-side floor for tool-call structural tags, or `None` for the
     /// tool parser's default level.
     pub tool_strict_level: Option<ToolStrictLevel>,
+    /// Backend that compiles every structured-output constraint. Parser-built
+    /// output grammars are xgrammar structural tags, so chat builds them only
+    /// with xgrammar.
+    pub structured_outputs_backend: StructuredOutputBackend,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as
@@ -329,6 +337,15 @@ impl Config {
             );
         }
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
+        if matches!(
+            self.tool_strict_level,
+            Some(ToolStrictLevel::Function | ToolStrictLevel::Parameter)
+        ) && self.structured_outputs_backend != StructuredOutputBackend::Xgrammar
+        {
+            bail!(
+                "--tool-strict-level other than `auto` requires the xgrammar structured outputs backend"
+            );
+        }
         self.cors.validate()?;
         if let Some(tls) = &self.tls {
             tls.validate()?;
