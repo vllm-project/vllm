@@ -1442,9 +1442,15 @@ class OffloadingConnectorScheduler:
 
             # Skip prefix-hit chunks for block-level policy; for
             # request-level, next_stored_chunk_idx stays at 0 so all
-            # chunks (including hits) are offloaded.
+            # chunks (including hits) are offloaded. In a full-attention group
+            # the chunk of a partial tail is not a hit: the request computes the
+            # rest of it, so store it when it is full. Sliding-window and Mamba
+            # blocks of that chunk can hold the tail state, so they keep the skip.
             if req_status.offloading_context.policy == OffloadPolicy.CHUNK_LEVEL:
-                group_state.next_stored_chunk_idx = num_chunks
+                group_state.next_stored_chunk_idx = num_chunks - (
+                    partial_tail_boundary is not None
+                    and group_config.sliding_window_size_in_chunks is None
+                )
 
         src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
         dst_spec = GPULoadStoreSpec(
