@@ -909,7 +909,7 @@ def get_internal_checkpoint_step_configs() -> dict[str, TestConfig]:
     the prompt's last block boundary itself, so the final chunk runs whole.
 
     The checkpoint goes in the second-to-last block the chunk reaches, keyed to
-    the boundary: column 1 holds the state at B for a 2B + 10 prompt.
+    the boundary: column 1 holds the state at 2B for a 2B + 10 prompt.
     """
     B = BLOCK_SIZE
     return {
@@ -1337,13 +1337,13 @@ def _run_mamba_prefix_cache_mrv2(
         assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
 
         if internal_checkpoints:
-            # The checkpoint a 2B + 10 prefill exports at B (column 1) is the
-            # final state of a prefill that stops at B (column 0). Distinct
+            # The checkpoint a 2B + 10 prefill exports at 2B (column 1) is the
+            # final state of a prefill that stops at 2B (column 1). Distinct
             # tokens make a shifted conv window visible.
             tokens = [(i * 7919) % 30000 + 1 for i in range(BLOCK_SIZE * 2 + 10)]
             scheduler = engine.llm_engine.engine_core.engine_core.scheduler
             states = []
-            for num_tokens, col in ((BLOCK_SIZE, 0), (len(tokens), 1)):
+            for num_tokens, col in ((BLOCK_SIZE * 2, 1), (len(tokens), 1)):
                 captured["snapshot_col"] = col
                 _ = engine.generate(
                     [TokensPrompt(prompt_token_ids=tokens[:num_tokens])],

@@ -223,6 +223,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         additional_config={},
         num_speculative_tokens=2,
+        num_hash_lookahead_tokens=0,
         use_v2_model_runner=True,
     )
     builder = KimiK3KDAMetadataBuilder(
