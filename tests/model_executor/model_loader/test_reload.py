@@ -1007,6 +1007,7 @@ def test_kda_online_loading_releases_sources_and_zeros_padding(
         config, default_vllm_config, prefix="model.layers.0.self_attn"
     )
     projection = attention.in_proj_qkvgfab
+    assert projection.weight.shape[0] % 128 == 0
     # Exercise online loading on CPU without selecting a GPU quantization kernel.
     projection.weight = to_meta_tensor(projection.weight)
     projection.quant_method = None

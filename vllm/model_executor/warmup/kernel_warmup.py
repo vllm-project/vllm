@@ -161,6 +161,49 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
         module.autotune_kda_qkvg(model)
 
 
+def _aiter_gemm_m_buckets(max_m: int) -> list[int]:
+    """One token count per AITER tuned-GEMM bucket up to ``max_m``.
+
+    AITER pads M to 1, 2, 4 or 8 below 16, then to multiples of 16 / 32 / 64 /
+    128 up to 256 / 1024 / 4096 / beyond, and builds each bucket's kernel on
+    first use.
+    """
+    buckets = [m for m in (1, 2, 4, 8) if m <= max_m]
+    for step, upper in ((16, 256), (32, 1024), (64, 4096), (128, max_m)):
+        start = (buckets[-1] // step + 1) * step if buckets else step
+        buckets.extend(range(start, min(upper, max_m) + 1, step))
+    if max_m > 0 and buckets[-1] != max_m:
+        buckets.append(max_m)
+    return buckets
+
+
+def _rocm_aiter_gemm_warmup(worker: "Worker") -> None:
+    if not worker.vllm_config.kernel_config.enable_rocm_aiter_gemm_warmup:
+        return
+    max_m = worker.scheduler_config.max_num_batched_tokens
+    # Other AITER tables key exact M at multiples of 8 up to 512; max_m - 1
+    # covers Triton's divisibility specialization.
+    sizes = sorted(
+        {
+            m
+            for m in (
+                *_aiter_gemm_m_buckets(max_m),
+                *range(8, min(512, max_m) + 1, 8),
+                max_m - 1,
+            )
+            if m > 0
+        }
+    )
+    start = time.perf_counter()
+    for num_tokens in sizes:
+        worker.model_runner._dummy_run(num_tokens, skip_eplb=True)
+    logger.info(
+        "Warmed up AITER GEMMs at %d token counts in %.1fs.",
+        len(sizes),
+        time.perf_counter() - start,
+    )
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -233,6 +276,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         )
 
         rocm_segmented_attn_autotune_warmup(worker)
+        _rocm_aiter_gemm_warmup(worker)
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)

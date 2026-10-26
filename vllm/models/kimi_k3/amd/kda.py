@@ -146,13 +146,15 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # Keep f_a before the narrow beta shard, then pad each TP-local row to
         # select the aligned BF16 GEMM path. The padding also avoids an Inductor
-        # correctness issue seen with the row-strided G view.
+        # correctness issue seen with the row-strided G view. 128 makes the TP8
+        # FP8 shape 6400x7168, which AITER's Kimi-K3 bpreshuffle table tunes;
+        # 6288 has no entry and falls back to torch._scaled_mm.
         qkvg_output_sizes = [self.projection_size] * 4
         in_proj_output_sizes = qkvg_output_sizes + [self.head_dim, self.num_heads]
         local_output_size = (
             4 * self.local_projection_size + self.head_dim + self.local_num_heads
         )
-        self.in_proj_padding = -local_output_size % 16
+        self.in_proj_padding = -local_output_size % 128
         if self.in_proj_padding:
             in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
 
