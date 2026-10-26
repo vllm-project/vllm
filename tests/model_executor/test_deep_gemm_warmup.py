@@ -130,5 +130,6 @@ def test_mega_moe_m_values_reach_mega_gate(monkeypatch) -> None:
         gate=SimpleNamespace(input_size=4096, output_size=128),
         experts=SimpleNamespace(top_k=6, get_block_m=lambda num_tokens: 16),
         use_sequence_parallel=False,
+        use_mega_gate=True,
     )
     assert deep_gemm_warmup._get_fp8_fp4_mega_moe_m_values(module, 40) == [16, 32, 40]
