@@ -1142,6 +1142,7 @@ class AsyncLLM(EngineClient):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         async with self._profile_lock:
             if self._profile_session_guard_enabled and self._profile_session_active:
@@ -1159,6 +1160,7 @@ class AsyncLLM(EngineClient):
                     profile_prefix,
                     delay_iterations,
                     max_iterations,
+                    profiler_kwargs=profiler_kwargs,
                 )
             except Exception:
                 self._profile_session_active = False
