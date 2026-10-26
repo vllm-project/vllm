@@ -165,6 +165,15 @@ def has_flashinfer_bf16_gemm() -> bool:
 
 
 @functools.cache
+def has_flashinfer_concat_mla_kv_quant_fp8() -> bool:
+    """Return whether FlashInfer exposes the MLA K/V pack + fp8 cast API."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer")
+    return mod is not None and callable(getattr(mod, "concat_mla_kv_quant_fp8", None))
+
+
+@functools.cache
 def is_flashinfer_bf16_gemm_supported(
     backend: str,
     compute_capability: int | None = None,
@@ -1302,6 +1311,7 @@ __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
     "has_flashinfer_bf16_gemm",
+    "has_flashinfer_concat_mla_kv_quant_fp8",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",
     "flashinfer_trtllm_fp8_block_scale_moe",
