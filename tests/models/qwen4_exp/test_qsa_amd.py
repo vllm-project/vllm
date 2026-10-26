@@ -15,6 +15,7 @@ from vllm.models.qwen4_exp.amd import (
     model as _qwen4_exp_model,  # noqa: F401
 )
 from vllm.models.qwen4_exp.amd import ple_layer as ple_layer_module
+from vllm.models.qwen4_exp.amd import qsa as qsa_module
 from vllm.models.qwen4_exp.amd.indexer_qsa import (
     QSAIndexer,
     apply_qsa_rmsnorm,
@@ -27,6 +28,8 @@ from vllm.models.qwen4_exp.amd.ops.qsa_prepare import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
+from vllm.v1.attention.ops import rocm_octave
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -313,6 +316,45 @@ def test_fused_pre_indexer_gate_is_config_shaped(overrides, expected) -> None:
             rotary, head_dim=128, num_kv_heads=1, compress_ratio=4
         )
         is expected
+    )
+
+
+@pytest.mark.skipif(
+    not is_flash_attn_varlen_func_available(),
+    reason="AMD QSA requires FlashAttention",
+)
+@pytest.mark.parametrize("kv_cache_dtype", qsa_module._OCTAVE_CACHE_DTYPES)
+def test_qsa_impl_accepts_octave_kv_cache(
+    kv_cache_dtype: str,
+    default_vllm_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FlashAttentionImpl rejects quantized caches it cannot read, and
+    octave_* counts as quantized. QSA reads Octave with its own kernel, so it
+    must still build, keep the Octave dtype and take the Octave path."""
+    head_size = 256
+    monkeypatch.setitem(rocm_octave._rope_dim_by_head_size, head_size, 64)
+    config = SimpleNamespace(
+        attention_config=default_vllm_config.attention_config,
+        compilation_config=default_vllm_config.compilation_config,
+        scheduler_config=default_vllm_config.scheduler_config,
+        model_config=SimpleNamespace(dtype=torch.float16),
+    )
+    monkeypatch.setattr(qsa_module, "get_current_vllm_config", lambda: config)
+
+    impl = qsa_module.Qwen4ExpQSAFlashAttentionImpl(
+        num_heads=8,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+
+    assert impl.kv_cache_dtype == kv_cache_dtype
+    assert impl.octave_fmt == rocm_octave.OctaveFormat.from_cache_dtype(
+        kv_cache_dtype, head_size, 64
     )
 
 
