@@ -516,7 +516,7 @@ class TestMockObjTierFailures:
     def test_submission_raise_with_failing_release_still_reports_failure(
         self, monkeypatch
     ):
-        # A failing release must not skip the remaining ones or the JobResult.
+        # A failing non-transfer cleanup must not suppress the JobResult.
         tier, agent = _make_tier(num_blocks=4)
         deregister = MagicMock()
         monkeypatch.setattr(
@@ -531,6 +531,27 @@ class TestMockObjTierFailures:
 
         assert deregister.call_count == 1
         assert [(r.job_id, r.success) for r in tier.get_finished_jobs()] == [(1, False)]
+
+    def test_submission_failure_retries_xfer_release_before_reporting(
+        self, monkeypatch
+    ):
+        tier, agent = _make_tier(num_blocks=4)
+        release_xfer = MagicMock(
+            side_effect=[RuntimeError("transfer is still active"), None]
+        )
+        monkeypatch.setattr(agent, "release_xfer_handle", release_xfer)
+        monkeypatch.setattr(agent, "transfer", MagicMock(return_value="ERR"))
+
+        tier.submit_store(make_job(1, [key(1)], [0]))
+
+        assert 1 in tier._transfers
+        assert list(tier.get_finished_jobs()) == []
+        assert 1 in tier._transfers
+
+        results = list(tier.get_finished_jobs())
+        assert [(r.job_id, r.success) for r in results] == [(1, False)]
+        assert not tier._transfers
+        assert release_xfer.call_count == 2
 
     def test_raise_does_not_leak_parent_job_or_primary_pin(self):
         # The parent tiering manager only unwinds a job when the tier reports

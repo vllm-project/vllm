@@ -61,6 +61,7 @@ class TransferEntry(NamedTuple):
     xfer_handle: "nixl_xfer_handle"
     files_desc: object
     obj_handle: "nixl_prepped_dlist_handle"
+    submission_failed: bool = False
 
 
 class ObjAsyncLookupManager(AsyncLookupManager):
@@ -236,8 +237,24 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         The parent tiering manager unwinds a job only after the tier reports a
         ``JobResult`` for it, so a submission failure must not raise.
         """
+        if xfer_handle is not None:
+            try:
+                self._agent.release_xfer_handle(xfer_handle)
+            except Exception as exc:
+                # Keep the handle until NIXL confirms that the transfer has
+                # stopped. The primary tier may still be accessed by it.
+                logger.warning("release_xfer_handle failed for job %d: %s", job_id, exc)
+                assert obj_handle is not None
+                assert files_desc is not None
+                self._transfers[job_id] = TransferEntry(
+                    xfer_handle=xfer_handle,
+                    files_desc=files_desc,
+                    obj_handle=obj_handle,
+                    submission_failed=True,
+                )
+                return
+
         releases = (
-            ("release_xfer_handle", xfer_handle, self._agent.release_xfer_handle),
             ("release_dlist_handle", obj_handle, self._agent.release_dlist_handle),
             ("deregister_memory", files_desc, self._agent.deregister_memory),
         )
@@ -247,8 +264,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             try:
                 release(handle)
             except Exception as exc:
-                # Each release is independent: one failure must not skip the
-                # others, or the OBJ registration stays live.
+                # These resources are safe to clean up best effort after the
+                # transfer handle has been released.
                 logger.warning("%s failed for job %d: %s", name, job_id, exc)
         self._pending_results.append(JobResult(job_id=job_id, success=False))
 
@@ -350,19 +367,24 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         """Poll all in-flight transfers once; move newly-completed (success or
         failure) into ``_pending_results`` and release their NIXL handles."""
         for job_id, entry in list(self._transfers.items()):
-            try:
-                state = self._agent.check_xfer_state(entry.xfer_handle)
-            except Exception as exc:
+            if entry.submission_failed:
                 success = False
-                logger.warning("check_xfer_state raised for job %d: %s", job_id, exc)
             else:
-                if state == NIXL_PROC:
-                    continue
-                if state == NIXL_DONE:
-                    success = True
-                else:
+                try:
+                    state = self._agent.check_xfer_state(entry.xfer_handle)
+                except Exception as exc:
                     success = False
-                    logger.warning("transfer failed job=%d state=%s", job_id, state)
+                    logger.warning(
+                        "check_xfer_state raised for job %d: %s", job_id, exc
+                    )
+                else:
+                    if state == NIXL_PROC:
+                        continue
+                    if state == NIXL_DONE:
+                        success = True
+                    else:
+                        success = False
+                        logger.warning("transfer failed job=%d state=%s", job_id, state)
 
             transfer_time = None
             if success:
