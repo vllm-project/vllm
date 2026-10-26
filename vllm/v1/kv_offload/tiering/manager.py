@@ -250,6 +250,8 @@ class TieringOffloadingManager(OffloadingManager):
         #   True:  secondary → primary (promotion)
         #   False: primary → secondary (cascade)
         self._jobs: dict[JobId, JobMetadata] = {}
+        # Set by reset_cache() until on_reset_flushed(); see lookup().
+        self._promotions_held = False
         primary_view = self.primary_tier.get_kv_memoryview()
         assert primary_view.strides is not None
         self._metrics = TieringMetricsTracker(
@@ -610,8 +612,9 @@ class TieringOffloadingManager(OffloadingManager):
             HIT_PENDING — chunk found but not yet readable (write
                         in-flight on the primary tier).
             RETRY     — promotion started or a secondary tier is busy.
-            MISS      — chunk not found in any tier, or primary is full
-                        and cannot accept a promotion.
+            MISS      — chunk not found in any tier, primary is full
+                        and cannot accept a promotion, or promotions are
+                        held after a cache reset (see reset_cache()).
 
         """
         # Poll first so a promotion that finished since the last call is
@@ -634,6 +637,8 @@ class TieringOffloadingManager(OffloadingManager):
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
+        if self._promotions_held:
+            return LookupResult.MISS
 
         any_retry = False
         for i, tier in enumerate(self.secondary_tiers):
@@ -1146,6 +1151,15 @@ class TieringOffloadingManager(OffloadingManager):
         (FS, network) keep their data across resets. Active request state is
         retained so those requests can continue after the reset; finished
         requests are finalized and removed.
+
+        Promotions are then held until on_reset_flushed(): a worker may still
+        write a freed primary chunk for a job in flight at the reset (a late
+        DMA), so no promotion may fill one meanwhile. lookup() is also reached
+        from serve_external_requests() through each tier's ParentManager, so
+        the hold sits here rather than in the scheduler. While held, a chunk
+        missing from the primary tier is a MISS, so the request recomputes it
+        and a peer is told it is absent; RETRY would instead stall both until
+        the hold is released.
         """
         for tier in self.secondary_tiers:
             tier.drain_jobs()
@@ -1181,6 +1195,11 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             if tier.bp_detector is not None:
                 tier.bp_detector.reset()
+        self._promotions_held = bool(self.secondary_tiers)
+
+    @override
+    def on_reset_flushed(self) -> None:
+        self._promotions_held = False
 
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:
