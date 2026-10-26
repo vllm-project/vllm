@@ -66,6 +66,7 @@ from vllm.models.deepseek_v4.amd.model import (
 )
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
+    MHCOverlapStream,
     mhc_pre_delayed_overlap,
     supports_mhc_overlap,
 )
@@ -192,12 +193,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         aux_stream_list: list[torch.cuda.Stream] | None = None,
         candidate_block_buffer: torch.Tensor | None = None,
         engram_layout: EngramLayout | None = None,
-        mhc_stream: torch.cuda.Stream | None = None,
+        mhc_overlap: MHCOverlapStream | None = None,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
-        self.mhc_stream = mhc_stream
+        self.mhc_overlap = mhc_overlap
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.engram: Engram | None = None
@@ -282,7 +283,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         self.mhc_pre_delayed = MHCPreDelayedOp()
         self.mhc_post = MHCPostOp()
-        if mhc_stream is not None:
+        if mhc_overlap is not None:
             MHC_POST_COLLAPSE_RMS_NORM_KERNEL.register_warmup(
                 hidden_size=self.hidden_size, weight_dtype=self.ffn_norm.weight.dtype
             )
@@ -333,18 +334,18 @@ class DeepseekV4DecoderLayer(nn.Module):
         # The fused kernel only takes the latter, so that seam keeps the
         # separate attn_norm.
         fuse_attn_norm = self.fuse_seam_norm and not (residual is None and x.dim() == 2)
-        mhc_stream = self.mhc_stream
-        if mhc_stream is not None and (
+        mhc_overlap = self.mhc_overlap
+        if mhc_overlap is not None and (
             in_piecewise_cudagraph()
             or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
             or not torch.cuda.is_current_stream_capturing()
         ):
             # Fork only inside FULL graph capture, where the joins become graph
             # edges; HIP event waits at runtime are unreliable here.
-            mhc_stream = None
+            mhc_overlap = None
         mhc_pre = (
-            partial(mhc_pre_delayed_overlap, self.mhc_pre_delayed, stream=mhc_stream)
-            if mhc_stream is not None
+            partial(mhc_pre_delayed_overlap, self.mhc_pre_delayed, overlap=mhc_overlap)
+            if mhc_overlap is not None
             else self.mhc_pre_delayed
         )
         # The reference collapses each sublayer's input with the *previous*
@@ -448,8 +449,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.attn(positions, x, None)
-        if mhc_stream is not None:
-            torch.cuda.current_stream().wait_stream(mhc_stream)
+        if mhc_overlap is not None:
+            mhc_overlap.join()
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
         elif self.mono is not None and self.mono.ffn_only:
@@ -478,8 +479,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         if not self.fuse_seam_norm:
             x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
-        if mhc_stream is not None:
-            torch.cuda.current_stream().wait_stream(mhc_stream)
+        if mhc_overlap is not None:
+            mhc_overlap.join()
         return x, residual, post_mix, res_mix, ffn_pre
 
     def write_kv(
@@ -547,8 +548,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (compressor kv_score, indexer.weights_proj). fused_wqa_wkv stays on
         # the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
-        # Keep mHC independent of the streams used inside attention.
-        mhc_stream = torch.cuda.Stream() if supports_mhc_overlap(vllm_config) else None
+        mhc_overlap = MHCOverlapStream() if supports_mhc_overlap(vllm_config) else None
 
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
@@ -593,7 +593,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_stream_list=aux_stream_list,
                 candidate_block_buffer=self.candidate_block_buffer,
                 engram_layout=self.engram_layout,
-                mhc_stream=mhc_stream,
+                mhc_overlap=mhc_overlap,
             ),
             prefix=f"{prefix}.layers",
         )

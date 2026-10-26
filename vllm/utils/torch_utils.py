@@ -854,6 +854,7 @@ def current_stream() -> torch.cuda.Stream:
 #
 # aux_stream() is currently used for:
 #   - MoE shared_expert overlap with router
+#   - DeepSeek-V4.1 mHC gate projection overlap on ROCm
 _aux_stream: torch.cuda.Stream | None = None
 
 

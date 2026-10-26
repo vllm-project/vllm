@@ -11,6 +11,7 @@ from vllm.model_executor.layers.mhc import (
     MHCPreDelayedOp,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import aux_stream
 
 # MI355X TP2, TP4 and TP8 improve through 128 tokens, shrinking from about +5%
 # output throughput at 1 token to +0.3-2% at 96-128.
@@ -29,6 +30,30 @@ def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
         and config.hc_mult == 4
         and not vllm_config.parallel_config.use_ubatching
     )
+
+
+class MHCOverlapStream:
+    """The global aux stream with the fork and join events of the overlap.
+
+    At the FFN seam the gates queue ahead of the shared experts on this stream,
+    so both stay off the routed experts' path. Every fork and join waits on its
+    event before the next records it, so all layers share the two events.
+    """
+
+    def __init__(self) -> None:
+        stream = aux_stream()
+        assert stream is not None
+        self.stream = stream
+        self._fork_event = torch.cuda.Event()
+        self._join_event = torch.cuda.Event()
+
+    def fork(self) -> None:
+        self._fork_event.record()
+        self.stream.wait_event(self._fork_event)
+
+    def join(self) -> None:
+        self._join_event.record(self.stream)
+        torch.cuda.current_stream().wait_event(self._join_event)
 
 
 def mhc_pre_delayed_overlap(
@@ -50,17 +75,17 @@ def mhc_pre_delayed_overlap(
     post_layer_mix: torch.Tensor | None = None,
     comb_res_mix: torch.Tensor | None = None,
     *,
-    stream: torch.cuda.Stream,
+    overlap: MHCOverlapStream,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``pre_delayed`` with the gate projection moved onto ``stream``.
+    """``pre_delayed`` with the gate projection moved onto ``overlap.stream``.
 
     Returns residual, post_mix, comb_mix, layer_input, next_pre_mix. Only the
-    residual and layer input are ready on the caller stream; join ``stream``
-    before using the gates. The residual and gates match the fused AITER seam
-    bit for bit, since the gates are ``pre_delayed`` applied to the same new
-    residual; the layer input's RMSNorm sums its row in another order, which
-    can move it by up to one bf16 ulp. Seams without a post block, a carried
-    pre-mix or a fused norm run ``pre_delayed`` on the caller stream.
+    residual and layer input are ready on the caller stream; call
+    ``overlap.join()`` before using the gates. The residual and gates match the
+    fused AITER seam bit for bit, since the gates are ``pre_delayed`` applied to
+    the same new residual; the layer input's RMSNorm sums its row in another
+    order, which can move it by up to one bf16 ulp. Seams without a post block,
+    a carried pre-mix or a fused norm run ``pre_delayed`` on the caller stream.
     """
     main = torch.cuda.current_stream()
     if (
@@ -73,7 +98,7 @@ def mhc_pre_delayed_overlap(
     ):
         # Fork anyway: the caller joins after every seam, and a join needs the
         # stream to be part of the capture.
-        stream.wait_stream(main)
+        overlap.fork()
         return pre_delayed(
             residual,
             fn,
@@ -101,7 +126,8 @@ def mhc_pre_delayed_overlap(
         norm_weight,
         norm_eps,
     )
-    stream.wait_stream(main)
+    stream = overlap.stream
+    overlap.fork()
     with torch.cuda.stream(stream):
         _, post_mix, comb_mix, _, next_pre_mix = pre_delayed(
             residual,

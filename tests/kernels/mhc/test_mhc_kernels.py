@@ -1451,7 +1451,10 @@ def test_deepseek_v41_rocm_mhc_overlap_matches_fused_seam(
     bit-exact and the layer input within one bf16 ulp, and the layer input is
     usable before the join; also across graph replays. A seam without a post
     block stays serial and still pairs with the caller's join."""
-    from vllm.models.deepseek_v41.amd.mhc import mhc_pre_delayed_overlap
+    from vllm.models.deepseek_v41.amd.mhc import (
+        MHCOverlapStream,
+        mhc_pre_delayed_overlap,
+    )
 
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
@@ -1475,12 +1478,12 @@ def test_deepseek_v41_rocm_mhc_overlap_matches_fused_seam(
             comb_res_mix=comb_res_mix,
         )
     pre_delayed = MHCPreDelayedOp()
-    side = torch.cuda.Stream()
+    overlap = MHCOverlapStream()
 
     def run():
-        outputs = mhc_pre_delayed_overlap(pre_delayed, *args, **kwargs, stream=side)
+        outputs = mhc_pre_delayed_overlap(pre_delayed, *args, **kwargs, overlap=overlap)
         consumed_input = outputs[3].clone()
-        torch.cuda.current_stream().wait_stream(side)
+        overlap.join()
         return (*outputs, consumed_input)
 
     def check(actual):
@@ -1495,13 +1498,15 @@ def test_deepseek_v41_rocm_mhc_overlap_matches_fused_seam(
     check(run())
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        captured = run()
+        # Two seams, as in consecutive layers, reuse the fork and join events.
+        captured = [run(), run()]
     for _ in range(3):
         for tensor in (residual, sublayer_out):
             tensor.normal_()
         pre_mix.uniform_(0.5, 1.5)
         graph.replay()
-        check(captured)
+        for actual in captured:
+            check(actual)
 
 
 @pytest.mark.skipif(
