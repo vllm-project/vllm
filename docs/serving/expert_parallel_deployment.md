@@ -110,7 +110,7 @@ Choosing a MoRI backend: use EPv2 wherever it applies, and EPv1 for deployments 
 | Deployment | Backend |
 | ---------- | ------- |
 | EP within one node (or one gfx1250 UALink fabric), BF16 model, AITER fused MoE | `mori` (runs EPv2) |
-| EP within one node, with experts that take activations quantized before dispatch (e.g. FP8 or INT8 Triton experts) | `mori` with `VLLM_MORI_EP_V2=0` (EPv1); EPv2 rejects these experts at startup |
+| EP within one node, with experts that take activations quantized before dispatch (e.g. FP8 or INT8 Triton experts) | EPv2 rejects these experts at startup. Enable AITER fused MoE (`VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1`) so `mori` runs EPv2 with AITER experts; MoRI EPv1 (`VLLM_MORI_EP_V2=0`) also needs AITER fused MoE. To keep Triton experts without AITER, use a non-MoRI backend such as `allgather_reducescatter` |
 | EP across nodes | `mori` (falls back to EPv1; picks InterNodeV1LL when the per-rank token budget is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD`, else InterNodeV1) |
 
 Within one node, all EPv1 options run the same IntraNode kernel. To pin the inter-node kernel, set the threshold: `0` always picks InterNodeV1, and a value at least the per-rank token budget always picks InterNodeV1LL. `mori_high_throughput` and `mori_low_latency` do the same pinning and are kept for compatibility; they will be deprecated in favor of `mori`.

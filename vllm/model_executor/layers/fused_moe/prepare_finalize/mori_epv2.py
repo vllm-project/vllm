@@ -59,8 +59,9 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             raise ValueError(
                 "MORI EPv2 dispatches unquantized BF16 activations, but "
                 f"{type(fused_experts).__name__} expects {quant_dtype} "
-                "activations quantized before dispatch. Set VLLM_MORI_EP_V2=0 to "
-                "use MORI EPv1."
+                "activations quantized before dispatch. Use AITER fused MoE experts "
+                "(VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1), or set "
+                "VLLM_MORI_EP_V2=0 for MORI EPv1, which also requires AITER fused MoE."
             )
 
         # AITER computes only the first expert_num_tokens rows.
