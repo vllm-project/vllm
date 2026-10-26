@@ -225,6 +225,7 @@ class HiSparseHostPool:
         self.backing: torch.Tensor | None = None
         self.registered: torch.Tensor | None = None
         self.shared_region: SharedOffloadRegion | None = None
+        self.shared_pinned: list[torch.Tensor] = []
 
     def allocate(self, size: int) -> torch.Tensor:
         if self.backing is not None:
@@ -243,7 +244,7 @@ class HiSparseHostPool:
             ]
             assert config.hisparse_host_num_blocks is not None
             assert config.hisparse_host_block_stride is not None
-            _, _, self.shared_region = allocate_hisparse_host_pools(
+            _, self.shared_pinned, self.shared_region = allocate_hisparse_host_pools(
                 self.vllm_config,
                 tensor_sizes,
                 config.hisparse_host_num_blocks,
@@ -404,21 +405,21 @@ def allocate_hisparse_host_pools(
         creator_memory_check=check_hisparse_host_memory,
         populate_shard=(tp_group.rank_in_group, tp_group.world_size),
     )
+    pinned: list[torch.Tensor] = []
     try:
         for start, end in _hisparse_registration_ranges(
             tensor_sizes, num_blocks, host_block_stride
         ):
             tensor = region.base_tensor[start:end]
             pin_tensor(tensor)
-            region.pinned_addresses.append(tensor.data_ptr())
-            region.is_pinned = True
+            pinned.append(tensor)
         pools = [
             region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
         ]
     except Exception:
-        region.cleanup()
+        release_pinned_state([], pinned, region)
         raise
-    return pools, [], region
+    return pools, pinned, region
 
 
 def release_pinned_state(
@@ -436,7 +437,7 @@ def release_pinned_state(
                 "HiSparse: device context unusable at teardown (%s); leaving "
                 "%d host-pool tensors pinned for kernel exit reclaim.",
                 e,
-                len(pinned_host_pools) + int(shared_host_region is not None),
+                len(pinned_host_pools),
             )
             return
 

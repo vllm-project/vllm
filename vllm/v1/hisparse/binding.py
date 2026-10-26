@@ -155,7 +155,7 @@ def init_hisparse_kv_cache(
         return kv_caches
     except Exception:
         if host_pool.shared_region is not None:
-            host_pool.shared_region.cleanup()
+            release_pinned_state([], host_pool.shared_pinned, host_pool.shared_region)
         elif host_pool.registered is not None:
             release_pinned_state([], [host_pool.registered])
         drop_hisparse_host_pool(vllm_config)

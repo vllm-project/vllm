@@ -28,6 +28,7 @@ from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     drop_hisparse_host_pool,
+    get_hisparse_host_pool,
     release_pinned_state,
     update_hisparse_residency,
 )
@@ -228,7 +229,7 @@ class HiSparseConnectorWorker:
             raise RuntimeError("HiSparse caches must share one host region.")
         shared_host_region = next(iter(shared_host_regions.values()), None)
         pinned_host_pools = (
-            []
+            get_hisparse_host_pool(self.vllm_config, self.kv_cache_config).shared_pinned
             if shared_host_region is not None
             else list(registered_host_pools.values())
         )
