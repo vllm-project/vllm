@@ -22,7 +22,12 @@ from vllm.config.cache import _layout_from_name
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    async_tensor_h2d,
+    np_to_pinned_tensor,
+    sync_copy_to_cpu,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
@@ -548,7 +553,7 @@ def make_local_attention_virtual_batches(
     query_start_loc_np = common_attn_metadata.query_start_loc_cpu.numpy()
     with gpu_sync_allowed():
         # TODO see https://github.com/vllm-project/vllm/pull/31852
-        seq_lens_np = common_attn_metadata.seq_lens.cpu().numpy()
+        seq_lens_np = sync_copy_to_cpu(common_attn_metadata.seq_lens).numpy()
     block_table = common_attn_metadata.block_table_tensor
     device = common_attn_metadata.query_start_loc.device
 

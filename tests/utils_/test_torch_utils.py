@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+
 import numpy as np
 import pytest
 import torch
@@ -16,6 +18,7 @@ from vllm.utils.torch_utils import (
     set_random_seed,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
+    sync_copy_to_cpu,
 )
 
 
@@ -221,6 +224,38 @@ def test_async_tensor_h2d_staging(device):
         async_tensor_h2d([1, 2, 3], device=device, dtype=torch.int32),
         torch.tensor([1, 2, 3], dtype=torch.int32, device=device),
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_sync_copy_to_cpu_does_not_stall_other_threads():
+    """While one thread waits for a D2H copy behind long GPU work, another
+    thread's kernel launch must not wait for that work to finish."""
+    src = torch.arange(8, device="cuda")
+    side_stream = torch.cuda.Stream()
+    side = torch.zeros(1, device="cuda")
+    # Warm up so lazy kernel loading cannot block the timed launch.
+    with torch.cuda.stream(side_stream):
+        side.add_(1)
+    sync_copy_to_cpu(src)
+    torch.accelerator.synchronize()
+    copy_done = threading.Event()
+    result: list[torch.Tensor] = []
+
+    def copy_behind_gpu_work():
+        torch.cuda._sleep(2**31)
+        result.append(sync_copy_to_cpu(src))
+        copy_done.set()
+
+    copier = threading.Thread(target=copy_behind_gpu_work)
+    copier.start()
+    try:
+        assert not copy_done.wait(timeout=0.2)
+        with torch.cuda.stream(side_stream):
+            side.add_(1)
+        assert not copy_done.is_set()
+    finally:
+        copier.join()
+    assert torch.equal(result[0], torch.arange(8))
 
 
 def test_set_random_seed_differs_per_data_parallel_index():
