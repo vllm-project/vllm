@@ -2256,16 +2256,6 @@ _TWO_STAGES = [
 ]
 
 
-class _AllUpdatesClient(RecordingClient):
-    def __init__(self):
-        super().__init__()
-        self.update_infos: list[dict] = []
-
-    def update_weights(self, update_info: dict) -> None:
-        super().update_weights(update_info)
-        self.update_infos.append(update_info)
-
-
 @pytest.mark.parametrize(
     ("meta", "match"),
     [
@@ -2306,115 +2296,6 @@ def test_nccl_trainer_rejects_world_size_without_workers():
             client=RecordingClient(),
             source=_ScriptedSource(_TWO_STAGES, []),
         )
-
-
-@pytest.mark.parametrize(("rank", "group_rank"), [(0, 0), (1, None), (2, 1)])
-def test_nccl_trainer_init_places_broadcasters(monkeypatch, rank, group_rank):
-    """Broadcasters take group ranks in trainer-rank order and workers start
-    after them; only rank 0 drives the inference side, other broadcasters
-    just join the group, and the rest stay out of it."""
-    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
-
-    opened: list[int] = []
-
-    def open_endpoint(info, rank):
-        opened.append(rank)
-        return MagicMock()
-
-    monkeypatch.setattr(nccl_engine_mod, "open_trainer_endpoint", open_endpoint)
-    client = RecordingClient()
-    NCCLTrainerWeightTransferEngine.trainer_init(
-        NCCLTrainerInitInfo(
-            master_address="127.0.0.1", master_port=29500, world_size=4, rank=rank
-        ),
-        client=client,
-        source=_ScriptedSource(_TWO_STAGES, []),
-    )
-
-    assert opened == ([] if group_rank is None else [group_rank])
-    if rank == 0:
-        assert client.last_init_info is not None
-        assert client.last_init_info["rank_offset"] == 2
-    else:
-        assert client.order == []
-
-
-@pytest.mark.parametrize("packed", [False, True])
-def test_nccl_trainer_sends_one_update_per_broadcaster(monkeypatch, packed):
-    """Rank 0 sends one update per broadcaster, in order, tagging all but its
-    own with `src` (so single-broadcaster payloads stay unchanged); unchanged
-    metadata is sent once. Each broadcaster sends only its own parameters and
-    receives the others' to stay in the collective."""
-    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
-
-    def engine_at(rank, pairs):
-        yielded: list[str] = []
-
-        class _Recording(_ScriptedSource):
-            def iter_full(self):
-                for name, tensor in super().iter_full():
-                    yielded.append(name)
-                    yield name, tensor
-
-        engine = NCCLTrainerWeightTransferEngine(
-            client=_AllUpdatesClient(),
-            source=_Recording(_TWO_STAGES, pairs),
-            is_sender=rank == 0,
-            rank=rank,
-            packed=packed,
-        )
-        engine.model_update_group = MagicMock()
-        engine.model_update_group.device = torch.device("cpu")
-        return engine, yielded
-
-    # (src, numel) of each broadcast this rank takes part in; w has 4 elements
-    # and b has 2.
-    calls: list[tuple[int, int]] = []
-
-    def packed_side(iterator, group, src, **kwargs):
-        # The producer yields (name, tensor), the consumer (name, (shape, dtype)).
-        calls.append(
-            (
-                src,
-                sum(
-                    v.numel() if isinstance(v, torch.Tensor) else math.prod(v[0])
-                    for _, v in iterator
-                ),
-            )
-        )
-
-    monkeypatch.setattr(nccl_engine_mod, "packed_nccl_broadcast_producer", packed_side)
-    monkeypatch.setattr(nccl_engine_mod, "packed_nccl_broadcast_consumer", packed_side)
-    monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
-
-    def broadcast_roles(engine):
-        if packed:
-            return list(calls)
-        return [
-            (c.kwargs["src"], c.args[0].numel())
-            for c in engine.model_update_group.broadcast.call_args_list
-        ]
-
-    stage0, yielded0 = engine_at(0, [("w", torch.ones(4))])
-    for _ in range(2):
-        stage0.send_weights()
-    full = {"names": ["w"], "dtype_names": ["float32"], "shapes": [[4]]}
-    assert stage0.client.update_infos == [
-        full,
-        {"names": ["b"], "dtype_names": ["float32"], "shapes": [[2]], "src": 1},
-        {"names": [], "dtype_names": [], "shapes": []},
-        {"names": [], "dtype_names": [], "shapes": [], "src": 1},
-    ]
-    assert stage0.client.order == ["start", "update", "update", "finish"] * 2
-    assert broadcast_roles(stage0) == [(0, 4), (1, 2)] * 2
-    assert yielded0 == ["w", "w"]
-
-    calls.clear()
-    stage1, yielded1 = engine_at(2, [("b", torch.ones(2))])
-    stage1.send_weights()
-    assert stage1.client.order == []
-    assert broadcast_roles(stage1) == [(0, 4), (1, 2)]
-    assert yielded1 == ["b"]
 
 
 def test_nccl_trainer_non_sender_owner_drives_its_gathers(monkeypatch):

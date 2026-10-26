@@ -263,7 +263,7 @@ class NCCLWeightTransferEngine(
 class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerInitInfo]):
     """Trainer-side NCCL weight transfer engine.
 
-    On the sender (rank 0) drives the full update round trip: it runs the
+    The sender (rank 0) drives the full update round trip: it runs the
     inference-side `update_weights` concurrently with the trainer-side broadcast
     (both rendezvous inside the same NCCL calls), then finishes the update.
 
@@ -420,40 +420,38 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             self._post_send_sync()
             return
 
-        reuse = meta == self._sent_meta
+        reuse = self.is_sender and meta == self._sent_meta
         if self.is_sender:
             self.client.start_weight_update()
         for broadcaster, metas in slices:
             src = group_ranks.index(broadcaster)
-            if reuse:
-                update_info = NCCLWeightTransferUpdateInfo(src=src)
+            is_broadcaster = broadcaster == self.rank
+            if self.is_sender:
+                self._send_update(metas, src, is_broadcaster, reuse)
             else:
-                update_info = NCCLWeightTransferUpdateInfo(
-                    names=[m.name for m in metas],
-                    dtype_names=[str(m.dtype).split(".")[-1] for m in metas],
-                    shapes=[list(m.shape) for m in metas],
-                    src=src,
-                )
-            self._send_update(update_info, metas, broadcaster == self.rank)
+                self._broadcast(metas, src, is_broadcaster)
         if self.is_sender:
             self.client.finish_weight_update()
             self._sent_meta = meta
         self._post_send_sync()
 
     def _send_update(
-        self,
-        update_info: NCCLWeightTransferUpdateInfo,
-        meta: list[ParamMeta],
-        is_broadcaster: bool,
+        self, meta: list[ParamMeta], src: int, is_broadcaster: bool, reuse: bool
     ) -> None:
-        """One broadcaster's turn: rank 0 runs its `update_weights` while this
-        rank sends `meta` (if it is the broadcaster) or receives and discards
-        it (to stay in the collective)."""
-        if not self.is_sender:
-            self._broadcast(meta, update_info.src, is_broadcaster)
-            return
+        """One broadcaster's turn on rank 0: run its `update_weights` while
+        sending `meta` (if rank 0 is the broadcaster) or receiving and
+        discarding it (to stay in the collective)."""
+        if reuse:
+            update_info = NCCLWeightTransferUpdateInfo(src=src)
+        else:
+            update_info = NCCLWeightTransferUpdateInfo(
+                names=[m.name for m in meta],
+                dtype_names=[str(m.dtype).split(".")[-1] for m in meta],
+                shapes=[list(m.shape) for m in meta],
+                src=src,
+            )
         payload = asdict(update_info)
-        if not update_info.src:
+        if not src:
             # Keep single-broadcaster payloads readable by older servers.
             del payload["src"]
         # update_weights (workers receive) must run concurrently with the
@@ -466,7 +464,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             # hanging in broadcast waiting for a peer that will never arrive.
             if future.done():
                 future.result()
-            self._broadcast(meta, update_info.src, is_broadcaster)
+            self._broadcast(meta, src, is_broadcaster)
             future.result()  # surface inference-side errors
         finally:
             # Never wait for the RPC thread here. If the broadcast raised, the
