@@ -1099,7 +1099,7 @@ def test_selective_lease_treats_error_results_as_failed_lease(monkeypatch):
     store = _LeaseTrackingStore()
     worker = _full_plus_mamba_worker(store)
     hs = _store_full_history(worker, store)
-    store.batch_is_exist = lambda keys: [-900] * len(keys)
+    monkeypatch.setattr(store, "batch_is_exist", lambda keys: [-900] * len(keys))
 
     assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 0
     assert worker.get_kv_connector_stats().reduce()["lookup_lease_error_count"] == 1
@@ -1115,7 +1115,7 @@ def test_selective_lease_reports_no_hit_when_lease_raises(monkeypatch):
     def _fail(_keys):
         raise RuntimeError("master unreachable")
 
-    store.batch_is_exist = _fail
+    monkeypatch.setattr(store, "batch_is_exist", _fail)
 
     assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 0
 

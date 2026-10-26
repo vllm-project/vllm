@@ -605,7 +605,7 @@ class ChunkedTokenDatabase:
     def process_tokens(
         self,
         token_len: int,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         mask_num: int = 0,
         *,
         chunk_mask: list[bool] | None = None,
