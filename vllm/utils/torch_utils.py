@@ -888,7 +888,7 @@ def weak_ref_tensors(
 ) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """Convenience function to create weak references to tensors,
     for single tensor, possibly nested list/tuple of tensors, or
-    IntermediateTensors. Ints are returned as is.
+    IntermediateTensors. Ints and LayerNames are returned as is.
     """
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
@@ -896,7 +896,7 @@ def weak_ref_tensors(
         return [weak_ref_tensors(t) for t in tensors]
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensors(t) for t in tensors)
-    if isinstance(tensors, int):
+    if isinstance(tensors, (int, LayerName)):
         return tensors
 
     # For IntermediateTensors used in pipeline parallelism

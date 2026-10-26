@@ -6,6 +6,7 @@ import torch
 
 from vllm.utils.torch_utils import (
     OMP_NUM_THREADS_SET_BY_VLLM,
+    LayerName,
     async_tensor_h2d,
     available_cpu_count,
     common_broadcastable_dtype,
@@ -24,11 +25,13 @@ from vllm.utils.torch_utils import (
 def test_weak_ref_tensors_does_not_keep_nested_tensors_alive() -> None:
     # CUDA graph wrappers weak-ref model outputs such as
     # (hidden_states, [aux_hidden_states, ...]); no tensor may stay pinned.
+    # Inductor graph partition outputs can also carry hoisted LayerNames.
     hidden, aux = (torch.empty(1 << 20, device="cuda") for _ in range(2))
-    out = weak_ref_tensors((hidden, [aux], 3))
+    layer_name = LayerName("model.layers.0.self_attn.attn")
+    out = weak_ref_tensors((hidden, [aux], 3, layer_name))
     assert isinstance(out, tuple)
-    weak_hidden, weak_list, size = out
-    assert isinstance(weak_list, list) and size == 3
+    weak_hidden, weak_list, size, name = out
+    assert isinstance(weak_list, list) and size == 3 and name is layer_name
     assert weak_hidden.data_ptr() == hidden.data_ptr()
     assert weak_list[0].data_ptr() == aux.data_ptr()
     nbytes = hidden.nbytes + aux.nbytes
