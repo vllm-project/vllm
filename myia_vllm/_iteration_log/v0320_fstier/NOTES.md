@@ -2462,3 +2462,41 @@ re-write share, 18.7 → ~9.2 GB/h, i.e. **1.06 → ~0.52 KB per prompt token
 
 **Watch**: VRAM GPU 0 22,956 MiB at 00:03Z — 44 MiB under the 23,000 alert line,
 GPU 1 21,508. `preemptions_total` 10 in this generation. No night-time restart.
+
+### 26/10 00:35Z — CORRECTION: the composition inverted under the filter
+
+Per-class split of the same 30 min window (class from the `_g<N>` path component:
+`g3` = attention, `g0-g2` = the three TP ranks of a GDN state block):
+
+| class | new (GB) | rewrite (GB) | total (GB) | share |
+|---|---|---|---|---|
+| attention (`g3`) | 2.861 | 3.097 | 5.958 | **75.2 %** |
+| GDN state (`g0-g2`) | 1.024 | 0.945 | 1.969 | **24.8 %** |
+
+**The pre-filter "two thirds GDN" no longer holds: GDN is a quarter of the
+writes now.** The mechanism is the filter itself, and it is the opposite of an
+accident. A one-off GDN end-of-request snapshot has a unique key by
+construction — it is never looked up twice, so it never reaches the 2-hit
+threshold and is never admitted. The frequency filter therefore removes
+one-off GDN snapshots *structurally*, without any GDN-specific rule. Exactly
+the outcome Gandalf (arXiv 2610.30791) predicts for admission on access
+history, reached here as a side effect rather than by design.
+
+Consequence for the plan, and it corrects what I wrote 20 minutes ago in this
+file and on issue #198:
+
+- **v2 (skip a re-write of an existing content-addressed file) is the bigger
+  lever, not the smaller one.** Rewrites are ~52 % of attention bytes and ~48 %
+  of GDN bytes — uniform, so the same predicate catches both.
+- **18.7 GB/h -> ~9.2 GB/h projected.** Against the 47.7 GB/h mean baseline
+  (issue #198) that is **÷ 5.2**; against the low end of the 33-47 GB/h range it
+  is ÷ 3.6. The x5 criterion is therefore plausibly met by v2 alone, and the
+  honest statement is the range, not a single ratio.
+- **Phase 1(b) (GDN latest-state rule) is now a much smaller lever than the
+  issue assumed** — it can only act on the remaining ~25 %, and half of that is
+  rewrites v2 already removes. Deprioritised, not abandoned: it still matters
+  for the user's "keep the state just before the compaction message", which is
+  a *correctness of reuse* goal, not a write-volume goal.
+
+Uniform block size, all groups: 26,214,144 B (25 MiB) per `.bin`. A GDN state is
+always a triplet of three such blocks (one per TP rank), i.e. ~75 MiB, not 79.
