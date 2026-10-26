@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_with::DefaultOnNull;
 use validator::{Validate, ValidationErrors};
 use vllm_chat::{ChatOptions, ChatRequest, ResolvedToolContext, SamplingParams};
 use vllm_text::output::TextDecodeOptions;
@@ -28,6 +29,7 @@ pub enum TokenizeRequest {
     Completion(TokenizeCompletionRequest),
 }
 
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenizeCompletionRequest {
     pub model: Option<String>,
@@ -35,6 +37,7 @@ pub struct TokenizeCompletionRequest {
     #[serde(default = "default_true")]
     pub add_special_tokens: bool,
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub return_token_strs: bool,
 }
 
@@ -50,16 +53,20 @@ impl TokenizeCompletionRequest {
             intermediate: false,
             priority: 0,
             cache_salt: None,
+            prompt_truncation: None,
             add_special_tokens: self.add_special_tokens,
             data_parallel_rank: None,
             session_id: None,
-            reasoning_parser_kwargs: None,
+            kv_hints: None,
+            reasoning_parser_kwargs: Default::default(),
+            reasoning_ended: None,
             lora_request: None,
             arrival_time: None,
         }
     }
 }
 
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct TokenizeChatRequest {
     pub model: Option<String>,
@@ -72,6 +79,7 @@ pub struct TokenizeChatRequest {
     #[serde(default)] // chat default is FALSE (template adds specials)
     pub add_special_tokens: bool,
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub return_token_strs: bool,
     #[serde(default)]
     pub chat_template: Option<String>,
@@ -116,6 +124,7 @@ impl TokenizeChatRequest {
             tool_context,
             decode_options: TextDecodeOptions::default(),
             intermediate: false,
+            prompt_truncation: None,
             priority: 0,
             documents: None,
             cache_salt: None,
@@ -211,8 +220,34 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: None,
+                defer_loading: None,
             }]
         );
+    }
+
+    /// Python declares `return_token_strs` as `bool | None` on both bodies, so
+    /// an explicit `null` means `false` instead of matching neither variant.
+    #[test]
+    fn null_return_token_strs_means_false() {
+        let request: TokenizeRequest = serde_json::from_value(json!({
+            "prompt": "hi",
+            "return_token_strs": null,
+        }))
+        .expect("completion body with `return_token_strs: null` is accepted");
+        let TokenizeRequest::Completion(req) = request else {
+            panic!("prompt body should parse as the completion variant");
+        };
+        assert!(!req.return_token_strs);
+
+        let request: TokenizeRequest = serde_json::from_value(json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "return_token_strs": null,
+        }))
+        .expect("chat body with `return_token_strs: null` is accepted");
+        let TokenizeRequest::Chat(req) = request else {
+            panic!("messages body should parse as the chat variant");
+        };
+        assert!(!req.return_token_strs);
     }
 
     #[test]

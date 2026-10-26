@@ -51,18 +51,33 @@ class BaseOffloader(ABC):
     inference. Different strategies trade memory for compute/transfer time.
     """
 
+    supports_tower_offload: bool = False
+    """Whether `wrap_modules` also accepts modules routed by
+    `SupportsMultiModal._mark_tower_model`, outside the `make_layers` call.
+
+    Offloaders whose `wrap_modules` may only be called on the decoder layer
+    stack (e.g. `PrefetchOffloader`, which schedules prefetches over a
+    circular layer stack) must keep this `False`.
+    """
+
     @abstractmethod
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
     ) -> list[nn.Module]:
         """Wrap modules with offloading logic.
 
         Args:
             modules_generator: Generator yielding modules to potentially offload.
+            prefix: Name prefix prepended to parameter names before matching
+                them against the offloading parameter set. Used when the
+                modules are not the full model, so that name segments stay
+                fully qualified (e.g. `visual` for a tower module).
 
         Returns:
             List of modules, potentially with offloading hooks installed.
+
         """
         pass
 
@@ -99,6 +114,7 @@ class NoopOffloader(BaseOffloader):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
     ) -> list[nn.Module]:
         """Return modules unchanged."""
         return list(modules_generator)
@@ -113,14 +129,14 @@ def get_offloader() -> BaseOffloader:
     return _instance
 
 
-def set_offloader(instance: BaseOffloader) -> None:
-    """Set the global offloader instance."""
+def set_offloader(instance: BaseOffloader | None) -> None:
+    """Set or reset the global offloader instance."""
     global _instance
-    _instance = instance
-    if isinstance(instance, NoopOffloader):
+    _instance = NoopOffloader() if instance is None else instance
+    if isinstance(_instance, NoopOffloader):
         logger.debug_once("Offloader set to NoopOffloader (no offloading).")
     else:
-        logger.info_once("Offloader set to %s", type(instance).__name__)
+        logger.info_once("Offloader set to %s", type(_instance).__name__)
 
 
 def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:

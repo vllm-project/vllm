@@ -723,9 +723,10 @@ at::Tensor convert_scale_packed(at::Tensor& scale) {
 // bias : [N]
 // out  : [*, N]
 //
-at::Tensor
-weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2, const std::optional<at::Tensor>& bias, bool is_vnni) {
-  auto packed_w = is_vnni ? mat2 : convert_weight_packed(mat2);
+void
+weight_packed_linear(at::Tensor& out, const at::Tensor& mat1, const at::Tensor& mat2, const std::optional<at::Tensor>& bias, bool is_vnni) {
+  TORCH_CHECK(is_vnni);
+  auto packed_w = mat2;
   bool use_fma_gemm = false;
   if (packed_w.scalar_type() == at::kFloat) {
     use_fma_gemm = true;
@@ -746,7 +747,6 @@ weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2, const std::optional<at:
   }
 
   auto dispatch_type = mat1.scalar_type();
-  auto out = at::empty({M, N}, mat1.options());
   // strides
   int64_t out_strideM = out.stride(0);
   int64_t mat1_strideM = mat1.stride(-2);
@@ -784,9 +784,6 @@ weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2, const std::optional<at:
           out_strideM);
     }
   });
-
-  input_sizes[ndim - 1] = N;
-  return out.view(input_sizes);
 }
 
 // mat1         : [M, K]

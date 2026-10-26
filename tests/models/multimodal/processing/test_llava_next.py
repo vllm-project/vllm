@@ -11,6 +11,7 @@ from pqdm.threads import pqdm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
 from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.tokenizers.hf import maybe_make_thread_pool
 
 from ...utils import build_model_context
 
@@ -115,8 +116,7 @@ def _test_image_prompt_replacements(
     num_imgs: int,
     image_sizes: list[ImageSize],
 ) -> None:
-    """
-    Ensure LlavaNextMultiModalProcessor
+    """Ensure LlavaNextMultiModalProcessor
     handles prompt replacement properly for input images.
     """
     failed_size_excs = list[tuple[ImageSize, Exception]]()
@@ -144,7 +144,14 @@ def test_processor_prompt_replacements_regression(model_id, num_imgs):
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    # Avoid tokenizer already borrowed error
+    maybe_make_thread_pool(ctx.tokenizer)
+
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
 
     image_ratios = [
         (171, 152),
@@ -177,7 +184,14 @@ def test_processor_prompt_replacements_all(model_id, num_imgs):
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    # Avoid tokenizer already borrowed error
+    maybe_make_thread_pool(ctx.tokenizer)
+
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
 
     seen_aspect_ratios = set[float]()
     image_sizes = list[ImageSize]()

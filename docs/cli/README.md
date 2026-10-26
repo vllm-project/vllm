@@ -9,7 +9,7 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {chat,complete,serve,launch,bench,collect-env,run-batch}
+vllm {chat,complete,serve,launch,bench,collect-env,download-kernels,run-batch,preload}
 ```
 
 ## serve
@@ -131,8 +131,47 @@ To use benchmark commands, please install with extra dependencies using `pip ins
 Available Commands:
 
 ```bash
-vllm bench {latency, serve, throughput}
+vllm bench {forward, latency, serve, throughput}
 ```
+
+### forward
+
+Benchmark the model forward of exact batches: each case lists its requests as `[N*]Q[@K][c][:D]` (query length Q, KV length K including the query, D draft tokens). A prefill's prefix is a prefix-cache hit unless `c` marks a chunked prefill; they differ only on models with SWA bounded replay, which recompute the last window of a hit. Each request's prefix length varies by ±50% by default (`--kv-len-jitter`), identically on every DP rank. Each forward is captured as a one-shot CUDA graph; sampling and CPU overhead aren't measured. Use `torchrun`, one process per GPU, for DP/TP/EP/PCP/PP. CUDA only for now. Add `--profile-dir DIR` to write a Perfetto trace and a per-kernel GPU time summary of each case; `python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]` prints a summary or compares two. Under Nsight Systems, `nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat --cuda-graph-trace=node` records just those replays, one report per case.
+
+```bash
+vllm bench forward \
+    --model meta-llama/Llama-3.2-1B-Instruct \
+    --case decode=32*1@4096 \
+    --case mix=2048,32*1@4096
+```
+
+PCP uses `--prefill-context-parallel-size` with the model runner's supported
+MLA models. Cases describe the global batch per DP rank, before PCP splits it;
+`num_local_tokens`, `num_tokens_after_padding`, and `batch_order` in each rank's
+JSON result describe the local partition (a request can appear twice).
+Latency is the maximum across all ranks. For example, with four GPUs:
+
+```bash
+torchrun --nproc-per-node=4 -m vllm.entrypoints.cli.main bench forward \
+    --model MODEL --tensor-parallel-size 2 --prefill-context-parallel-size 2 \
+    --case prefill=8192 --case mix=2048,8*1@4096
+```
+
+With `--pipeline-parallel-size`, the benchmark streams identical microbatches
+through captured stages. `median_us` measures each microbatch from its first
+stage's forward start to its last stage's forward completion, including PP
+transfers while other microbatches are in flight. Pipeline fill and drain are
+excluded. This is latency under steady-state load, not the completion interval.
+Per-rank JSON includes stage timelines and the estimated clock synchronization
+uncertainty in microseconds.
+
+```bash
+torchrun --nproc-per-node=4 -m vllm.entrypoints.cli.main bench forward \
+    --model MODEL --pipeline-parallel-size 2 --tensor-parallel-size 2 \
+    --case prefill8x1k=8*1024 --case prefill1x8k=8192
+```
+
+See [vllm bench forward](./bench/forward.md) for the full reference of all available arguments.
 
 ### latency
 
@@ -188,6 +227,21 @@ Start collecting environment information.
 vllm collect-env
 ```
 
+## download-kernels
+
+Install the precompiled kernels that vLLM's dependencies would otherwise download
+or compile at startup. Run it after installing or upgrading vLLM. It currently
+installs FlashInfer's kernels and does nothing when FlashInfer is not installed.
+
+```bash
+vllm download-kernels
+
+# Print the install commands without running them
+vllm download-kernels --dry-run
+```
+
+See [vllm download-kernels](./download-kernels.md) for the full reference of all available arguments.
+
 ## run-batch
 
 Run batch prompts and write results to file.
@@ -196,7 +250,7 @@ Running with a local file:
 
 ```bash
 vllm run-batch \
-    -i features/openai_batch/openai_example_batch.jsonl \
+    -i examples/features/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
@@ -211,6 +265,33 @@ vllm run-batch \
 ```
 
 See [vllm run-batch](./run-batch.md) for the full reference of all available arguments.
+
+## preload
+
+Launch weight cache daemons (one per GPU) that hold the post-quantized,
+TP-sharded weights in GPU memory and serve CUDA IPC handles to vLLM engines
+over a Unix domain socket. Restarting engines then map the weights via
+zero-copy IPC instead of reloading from disk, enabling fast engine restarts.
+
+```bash
+# Launch one daemon per GPU
+vllm preload --model meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4
+
+# Engines then load from the daemons
+vllm serve meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4 \
+    --load-format ipc_cache
+```
+
+The daemon accepts the standard engine arguments (model, dtype, quantization,
+tensor-parallel-size, ...) plus `--weight-cache-socket-dir` to override the
+directory holding the per-GPU Unix sockets, and `--weight-cache-master-port` /
+`--weight-cache-draft-master-port` to pin the daemon rendezvous ports for
+multi-node and speculative-decoding setups. Tensor, expert and data
+parallelism are supported; pipeline parallelism is rejected at launch.
+
+See [Preload](../features/preload.md) for how it works, cache modes, and
+limitations, and [vllm preload](./preload.md) for the full reference of all
+available arguments.
 
 ## More Help
 

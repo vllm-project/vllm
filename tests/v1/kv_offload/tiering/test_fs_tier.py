@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for FileSystemTierManager.
+"""Unit tests for FileSystemTierManager.
 
 These tests use real disk I/O to verify the filesystem tier implementation.
 The tier manager writes KV cache blocks to disk and reads them back, verifying
 data integrity throughout the process.
 """
 
+import errno
 import mmap
 import os
 import threading
@@ -105,15 +105,15 @@ def key(n: int) -> OffloadKey:
 def make_job(
     job_id: int,
     keys: list[OffloadKey],
-    block_ids: list[int] | None = None,
+    chunk_ids: list[int] | None = None,
     is_promotion: bool = False,
 ) -> TransferJob:
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
+    if chunk_ids is None:
+        chunk_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids, dtype=np.int64),
+        chunk_ids=np.array(chunk_ids, dtype=np.int64),
         is_promotion=is_promotion,
         req_context=_CTX,
     )
@@ -229,6 +229,52 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
     dest = tier.file_mapper.get_file_name(key(1))
     assert os.path.exists(dest), f"Expected file at {dest}"
+
+
+def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
+    """Losing the race to publish a block must not fail the store job.
+
+    Another engine instance sharing the same root_dir can publish the block
+    between the existence check and the rename, and some shared filesystems
+    report that as EEXIST instead of replacing. Block file names are content
+    hashes, so the file already in place holds the same data and the job has
+    nothing left to do.
+    """
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    # Python path only: EEXIST cannot be injected into the C extension.
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", False)
+    tier, tensor = fs_tier
+    dest = tier.file_mapper.get_file_name(key(1))
+
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    with open(dest, "rb") as f:
+        published = f.read()
+
+    real_exists = os.path.exists
+    real_replace = os.replace
+
+    def racing_replace(src: str, dst: str) -> None:
+        if dst == dest:
+            raise FileExistsError(errno.EEXIST, "File exists", dst)
+        real_replace(src, dst)
+
+    # Hide the published block from the check, then lose the rename to it.
+    monkeypatch.setattr(
+        io_mod.os.path, "exists", lambda p: False if p == dest else real_exists(p)
+    )
+    monkeypatch.setattr(io_mod.os, "replace", racing_replace)
+
+    # Distinct bytes, so the comparison below fails if the loser overwrites.
+    tensor[1] = 1.0
+    tier.submit_store(make_job(2, [key(1)], [1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert os.listdir(os.path.dirname(dest)) == [os.path.basename(dest)]
+    with open(dest, "rb") as f:
+        assert f.read() == published
 
 
 def test_store_then_load_roundtrip(fs_tier):
@@ -382,11 +428,11 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     tensor[:] = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
 
     keys = [key(i) for i in range(batch_size)]
-    store_block_ids = list(range(batch_size))
-    load_block_ids = list(range(_NUM_BLOCKS - batch_size, _NUM_BLOCKS))
+    store_chunk_ids = list(range(batch_size))
+    load_chunk_ids = list(range(_NUM_BLOCKS - batch_size, _NUM_BLOCKS))
     expected = tensor[:batch_size].clone()
 
-    tier.submit_store(make_job(1, keys, store_block_ids))
+    tier.submit_store(make_job(1, keys, store_chunk_ids))
     store_results = drain(tier)
     assert len(store_results) == 1
     assert store_results[0].success
@@ -396,15 +442,15 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     tensor[:] = 0.0
 
     # Load into a range disjoint by index from the store ids, to also
-    # exercise loading a block into a different id than it was stored from.
-    tier.submit_load(make_job(2, keys, load_block_ids, is_promotion=True))
+    # exercise loading a chunk into a different id than it was stored from.
+    tier.submit_load(make_job(2, keys, load_chunk_ids, is_promotion=True))
     load_results = drain(tier)
     assert len(load_results) == 1
     assert load_results[0].success
 
-    for i, bid in enumerate(load_block_ids):
-        assert torch.allclose(tensor[bid], expected[i]), (
-            f"Block {bid} data mismatch after store+load"
+    for i, cid in enumerate(load_chunk_ids):
+        assert torch.allclose(tensor[cid], expected[i]), (
+            f"Chunk {cid} data mismatch after store+load"
         )
 
 
@@ -603,6 +649,33 @@ def test_failed_load_corrects_verdict_and_removes_corrupt_file(
     # since the corrupt file is gone -- the real batch_lookup re-probe path.
     fresh = ReqContext(req_id="fresh-after-short-read")
     assert lookup_and_wait(tier, [key(1)], ctx=fresh) == [LookupResult.MISS]
+
+
+def test_failed_load_after_abort_does_not_break_newer_probe(fs_tier):
+    """A promotion for request A fails after A was aborted and request B
+    re-probed the same key. The failure must not flip B's in-flight probe:
+    B's next lookup drains its own result (MISS: the file is gone) instead of
+    asserting on the scheduler thread."""
+    tier, _ = fs_tier
+    k = key(1)
+    tier.submit_store(make_job(1, [k], [0]))
+    assert all(r.success for r in drain(tier))
+    ctx_a, ctx_b = ReqContext(req_id="A"), ReqContext(req_id="B")
+    assert lookup_and_wait(tier, [k], ctx=ctx_a) == [LookupResult.HIT]
+
+    os.remove(tier.file_mapper.get_file_name(k))
+    tier.submit_load(make_job(2, [k], [1], is_promotion=True))
+    tier.on_request_finished(ctx_a)
+
+    assert tier.lookup(k, ctx_b) == LookupResult.RETRY
+    tier.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=()))
+    deadline = time.monotonic() + 1.0
+    while tier._lookup_manager._pending_results.empty():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+    assert [r.success for r in drain(tier)] == [False]
+    assert tier.lookup(k, ctx_b) == LookupResult.MISS
 
 
 @pytest.mark.parametrize("use_c_ext", [True, False])
@@ -895,7 +968,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     view = memoryview(tensor.numpy())
     mock_region = MagicMock()
     mock_region.create_kv_memoryview.return_value = view
-    primary = CPUPrimaryTierOffloadingManager(num_blocks=4, mmap_region=mock_region)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=mock_region)
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
         primary_kv_view=primary.get_kv_memoryview(),

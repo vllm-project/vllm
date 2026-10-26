@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Mock-based unit tests for ObjectStoreSecondaryTierManager.
+"""Mock-based unit tests for ObjectStoreSecondaryTierManager.
 
 These tests replace the NIXL backend with an in-memory mock so they run
 without S3 credentials or a live object store. They verify the manager's
@@ -106,14 +105,14 @@ def key(n: int) -> OffloadKey:
 def make_job(
     job_id: int,
     keys: list[OffloadKey],
-    block_ids: list[int] | None = None,
+    chunk_ids: list[int] | None = None,
 ) -> TransferJob:
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
+    if chunk_ids is None:
+        chunk_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids, dtype=np.int64),
+        chunk_ids=np.array(chunk_ids, dtype=np.int32),
         is_promotion=False,
         req_context=_CTX,
     )
@@ -140,7 +139,8 @@ class MockNixlAgent:
     check_xfer_state: Callable
     query_memory: Callable
 
-    def __init__(self):
+    def __init__(self, agent_name, config):
+        self._capture_telemetry = config.capture_telemetry
         self._stored_obj_keys: set[str] = set()
         # handle_id -> (op, [obj_keys])
         self._pending: dict[int, tuple[str, list[str]]] = {}
@@ -204,6 +204,8 @@ class MockNixlAgent:
         pass
 
     def get_xfer_telemetry(self, handle):
+        if not self._capture_telemetry:
+            raise RuntimeError("Telemetry capture is disabled")
         return SimpleNamespace(xferDuration=1000)
 
     def _query_memory(self, queries, mem_type, agent_name):
@@ -233,15 +235,19 @@ def _make_tier(
     **tier_kwargs,
 ) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
     """Create a tier backed by a fresh MockNixlAgent."""
-    mock_agent = MockNixlAgent()
     if primary_kv_view is None:
         tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
         primary_kv_view = memoryview(tensor.numpy())
     with (
-        patch("vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config"),
+        patch(
+            "vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config",
+            side_effect=lambda backends, capture_telemetry=False: SimpleNamespace(
+                capture_telemetry=capture_telemetry
+            ),
+        ),
         patch(
             "vllm.v1.kv_offload.tiering.obj.manager.nixl_agent",
-            return_value=mock_agent,
+            side_effect=MockNixlAgent,
         ),
     ):
         tier = ObjectStoreSecondaryTierManager(
@@ -252,7 +258,7 @@ def _make_tier(
             prefix=_RUN_PREFIX,
             **tier_kwargs,
         )
-    return tier, mock_agent
+    return tier, tier._agent
 
 
 def drain(
@@ -272,7 +278,7 @@ def lookup_and_wait(
     keys: list[OffloadKey],
     ctx: ReqContext = _CTX,
     timeout: float = 1.0,
-) -> list[bool]:
+) -> list[LookupResult]:
     """Perform a full async lookup cycle and return resolved results."""
     for k in keys:
         tier.lookup(k, ctx)
@@ -316,14 +322,16 @@ class TestMockObjTierBasic:
         assert lookup_and_wait(self.tier, [key(999)]) == [LookupResult.MISS]
 
     def test_store_then_load_roundtrip(self):
+        """Completed stores and loads report transfer timing without an env override."""
         self.tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
         results = drain(self.tier)
-        assert results[0].success
+        assert results == [JobResult(job_id=1, success=True, transfer_time=0.001)]
 
         self.tier.submit_load(make_job(2, [key(1), key(2)], [0, 1]))
         results = drain(self.tier)
-        assert len(results) == 1
-        assert results[0].success
+        assert results == [JobResult(job_id=2, success=True, transfer_time=0.001)]
+        assert not self.tier._transfers
+        assert list(self.tier.get_finished_jobs()) == []
 
     def test_multiple_jobs_tracked_independently(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
@@ -541,7 +549,7 @@ class TestMockObjTierFailures:
         mmap_region = MagicMock()
         mmap_region.create_kv_memoryview.return_value = primary_kv_view
         primary_tier = CPUPrimaryTierOffloadingManager(
-            num_blocks=num_blocks, mmap_region=mmap_region
+            num_chunks=num_blocks, mmap_region=mmap_region
         )
         obj_tier, agent = _make_tier(
             num_blocks=num_blocks, primary_kv_view=primary_kv_view

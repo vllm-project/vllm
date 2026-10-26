@@ -42,6 +42,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "deepseekv4_engine_tool_parser",
         "DeepSeekV4EngineToolParser",
     ),
+    "deepseek_v41": (
+        "deepseekv41_engine_tool_parser",
+        "DeepSeekV41EngineToolParser",
+    ),
     "cohere_command3": (
         "cohere_command_tool_parser",
         "CohereCommand3ToolParser",
@@ -71,8 +75,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Granite20bFCToolParser",
     ),
     "granite": (
-        "granite_tool_parser",
-        "GraniteToolParser",
+        "granite_engine_tool_parser",
+        "GraniteEngineToolParser",
     ),
     "granite4": (
         "granite4_tool_parser",
@@ -81,6 +85,14 @@ _TOOL_PARSERS_TO_REGISTER = {
     "hermes": (
         "hermes_tool_parser",
         "Hermes2ProToolParser",
+    ),
+    "hf": (
+        "response_template_tool_parser",
+        "ResponseTemplateToolParser",
+    ),
+    "beam": (
+        "beam_tool_parser",
+        "BeamToolParser",
     ),
     "poolside_v1": (
         "poolside_v1_tool_parser",
@@ -93,6 +105,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "hy_v3": (
         "hy_v3_tool_parser",
         "HYV3ToolParser",
+    ),
+    "hy_v4": (
+        "hy_v4_tool_parser",
+        "HYV4ToolParser",
     ),
     "internlm": (
         "internlm2_tool_parser",
@@ -114,6 +130,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "kimi_k3_tool_parser",
         "KimiK3ToolParser",
     ),
+    "k2_horizon": (
+        "k2_horizon_tool_parser",
+        "K2HorizonToolParser",
+    ),
     "llama3_json": (
         "llama_tool_parser",
         "Llama3JsonToolParser",
@@ -131,8 +151,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "LongcatFlashToolParser",
     ),
     "mimo": (
-        "qwen3_engine_tool_parser",
-        "Qwen3EngineToolParser",
+        "mimo_tool_parser",
+        "MiMoToolParser",
     ),
     "minimax_m2": (
         "minimax_m2_tool_parser",
@@ -154,9 +174,22 @@ _TOOL_PARSERS_TO_REGISTER = {
         "olmo3_tool_parser",
         "Olmo3PythonicToolParser",
     ),
+    "plamo3": (
+        "plamo3_engine_tool_parser",
+        "Plamo3EngineToolParser",
+    ),
+    "muse": (
+        "muse_tool_parser",
+        "MuseToolParser",
+    ),
     "muse_glimmer": (
         "muse_glimmer_tool_parser",
         "MuseGlimmerToolParser",
+    ),
+    # Alias of "muse".
+    "musespark1x": (
+        "muse_tool_parser",
+        "MuseToolParser",
     ),
     "openai": (
         "gptoss_tool_parser",
@@ -174,6 +207,13 @@ _TOOL_PARSERS_TO_REGISTER = {
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",
     ),
+    # TODO: Qwen2.5/QwQ/Qwen3 JSON tool calls. Aliased to `hermes` for now;
+    # a dedicated parser should treat the template's newline before and
+    # between `<tool_call>` blocks as framing, as the Rust frontend does.
+    "qwen3_json": (
+        "hermes_tool_parser",
+        "Hermes2ProToolParser",
+    ),
     "qwen3_xml": (
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",
@@ -189,6 +229,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "step3p5": (
         "step3p5_tool_parser",
         "Step3p5ToolParser",
+    ),
+    "step5": (
+        "step5_tool_parser",
+        "Step5ToolParser",
     ),
     "inkling": (
         "inkling_tool_parser",

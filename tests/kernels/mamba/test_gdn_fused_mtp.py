@@ -6,16 +6,19 @@ from __future__ import annotations
 
 import types
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
 
-if not (current_platform.is_cuda() and current_platform.has_device_capability(80)):
+if not (
+    current_platform.is_rocm()
+    or (current_platform.is_cuda() and current_platform.has_device_capability(80))
+):
     pytest.skip(
-        reason="Fused GDN MTP decode requires CUDA compute capability 8.0+.",
+        reason="Fused GDN MTP decode requires ROCm or CUDA compute capability 8.0+.",
         allow_module_level=True,
     )
 
@@ -57,13 +60,13 @@ EPS = 1e-6
 
 
 class _TestGatedNorm:
-    def __init__(self, weight: torch.Tensor) -> None:
+    def __init__(self, weight: torch.Tensor, activation: str) -> None:
         self.weight = weight
         self.bias = None
         self.eps = EPS
         self.group_size = None
         self.norm_before_gate = True
-        self.activation = "silu"
+        self.activation = activation
 
     def __call__(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         return rmsnorm_fn(
@@ -83,7 +86,9 @@ def _make_vllm_config():
         block_size=BLOCK_SIZE,
         hf_config_override={"linear_key_head_dim": K},
     )
-    config.additional_config = {"gdn_prefill_backend": "cutedsl"}
+    config.additional_config = {
+        "gdn_prefill_backend": "triton" if current_platform.is_rocm() else "cutedsl"
+    }
     config.cache_config.mamba_cache_mode = "none"
     config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=NUM_SPEC
@@ -99,6 +104,7 @@ def _build_layer(
     dt_bias: torch.Tensor,
     conv_weight: torch.Tensor,
     norm_weight: torch.Tensor,
+    output_gate_activation: str,
 ):
     layer = types.SimpleNamespace(
         prefix=PREFIX,
@@ -116,7 +122,7 @@ def _build_layer(
         dt_bias=dt_bias,
         conv1d=types.SimpleNamespace(weight=conv_weight, bias=None),
         kv_cache=(conv_state, ssm_state),
-        norm=_TestGatedNorm(norm_weight),
+        norm=_TestGatedNorm(norm_weight, output_gate_activation),
         layer_norm_epsilon=EPS,
         gdn_decode_kernel="cuda",
     )
@@ -154,7 +160,7 @@ def _build_layer(
     ],
 )
 def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
-    if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+    if not qwen_gdn_linear_attn.supports_fused_mtp_decode():
         pytest.skip("fused GDN decode MTP op is not built")
 
     layer = types.SimpleNamespace(
@@ -193,7 +199,7 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
     ba = torch.randn(num_tokens, 2 * HV, dtype=torch.bfloat16, device=device)
     layer = types.SimpleNamespace(
         prefix=PREFIX,
-        enable_fused_gdn_decode=True,
+        enable_fused_gdn_spec_decode=True,
         norm=types.SimpleNamespace(
             weight=torch.empty(V, dtype=torch.bfloat16, device=device)
         ),
@@ -250,12 +256,14 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
         pytest.param([128], [1], [-1], 0, id="pure-decode"),
     ],
 )
+@pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
 @torch.inference_mode()
 def test_fused_model_path_matches_reference(
     seq_lens: list[int],
     query_lens: list[int],
     draft_tokens: list[int],
     expected_fused_calls: int,
+    output_gate_activation: str,
 ) -> None:
     """Fused MTP and its mixed/prefill/decode fallbacks match the reference."""
     torch.manual_seed(1)
@@ -334,6 +342,7 @@ def test_fused_model_path_matches_reference(
         dt_bias,
         conv_weight,
         norm_weight,
+        output_gate_activation,
     )
     reference_out = torch.zeros_like(output_gate)
     with patch.object(
@@ -355,17 +364,16 @@ def test_fused_model_path_matches_reference(
         dt_bias,
         conv_weight,
         norm_weight,
+        output_gate_activation,
     )
     context.no_compile_layers = {PREFIX: fused_layer}
     fused_out = torch.zeros_like(output_gate)
-    fused_op = qwen_gdn_linear_attn.ops.fused_gdn_decode_post_conv_mtp
+    fused_mock = MagicMock(wraps=qwen_gdn_linear_attn.fused_mtp_decode_impl())
     with (
         patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=context),
         patch.object(
-            qwen_gdn_linear_attn.ops,
-            "fused_gdn_decode_post_conv_mtp",
-            wraps=fused_op,
-        ) as fused_mock,
+            qwen_gdn_linear_attn, "fused_mtp_decode_impl", return_value=fused_mock
+        ),
     ):
         torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
             mixed_qkvz.clone(),

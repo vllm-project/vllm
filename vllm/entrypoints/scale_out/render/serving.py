@@ -1,38 +1,72 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
+from fastapi import Request
+
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicDisabledThinkingEffortOption,
+    AnthropicMessagesRequest,
+)
+from vllm.entrypoints.anthropic.serving import (
+    AnthropicServingMessages,
+    DisabledThinkingEffortResolver,
+)
+from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import encode_mm_kwargs_item
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+    extract_mm_features,
+)
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     MultiModalFeatures,
-    PlaceholderRangeInfo,
+    ParseContext,
+    ReasoningParserKwargs,
 )
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import (
-    EngineInput,
-    MultiModalHashes,
-    MultiModalInput,
-    MultiModalPlaceholders,
-)
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
+from vllm.multimodal.parse import MultiModalDataParser
+from vllm.parser.utils import count_history_tool_calls
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.utils import random_uuid
+from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.mcp.tool_server import ToolServer
+
+
+def _hoist_transfer_params(
+    params: SamplingParams,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Move KV/EC transfer params out of `extra_args`.
+
+    Render emits them only as top-level `GenerateRequest` fields. Generate
+    copies them back into `extra_args` for the engine.
+    """
+    if not params.extra_args:
+        return None, None
+    # to_sampling_params aliases request.vllm_xargs, so copy before popping.
+    extra = dict(params.extra_args)
+    kv = extra.pop("kv_transfer_params", None)
+    ec = extra.pop("ec_transfer_params", None)
+    params.extra_args = extra or None
+    return kv, ec
 
 
 class ServingRender(BaseServing):
@@ -42,6 +76,9 @@ class ServingRender(BaseServing):
         online_renderer: "OnlineRenderer",
         *,
         request_logger: RequestLogger | None = None,
+        tool_server: "ToolServer | None" = None,
+        disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
+        disabled_thinking_effort_resolver: DisabledThinkingEffortResolver | None = None,
     ) -> None:
         super().__init__(
             models=models,
@@ -50,6 +87,22 @@ class ServingRender(BaseServing):
         )
 
         self.online_renderer = online_renderer
+        self.tool_server = tool_server
+        # A shared resolver takes precedence over disabled_thinking_effort.
+        self._disabled_thinking_effort_resolver = (
+            disabled_thinking_effort_resolver
+            if disabled_thinking_effort_resolver is not None
+            else DisabledThinkingEffortResolver(
+                online_renderer, disabled_thinking_effort
+            )
+        )
+
+        self._merge_inline_system = (
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
+        )
+
+        self._placeholder_metadata_parser: MultiModalDataParser | None = None
+        self._placeholder_metadata_parser_failed = False
 
         self.default_sampling_params = (
             online_renderer.model_config.get_diff_sampling_param()
@@ -64,11 +117,23 @@ class ServingRender(BaseServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
+        raw_request: Request | None = None,
+        engine_chat_template_kwargs: (
+            Callable[[dict[str, Any]], dict[str, Any]] | None
+        ) = None,
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
         This is the authoritative implementation used directly by the
         GPU-less render server and delegated to by OpenAIServingChat.
+
+        Args:
+            request: The chat completion request.
+            raw_request: The incoming HTTP request, if any.
+            engine_chat_template_kwargs: The calling handler's
+                `_engine_chat_template_kwargs`, applied to the kwargs put in
+                `parse_context` to drop API server only state.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -111,47 +176,97 @@ class ServingRender(BaseServing):
             truncate_prompt_tokens=request.truncate_prompt_tokens,
         )
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
+        kv_transfer_params, ec_transfer_params = _hoist_transfer_params(params)
 
-        assistant_tokens_mask: list[int] | None = engine_input.get(  # type: ignore[assignment]
-            "assistant_tokens_mask"
+        # Resolve here what OpenAIServingChat passes to the engine:
+        # `_grammar_from_parser` (set by `adjust_request`) is not serialized.
+        chat_template_kwargs = self.online_renderer.effective_chat_template_kwargs(
+            request
         )
-        if assistant_tokens_mask is not None and len(assistant_tokens_mask) != len(
-            token_ids
-        ):
-            logger.warning(
-                "assistant_tokens_mask length (%d) != token_ids length (%d); "
-                "this can happen with multimodal inputs where "
-                "placeholder expansion changes the token count. "
-                "The mask may be positionally misaligned.",
-                len(assistant_tokens_mask),
-                len(token_ids),
+        reasoning_parser_kwargs = self._reasoning_parser_kwargs(chat_template_kwargs)
+        parser = None
+        if reasoning_parser_kwargs is not None:
+            assert self.online_renderer.parser is not None
+            parser = self.online_renderer.parser(
+                self.online_renderer.renderer.get_tokenizer(),
+                request.tools,
+                chat_template_kwargs=reasoning_parser_kwargs.chat_template_kwargs,
+                model_config=self.model_config,
             )
-            if len(assistant_tokens_mask) < len(token_ids):
-                assistant_tokens_mask.extend(
-                    [0] * (len(token_ids) - len(assistant_tokens_mask))
-                )
-            else:
-                assistant_tokens_mask = assistant_tokens_mask[: len(token_ids)]
+        reasoning_ended = request.resolve_reasoning_ended(parser, token_ids)
 
-        request_id = f"chatcmpl-{random_uuid()}"
+        request_id = (
+            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
+        )
 
         return GenerateRequest(
             request_id=request_id,
             token_ids=token_ids,
-            assistant_tokens_mask=assistant_tokens_mask,
-            features=self._extract_mm_features(engine_input),
+            features=self._extract_mm_features(
+                engine_input, mm_payload=request.mm_payload
+            ),
             sampling_params=params,
+            kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
             model=request.model,
+            reasoning_ended=reasoning_ended,
+            reasoning_parser_kwargs=reasoning_parser_kwargs,
             stream=bool(request.stream),
             stream_options=(request.stream_options if request.stream else None),
+            return_token_ids=request.return_token_ids,
             cache_salt=request.cache_salt,
             priority=request.priority,
             token_offsets=engine_input.get("prompt_token_offsets"),
+            parse_context=self._build_parse_context(
+                request,
+                engine_chat_template_kwargs(chat_template_kwargs)
+                if engine_chat_template_kwargs is not None
+                else chat_template_kwargs,
+            ),
         )
+
+    def _build_parse_context(
+        self, request: ChatCompletionRequest, chat_template_kwargs: dict[str, Any]
+    ) -> ParseContext:
+        return ParseContext(
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            parallel_tool_calls=request.parallel_tool_calls,
+            include_reasoning=request.include_reasoning,
+            # Like the derenderer, Harmony output is parsed without template
+            # kwargs.
+            chat_template_kwargs=(
+                {} if self.online_renderer.use_harmony else chat_template_kwargs
+            ),
+            history_tool_call_cnt=count_history_tool_calls(request),
+        )
+
+    async def render_messages_request(
+        self,
+        request: AnthropicMessagesRequest,
+        raw_request: Request | None = None,
+    ) -> GenerateRequest | ErrorResponse:
+        """Validate the model and preprocess an Anthropic Messages request.
+
+        Converts the request to the OpenAI chat format using the same
+        conversion as the /v1/messages server path, then delegates to
+        render_chat_request so the rendered tokens match the server exactly.
+        """
+        disabled_thinking_effort = (
+            await self._disabled_thinking_effort_resolver.resolve_for(request)
+        )
+        chat_req = AnthropicServingMessages.to_chat_completion_request(
+            request,
+            merge_inline_system=self._merge_inline_system,
+            disabled_thinking_effort=disabled_thinking_effort,
+        )
+        chat_req.mm_payload = request.mm_payload
+        return await self.render_chat_request(chat_req, raw_request)
 
     async def render_completion_request(
         self,
         request: CompletionRequest,
+        raw_request: Request | None = None,
     ) -> list[GenerateRequest] | ErrorResponse:
         """Validate the model and preprocess a completion request.
 
@@ -161,13 +276,20 @@ class ServingRender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if request.use_beam_search:
+            return self.create_error_response(
+                "Beam search is not supported by the render endpoint"
+            )
+
         result = await self.online_renderer.render_completion(
             request, skip_mm_cache=True
         )
         if isinstance(result, ErrorResponse):
             return result
+        base_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         generate_requests: list[GenerateRequest] = []
-        for engine_input in result:
+        for i, engine_input in enumerate(result):
             prompt_components = extract_prompt_components(
                 self.model_config, engine_input
             )
@@ -188,18 +310,24 @@ class ServingRender(BaseServing):
             params = request.to_sampling_params(
                 max_tokens, self.default_sampling_params
             )
+            kv_transfer_params, ec_transfer_params = _hoist_transfer_params(params)
 
-            request_id = f"cmpl-{random_uuid()}"
+            request_id = base_id if len(result) == 1 else f"{base_id}-{i}"
 
             generate_requests.append(
                 GenerateRequest(
                     request_id=request_id,
                     token_ids=token_ids,
-                    features=self._extract_mm_features(engine_input),
+                    features=self._extract_mm_features(
+                        engine_input, mm_payload=request.mm_payload
+                    ),
                     sampling_params=params,
+                    kv_transfer_params=kv_transfer_params,
+                    ec_transfer_params=ec_transfer_params,
                     model=request.model,
                     stream=bool(request.stream),
                     stream_options=(request.stream_options if request.stream else None),
+                    return_token_ids=request.return_token_ids,
                     cache_salt=request.cache_salt,
                     priority=request.priority,
                     token_offsets=engine_input.get("prompt_token_offsets"),
@@ -208,41 +336,110 @@ class ServingRender(BaseServing):
 
         return generate_requests
 
-    @staticmethod
-    def _extract_mm_features(
-        engine_input: EngineInput,
-    ) -> MultiModalFeatures | None:
-        """Extract multimodal metadata from a rendered engine prompt.
+    async def render_responses_request(
+        self,
+        request: ResponsesRequest,
+    ) -> GenerateRequest | ErrorResponse:
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+        if request.previous_response_id is not None:
+            return self.create_error_response(
+                message=(
+                    "previous_response_id is not supported by the stateless "
+                    "render endpoint."
+                ),
+                err_type="invalid_request_error",
+                param="previous_response_id",
+            )
 
-        Returns ``None`` for text-only prompts.
-        """
-        if engine_input.get("type") != "multimodal":
+        result = await self.online_renderer.render_responses(
+            request,
+            previous_messages=None,
+            previous_response_outputs=None,
+            tool_server=self.tool_server,
+            skip_mm_cache=True,
+        )
+        if isinstance(result, ErrorResponse):
+            return result
+
+        engine_input = result.engine_input
+        prompt_components = extract_prompt_components(self.model_config, engine_input)
+        token_ids = prompt_components.token_ids
+        if not token_ids:
+            return self.create_error_response("No token_ids rendered")
+
+        input_length = extract_prompt_len(self.model_config, engine_input)
+        max_tokens = get_max_tokens(
+            self.model_config.max_model_len,
+            request.max_output_tokens,
+            input_length,
+            self.default_sampling_params,
+            self.override_max_tokens,
+            truncate_prompt_tokens=(-1 if request.truncation != "disabled" else None),
+        )
+        params = request.to_sampling_params(max_tokens, self.default_sampling_params)
+        kv_transfer_params, ec_transfer_params = _hoist_transfer_params(params)
+
+        return GenerateRequest(
+            request_id=request.request_id,
+            token_ids=list(token_ids),
+            features=self._extract_mm_features(
+                engine_input, mm_payload=request.mm_payload
+            ),
+            sampling_params=params,
+            model=request.model,
+            reasoning_parser_kwargs=self._reasoning_parser_kwargs(
+                self.online_renderer.effective_chat_template_kwargs(request)
+            ),
+            stream=bool(request.stream),
+            cache_salt=request.cache_salt,
+            priority=request.priority,
+            kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
+            token_offsets=engine_input.get("prompt_token_offsets"),
+        )
+
+    def _reasoning_parser_kwargs(
+        self, chat_template_kwargs: dict[str, Any]
+    ) -> ReasoningParserKwargs | None:
+        parser_cls = self.online_renderer.parser
+        if parser_cls is None or parser_cls.reasoning_parser_cls is None:
             return None
+        return ReasoningParserKwargs(chat_template_kwargs=chat_template_kwargs)
 
-        # At this point engine_input is a MultiModalInput TypedDict.
-        mm_engine_input = cast(MultiModalInput, engine_input)
-        mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
-        raw_placeholders: MultiModalPlaceholders = mm_engine_input["mm_placeholders"]
+    def _placeholder_metadata_fields(self, modality: str) -> set[str]:
+        """Fields the EC consumer still requires after embeddings transfer."""
+        if self._placeholder_metadata_parser_failed:
+            return set()
+        if self._placeholder_metadata_parser is None:
+            try:
+                from vllm.multimodal import MULTIMODAL_REGISTRY
 
-        mm_placeholders = {
-            modality: [
-                PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
-            ]
-            for modality, ranges in raw_placeholders.items()
-        }
+                self._placeholder_metadata_parser = (
+                    MULTIMODAL_REGISTRY.create_processor(
+                        self.model_config
+                    ).info.data_parser
+                )
+            except Exception:
+                logger.debug(
+                    "Could not load placeholder metadata fields; "
+                    "mm_metadata will use keep_on_cpu fields only."
+                )
+                self._placeholder_metadata_parser_failed = True
+                return set()
+        return set(
+            self._placeholder_metadata_parser.placeholder_metadata_fields(modality)
+        )
 
-        # Serialize tensor data per modality.
-        kwargs_data: dict[str, list[str | None]] | None = None
-        if raw_mm_kwargs := mm_engine_input.get("mm_kwargs"):
-            kwargs_data = {}
-            for modality, items in raw_mm_kwargs.items():
-                kwargs_data[modality] = [
-                    encode_mm_kwargs_item(item) if item is not None else None
-                    for item in items
-                ]
-
-        return MultiModalFeatures(
-            mm_hashes=mm_hashes,
-            mm_placeholders=mm_placeholders,
-            kwargs_data=kwargs_data,
+    def _extract_mm_features(
+        self,
+        engine_input: EngineInput,
+        *,
+        mm_payload: MMPayload = "tensors",
+    ) -> MultiModalFeatures | None:
+        return extract_mm_features(
+            engine_input,
+            metadata_fields_for=self._placeholder_metadata_fields,
+            mm_payload=mm_payload,
         )

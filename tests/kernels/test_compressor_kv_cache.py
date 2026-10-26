@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Round-trip tests for compressor → FP8 quant + KV cache insert → gather + dequant.
+"""Round-trip tests for compressor → FP8 quant + KV cache insert → gather + dequant.
 
 These tests cover:
   A) DeepseekV4 Attention: head_dim=512 (448 FP8 nope + 64 bf16 rope), quant_block=64
@@ -15,6 +14,7 @@ These tests cover:
 import math
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -40,6 +40,1440 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 )
 
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize(
+    "cache_dtype,kv_mxfp8",
+    [
+        (torch.uint8, False),
+        (torch.uint8, True),
+        (torch.bfloat16, False),
+        (torch.float8_e4m3fn, False),
+    ],
+)
+@pytest.mark.parametrize("num_tokens", [1, 17, 1023, 1024])
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_dspark_context_kv_matches_query_insert(
+    cache_dtype, kv_mxfp8, num_tokens, use_graph
+):
+    """KV-only insertion must preserve every cache byte, including graph replay."""
+    from vllm.models.deepseek_v41.nvidia.dspark import _insert_context_kv
+
+    torch.manual_seed(42)
+    block_size = 256
+    num_blocks = math.ceil((num_tokens + 7) / block_size)
+    row_size = (528 if kv_mxfp8 else 584) if cache_dtype == torch.uint8 else 512
+    page_stride = math.ceil(block_size * row_size / 576) * 576 + 576
+    backing = torch.full((num_blocks, page_stride), 3, device="cuda").to(cache_dtype)
+    cache = backing.as_strided(
+        (num_blocks, block_size, row_size), (page_stride, row_size, 1)
+    )
+    reference_backing = backing.clone()
+    reference = reference_backing.as_strided(cache.shape, cache.stride())
+    kv = torch.randn(num_tokens + 3, 512, device="cuda", dtype=torch.bfloat16)
+    positions = torch.arange(num_tokens + 3, device="cuda") + 7
+    angles = torch.randn(num_tokens + 16, 32, device="cuda")
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    slots = torch.randperm(num_blocks * block_size, device="cuda")[:num_tokens]
+    slots[::5] = -1
+    scale = torch.tensor([0.7], device="cuda")
+    # Only what _insert_context_kv actually reads: the record width comes off
+    # the cache tensor, so no per-record width attribute is stubbed here.
+    attn = SimpleNamespace(
+        swa_cache_layer=SimpleNamespace(kv_cache=cache, block_size=block_size),
+        kv_mxfp8=kv_mxfp8,
+        rotary_emb=SimpleNamespace(cos_sin_cache=cos_sin),
+        _flashinfer_fp8_kv_scale=scale,
+    )
+
+    def legacy_insert():
+        q = torch.zeros(kv.shape[0], 8, 512, dtype=kv.dtype, device="cuda")
+        if cache_dtype == torch.uint8:
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+                q,
+                kv,
+                reference.view(num_blocks, -1),
+                slots,
+                positions,
+                cos_sin,
+                8,
+                1e-20,
+                block_size,
+                True,
+                kv_mxfp8,
+            )
+        elif cache_dtype == torch.bfloat16:
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
+                q,
+                kv,
+                reference,
+                slots,
+                positions,
+                cos_sin,
+                1e-20,
+                block_size,
+            )
+        else:
+            q_fp8 = torch.empty_like(q, dtype=cache_dtype)
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+                q,
+                kv,
+                q_fp8,
+                reference,
+                slots,
+                positions,
+                cos_sin,
+                scale,
+                scale,
+                1e-20,
+                block_size,
+            )
+
+    def insert():
+        _insert_context_kv(attn, kv, positions, slots)
+
+    insert()
+    graph = None
+    if use_graph:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            insert()
+    for iteration in range(3):
+        kv.normal_()
+        positions.add_(1)
+        if iteration == 2:
+            slots.fill_(-1)
+        backing.view(torch.uint8).fill_(165)
+        reference_backing.copy_(backing)
+        before = kv.clone()
+        legacy_insert()
+        insert() if graph is None else graph.replay()
+        torch.testing.assert_close(
+            backing.view(torch.uint8),
+            reference_backing.view(torch.uint8),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(kv, before, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("kv_mxfp8", [False, True])
+def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
+    """PCP SWA writes must preserve the established CUDA cache bytes."""
+    from vllm.models.deepseek_v41 import attention as attention_module
+    from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+
+    torch.manual_seed(43)
+    block_size = 64
+    num_local_tokens = 5
+    num_tokens = 2 * num_local_tokens
+    row_size = 528 if kv_mxfp8 else 584
+    num_blocks = 2
+    page_stride = math.ceil(block_size * row_size / 576) * 576 + 576
+    backing = torch.full(
+        (num_blocks, page_stride), 165, dtype=torch.uint8, device="cuda"
+    )
+    cache = backing.as_strided(
+        (num_blocks, block_size, row_size), (page_stride, row_size, 1)
+    )
+    reference_backing = backing.clone()
+    reference = reference_backing.as_strided(cache.shape, cache.stride())
+
+    local_kv = torch.randn(num_local_tokens, 512, dtype=torch.bfloat16, device="cuda")
+    remote_kv = torch.randn_like(local_kv)
+    gathered_kv = torch.cat((local_kv, remote_kv))
+    local_positions = torch.arange(num_local_tokens, device="cuda") + 3
+    cache_positions = torch.cat((local_positions, local_positions + 11))
+    cache_slots = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device="cuda"
+    )[:num_tokens]
+    cache_slots[2] = -1
+    angles = torch.randn(32, 32, device="cuda")
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    num_heads = 8
+    q = torch.randn(
+        num_local_tokens,
+        num_heads,
+        512,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        torch.zeros(num_tokens, num_heads, 512, dtype=torch.bfloat16, device="cuda"),
+        gathered_kv,
+        reference.view(num_blocks, -1),
+        cache_slots,
+        cache_positions,
+        cos_sin,
+        num_heads,
+        1e-20,
+        block_size,
+        False,
+        kv_mxfp8,
+    )
+
+    monkeypatch.setattr(
+        attention_module,
+        "get_pcp_group",
+        lambda: SimpleNamespace(
+            all_gather=lambda tensor, dim: torch.cat((tensor, remote_kv), dim=dim)
+        ),
+    )
+    metadata = SimpleNamespace(
+        slot_mapping=torch.full(
+            (num_local_tokens,), -1, dtype=torch.int64, device="cuda"
+        ),
+        cache_slot_mapping=cache_slots,
+        cache_positions=cache_positions,
+        block_size=block_size,
+    )
+    attention = SimpleNamespace(
+        use_pcp=True,
+        swa_cache_layer=SimpleNamespace(
+            prefix="swa", kv_cache=cache, block_size=block_size
+        ),
+        rotary_emb=SimpleNamespace(cos_sin_cache=cos_sin),
+        _flashinfer_fp8_kv_scale=None,
+        kv_mxfp8=kv_mxfp8,
+        accepts_unnormed_unroped_query=False,
+        n_local_heads=num_heads,
+        padded_heads=num_heads,
+        eps=1e-20,
+        head_dim=512,
+    )
+    # metadata is a SimpleNamespace stub of the attention metadata.
+    DeepseekV4Attention._fused_qnorm_rope_kv_insert(
+        attention,
+        q,
+        local_kv,
+        local_positions,
+        {"swa": metadata},  # type: ignore[dict-item]
+    )
+
+    torch.testing.assert_close(
+        backing.view(torch.uint8),
+        reference_backing.view(torch.uint8),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="graph capture coverage"
+)
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize(
+    "lengths",
+    [(1, 5, 13), (1, 1, 1), (1, 2, 0), (7, 8, 8), (2, 3, 3)],
+    ids=["prefill", "decode", "empty", "wrap_threshold", "packed_boundary"],
+)
+def test_v41_fused_save_compress_and_insert(
+    compress_ratio: int, use_graph: bool, lengths: tuple[int, ...]
+):
+    """Ring states: a group boundary whose previous token is outside the chunk
+    pools the ring row that chunk left behind, even when this chunk overwrites
+    that row; only the last ``capacity`` tokens of a chunk are stored.
+
+    Exercise historical group starts, adjacent requests, a chunk longer than
+    the ring, single-token decode pairs, empty requests, wrap thresholds at
+    odd and even starts, padded graph rows, and padded physical pages against
+    a Torch reference with BF16 rounding before RoPE. Replays change both
+    inputs and history so stale scratch/cache values cannot satisfy the test.
+    """
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        fused_save_compress_norm,
+        rope_quant_insert,
+    )
+
+    torch.manual_seed(42)
+    device = "cuda"
+    capacity = 8
+    starts = [7, 8, 13]
+    actual = sum(lengths)
+    num_tokens = actual + 5
+    positions = torch.zeros(num_tokens, dtype=torch.int64, device=device)
+    req_ids = torch.zeros(actual + 2, dtype=torch.int32, device=device)
+    state_slots = torch.full((actual + 2,), -1, dtype=torch.int64, device=device)
+    cache_slots = torch.full_like(state_slots, -1)
+    query_start_loc = torch.tensor(
+        [0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32
+    ).to(device)
+    ring_blocks = torch.randperm(6, device=device)[:3]
+    raw = torch.randn(num_tokens, 512 * compress_ratio, device=device)
+    norm = torch.randn(512, dtype=torch.bfloat16, device=device)
+    latent = torch.empty(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(32, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    # capacity x 1024 floats rounded up to 576-byte alignment.
+    state_backing = torch.empty(6, 8208, device=device)
+    state = state_backing.as_strided((6, capacity, 1024), (8208, 1024, 1))
+    cache_block = 256 // compress_ratio
+    cache_stride = math.ceil(cache_block * 584 / 576) * 576
+    cache_backing = torch.empty(3, cache_stride, dtype=torch.uint8, device=device)
+    cache = cache_backing.as_strided((3, cache_block, 584), (cache_stride, 584, 1))
+    cursor = 0
+    for req, (start, length) in enumerate(zip(starts, lengths)):
+        pos = torch.arange(start, start + length, device=device)
+        rows = slice(cursor, cursor + length)
+        positions[rows] = pos
+        req_ids[rows] = req
+        state_slots[rows] = ring_blocks[req] * capacity + pos % capacity
+        cache_slots[rows] = (2 - req) * cache_block + pos // compress_ratio
+        cursor += length
+
+    has_ring = compress_ratio == 2
+
+    def run():
+        fused_save_compress_norm(
+            raw,
+            positions,
+            state if has_ring else None,
+            state_slots,
+            query_start_loc if has_ring else None,
+            req_ids if has_ring else None,
+            norm,
+            1e-20,
+            compress_ratio,
+            latent,
+        )
+        rope_quant_insert(
+            latent, positions, cos_sin, cache, cache_slots, compress_ratio
+        )
+
+    state_backing.normal_()
+    run()
+    graph = None
+    if use_graph:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+
+    for _ in range(3):
+        raw.normal_()
+        state_backing.normal_()
+        history = state.clone()
+        expected_state = state_backing.clone()
+        expected_rows = expected_state.as_strided((6, capacity, 1024), (8208, 1024, 1))
+        cache_backing.fill_(165)
+        expected_cache = cache_backing.clone()
+        latent.fill_(float("nan"))
+        # Ratio 1 has no ring; ratio 2 stores each chunk's last `capacity` rows.
+        for t in range(actual if has_ring else 0):
+            req = req_ids[t].item()
+            if query_start_loc[req + 1].item() - t > capacity:
+                continue
+            slot = state_slots[t].item()
+            expected_rows[slot // capacity, slot % capacity, :512] = raw[t, :512]
+            expected_rows[slot // capacity, slot % capacity, 512:] = raw[t, 512:]
+
+        if graph is None:
+            run()
+        else:
+            graph.replay()
+
+        torch.testing.assert_close(state_backing, expected_state, rtol=0, atol=0)
+        for t in range(num_tokens):
+            pos = positions[t].item()
+            if t >= actual or (pos + 1) % compress_ratio:
+                assert torch.isnan(latent[t]).all()
+                continue
+            req = req_ids[t].item()
+            group_rows = []
+            for k in range(compress_ratio - 1, -1, -1):
+                if t - k >= query_start_loc[req].item():
+                    kv_score = raw[t - k]
+                    if compress_ratio == 1:
+                        kv_score = torch.cat((kv_score, torch.zeros_like(kv_score)))
+                    group_rows.append(kv_score)
+                else:
+                    ring = ring_blocks[req].item()
+                    group_rows.append(history[ring, (pos - k) % capacity])
+            group = torch.stack(group_rows)
+            pooled = (group[:, :512] * group[:, 512:].softmax(0)).sum(0)
+            normed = pooled * torch.rsqrt(pooled.square().mean() + 1e-20) * norm
+            torch.testing.assert_close(latent[t].float(), normed, rtol=0.004, atol=1e-6)
+
+            slot = cache_slots[t].item()
+            page, row = divmod(slot, cache_block)
+            values = expected_cache[page, row * 576 : (row + 1) * 576]
+            quantized, scales = _ue8m0_reference(latent[t, :448], 64, 448.0)
+            values[:448] = quantized.view(torch.uint8)
+            c, s = cos_sin[pos // compress_ratio * compress_ratio].chunk(2)
+            rope_input = latent[t, 448:].float()
+            rotated = (
+                torch.stack(
+                    (
+                        rope_input[0::2] * c - rope_input[1::2] * s,
+                        rope_input[1::2] * c + rope_input[0::2] * s,
+                    ),
+                    dim=-1,
+                )
+                .flatten()
+                .to(torch.bfloat16)
+            )
+            actual_rope = cache_backing[page, row * 576 + 448 : (row + 1) * 576].view(
+                torch.bfloat16
+            )
+            torch.testing.assert_close(actual_rope, rotated, rtol=0.008, atol=1e-6)
+            values[448:] = actual_rope.view(torch.uint8)
+            scale_offset = cache_block * 576 + row * 8
+            expected_cache[page, scale_offset : scale_offset + 7] = (
+                scales.log2() + 127
+            ).to(torch.uint8)
+            expected_cache[page, scale_offset + 7] = 0
+        # Includes unwritten rows, page padding, quantized values and scales.
+        torch.testing.assert_close(cache_backing, expected_cache, rtol=0, atol=0)
+
+
+def _rotate_rope_tail(
+    latent_row: torch.Tensor, cos_sin_row: torch.Tensor
+) -> torch.Tensor:
+    """GPT-J RoPE of one latent row's last 64 dims, in fp32."""
+    row = latent_row.float()
+    c, s = cos_sin_row.chunk(2)
+    rotated = row.clone()
+    even, odd = row[448::2], row[449::2]
+    rotated[448::2] = even * c - odd * s
+    rotated[449::2] = odd * c + even * s
+    return rotated
+
+
+def _mxfp8_record_reference(
+    latent_row: torch.Tensor, cos_sin_row: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference V4.1 record for one token: 512 fp8 bytes + 16 UE8M0 scales.
+
+    Mirrors FlashMLA's ``KVCacheLayout.V41_FP8Sparse`` quantizer: rotate the
+    RoPE tail first, then scale every 32-dim tile, RoPE tiles included.
+    """
+    rotated = _rotate_rope_tail(latent_row, cos_sin_row)
+    quantized, scales = _ue8m0_reference(rotated, 32, 448.0)
+    return quantized.view(torch.uint8), (scales.log2() + 127).to(torch.uint8)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
+    """The 528-byte V4.1 record quantizes the RoPE dims instead of keeping them
+    in bf16, so a token is [512 fp8][16 UE8M0].
+
+    Byte-exact against the reference quantizer, including the rows and page
+    padding the kernel must leave alone.
+    """
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    torch.manual_seed(7)
+    device = "cuda"
+    cache_block = 64
+    cache_stride = math.ceil(cache_block * 528 / 512) * 512
+    num_tokens = 12
+
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    latent = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(64, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+
+    cache_backing = torch.full((2, cache_stride), 165, dtype=torch.uint8, device=device)
+    cache = cache_backing.as_strided((2, cache_block, 528), (cache_stride, 528, 1))
+    # Leave one token unmapped so the kernel's negative-slot skip is covered.
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    slots[3] = -1
+
+    rope_quant_insert(latent, positions, cos_sin, cache, slots, compress_ratio)
+
+    expected = torch.full_like(cache_backing, 165)
+    for t in range(num_tokens):
+        slot = slots[t].item()
+        pos = positions[t].item()
+        if slot < 0 or (pos + 1) % compress_ratio:
+            continue
+        page, row = divmod(slot, cache_block)
+        values, scales = _mxfp8_record_reference(
+            latent[t], cos_sin[pos // compress_ratio * compress_ratio]
+        )
+        expected[page, row * 528 : row * 528 + 512] = values
+        expected[page, row * 528 + 512 : (row + 1) * 528] = scales
+
+    torch.testing.assert_close(cache_backing, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="needs a CUDA or ROCm device"
+)
+@pytest.mark.parametrize("gather_len", [None, 70, 200])
+@pytest.mark.parametrize("one_pass", [False, True])
+def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatch):
+    """The gather grid only partitions tokens, so its width cannot move the
+    result, and the rows it writes must match a host-side dequantization.
+
+    Covers the fp8_ds_mla record (584 B); the MXFP8 one is covered below.
+    Both dequantization forms are checked against the same host reference on
+    whatever device is present: the wrapper picks the one-pass form on ROCm
+    alone, so otherwise each platform would only ever see one of them.
+    """
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: one_pass)
+    from vllm.models.deepseek_v41.common.ops import quantize_and_insert_k_cache
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        dequantize_and_gather_k_cache_triton,
+    )
+
+    torch.manual_seed(7)
+    device = "cuda"
+    block_size, num_blocks = 64, 6
+    num_tokens = block_size * num_blocks
+
+    k = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    # insert takes [num_blocks, block_bytes]; gather takes the record view.
+    cache = torch.zeros(num_blocks, block_size * 584, dtype=torch.uint8, device=device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    quantize_and_insert_k_cache(k, cache, slot_mapping, block_size=block_size)
+    cache_view = cache.view(num_blocks, block_size, 584)
+
+    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    gls = (
+        None
+        if gather_len is None
+        else torch.tensor([gather_len], dtype=torch.int32, device=device)
+    )
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).view(1, -1)
+
+    def gather(bound):
+        out = torch.zeros(1, num_tokens, 512, dtype=torch.bfloat16, device=device)
+        dequantize_and_gather_k_cache_triton(
+            out,
+            cache_view,
+            seq_lens,
+            gls,
+            block_table,
+            block_size,
+            0,
+            max_gather_len=bound,
+        )
+        return out
+
+    # None keeps the historical 128; the rest make the wrapper pick other widths
+    # for the same work, and the output must not notice.
+    baseline = gather(None)
+    for bound in (8, num_tokens, 1 << 20):
+        torch.testing.assert_close(gather(bound), baseline, rtol=0, atol=0)
+
+    n = num_tokens if gather_len is None else gather_len
+    start = num_tokens - n
+    for i in (0, 1, n // 2, n - 1):
+        values, scales = _ue8m0_reference(k[start + i, :448], 64, 448.0)
+        nope = (values.to(torch.float32).view(7, 64) * scales.view(7, 1)).reshape(448)
+        torch.testing.assert_close(
+            baseline[0, i, :448], nope.to(torch.bfloat16), rtol=4e-3, atol=1e-6
+        )
+        # The RoPE dims are stored verbatim, so they come back exactly.
+        torch.testing.assert_close(
+            baseline[0, i, 448:], k[start + i, 448:], rtol=0, atol=0
+        )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_v41_mxfp8_cache_round_trip():
+    """quantize_and_insert -> dequantize_and_gather recovers the V4.1 record.
+
+    The RoPE dims now go through fp8, so they carry quantization error too --
+    the check is that every dim survives within one MXFP8 tile step, and that
+    the bytes on the way match the reference quantizer.
+    """
+    from vllm.models.deepseek_v41.common.ops import (
+        dequantize_and_gather_k_cache,
+        quantize_and_insert_k_cache,
+    )
+
+    torch.manual_seed(11)
+    device = "cuda"
+    block_size = 64
+    num_tokens = 70
+    num_blocks = 4
+    page_bytes = math.ceil(block_size * 528 / 512) * 512
+
+    k = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    cache = torch.zeros(num_blocks, page_bytes, dtype=torch.uint8, device=device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    quantize_and_insert_k_cache(
+        k, cache, slot_mapping, block_size=block_size, bytes_per_token=528
+    )
+
+    for t in (0, 1, block_size, num_tokens - 1):
+        values, scales = _ue8m0_reference(k[t].float(), 32, 448.0)
+        page, row = divmod(t, block_size)
+        torch.testing.assert_close(
+            cache[page, row * 528 : row * 528 + 512],
+            values.view(torch.uint8),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            cache[page, row * 528 + 512 : (row + 1) * 528],
+            (scales.log2() + 127).to(torch.uint8),
+            rtol=0,
+            atol=0,
+        )
+
+    out = torch.zeros(1, num_tokens, 512, dtype=torch.bfloat16, device=device)
+    dequantize_and_gather_k_cache(
+        out,
+        cache.view(num_blocks, block_size, 528),
+        seq_lens=torch.tensor([num_tokens], dtype=torch.int32, device=device),
+        gather_lens=None,
+        block_table=torch.arange(num_blocks, dtype=torch.int32, device=device).view(
+            1, -1
+        ),
+        block_size=block_size,
+        offset=0,
+    )
+    # Half an e4m3 ULP at the top of the range (16 units) bounds the error.
+    tile_amax = k.float().abs().view(num_tokens, 16, 32).amax(-1).clamp(min=1e-4)
+    tolerance = 16.0 * (tile_amax / 448.0).log2().ceil().exp2()
+    error = (out[0].float() - k.float()).abs()
+    assert (error <= tolerance.repeat_interleave(32, dim=-1)).all()
+
+
+# e2m1 magnitudes indexed by the low 3 bits of a code; bit 3 is the sign.
+_E2M1_MAGNITUDES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def _decode_nvfp4_row(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Unpack e2m1 rows and apply their e4m3 tile scales."""
+    mags = torch.tensor(_E2M1_MAGNITUDES, device=packed.device)
+    codes = torch.empty(
+        (*packed.shape[:-1], 512), dtype=torch.uint8, device=packed.device
+    )
+    codes[..., 0::2] = packed & 0xF  # even element in the low nibble
+    codes[..., 1::2] = packed >> 4
+    vals = mags[(codes & 7).long()] * torch.where(codes >= 8, -1.0, 1.0)
+    return (
+        vals.reshape(*packed.shape[:-1], 32, 16)
+        * scales.view(torch.float8_e4m3fn).float().reshape(*packed.shape[:-1], 32, 1)
+    ).flatten(-2)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
+    """The 288-byte V4.1 NVFP4 record: 256 B of e2m1 pairs then 32 e4m3 scales
+    per token.
+
+    Scales are byte-exact against the reference (``amax / 6`` clamped to the
+    e4m3 range); values are checked as round-to-nearest on the e2m1 grid, whose
+    coarsest step is 2 between 4 and 6, so half a step is ``1.0 * scale``.
+    """
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    torch.manual_seed(13)
+    device = "cuda"
+    cache_block = 64
+    cache_stride = math.ceil(cache_block * 288 / 512) * 512
+    num_tokens = 12
+
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    latent = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(64, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+
+    cache_backing = torch.full((2, cache_stride), 165, dtype=torch.uint8, device=device)
+    cache = cache_backing.as_strided((2, cache_block, 288), (cache_stride, 288, 1))
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    slots[3] = -1  # covers the negative-slot skip
+
+    rope_quant_insert(latent, positions, cos_sin, cache, slots, compress_ratio)
+
+    untouched = torch.full_like(cache_backing, 165)
+    for t in range(num_tokens):
+        slot = slots[t].item()
+        pos = positions[t].item()
+        if slot < 0 or (pos + 1) % compress_ratio:
+            continue
+        page, row = divmod(slot, cache_block)
+        cs = cos_sin[pos // compress_ratio * compress_ratio]
+        rotated = _rotate_rope_tail(latent[t], cs)
+        amax = rotated.view(32, 16).abs().amax(-1)
+        scale = (amax / 6.0).clamp(2.0**-9, 448.0).to(torch.float8_e4m3fn)
+
+        record = cache_backing[page, row * 288 : (row + 1) * 288]
+        got_scales = record[256:]
+        torch.testing.assert_close(got_scales, scale.view(torch.uint8), rtol=0, atol=0)
+        decoded = _decode_nvfp4_row(record[:256], got_scales)
+        step = scale.float().repeat_interleave(16)
+        assert ((decoded - rotated).abs() <= step).all()
+        untouched[page, row * 288 : (row + 1) * 288] = record
+    # Rows the kernel must not have touched, page padding included.
+    torch.testing.assert_close(cache_backing, untouched, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("num_reqs", [1, 8, 32])
+@pytest.mark.parametrize("num_tokens", [70, 128, 129, 2051])
+@pytest.mark.parametrize("partial", [False, True])
+def test_v41_nvfp4_gather_matches_insert(num_reqs, num_tokens, partial):
+    """The NVFP4 gather dequantizes exactly what the insert kernel wrote."""
+    from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    torch.manual_seed(17)
+    device = "cuda"
+    block_size = 64
+    num_blocks = math.ceil(num_tokens / block_size)
+    page_bytes = math.ceil(block_size * 288 / 512) * 512
+
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    latent = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(num_tokens, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    backing = torch.zeros(num_blocks, page_bytes, dtype=torch.uint8, device=device)
+    cache = backing.as_strided((num_blocks, block_size, 288), (page_bytes, 288, 1))
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    rope_quant_insert(latent, positions, cos_sin, cache, slots, 1)
+
+    offset = 7 if partial else 0
+    seq_lens = num_tokens - torch.arange(num_reqs, dtype=torch.int32, device=device)
+    gather_lens = seq_lens - 3 if partial else None
+    storage = torch.full(
+        (num_reqs, num_tokens + offset + 16, 512),
+        -123.0,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    out = storage[:, : num_tokens + offset]
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).repeat(
+        num_reqs, 1
+    )
+
+    def gather():
+        dequantize_and_gather_k_cache(
+            out,
+            cache,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            block_table=block_table,
+            block_size=block_size,
+            offset=offset,
+        )
+
+    records = backing[:, : block_size * 288].reshape(-1, 288)
+    expected = _decode_nvfp4_row(records[:, :256], records[:, 256:])
+
+    def check(shorter_by):
+        assert (storage[:, num_tokens + offset :] == -123).all()
+        for req in range(num_reqs):
+            start = 3 if partial else 0
+            length = num_tokens - req - start - shorter_by
+            assert (out[req, :offset] == -123).all()
+            assert (out[req, offset + length :] == -123).all()
+            torch.testing.assert_close(
+                out[req, offset : offset + length].float(),
+                expected[start : start + length],
+                rtol=0,
+                atol=0,
+            )
+
+    gather()
+    check(0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        gather()
+    storage.fill_(-123)
+    seq_lens.sub_(1)
+    if gather_lens is not None:
+        gather_lens.sub_(1)
+    graph.replay()
+    check(1)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="The V4.1 records are SM100-only",
+)
+@pytest.mark.parametrize("record", ["swa_fp8", "compressed_fp8", "compressed_fp4"])
+def test_v41_cache_writers_match_flashmla_decode(record: str):
+    """FlashMLA and vLLM's gathers read back the token a V4.1 writer put mid
+    page in a padded block, so all agree on the interleaved record layout."""
+    import vllm.v1.attention.ops.flashmla as fm
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        dequantize_and_gather_k_cache,
+        dequantize_and_gather_k_cache_triton,
+    )
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    device, block_size, topk = "cuda", 64, 64
+    slot = block_size + 37
+    bytes_per_token = 288 if record == "compressed_fp4" else 528
+    torch.manual_seed(0)
+    kv = torch.randn(1, 512, dtype=torch.bfloat16, device=device)
+    positions = torch.tensor([slot], device=device)
+    # cos = 1, sin = 0: RoPE is the identity, so the cache should hold `kv`.
+    cos_sin = torch.zeros(slot + 1, 64, device=device)
+    cos_sin[:, :32] = 1
+    # Padded like a packed block: a multiple of the record and of 512 B.
+    cache = torch.zeros(2, block_size + 32, bytes_per_token, dtype=torch.uint8)
+    cache = cache.to(device)[:, :block_size]
+    if record == "swa_fp8":
+        torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+            kv, cache, positions, positions, cos_sin, block_size, None, True
+        )
+    else:
+        rope_quant_insert(kv, positions, cos_sin, cache, positions, 1)
+
+    indices = torch.full((1, 1, topk), -1, dtype=torch.int32, device=device)
+    indices[..., 0] = slot
+    extra = None
+    if record == "compressed_fp4":
+        cache, extra = torch.zeros(2, block_size, 528).to(cache), cache
+    out, _ = fm.flash_mla_with_kvcache(
+        q=torch.randn(1, 1, 64, 512, dtype=torch.bfloat16, device=device),
+        k_cache=cache.unsqueeze(2),
+        block_table=None,
+        cache_seqlens=None,
+        head_dim_v=512,
+        tile_scheduler_metadata=fm.get_mla_metadata()[0],
+        is_fp8_kvcache=True,
+        indices=indices if extra is None else torch.full_like(indices, -1),
+        extra_k_cache=None if extra is None else extra.unsqueeze(2),
+        extra_indices_in_kvcache=None if extra is None else indices,
+    )
+    for gather in (dequantize_and_gather_k_cache, dequantize_and_gather_k_cache_triton):
+        rows = torch.zeros(1, slot + 1, 512, dtype=torch.bfloat16, device=device)
+        block_table = torch.arange(2, dtype=torch.int32, device=device)[None]
+        seq_lens = torch.tensor([slot + 1], dtype=torch.int32, device=device)
+        k_cache = cache if extra is None else extra
+        gather(rows, k_cache, seq_lens, None, block_table, block_size, offset=0)
+        torch.testing.assert_close(
+            out[0, 0], rows[0, slot].expand(64, -1), rtol=0, atol=0
+        )
+    cos = torch.nn.functional.cosine_similarity(rows[0, slot].float(), kv[0].float(), 0)
+    assert cos > (0.98 if extra is not None else 0.999)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+@pytest.mark.parametrize("store_fp8", [False, True])
+def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
+    """The FlashInfer plain-row compressed cache gets [448 NoPE | 64 RoPE] rows.
+
+    bf16 caches store the latent verbatim with the RoPE tail rotated; per-tensor
+    fp8 caches scale the bf16-rounded row by 1/fp8_scale and clamp to e4m3.
+    Non-boundary positions, negative slots and untouched rows must keep their
+    prior contents.
+    """
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    torch.manual_seed(3)
+    device = "cuda"
+    num_tokens = 9
+    cache_block = 4
+    positions = torch.arange(5, 5 + num_tokens, dtype=torch.int64, device=device)
+    cache_slots = torch.randperm(3 * cache_block, device=device)[:num_tokens]
+    cache_slots[2] = -1
+    latent = torch.randn(num_tokens, 512, device=device).to(torch.bfloat16)
+    angles = torch.randn(32, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    dtype = torch.float8_e4m3fn if store_fp8 else torch.bfloat16
+    # Pad the page stride so the kernel must honour strides, not shape.
+    cache_backing = torch.full((3, (cache_block + 1) * 512), 3.0, device=device)
+    cache_backing = cache_backing.to(dtype)
+    cache = cache_backing.as_strided(
+        (3, cache_block, 512), ((cache_block + 1) * 512, 512, 1)
+    )
+    fp8_scale = torch.tensor([0.5], dtype=torch.float32, device=device)
+    expected = cache_backing.clone().float()
+
+    rope_quant_insert(
+        latent,
+        positions,
+        cos_sin,
+        cache,
+        cache_slots,
+        compress_ratio,
+        fp8_scale=fp8_scale if store_fp8 else None,
+    )
+
+    for t in range(num_tokens):
+        pos = positions[t].item()
+        slot = cache_slots[t].item()
+        if slot < 0 or (pos + 1) % compress_ratio:
+            continue
+        c, s = cos_sin[pos // compress_ratio * compress_ratio].chunk(2)
+        rope_input = latent[t, 448:].float()
+        rotated = torch.stack(
+            (
+                rope_input[0::2] * c - rope_input[1::2] * s,
+                rope_input[1::2] * c + rope_input[0::2] * s,
+            ),
+            dim=-1,
+        ).flatten()
+        row = torch.cat((latent[t, :448], rotated.to(torch.bfloat16))).float()
+        if store_fp8:
+            row = (row * (1.0 / fp8_scale)).clamp(-448.0, 448.0)
+            row = row.to(torch.float8_e4m3fn).float()
+        page, idx = divmod(slot, cache_block)
+        expected[page, idx * 512 : (idx + 1) * 512] = row
+
+    actual = cache_backing.float()
+    if store_fp8:
+        # One e4m3 ulp of slack for FMA-vs-separate rounding in the RoPE tail.
+        torch.testing.assert_close(actual, expected, rtol=0.13, atol=1e-2)
+    else:
+        nope = torch.arange(512, device=device) < 448
+        nope = nope.repeat(cache_block + 1)
+        torch.testing.assert_close(actual[:, nope], expected[:, nope], rtol=0, atol=0)
+        torch.testing.assert_close(
+            actual[:, ~nope], expected[:, ~nope], rtol=0.008, atol=1e-6
+        )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
+def test_v41_compressor_metadata_maps_tokens_to_their_ring():
+    """The ring group's generic slot mapping is disabled (all PAD), so the
+    builder must map every real token to ``ring_block * capacity + pos %
+    capacity``. Padding tokens and requests on the null block (block 0, as in
+    dummy batches) must stay at PAD."""
+    from unittest.mock import MagicMock
+
+    from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+    capacity = 8
+    vllm_config = MagicMock()
+    vllm_config.scheduler_config.max_num_batched_tokens = 16
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
+    spec = CircularBufferSpec(
+        block_size=capacity,
+        num_kv_heads=1,
+        head_size=1024,
+        head_size_v=0,
+        dtype=torch.float32,
+    )
+    device = torch.device("cuda")
+    builder = CompressorMetadataBuilder(spec, ["state"], vllm_config, device)
+
+    # Three requests: 3 tokens at positions 13..15 on ring block 5, 2 tokens
+    # at positions 7..8 on ring block 2, then 2 tokens on the null block;
+    # three padding tokens.
+    query_start_loc = torch.tensor([0, 3, 5, 7], dtype=torch.int32, device=device)
+    positions = torch.tensor([13, 14, 15, 7, 8, 0, 1, 0, 0, 0], device=device)
+    block_table = torch.tensor([[5], [2], [0]], dtype=torch.int32, device=device)
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.cpu(),
+        seq_lens=torch.tensor([16, 9, 2], dtype=torch.int32, device=device),
+        num_reqs=3,
+        num_actual_tokens=7,
+        max_query_len=3,
+        max_seq_len=16,
+        block_table_tensor=block_table,
+        slot_mapping=torch.full((10,), -1, dtype=torch.int64, device=device),
+        positions=positions,
+    )
+    metadata = builder.build(0, common)
+
+    ring = [5 * 8 + 5, 5 * 8 + 6, 5 * 8 + 7, 2 * 8 + 7, 2 * 8 + 0]
+    assert metadata.slot_mapping.tolist() == ring + [-1] * 5
+    assert metadata.query_start_loc is query_start_loc
+    assert metadata.token_to_req_indices.tolist() == [0, 0, 0, 1, 1, 2, 2]
+
+
+def test_v41_pcp_compressor_latent_is_gathered_for_cache_writes(monkeypatch):
+    """PCP compresses locally and publishes the gathered latent to both caches."""
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41 import attention as attention_module
+    from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+
+    local_latent = torch.arange(8, dtype=torch.float32).view(2, 4)
+    cache_positions = torch.tensor([0, 1, 10, 11])
+    observed = {}
+
+    class Compressor:
+        def __call__(self, kv_score, positions):
+            return local_latent
+
+        def insert_cache(self, latent, positions, rotary_emb):
+            observed["insert"] = (latent, positions)
+
+    def prepare_indexer(qr, latent, weights, positions, rotary, qr_scale, **kwargs):
+        observed["indexer"] = (latent, kwargs)
+        return None, None, None
+
+    monkeypatch.setattr(
+        attention_module,
+        "get_pcp_group",
+        lambda: SimpleNamespace(
+            all_gather=lambda tensor, dim: torch.cat((tensor, tensor + 10), dim=dim)
+        ),
+    )
+    metadata = {"swa": SimpleNamespace(cache_positions=cache_positions)}
+    attention = SimpleNamespace(
+        use_pcp=True,
+        compressor=Compressor(),
+        indexer=prepare_indexer,
+        aux_stream_list=None,
+        ln_events=[None, None],
+        swa_cache_layer=SimpleNamespace(prefix="swa"),
+        rotary_emb=SimpleNamespace(),
+        indexer_rotary_emb=SimpleNamespace(),
+        n_local_heads=1,
+        head_dim=4,
+        _wq_b_proj=lambda qr, scale: qr,
+        _fused_qnorm_rope_kv_insert=lambda q, kv, pos, meta: q,
+        _sparse_indexer_and_attn=lambda *args: None,
+    )
+    rows = torch.zeros(2, 4)
+    positions = torch.arange(2)
+    with override_forward_context(ForwardContext({}, metadata, {})):
+        DeepseekV4Attention._prepare_and_attn(
+            attention, rows, rows, rows, None, rows, rows, positions, rows
+        )
+
+    expected_global = torch.cat((local_latent, local_latent + 10))
+    insert_latent, insert_positions = observed["insert"]
+    torch.testing.assert_close(insert_latent, expected_global)
+    torch.testing.assert_close(insert_positions, cache_positions)
+    indexer_latent, indexer_kwargs = observed["indexer"]
+    torch.testing.assert_close(indexer_latent, local_latent)
+    torch.testing.assert_close(indexer_kwargs["cache_latent"], expected_global)
+    torch.testing.assert_close(indexer_kwargs["cache_positions"], cache_positions)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA stream coverage")
+@pytest.mark.parametrize(
+    "use_aux,use_graph", [(False, False), (True, False), (True, True)]
+)
+@torch.inference_mode()
+def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph):
+    """Both reused-event joins must publish this forward's states and cache rows."""
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.attention import (
+        DeepseekV4Attention,
+        DeepseekV4Indexer,
+    )
+    from vllm.models.deepseek_v41.compressor import DeepseekCompressor
+
+    torch.manual_seed(43)
+    raw = torch.randn(19, 1024, device="cuda")
+    q = torch.zeros(19, 512, dtype=torch.bfloat16, device="cuda")
+    positions = torch.arange(7, 26, device="cuda")
+    state_slots = positions.clone()
+    state_slots[-2:] = -1
+    cache_slots = torch.where(state_slots >= 0, positions // 2, -1)
+    state = torch.empty(4, 8, 1024, device="cuda")
+    main = torch.empty(1, 128, 584, dtype=torch.uint8, device="cuda")
+    index = torch.empty(1, 128, 132, dtype=torch.uint8, device="cuda")
+    caches = (state, main, index)
+    observed = tuple(torch.empty_like(cache) for cache in caches)
+    rotary = SimpleNamespace(cos_sin_cache=torch.randn(32, 64, device="cuda"))
+    metadata = {
+        "state": SimpleNamespace(
+            slot_mapping=state_slots,
+            query_start_loc=torch.tensor([0, 19], dtype=torch.int32, device="cuda"),
+            token_to_req_indices=torch.zeros(19, dtype=torch.int32, device="cuda"),
+        ),
+        "main": SimpleNamespace(slot_mapping=cache_slots),
+        "index": SimpleNamespace(slot_mapping=cache_slots),
+    }
+    context = ForwardContext({}, metadata, {})
+    compressor = DeepseekCompressor.__new__(DeepseekCompressor)
+    torch.nn.Module.__init__(compressor)
+    compressor.pcp_size = 1
+    compressor.head_dim, compressor.rope_head_dim, compressor.compress_ratio = (
+        512,
+        64,
+        2,
+    )
+    compressor.rms_norm_eps = 1e-20
+    compressor.norm = SimpleNamespace(
+        weight=torch.ones(512, dtype=torch.bfloat16, device="cuda")
+    )
+    compressor.state_cache = SimpleNamespace(prefix="state", kv_cache=state)
+    compressor.k_cache_prefix = "main"
+    compressor._static_forward_context = {"main": SimpleNamespace(kv_cache=main)}
+    indexer_weight = torch.randn(128, 512, dtype=torch.bfloat16, device="cuda")
+    indexer = SimpleNamespace(
+        owns_k=True,
+        wk=lambda latent: (torch.nn.functional.linear(latent, indexer_weight), None),
+        k_norm=SimpleNamespace(
+            weight=torch.ones(128, dtype=torch.bfloat16, device="cuda"),
+            variance_epsilon=1e-20,
+        ),
+        k_cache=SimpleNamespace(prefix="index", kv_cache=index),
+        compress_ratio=2,
+        use_fp4_kv=False,
+    )
+
+    def prepare_indexer(qr, latent, weights, positions, rotary, qr_scale, **kwargs):
+        DeepseekV4Indexer._produce_k(indexer, latent, positions, rotary)
+        return None, None, None
+
+    def observe(*args):
+        for output, cache in zip(observed, caches):
+            output.copy_(cache)
+
+    auxiliary = [torch.cuda.Stream()] if use_aux else None
+    attention = SimpleNamespace(
+        use_pcp=False,
+        compressor=compressor,
+        indexer=prepare_indexer,
+        aux_stream_list=auxiliary,
+        ln_events=[torch.cuda.Event(), torch.cuda.Event()],
+        rotary_emb=rotary,
+        indexer_rotary_emb=rotary,
+        n_local_heads=1,
+        head_dim=512,
+        _wq_b_proj=lambda qr, scale: qr.clone(),
+        _fused_qnorm_rope_kv_insert=lambda q, kv, pos, meta: q,
+        _sparse_indexer_and_attn=observe,
+    )
+
+    def run():
+        with override_forward_context(context):
+            DeepseekV4Attention._prepare_and_attn(
+                attention, q, q, q, None, raw, q, positions, q
+            )
+
+    def reset():
+        state.zero_()
+        main.fill_(165)
+        index.fill_(165)
+
+    reset()
+    run()
+    graph = None
+    if use_graph:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+
+    previous = None
+    for _ in range(3):
+        raw.normal_()
+        reset()
+        attention.aux_stream_list = None
+        run()
+        expected = tuple(output.clone() for output in observed)
+        reset()
+        attention.aux_stream_list = auxiliary
+        if graph is None:
+            run()
+        else:
+            graph.replay()
+        for actual, reference in zip(observed, expected):
+            torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+        if previous is not None:
+            assert all(not torch.equal(a, b) for a, b in zip(expected, previous))
+        previous = expected
+
+
+@pytest.mark.parametrize("pcp_size", [2, 4])
+@pytest.mark.parametrize(
+    "lengths,prefilling,starts",
+    [
+        ([9, 1], [True, False], [1, 4]),
+        ([1, 1], [False, False], [16, 3]),
+        ([3, 1], [True, False], [1, 0]),
+    ],
+)
+def test_v41_pcp_ring_links_match_request_positions(
+    pcp_size, lengths, prefilling, starts, monkeypatch
+):
+    """Cross-chunk predecessors and open ring writes must belong to the request."""
+    from vllm.models.deepseek_v41 import compressor as compressor_module
+    from vllm.models.deepseek_v41.compressor import (
+        CompressorMetadata,
+        CompressorMetadataBuilder,
+    )
+    from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
+
+    monkeypatch.setattr(
+        pcp_manager_module,
+        "async_tensor_h2d",
+        lambda array, **kwargs: torch.from_numpy(array),
+    )
+    manager = PCPManager(pcp_size, 0, torch.device("cpu"), shard_decode_requests=True)
+    query_start = np.array([0, *np.cumsum(lengths)], dtype=np.int32)
+    segments, counts = manager._build_batch_layout(
+        np.array(lengths), np.array(starts), np.array(prefilling), query_start
+    )
+    width = max(counts)
+    capacity = 8
+    blocks = [1, (1 << 20) + 2]
+    num_rows = min(width, 2 * len(lengths))
+    metadata_by_rank = []
+    positions_by_rank = []
+    gathered_keys = []
+    for local_segments in segments:
+        positions = torch.zeros(width, dtype=torch.int64)
+        slots = torch.full((width,), -1, dtype=torch.int64)
+        local_query_start = [0]
+        keys = [-1] * num_rows
+        for row, segment in enumerate(local_segments):
+            req = segment.global_batch_req_idx
+            begin = starts[req] + segment.global_batch_slice.start - query_start[req]
+            local = segment.rank_local_batch_slice
+            positions[local] = torch.arange(begin, begin + segment.num_tokens)
+            slots[local] = blocks[req] * capacity + positions[local] % capacity
+            local_query_start.append(local.stop)
+            keys[row] = (blocks[req] << 32) | int(positions[local.stop - 1])
+        if not local_segments:
+            local_query_start.append(0)
+        metadata_by_rank.append(
+            CompressorMetadata(
+                slot_mapping=slots,
+                query_start_loc=torch.tensor(local_query_start, dtype=torch.int32),
+                token_to_req_indices=torch.empty(0, dtype=torch.int32),
+            )
+        )
+        positions_by_rank.append(positions)
+        gathered_keys.extend(keys)
+
+    keys = torch.tensor(gathered_keys, dtype=torch.int64)
+    contributed_keys = []
+
+    def all_gather(tensor, dim):
+        contributed_keys.append(tensor.clone())
+        return keys
+
+    monkeypatch.setattr(
+        compressor_module,
+        "get_pcp_group",
+        lambda: SimpleNamespace(all_gather=all_gather),
+    )
+    builder = SimpleNamespace(
+        capacity=capacity,
+        device=torch.device("cpu"),
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_seqs=len(lengths))
+        ),
+    )
+    expected_rows = {
+        block: max(key for key in gathered_keys if key >> 32 == block)
+        for block in blocks
+    }
+    expected_slots = [
+        block * capacity + (key & 0xFFFFFFFF) % capacity
+        for block, key in expected_rows.items()
+        if key % 2 == 0
+    ]
+    for metadata, positions in zip(metadata_by_rank, positions_by_rank):
+        num_reqs = metadata.query_start_loc.numel() - 1
+        CompressorMetadataBuilder._link_pcp_chunks(
+            builder, metadata, num_reqs, positions
+        )
+        assert metadata.prev_row_indices is not None
+        assert metadata.gather_tokens is not None
+        assert metadata.ring_write_slots is not None
+        for row, token in enumerate(metadata.gather_tokens.tolist()):
+            key = int(contributed_keys[-1][row])
+            if key >= 0:
+                assert int(metadata.slot_mapping[token]) // capacity == key >> 32
+                assert int(positions[token]) == key & 0xFFFFFFFF
+        for start, prev in zip(
+            metadata.query_start_loc[:-1].tolist(), metadata.prev_row_indices.tolist()
+        ):
+            position = int(positions[start])
+            block = int(metadata.slot_mapping[start]) // capacity
+            wanted = (block << 32) | (position - 1)
+            if position % 2 == 1 and wanted in gathered_keys:
+                assert prev >= 0 and gathered_keys[prev] == wanted
+            else:
+                assert prev == -1
+        writes = metadata.ring_write_slots.tolist()
+        assert sorted(slot for slot in writes if slot >= 0) == sorted(expected_slots)
+        for row, slot in enumerate(writes):
+            if slot >= 0:
+                assert gathered_keys[row] == expected_rows[slot // capacity]
+                assert (gathered_keys[row] & 0xFFFFFFFF) % capacity == slot % capacity
+    torch.testing.assert_close(torch.cat(contributed_keys), keys)
+
+
+def _build_pcp_ring_metadata(ranks, all_gather, spec, config, device, monkeypatch):
+    from vllm.models.deepseek_v41 import compressor as compressor_module
+    from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
+
+    monkeypatch.setattr(
+        compressor_module,
+        "get_pcp_group",
+        lambda: SimpleNamespace(all_gather=all_gather),
+    )
+    for local in ranks:
+        builder = CompressorMetadataBuilder(spec, ["ring"], config, device)
+        local.metadata = builder.build(0, local.common)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
+@pytest.mark.parametrize("pcp_size", [2, 4])
+def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypatch):
+    """Pairs split across PCP chunks and decode owner changes keep exact latents."""
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41 import compressor as compressor_module
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        fused_save_compress_norm,
+    )
+    from vllm.models.deepseek_v41.compressor import DeepseekCompressor
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import CircularBufferSpec
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
+
+    torch.manual_seed(42)
+    device = torch.device("cuda")
+    norm = torch.randn(512, dtype=torch.bfloat16, device=device)
+    # Block 0 is reserved as the null block; requests use physical blocks 1/2.
+    reference_state = torch.zeros(3, 8, 1024, device=device)
+    rank_states = [reference_state.clone() for _ in range(pcp_size)]
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=4),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
+        speculative_config=None,
+    )
+    spec = CircularBufferSpec(
+        block_size=8, num_kv_heads=1, head_size=1024, head_size_v=0, dtype=torch.float32
+    )
+    starts = np.zeros(2, dtype=np.int32)
+    for lengths, prefilling in [
+        ([7, 3], [True, True]),
+        ([9, 1], [True, False]),
+        ([1, 1], [False, False]),
+        ([1, 1], [False, False]),
+    ]:
+        lengths = np.array(lengths, dtype=np.int32)
+        query_start = np.concatenate(([0], np.cumsum(lengths))).astype(np.int32)
+        qsl = torch.from_numpy(query_start).to(device)
+        positions = torch.cat(
+            [torch.arange(s, s + n, device=device) for s, n in zip(starts, lengths)]
+        )
+        req_ids = torch.repeat_interleave(
+            torch.arange(2, device=device, dtype=torch.int32),
+            torch.from_numpy(lengths).to(device),
+        )
+        slots = (req_ids.long() + 1) * 8 + positions % 8
+        raw = torch.randn(sum(lengths), 1024, device=device)
+        expected = torch.empty(sum(lengths), 512, dtype=torch.bfloat16, device=device)
+        fused_save_compress_norm(
+            raw,
+            positions,
+            reference_state,
+            slots,
+            qsl,
+            req_ids,
+            norm,
+            1e-20,
+            2,
+            expected,
+        )
+
+        ranks = []
+        for rank in range(pcp_size):
+            manager = PCPManager(pcp_size, rank, device, shard_decode_requests=True)
+            segments, counts = manager._build_batch_layout(
+                lengths, starts, np.array(prefilling), query_start
+            )
+            width = max(counts)
+            assert manager._padded_gather_idx is not None
+            local_indices = manager._padded_gather_idx[
+                rank * width : (rank + 1) * width
+            ]
+            local_lengths = [s.num_tokens for s in segments[rank]] or [0]
+            local_qsl = torch.tensor([0, *np.cumsum(local_lengths)], dtype=torch.int32)
+            local_reqs = [s.global_batch_req_idx for s in segments[rank]] or [0]
+            common = CommonAttentionMetadata(
+                query_start_loc=local_qsl.to(device),
+                query_start_loc_cpu=local_qsl,
+                seq_lens=torch.zeros(len(local_reqs), dtype=torch.int32, device=device),
+                num_reqs=len(local_reqs),
+                num_actual_tokens=counts[rank],
+                max_query_len=max(local_lengths),
+                max_seq_len=int(max(starts + lengths)),
+                block_table_tensor=torch.tensor(
+                    np.array(local_reqs) + 1, dtype=torch.int32, device=device
+                ).unsqueeze(1),
+                slot_mapping=torch.full((width * pcp_size,), -1, device=device),
+                positions=positions[local_indices],
+            )
+            ranks.append(
+                SimpleNamespace(
+                    indices=local_indices[: counts[rank]],
+                    raw=raw[local_indices],
+                    positions=common.positions,
+                    common=common,
+                )
+            )
+
+        # Each rank's builder contributes its last-row candidates to a gather.
+        candidates: list[torch.Tensor] = []
+        _build_pcp_ring_metadata(
+            ranks,
+            lambda t, dim, out=candidates: out.append(t.clone()) or t.repeat(pcp_size),
+            spec,
+            config,
+            device,
+            monkeypatch,
+        )
+        _build_pcp_ring_metadata(
+            ranks,
+            lambda t, dim, out=candidates: torch.cat(out),
+            spec,
+            config,
+            device,
+            monkeypatch,
+        )
+        gathered_rows = torch.cat([r.raw[r.metadata.gather_tokens] for r in ranks])
+        monkeypatch.setattr(
+            compressor_module,
+            "get_pcp_group",
+            lambda rows=gathered_rows: SimpleNamespace(all_gather=lambda t, dim: rows),
+        )
+        for rank, local in enumerate(ranks):
+            compressor = SimpleNamespace(
+                pcp_size=pcp_size,
+                head_dim=512,
+                compress_ratio=2,
+                rms_norm_eps=1e-20,
+                norm=SimpleNamespace(weight=norm),
+                state_cache=SimpleNamespace(prefix="ring", kv_cache=rank_states[rank]),
+            )
+            context = ForwardContext({}, {"ring": local.metadata}, {})
+            with override_forward_context(context):
+                actual = DeepseekCompressor.forward(
+                    compressor, local.raw, local.positions
+                )
+            assert isinstance(actual, torch.Tensor)
+            valid = (positions[local.indices] + 1) % 2 == 0
+            torch.testing.assert_close(
+                actual[: local.indices.numel()][valid],
+                expected[local.indices][valid],
+                rtol=0,
+                atol=0,
+            )
+        for state in rank_states[1:]:
+            torch.testing.assert_close(state, rank_states[0], rtol=0, atol=0)
+        starts += lengths
 
 
 def _on_gfx950() -> bool:
@@ -273,11 +1707,93 @@ def test_gfx950_compressed_cache_canonicalizes_nonfinite(writer: str) -> None:
     ],
 )
 def test_get_c128_boundary(starts, query_start_loc, expected):
+    query_start_loc_tensor = torch.tensor(query_start_loc)
+    query_lens = query_start_loc_tensor[1:] - query_start_loc_tensor[:-1]
     metadata = SimpleNamespace(
-        _num_computed_tokens_cpu=None if starts is None else torch.tensor(starts),
-        query_start_loc_cpu=torch.tensor(query_start_loc),
+        seq_lens_cpu_upper_bound=(
+            None if starts is None else torch.tensor(starts) + query_lens
+        ),
+        query_start_loc_cpu=query_start_loc_tensor,
     )
     assert _get_c128_boundary(metadata) is expected
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@torch.inference_mode()
+def test_c128_skip_is_not_baked_into_cuda_graph(monkeypatch):
+    """A graph captured on a batch with no C128 boundary must still launch the
+    compressor on replay; only eager steps may skip it."""
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v4 import compressor as compressor_mod
+    from vllm.models.deepseek_v4.compressor import DeepseekCompressor
+    from vllm.models.deepseek_v4.nvidia.ops import sparse_attn_compress_cutedsl
+
+    launches = torch.zeros(1, dtype=torch.int32, device="cuda")
+    monkeypatch.setattr(
+        compressor_mod, "_SAVE_PARTIAL_STATES_KERNEL", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        sparse_attn_compress_cutedsl,
+        "_SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL",
+        lambda **kw: launches.add_(1),
+    )
+
+    compressor = DeepseekCompressor.__new__(DeepseekCompressor)
+    torch.nn.Module.__init__(compressor)
+    compressor.head_dim, compressor.rope_head_dim = 512, 64
+    compressor.compress_ratio, compressor.coff, compressor.overlap = 128, 1, False
+    compressor.use_fp4_cache = False
+    compressor._use_two_stage_fused_compressor = False
+    compressor._quant_block = 64
+    compressor._token_stride = 576
+    compressor._scale_dim = 8
+    compressor.rms_norm_eps = 1e-6
+    compressor.ape = torch.zeros(128, 512, device="cuda")
+    compressor.norm = SimpleNamespace(weight=torch.ones(512, device="cuda"))
+    compressor.state_cache = SimpleNamespace(
+        prefix="state", kv_cache=torch.zeros(2, 8, 1024, device="cuda")
+    )
+    compressor.k_cache_prefix = "main"
+    kv_cache = torch.zeros(1, 64, 584, dtype=torch.uint8, device="cuda")
+    compressor._static_forward_context = {"main": SimpleNamespace(kv_cache=kv_cache)}
+
+    num_tokens = 4
+    slots = torch.arange(num_tokens, device="cuda")
+    metadata = {
+        "state": SimpleNamespace(
+            slot_mapping=slots,
+            block_table=torch.zeros(num_tokens, 1, dtype=torch.int32, device="cuda"),
+            block_size=8,
+            token_to_req_indices=torch.arange(
+                num_tokens, dtype=torch.int32, device="cuda"
+            ),
+            c128_boundary=False,
+        ),
+        "main": SimpleNamespace(slot_mapping=slots),
+    }
+    kv_score = torch.zeros(num_tokens, 1024, device="cuda")
+    positions = torch.arange(num_tokens, device="cuda")
+    rotary = SimpleNamespace(cos_sin_cache=torch.zeros(1, 64, device="cuda"))
+    context = ForwardContext(
+        {}, metadata, {}, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+    )
+
+    def run():
+        with override_forward_context(context):
+            compressor(kv_score, positions, rotary)
+
+    run()
+    torch.accelerator.synchronize()
+    assert launches.item() == 0, "eager step with no boundary should skip"
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    launches.zero_()
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert launches.item() == 1, "captured graph must not bake in the skip"
 
 
 # ── Test A: DeepseekV4 Attention path ──────────────────────────────────────────────
@@ -288,7 +1804,6 @@ def test_get_c128_boundary(starts, query_start_loc, expected):
 def test_deepseek_v4_attention_quant_cache_roundtrip(num_tokens: int, block_size: int):
     """compressed_kv → quantize_and_insert_k_cache → dequantize_and_gather_k_cache
     → compare against original."""
-
     HEAD_DIM = 512
     NOPE_DIM = 448
     HEAD_BYTES = 584  # 448 fp8 + 128 bf16 + 8 uint8 scale
@@ -498,10 +2013,12 @@ def test_dequantize_and_gather_k_cache(
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 17])
 @pytest.mark.parametrize("block_size", [16, 64])
-def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
-    """k → indexer_k_quant_and_cache → cp_gather_indexer_k_quant_cache
+@pytest.mark.parametrize("scale_fmt", ["ue8m0", "mxfp8"])
+def test_indexer_quant_cache_roundtrip(
+    num_tokens: int, block_size: int, scale_fmt: str
+):
+    """K → indexer_k_quant_and_cache → cp_gather_indexer_k_quant_cache
     → manual dequant → compare against original."""
-
     HEAD_DIM = 128
     QUANT_BLOCK_SIZE = 128
     # cache_stride = head_dim + (head_dim * 4 / quant_block_size) = 128 + 4 = 132
@@ -519,7 +2036,9 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
     )
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
 
-    ops.indexer_k_quant_and_cache(k, kv_cache, slot_mapping, QUANT_BLOCK_SIZE, "ue8m0")
+    ops.indexer_k_quant_and_cache(
+        k, kv_cache, slot_mapping, QUANT_BLOCK_SIZE, scale_fmt
+    )
 
     # ── Gather ──────────────────────────────────────────────────────────
     max_blocks_per_seq = num_blocks
@@ -542,7 +2061,12 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
 
     # ── Manual dequant ──────────────────────────────────────────────────
     k_fp8 = dst_k.view(torch.float8_e4m3fn).float()  # [num_tokens, 128]
-    scale = dst_scale.view(torch.float32)  # [num_tokens, 1]
+    if scale_fmt == "mxfp8":
+        # One UE8M0 byte per 32 elements, all equal to the token's scale.
+        assert (dst_scale == dst_scale[:, :1]).all()
+        scale = (dst_scale[:, :1].to(torch.int32) << 23).view(torch.float32)
+    else:
+        scale = dst_scale.view(torch.float32)  # [num_tokens, 1]
     k_recovered = k_fp8 * scale  # [num_tokens, 128]
 
     # ── Compare ─────────────────────────────────────────────────────────
@@ -565,7 +2089,6 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
 
 def test_indexer_gather_accepts_upper_bound_output():
     """Gather only exact cu_seq_lens even when dst is over-allocated."""
-
     head_dim = 128
     quant_block_size = 128
     cache_stride = head_dim + head_dim * 4 // quant_block_size
@@ -665,7 +2188,6 @@ def test_indexer_gather_accepts_upper_bound_output():
 
 def test_deepseek_v4_quant_magnitude_range():
     """Test that quantization handles a range of magnitudes correctly."""
-
     HEAD_DIM = 512
     NOPE_DIM = 448
     HEAD_BYTES = 584
@@ -812,9 +2334,29 @@ def _reference_kv_compress_norm_rope(
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 32])
 @pytest.mark.parametrize("kv_block_size", [16, 32])
-@pytest.mark.parametrize("use_fp4", [False, True])
-def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: bool):
+@pytest.mark.parametrize(
+    "use_fp4",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not (
+                    current_platform.is_cuda()
+                    and current_platform.is_device_capability_family(100)
+                ),
+                reason="MXFP4 indexer cache requires an SM100-family GPU",
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize("mx_scale", [False, True])
+def test_fused_kv_insert_indexer(
+    num_tokens: int, kv_block_size: int, use_fp4: bool, mx_scale: bool
+):
     """Fused K compress+norm+rope+quant+insert for the indexer KV cache."""
+    if use_fp4 and mx_scale:
+        pytest.skip("MX scales only change the FP8 cache")
     HEAD_DIM = 128
     ROPE_DIM = 64
     BLOCK_SIZE = 16
@@ -897,6 +2439,7 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         TOKEN_STRIDE=TOKEN_STRIDE,
         SCALE_DIM=SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
+        MX_SCALE=mx_scale,
         num_warps=1,
     )
 
@@ -940,12 +2483,18 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
             ), f"token {i}: FP8 bytes differ"
 
             scale_off = kv_block_size * TOKEN_STRIDE + pos * SCALE_DIM
-            actual_scale = kv_cache[blk, scale_off : scale_off + SCALE_DIM].view(
-                torch.float32
-            )
-            assert torch.equal(actual_scale, scale[i : i + 1]), (
-                f"token {i}: scale {actual_scale.item()} != {scale[i].item()}"
-            )
+            actual_scale = kv_cache[blk, scale_off : scale_off + SCALE_DIM]
+            if mx_scale:
+                # The power-of-two scale's exponent as 4 equal UE8M0 bytes.
+                ue8m0 = (scale[i : i + 1].view(torch.int32) >> 23).to(torch.uint8)
+                assert torch.equal(actual_scale, ue8m0.repeat(SCALE_DIM)), (
+                    f"token {i}: mx scale {actual_scale.tolist()} != {ue8m0.item()}"
+                )
+            else:
+                actual_scale = actual_scale.view(torch.float32)
+                assert torch.equal(actual_scale, scale[i : i + 1]), (
+                    f"token {i}: scale {actual_scale.item()} != {scale[i].item()}"
+                )
 
 
 @pytest.mark.parametrize("compress_ratio", [4, 128])
@@ -1215,3 +2764,273 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
     # RoPE (last 64): stored as bf16. The kernel recomputes the rotation, so it
     # is bf16-close to the reference rather than bit-exact (cf. test_cutedsl).
     torch.testing.assert_close(recovered[:, NOPE_DIM:], ref[:, NOPE_DIM:])
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm stream coverage")
+def test_v41_rocm_csa2_full_pipeline(monkeypatch):
+    """_forward_csa2_full: one fork, then K write and q-side after the join.
+
+    The default chain must run first on the current stream, the compressor
+    chain on aux 0 and the indexer weights projection on aux 1; the join must
+    publish both cache writes before _produce_k / forward_q run.
+    """
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
+    from vllm.models.deepseek_v41.compressor import DeepseekCompressor
+
+    torch.manual_seed(43)
+    num_tokens = 19
+    hidden_states = torch.randn(num_tokens, 1024, device="cuda")
+    positions = torch.arange(7, 26, device="cuda")
+    qr_kv = torch.zeros(num_tokens, 1536, device="cuda")
+    qr = torch.zeros(num_tokens, 4, device="cuda")
+    kv = torch.zeros(num_tokens, 512, device="cuda")
+    q = torch.zeros(num_tokens, 512, device="cuda")
+    latent = torch.ones(num_tokens, 512, dtype=torch.bfloat16, device="cuda")
+    weights = torch.randn(num_tokens, 32, device="cuda")
+    index_q = torch.full((num_tokens, 32, 128), 2.0, device="cuda")
+    index_q_scale = torch.full((num_tokens, 32), 3.0, device="cuda")
+    index_weights_out = torch.full((num_tokens, 32), 4.0, device="cuda")
+    main_cache = torch.full((1, 128, 584), 165, dtype=torch.uint8, device="cuda")
+    index_cache = torch.full((1, 128, 132), 165, dtype=torch.uint8, device="cuda")
+
+    order: list[str] = []
+    streams: dict[str, torch.cuda.Stream] = {}
+
+    compressor = DeepseekCompressor.__new__(DeepseekCompressor)
+    torch.nn.Module.__init__(compressor)
+    compressor.fused_wkv_wgate = SimpleNamespace(
+        weight=torch.randn(1024, 1024, device="cuda")
+    )
+
+    def compressor_forward(kv_score, positions_):
+        order.append("compressor")
+        streams["compressor"] = torch.cuda.current_stream()
+        return latent
+
+    def compressor_insert(latent_, positions_, rotary_emb):
+        order.append("insert_cache")
+        streams["insert_cache"] = torch.cuda.current_stream()
+        main_cache.fill_(5)
+
+    monkeypatch.setattr(compressor, "forward", compressor_forward)
+    monkeypatch.setattr(compressor, "insert_cache", compressor_insert)
+
+    def weights_proj(hidden_states_):
+        order.append("weights_proj")
+        streams["weights_proj"] = torch.cuda.current_stream()
+        return weights, None
+
+    def produce_k(latent_, positions_, rotary_emb):
+        order.append("produce_k")
+        streams["produce_k"] = torch.cuda.current_stream()
+        index_cache.fill_(7)
+
+    def forward_q(qr_, qr_scale, indexer_weights, positions_, rotary_emb):
+        order.append("forward_q")
+        streams["forward_q"] = torch.cuda.current_stream()
+        return index_q, index_q_scale, index_weights_out
+
+    indexer = SimpleNamespace(
+        weights_proj=weights_proj,
+        _produce_k=produce_k,
+        forward_q=forward_q,
+    )
+    rotary = SimpleNamespace(cos_sin_cache=torch.randn(32, 64, device="cuda"))
+    aux_streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+
+    def wq_b(qr_, qr_scale):
+        order.append("wq_b")
+        streams["wq_b"] = torch.cuda.current_stream()
+        return q
+
+    def qnorm_insert(q_, kv_, positions_, attn_metadata):
+        order.append("qnorm_insert")
+        streams["qnorm_insert"] = torch.cuda.current_stream()
+        return q_
+
+    attention = SimpleNamespace(
+        compressor=compressor,
+        indexer=indexer,
+        aux_stream_list=aux_streams,
+        ln_events=[torch.cuda.Event() for _ in range(4)],
+        rotary_emb=rotary,
+        indexer_rotary_emb=rotary,
+        n_local_heads=1,
+        head_dim=512,
+        _fused_wqa_wkv_gemm=lambda hidden_states_: qr_kv,
+        _split_qkv_and_norm=lambda qr_kv_: (qr, None, kv),
+        _wq_b_proj=wq_b,
+        _fused_qnorm_rope_kv_insert=qnorm_insert,
+    )
+
+    context = ForwardContext({}, {}, {})
+    with override_forward_context(context):
+        result = DeepseekV41ROCMAiterMLAAttention._forward_csa2_full(
+            attention, hidden_states, positions
+        )
+
+    q_out, kv_out, index_q_out, index_q_scale_out, index_weights_out_out = result
+    assert torch.equal(
+        q_out, q.view(num_tokens, attention.n_local_heads, attention.head_dim)
+    )
+    assert torch.equal(kv_out, kv)
+    assert torch.equal(index_q_out, index_q)
+    assert torch.equal(index_q_scale_out, index_q_scale)
+    assert torch.equal(index_weights_out_out, index_weights_out)
+    # Join publishes the aux-0 cache insert and orders the post-join K write.
+    assert torch.equal(main_cache, torch.full_like(main_cache, 5))
+    assert torch.equal(index_cache, torch.full_like(index_cache, 7))
+
+    assert order == [
+        "wq_b",
+        "qnorm_insert",
+        "compressor",
+        "insert_cache",
+        "weights_proj",
+        "produce_k",
+        "forward_q",
+    ]
+    current = torch.cuda.current_stream()
+    for name in ("wq_b", "qnorm_insert", "produce_k", "forward_q"):
+        assert streams[name] == current, name
+    for name in ("compressor", "insert_cache"):
+        assert streams[name] == aux_streams[0], name
+    assert streams["weights_proj"] == aux_streams[1]
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm stream coverage")
+def test_v41_rocm_csa2_reindex_pipeline():
+    """_forward_csa2_reindex: serial projections, then SWA q path vs q-side."""
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
+
+    torch.manual_seed(45)
+    num_tokens = 19
+    hidden_states = torch.randn(num_tokens, 1024, device="cuda")
+    positions = torch.arange(7, 26, device="cuda")
+    qr_kv = torch.zeros(num_tokens, 1536, device="cuda")
+    qr = torch.zeros(num_tokens, 4, device="cuda")
+    kv = torch.zeros(num_tokens, 512, device="cuda")
+    q = torch.zeros(num_tokens, 512, device="cuda")
+    indexer_weights = torch.randn(num_tokens, 32, device="cuda")
+    index_q = torch.full((num_tokens, 32, 128), 2.0, device="cuda")
+    index_q_scale = torch.full((num_tokens, 32), 3.0, device="cuda")
+    index_weights_out = torch.full((num_tokens, 32), 4.0, device="cuda")
+
+    order: list[str] = []
+    streams: dict[str, torch.cuda.Stream] = {}
+
+    def forward_q(qr_, qr_scale, indexer_weights_, positions_, rotary_emb):
+        order.append("forward_q")
+        streams["forward_q"] = torch.cuda.current_stream()
+        return index_q, index_q_scale, index_weights_out
+
+    indexer = SimpleNamespace(forward_q=forward_q)
+    rotary = SimpleNamespace(cos_sin_cache=torch.randn(32, 64, device="cuda"))
+    aux0 = torch.cuda.Stream()
+
+    def wq_b(qr_, qr_scale):
+        order.append("wq_b")
+        streams["wq_b"] = torch.cuda.current_stream()
+        return q
+
+    def qnorm_insert(q_, kv_, positions_, attn_metadata):
+        order.append("qnorm_insert")
+        streams["qnorm_insert"] = torch.cuda.current_stream()
+        return q_
+
+    attention = SimpleNamespace(
+        indexer=indexer,
+        aux_stream_list=[aux0],
+        ln_events=[torch.cuda.Event() for _ in range(2)],
+        indexer_rotary_emb=rotary,
+        n_local_heads=1,
+        head_dim=512,
+        _run_parallel_input_projections=lambda hidden_states_: (
+            qr_kv,
+            None,
+            indexer_weights,
+        ),
+        _split_qkv_and_norm=lambda qr_kv_: (qr, None, kv),
+        _wq_b_proj=wq_b,
+        _fused_qnorm_rope_kv_insert=qnorm_insert,
+    )
+
+    context = ForwardContext({}, {}, {})
+    with override_forward_context(context):
+        result = DeepseekV41ROCMAiterMLAAttention._forward_csa2_reindex(
+            attention, hidden_states, positions
+        )
+
+    q_out, kv_out, index_q_out, index_q_scale_out, index_weights_out_out = result
+    assert torch.equal(
+        q_out, q.view(num_tokens, attention.n_local_heads, attention.head_dim)
+    )
+    assert torch.equal(kv_out, kv)
+    assert torch.equal(index_q_out, index_q)
+    assert torch.equal(index_q_scale_out, index_q_scale)
+    assert torch.equal(index_weights_out_out, index_weights_out)
+
+    assert order == ["wq_b", "qnorm_insert", "forward_q"]
+    current = torch.cuda.current_stream()
+    for name in ("wq_b", "qnorm_insert"):
+        assert streams[name] == current, name
+    assert streams["forward_q"] == aux0
+
+
+@pytest.mark.parametrize("quant_tuple", [False, True])
+def test_v41_indexer_forward_q(quant_tuple):
+    """forward_q runs wq_b then the fused RoPE/quant and unpacks both shapes."""
+    from unittest.mock import patch
+
+    from vllm.models.deepseek_v41.attention import DeepseekV4Indexer
+
+    num_tokens, n_head, head_dim = 5, 32, 128
+    qr = torch.randn(num_tokens, 1280)
+    q = torch.randn(num_tokens, n_head * head_dim)
+    positions = torch.arange(num_tokens)
+    indexer_weights = torch.randn(num_tokens, n_head)
+    rotary = SimpleNamespace(cos_sin_cache=torch.randn(32, 64))
+    fake = SimpleNamespace(
+        n_head=n_head,
+        head_dim=head_dim,
+        softmax_scale=head_dim**-0.5,
+        use_fp4_kv=False,
+        indexer_weights_dtype=torch.float32,
+        _wq_b_proj=lambda qr_, qr_scale: q,
+    )
+    q_quant = torch.randn(num_tokens, n_head, head_dim)
+    q_scale = torch.randn(num_tokens, n_head)
+    weights_out = torch.randn(num_tokens, n_head)
+    if quant_tuple:
+        fused_return = ((q_quant, q_scale), weights_out)
+        expected = (q_quant, q_scale, weights_out)
+    else:
+        fused_return = (q_quant, weights_out)
+        expected = (q_quant, None, weights_out)
+
+    with patch(
+        "vllm.models.deepseek_v41.attention.fused_indexer_q_rope_quant",
+        return_value=fused_return,
+    ) as mock_fused:
+        result = DeepseekV4Indexer.forward_q(
+            fake, qr, None, indexer_weights, positions, rotary
+        )
+
+    assert torch.equal(result[0], expected[0])
+    assert (result[1] is None) == (expected[1] is None)
+    if expected[1] is not None:
+        assert torch.equal(result[1], expected[1])
+    assert torch.equal(result[2], expected[2])
+    args = mock_fused.call_args.args
+    assert args[0] is positions
+    torch.testing.assert_close(args[1], q.view(-1, n_head, head_dim))
+    assert args[2] is rotary.cos_sin_cache
+    assert args[3] is indexer_weights
+    assert args[4] == head_dim**-0.5
+    assert args[5] == n_head**-0.5
+    assert mock_fused.call_args.kwargs == {
+        "use_fp4": False,
+        "weights_out_dtype": torch.float32,
+    }
