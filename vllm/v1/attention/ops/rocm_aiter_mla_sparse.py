@@ -1280,17 +1280,22 @@ def rocm_aiter_sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
-            cp_gather_indexer_k_quant_cache_triton(
-                kv_cache,
-                k_fp8,
-                k_scale,
-                chunk.block_table,
-                chunk.cu_seq_lens,
-                token_to_seq=chunk.token_to_seq,
-                cache_layout=(
-                    "NORMAL" if _indexer_k_is_c4a_block_flat(compress_ratio) else None
-                ),
-            )
+            # Query-split sub-chunks of one request share the K workspace
+            # filled by the first sub-chunk.
+            if not chunk.skip_kv_gather:
+                cp_gather_indexer_k_quant_cache_triton(
+                    kv_cache,
+                    k_fp8,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
+                    token_to_seq=chunk.token_to_seq,
+                    cache_layout=(
+                        "NORMAL"
+                        if _indexer_k_is_c4a_block_flat(compress_ratio)
+                        else None
+                    ),
+                )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
