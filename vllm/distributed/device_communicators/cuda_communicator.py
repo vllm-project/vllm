@@ -31,6 +31,10 @@ logger = init_logger(__name__)
 # non-registered output for ReduceScatter (ncclSymSendRegRecvNonreg).
 NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION = 22902
 
+# Per-rank cap for ROCm TP all-gathers on AITER's kernel, as for the CUDA
+# custom all-gather. Larger gathers stay on RCCL.
+AITER_TP_ALL_GATHER_MAX_SIZE = 2 * 1024 * 1024
+
 
 class CudaCommunicator(DeviceCommunicatorBase):
     def __init__(
@@ -497,8 +501,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # than the manual pynccl + torch.empty + movedim + reshape path below,
         # which adds a per-call output allocation and (for dim != 0) an extra
         # copy on every step. This is on the hot path for TP forward passes, so
-        # keep ROCm on the base-class collective to avoid a decode regression.
+        # keep ROCm on the base-class collective to avoid a decode regression,
+        # unless AITER's all-gather takes the input.
         if current_platform.is_rocm():
+            out = self._aiter_all_gather(input_, dim)
+            if out is not None:
+                return out
             return super().all_gather(input_, dim)
 
         input_size = input_.size()
@@ -510,6 +518,43 @@ class CudaCommunicator(DeviceCommunicatorBase):
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         return output_tensor.reshape(
+            input_size[:dim]
+            + (self.world_size * input_size[dim],)
+            + input_size[dim + 1 :]
+        )
+
+    def _aiter_all_gather(self, input_: torch.Tensor, dim: int) -> torch.Tensor | None:
+        """TP all-gather on AITER's IPC kernel, or None if it cannot take input_.
+
+        The kernel gathers along the first or the last dim, so a later dim is
+        gathered as the last dim of a 2-D view whose rows are input_.shape[dim:].
+        Only dtype, shape and contiguity decide, so every TP rank takes the same
+        path.
+        """
+        aiter_comm = self.aiter_ar_comm
+        if (
+            not self.use_aiter_allreduce
+            or aiter_comm is None
+            # AITER's all-gather kernel has no 6-GPU variant.
+            or self.world_size not in (2, 4, 8)
+            or input_.dtype not in (torch.bfloat16, torch.float16, torch.float32)
+            or input_.numel() == 0
+            or input_.nbytes > AITER_TP_ALL_GATHER_MAX_SIZE
+            or not input_.is_contiguous()
+            or not aiter_comm.should_custom_ag(input_)
+        ):
+            return None
+        input_size = input_.size()
+        if dim > 0:
+            row = input_size[dim:].numel()
+            # The kernel moves whole 16-byte packs of each row.
+            if row * input_.element_size() % 16 != 0:
+                return None
+            input_ = input_.view(-1, row)
+        # Copy-in even under capture: a TP input may be a persistent buffer that
+        # cannot be IPC-registered, and the all-reduce graph buffers stay as is.
+        output = aiter_comm.all_gather_unreg(input_, dim=0 if dim == 0 else -1)
+        return output.view(
             input_size[:dim]
             + (self.world_size * input_size[dim],)
             + input_size[dim + 1 :]
