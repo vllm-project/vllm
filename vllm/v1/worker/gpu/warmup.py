@@ -250,6 +250,11 @@ def warmup_kernels(
         if adaptive_sampling:
             assert rejection_sampler is not None
             rejection_sampler.enable_adaptive_verification = True
+    acceptance_estimator = getattr(
+        model_runner.speculator, "acceptance_estimator", None
+    )
+    if acceptance_estimator is not None:
+        acceptance_estimator.warmup()
 
 
 def _warmup_kernels(
