@@ -6,6 +6,7 @@ from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning.hunyuan_a13b_reasoning_parser import HunyuanA13BReasoningParser
 
 parser_name = "hunyuan_a13b"
 START_REASONING = "<think>\n"
@@ -166,3 +167,84 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+def _new_parser() -> HunyuanA13BReasoningParser:
+    return HunyuanA13BReasoningParser(tokenizer)
+
+
+END_DETECTION_OUTPUTS = [
+    pytest.param(SIMPLE_REASONING["output"], id="simple_reasoning"),
+    pytest.param(NO_REASONING_QUICK_THOUGHT["output"], id="quick_thought"),
+    pytest.param(MULTIPLE_LINES["output"], id="multiple_lines"),
+    pytest.param(COMPLETE_REASONING_WITH_SYMBOL["output"], id="with_symbol"),
+]
+
+
+@pytest.mark.parametrize("output", END_DETECTION_OUTPUTS)
+def test_reasoning_end_gate_matches_streaming_extraction(output: str):
+    """The structured-output manager uses its own parser instance and never
+    calls `extract_reasoning_streaming`, so end detection must work from token
+    ids alone and fire on the same token where extraction switches to the
+    answer."""
+    ids = tokenizer.encode(output, add_special_tokens=False)
+
+    extractor = _new_parser()
+    extraction_end = None
+    for i in range(1, len(ids) + 1):
+        extractor.extract_reasoning_streaming(
+            tokenizer.decode(ids[: i - 1]),
+            tokenizer.decode(ids[:i]),
+            tokenizer.decode(ids[i - 1 : i]),
+            ids[: i - 1],
+            ids[:i],
+            ids[i - 1 : i],
+        )
+        if extractor.current_state == "response":
+            extraction_end = i
+            break
+    assert extraction_end is not None
+
+    gate = _new_parser()
+    gate_steps = [
+        i
+        for i in range(1, len(ids) + 1)
+        if gate.is_reasoning_end_streaming(ids[:i], ids[i - 1 : i])
+    ]
+    assert gate_steps == [extraction_end]
+    assert not gate.is_reasoning_end(ids[: extraction_end - 1])
+    assert gate.is_reasoning_end(ids[:extraction_end])
+
+
+def test_is_reasoning_end_streaming_marker_across_steps():
+    ids = tokenizer.encode(SIMPLE_REASONING["output"], add_special_tokens=False)
+    parser = _new_parser()
+    end = len(tokenizer.encode(COMPLETE_REASONING["output"], add_special_tokens=False))
+
+    # Several tokens accepted at once, e.g. speculative decoding.
+    assert parser.is_reasoning_end_streaming(ids[:end], iter(ids[end - 3 : end]))
+    assert not parser.is_reasoning_end_streaming(ids[: end + 2], ids[end : end + 2])
+
+
+def test_is_reasoning_end_ignores_prior_turns_in_prompt():
+    """Earlier assistant turns keep `<think>...</answer>` in the prompt; they
+    must not start the grammar for the current turn."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": SIMPLE_REASONING["output"]},
+        {"role": "user", "content": "again"},
+    ]
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+    parser = _new_parser()
+
+    assert not parser.is_reasoning_end(prompt_ids)
+    assert not parser.is_reasoning_end(
+        prompt_ids + tokenizer.encode(START_REASONING, add_special_tokens=False)
+    )
+    assert parser.is_reasoning_end(
+        prompt_ids
+        + tokenizer.encode(COMPLETE_REASONING["output"], add_special_tokens=False)
+    )
