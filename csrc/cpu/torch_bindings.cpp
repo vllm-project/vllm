@@ -78,7 +78,8 @@ void fused_experts_cpu(at::Tensor& out, at::Tensor& hidden_states,
                        const std::optional<at::Tensor>& w1_bias,
                        const std::optional<at::Tensor>& w2_bias,
                        const std::optional<double>& alpha,
-                       const std::optional<double>& limit, bool is_vnni);
+                       const std::optional<double>& limit, bool is_vnni,
+                       int64_t act_method);
 
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,
@@ -398,6 +399,13 @@ torch::Tensor fused_gumbel_argmax(const torch::Tensor& logits,
 
 torch::Tensor greedy_argmax(const torch::Tensor& logits);
 
+void static_scaled_fp8_quant(
+    torch::Tensor& out, const torch::Tensor& input, const torch::Tensor& scale,
+    const std::optional<std::vector<int64_t>>& group_shape);
+void dynamic_per_token_scaled_fp8_quant(
+    torch::Tensor& out, const torch::Tensor& input, torch::Tensor& scale,
+    const std::optional<torch::Tensor>& scale_ub);
+
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
@@ -661,7 +669,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
       "Tensor? w1_zero, Tensor? w2_zero, Tensor? a1_scale, int[]? block_size, "
       "Tensor? w1_bias, Tensor? w2_bias, float? alpha, float? limit, "
-      "bool is_vnni) -> "
+      "bool is_vnni, int act_method) -> "
       "()");
   ops.impl("fused_experts_cpu", torch::kCPU, &fused_experts_cpu);
   ops.def(
@@ -908,9 +916,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &cpu_attention_with_kv_cache);
 
   // placeholders
-  ops.def("static_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def(
+      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
+      "int[]? group_shape=None) -> ()");
+  ops.impl("static_scaled_fp8_quant", torch::kCPU, &static_scaled_fp8_quant);
   ops.def("dynamic_scaled_fp8_quant() -> ()", placeholder_op);
-  ops.def("dynamic_per_token_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def(
+      "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! scale, Tensor? scale_ub) -> ()");
+  ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCPU,
+           &dynamic_per_token_scaled_fp8_quant);
 
   // WNA16
 #if defined(__AVX512F__) || defined(__riscv_v) || defined(__s390x__) || \

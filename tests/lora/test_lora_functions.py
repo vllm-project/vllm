@@ -9,6 +9,7 @@ from vllm.entrypoints.launchers.api_server.entry import (
     build_async_engine_client_from_engine_args,
 )
 from vllm.lora.request import LoRARequest
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
@@ -82,11 +83,14 @@ async def test_lora_functions_async():
         enforce_eager=True,
     )
 
-    async def run_check(fn, args, expected: list):
-        await fn(args)
-        assert set(await llm.list_loras()) == set(expected)
-
     async with build_async_engine_client_from_engine_args(engine_args) as llm:
+        # The builder always yields an AsyncLLM; EngineClient only declares add_lora.
+        assert isinstance(llm, AsyncLLM)
+
+        async def run_check(fn, args, expected: list):
+            await fn(args)
+            assert set(await llm.list_loras()) == set(expected)
+
         await run_check(llm.add_lora, make_lora_request(1), [1])
         await run_check(llm.add_lora, make_lora_request(2), [1, 2])
 
