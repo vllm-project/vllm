@@ -144,6 +144,45 @@ You can override the number of iterations in the algorithm by setting `--workloa
     In general, `--workload-var max_concurrency` produces more reliable results because it directly controls the workload imposed on the vLLM engine.
     Nevertheless, we default to `--workload-var request_rate` to maintain similar behavior as GuideLLM.
 
+### Simulated Sweep
+
+`vllm bench sweep simulate` runs the combinations of `vllm bench sweep serve` with [simulated execution](../features/simulated_execution.md), without the deployment's GPUs, in parallel over the visible devices (`-j`). It accepts the options of `vllm bench sweep serve`, ignoring those that only concern a real server or repeated runs, and sends the requests `vllm bench serve` would, so the same files can check a picked configuration on real hardware.
+
+`--simulation-config` sets the timing model, typically a replay of a step log recorded on the target deployment (`record_step_timing`); combinations can override its keys as `simulation_config.<key>`. Set `--kv-cache-memory-bytes` in `--serve-cmd` to the real deployment's.
+
+With `--slo`, each combination is searched for the highest request rate meeting all the given upper bounds: bracketed from the throughput of a run with all requests sent at once, then bisected `--search-iters` times.
+
+```bash
+vllm bench sweep simulate \
+    --serve-cmd 'vllm serve Qwen/Qwen3-8B --kv-cache-memory-bytes 21474836480' \
+    --bench-cmd 'vllm bench serve --model Qwen/Qwen3-8B --dataset-name random --random-input-len 1024 --random-output-len 256 --num-prompts 400 --ignore-eos' \
+    --serve-params benchmarks/serve_hparams.json \
+    --simulation-config '{"timing": "replay", "timing_args": {"path": "steps.jsonl"}}' \
+    --slo p99_ttft_ms=500,mean_tpot_ms=8 \
+    -j 8 \
+    --output-dir benchmarks/results \
+    --experiment-name demo-sim
+```
+
+Each run is saved as `summary.json` with the metrics of `vllm bench serve`, so [the plots](#visualization) work on the results. Each combination's best run is saved as `result.json` with `max_request_rate`, and `slo_summary.csv` ranks the combinations by output throughput per GPU.
+
+- **`--frontend-latency-ms`**: the server latency outside the engine core (HTTP, API server), added to TTFT and end-to-end latency. Calibrate it as the real minus the simulated median TTFT at a rate without queueing.
+- **Disaggregated deployments**: `_num_prefill` and `_num_decode` simulate that many prefill and decode instances (NIXL pull mode, one rank each). Keys prefixed with `_prefill.` or `_decode.` apply to one role, such as `_prefill.simulation_config.timing_args.path`. `--handoff-latency-ms` is the proxy's time from a finished prefill to the decode instance. `gpu_count` counts all instances (pass `--gpu-count-var gpu_count` to `plot_pareto`).
+
+    ```json
+    [
+        {"_benchmark_name": "1p2d", "_num_prefill": 1, "_num_decode": 2},
+        {"_benchmark_name": "2p1d", "_num_prefill": 2, "_num_decode": 1}
+    ]
+    ```
+
+- **`--fill-kv-caches`**: uses up each instance's KV cache once before a combination's first run, so that the runs see a long-running server's scattered KV blocks, which slow a disaggregated decode instance's reads.
+
+A replayed step larger than any recorded one is underestimated. Each run reports such lookups (`timing_lookups_outside_range`), and the sweep warns about runs with many, so record under the heaviest load the search will simulate. Fit `kv_transfer_timing` to a recording where transfers rarely overlap, as the simulated link adds contention itself.
+
+!!! note
+    The simulated clocks need a single-rank engine, so multi-rank combinations need `"clock": "real"` and run in real time. `--max-concurrency` and multimodal datasets are not supported, nor are ramp-up and timed traces with `--slo`.
+
 ## Startup Benchmark
 
 `vllm bench sweep startup` runs `vllm bench startup` across parameter combinations to compare cold/warm startup time for different engine settings.

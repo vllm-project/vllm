@@ -12,7 +12,7 @@ and worker classes; the connector classes here only forward calls.
 * ``NixlConnector`` – backward-compatible alias for :class:`NixlPullConnector`.
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
@@ -350,6 +350,8 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
 class NixlPullConnector(NixlBaseConnector):
     """Pull-based (READ) NIXL KV transfer connector."""
 
+    worker_cls: ClassVar[type[NixlPullConnectorWorker]] = NixlPullConnectorWorker
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -364,7 +366,7 @@ class NixlPullConnector(NixlBaseConnector):
             self.connector_worker = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = NixlPullConnectorWorker(
+            self.connector_worker = self.worker_cls(
                 vllm_config, self.engine_id, kv_cache_config
             )
 
@@ -383,13 +385,15 @@ class NixlPullConnector(NixlBaseConnector):
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        assert isinstance(self.connector_worker, NixlPullConnectorWorker)
+        assert isinstance(self.connector_worker, self.worker_cls)
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
 
 
 class NixlPushConnector(NixlBaseConnector):
     """Push-based (WRITE) NIXL KV transfer connector."""
+
+    worker_cls: ClassVar[type[NixlPushConnectorWorker]] = NixlPushConnectorWorker
 
     def __init__(
         self,
@@ -409,7 +413,7 @@ class NixlPushConnector(NixlBaseConnector):
                 vllm_config, self.engine_id, kv_cache_config
             )
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = NixlPushConnectorWorker(
+            self.connector_worker = self.worker_cls(
                 vllm_config, self.engine_id, kv_cache_config
             )
         else:

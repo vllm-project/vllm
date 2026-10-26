@@ -65,12 +65,14 @@ class ActiveKVConnector(KVConnector):
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
-        # Register kv caches with KV Connector if applicable.
-        self.kv_connector.register_kv_caches(kv_caches_dict)
-        self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
+        self.register_kv_caches(kv_caches_dict)
 
         self._pending_load_kwargs: dict[str, Any] | None = None
         self._disabled = False
+
+    def register_kv_caches(self, kv_caches_dict: dict[str, torch.Tensor]) -> None:
+        self.kv_connector.register_kv_caches(kv_caches_dict)
+        self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def pre_forward(
         self,
