@@ -396,9 +396,10 @@ def clamp_prompt_logprobs(
 def drop_misaligned_logprobs(
     token_ids: Sequence[int], top_logprobs: Sequence[dict[int, Logprob] | None]
 ) -> Sequence[dict[int, Logprob] | None]:
-    """Return `top_logprobs`, or one None per token if it is shorter than
-    `token_ids`, since the alignment is then unknown."""
-    if len(top_logprobs) >= len(token_ids):
+    """Return `top_logprobs`, or one None per token if the lengths differ.
+    A missing or extra row may be anywhere, not only at the end, so no row
+    can be trusted to line up with its token."""
+    if len(top_logprobs) == len(token_ids):
         return top_logprobs
     logger.warning(
         "Output has %d tokens but %d logprob positions; returning it without logprobs.",

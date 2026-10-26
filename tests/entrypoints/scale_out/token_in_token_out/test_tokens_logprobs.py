@@ -179,19 +179,32 @@ def test_text_logprobs_clamp_a_nan_logprob():
     "create_logprobs",
     [ServingTokens._create_tokens_logprobs, ServingTokens._create_text_logprobs],
 )
-def test_misaligned_logprobs_are_dropped_and_logged(create_logprobs):
-    """With fewer logprob positions than tokens the alignment is unknown, so the
-    output gets no logprobs, and both lengths are logged to trace the cause."""
+@pytest.mark.parametrize(
+    "top_logprobs",
+    [
+        # Token 11's row is missing, so token 11 would get token 12's row.
+        [
+            {10: Logprob(-0.1, rank=1)},
+            {12: Logprob(-0.3, rank=1), 11: Logprob(-2.0, rank=2)},
+        ],
+        # An extra row before token 11's, so token 11 would get the extra row.
+        [
+            {10: Logprob(-0.1, rank=1)},
+            {12: Logprob(-0.3, rank=1), 11: Logprob(-2.0, rank=2)},
+            {11: Logprob(-0.2, rank=1)},
+            {12: Logprob(-0.3, rank=1)},
+        ],
+    ],
+    ids=["missing_row", "extra_row"],
+)
+def test_misaligned_logprobs_are_dropped_and_logged(create_logprobs, top_logprobs):
+    """When the logprob positions and tokens differ in length the alignment is
+    unknown, so the output gets no logprobs, and both lengths are logged."""
     with patch("vllm.entrypoints.generate.base.serving.logger") as logger:
         result = create_logprobs(
-            None,
-            token_ids=[10, 11, 12],
-            top_logprobs=[
-                {10: Logprob(-0.1, rank=1)},
-                {12: Logprob(-0.3, rank=1), 11: Logprob(-2.0, rank=2)},
-            ],
+            None, token_ids=[10, 11, 12], top_logprobs=top_logprobs
         )
 
     assert [entry.logprob for entry in result.content] == [-9999.0] * 3
     logger.warning.assert_called_once()
-    assert logger.warning.call_args.args[1:] == (3, 2)
+    assert logger.warning.call_args.args[1:] == (3, len(top_logprobs))
