@@ -17,8 +17,10 @@ import math
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip("CUDA required for Gumbel sampler tests", allow_module_level=True)
 
 from vllm.triton_utils import tl, triton
@@ -28,7 +30,7 @@ from vllm.v1.worker.gpu.sample.gumbel import (
     murmur3_hash32,
 )
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 VOCAB_SIZE = 200_000
 NUM_SAMPLES = 500_000
 # Dominant token is exp(HEAD_LOG_GAP)x larger than the unit-count tail, so the
