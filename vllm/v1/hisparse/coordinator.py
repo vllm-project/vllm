@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -187,6 +188,14 @@ class HiSparseCoordinator:
         self._copy_by_block: dict[int, BlockHashWithGroupId] = {}
         # Unpinned GPU block id -> (request, page) pairs still reading it.
         self._owners: dict[int, set[tuple[str, int]]] = {}
+        # TODO: Temporary workaround for a race in P/D: an RDMA transfer into a
+        # reused indexer page can overwrite a resident page an in-flight step
+        # still reads. Drop such pages at once and unpin them after the steps
+        # already scheduled are processed.
+        self.defer_unpins = False
+        self.sched_step_seq = 0
+        self.processed_step_seq = 0
+        self.deferred_unpins: deque[tuple[int, list[KVCacheBlock]]] = deque()
 
     def _get_request_state(self, request_id: str) -> _HiSparseRequestState:
         state = self.request_states.get(request_id)
@@ -363,6 +372,11 @@ class HiSparseCoordinator:
         blocks = self._resident_page_blocks(request_id, page_idx)
         if blocks is None:
             return False
+        if self.defer_unpins:
+            self._lose_page(request_id, page_idx)
+            self._unpin_after_scheduled_steps(blocks)
+            state.pinned_clean.discard(page_idx)
+            return True
         for manager, block in zip(self.resident_managers, blocks):
             self._owners.setdefault(block.block_id, set()).add((request_id, page_idx))
             manager.block_pool.unpin_blocks([block], self._on_block_reused)
@@ -381,6 +395,26 @@ class HiSparseCoordinator:
         state.pinned_clean.add(page_idx)
         if self._can_read_from_host(request_id):
             self._unpin_page(request_id, state, page_idx)
+
+    def _unpin_after_scheduled_steps(self, blocks: list[KVCacheBlock]) -> None:
+        self.deferred_unpins.append((self.sched_step_seq, blocks))
+        self._drain_deferred_unpins()
+
+    def step_scheduled(self) -> None:
+        self.sched_step_seq += 1
+
+    def step_processed(self) -> None:
+        self.processed_step_seq += 1
+        self._drain_deferred_unpins()
+
+    def _drain_deferred_unpins(self) -> None:
+        while (
+            self.deferred_unpins
+            and self.deferred_unpins[0][0] <= self.processed_step_seq
+        ):
+            _, blocks = self.deferred_unpins.popleft()
+            assert self.gpu_pool is not None
+            self.gpu_pool.unpin_blocks(blocks, self._on_block_reused)
 
     def _on_block_reused(self, block: KVCacheBlock) -> None:
         host_hash = self._copy_by_block.get(block.block_id)
@@ -751,7 +785,7 @@ class HiSparseCoordinator:
 
     def has_pending_reclamation(self) -> bool:
         """Whether an in-flight spill will free GPU or host blocks on completion."""
-        return any(
+        return bool(self.deferred_unpins) or any(
             pending.host_block.ref_cnt == 1
             or (
                 pending.page[0] in self.request_states
@@ -876,6 +910,7 @@ class HiSparseCoordinator:
             # Preemption can cancel a scheduled forward after its spills were
             # planned, so its copies do not prove that the KV was computed.
             state.publication = None
+        deferred: list[KVCacheBlock] = []
         for manager in self.resident_managers:
             blocks = manager.get_residency_row(request_id)
             # Tail first, so a prefix loses its tail pages before its head.
@@ -891,10 +926,15 @@ class HiSparseCoordinator:
                     page_idx in state.valid_pages
                     and page_idx not in state.pending_pages
                 ):
-                    manager.block_pool.unpin_blocks([block], self._on_block_reused)
+                    if self.defer_unpins:
+                        deferred.append(block)
+                    else:
+                        manager.block_pool.unpin_blocks([block], self._on_block_reused)
                 else:
                     continue
                 manager.drop_resident_page(request_id, page_idx)
+        if deferred:
+            self._unpin_after_scheduled_steps(deferred)
 
 
 def get_hisparse_coordinator(
