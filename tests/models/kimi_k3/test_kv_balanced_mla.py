@@ -8,12 +8,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.kimi_k3.nvidia.kv_balanced_mla.layer import (
-    AUTO,
-    KV_BALANCED,
-    mla_decode_backend,
-)
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 LATENT, ROPE, PAGE = 512, 64, 64
 SCALE = 1.0 / math.sqrt(192)
@@ -25,18 +21,29 @@ requires_sm100 = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize(
-    ("extra", "expected"),
-    [(None, AUTO), ({}, AUTO), ({"mla_decode_backend": "kv_balanced"}, KV_BALANCED)],
-)
-def test_mla_decode_backend(extra, expected):
-    assert mla_decode_backend(SimpleNamespace(additional_config=extra)) == expected
+def test_kv_balanced_backend_is_registered_and_opt_in():
+    """KIMI_K3_KV_BALANCED_MLA resolves to the TOKENSPEED_MLA backend with the
+    KV-balanced decode, and the platforms never pick it on their own."""
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend import (
+        KvBalancedMLABackend,
+        KvBalancedMLAImpl,
+    )
+    from vllm.platforms.cuda import _get_backend_priorities
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.mla.tokenspeed_mla import (
+        TokenspeedMLABackend,
+        TokenspeedMLAImpl,
+    )
 
-
-def test_mla_decode_backend_rejects_unknown():
-    with pytest.raises(ValueError, match="mla_decode_backend"):
-        mla_decode_backend(
-            SimpleNamespace(additional_config={"mla_decode_backend": "flash"})
+    backend = AttentionBackendEnum.KIMI_K3_KV_BALANCED_MLA
+    assert backend.get_class() is KvBalancedMLABackend
+    assert KvBalancedMLABackend.get_name() == backend.name
+    assert issubclass(KvBalancedMLABackend, TokenspeedMLABackend)
+    assert issubclass(KvBalancedMLABackend.get_impl_cls(), TokenspeedMLAImpl)
+    assert KvBalancedMLABackend.get_impl_cls() is KvBalancedMLAImpl
+    for major in (9, 10, 12):
+        assert backend not in _get_backend_priorities(
+            use_mla=True, device_capability=DeviceCapability(major, 0)
         )
 
 
@@ -250,9 +257,9 @@ def test_kv_balanced_plan_replays_in_cuda_graph():
 
 
 def _layer(monkeypatch, lengths, cp, lse):
-    """A KV-balanced MLA layer over random shards of ``lengths`` on rank ``cp[1]``,
-    with the backend decode returning "backend"."""
-    from vllm.models.kimi_k3.nvidia.kv_balanced_mla import layer
+    """The KV-balanced decode of an MLA layer over random shards of ``lengths`` on
+    rank ``cp[1]``."""
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla import decode
 
     device = torch.device("cuda")
     heads, q = 96, 5
@@ -264,10 +271,10 @@ def _layer(monkeypatch, lengths, cp, lse):
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         attention_config=SimpleNamespace(tokenspeed_mla_min_split_kv=1),
     )
-    monkeypatch.setattr(layer, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(layer, "max_decode_query_len", lambda _: q)
-    monkeypatch.setattr(layer, "_SHAPES", {})
-    monkeypatch.setattr(layer, "_PLANNED", {})
+    monkeypatch.setattr(decode, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(decode, "max_decode_query_len", lambda _: q)
+    monkeypatch.setattr(decode, "_SHAPES", {})
+    monkeypatch.setattr(decode, "_PLANNED", {})
     local = [_shard_len(n, cp) for n in lengths]
     cache, block_table = _paged(
         [torch.randn(n, LATENT + ROPE, device=device) / 2 for n in local], device
@@ -278,15 +285,8 @@ def _layer(monkeypatch, lengths, cp, lse):
         dcp_world_size=world,
         dcp_rank=rank,
         need_to_return_lse_for_decode=lse,
-        forward_mqa=lambda *args: "backend",
     )
-    mla = SimpleNamespace(
-        num_local_heads=heads // world,
-        impl=impl,
-        _q_scale_float=1.0,
-        _k_scale_float=1.0,
-        _attn_read_kv_cache=lambda: cache,
-    )
+    attn_layer = SimpleNamespace(_q_scale_float=1.0, _k_scale_float=1.0)
     metadata = SimpleNamespace(
         decode=SimpleNamespace(
             seq_lens=as_tensor(local),
@@ -300,7 +300,11 @@ def _layer(monkeypatch, lengths, cp, lse):
     query = (torch.randn(len(lengths) * q, heads, LATENT + ROPE, device=device) / 2).to(
         torch.float8_e4m3fn
     )
-    mqa = layer.TokenspeedKvBalancedMqa(mla)
+    kv_balanced = decode.KvBalancedDecode(heads // world)
+
+    def mqa(query, metadata):
+        """The decode, or None for a step left to TokenSpeed's decode."""
+        return kv_balanced(impl, query, cache, metadata, attn_layer)
 
     def reference():
         decode = metadata.decode
@@ -315,7 +319,7 @@ def _layer(monkeypatch, lengths, cp, lse):
             cp,
         )
 
-    return mla, mqa, metadata, query, reference
+    return mqa, metadata, query, reference
 
 
 @requires_sm100
@@ -323,16 +327,16 @@ def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
     monkeypatch, workspace_init
 ):
     """The per-layer dispatch: the first layer of a forward plans and later layers
-    reuse it; steps the kernel can't run use the backend decode."""
-    from vllm.models.kimi_k3.nvidia.kv_balanced_mla import core, layer
+    reuse it; steps the kernel can't run are left to TokenSpeed's decode."""
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla import core, decode
 
     torch.manual_seed(0)
     q = 5
-    mla, mqa, metadata, query, reference = _layer(
+    mqa, metadata, query, reference = _layer(
         monkeypatch, [3000, 21000], (1, 0, 1), lse=False
     )
     context = [object()]
-    monkeypatch.setattr(layer, "get_forward_context", lambda: context[0])
+    monkeypatch.setattr(decode, "get_forward_context", lambda: context[0])
     plans = []
     plan = core.KvBalancedMla.plan
 
@@ -342,42 +346,42 @@ def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
 
     monkeypatch.setattr(core.KvBalancedMla, "plan", counted_plan)
 
-    out, lse = mqa(mla, query, metadata)
+    out, lse = mqa(query, metadata)
     assert lse is None
     ref_out, _ = reference()
     assert (out.view_as(ref_out).float() - ref_out).norm() / ref_out.norm() < 0.03
-    mqa(mla, query, metadata)  # a later layer of the same forward
+    mqa(query, metadata)  # a later layer of the same forward
     assert len(plans) == 1
     context[0] = object()  # the next forward
-    mqa(mla, query, metadata)
+    mqa(query, metadata)
     assert len(plans) == 2
 
     requests = metadata.num_decodes
-    assert mqa(mla, query.to(torch.bfloat16), metadata) == "backend"
+    assert mqa(query.to(torch.bfloat16), metadata) is None
     many = SimpleNamespace(
         **{**vars(metadata), "num_decodes": 5, "num_decode_tokens": 5 * q}
     )
-    assert mqa(mla, _cat([query] * 3)[: 5 * q], many) == "backend"
+    assert mqa(_cat([query] * 3)[: 5 * q], many) is None
     longer = SimpleNamespace(
         **{**vars(metadata), "num_decode_tokens": requests * (q + 1)}
     )  # more query rows per request than the reserved buffers hold
-    assert mqa(mla, _cat([query, query[:requests]]), longer) == "backend"
+    assert mqa(_cat([query, query[:requests]]), longer) is None
     # The heads of a wider (padded) query buffer: not packed.
     wide = torch.cat([query.view(torch.uint8)] * 2, dim=1).view(torch.float8_e4m3fn)
-    assert mqa(mla, wide[:, : query.shape[1]], metadata) == "backend"
+    assert mqa(wide[:, : query.shape[1]], metadata) is None
 
 
 @requires_sm100
 def test_kv_balanced_mqa_dcp_shard(monkeypatch, workspace_init):
-    """Under DCP the layer passes this rank's shard, the global lengths and the
+    """Under DCP the decode passes this rank's shard, the global lengths and the
     interleave to the kernel and returns the log2 LSE for the DCP combine."""
-    from vllm.models.kimi_k3.nvidia.kv_balanced_mla import layer
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla import decode
 
     torch.manual_seed(0)
-    monkeypatch.setattr(layer, "get_forward_context", lambda: object())
-    mla, mqa, metadata, query, reference = _layer(
+    monkeypatch.setattr(decode, "get_forward_context", lambda: object())
+    mqa, metadata, query, reference = _layer(
         monkeypatch, [3000, 21000, 700], (4, 2, 64), lse=True
     )
-    out, lse = mqa(mla, query, metadata)
+    out, lse = mqa(query, metadata)
     ref_out, ref_lse = reference()
     _check(out.view_as(ref_out).float(), lse.view_as(ref_lse), ref_out, ref_lse)

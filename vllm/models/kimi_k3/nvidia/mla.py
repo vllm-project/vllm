@@ -77,10 +77,6 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.models.common.ops import fused_q_kv_rmsnorm
-from vllm.models.kimi_k3.nvidia.kv_balanced_mla.layer import (
-    TokenspeedKvBalancedMqa,
-    use_tokenspeed_kv_balanced_mqa,
-)
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_decode_q_concat_kv_cache_insert,
@@ -368,10 +364,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.impl.dcp_world_size = 1
             self.impl.dcp_rank = 0
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
-        # additional_config mla_decode_backend=kv_balanced: the KV-balanced decode.
-        self.use_tokenspeed_kv_balanced_mqa = use_tokenspeed_kv_balanced_mqa(self)
-        if self.use_tokenspeed_kv_balanced_mqa:
-            self.tokenspeed_kv_balanced_mqa = TokenspeedKvBalancedMqa(self)
 
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
@@ -724,14 +716,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 assert self.dcp_manager is not None
                 assert self.dcp_manager.query_gather is not None
                 mqa_q = self.dcp_manager.query_gather(mqa_q)
-            if self.use_tokenspeed_kv_balanced_mqa:
-                latent_out, lse = self.tokenspeed_kv_balanced_mqa(
-                    self, mqa_q, attn_metadata
-                )
-            else:
-                latent_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
-                    mqa_q, self._attn_read_kv_cache(), attn_metadata, self
-                )
+            latent_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                mqa_q, self._attn_read_kv_cache(), attn_metadata, self
+            )
             if self.dcp_world_size > 1:
                 assert lse is not None
                 assert self.dcp_manager is not None

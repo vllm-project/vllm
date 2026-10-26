@@ -1,10 +1,11 @@
 # Kimi-K3 KV-balanced MLA decode (SM100 family)
 
-An opt-in MLA decode for Kimi-K3 on Blackwell (SM100/SM103) that splits each
-request's KV into a number of chunks planned from its length, so that the GPU's
-clusters get about the same amount of KV. It replaces the decode attention of the
-`TOKENSPEED_MLA` backend; everything else (prefill, the KV cache, the decode
-metadata, the DCP combine) stays the backend's.
+An opt-in MLA attention backend for Kimi-K3 on Blackwell (SM100/SM103),
+`KIMI_K3_KV_BALANCED_MLA`, whose decode splits each request's KV into a number of
+chunks planned from its length, so that the GPU's clusters get about the same
+amount of KV. It is the `TOKENSPEED_MLA` backend (`backend.py` subclasses it) with
+a different decode attention kernel; everything else (prefill, the KV cache, the
+decode metadata, the FP8 query, the DCP combine) is TokenSpeed's.
 
 The kernel is TokenSpeed MLA 2.0.3's FP8 MLA decode, vendored in `kernel.py` and
 `helpers.py` with these changes:
@@ -23,25 +24,26 @@ The kernel is TokenSpeed MLA 2.0.3's FP8 MLA decode, vendored in `kernel.py` and
 ## Enabling
 
 ```bash
-vllm serve <Kimi-K3> --attention-backend TOKENSPEED_MLA --kv-cache-dtype fp8 \
-  --additional-config '{"mla_decode_backend": "kv_balanced"}'
+vllm serve <Kimi-K3> --attention-backend KIMI_K3_KV_BALANCED_MLA --kv-cache-dtype fp8 \
+  --speculative-config '{..., "attention_backend": "KIMI_K3_KV_BALANCED_MLA"}'
 ```
 
-`mla_decode_backend=auto` (the default) runs the attention backend's decode.
+The backend is never selected automatically. The DSpark draft takes its attention
+backend from the speculative config, so set it there too to run the draft's decode
+on the kernel.
 
 ## Supported deployments
 
-The `TOKENSPEED_MLA` attention backend with an FP8 E4M3 KV cache, on an SM100-family
-GPU, with more than 64 query rows per request (heads × query tokens), with or
-without decode context parallel. If you request the KV-balanced decode for
-anything else, startup fails with a `RuntimeError` that lists every unsupported
-setting.
+Those of `TOKENSPEED_MLA` (an FP8 E4M3 KV cache on an SM100-family GPU, DeepSeek
+MLA head dimensions) with `kv_lora_rank` 512, more than 64 query rows per request
+(heads × query tokens), with or without decode context parallel. Backend selection
+rejects any other configuration with the reason.
 
-At run time, a step the kernel can't run uses the backend's decode: more requests
+At run time, a step the kernel can't run uses TokenSpeed's decode: more requests
 than the split-KV scratch can address, a strided query, a micro-batch lane first
 seen after the workspace is locked, or the first call for a decode shape inside
-CUDA graph capture. `tokenspeed_mla_min_split_kv` applies only to the backend's
-decode.
+CUDA graph capture. `tokenspeed_mla_min_split_kv` applies only to
+TokenSpeed's decode.
 
 The split-KV scratch (FP16 partial outputs) is reserved when the model is built,
 and its size is logged.
