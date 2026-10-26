@@ -358,7 +358,9 @@ class ZmqEventPublisher(EventPublisher):
         )
         assert self._endpoint is not None
         self._hwm = hwm
-        self._replay_hwm = buffer_steps + 1
+        # ZMQ acks reads only every HWM/2 messages, so the sender can see up to
+        # HWM/2 stale messages; 2x lets a full replay plus marker always fit.
+        self._replay_hwm = 2 * (buffer_steps + 1)
         self._socket_setup()
         self._publisher_config = KVEventsConfig(
             enable_kv_cache_events=True,
