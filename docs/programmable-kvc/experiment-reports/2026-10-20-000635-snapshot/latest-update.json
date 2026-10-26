@@ -1,9 +1,0 @@
-{
-  "manifest": "updates/2026-10-20-013805/evidence-manifest.json",
-  "status": "updates/2026-10-20-013805/status.json",
-  "snapshot_finished": "2026-10-20T01:38:22-07:00",
-  "additional_file_count": 48,
-  "additional_bytes": 19586657,
-  "total_saved_evidence_files": 965,
-  "total_saved_evidence_bytes": 684894533
-}

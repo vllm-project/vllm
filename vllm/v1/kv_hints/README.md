@@ -1,6 +1,6 @@
 # Native KV hint primitives
 
-The `rfc-hint` reference branch implements RFC #59708 primitives on the existing `KvHintsEnvelope` (`protocol_version: "0.1"`).
+This experimental implementation of [RFC #57103](https://github.com/vllm-project/vllm/issues/57103) adds RFC #59708 primitives to the existing `KvHintsEnvelope` (`protocol_version: "0.1"`).
 Native action version **1.0** provides `vllm.set_priority`, `vllm.copy_to` and `vllm.move_to`.
 It follows #59714's priority payload and successful-completion semantics, and extends execution to existing CPU/Mooncake adapters and correlated asynchronous results.
 The COPY/MOVE payloads below define this branch's experimental interface; the upstream schema remains under discussion.
@@ -9,6 +9,8 @@ Enable `--kv-control-config '{"engine_id":"worker-a"}'` (Python accepts the same
 Without it, existing hint forwarding is unchanged.
 Local policies are optional and disabled by default.
 No changes to Mooncake itself are required.
+
+See [benchmark and validation commands](../../../benchmarks/programmable_kv_cache/README.md) for serving examples and regression checks.
 
 ## Terms
 

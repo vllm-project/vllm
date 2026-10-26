@@ -3,12 +3,6 @@
 > These instructions apply to **all** AI-assisted contributions to `vllm-project/vllm`.
 > Breaching these guidelines can result in automatic banning.
 
-## 当前仓库
-
-- 对应 PR：[#62382](https://github.com/vllm-project/vllm/pull/62382)。
-- 相关 RFC：[#57103](https://github.com/vllm-project/vllm/issues/57103)。
-- 参考文档：[docs/programmable-kvc/](docs/programmable-kvc/)。
-
 ## 1. Contribution Policy (Mandatory)
 
 ### Duplicate-work checks

@@ -2989,7 +2989,6 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_pp_group_count_bump(monkeypatc
     from vllm.config import ParallelConfig
     from vllm.distributed.utils import get_pp_indices
 
-    monkeypatch.setattr("vllm.config.parallel.current_platform.device_count", lambda: 4)
     monkeypatch.setattr(ModelConfig, "get_total_num_hidden_layers", lambda self: 45)
     vllm_config = VllmConfig(
         model_config=ModelConfig(max_model_len=8192),
