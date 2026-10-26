@@ -250,6 +250,8 @@ def warmup_kernels(
         if adaptive_sampling:
             assert rejection_sampler is not None
             rejection_sampler.enable_adaptive_verification = True
+    if adaptive_verification is not None:
+        adaptive_verification.warmup_budget_kernel()
 
 
 def _warmup_kernels(
