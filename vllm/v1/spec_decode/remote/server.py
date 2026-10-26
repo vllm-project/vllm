@@ -1341,6 +1341,8 @@ class _ServerSession:
     def _prefill(self, message: PrefillChunk, request_id: int) -> None:
         deadline = self._execution_deadline(message)
         copy_deadline = self._copy_deadline(message)
+        if deadline is not None:
+            copy_deadline = min(copy_deadline, deadline)
         key = message.key
         schema = self.server.adapter.feature_schema()
         frames = self._take_frames(message.feature_slot, len(schema.slots))
@@ -1451,6 +1453,8 @@ class _ServerSession:
     def _propose(self, message: AdvanceAndPropose, request_id: int) -> None:
         deadline = self._execution_deadline(message)
         copy_deadline = self._copy_deadline(message)
+        if deadline is not None:
+            copy_deadline = min(copy_deadline, deadline)
         schema = self.server.adapter.feature_schema()
         accepted = self.inbound.pop(message.accepted_counts_slot, None)
         recovery = self.inbound.pop(message.recovery_tokens_slot, None)
@@ -1782,8 +1786,8 @@ class _ServerSession:
                 self.conn.close()
                 raise
             resolved.append(DeviceFeature(frame.slot, frame.dtype, frame.shape, tensor))
-        if deadline is not None and time.monotonic() >= deadline:
-            raise TransportTimeout("feature import exhausted its execution budget")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TransportTimeout("feature import exhausted its execution budget")
         return tuple(resolved)
 
 

@@ -555,6 +555,7 @@ def test_cuda_ipc_ack_requires_completed_import_before_deadline(
     tmp_path, monkeypatch, operation, import_outcome
 ):
     observed: list[DataFrame | DeviceFeature | None] = []
+    execution_deadlines: list[float | None] = []
 
     class CudaAdapter(FakeDraftAdapter):
         def cuda_ipc_device(self):
@@ -565,6 +566,7 @@ def test_cuda_ipc_ack_requires_completed_import_before_deadline(
 
         def advance_and_propose(self, batch):
             observed.extend(batch.features)
+            execution_deadlines.append(batch.execution_deadline)
             return super().advance_and_propose(
                 dataclasses.replace(batch, features=(None,))
             )
@@ -661,6 +663,9 @@ def test_cuda_ipc_ack_requires_completed_import_before_deadline(
         assert receiver.receive.call_count == 1
         assert receiver.receive.call_args.args == (descriptor, "float32", (1, 2))
         assert len(copy_budgets) == 1 and 0 < copy_budgets[0] <= 1
+        if import_outcome == "ok" and operation == "proposal":
+            assert len(execution_deadlines) == 1 and execution_deadlines[0] is not None
+            assert copy_deadlines[0] <= execution_deadlines[0]
         if import_outcome == "ok" and operation == "prefill":
             feature = msgspec.structs.replace(
                 feature, cuda_ipc=msgspec.structs.replace(descriptor, generation=2)
@@ -2129,7 +2134,11 @@ def test_execution_budget_expires_before_queued_adapter_work(operation, budget_m
 
     adapter = CountingAdapter()
     server = RemoteDraftServer(
-        adapter, server_id="srv", target_fingerprint="tf", tokenizer_fingerprint="kf"
+        adapter,
+        server_id="srv",
+        target_fingerprint="tf",
+        tokenizer_fingerprint="kf",
+        ipc_copy_timeout_s=0.02,
     )
     server.start("tcp://127.0.0.1:0")
     client = RawClient(server.endpoint)
@@ -2189,10 +2198,10 @@ def test_execution_budget_expires_before_queued_adapter_work(operation, budget_m
             frames = (ints_to_frame(100, [0]), ints_to_frame(101, [4]), frame)
         waiting.send(message, frames=frames)
         assert wait_until(lambda: server.queue_depth == 2)
-        if budget_ms == 20:
-            # The handler has captured its budget before joining this queue.
-            deadline = time.monotonic() + budget_ms / 1000
-            assert wait_until(lambda: time.monotonic() >= deadline)
+        # Expire short execution budgets and the IPC-only copy timeout;
+        # inline features must not inherit the latter.
+        deadline = time.monotonic() + server.ipc_copy_timeout_s
+        assert wait_until(lambda: time.monotonic() >= deadline)
         adapter.release()
         assert client.recv()[1].status is OK
         reply = waiting.recv()[1]
