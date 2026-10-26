@@ -260,6 +260,12 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   The engine reuses the quantized weights and scales without running online
   quantization again. This does not enable online MoE quantization or
   conversion from an already quantized checkpoint.
+  Serialized ModelOpt `FP8` (per-tensor) and `FP8_PER_CHANNEL_PER_TOKEN`
+  linear layers also support CUDA IPC with the CUTLASS linear backend.
+  Set the same `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon
+  and engine. Engines reuse the processed weights and scales, including
+  fused-projection scales and output padding. This does not enable ModelOpt
+  block FP8, FP8 MoE, or other FP8 linear backends.
   ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.

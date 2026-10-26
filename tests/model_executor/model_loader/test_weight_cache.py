@@ -355,6 +355,37 @@ def _run_online_quantization(
     run_cold_start_and_warm_restart(vllm_runner, case, tmp_path)
 
 
+MODELOPT_FP8_CASE = ModelCase(
+    model="CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        revision="d9c87375a9b950b1c7965a1110ac6ca455929726",
+        dtype="bfloat16",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--revision",
+        "d9c87375a9b950b1c7965a1110ac6ca455929726",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+def test_ipc_cache_modelopt_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Serialized ModelOpt FP8 tensors survive repeated IPC attachment."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, MODELOPT_FP8_CASE, tmp_path)
+
+
 NVFP4_CASE = ModelCase(
     model="nvidia/Qwen3-30B-A3B-NVFP4",
     prompts=["The capital of France is", "Hello, my name is"],

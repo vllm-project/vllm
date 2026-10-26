@@ -1605,3 +1605,123 @@ def test_modelopt_block_quant_loads_expert_blocks_with_aligned_tp_slices(
             "w2",
             0,
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="Requires CUDA CUTLASS FP8 kernels",
+)
+@pytest.mark.parametrize("algorithm", ["FP8", "FP8_PER_CHANNEL_PER_TOKEN"])
+@pytest.mark.parametrize("output_sizes", [[32, 32], [17, 32]])
+@torch.inference_mode()
+def test_modelopt_fp8_preprocessed_shared_weights(
+    algorithm, output_sizes, dist_init, workspace_init, monkeypatch
+):
+    """Repeated attachments retain fused/padded weights and exact outputs."""
+    from vllm.config import KernelConfig
+    from vllm.model_executor.kernels.linear.scaled_mm import (
+        CutlassFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.utils import replace_parameter, weights_already_processed
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="bfloat16"),
+        kernel_config=KernelConfig(linear_backend="cutlass"),
+    )
+    quant_config = ModelOptFp8Config(
+        quant_method=algorithm,
+        is_checkpoint_fp8_serialized=True,
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+    )
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
+        source = MergedColumnParallelLinear(
+            64,
+            output_sizes,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+        )
+        assert isinstance(source.quant_method, ModelOptLinearMethod)
+        assert isinstance(source.quant_method.kernel, CutlassFP8ScaledMMLinearKernel)
+        torch.manual_seed(0)
+        source.weight.copy_(torch.randn(source.weight.shape).to(source.weight.dtype))
+        source.weight_scale.copy_(
+            torch.linspace(0.01, 0.03, source.weight_scale.numel()).reshape(
+                source.weight_scale.shape
+            )
+        )
+        if algorithm == "FP8":
+            source.input_scale.copy_(torch.tensor([0.01, 0.02]))
+        process_weights_after_loading(source, config.model_config, torch.device("cuda"))
+        inputs = torch.randn(3, 64, dtype=torch.bfloat16)
+        expected, _ = source(inputs)
+        shared = dict(source.named_parameters())
+        snapshots = {name: param.detach().clone() for name, param in shared.items()}
+        for _ in range(2):
+            with torch.device("meta"):
+                attached = MergedColumnParallelLinear(
+                    64,
+                    output_sizes,
+                    bias=False,
+                    params_dtype=torch.bfloat16,
+                    quant_config=quant_config,
+                )
+            for name, param in shared.items():
+                replace_parameter(attached, name, param)
+            with weights_already_processed():
+                process_weights_after_loading(
+                    attached, config.model_config, torch.device("cuda")
+                )
+            actual, _ = attached(inputs)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            assert actual.shape == (3, sum(output_sizes))
+            assert attached.processed_weight_dims == source.processed_weight_dims
+            for name, param in attached.named_parameters():
+                assert param.data_ptr() == shared[name].data_ptr()
+                torch.testing.assert_close(
+                    param.float(), snapshots[name].float(), rtol=0, atol=0
+                )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="Requires CUDA FP8 kernels",
+)
+@pytest.mark.parametrize("backend", ["torch", "triton"])
+def test_modelopt_fp8_preprocessed_unsupported_backend(backend, dist_init):
+    """An unvalidated backend must reject IPC weights before using them."""
+    from vllm.config import KernelConfig
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.utils import weights_already_processed
+
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="bfloat16"),
+        kernel_config=KernelConfig(linear_backend=backend),
+    )
+    quant_config = ModelOptFp8Config("FP8", True, None, [])
+    with set_current_vllm_config(config), torch.device("meta"):
+        layer = ReplicatedLinear(
+            64,
+            64,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+        )
+    with (
+        weights_already_processed(),
+        pytest.raises(
+            RuntimeError,
+            match="ModelOptLinearMethod does not support pre-processed weights",
+        ),
+    ):
+        process_weights_after_loading(layer, config.model_config, torch.device("cuda"))

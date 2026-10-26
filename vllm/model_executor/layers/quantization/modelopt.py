@@ -18,6 +18,9 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -2590,10 +2593,14 @@ class ModelOptLinearMethod(LinearMethodBase):
 
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
-        # TODO(Isotr0py): support fp8 ModelOpt kernels transpose/repack.
         w = self.spec.weight
         return isinstance(w, QuantKey) and (
             w.dtype == FP4_DTYPE
+            or (
+                w in (kFp8StaticTensorSym, kFp8StaticTokenSym)
+                and isinstance(self.kernel, CutlassFP8ScaledMMLinearKernel)
+                and type(self.fmt) is FormatScheme
+            )
             or (
                 w == kMxfp8Static
                 and self.kernel is not None
@@ -2643,6 +2650,9 @@ class ModelOptLinearMethod(LinearMethodBase):
                 raise RuntimeError(
                     f"{type(self.kernel).__name__} cannot use pre-processed weights"
                 )
+            if self.spec.weight in (kFp8StaticTensorSym, kFp8StaticTokenSym):
+                # IPC restores transposed tensors, but not this Python metadata.
+                layer.processed_weight_dims = (0, 1)
             return
         self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)
