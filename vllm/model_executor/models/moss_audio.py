@@ -504,9 +504,7 @@ class MossAudioEncoder(nn.Module):
             padding=(1, 1),
         )
 
-        conv_freq = self._compute_downsampled_length(
-            torch.tensor(config.num_mel_bins)
-        ).item()
+        conv_freq = (config.num_mel_bins + 7) // 8
         self.stem_proj = ReplicatedLinear(
             config.downsample_hidden_size * int(conv_freq),
             config.d_model,
