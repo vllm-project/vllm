@@ -2573,3 +2573,50 @@ level. No heavy work; reported. First consumer remains vmmemWSL.
 Security: same four known actors, zero new IP, zero #431 signature. nbaudit ok
 (03:06Z, Image/). Condensation log: no event, only heartbeats. CoursIA
 confirmed our #22462 figures are integrated as-is, caveat included (c.6406755988).
+
+### 26/10 05:41Z — cruise measured on its own: 5.0 GB/h, cached share 91.4%, and a first apples-to-apples x5 verdict
+
+Boot 21:48:52Z -> 05:41Z = 7 h 52. Delta window vs 03:41Z = exactly 2 h,
+prompt load still 22.15 M tok/h (higher than the previous window).
+
+| metric | cumulative | delta 03:41->05:41 (2 h) |
+|---|---|---|
+| fs writes | 82.26 GB | +12.26 GB = **5.0 GB/h** (same as the previous window: stable, not a one-off dip) |
+| fs reads | 42.81 GB | +0.63 GB |
+| prompt tokens | 145.27 M | +44.29 M = **22.15 M tok/h** |
+| cached share | **91.4 %** (device 63.1 / host 25.3 / disk 2.40) | 84.2 -> 89.1 -> 91.4 over 6 h |
+| computed prefill | 13.69 M = 9.4 % | 2.67 M this window = **6.0 %** |
+| preemptions | 14 | **+0 for 4 h** |
+| WEDGE | 2 events (03:57, 04:05Z) | — |
+| KV usage | 67 % | — |
+
+**The x5 target can now be measured like-for-like.** Baseline (issue #198,
+25/10 17:53Z): **1.7 KB written per prompt token**. In this window:
+12.26 GB written / 44.29 M prompt tokens = **0.29 KB/token, i.e. ÷5.9** —
+and against the same kind of load (heavy recurrent sessions) rather than
+against a burst-inclusive average. Both acceptance criteria of #198 are met
+in cruise: write rate ÷5.9, disk-served share 2.40 % >= 80 % of the 2.2 %
+baseline. The earlier "÷3.6-5.2 projected with v2" estimate was wrong in
+direction, not just in size: the filter alone overshot it.
+
+**This changes the v2 (PR #211) recommendation.** v2 would remove ~half of
+the remaining 5 GB/h, i.e. save ~2.5 GB/h ≈ 60 GB/day of SSD writes, and it
+eliminates the post-restart write burst (16.7 GB/h in the first hours). It
+is no longer needed to reach the acceptance target — the trade is now
+explicitly "one restart (~5 min down + ~1 h re-prefill) versus ~60 GB/day
+and the burst". Q39 updated accordingly; the lane's recommendation shifts
+from "yes, grouped" to "optional — not worth a dedicated restart; fold into
+the next image bump or leave off".
+
+**⚠ Host commit 92.4 %** (365.1/395.3 GB, margin 30.2 GB) and **climbing
+across three cycles**: 88.6 -> 90.1 -> 92.4. Measured top consumers:
+`vmmemWSL` **165.4 GB commit / 113.1 GB resident**, a host `python` 38.0 GB.
+Inside the WSL VM: 55 GB used of 125 GB, 26 GB shared, 57 GB buff/cache,
+70 GB available; /dev/shm 25 GB (the RAM tier itself). The VM's committed
+footprint is ~2x what its own accounting shows used — the known WSL2
+commit-charge behaviour, aggravated by the 24 GiB tmpfs tier and the
+GPU-2 CoursIA training. This is the pressure that killed Docker Desktop
+on 24/09 at 97.8 %. No heavy work from this lane; watch 97 %. Not ours to
+fix (`.wslconfig` / `wsl --shutdown` would kill engine and hub).
+
+Security: five known actors, no new IP, zero #431 signature. nbaudit ok.
