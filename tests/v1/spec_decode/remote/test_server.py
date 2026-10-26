@@ -549,9 +549,10 @@ def test_hello_ack_reports_adapter_capabilities(server, adapter, client):
     assert ack.feature_schema.slots[0].kind == TargetFeatureKind.TOKEN_IDS.value
 
 
-@pytest.mark.parametrize("fail_import", [False, True])
-def test_cuda_ipc_prefill_ack_requires_completed_import(
-    tmp_path, monkeypatch, fail_import
+@pytest.mark.parametrize("operation", ["prefill", "proposal"])
+@pytest.mark.parametrize("import_outcome", ["ok", "failure", "expired"])
+def test_cuda_ipc_ack_requires_completed_import_before_deadline(
+    tmp_path, monkeypatch, operation, import_outcome
 ):
     observed: list[DataFrame | DeviceFeature | None] = []
 
@@ -561,6 +562,12 @@ def test_cuda_ipc_prefill_ack_requires_completed_import(
 
         def prefill(self, key, inputs):
             observed.extend(inputs.features)
+
+        def advance_and_propose(self, batch):
+            observed.extend(batch.features)
+            return super().advance_and_propose(
+                dataclasses.replace(batch, features=(None,))
+            )
 
     adapter = CudaAdapter(
         vocab_size=VOCAB,
@@ -576,8 +583,11 @@ def test_cuda_ipc_prefill_ack_requires_completed_import(
     def receive(*args, deadline):
         copy_budgets.append(deadline - time.monotonic())
         copy_deadlines.append(deadline)
-        if fail_import:
+        if import_outcome == "failure":
             raise RuntimeError("copy completion unknown")
+        if import_outcome == "expired":
+            # Completion may be observed after the host resumes past its budget.
+            assert wait_until(lambda: time.monotonic() >= deadline)
         return received
 
     receiver.receive.side_effect = receive
@@ -608,22 +618,50 @@ def test_cuda_ipc_prefill_ack_requires_completed_import(
             False,
             100,
             frame_checksum([feature]),
-            execution_timeout_ms=1000,
+            execution_timeout_ms=20 if import_outcome == "expired" else 1000,
             execution_group_id=1,
         )
-        if fail_import:
+        frames = (feature,)
+        if operation == "proposal":
+            inline = msgspec.structs.replace(
+                feature, payload=received.numpy().tobytes(), cuda_ipc=None
+            )
+            initial = msgspec.structs.replace(
+                message,
+                is_final=True,
+                checksum=frame_checksum([inline]),
+                execution_timeout_ms=None,
+            )
+            assert client.call(initial, frames=(inline,)).status is OK
+            observed.clear()
+            message = AdvanceAndPropose(
+                batch_id=0,
+                keys=(sequence,),
+                accepted_counts_slot=101,
+                recovery_tokens_slot=102,
+                feature_slot=100,
+                execution_timeout_ms=message.execution_timeout_ms,
+            )
+            frames = (feature, ints_to_frame(101, [0]), ints_to_frame(102, [4]))
+        if import_outcome == "failure":
             with pytest.raises(ConnectionClosed):
-                client.call(message, frames=(feature,))
+                client.call(message, frames=frames)
             assert observed == []
+        elif import_outcome == "expired":
+            reply = client.call(message, frames=frames)
+            assert reply.status is SpeculatorStatusCode.TIMEOUT
+            assert observed == []
+            assert server.registry.get(sequence) is None
+            assert client.call(Ping()).healthy
         else:
-            reply = client.call(message, frames=(feature,))
+            reply = client.call(message, frames=frames)
             assert reply.status is OK
             assert len(observed) == 1 and isinstance(observed[0], DeviceFeature)
             assert observed[0].tensor is received
         assert receiver.receive.call_count == 1
         assert receiver.receive.call_args.args == (descriptor, "float32", (1, 2))
         assert len(copy_budgets) == 1 and 0 < copy_budgets[0] <= 1
-        if not fail_import:
+        if import_outcome == "ok" and operation == "prefill":
             feature = msgspec.structs.replace(
                 feature, cuda_ipc=msgspec.structs.replace(descriptor, generation=2)
             )

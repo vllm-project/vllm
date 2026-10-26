@@ -30,6 +30,8 @@ With older peers, the client waits for each prefill ACK before sending the next
 chunk, using the same round deadline. Already executing GPU work is not cancelled.
 When buffered final prompt chunks require multiple draft forwards, they also
 share the proposal deadline; expired rows do not start another forward.
+The server also checks the remaining budget after importing CUDA IPC features,
+before starting prefill or proposal computation.
 
 Feature schema and frame byte budgets are checked before tensor serialization.
 Connections, partial frames, pending bytes and adapter waiters have server-side

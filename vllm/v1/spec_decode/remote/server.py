@@ -1405,7 +1405,12 @@ class _ServerSession:
                 except (TransportError, RuntimeError) as e:
                     self.server._adapter_failed(e)
                     self._discard_owned_sequences((key,))
-                    status, detail = SpeculatorStatusCode.INTERNAL_ERROR, str(e)
+                    status = (
+                        SpeculatorStatusCode.TIMEOUT
+                        if isinstance(e, TransportTimeout)
+                        else SpeculatorStatusCode.INTERNAL_ERROR
+                    )
+                    detail = str(e)
                 else:
                     failure = self._call_adapter(
                         self.server.adapter.prefill,
@@ -1600,6 +1605,10 @@ class _ServerSession:
                             execution_deadline=deadline,
                         )
                     )
+                except TransportTimeout as e:
+                    self.server._adapter_failed(e)
+                    failure = str(e)
+                    failure_status = SpeculatorStatusCode.TIMEOUT
                 except Exception as e:
                     self.server._adapter_failed(e)
                     logger.exception(
@@ -1773,6 +1782,8 @@ class _ServerSession:
                 self.conn.close()
                 raise
             resolved.append(DeviceFeature(frame.slot, frame.dtype, frame.shape, tensor))
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TransportTimeout("feature import exhausted its execution budget")
         return tuple(resolved)
 
 
