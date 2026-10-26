@@ -174,6 +174,7 @@ def test_eagle_draft_inherits_target_max_model_len(
 @pytest.mark.cpu_test
 def test_mtp_draft_inherits_target_max_model_len(
     vllm_caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """MTP drafts get none of the target's dict hf_overrides; the raised value
     must land in the draft's nested text config."""
@@ -188,9 +189,18 @@ def test_mtp_draft_inherits_target_max_model_len(
         method="mtp",
         num_speculative_tokens=1,
     )
-    draft_text_config = speculative_config.draft_model_config.hf_text_config
+    draft_config = speculative_config.draft_model_config
+    draft_text_config = draft_config.hf_text_config
     assert draft_text_config.max_position_embeddings == 524288
     assert _override_logged(vllm_caplog)
+
+    # The position-sharing check must also read the nested text config.
+    assert draft_config.hf_config is not draft_text_config
+    monkeypatch.setattr(
+        "vllm.config.speculative._rope_only_sizes_cache",
+        lambda config: config is draft_text_config,
+    )
+    assert speculative_config.draft_shares_target_positions()
 
 
 @pytest.mark.cpu_test
