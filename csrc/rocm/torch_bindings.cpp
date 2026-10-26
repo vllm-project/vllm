@@ -74,6 +74,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int output_topk, bool use_v2_format) -> ()");
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
 
+  // Octave-W3 experts: 3-bit Lloyd-Max codes, fp16 group scales, input
+  // rotated by a block Hadamard of size `had` inside the kernel.
+  rocm_ops.def(
+      "moe_octw3_gemm_rdna3(Tensor a, Tensor! c, Tensor w, Tensor scales, "
+      "Tensor topk_weights, Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, int top_k, int block_size_m, "
+      "bool mul_topk_weight, int output_topk, int had) -> ()");
+  rocm_ops.impl("moe_octw3_gemm_rdna3", torch::kCUDA, &moe_octw3_gemm_rdna3);
+
   // qwen4_exp HyperConnection combine_and_mix for decode (1 <= M <= 8).
   rocm_ops.def(
       "qwen4_hc_combine_mix(Tensor h, Tensor block_out, Tensor inj, "
