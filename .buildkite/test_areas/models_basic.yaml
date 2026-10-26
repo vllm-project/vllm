@@ -186,6 +186,8 @@ steps:
   - csrc/kimi_k3/
   - tests/models/kimi_k3/
   - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
+  - vllm/model_executor/models/kimi_k25_vit.py
+  - vllm/model_executor/layers/rotary_embedding/packed_qk_rope.py
   commands:
     # The native NVIDIA Kimi K3 kernels require the SM100 family.
     - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py kernels/attention/test_kimi_k3_mla_fused_epilogue.py

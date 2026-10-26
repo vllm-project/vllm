@@ -1332,6 +1332,8 @@ steps:
   - csrc/kimi_k3/
   - tests/models/kimi_k3/
   - vllm/platforms/rocm.py
+  - vllm/model_executor/models/kimi_k25_vit.py
+  - vllm/model_executor/layers/rotary_embedding/packed_qk_rope.py
   commands:
   # Mirrors the ":amd: (MI355) Kimi K3" step generated from
   # .buildkite/test_areas/models_basic.yaml. The ROCm KDA/AttnRes kernels are
