@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import ClassVar, Generic, TypeVar
@@ -391,3 +391,16 @@ def clamp_prompt_logprobs(
             if logprob_values.logprob == float("-inf"):
                 logprob_values.logprob = -9999.0
     return prompt_logprobs
+
+
+def get_step_logprobs(
+    top_logprobs: Sequence[dict[int, Logprob] | None], index: int
+) -> dict[int, Logprob] | None:
+    """Logprobs at output position `index`, or None if there is no entry."""
+    if index < len(top_logprobs):
+        return top_logprobs[index]
+    logger.warning_once(
+        "Output has more tokens than logprob positions; returning the extra "
+        "tokens without logprobs."
+    )
+    return None

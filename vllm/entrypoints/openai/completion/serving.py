@@ -22,6 +22,7 @@ from vllm.entrypoints.generate.base.serving import (
     clamp_prompt_logprobs,
     completion_top_logprobs_limit,
     format_token_id_placeholder,
+    get_step_logprobs,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
@@ -735,7 +736,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
             else self.return_tokens_as_token_ids
         )
         for i, token_id in enumerate(token_ids):
-            step_top_logprobs = top_logprobs[i]
+            step_top_logprobs = get_step_logprobs(top_logprobs, i)
             if step_top_logprobs is None:
                 if should_return_as_token_id:
                     token = format_token_id_placeholder(token_id)

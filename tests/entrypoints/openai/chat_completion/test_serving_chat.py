@@ -718,6 +718,25 @@ async def _collect_metrics_stream_chunks(
     return chunks
 
 
+def test_chat_logprobs_tolerate_missing_positions():
+    """A token without a logprob position gets no logprob instead of failing
+    the whole response with an IndexError."""
+    serving = OpenAIServingChat.__new__(OpenAIServingChat)
+    serving.return_tokens_as_token_ids = False
+    tokenizer = MagicMock()
+    tokenizer.decode.return_value = "b"
+
+    logprobs = serving._create_chat_logprobs(
+        token_ids=[10, 11],
+        top_logprobs=[{10: Logprob(logprob=-0.1, decoded_token="a")}],
+        tokenizer=tokenizer,
+    )
+
+    assert logprobs.content is not None
+    assert [entry.token for entry in logprobs.content] == ["a", "b"]
+    assert [entry.logprob for entry in logprobs.content] == [-0.1, -9999.0]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raw", [False, True])
 async def test_streaming_chunks_keep_usage_and_metadata(raw):

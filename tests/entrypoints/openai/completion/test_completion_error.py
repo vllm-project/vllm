@@ -1098,6 +1098,23 @@ def test_completion_logprobs_honors_requested_count(
     assert len(logprobs.top_logprobs[0]) == expected
 
 
+def test_completion_logprobs_tolerate_missing_positions():
+    """A token without a logprob position gets no logprob instead of failing
+    the whole response with an IndexError."""
+    tokenizer = MagicMock()
+    tokenizer.decode.return_value = "b"
+
+    logprobs = _minimal_serving_completion()._create_completion_logprobs(
+        token_ids=[10, 11],
+        top_logprobs=[{10: Logprob(logprob=-0.1, decoded_token="a")}],
+        num_output_top_logprobs=0,
+        tokenizer=tokenizer,
+    )
+
+    assert logprobs.tokens == ["a", "b"]
+    assert logprobs.token_logprobs == [-0.1, None]
+
+
 def test_logprobs_below_minus_one_rejected():
     """Values more negative than -1 stay invalid."""
     with pytest.raises(Exception, match="must be a positive value or -1"):

@@ -173,3 +173,16 @@ def test_text_logprobs_clamp_a_nan_logprob():
     assert entry.logprob == -9999.0
     assert entry.top_logprobs[0].logprob == -9999.0
     json.dumps(result.model_dump(), allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    "create_logprobs",
+    [ServingTokens._create_tokens_logprobs, ServingTokens._create_text_logprobs],
+)
+def test_token_without_a_logprob_position_gets_no_logprob(create_logprobs):
+    """A token without a logprob position gets the no-logprob entry instead
+    of failing the whole response with an IndexError."""
+    result = create_logprobs(
+        None, token_ids=[7, 8], top_logprobs=[{7: Logprob(-0.5, rank=1)}]
+    )
+    assert [entry.logprob for entry in result.content] == [-0.5, -9999.0]

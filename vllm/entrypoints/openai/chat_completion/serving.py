@@ -25,6 +25,7 @@ from vllm.entrypoints.generate.base.serving import (
     chat_top_logprobs_limit,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
+    get_step_logprobs,
 )
 from vllm.entrypoints.openai.chat_completion.message_assembly import (
     assemble_chat_message_fields,
@@ -1231,7 +1232,7 @@ class OpenAIServingChat(GenerateBaseServing):
             else self.return_tokens_as_token_ids
         )
         for i, token_id in enumerate(token_ids):
-            step_top_logprobs = top_logprobs[i]
+            step_top_logprobs = get_step_logprobs(top_logprobs, i)
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
                 if should_return_as_token_id:
                     token = format_token_id_placeholder(token_id)

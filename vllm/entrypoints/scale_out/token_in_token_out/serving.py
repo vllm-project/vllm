@@ -24,6 +24,7 @@ from vllm.entrypoints.generate.base.serving import (
     chat_top_logprobs_limit,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
+    get_step_logprobs,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -847,7 +848,7 @@ class ServingTokens(GenerateBaseServing):
         logprobs_content: list[ChatCompletionLogProbsContent] = []
 
         for i, token_id in enumerate(token_ids):
-            step_top_logprobs = top_logprobs[i]
+            step_top_logprobs = get_step_logprobs(top_logprobs, i)
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
                 token, token_bytes = _logprob_token(token_id, None, tokenizer)
                 logprobs_content.append(
@@ -893,7 +894,7 @@ class ServingTokens(GenerateBaseServing):
         logprobs_content: list[GenerateLogProbsContent] = []
 
         for i, token_id in enumerate(token_ids):
-            step_top_logprobs = top_logprobs[i]
+            step_top_logprobs = get_step_logprobs(top_logprobs, i)
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
                 # Same sentinel the OpenAI shapes use when the sampled token
                 # has no entry in the engine's top-k map.
