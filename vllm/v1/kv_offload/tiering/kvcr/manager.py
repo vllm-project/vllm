@@ -89,7 +89,6 @@ if TYPE_CHECKING:
 _REQUIRED_ROUTER_CAPABILITIES = ROUTER_HINT_CAPABILITIES
 
 logger = init_logger(__name__)
-_KVCR_SHUTDOWN = False
 
 _BUILTIN_POLICIES: dict[str, type[KVCachePolicy]] = {
     "fifo": FIFOPolicy,
@@ -139,10 +138,6 @@ def _kvcr_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
         _vllm_metric_name(STATE_METRIC): OffloadingGaugeMetadata(
             documentation="Current KVCR metadata and operation counts.",
             labelnames=("resource",),
-        ),
-        "vllm:kvcr_guard_source_events": OffloadingCounterMetadata(
-            documentation="Guard-only source events.",
-            labelnames=("event",),
         ),
     }
 
@@ -314,7 +309,6 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         g3: dict[str, Any] | None = None,
         local_dram_backend: str = "UCX",
         remote_fw_dram_backend: str = "UCX",
-        guard_only_sources: bool | None = None,
         backpressure_detector: "BackpressureDetector | None" = None,
     ) -> None:
         super().__init__(
@@ -413,12 +407,6 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             if kvcr_service_socket_path is not None and compatibility_digest is not None
             else None
         )
-        if guard_only_sources is None:
-            guard_only_sources = guard_config is not None
-        if guard_only_sources and guard_config is None:
-            raise ValueError("guard_only_sources requires a KVCR Guard service")
-        self.guard_only_sources = guard_only_sources
-        self.suppresses_primary_events = guard_only_sources
         g3_config = None
         if g3 is not None:
             g3_values = dict(g3)
@@ -437,7 +425,6 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                     abandon_timeout_ms=abandon_timeout_ms,
                     nixl_agent_name=nixl_agent_name,
                     nixl_listen_port=_nixl_listen_port,
-                    startup_timeout_seconds=900 if guard_only_sources else None,
                 ),
                 KVCRBindings(
                     request_pin=self._framework_pin_adapter.request_pin,
@@ -469,7 +456,6 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                         opportunistic_query=opportunistic_query,
                         metadata_retry_interval_ms=metadata_retry_interval_ms,
                         backend=remote_fw_dram_backend,
-                        guard_only_sources=guard_only_sources,
                     ),
                 ),
                 guard_config,
@@ -605,15 +591,13 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def has_pending_work(self) -> bool:
-        # Keep peer polling until shutdown; then drain actual transfer jobs.
-        return not _KVCR_SHUTDOWN or bool(self._jobs_by_op)
+        # Keep scheduler polling: control messages may arrive without a load job.
+        return True
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         events = self._inventory_events
         self._inventory_events = []
-        if self.guard_only_sources:
-            return [event for event in events if event.ownership == "kvcr"]
         return events
 
     @override

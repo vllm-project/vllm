@@ -1706,13 +1706,6 @@ class EngineCoreProc(EngineCore):
             return True
 
         if self.shutdown_state == EngineShutdownState.REQUESTED:
-            # A KVCR tier polls for peer requests while idle. Stop that poll
-            # during teardown so only actual transfer jobs delay shutdown.
-            import sys
-
-            kvcr_adapter = sys.modules.get("vllm.v1.kv_offload.tiering.kvcr.manager")
-            if kvcr_adapter is not None:
-                kvcr_adapter._KVCR_SHUTDOWN = True
             shutdown_timeout = self.vllm_config.shutdown_timeout
             mode = "abort" if shutdown_timeout == 0 else "drain"
 
