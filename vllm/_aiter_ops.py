@@ -4343,6 +4343,7 @@ class rocm_aiter_ops:
         YQ: torch.Tensor | None = None,
         transpose_bm: bool | None = False,
         config: dict | None = None,
+        y_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # ruff: noqa: E501 # isort: skip
         from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (
@@ -4360,6 +4361,7 @@ class rocm_aiter_ops:
             YQ=YQ,
             transpose_bm=transpose_bm,
             config=config,
+            y_scale=y_scale,
         )
 
     @staticmethod
