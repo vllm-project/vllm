@@ -3,6 +3,7 @@
 import copy
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -19,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -94,6 +96,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
         self._context_selection: tuple[torch.Tensor, torch.Tensor] | None = None
         self._compact_context_states: torch.Tensor | None = None
+        self._context_cu_lens = UvaBufferPool(self.max_num_reqs + 1, torch.int64)
 
         # Fixed-address inputs of the FULL graph's context step: the target's aux
         # hidden states and, for an anchor that reads them, the rejected counts.
@@ -596,9 +599,17 @@ class DFlashSpeculator(DraftModelSpeculator):
             if context_window is not None:
                 # Rejection moves the earliest draft anchor back by N positions.
                 keep = context_window() + self.num_speculative_steps
-                if num_target_tokens > 2 * num_reqs * keep:
+                kept_lens = input_batch.num_scheduled_tokens[:num_reqs].clip(max=keep)
+                num_context_tokens = int(kept_lens.sum())
+                if num_target_tokens > 2 * num_context_tokens:
+                    cu_lens = np.empty(num_reqs + 1, dtype=np.int64)
+                    cu_lens[0] = 0
+                    np.cumsum(kept_lens, out=cu_lens[1:])
                     self._context_selection = select_context_window_indices(
-                        input_batch.query_start_loc, num_reqs, keep
+                        input_batch.query_start_loc,
+                        self._context_cu_lens.copy_to_uva(cu_lens),
+                        num_context_tokens,
+                        keep,
                     )
 
         if num_speculative_tokens == 0:
@@ -695,6 +706,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 @triton.jit
 def _select_context_window_indices_kernel(
     query_start_loc,
+    cu_context_lens,
     indices,
     valid,
     KEEP: tl.constexpr,
@@ -703,24 +715,36 @@ def _select_context_window_indices_kernel(
     req = tl.program_id(0)
     begin = tl.load(query_start_loc + req).to(tl.int64)
     end = tl.load(query_start_loc + req + 1).to(tl.int64)
+    dest_begin = tl.load(cu_context_lens + req).to(tl.int64)
+    dest_end = tl.load(cu_context_lens + req + 1).to(tl.int64)
     offset = tl.arange(0, BLOCK)
     row = tl.maximum(begin, end - KEEP) + offset
-    is_valid = (offset < KEEP) & (row < end)
-    dest = req.to(tl.int64) * KEEP + offset
-    tl.store(indices + dest, tl.where(is_valid, row, 0), offset < KEEP)
-    tl.store(valid + dest, is_valid, offset < KEEP)
+    dest = dest_begin + offset
+    mask = dest < dest_end
+    is_valid = mask & (row < end)
+    tl.store(indices + dest, tl.where(is_valid, row, 0), mask)
+    tl.store(valid + dest, is_valid, mask)
 
 
 def select_context_window_indices(
-    query_start_loc: torch.Tensor, num_reqs: int, keep: int
+    query_start_loc: torch.Tensor,
+    cu_context_lens: torch.Tensor,
+    num_context_tokens: int,
+    keep: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pack bounded context suffixes without reading GPU request lengths."""
+    """Keep short contexts whole within CPU capacities and GPU request bounds."""
     indices = torch.empty(
-        num_reqs * keep, dtype=torch.int64, device=query_start_loc.device
+        num_context_tokens, dtype=torch.int64, device=query_start_loc.device
     )
     valid = torch.empty_like(indices, dtype=torch.bool)
+    num_reqs = cu_context_lens.numel() - 1
     _select_context_window_indices_kernel[(num_reqs,)](
-        query_start_loc, indices, valid, keep, triton.next_power_of_2(keep)
+        query_start_loc,
+        cu_context_lens,
+        indices,
+        valid,
+        keep,
+        triton.next_power_of_2(keep),
     )
     return indices, valid
 

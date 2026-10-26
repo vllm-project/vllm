@@ -10,6 +10,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
     select_context_window_indices,
@@ -22,11 +23,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("lengths", [[16384], [6, 16348, 1, 29], [0, 132, 133, 134]])
+@pytest.mark.parametrize(
+    "lengths", [[16384], [6, 16348, 1, 29], [0, 132, 133, 134], [1, 6, 29]]
+)
 @pytest.mark.parametrize("pointer_offset", [0, 1])
-def test_context_suffix_keeps_rejected_anchor_window(lengths, pointer_offset):
-    """Packing preserves every cache row reachable after any rejection count."""
-    window, speculative = 128, 5
+@pytest.mark.parametrize("speculative", [1, 5, 8])
+def test_context_suffix_keeps_rejected_anchor_window(
+    lengths, pointer_offset, speculative
+):
+    """Short contexts stay whole without window padding; long ones keep slack."""
+    window = 128
     keep = window + speculative
     boundaries = np.concatenate(([0], np.cumsum(lengths)))
     storage = torch.full(
@@ -37,12 +43,20 @@ def test_context_suffix_keeps_rejected_anchor_window(lengths, pointer_offset):
     )
     query_start_loc = storage[pointer_offset:]
     query_start_loc.copy_(torch.tensor(boundaries))
-    indices, valid = select_context_window_indices(query_start_loc, len(lengths), keep)
+    packed_starts = np.concatenate(([0], np.cumsum(np.minimum(lengths, keep))))
+    packed_starts_pool = UvaBufferPool(len(packed_starts), torch.int64)
+    indices, valid = select_context_window_indices(
+        query_start_loc,
+        packed_starts_pool.copy_to_uva(packed_starts),
+        int(packed_starts[-1]),
+        keep,
+    )
+    assert indices.numel() == sum(min(length, keep) for length in lengths)
     expected_indices = torch.zeros_like(indices, device="cpu")
     expected_valid = torch.zeros_like(valid, device="cpu")
     for req, (begin, end) in enumerate(zip(boundaries, boundaries[1:])):
         rows = torch.arange(max(begin, end - keep), end)
-        start = req * keep
+        start = packed_starts[req]
         expected_indices[start : start + len(rows)] = rows
         expected_valid[start : start + len(rows)] = True
         selected = set(rows.tolist())
@@ -66,12 +80,17 @@ def test_context_suffix_uses_replayed_gpu_boundaries():
     """Adaptive verification can change request boundaries without CPU readback."""
     device = current_platform.device_type
     boundaries = torch.tensor([0, 8, 4096, 4102], dtype=torch.int32, device=device)
-    select_context_window_indices(boundaries, 3, 133)
+    packed_starts_pool = UvaBufferPool(4, torch.int64)
+    packed_starts = packed_starts_pool.copy_to_uva([0, 8, 141, 147])
+    select_context_window_indices(boundaries, packed_starts, 147, 133)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        indices, valid = select_context_window_indices(boundaries, 3, 133)
+        indices, valid = select_context_window_indices(
+            boundaries, packed_starts, 147, 133
+        )
     boundaries.copy_(torch.tensor([0, 3, 4091, 4092]))
     graph.replay()
+    assert indices.numel() == 147
     actual = indices[valid].cpu()
     expected = torch.cat(
         [torch.arange(3), torch.arange(3958, 4091), torch.tensor([4091])]
