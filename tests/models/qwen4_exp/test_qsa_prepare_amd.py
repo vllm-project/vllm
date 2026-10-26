@@ -132,41 +132,35 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
     q, k = rope(positions, q, k)
     kv_cache = main["main_kv_cache"]
     if kv_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
-        # The FP8 cache holds (value / scale) as e4m3 codes. Build the
-        # expected codes with a torch-side cast: the C++ cache-update
-        # reference writes wrong codes when the destination flavor is not
-        # the one the GPU natively produces (FNUZ destinations on gfx950),
-        # so it cannot referee this comparison.
+        torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
+        assert torch.equal(gate_out, gate)
+
+        # Build the expected codes with a torch-side cast. The C++
+        # reshape_and_cache_flash writes FNUZ-encoded codes on ROCm
+        # regardless of the cache tensor's typed flavor, so it cannot
+        # referee the comparison on gfx950 where the cache holds OCP
+        # codes (tested empirically: max code difference 128, a sign-bit
+        # flip from the FNUZ/OCP encoding mismatch). The torch reference
+        # applies the same divide-in-FP32-then-cast sequence as the
+        # kernel.
         slot = main["main_slot_mapping"]
         valid = slot >= 0
         blocks = (slot[valid] // MAIN_PAGE).long()
         pages = (slot[valid] % MAIN_PAGE).long()
         stored = kv_cache[blocks, pages]
-        # Match the kernel (and the C++ cache-update op): divide in FP32,
-        # not in BF16, before the fp8 cast.
         expected_k = (
             k.view(-1, MAIN_HK, MAIN_D)[valid].float() / main["main_k_scale"]
         ).to(kv_cache.dtype)
         expected_v = (
             v.view(-1, MAIN_HK, MAIN_D)[valid].float() / main["main_v_scale"]
         ).to(kv_cache.dtype)
-        torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
-        assert torch.equal(gate_out, gate)
 
-        # Compare in code space (the uint8 codes), not fp8 values with a
-        # plain rtol/atol: one code step's float meaning varies ~100x
-        # across e4m3's range, so no fixed tolerance can say "2 steps".
-        #
-        # The fused kernel and the unfused reference round in a slightly
-        # different order, so their answers differ by tiny amounts. That
-        # nudges a value sitting on a step boundary to the next step, and
-        # on very small numbers (where fp8 steps are coarse) it can jump
-        # many steps at once. Allowing 2 codes covers the boundary flips;
-        # the float check below covers the small-value jumps, which are
-        # tiny in absolute terms but can span many codes. A real bug —
-        # like a scale that was never applied — moves normal-sized
-        # numbers by many codes AND large amounts, so it still fails
-        # loudly.
+        # Compare in code space (the uint8 codes): the fused kernel and
+        # the torch reference round in a slightly different order, so a
+        # value on a step boundary may flip to the adjacent code. Allowing
+        # 2 codes covers the boundary flips; a real bug — like a scale
+        # that was never applied — moves normal-sized numbers by many
+        # codes.
         def _assert_codes_match(actual, expected):
             code_diff = (
                 actual.view(torch.uint8).int() - expected.view(torch.uint8).int()

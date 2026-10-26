@@ -396,7 +396,14 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
 
 @requires_qsa_kernels
 @pytest.mark.parametrize(
-    ("num_rows", "num_query_heads", "num_kv_heads", "page_size"),
+    "kv_dtype",
+    [
+        pytest.param(torch.bfloat16, id="bf16"),
+        pytest.param(None, id="fp8_platform"),
+    ],
+)
+@pytest.mark.parametrize(
+    "num_rows,num_query_heads,num_kv_heads,page_size",
     [
         pytest.param(1, 24, 2, 1792, id="tp1_split64"),
         pytest.param(16, 12, 1, 1792, id="tp2_split32"),
@@ -410,6 +417,7 @@ def test_qsa_sparse_paged_attention_matches_reference(
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
+    kv_dtype: torch.dtype | None,
 ) -> None:
     torch.manual_seed(2)
     head_dim = 256
@@ -431,7 +439,18 @@ def test_qsa_sparse_paged_attention_matches_reference(
         device="cuda",
         dtype=torch.bfloat16,
     )
-    k_cache, v_cache = kv_cache.split(head_dim, dim=-1)
+    if kv_dtype is not None:
+        fp8_dtype = current_platform.fp8_dtype()
+        # The kernel's contract is that the cache already holds values in
+        # the attention dtype's numeric space; quantize the stored cache and
+        # have the reference consume the stored (quantized) values upcast
+        # to float, not the original bf16 — the fp8 cast is lossy.
+        kv_stored = kv_cache.to(fp8_dtype)
+        k_cache, v_cache = kv_stored.split(head_dim, dim=-1)
+        ref_k, ref_v = k_cache.float(), v_cache.float()
+    else:
+        k_cache, v_cache = kv_cache.split(head_dim, dim=-1)
+        ref_k, ref_v = k_cache, v_cache
     block_table = (
         torch.randperm(num_cache_blocks, device="cuda")
         .reshape(num_requests, num_pages_per_request)
@@ -484,8 +503,8 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
     expected = _qsa_sparse_paged_attention_reference(
         q,
-        k_cache,
-        v_cache,
+        ref_k,
+        ref_v,
         logical_indices,
         block_table,
         token_to_req,

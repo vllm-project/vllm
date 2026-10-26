@@ -14,7 +14,6 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
@@ -63,8 +62,6 @@ from vllm.v1.worker.workspace import (
 from ..common.qsa_cache import QSAForwardMetadata, qsa_kv_cache_dtype
 from . import model
 from .indexer_qsa import QSAIndexer
-
-logger = init_logger(__name__)
 
 
 def _octave_mid_o_capacity(vllm_config: VllmConfig) -> int:
@@ -135,9 +132,10 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     # fp8/fp8_e4m3: e4m3 bytes in a uint8 cache, written by qsa_prepare with
-    # the layer's per-tensor scales and dequantized on load inside the QSA
-    # Triton kernel. flash-attn never runs over this cache, so its fp8 probe
-    # does not apply (see supports_combination below).
+    # the layer's per-tensor scales and cast to the query dtype for the QK
+    # dot (fp16 for PV) inside the QSA Triton kernel. flash-attn never runs
+    # over this cache, so its fp8 probe does not apply (see
+    # supports_combination below).
     # octave_*: packed 3-bit slots handled by the Octave kernels.
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = list(_QSA_CACHE_DTYPES)
 
@@ -158,10 +156,21 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        # The QSA Triton kernel dequantizes the fp8 KV itself; flash-attn
-        # never runs over the quantized cache, so every combination the
-        # parent would reject on kv-cache-dtype grounds is accepted here.
-        return None
+        # The QSA Triton kernel reads the quantized KV itself (fp8 casts
+        # inside the kernel, Octave decode kernels); flash-attn never runs
+        # over this cache, so bypass only the parent's flash-attn
+        # kv-cache-dtype probe and keep every other combination check.
+        return super().supports_combination(
+            head_size,
+            dtype,
+            None,
+            block_size,
+            use_mla,
+            has_sink,
+            use_sparse,
+            use_mm_prefix,
+            device_capability,
+        )
 
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
@@ -406,6 +415,10 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            assert key_cache.dtype == torch.uint8, (
+                "fp8 KV cache must be uint8 storage; a config mismatch would "
+                "silently double the view's shape"
+            )
             fp8_dtype = current_platform.fp8_dtype()
             key_cache = key_cache.view(fp8_dtype)
             value_cache = value_cache.view(fp8_dtype)
@@ -574,8 +587,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.indexer",
         )
-        # The fused prepare writes raw BF16 K/V; an Octave cache is packed by
-        # do_kv_cache_update instead.
+        # The fused prepare writes bf16 or platform-fp8 K/V; an Octave cache
+        # is packed by do_kv_cache_update instead.
         self.use_fused_qsa_prepare = (
             self.attn_output_gate
             and self.indexer.use_fused_pre_indexer
