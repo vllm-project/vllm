@@ -16,6 +16,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.config import ModelConfig, get_current_vllm_config_or_none
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import StackedColumnParallelLinear
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
@@ -570,3 +571,21 @@ class DefaultModelLoader(BaseModelLoader):
                     "Following weights were not initialized from "
                     f"checkpoint: {weights_not_loaded}"
                 )
+        self._check_stacked_weights_complete(model)
+
+    @staticmethod
+    def _check_stacked_weights_complete(model: nn.Module) -> None:
+        """Reject a stacked parameter, e.g. `qkv_proj`, that received only
+        some of its shards; the name-level check cannot see that."""
+        missing_shards: dict[str, list[str | int]] = {}
+        for module_name, module in model.named_modules():
+            if not isinstance(module, StackedColumnParallelLinear):
+                continue
+            for param_name, shards in module.pop_missing_shards().items():
+                full_name = f"{module_name}.{param_name}" if module_name else param_name
+                missing_shards[full_name] = shards
+        if missing_shards:
+            raise ValueError(
+                "Following weights were only partially initialized from "
+                f"checkpoint, missing shards: {missing_shards}"
+            )
