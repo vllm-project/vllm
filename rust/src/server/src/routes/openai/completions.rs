@@ -6,6 +6,7 @@ mod types;
 mod validate;
 
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -15,6 +16,8 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
+use futures::future::try_join_all;
+use futures::stream::select_all;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
@@ -30,8 +33,8 @@ use vllm_text::{
 use self::convert::{ResponseOptions, prepare_completion_request};
 pub(crate) use self::types::CompletionRequest;
 use super::utils::logprobs::{
-    collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
-    prompt_logprobs_to_maps, text_len,
+    append_openai_logprobs, collected_logprobs_to_openai, decoded_logprobs_to_openai,
+    decoded_prompt_logprobs_to_openai, prompt_logprobs_to_maps, text_len,
 };
 use super::utils::metrics::PerRequestMetrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
@@ -48,6 +51,9 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
+type CompletionChunkStream =
+    Pin<Box<dyn Stream<Item = Result<CompletionSseChunk, ApiError>> + Send>>;
+
 pub(crate) fn lower_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
@@ -63,74 +69,255 @@ pub(crate) fn lower_completion_request(
 pub async fn completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<CompletionRequest>,
+    ValidatedJson(mut body): ValidatedJson<CompletionRequest>,
 ) -> Response {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let public_request_id = format!("cmpl-{}", request_context.request_id);
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
+    if let Err(error) = validate::validate_request_compat(&body, &lora_resolution.model_names) {
+        return error.into_response();
+    }
 
     let tokenizer = state.chat.text().tokenizer();
-    let prepared = match prepare_completion_request(
-        body,
-        &lora_resolution,
-        request_context,
-        tokenizer.as_ref(),
-    ) {
-        Ok(prepared) => prepared,
-        Err(error) => return error.into_response(),
-    };
+    let is_batch = body.prompt.is_batch();
+    let prompts = std::mem::replace(
+        &mut body.prompt,
+        types::CompletionPrompt::Text(String::new()),
+    )
+    .into_prompts();
+    if prompts.is_empty() {
+        return ApiError::invalid_request("You must pass at least one prompt", Some("prompt"))
+            .into_response();
+    }
+    let mut prepared_requests = Vec::with_capacity(prompts.len());
+    for prompt in prompts {
+        let mut item = body.clone();
+        item.prompt = prompt.into();
+        match prepare_completion_request(
+            item,
+            &lora_resolution,
+            request_context.clone(),
+            tokenizer.as_ref(),
+        ) {
+            Ok(prepared) => {
+                if let Err(error) = prepared.text_request.validate() {
+                    return completion_error_response(
+                        text_submit_error("invalid completion request", error),
+                        stream && is_batch,
+                        state.api_server_options,
+                    );
+                }
+                prepared_requests.push(prepared);
+            }
+            Err(error) => return error.into_response(),
+        }
+    }
+    let response_model = lora_resolution
+        .lora_request
+        .as_ref()
+        .map(|request| request.lora_name.clone())
+        .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
     let request_span = tracing::info_span!(
         "completions",
-        request_id = %prepared.request_id,
+        request_id = %public_request_id,
         engine_request_id = tracing::field::Empty,
     );
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
-    let text_stream = match state
-        .chat
-        .text()
-        .generate(prepared.text_request)
-        .instrument(request_span.clone())
-        .await
-    {
-        Ok(stream) => stream,
-        Err(error) => {
-            return text_submit_error("failed to submit completion request", error).into_response();
-        }
-    };
+    let mut submitted = Vec::with_capacity(prepared_requests.len());
+    for prepared in prepared_requests {
+        let text_stream = match state
+            .chat
+            .text()
+            .generate(prepared.text_request)
+            .instrument(request_span.clone())
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                return completion_error_response(
+                    text_submit_error("failed to submit completion request", error),
+                    stream && is_batch,
+                    api_server_options,
+                );
+            }
+        };
+        submitted.push((text_stream, prepared.options));
+    }
 
     if stream {
-        let chunk_stream = completion_chunk_stream(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
+        if !is_batch {
+            let (text_stream, options) = submitted.pop().expect("one submitted request");
+            let chunk_stream = completion_chunk_stream(
+                text_stream,
+                public_request_id,
+                response_model,
+                created,
+                api_server_options,
+                options,
+            );
+            let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
+            return sse_response(sse_stream, api_server_options.sse_keep_alive_interval);
+        }
+        let chunk_streams = submitted
+            .into_iter()
+            .enumerate()
+            .map(|(index, (text_stream, options))| {
+                let stream = completion_chunk_stream(
+                    text_stream,
+                    public_request_id.clone(),
+                    response_model.clone(),
+                    created,
+                    api_server_options,
+                    options,
+                )
+                .map(move |result| result.map(|chunk| with_choice_index(chunk, index as u32)));
+                Box::pin(stream) as CompletionChunkStream
+            })
+            .collect();
+        let chunk_stream = aggregate_completion_chunk_streams(
+            chunk_streams,
+            public_request_id,
+            response_model,
             created,
-            api_server_options,
-            prepared.options,
+            body.stream_options
+                .as_ref()
+                .and_then(|options| options.include_usage)
+                .unwrap_or(false),
         );
         let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        let response = match collect_completion(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        )
+        let responses = try_join_all(submitted.into_iter().map(|(text_stream, options)| {
+            collect_completion(
+                text_stream,
+                public_request_id.clone(),
+                response_model.clone(),
+                created,
+                api_server_options,
+                options,
+            )
+        }))
         .instrument(request_span.clone())
-        .await
-        {
-            Ok(response) => response,
+        .await;
+        let response = match responses {
+            Ok(responses) => merge_completion_responses(responses),
             Err(error) => return error.into_response(),
         };
 
         Json(response).into_response()
     }
+}
+
+fn completion_error_response(
+    error: ApiError,
+    stream: bool,
+    api_server_options: ApiServerOptions,
+) -> Response {
+    if stream {
+        let chunks = futures::stream::once(async move { Err::<CompletionSseChunk, _>(error) });
+        sse_response(
+            completion_sse_stream(chunks),
+            api_server_options.sse_keep_alive_interval,
+        )
+    } else {
+        error.into_response()
+    }
+}
+
+fn merge_completion_responses(mut responses: Vec<CompletionResponse>) -> CompletionResponse {
+    let mut response = responses.remove(0);
+    for next in responses {
+        response.choices.extend(next.choices);
+        response.usage = merge_usage(response.usage, next.usage);
+        response.metrics = None;
+    }
+    for (index, choice) in response.choices.iter_mut().enumerate() {
+        choice.index = index as u32;
+    }
+    response
+}
+
+fn merge_usage(left: Option<Usage>, right: Option<Usage>) -> Option<Usage> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(Usage::from_counts(
+            left.prompt_tokens.saturating_add(right.prompt_tokens),
+            left.completion_tokens
+                .unwrap_or_default()
+                .saturating_add(right.completion_tokens.unwrap_or_default()),
+            match (left.prompt_tokens_details, right.prompt_tokens_details) {
+                (Some(left), Some(right)) => {
+                    Some(left.cached_tokens.saturating_add(right.cached_tokens))
+                }
+                (Some(details), None) | (None, Some(details)) => Some(details.cached_tokens),
+                (None, None) => None,
+            },
+            left.completion_tokens_details
+                .reasoning_tokens
+                .saturating_add(right.completion_tokens_details.reasoning_tokens),
+        )),
+        (usage @ Some(_), None) | (None, usage @ Some(_)) => usage,
+        (None, None) => None,
+    }
+}
+
+fn with_choice_index(mut chunk: CompletionSseChunk, index: u32) -> CompletionSseChunk {
+    if let CompletionSseChunk::Chunk(response) = &mut chunk {
+        for choice in &mut response.choices {
+            choice.index = index;
+        }
+    }
+    chunk
+}
+
+#[try_stream]
+async fn aggregate_completion_chunk_streams(
+    streams: Vec<CompletionChunkStream>,
+    request_id: String,
+    response_model: String,
+    created: u64,
+    include_usage: bool,
+    mut y: TryYielder<CompletionSseChunk, ApiError>,
+) -> Result<(), ApiError> {
+    let mut streams = select_all(streams);
+    let mut usage = None;
+    while let Some(next) = streams.next().await {
+        let chunk = match next {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                drop(streams);
+                y.yield_error(error).await;
+                return Ok(());
+            }
+        };
+        match chunk {
+            CompletionSseChunk::Chunk(chunk) => {
+                y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
+            }
+            CompletionSseChunk::Usage(chunk) => {
+                usage = merge_usage(usage, chunk.usage);
+            }
+        }
+    }
+    if include_usage {
+        let envelope = Arc::new(StreamResponseEnvelope::new(
+            request_id,
+            "text_completion",
+            created,
+            response_model,
+        ));
+        y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
+            &envelope,
+            usage.unwrap_or_else(|| Usage::from_counts(0, 0, None, 0)),
+            None,
+        )))
+        .await;
+    }
+    Ok(())
 }
 
 async fn collect_completion(
@@ -169,16 +356,35 @@ async fn collect_completion(
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
 
     let prompt_char_count = echo.as_ref().map(|prompt| text_len(prompt)).unwrap_or_default();
-    let logprobs = if requested_logprobs.is_some() && prompt_only {
-        let prompt = echo.as_deref().ok_or_else(|| {
-            server_error!("prompt-only completion response missing echoed prompt")
-        })?;
-        Some(prompt_only_logprobs_to_openai(
+    let logprobs = if requested_logprobs.is_some()
+        && let Some(prompt) = echo.as_deref()
+    {
+        let prompt_logprobs = echo_prompt_logprobs_to_openai(
             collected.prompt_logprobs.as_ref(),
             prompt,
             collected.prompt_token_ids.as_ref(),
             return_tokens_as_token_ids,
-        )?)
+        )?;
+        Some(
+            if !prompt_only && let Some(completion_logprobs) = collected.logprobs.as_ref() {
+                let completion_offset = prompt_logprobs
+                    .text_offset
+                    .last()
+                    .zip(prompt_logprobs.tokens.last())
+                    .map(|(&offset, token)| offset.saturating_add(text_len(token)))
+                    .unwrap_or_default();
+                append_openai_logprobs(
+                    prompt_logprobs,
+                    decoded_logprobs_to_openai(
+                        completion_logprobs,
+                        completion_offset,
+                        return_tokens_as_token_ids,
+                    )?,
+                )
+            } else {
+                prompt_logprobs
+            },
+        )
     } else if requested_logprobs.is_some() {
         Some(collected_logprobs_to_openai(
             &collected,
@@ -308,8 +514,8 @@ async fn completion_chunk_stream(
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 if let Some(prompt) = echo.as_ref() {
                     visible_text_len = text_len(prompt);
-                    let logprobs = if prompt_only && requested_logprobs.is_some() {
-                        Some(prompt_only_logprobs_to_openai(
+                    let logprobs = if requested_logprobs.is_some() {
+                        Some(echo_prompt_logprobs_to_openai(
                             prompt_logprobs.as_ref(),
                             prompt,
                             prompt_token_ids.as_ref(),
@@ -504,7 +710,7 @@ fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
     serde_json::to_value(stop_reason).expect("StopReason must serialize to JSON")
 }
 
-fn prompt_only_logprobs_to_openai(
+fn echo_prompt_logprobs_to_openai(
     prompt_logprobs: Option<&DecodedPromptLogprobs>,
     prompt: &str,
     prompt_token_ids: &[u32],
@@ -530,7 +736,7 @@ fn prompt_only_logprobs_to_openai(
     }
 
     Err(server_error!(
-        "prompt-only completion requested logprobs but generation returned none"
+        "echoed completion requested logprobs but generation returned none"
     ))
 }
 

@@ -5,7 +5,7 @@ use thiserror_ext::AsReport as _;
 use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 
-use super::types::CompletionRequest;
+use super::types::{CompletionPrompt, CompletionRequest};
 use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
@@ -79,12 +79,7 @@ pub(super) fn prepare_completion_request(
 
     let logprobs = request.logprobs;
     let prompt_only = request.echo && request.max_tokens == Some(0);
-    let prompt_logprobs =
-        request.prompt_logprobs.or(if request.echo && (!request.stream || prompt_only) {
-            logprobs
-        } else {
-            None
-        });
+    let prompt_logprobs = request.prompt_logprobs.or(if request.echo { logprobs } else { None });
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
@@ -118,7 +113,16 @@ pub(super) fn prepare_completion_request(
 
     let text_request = TextRequest {
         request_id: request_id.clone(),
-        prompt: request.prompt,
+        prompt: match request.prompt {
+            CompletionPrompt::Text(prompt) => Prompt::Text(prompt),
+            CompletionPrompt::TokenIds(token_ids) => Prompt::TokenIds(token_ids),
+            CompletionPrompt::TextBatch(_) | CompletionPrompt::TokenIdsBatch(_) => {
+                return Err(ApiError::invalid_request(
+                    "batch prompts must be split before request conversion",
+                    Some("prompt"),
+                ));
+            }
+        },
         mm_features: None,
         sampling_params: SamplingParams {
             temperature: request.temperature,
@@ -200,11 +204,11 @@ fn completion_echo_text(
     }
 
     match &request.prompt {
-        Prompt::Text(prompt) => Ok(Some(prompt.clone())),
-        Prompt::TokenIds(token_ids) if request.return_token_ids.unwrap_or(false) => {
+        CompletionPrompt::Text(prompt) => Ok(Some(prompt.clone())),
+        CompletionPrompt::TokenIds(token_ids) if request.return_token_ids.unwrap_or(false) => {
             Ok(Some(String::new()))
         }
-        Prompt::TokenIds(token_ids) => {
+        CompletionPrompt::TokenIds(token_ids) => {
             tokenizer.decode(token_ids, false).map(Some).map_err(|error| {
                 ApiError::invalid_request(
                     format!(
@@ -214,6 +218,12 @@ fn completion_echo_text(
                     Some("prompt"),
                 )
             })
+        }
+        CompletionPrompt::TextBatch(_) | CompletionPrompt::TokenIdsBatch(_) => {
+            Err(ApiError::invalid_request(
+                "batch prompts must be split before request conversion",
+                Some("prompt"),
+            ))
         }
     }
 }
@@ -230,7 +240,7 @@ mod tests {
 
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
-    use crate::routes::openai::completions::types::CompletionRequest;
+    use crate::routes::openai::completions::types::{CompletionPrompt, CompletionRequest};
     use crate::routes::openai::utils::types::Normalizable;
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -262,8 +272,42 @@ mod tests {
         let request: CompletionRequest =
             serde_json::from_value(base_request_json()).expect("parse request");
 
-        assert_eq!(request.prompt, Prompt::Text("hello".to_string()));
+        assert_eq!(request.prompt, CompletionPrompt::Text("hello".to_string()));
         assert_eq!(request.model.as_deref(), Some("Qwen/Qwen1.5-0.5B-Chat"));
+    }
+
+    #[test]
+    fn completion_http_request_deserializes_batch_prompt_forms() {
+        for (prompt, expected) in [
+            (
+                json!(["hello", "world"]),
+                CompletionPrompt::TextBatch(vec!["hello".to_string(), "world".to_string()]),
+            ),
+            (
+                json!([[11, 22], [33]]),
+                CompletionPrompt::TokenIdsBatch(vec![vec![11, 22], vec![33]]),
+            ),
+        ] {
+            let mut value = base_request_json();
+            value["prompt"] = prompt;
+            let request: CompletionRequest =
+                serde_json::from_value(value).expect("parse batch request");
+            assert_eq!(request.prompt, expected);
+        }
+    }
+
+    #[test]
+    fn completion_http_request_rejects_mixed_or_nested_batch_prompts() {
+        for prompt in [
+            json!(["hello", [11, 22]]),
+            json!([[[11, 22]]]),
+            json!([11, "hello"]),
+        ] {
+            let mut value = base_request_json();
+            value["prompt"] = prompt;
+            serde_json::from_value::<CompletionRequest>(value)
+                .expect_err("invalid batch prompt must be rejected");
+        }
     }
 
     #[test]
@@ -305,7 +349,7 @@ mod tests {
         }))
         .expect("parse request");
 
-        assert_eq!(request.prompt, Prompt::TokenIds(vec![11, 22, 33]));
+        assert_eq!(request.prompt, CompletionPrompt::TokenIds(vec![11, 22, 33]));
         assert_eq!(request.max_tokens, Some(7));
         assert!(request.ignore_eos);
     }
@@ -611,12 +655,12 @@ mod tests {
     }
 
     #[test]
-    fn prepare_completion_request_enables_prompt_logprobs_for_non_stream_echo() {
+    fn prepare_completion_request_enables_prompt_logprobs_for_stream_echo() {
         let request: CompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "prompt": "hello",
             "echo": true,
-            "stream": false,
+            "stream": true,
             "logprobs": 3
         }))
         .expect("parse request");
