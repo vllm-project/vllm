@@ -813,8 +813,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         # A non-last PP rank hands the bank to the PP send, so it must not be reused.
         if not is_workspace_manager_initialized() or not get_pp_group().is_last_rank:
             return hidden_states.new_empty(num_tokens, num_blocks, hidden_size)
-        # Persistent: a fresh bank sized to each step's token count leaves the
-        # caching allocator holding slightly-too-small ~1.8 GB segments.
         bank = current_workspace_manager().get_persistent(
             "kimi_k3_attn_res_block_residual",
             (self.max_num_batched_tokens, num_blocks, hidden_size),
