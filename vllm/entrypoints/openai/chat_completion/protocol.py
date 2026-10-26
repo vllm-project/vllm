@@ -41,7 +41,13 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import WeightVersionSpan
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import (
+    ChatParams,
+    ReasoningEffort,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -191,6 +197,10 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     # ``return_prompt_text=True`` on the request); only sent on the first chunk.
     prompt_text: str | None = None
     metrics: PerRequestMetrics | None = None
+    # vLLM-specific: KV transfer params returned with the final chunk
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
@@ -254,9 +264,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: (
-        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
-    ) = Field(
+    reasoning_effort: ReasoningEffort | None = Field(
         default=None,
         description=(
             "Constrains effort on reasoning for reasoning models. "
@@ -636,12 +644,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
+        reasoning_effort_map: dict[str, str] | None = None,
     ) -> ChatParams:
+        reasoning_effort = map_reasoning_effort(
+            self.reasoning_effort, reasoning_effort_map
+        )
+
         extra_kwargs: dict[str, Any] = dict(
             add_generation_prompt=self.add_generation_prompt,
             continue_final_message=self.continue_final_message,
             documents=self.documents,
-            reasoning_effort=self.reasoning_effort,
+            reasoning_effort=reasoning_effort,
         )
 
         # When reasoning is requested, activate thinking for models whose
@@ -649,8 +662,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         # enable_thinking to false). For templates that don't declare the
         # variable, resolve_chat_template_kwargs filters it out harmlessly.
         user_kwargs = self.chat_template_kwargs or {}
-        if self.reasoning_effort is not None and "enable_thinking" not in user_kwargs:
-            extra_kwargs["enable_thinking"] = self.reasoning_effort != "none"
+        if reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+            extra_kwargs["enable_thinking"] = reasoning_effort != "none"
 
         return ChatParams(
             chat_template=self.chat_template or default_template,
