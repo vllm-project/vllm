@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
+from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -375,6 +376,112 @@ def _profile_result(consumed, reserved_before=0, reserved_after=0):
         before_create=_snapshot(ANY_FREE_MEMORY, reserved_before),
         after_profile=_snapshot(ANY_FREE_MEMORY - consumed, reserved_after),
     )
+
+
+@pytest.mark.parametrize("apply_graph_estimate", [False, True])
+@pytest.mark.parametrize("graph_estimate", [0, GiB_bytes])
+def test_kv_budget_reserves_workspace_retained_by_graph_setup(
+    monkeypatch, apply_graph_estimate, graph_estimate
+):
+    """Late attention workspaces are persistent, regardless of graph accounting."""
+    result = _profile_result(MEASURED_DROP)
+    result.transient_peak_headroom = GiB_bytes
+    result.non_kv_cache_memory = MEASURED_DROP + GiB_bytes
+    retained_memory = 2 * GiB_bytes
+    after_graph_setup = _snapshot(result.after_profile.free_memory - retained_memory)
+    compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+    worker = SimpleNamespace(
+        device="cuda:0",
+        init_snapshot=SimpleNamespace(
+            free_memory=ANY_FREE_MEMORY, total_memory=ANY_FREE_MEMORY
+        ),
+        requested_memory=ANY_FREE_MEMORY,
+        model_runner=SimpleNamespace(
+            model_memory_usage=0,
+            profile_run=lambda **_: None,
+            profile_cudagraph_memory=lambda: graph_estimate,
+        ),
+        vllm_config=SimpleNamespace(compilation_config=compilation_config),
+        cache_config=SimpleNamespace(
+            kv_cache_memory_bytes=None, gpu_memory_utilization=1.0
+        ),
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        _scoped_allocator_max_split=lambda **_: nullcontext(),
+        randomize_dummy_inputs=False,
+    )
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker, "memory_profiling", lambda *a, **kw: nullcontext(result)
+    )
+    monkeypatch.setattr(gpu_worker, "MemorySnapshot", lambda **kw: after_graph_setup)
+    monkeypatch.setattr(
+        gpu_worker,
+        "current_platform",
+        SimpleNamespace(
+            is_cuda_alike=lambda: True, get_process_device_memory_bytes=lambda _: None
+        ),
+    )
+    monkeypatch.setattr(
+        gpu_worker.envs,
+        "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS",
+        apply_graph_estimate,
+    )
+
+    available = gpu_worker.Worker.determine_available_memory(worker)
+
+    assert worker.total_consumed == MEASURED_DROP + retained_memory
+    assert available == GiB_bytes - (graph_estimate if apply_graph_estimate else 0)
+
+
+def test_kv_budget_retained_by_graph_setup_uses_process_counter(monkeypatch):
+    """With a per-process memory counter (ROCm), the retained charge comes from
+    the counter, not from free memory (2 MiB-rounded on ROCm)."""
+    result = _profile_result(MEASURED_DROP)
+    result.transient_peak_headroom = GiB_bytes
+    result.non_kv_cache_memory = MEASURED_DROP + GiB_bytes
+    # Free memory reports 2 GiB retained; the counter grew by 1 GiB.
+    after_graph_setup = _snapshot(result.after_profile.free_memory - 2 * GiB_bytes)
+    counter = iter([10 * GiB_bytes, 11 * GiB_bytes])
+    worker = SimpleNamespace(
+        device="cuda:0",
+        init_snapshot=SimpleNamespace(
+            free_memory=ANY_FREE_MEMORY, total_memory=ANY_FREE_MEMORY
+        ),
+        requested_memory=ANY_FREE_MEMORY,
+        model_runner=SimpleNamespace(
+            model_memory_usage=0,
+            profile_run=lambda **_: None,
+            profile_cudagraph_memory=lambda: 0,
+        ),
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+        ),
+        cache_config=SimpleNamespace(
+            kv_cache_memory_bytes=None, gpu_memory_utilization=1.0
+        ),
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        _scoped_allocator_max_split=lambda **_: nullcontext(),
+        randomize_dummy_inputs=False,
+    )
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker, "memory_profiling", lambda *a, **kw: nullcontext(result)
+    )
+    monkeypatch.setattr(gpu_worker, "MemorySnapshot", lambda **kw: after_graph_setup)
+    monkeypatch.setattr(
+        gpu_worker,
+        "current_platform",
+        SimpleNamespace(
+            is_cuda_alike=lambda: True,
+            get_process_device_memory_bytes=lambda _: next(counter),
+        ),
+    )
+
+    gpu_worker.Worker.determine_available_memory(worker)
+
+    assert worker.total_consumed == MEASURED_DROP + GiB_bytes
 
 
 @pytest.fixture

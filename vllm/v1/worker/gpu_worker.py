@@ -714,7 +714,26 @@ class Worker(WorkerBase):
                 and not self.model_config.enforce_eager
             )
         ):
+            process_before = current_platform.get_process_device_memory_bytes(
+                self.device
+            )
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            after_cudagraph_profile = MemorySnapshot(device=self.device)
+            retained_memory = max(
+                profile_result.after_profile.free_memory
+                - after_cudagraph_profile.free_memory,
+                0,
+            )
+            process_after = current_platform.get_process_device_memory_bytes(
+                self.device
+            )
+            if process_before is not None and process_after is not None:
+                # Where the platform counts this process's memory (ROCm), use
+                # that: free memory there rounds each allocation up to 2 MB.
+                retained_memory = max(process_after - process_before, 0)
+            profile_result.total_consumed += retained_memory
+            profile_result.non_kv_cache_memory += retained_memory
+            profile_result.after_profile = after_cudagraph_profile
 
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (

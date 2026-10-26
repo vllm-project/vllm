@@ -4,6 +4,7 @@
 import importlib.metadata
 import os
 import platform
+import stat
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
@@ -647,6 +648,79 @@ def _get_invalid_reasons(
     return invalid_reasons
 
 
+# Per-process VRAM for get_process_device_memory_bytes(), from DRM fdinfo.
+# HIP opens the GPU's render node /dev/dri/renderD<minor> (DRM major 226).
+# /proc/self/fdinfo/<fd> of that file reports the VRAM of this process's GPU
+# address space, HIP's own allocations included. /proc/self works in any
+# container, unlike KFD's per-process files, which are keyed by host PID.
+# The KFD topology is read only to map a torch device to its render node.
+_KFD_TOPOLOGY_NODES = "/sys/class/kfd/kfd/topology/nodes"
+_DRM_MAJOR = 226
+# Buffers that prefer VRAM, evicted ones included since they return when used
+# (drm-usage-stats.rst): the DRM key (Linux 6.13+), then amdgpu's key on older
+# kernels. Not drm-resident-vram, which leaves evicted buffers out. Without a
+# key, the caller falls back.
+_FDINFO_VRAM_KEYS = ("drm-total-vram", "amd-requested-vram")
+_FDINFO_UNITS = {"": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}
+
+
+@cache
+def _drm_render_minor(uuid: str, pci: tuple[int, int, int]) -> int | None:
+    """Render-node minor number of the GPU with this torch UUID / PCI address,
+    read from the KFD topology. ``None`` if no single GPU node matches."""
+    try:
+        # torch's ROCm UUID is the KFD unique_id written as ASCII hex digits.
+        unique_id = int(bytes.fromhex(uuid.replace("-", "")).decode(), 16)
+    except ValueError:
+        unique_id = None
+    by_uid, by_pci = [], []
+    for node in os.listdir(_KFD_TOPOLOGY_NODES):
+        try:
+            # One "name value" pair per line; a malformed node is skipped.
+            with open(f"{_KFD_TOPOLOGY_NODES}/{node}/properties") as f:
+                props = dict(line.split() for line in f if line.strip())
+            if int(props.get("simd_count", 0)) == 0:
+                continue  # a CPU node
+            minor = int(props["drm_render_minor"])
+            # location_id is (bus << 8) | (dev << 3) | fn; fn is dropped
+            # because torch reports only domain, bus and device.
+            loc = int(props["location_id"])
+            node_pci = (int(props.get("domain", 0)), loc >> 8, (loc >> 3) & 0x1F)
+        except (OSError, KeyError, ValueError):
+            continue
+        if unique_id is not None and int(props.get("unique_id", -1)) == unique_id:
+            by_uid.append(minor)
+        if node_pci == pci:
+            by_pci.append(minor)
+    # The UUID is unique per partition; GPU partitions share bus and device,
+    # so a PCI match is used only when exactly one node has it.
+    for matches in (by_uid, by_pci):
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def _sum_fdinfo_vram(fdinfos: list[str]) -> int | None:
+    """Total VRAM in the given fdinfo texts. Files that share a drm-client-id
+    are one open file reached through duplicated fds, so they count once.
+    ``None`` if no text has a VRAM key."""
+    total, seen, found = 0, set(), False
+    for text in fdinfos:
+        pairs = (line.split(":", 1) for line in text.splitlines() if ":" in line)
+        info = {key.strip(): value.strip() for key, value in pairs}
+        client = info.get("drm-client-id")
+        if client is not None and client in seen:
+            continue
+        seen.add(client)
+        key = next((k for k in _FDINFO_VRAM_KEYS if k in info), None)
+        if key is not None:
+            # Sizes are printed exactly, e.g. "1052672 KiB" or "4096".
+            number, _, unit = info[key].partition(" ")
+            total += int(number) * _FDINFO_UNITS[unit.strip()]
+            found = True
+    return total if found else None
+
+
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
     device_name: str = "rocm"
@@ -1240,6 +1314,41 @@ class RocmPlatform(Platform):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.max_memory_allocated(device)
+
+    @classmethod
+    def get_process_device_memory_bytes(cls, device: torch.device) -> int | None:
+        # Read from DRM fdinfo, not hipMemGetInfo (torch's free memory on
+        # ROCm), which counts every allocation as at least 2 MB. fdinfo is
+        # exact but misses KFD's SVM memory, e.g. the CWSR save area of each
+        # hardware queue (about 30 MB per queue on an R9700). ``None``
+        # (caller falls back) when the render node or a VRAM key is missing.
+        try:
+            props = torch.cuda.get_device_properties(device)
+            minor = _drm_render_minor(
+                str(props.uuid),
+                (props.pci_domain_id, props.pci_bus_id, props.pci_device_id),
+            )
+            if minor is None:
+                return None
+            # Wait for queued work so the reading includes its allocations.
+            torch.cuda.synchronize(device)
+            fdinfos = []
+            for fd in os.listdir("/proc/self/fd"):
+                try:
+                    st = os.stat(f"/proc/self/fd/{fd}")
+                    if (os.major(st.st_rdev), os.minor(st.st_rdev)) != (
+                        _DRM_MAJOR,
+                        minor,
+                    ) or not stat.S_ISCHR(st.st_mode):
+                        continue
+                    with open(f"/proc/self/fdinfo/{fd}") as f:
+                        fdinfos.append(f.read())
+                except OSError:
+                    continue  # the fd was closed while we were scanning
+            return _sum_fdinfo_vram(fdinfos)
+        except (OSError, AttributeError, KeyError, ValueError, RuntimeError) as e:
+            logger.debug("Per-process VRAM from DRM fdinfo unavailable: %s", e)
+            return None
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
