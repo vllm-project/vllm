@@ -18,6 +18,7 @@ from vllm.renderers.chat_utils import (
     roles_rendered_by_chat_template,
 )
 from vllm.renderers.chat_utils.rendered_roles import _STANDARD_CHAT_ROLES
+from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 
 # Qwen-style dispatch: unknown roles fall through and emit nothing.
 _FILTERING_TEMPLATE = """
@@ -777,6 +778,20 @@ def _read_repo_template(*parts: str) -> str:
     return root.joinpath(*parts).read_text()
 
 
+def _read_user_assistant_template(template_path: str | tuple[str, ...]) -> str:
+    """Load a repo template, or a built-in fallback by model type.
+
+    The CPU test image installs the wheel and does not keep the source tree,
+    so built-in templates are read from the same registry the renderer uses.
+    """
+    if isinstance(template_path, str):
+        path = get_chat_template_fallback_path(template_path, "")
+        if path is None:
+            raise FileNotFoundError(template_path)
+        return path.read_text()
+    return _read_repo_template(*template_path)
+
+
 def _render_chat_template(template: str, messages) -> str:
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(
         trim_blocks=True,
@@ -888,21 +903,17 @@ def test_rendered_tool_call_keeps_a_turn_whose_text_was_omitted():
     assert_chat_template_rendered_messages([message], template, render_text)
 
 
-_USER_ASSISTANT_TEMPLATES = [
+_USER_ASSISTANT_TEMPLATES: list[str | tuple[str, ...]] = [
     ("examples", "template_falcon.jinja"),
     ("examples", "template_chatglm2.jinja"),
-    (
-        "vllm",
-        "transformers_utils",
-        "chat_templates",
-        "template_blip2.jinja",
-    ),
+    # Registered fallback. Resolved from the installed package, not the source tree.
+    "blip-2",
 ]
 
 
 @pytest.mark.parametrize("template_path", _USER_ASSISTANT_TEMPLATES)
 def test_ignored_system_prompt_warns_and_is_not_a_400(template_path):
-    template = _read_repo_template(*template_path)
+    template = _read_user_assistant_template(template_path)
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "hello"},
@@ -1034,7 +1045,7 @@ def test_role_header_without_content_path_rejects_typo():
 @pytest.mark.parametrize("template_path", _USER_ASSISTANT_TEMPLATES)
 @pytest.mark.parametrize("role", ["usr", "assistan", "USER"])
 def test_typo_role_on_user_assistant_template_is_rejected(template_path, role):
-    template = _read_repo_template(*template_path)
+    template = _read_user_assistant_template(template_path)
     with pytest.raises(VLLMValidationError, match=re.escape(repr(role))):
         assert_chat_template_rendered_messages(
             [{"role": role, "content": "hello"}],
@@ -1043,3 +1054,79 @@ def test_typo_role_on_user_assistant_template_is_rejected(template_path, role):
                 template, rendered_messages
             ),
         )
+
+
+# HuggingFaceH4/zephyr-7b-beta. No branch for any other role.
+_ZEPHYR_TEMPLATE = """
+{% for message in messages %}
+{% if message['role'] == 'user' %}
+{{ '<|user|>\\n' + message['content'] }}
+{% elif message['role'] == 'system' %}
+{{ '<|system|>\\n' + message['content'] }}
+{% elif message['role'] == 'assistant' %}
+{{ '<|assistant|>\\n' + message['content'] }}
+{% endif %}
+{% endfor %}
+"""
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["what is 1+1?", [{"type": "text", "text": "what is 1+1?"}]],
+)
+def test_zephyr_template_rejects_custom_role(content):
+    """Zephyr drops my-custom-role for both string and list content."""
+
+    def render_text(messages):
+        return _render_chat_template(_ZEPHYR_TEMPLATE, messages)
+
+    rendered = render_text([{"role": "my-custom-role", "content": content}])
+    assert "what is 1+1?" not in rendered
+    with pytest.raises(VLLMValidationError, match="my-custom-role"):
+        assert_chat_template_rendered_messages(
+            [{"role": "my-custom-role", "content": content}],
+            _ZEPHYR_TEMPLATE,
+            render_text,
+        )
+
+
+# Llama Guard prints `content['text']` from text parts and ignores a string.
+_TEXT_PART_TEMPLATE = """
+{% for message in messages %}
+{% if message['role'] == 'user' %}
+{% set role = 'User' %}
+{% elif message['role'] == 'assistant' %}
+{% set role = 'Agent' %}
+{% endif %}
+{% for part in message['content'] | selectattr('type', 'equalto', 'text') %}
+{{ role }}: {{ part['text'] }}
+{% endfor %}
+{% endfor %}
+"""
+
+
+def test_text_part_template_keeps_user_text():
+    """A user turn is present once content is a text part, and a printed typo stays."""
+
+    def render_text(messages):
+        return _render_chat_template(_TEXT_PART_TEMPLATE, messages)
+
+    plain = render_text([{"role": "user", "content": "hello from the user"}])
+    assert "hello from the user" not in plain
+
+    parts = [{"type": "text", "text": "hello from the user"}]
+    rendered = render_text([{"role": "user", "content": parts}])
+    assert "User: hello from the user" in rendered
+    assert_chat_template_rendered_messages(
+        [{"role": "user", "content": parts}],
+        _TEXT_PART_TEMPLATE,
+        render_text,
+    )
+
+    typo = [{"type": "text", "text": "typo payload zebra"}]
+    assert "typo payload zebra" in render_text([{"role": "usr", "content": typo}])
+    assert_chat_template_rendered_messages(
+        [{"role": "usr", "content": typo}],
+        _TEXT_PART_TEMPLATE,
+        render_text,
+    )

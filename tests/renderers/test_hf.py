@@ -605,28 +605,37 @@ def _assert_real_template_checks_dropped_roles(model: str) -> None:
         trust_remote_code=model_config.trust_remote_code,
     )
 
-    user_text = "hello from the user"
-    rendered = safe_apply_chat_template(
-        model_config,
-        tokenizer,
-        [{"role": "user", "content": user_text}],
-        chat_template=None,
-        tokenize=False,
-        add_generation_prompt=False,
-    )
-    assert isinstance(rendered, str)
-    assert user_text in rendered
-
-    typo_text = "typo payload zebra"
-    try:
-        typo_rendered = safe_apply_chat_template(
+    def render(messages):
+        return safe_apply_chat_template(
             model_config,
             tokenizer,
-            [{"role": "usr", "content": typo_text}],
+            messages,
             chat_template=None,
             tokenize=False,
             add_generation_prompt=False,
         )
+
+    # Most templates print a string `content`. Llama Guard only walks text
+    # parts (`selectattr('type', 'equalto', 'text')`) and prefixes them.
+    as_text_parts = False
+
+    def content_of(text: str) -> str | list[dict[str, str]]:
+        if as_text_parts:
+            return [{"type": "text", "text": text}]
+        return text
+
+    user_text = "hello from the user"
+    rendered = render([{"role": "user", "content": user_text}])
+    assert isinstance(rendered, str)
+    if user_text not in rendered:
+        as_text_parts = True
+        rendered = render([{"role": "user", "content": content_of(user_text)}])
+        assert isinstance(rendered, str)
+    assert user_text in rendered
+
+    typo_text = "typo payload zebra"
+    try:
+        typo_rendered = render([{"role": "usr", "content": content_of(typo_text)}])
     except VLLMValidationError as exc:
         # Our checker names the typo. A template that rejects the turn
         # itself is also not a silent drop.
@@ -642,16 +651,11 @@ def _assert_real_template_checks_dropped_roles(model: str) -> None:
         "vllm.renderers.chat_utils.rendered_roles.logger.warning_once"
     ) as system_warn:
         try:
-            system_rendered = safe_apply_chat_template(
-                model_config,
-                tokenizer,
+            system_rendered = render(
                 [
-                    {"role": "system", "content": system_text},
-                    {"role": "user", "content": user_text},
-                ],
-                chat_template=None,
-                tokenize=False,
-                add_generation_prompt=False,
+                    {"role": "system", "content": content_of(system_text)},
+                    {"role": "user", "content": content_of(user_text)},
+                ]
             )
         except VLLMValidationError as exc:
             assert "check for a typo in `role`" not in str(exc)
@@ -665,20 +669,15 @@ def _assert_real_template_checks_dropped_roles(model: str) -> None:
     function_text = "function result zebra"
     with patch("vllm.renderers.chat_utils.rendered_roles.logger.warning_once") as warn:
         try:
-            function_rendered = safe_apply_chat_template(
-                model_config,
-                tokenizer,
+            function_rendered = render(
                 [
-                    {"role": "user", "content": user_text},
+                    {"role": "user", "content": content_of(user_text)},
                     {
                         "role": "function",
                         "name": "lookup",
-                        "content": function_text,
+                        "content": content_of(function_text),
                     },
-                ],
-                chat_template=None,
-                tokenize=False,
-                add_generation_prompt=False,
+                ]
             )
         except VLLMValidationError as exc:
             # The template rejected the role itself. Our checker must not

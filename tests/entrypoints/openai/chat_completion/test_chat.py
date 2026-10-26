@@ -741,36 +741,25 @@ async def test_complex_message_content(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_custom_role(client: openai.AsyncOpenAI):
-    # Not sure how the model handles custom roles so we just check that
-    # both string and complex message content are handled in the same way
-
-    resp1 = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {
-                "role": "my-custom-role",
-                "content": "what is 1+1?",
-            }
-        ],
-        temperature=0,
-        seed=0,
-    )
-
-    resp2 = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {
-                "role": "my-custom-role",
-                "content": [{"type": "text", "text": "what is 1+1?"}],
-            }
-        ],
-        temperature=0,
-        seed=0,
-    )
-
-    content1 = resp1.choices[0].message.content
-    content2 = resp2.choices[0].message.content
-    assert content1 == content2
+    # Zephyr renders user, system, and assistant only. A custom role used to
+    # vanish from the prompt; string and list content are both rejected.
+    for content in (
+        "what is 1+1?",
+        [{"type": "text", "text": "what is 1+1?"}],
+    ):
+        with pytest.raises(BadRequestError) as exc_info:
+            await client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {
+                        "role": "my-custom-role",
+                        "content": content,
+                    }
+                ],
+                temperature=0,
+                seed=0,
+            )
+        assert "my-custom-role" in exc_info.value.message
 
 
 @pytest.mark.asyncio
