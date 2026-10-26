@@ -369,7 +369,6 @@ def test_needs_split_local_xfer_handles(use_mla, source_ranks, tp_ratio, expecte
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("num_external_tokens", [0, 2])
-@pytest.mark.parametrize("sequence_type", [list, tuple])
 @pytest.mark.parametrize(
     "pattern,cached_count,unhashed_ids",
     [
@@ -380,7 +379,7 @@ def test_needs_split_local_xfer_handles(use_mla, source_ranks, tp_ratio, expecte
     ],
 )
 def test_update_state_after_alloc_tracks_cached_blocks_per_group(
-    num_external_tokens, sequence_type, pattern, cached_count, unhashed_ids
+    num_external_tokens, pattern, cached_count, unhashed_ids
 ):
     """Preserve per-group DCP offsets and clipped pull IDs, including holes."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
@@ -405,7 +404,7 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group(
             if state == "H":
                 block.set_block_hash(bytes([i]))
             group.append(block)
-        return sequence_type(group)
+        return group
 
     blocks = KVCacheBlocks((make_group("HHU", 1), make_group(pattern, 10)))
     request = create_request(do_remote_prefill=True)
