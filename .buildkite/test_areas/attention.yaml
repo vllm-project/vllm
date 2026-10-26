@@ -10,6 +10,9 @@ steps:
   source_file_dependencies:
     - vllm/config/attention.py
     - vllm/model_executor/layers/attention
+    - vllm/models/deepseek_v4/nvidia/
+    - csrc/attention/deepseek_v4_c128/
+    - cmake/external_projects/flashmla.cmake
     - vllm/v1/attention
     - tests/v1/attention
   commands:
