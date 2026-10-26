@@ -1131,11 +1131,13 @@ def _fused_moe_lora_kernel(
             )
             a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
 
-        # Cast operands to matching dtype for tl.dot. On ROCm, Triton's
-        # compiler may infer different types for a and b when merging
-        # if/else branches (TMA desc path returns fp32, tl.load returns
-        # the pointer's element type).
-        accumulator += tl.dot(a.to(tl.bfloat16), b.to(tl.bfloat16))
+        # Cast operands to the input dtype for tl.dot. On ROCm, Triton's
+        # compiler may infer different types for a and b when merging if/else
+        # branches (TMA desc path returns fp32, tl.load returns the pointer's
+        # element type). Casting to bfloat16 here silently changes fp16 LoRA
+        # operands and can produce incorrect results.
+        dot_dtype = a_ptr.dtype.element_ty
+        accumulator += tl.dot(a.to(dot_dtype), b.to(dot_dtype))
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
