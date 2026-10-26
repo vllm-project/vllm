@@ -3,8 +3,10 @@
 """IPC model loader: maps post-quantized weights from a local weight cache
 daemon via CUDA IPC instead of loading from disk."""
 
+import contextlib
 import dataclasses
 import socket
+import threading
 import time
 from collections.abc import Callable
 from copy import copy
@@ -88,7 +90,10 @@ class IpcModelLoader(BaseModelLoader):
 
     Note: in zero-copy mode the weights live in the daemon's CUDA IPC
     allocations, so sleep mode (CuMemAllocator weight offloading) must not be
-    used with this loader.
+    used with this loader. If the daemon exits, the CUDA driver keeps the
+    mapped weights alive until the engine exits, so the engine keeps serving;
+    the loader watches the daemon and warns since a restarted daemon then holds
+    a second copy of the weights on the GPU.
     """
 
     def __init__(self, load_config: LoadConfig):
@@ -123,6 +128,8 @@ class IpcModelLoader(BaseModelLoader):
                 f"Unexpected extra config keys for load format "
                 f"{load_config.load_format}: {sorted(extra_config)}"
             )
+        # Set once the daemon serving the zero-copy weights has exited.
+        self.daemon_lost = threading.Event()
         # Fingerprint computed by load_model, reused by standalone
         # load_weights so a reload keys on the same configuration.
         self._cache_key: WeightCacheKey | None = None
@@ -304,6 +311,8 @@ class IpcModelLoader(BaseModelLoader):
             )
         if self.mode == "copy":
             self._send_release()
+        else:
+            self._watch_daemon()
         logger.info(
             "Mapped %d tensors from the weight cache daemon (%s mode)",
             len(state.entries),
@@ -511,6 +520,64 @@ class IpcModelLoader(BaseModelLoader):
                 recv_msg(conn)
         except (WeightCacheUnavailableError, ConnectionError, OSError):
             logger.warning("Failed to ask the weight cache daemon to release")
+
+    def _watch_daemon(self) -> threading.Thread | None:
+        """Watch for the exit of the daemon serving the zero-copy weights.
+
+        The daemon holds the watch connection open for its lifetime, so the
+        connection closes exactly when that daemon instance exits; a daemon
+        restarted on the same socket does not mask the loss.
+        """
+        socket_path = self._resolve_socket_path()
+        try:
+            conn = self._connect(self.connect_timeout_s)
+        except WeightCacheUnavailableError as e:
+            logger.warning("Cannot watch the weight cache daemon: %s", e)
+            return None
+        try:
+            send_msg(conn, {"cmd": "watch"})
+            response = recv_msg(conn)
+        except Exception as e:
+            # Best effort: the weights are already mapped, so a failed watch
+            # must not send load_model down the disk fallback.
+            conn.close()
+            logger.warning(
+                "Cannot watch the weight cache daemon at %s: %s", socket_path, e
+            )
+            return None
+        if response.get("status") != "ok":
+            # Daemons predating the watch command reject it.
+            conn.close()
+            logger.info(
+                "Weight cache daemon at %s does not support watching (%s)",
+                socket_path,
+                response.get("message"),
+            )
+            return None
+        conn.settimeout(None)
+        thread = threading.Thread(
+            target=self._wait_for_daemon_exit,
+            args=(conn, socket_path),
+            daemon=True,
+            name="WeightCacheDaemonWatch",
+        )
+        thread.start()
+        return thread
+
+    def _wait_for_daemon_exit(self, conn: socket.socket, socket_path: str) -> None:
+        with conn, contextlib.suppress(OSError):
+            # The daemon never writes on a watch connection; recv returns
+            # b"" once it exits.
+            while conn.recv(1):
+                pass
+        self.daemon_lost.set()
+        logger.warning(
+            "Weight cache daemon at %s exited. This engine keeps serving: the "
+            "CUDA driver keeps its mapped weights alive until the engine exits. "
+            "A restarted daemon holds a second copy of the weights on this GPU, "
+            "and engine restarts miss the cache until a daemon serves again.",
+            socket_path,
+        )
 
     def _fallback_load_config(self) -> LoadConfig:
         # DefaultModelLoader must not see load_format="ipc_cache" or the ipc

@@ -788,6 +788,102 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     assert loader.get_external_weight_memory(None) == 0
 
 
+def _serve_one(handler):
+    """Fake ``IpcModelLoader._connect``: serve each request on a thread and
+    close the accepted connection afterwards, like ``serve_forever``.
+
+    Returns the fake and the list of server threads it started.
+    """
+    import socket
+
+    server_threads: list[threading.Thread] = []
+
+    def connect(timeout: float) -> socket.socket:
+        client, connection = socket.socketpair()
+
+        def serve() -> None:
+            with connection:
+                handler(connection)
+
+        server_thread = threading.Thread(target=serve, daemon=True)
+        server_thread.start()
+        server_threads.append(server_thread)
+        return client
+
+    return connect, server_threads
+
+
+def test_ipc_loader_detects_daemon_exit(monkeypatch):
+    """A zero-copy engine's watch connection closes exactly when the daemon
+    that served it exits; watches of exited engines are pruned."""
+    import socket
+
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+
+    server = object.__new__(daemon.WeightCacheDaemon)
+    server._watchers = []
+    connect, server_threads = _serve_one(server._handle_connection)
+    load_config = LoadConfig(
+        load_format="ipc_cache",
+        model_loader_extra_config={"socket_path": "/unused/daemon.sock"},
+    )
+    loaders = [ipc_loader.IpcModelLoader(load_config) for _ in range(2)]
+    threads = []
+    for loader in loaders:
+        monkeypatch.setattr(loader, "_connect", connect)
+        thread = loader._watch_daemon()
+        assert thread is not None
+        threads.append(thread)
+    for server_thread in server_threads:
+        server_thread.join(timeout=5)
+    # The second watch prunes nothing while the first engine is alive.
+    assert len(server._watchers) == 2
+    threads[0].join(timeout=0.2)
+    assert threads[0].is_alive() and not loaders[0].daemon_lost.is_set()
+
+    # The daemon exiting closes its end of every watch connection.
+    for watcher in server._watchers:
+        watcher.close()
+    for loader, thread in zip(loaders, threads):
+        thread.join(timeout=5)
+        assert loader.daemon_lost.is_set()
+
+    # A watcher whose engine has exited is pruned; a live one is kept.
+    peers = [socket.socketpair() for _ in range(2)]
+    server._watchers = [ours for ours, _ in peers]
+    peers[0][1].close()
+    server._prune_watchers()
+    assert server._watchers == [peers[1][0]]
+    for ours, theirs in peers:
+        ours.close()
+        theirs.close()
+
+
+def test_ipc_loader_skips_watch_on_old_daemon(monkeypatch):
+    """Daemons predating the watch command reject it; loading still works."""
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache import ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_msg,
+        send_msg,
+    )
+
+    def reject(connection) -> None:
+        assert recv_msg(connection) == {"cmd": "watch"}
+        send_msg(connection, {"status": "error", "message": "Unknown command"})
+
+    loader = ipc_loader.IpcModelLoader(
+        LoadConfig(
+            load_format="ipc_cache",
+            model_loader_extra_config={"socket_path": "/unused/daemon.sock"},
+        )
+    )
+    monkeypatch.setattr(loader, "_connect", _serve_one(reject)[0])
+    assert loader._watch_daemon() is None
+    assert not loader.daemon_lost.is_set()
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @create_new_process_for_each_test("spawn")
 def test_daemon_releases_cublas_workspaces():
