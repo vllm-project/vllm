@@ -138,6 +138,7 @@ class _StubTranscriptionModel:
 
     no_space_languages: set[str] = {"ja", "zh"}
     supports_segment_timestamp = False
+    supports_diarized_transcription = False
 
     @classmethod
     def get_speech_to_text_config(
