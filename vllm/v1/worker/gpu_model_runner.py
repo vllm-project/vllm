@@ -34,7 +34,6 @@ from vllm.config import (
     VllmConfig,
     get_layers_from_vllm_config,
     set_current_vllm_config,
-    update_config,
 )
 from vllm.config.cache import CacheConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
@@ -57,7 +56,7 @@ from vllm.forward_context import (
     set_forward_context,
 )
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
+from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -67,10 +66,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 )
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
-)
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
@@ -119,7 +115,6 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
-from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     async_tensor_h2d,
@@ -141,6 +136,7 @@ from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilde
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
+    compute_mm_prefix_ranges,
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
@@ -149,15 +145,12 @@ from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
 )
@@ -188,7 +181,6 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
-from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import (
     NgramProposerGPU,
@@ -210,6 +202,10 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.eplb_utils import (
+    draft_model_supports_eplb,
+    eplb_draft_model_name,
+)
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -245,15 +241,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
-
-
-def _get_parameter_for_reload(model: nn.Module, name: str) -> nn.Parameter:
-    """Resolve checkpoint names without changing the model's module tree."""
-    module_name, _, parameter_name = name.rpartition(".")
-    module = model.get_submodule(module_name)
-    if isinstance(module, BaseLayerWithLoRA):
-        module = module.base_layer
-    return module.get_parameter(parameter_name)
 
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
@@ -376,6 +363,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         return output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self._model_runner_output.kv_connector_output
+
 
 def _copy_pooler_output_to_cpu(
     raw_pooler_output: PoolerOutput, finished_mask: list[bool]
@@ -460,6 +451,10 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         del self._raw_pooler_output
         return self._model_runner_output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self._model_runner_output.kv_connector_output
+
 
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
@@ -539,13 +534,11 @@ class GPUModelRunner(
         )
 
         # Model-related.
-        self.num_query_heads = model_config.get_num_attention_heads(parallel_config)
         self.inputs_embeds_size = model_config.get_inputs_embeds_size()
-        # Only relevant for models using ALiBi (e.g, MPT)
-        self.use_alibi = model_config.uses_alibi
-
-        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
         self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
+        # Deprecated: cascade attention has been removed. Kept for
+        # out-of-tree model runners.
+        self.cascade_attn_enabled = False
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -610,7 +603,6 @@ class GPUModelRunner(
                 | EagleProposer
                 | DFlashProposer
                 | DraftModelProposer
-                | MedusaProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
                 | Step3p5MTPProposer
@@ -661,10 +653,6 @@ class GPUModelRunner(
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state
                     )
-            elif self.speculative_config.method == "medusa":
-                self.drafter = MedusaProposer(
-                    vllm_config=self.vllm_config, device=self.device
-                )
             elif self.speculative_config.method == "extract_hidden_states":
                 self.drafter = ExtractHiddenStatesProposer(
                     vllm_config=self.vllm_config, device=self.device
@@ -777,9 +765,6 @@ class GPUModelRunner(
             )
         else:
             self.cudagraph_batch_sizes = []
-
-        # Cache the device properties.
-        self._init_device_properties()
 
         # Encoder timing registry for observability
         self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
@@ -1103,8 +1088,9 @@ class GPUModelRunner(
 
         for i in range(num_reqs):
             seq_len_i = seq_lens_cpu[i]
-            pos = token_type_id_requests.get(i, seq_len_i)
-            ids = (torch.arange(seq_len_i) >= pos).int()
+            start, end = token_type_id_requests.get(i, (seq_len_i, seq_len_i))
+            positions = torch.arange(seq_len_i)
+            ids = ((positions >= start) & (positions < end)).int()
             token_type_ids.append(ids)
 
         token_type_ids_cpu = torch.empty(
@@ -1159,11 +1145,6 @@ class GPUModelRunner(
         """Zero the KV cache memory for the given block IDs."""
         if hasattr(self, "_kv_block_zeroer"):
             self._kv_block_zeroer.zero_block_ids(block_ids)
-
-    # Note: used for model runner override.
-    def _init_device_properties(self) -> None:
-        """Initialize attributes from torch.cuda.get_device_properties"""
-        self.num_sms = num_compute_units(self.device.index)
 
     # Note: used for model runner override.
     def _sync_device(self) -> None:
@@ -2282,7 +2263,6 @@ class GPUModelRunner(
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
-        cascade_attn_prefix_lens: list[list[int]] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """Returns:
@@ -2351,59 +2331,21 @@ class GPUModelRunner(
 
         # Compute mm_prefix bidirectional ranges before building
         # attention metadata so builders handle them during build().
-        # By default, ranges exceeding sliding_window are skipped to prevent
-        # early tokens from attending across the entire image span. Models that
-        # clamp mm_prefix to the sliding window *in-kernel* (e.g. Gemma4, which
-        # needs HF's (causal OR blockwise) AND sliding_window on sliding layers)
-        # opt out of the skip so the bidirectional range survives for images
-        # larger than the window; the kernel then bounds it per-query.
         req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
         if self.is_mm_prefix_lm:
-            req_doc_ranges = {}
             hf_text_config = self.model_config.hf_text_config
-            _bidi_sw = getattr(hf_text_config, "sliding_window", None)
-            _clamps_in_kernel = getattr(
-                self.model, "mm_prefix_clamp_sliding_window", False
-            ) or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False)
-            # Some models (DeepSeek-V4 vision) define the bidirectional span
-            # over the whole sentinel block ([IMAGE_START, IMAGE_END]) rather
-            # than the embed tokens, and prepend a position-dependent
-            # alignment pad before the first sentinel. For those, derive the
-            # span from the full placeholder range and strip the pad.
-            # TODO(Isotr0py): Refactor mm_prefix_lm implementation
-            # for better readability and maintainability.
-            _span_pad_modulus = getattr(
-                hf_text_config, "mm_prefix_span_leading_pad_modulus", 0
+            req_doc_ranges = compute_mm_prefix_ranges(
+                [
+                    self.requests[req_id].mm_features
+                    for req_id in self.input_batch.req_ids
+                ],
+                sliding_window=self.model_config.get_sliding_window(),
+                clamp_sliding_window=getattr(
+                    self.model, "mm_prefix_clamp_sliding_window", False
+                )
+                or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
+                span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
             )
-            for req_id in self.input_batch.req_ids:
-                image_doc_ranges = []
-                req_state = self.requests[req_id]
-                for mm_feature in req_state.mm_features:
-                    if mm_feature.modality == "audio":
-                        continue
-                    pos_info = mm_feature.mm_position
-                    if _span_pad_modulus:
-                        pad = (
-                            _span_pad_modulus - 1 - pos_info.offset % _span_pad_modulus
-                        )
-                        img_doc_range = [
-                            (
-                                pos_info.offset + pad,
-                                pos_info.offset + pos_info.length - 1,
-                            )
-                        ]
-                    else:
-                        img_doc_range = pos_info.extract_embeds_range()
-                    for r in img_doc_range:
-                        if (
-                            not _clamps_in_kernel
-                            and _bidi_sw is not None
-                            and (r[1] - r[0] + 1) > _bidi_sw
-                        ):
-                            continue
-                        image_doc_ranges.append(r)
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                req_doc_ranges[req_idx] = image_doc_ranges
 
         # Reference Sliding Window Attention (R-SWA): pass per-request prompt
         # lengths so the attention backend can keep the prefix globally visible.
@@ -2481,12 +2423,6 @@ class GPUModelRunner(
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
             cache_key = (kv_cache_spec, type(builder))
 
-            cascade_attn_prefix_len = (
-                cascade_attn_prefix_lens[kv_cache_gid][attn_gid]
-                if cascade_attn_prefix_lens
-                else 0
-            )
-
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(
                 builder,
@@ -2526,7 +2462,6 @@ class GPUModelRunner(
                 attn_metadata_i = attn_group.build_metadata(
                     common_attn_metadata,
                     ubid or 0,
-                    common_prefix_len=cascade_attn_prefix_len,
                     **extra_attn_metadata_args,
                 )
                 if builder.supports_update_block_table:
@@ -2603,144 +2538,6 @@ class GPUModelRunner(
             )
 
         return attn_metadata, spec_decode_common_attn_metadata
-
-    def _compute_cascade_attn_prefix_lens(
-        self,
-        num_scheduled_tokens: np.ndarray,
-        num_computed_tokens: np.ndarray,
-        num_common_prefix_blocks: list[int],
-    ) -> list[list[int]] | None:
-        """Returns:
-        Optional[cascade_attn_prefix_lens]
-            cascade_attn_prefix_lens is 2D:
-            ``[kv_cache_group_id][attn_group_idx]``,
-            None if we should not use cascade attention
-
-        """
-        use_cascade_attn = False
-        num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
-        cascade_attn_prefix_lens: list[list[int]] = [
-            [] for _ in range(num_kv_cache_groups)
-        ]
-
-        for kv_cache_gid in range(num_kv_cache_groups):
-            for attn_group in self.attn_groups[kv_cache_gid]:
-                if isinstance(attn_group.kv_cache_spec, EncoderOnlyAttentionSpec):
-                    cascade_attn_prefix_len = 0
-                else:
-                    # 0 if cascade attention should not be used
-                    cascade_attn_prefix_len = self._compute_cascade_attn_prefix_len(
-                        num_scheduled_tokens,
-                        num_computed_tokens,
-                        num_common_prefix_blocks[kv_cache_gid],
-                        attn_group.kv_cache_spec,
-                        attn_group.get_metadata_builder(),
-                    )
-                cascade_attn_prefix_lens[kv_cache_gid].append(cascade_attn_prefix_len)
-                use_cascade_attn |= cascade_attn_prefix_len > 0
-
-        return cascade_attn_prefix_lens if use_cascade_attn else None
-
-    def _compute_cascade_attn_prefix_len(
-        self,
-        num_scheduled_tokens: np.ndarray,
-        num_computed_tokens: np.ndarray,
-        num_common_prefix_blocks: int,
-        kv_cache_spec: KVCacheSpec,
-        attn_metadata_builder: AttentionMetadataBuilder,
-    ) -> int:
-        """Compute the length of the common prefix for cascade attention.
-
-        NOTE(woosuk): The common prefix length returned by this function
-        represents the length used specifically for cascade attention, not the
-        actual number of tokens shared between requests. When cascade attention
-        is disabled (use_cascade=False), this function returns 0 even if
-        requests share common tokens. Additionally, the common prefix length is
-        truncated to a multiple of the block size and may be further truncated
-        due to implementation details explained below.
-
-        Args:
-            num_scheduled_tokens: Number of tokens scheduled per request.
-            num_computed_tokens: Number of tokens already computed per request.
-            num_common_prefix_blocks: Number of shared KV cache blocks.
-            kv_cache_spec: The KV cache spec of the group being considered.
-            attn_metadata_builder: Builder used to decide whether cascade
-                attention can be used.
-
-        Returns:
-            int: Length of common prefix in tokens.
-
-        """
-        common_prefix_len = num_common_prefix_blocks * kv_cache_spec.block_size
-        if common_prefix_len == 0:
-            # Common case.
-            return 0
-
-        # NOTE(woosuk): Cascade attention uses two attention kernels: one
-        # for the common prefix and the other for the rest. For the first
-        # kernel, we concatenate all the query tokens (possibly from
-        # different requests) and treat them as if they are from the same
-        # request. Then, we use bi-directional attention to process the
-        # common prefix in the KV cache. Importantly, this means that the
-        # first kernel does not do any masking.
-
-        # Consider the following example:
-        # Request 1's input query: [D, E, X]
-        # Request 1's kv cache: [A, B, C, D, E, X]
-        # Request 1's num_computed_tokens: 3 (i.e., [A, B, C])
-        # Request 2's input query: [E, Y]
-        # Request 2's kv cache: [A, B, C, D, E, Y]
-        # Request 2's num_computed_tokens: 4 (i.e., [A, B, C, D])
-
-        # If we use [A, B, C, D, E] as the common prefix, then the
-        # first kernel will compute the bi-directional attention between
-        # input query [D, E, X, E, Y] and common prefix [A, B, C, D, E].
-        # However, this is wrong because D in Request 1 should not attend to
-        # E in the common prefix (i.e., we need masking).
-        # To avoid this, [A, B, C, D] should be the common prefix.
-        # That is, the common prefix should be capped by the minimum
-        # num_computed_tokens among the requests, and plus one to include
-        # the first token of the query.
-
-        # In practice, we use [A, B, C] as the common prefix, instead of
-        # [A, B, C, D] (i.e., the common prefix is capped by the minimum
-        # num_computed_tokens, without plus one).
-        # This is because of an implementation detail: We want to always
-        # use two kernels for cascade attention. Let's imagine:
-        # Request 3's input query: [D]
-        # Request 3's kv cache: [A, B, C, D]
-        # Request 3's num_computed_tokens: 3 (i.e., [A, B, C])
-        # If we use [A, B, C, D] as the common prefix for Request 1-3,
-        # then Request 3 will be processed only by the first kernel,
-        # and the second kernel will get an empty input. While this is not
-        # a fundamental problem, our current implementation does not support
-        # this case.
-        common_prefix_len = min(common_prefix_len, num_computed_tokens.min())
-        # common_prefix_len should be a multiple of the block size.
-        common_prefix_len = (
-            common_prefix_len // kv_cache_spec.block_size * kv_cache_spec.block_size
-        )
-        use_sliding_window = isinstance(kv_cache_spec, SlidingWindowSpec) or (
-            isinstance(kv_cache_spec, FullAttentionSpec)
-            and kv_cache_spec.sliding_window is not None
-        )
-        use_local_attention = isinstance(kv_cache_spec, ChunkedLocalAttentionSpec) or (
-            isinstance(kv_cache_spec, FullAttentionSpec)
-            and kv_cache_spec.attention_chunk_size is not None
-        )
-        assert isinstance(kv_cache_spec, AttentionSpec)
-        use_cascade = attn_metadata_builder.use_cascade_attention(
-            common_prefix_len=common_prefix_len,
-            query_lens=num_scheduled_tokens,
-            num_query_heads=self.num_query_heads,
-            num_kv_heads=kv_cache_spec.num_kv_heads,
-            use_alibi=self.use_alibi,
-            use_sliding_window=use_sliding_window,
-            use_local_attention=use_local_attention,
-            num_sms=self.num_sms,
-            dcp_world_size=self.dcp_world_size,
-        )
-        return common_prefix_len if use_cascade else 0
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
@@ -3890,7 +3687,8 @@ class GPUModelRunner(
         num_reqs: int,
         num_scheduled_tokens_np: np.ndarray,
         max_num_scheduled_tokens: int,
-        use_cascade_attn: bool,
+        # Deprecated and ignored. Kept for out-of-tree model runners.
+        use_cascade_attn: bool = False,
         allow_microbatching: bool = True,
         force_eager: bool = False,
         # For cudagraph capture TODO(lucas): Refactor how we capture cudagraphs (will
@@ -3938,7 +3736,7 @@ class GPUModelRunner(
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens, disable_full=use_cascade_attn or has_encoder_output
+            num_tokens, disable_full=has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
 
@@ -4190,16 +3988,6 @@ class GPUModelRunner(
                 self._prepare_inputs(scheduler_output, num_scheduled_tokens_np)
             )
 
-            cascade_attn_prefix_lens = None
-            # Disable cascade attention when using microbatching (DBO)
-            if self.cascade_attn_enabled and not self.parallel_config.use_ubatching:
-                # Pre-compute cascade attention prefix lengths
-                cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
-                    num_scheduled_tokens_np,
-                    self.input_batch.num_computed_tokens_cpu[:num_reqs],
-                    scheduler_output.num_common_prefix_blocks,
-                )
-
             (
                 cudagraph_mode,
                 batch_desc,
@@ -4211,7 +3999,7 @@ class GPUModelRunner(
                 num_reqs=num_reqs,
                 num_scheduled_tokens_np=num_scheduled_tokens_np,
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
-                use_cascade_attn=cascade_attn_prefix_lens is not None,
+                use_cascade_attn=False,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 allow_microbatching=self._allow_microbatching(
                     num_reqs, num_scheduled_tokens_np
@@ -4328,7 +4116,6 @@ class GPUModelRunner(
                     max_num_sampled_tokens=max_num_sampled_tokens,
                     use_spec_decode=use_spec_decode,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
-                    cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     slot_mappings=slot_mappings_by_group,
                 )
             )
@@ -5009,33 +4796,6 @@ class GPUModelRunner(
                 sampled_token_ids,
                 slot_mappings=slot_mappings,
             )
-        elif spec_config.method == "medusa":
-            assert isinstance(sampled_token_ids, list)
-            assert isinstance(self.drafter, MedusaProposer)
-
-            if sample_hidden_states.shape[0] == len(sampled_token_ids):
-                # The input to the target model does not include draft tokens.
-                hidden_states = sample_hidden_states
-            else:
-                indices = []
-                offset = 0
-                assert spec_decode_metadata is not None, (
-                    "No spec decode metadata for medusa"
-                )
-                for num_draft, tokens in zip(
-                    spec_decode_metadata.num_draft_tokens, sampled_token_ids
-                ):
-                    indices.append(offset + len(tokens) - 1)
-                    offset += num_draft + 1
-                indices = async_tensor_h2d(indices, device=self.device)
-                hidden_states = sample_hidden_states[indices]
-
-            draft_token_ids = self.drafter.propose(
-                num_speculative_tokens=num_spec_tokens_to_schedule,
-                target_hidden_states=hidden_states,
-                sampling_metadata=sampling_metadata,
-                slot_mappings=slot_mappings,
-            )
         elif spec_config.uses_extract_hidden_states():
             assert isinstance(self.drafter, ExtractHiddenStatesProposer)
             assert isinstance(sampled_token_ids, torch.Tensor), (
@@ -5203,19 +4963,6 @@ class GPUModelRunner(
 
         return draft_token_ids
 
-    def update_config(self, overrides: dict[str, Any]) -> None:
-        allowed_config_names = {"load_config", "model_config"}
-        for config_name, config_overrides in overrides.items():
-            if config_name not in allowed_config_names:
-                allowed = ", ".join(sorted(allowed_config_names))
-                raise ValueError(
-                    f"Config override '{config_name}' is not supported. "
-                    f"Supported configs: {allowed}"
-                )
-            config = getattr(self, config_name)
-            new_config = update_config(config, config_overrides)
-            setattr(self, config_name, new_config)
-
     @instrument(span_name="Loading (GPU)")
     def load_model(
         self,
@@ -5263,25 +5010,34 @@ class GPUModelRunner(
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
                         self.drafter.load_model(self.model)
+                    drafter_moe_model = None
+                    if self.parallel_config.enable_eplb and hasattr(
+                        self.drafter, "model"
+                    ):
+                        drafter_moe_model = get_mixture_of_experts_model(
+                            self.drafter.model
+                        )
+                        if not draft_model_supports_eplb(
+                            self.vllm_config.speculative_config,
+                            drafter_moe_model,
+                        ):
+                            drafter_moe_model = None
+
                     if (
                         self.parallel_config.enable_eplb
                         and hasattr(self.drafter, "model")
-                        and (
-                            drafter_moe_model := get_mixture_of_experts_model(
-                                self.drafter.model
-                            )
-                        )
-                        is not None
+                        and drafter_moe_model is not None
                     ):
                         assert not self.parallel_config.enable_elastic_ep, (
                             "Elastic EP is not supported with drafter model."
                         )
                         spec_config = self.vllm_config.speculative_config
                         assert spec_config is not None
-                        assert spec_config.draft_model_config is not None
+                        draft_model_config = spec_config.draft_model_config
+                        assert draft_model_config is not None
                         logger.info_once(
                             "EPLB is enabled for MoE part of drafter model %s.",
-                            spec_config.draft_model_config.model,
+                            draft_model_config.model,
                         )
                         if self.eplb_state is None:
                             self.eplb_state = EplbState(
@@ -5289,7 +5045,8 @@ class GPUModelRunner(
                             )
                         self.eplb_state.add_model(
                             drafter_moe_model,
-                            spec_config.draft_model_config,
+                            draft_model_config,
+                            model_name=eplb_draft_model_name(draft_model_config),
                         )
                         assert hasattr(self.drafter, "set_eplb_state")
                         self.drafter.set_eplb_state(self.eplb_state)
@@ -5472,89 +5229,16 @@ class GPUModelRunner(
         weights_path: str | None = None,
         is_checkpoint_format: bool = True,
     ) -> None:
-        """Reload weights from a weights iterator or from disk
-
-        Args:
-            weights_iterator: weights to load into model
-            weights_path: path to load weights from if weights_iterator is not
-                provided. Use path of original model if neither is provided.
-            is_checkpoint_format: set to False if weights have already been
-                processed into kernel format (repacking, renaming, etc.)
-
-        """
-        # TODO(@kylesayrs): generalize to all runners and loaders
-        # argument validation
-        if weights_iterator is None and not is_checkpoint_format:
-            logger.warning(
-                "Reloading from disk means that weights will be in checkpoint format. "
-                "Please use `is_checkpoint_format=True` "
-                "to avoid weight reloading errors"
-            )
-
-        model = self.get_model()
-        weights_to_load = {
-            name.replace(".base_layer.", ".") if self.lora_config else name
-            for name, _ in model.named_parameters()
-        }
-        counter_before_reloading = time.perf_counter()
-
-        # load weights from disk if none are provided
-        if weights_iterator is None:
-            model_loader = get_model_loader(self.load_config)
-            if not hasattr(model_loader, "get_all_weights"):
-                raise NotImplementedError(
-                    f"Model reloading with `{self.load_config.load_format}` format"
-                )
-
-            if weights_path is not None:
-                # The revision and any object-storage `model_weights` source
-                # belong to the model we are reloading away from, so they must
-                # not be carried over to the new path.
-                self.model_config.model = weights_path
-                self.model_config.model_weights = ""
-                self.model_config.revision = None
-            weights_iterator = model_loader.get_all_weights(self.model_config, model)
-            weights_iterator = cast(
-                Iterable[tuple[str, torch.Tensor]], weights_iterator
-            )
-
-        # begin loading weights
-        logger.info_once("Reloading weights inplace...")
-        if is_checkpoint_format:
-            # load weights from checkpoint/ original model format
-            initialize_layerwise_reload(model)
-            loaded_weights = model.load_weights(weights_iterator)
-            finalize_layerwise_reload(model, self.model_config)
-
-        else:
-            # load weights from kernel format
-            logger.warning_once(
-                "Reloading with `is_checkpoint_format=True` requires that "
-                "weights be in kernel format and already sharded",
-            )
-            loaded_weights = set()
-            for name, loaded_weight in weights_iterator:
-                param = _get_parameter_for_reload(model, name)  # TODO: buffers?
-                param.copy_(loaded_weight)
-                loaded_weights.add(name)
-
-        self.reset_lora_state()
-
-        # logging and validation
-        counter_after_reloading = time.perf_counter()
-        diff_seconds = counter_after_reloading - counter_before_reloading
-        logger.info_once(
-            "Reloading and processing weights took %.2f seconds",
-            diff_seconds,
+        """Reload weights in place; see `reload_weights` in
+        `vllm.model_executor.model_loader.reload.inplace` for details."""
+        reload_weights(
+            self.vllm_config,
+            self.get_model(),
+            weights_iterator=weights_iterator,
+            weights_path=weights_path,
+            is_checkpoint_format=is_checkpoint_format,
         )
-        if self.model_config.quantization is None and loaded_weights is not None:
-            weights_not_loaded = weights_to_load - loaded_weights
-            if weights_not_loaded:
-                logger.warning(
-                    "Following weights were not loaded from checkpoint: %s",
-                    weights_not_loaded,
-                )
-
+        self.reset_lora_state()
         self.reset_encoder_cache()
         self.reset_mm_cache()
 
@@ -6259,7 +5943,7 @@ class GPUModelRunner(
             num_tokens = sum(len(ids) for ids in draft_token_ids)
             draft_probs = None
             if (
-                self.speculative_config.rejection_sample_method == "standard"
+                self.speculative_config.rejection_sample_method in ("standard", "fly")
                 and self.speculative_config.draft_sample_method == "probabilistic"
             ):
                 draft_probs = torch.rand(
@@ -6461,27 +6145,23 @@ class GPUModelRunner(
         gc.collect()
 
     def _init_minimal_kv_cache_for_profiling(self) -> None:
-        from vllm.v1.core.kv_cache_utils import (
-            get_kv_cache_config_from_groups,
-            get_kv_cache_groups,
-        )
+        from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+        from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
         kv_cache_spec = self.get_kv_cache_spec()
         KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
-        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        builder = get_kv_cache_config_builder(self.vllm_config)
+        kv_cache_groups = get_kv_cache_groups_from_builder(
+            builder, self.vllm_config, kv_cache_spec
+        )
         # the minimum number of blocks required is 1 block *per sequence*
         min_blocks = (
             min(self.max_num_reqs, self.compilation_config.max_cudagraph_capture_size)
             or 1
         )
-
-        # Temporarily change num_gpu_blocks_override to allocate a minimal KV cache
-        saved_override = self.cache_config.num_gpu_blocks_override
-        self.cache_config.num_gpu_blocks_override = min_blocks
-        minimal_config = get_kv_cache_config_from_groups(
-            self.vllm_config, kv_cache_groups, available_memory=0
+        minimal_config = builder.get_kv_cache_config_from_groups(
+            self.vllm_config, kv_cache_groups, num_blocks=min_blocks
         )
-        self.cache_config.num_gpu_blocks_override = saved_override
 
         self.initialize_kv_cache(minimal_config, is_profiling=True)
         self.cache_config.num_gpu_blocks = minimal_config.num_blocks
@@ -7431,6 +7111,8 @@ class GPUModelRunner(
                     spec = customize_attention_spec(
                         attn_module.get_attn_backend(), spec
                     )
+                if attn_module.is_draft_layer:
+                    spec = replace(spec, is_draft=True)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec

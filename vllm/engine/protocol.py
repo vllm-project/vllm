@@ -36,7 +36,7 @@ class StreamingInput:
     where inputs are provided via an async generator.
     """
 
-    prompt: EngineInput
+    prompt: PromptType | EngineInput
     sampling_params: SamplingParams | None = None
 
 
@@ -59,6 +59,10 @@ class EngineClient(ABC):
     @property
     @abstractmethod
     def errored(self) -> bool: ...
+
+    @property
+    def should_keep_api_server_alive(self) -> bool:
+        return False
 
     @property
     @abstractmethod
@@ -168,6 +172,7 @@ class EngineClient(ABC):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Start profiling with optional per-session overrides."""
         ...
@@ -224,7 +229,6 @@ class EngineClient(ABC):
         self,
         *,
         mode: "PauseMode" = "abort",
-        wait_for_inflight_requests: bool = False,
         clear_cache: bool = True,
     ) -> None:
         """Pause new generation/encoding requests.
@@ -236,7 +240,6 @@ class EngineClient(ABC):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
                 after draining.
 
@@ -263,6 +266,12 @@ class EngineClient(ABC):
     ) -> None:
         """Scale the engine."""
         raise NotImplementedError
+
+    async def get_external_elastic_ep_status(
+        self,
+    ) -> dict[str, str | int | None] | None:
+        """Return shared external Elastic EP operation status, if enabled."""
+        return None
 
     async def collective_rpc(
         self,
@@ -296,6 +305,10 @@ class EngineClient(ABC):
         self, init_request: WeightTransferInitRequest
     ) -> None:
         """Initialize weight transfer for RL training."""
+        raise NotImplementedError
+
+    async def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
         raise NotImplementedError
 
     async def start_weight_update(self) -> None:

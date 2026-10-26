@@ -24,6 +24,7 @@ from vllm.v1.kv_offload.cpu.common import (
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
 
 def make_req_context(
@@ -236,6 +237,15 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     stats = manager.get_stats()
     assert stats is not None
     assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
+
+
+def test_cpu_manager_fills_the_config_info_keys_of_the_spec():
+    """A name the declaration misses becomes a dropped label at runtime."""
+    manager = make_cpu_manager(num_chunks=4)
+
+    (info,) = manager.config_info()
+    assert tuple(info) == CPUOffloadingSpec.config_info_keys({})
+    assert info["cpu_num_chunks"] == 4
 
 
 def test_cpu_manager_reports_cache_usage_gauge():
@@ -478,7 +488,7 @@ def test_cpu_manager():
     verify_events(
         cpu_manager.take_events(),
         expected_stores=({3, 4, 5}, {6, 7, 8}),
-        expected_evictions=({4, 5, 3}, {8}),
+        expected_evictions=({4, 5, 3}, {8}, {9}),
     )
 
 
@@ -1026,6 +1036,27 @@ class TestARCPolicy:
         assert len(events) > 0  # should have store and eviction events
 
 
+def test_take_events_prunes_retried_cleanup_and_drains_once():
+    """Failed-write cleanup must not outlive a retry that re-owns the key, and a
+    partially consumed drain must not replay it."""
+    manager = make_cpu_manager(num_chunks=4, cache_policy="lru", enable_events=True)
+
+    assert manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
+    # A retry re-allocates key 1 before the cleanup is drained.
+    assert manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX) is not None
+    assert manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+
+    drain = iter(manager.take_events())
+    cleanup = next(drain)
+    assert cleanup.removed and cleanup.metadata_only
+    assert cleanup.keys == to_keys([2])
+    # Stopping early must not leave the batch queued for the next drain.
+    assert list(manager.take_events()) == []
+    assert [event.keys for event in drain] == [to_keys([3])]
+
+
 def test_filter_reused_manager():
     """Tests CPUOffloadingManager reuse filtering (store_threshold=2)."""
     manager = make_cpu_manager(
@@ -1039,6 +1070,8 @@ def test_filter_reused_manager():
     # lookup() does not count towards store admission
     assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
     assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.MISS
+    # store_threshold > 1 means the reuse tracker is enabled, so counts exists.
+    assert manager.counts is not None
     assert not manager.counts
 
     # 1st offer of [1, 2] -> tracked at count 1, not eligible yet
@@ -1133,7 +1166,7 @@ def test_store_threshold_does_not_hide_ready_reuse():
     assert output.evicted_keys == [head]
 
 
-def test_evictable_cache_chunk_count():
+def test_evictable_cache_chunk_count(monkeypatch):
     """Verifies _num_evictable_cache_chunks is maintained correctly through the
     full store/load lifecycle, eviction, failed stores, concurrent loads,
     reset_cache, and the early-exit fast path in prepare_store.
@@ -1206,7 +1239,7 @@ def test_evictable_cache_chunk_count():
         evict_called = True
         return original_evict(*args, **kwargs)
 
-    manager._policy.evict = spy_evict  # type: ignore[method-assign]
+    monkeypatch.setattr(manager._policy, "evict", spy_evict)
     # cache state [10', 11', 12', x] <- cannot evict anything
     assert manager.prepare_store(to_keys([14, 15]), _EMPTY_REQ_CTX) is None
     assert not evict_called, (

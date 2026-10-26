@@ -32,6 +32,8 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T, as_ir_value
 
+from ..common.arch import GFX942
+from ..common.gfx942 import fp8x2_f32, ocp_to_fnuz
 from .device import (
     BLOCKS,
     CM_DEV,
@@ -112,11 +114,22 @@ def head_groups(d: Dims, s: int) -> int:
     """Wave groups a split unit's head tiles are spread over: two (a tile each,
     64-key chunks, twice the units) while the units fit the grid, else one (a
     wave's keys loaded and dequantized once for every head tile)."""
+    if GFX942:
+        return 1
     return 2 if d.head_tiles == 2 and s * cdiv(KEYS, 64) <= BLOCKS else 1
+
+
+# gfx942 has 64 KB of LDS a workgroup: a split unit keeps 64 keys' raw records
+# (37 KB) instead of 128 (75 KB). Its first 4 waves load and score a 16-key
+# tile each. The other 4 compute the same scores and store nothing, and all 8
+# share the PV.
+SPLIT_KEYS_942 = 64
 
 
 def chunk_keys(d: Dims, s: int) -> int:
     """A split unit's keys: a 16-key tile a wave of a head group."""
+    if GFX942:
+        return SPLIT_KEYS_942
     return 16 * (WAVES // head_groups(d, s))
 
 
@@ -151,9 +164,12 @@ def key_rec(c, t, k):
     table: slot | 1 << 31 for a compressed row, a window slot otherwise, -1 for
     none (it reads a zero record: its scores are masked, its values zeros)."""
     a, ratio = c["args"], c["ratio"]
-    val = ld_i32(a["kt"], t * KEYS + fx.min(fx.max(k, 0), KEYS - 1))
+    # a table this launch wrote (``krdy``) is read past the CU's cache
+    cm = CM_DEV if const_expr("krdy" in c) else 0
+    val = ld_i32(a["kt"], t * KEYS + fx.min(fx.max(k, 0), KEYS - 1), cm)
     ok = val != fx.Int32(-1)
     slot = ok.select(val & fx.Int32(0x7FFFFFFF), fx.Int32(0))
+    is_c = None
     if const_expr(ratio > 0):
         is_c = ok & (val < 0)
         blk = is_c.select(a["comp_block"], a["swa_block"])
@@ -167,7 +183,30 @@ def key_rec(c, t, k):
     z = a["zrec"]
     data = ok.select(page + fx.Int64(off * DATA), z)
     sc = ok.select(page + fx.Int64(blk * DATA + off * 8), z + fx.Int64(DATA))
+    if const_expr(GFX942):
+        return data, sc, ok, is_c
     return data, sc, ok
+
+
+def records_to_fnuz(nope, scw, is_c):
+    """gfx942: a key's loaded record as FNUZ. vLLM's gfx942 window cache holds
+    FNUZ records (maximum 224), its compressed cache OCP records (Triton's
+    compressor). An OCP record becomes FNUZ by turning -0 bytes (0x80, the
+    FNUZ NaN) into 0 and raising each scale code by one (FNUZ bytes stand for
+    half the OCP value). ``is_c`` None: a layer without compressed keys."""
+    if const_expr(is_c is None):
+        return nope, scw
+    fixed = [
+        fx.Vector.from_elements(
+            [is_c.select(ocp_to_fnuz(v[e]), v[e]) for e in range(4)], fx.Int32
+        )
+        for v in nope
+    ]
+    # Bytes 0 .. 6 hold the 7 codes of 64 dims, byte 7 is padding. A code is
+    # at most 254, so + 1 never carries into the next byte.
+    sc0 = is_c.select(scw[0] + fx.Int32(0x01010101), scw[0])
+    sc1 = is_c.select(scw[1] + fx.Int32(0x00010101), scw[1])
+    return fixed, fx.Vector.from_elements([sc0, sc1], fx.Int32)
 
 
 def _scale_byte(scw, blk64):
@@ -175,6 +214,9 @@ def _scale_byte(scw, blk64):
 
 
 def _fp8_pair_f32(word, scale, hi):
+    if const_expr(GFX942):
+        a, b = fp8x2_f32(word, hi)
+        return [a * scale, b * scale]
     v = rocdl.cvt_scalef32_pk_f32_fp8(
         fx.Vector.make_type(2, fx.Float32),
         as_ir_value(fx.Int32(word)),
@@ -186,6 +228,12 @@ def _fp8_pair_f32(word, scale, hi):
 
 
 # ---------------------------------------------------------------- split
+
+
+def owned(cond, owner):
+    """``cond``, and on gfx942 also whether this wave owns its key tile's
+    stores (``owner``, None when every wave does)."""
+    return cond if owner is None else cond & owner
 
 
 @traced
@@ -202,18 +250,28 @@ def stage_split(c, unit):
     ch = unit % nchunk
     ck = chunk_keys(d, s)
     ngrp = head_groups(d, s)
-    nkt = WAVES // ngrp  # 16-key tiles a chunk
+    nkt = ck // 16  # 16-key tiles a chunk
     nht = d.head_tiles // ngrp  # head tiles a wave
     hgi = wave // nkt
     kt = wave % nkt
     g = lane // 16
     r16 = lane % 16
     k0 = ch * ck
+    if const_expr("krdy" in c):
+        await_flags(c, c["krdy"], 1, lambda u: t)
     # the key count, this lane's key and q: independent loads, out together
-    # (K1's key table holds -1 past a token's keys)
-    kv_len = ld_i32(a["klen"], t)
+    # (the key table holds -1 past a token's keys)
+    kv_len = ld_i32(a["klen"], t, CM_DEV if const_expr("krdy" in c) else 0)
     key = k0 + kt * 16 + r16
-    data, sc, okv = key_rec(c, t, key)
+    if const_expr(GFX942):
+        data, sc, okv, is_c = key_rec(c, t, key)
+        # Waves past the chunk's key tiles redo a tile's scores and store
+        # nothing (``SPLIT_KEYS_942``). The head tile is not wave dependent.
+        owner = hgi == 0
+        hgi = 0
+    else:
+        data, sc, okv = key_rec(c, t, key)
+        owner = None
     qrow = d.heads * HEAD_DIM // 8
     qv = []
     for i in range_constexpr(cdiv(qrow, THREADS)):
@@ -240,6 +298,8 @@ def stage_split(c, unit):
             gload(data + fx.Int64(NOPE + (cc * 32 + 8 * g) * 2), words=4)
             for cc in range(ROPE // 32)
         ]
+        if const_expr(GFX942):
+            nope, scw = records_to_fnuz(nope, scw, is_c)
         # q of every head into LDS (bf16 rows of 512 + pad), 16 B a thread
         for i in range_constexpr(cdiv(qrow, THREADS)):
             u = fresh(tid) + THREADS * i
@@ -251,7 +311,7 @@ def stage_split(c, unit):
                     + (u % (HEAD_DIM // 8)) * 4,
                 )
         # the raw rows to LDS for the PV (head group 0's waves)
-        if hgi == 0:
+        if hgi == 0 if owner is None else owner:
             rawb = sl["raw"] + (kt * 16 + r16) * (REC // 4)
             for c4 in range_constexpr(NOPE // 64):
                 fx.ptr_store(nope[c4], rawb + (64 * c4 + 16 * g) // 4)
@@ -306,7 +366,7 @@ def stage_split(c, unit):
             mw = butterfly(
                 fx.max(fx.max(sv[0], sv[1]), fx.max(sv[2], sv[3])), (32, 16), fx.max
             )
-            if g == 0:
+            if owned(g == 0, owner):
                 fx.ptr_store(mw, st + ((hgi * nht + ht) * nkt + kt) * HEAD_TILE + r16)
             svs.append(sv)
         gpu.barrier()
@@ -330,8 +390,13 @@ def stage_split(c, unit):
             pbase = (
                 sl["p"] + (hti * HEAD_TILE + r16) * p_row(d, s) + (kt * 16 + 4 * g) // 2
             )
-            fx.ptr_store(fx.Vector.from_elements([pw[0], pw[1]], fx.Int32), pbase)
-            if g == 0:
+            pw2 = fx.Vector.from_elements([pw[0], pw[1]], fx.Int32)
+            if const_expr(owner is None):
+                fx.ptr_store(pw2, pbase)
+            else:
+                if owner:
+                    fx.ptr_store(pw2, pbase)
+            if owned(g == 0, owner):
                 fx.ptr_store(lw, lst + (hti * nkt + kt) * HEAD_TILE + r16)
         gpu.barrier()
         # chunk stats: (max, sum) per head
@@ -579,19 +644,6 @@ def stage_woa(c, task, ops, t0, n):
     gpu.barrier()
 
 
-def woa_loads(c, task):
-    a = c["args"]
-    return gemv_loads(
-        c,
-        a["woa"],
-        a["woa_s"],
-        c["d"].group_k,
-        task * WOA_ROWS,
-        WOA_SPLIT_K,
-        tiled=True,
-    )
-
-
 def wob_loads(c, task, pred=None):
     a = c["args"]
     return gemv_loads(c, a["wob"], a["wob_s"], c["d"].o_rows, task * ROWS, pred=pred)
@@ -678,19 +730,6 @@ def back_lds_members(s: int, d: Dims) -> dict:
         xsl: fx.Array[fx.Int32, rows * lds_row(d.group_k // 32), 16]
 
     return {"split": SplitLds, "gemv": GemvLds}
-
-
-def back_lds(s: int, d: Dims):
-    """K2's attention LDS: the union of ``back_lds_members``."""
-    m = back_lds_members(s, d)
-    SplitLds, GemvLds = m["split"], m["gemv"]
-
-    @fx.union
-    class BackLds:
-        split: SplitLds  # type: ignore[valid-type]
-        gemv: GemvLds  # type: ignore[valid-type]
-
-    return BackLds
 
 
 def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:

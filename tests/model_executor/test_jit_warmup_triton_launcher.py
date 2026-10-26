@@ -78,7 +78,7 @@ class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
     class CompileKey:
         value: int
 
-    def dispatch(self, *, value: int) -> CompileKey:
+    def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]  # narrows base **kwargs
         return self.CompileKey(value=value)
 
     def get_warmup_keys(self) -> list[CompileKey]:
@@ -168,23 +168,28 @@ def _warmup_store_kernel(out, VALUE: tl.constexpr):
     not current_platform.is_cuda() or not hasattr(triton, "AsyncCompileMode"),
     reason="Requires CUDA Triton async compilation",
 )
-def test_registered_warmup_parallelizes_compile_only_and_runtime_stays_serial(
+def test_registered_warmup_overlaps_kernels_and_runtime_stays_serial(
     monkeypatch,
 ) -> None:
     from triton.runtime._async_compile import active_mode
 
     monkeypatch.setattr(envs, "VLLM_TRITON_JIT_WARMUP_NUM_THREADS", 2)
 
-    def warmup_inputs():
-        return dict(out=TritonWarmupTensor(torch.int32), value=WarmupChoices(1, 2))
+    def make_store(value):
+        def warmup_inputs():
+            return dict(out=TritonWarmupTensor(torch.int32), value=value)
 
-    @triton_kernel_dispatcher_with_warmup(
-        kernel=_warmup_store_kernel, warmup_inputs=warmup_inputs
-    )
-    def store(out, value):
-        return (1,), dict(VALUE=value)
+        @triton_kernel_dispatcher_with_warmup(
+            kernel=_warmup_store_kernel, warmup_inputs=warmup_inputs
+        )
+        def store(out, value):
+            return (1,), dict(VALUE=value)
 
-    store.get_warmup_keys()  # Initialize Triton's binder before wrapping its compiler.
+        # Initialize Triton's binder before wrapping its compiler.
+        store.get_warmup_keys()
+        return store
+
+    stores = [make_store(value) for value in (1, 2)]
     caller = threading.get_ident()
     barrier = threading.Barrier(2, timeout=10)
     compiled_on = []
@@ -200,14 +205,15 @@ def test_registered_warmup_parallelizes_compile_only_and_runtime_stays_serial(
     monkeypatch.setattr(_warmup_store_kernel, "compile", record_compile)
     registry = JitWarmupRegistry(None)
     with registry.activate():
-        store.register_warmup()
+        for store in stores:
+            store.register_warmup()
     registry.warmup()
 
     assert len(compiled_on) == 2
     assert all(thread != caller for thread in compiled_on)
     assert active_mode.get() is None
     out = torch.empty(1, dtype=torch.int32, device=current_platform.device_type)
-    for value in (1, 2):
+    for store, value in zip(stores, (1, 2)):
         store(out, value)
         assert out.item() == value
     assert len(compiled_on) == 2
@@ -306,7 +312,7 @@ def test_triton_kernel_decorator_returns_launcher(
     ]
     assert launch.__name__ == "launch"
     with pytest.raises(TypeError, match="unexpected keyword"):
-        launch(first, 1, 7, stale_constexpr=True)
+        launch(first, 1, 7, stale_constexpr=True)  # type: ignore[call-arg]  # invalid on purpose
 
 
 def test_triton_kernel_decorator_without_triton(

@@ -85,7 +85,12 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
-    indexer_kv_dtype: IndexerKVDType = "auto"
+    trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"] = "trtllm-gen"
+    """Kernel backend for cached-context TRTLLM_RAGGED MLA prefill.
+    CuTe DSL requires FP8 queries for head dimension 192 and does not support
+    head dimension 256. New-token prefill always uses TRTLLM."""
+
+    indexer_kv_dtype: IndexerKVDType | str = "auto"
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
@@ -103,6 +108,20 @@ class AttentionConfig:
     candidate pool instead, with fp32 logits, and keeps the masked dense walk
     for steps whose contexts are too short for the pool to pay."""
 
+    indexer_tp_shard_min_rows: int = Field(default=65536, ge=1)
+    """Minimum total prefill rows for the sparse-attention indexer to split
+    them across TP ranks instead of scoring every row on each rank."""
+
+    minimax_m3_indexer_cp: bool = False
+    """MiniMax M3 on ROCm with tensor_parallel_size > 1: score the sparse
+    indexer context-parallel at decode. Each rank reads 1/TP of the index
+    cache, scores every index head on it, and per-head top-k candidates are
+    exchanged and merged, so the selected blocks match the default path.
+    `indexer_kv_dtype` picks the kernels that do it: a bf16 index cache ("auto"
+    or "bf16") runs the Triton CP indexer, an fp8 e4m3 one the AITER MSA CP
+    indexer on gfx950. This shards indexer *work* and not the KV cache, so it
+    is not `decode_context_parallel_size` and requires that to be 1."""
+
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
     Model Runner V2-only HiSparse sparse-MLA decode hot-buffering. It is inferred
@@ -116,6 +135,15 @@ class AttentionConfig:
     """Force sparse MLA to use forward_mqa for all requests, including prefill.
     When False (default), pure prefill batches use forward_mha when implemented.
     Set to True to always use the MQA path."""
+
+    sparse_mla_prefill_workspace_factor: int | None = Field(default=None, ge=2)
+    """Sparse MLA prefill workspace size, in multiples of `max_model_len`.
+    FlashMLA sparse gathers a prefill step's context KV into this workspace and
+    runs attention in more chunks when the step holds more. The sparse indexer's
+    prefill K buffer is sized to fit in the same memory. Lower values return
+    memory to the KV cache at long `max_model_len`; the minimum of 2 leaves room
+    for a full-length request's context-parallel shard. If None, 5 when
+    `max_model_len` is at most 256K tokens, else 2."""
 
     flex_attn_block_m: int | None = None
     """Triton kernel BLOCK_M tile size for flex attention.
@@ -150,8 +178,25 @@ class AttentionConfig:
             # The alias selects only MiniMax's sparse decode kernel. Dense
             # layers still use the platform's normal automatic backend.
             self.backend = None
+        # Checked here rather than at indexer selection, which the two CP
+        # backends reach separately: bf16 goes to the Triton indexer and fp8
+        # to the AITER MSA one, so neither ever sees the other's dtype and
+        # neither can speak for the dtypes that have no CP indexer at all.
+        if self.minimax_m3_indexer_cp and self.indexer_kv_dtype not in (
+            "auto",
+            "bf16",
+            "fp8",
+            "fp8_e4m3",
+        ):
+            raise ValueError(
+                "minimax_m3_indexer_cp requires a bf16 or fp8 e4m3 index cache "
+                "(indexer_kv_dtype 'auto', 'bf16', 'fp8' or 'fp8_e4m3'), got "
+                f"{self.indexer_kv_dtype!r}"
+            )
 
-    def resolve_indexer_kv_dtype(self, default: IndexerKVDType) -> IndexerKVDType:
+    def resolve_indexer_kv_dtype(
+        self, default: IndexerKVDType | str
+    ) -> IndexerKVDType | str:
         """Resolve `indexer_kv_dtype`, substituting `default` for "auto"."""
         if self.indexer_kv_dtype == "auto":
             return default
