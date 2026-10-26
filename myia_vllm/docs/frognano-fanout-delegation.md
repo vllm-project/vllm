@@ -76,6 +76,28 @@ logger échantillonne à 5 min là où le gouverneur est horaire — il a capté
 `free=3 Mo` que la vue horaire avait manqué : un corpus neuf peut révéler ce qu'un corpus familier
 lisse.
 
+### Quatrième démo — hygiène git (26/10, `mini-sweeper`, mandat « entropie + hygiène git »)
+
+Un sous-agent `mini-sweeper` lancé **en arrière-plan** sur `D:\dev\vllm` (lecture seule) pendant que
+la session traitait la diffusion du nudge. Sortie : **10 candidats** avec preuve verbatim — 6
+branches locales entièrement fusionnées (`ahead=0` + `branch --merged main`), 1 `main` local 103
+commits derrière (à fast-forwarder, pas à supprimer), 3 docs contredisant la prod réelle
+(`DEPLOYMENT_GUIDE.md:5` pointait encore `medium-swift15-27b.yml` + stock v0.32.0 alors que la prod
+est le profil `-fstier` + l'overlay `tierpin:v1` ; `MACHINE_SPECS.md` décrivait encore GLM-4.7-Flash
+sur les GPU 0/1 et un modèle vision sur GPU 2). Les 6 branches ont été supprimées après
+re-vérification individuelle (`ahead=0` re-mesuré, `git branch -d` refuse par construction le
+non-fusionné) ; les docs corrigés en PR séparée.
+
+**Donnée de calibration — la frontière se précise** : sur du **markdown hétérogène** (regex
+multi-marqueurs sur les docs), le mini atteint **9/13 (69 %) au retry** — contre ~100 % sur des logs
+réguliers. Trois faux positifs écartés mécaniquement, une ligne altérée (accent perdu) rejetée,
+**0 citation fabriquée retenue** ; 100 % des citations finales viennent du grep/Read du parent.
+Autrement dit : **le rappel du mini chute sur les corpus irréguliers, mais la précision est sauvée
+par l'étage de vérification** — c'est exactement le critère du mandat (vérification ≪ exécution), à
+condition de ne jamais accepter une sortie sans `comm`/grep. Corollaire pratique : sur un corpus à
+marqueurs multiples, prévoir **2 shards de plus que de besoin** et le repli grep comme issue de
+secours normale, pas comme échec.
+
 ### Deuxième démo — sweep entropie docs (25/10 soir, `mini-sweeper`)
 
 Sweep de `myia_vllm/docs/` (74 fichiers, 152 appels mini) pour marqueurs d'état périmé
