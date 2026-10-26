@@ -61,6 +61,9 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
     row_mirrors: dict[str, tuple[SparseKVRowMirror, ...]]
     all_context_pages_resident: bool
     residency_updates: dict[str, SparseKVResidencyUpdate]
+    # An async external load in this step fills a block released readable,
+    # which the step still in flight may read.
+    fence_async_loads: bool = False
 
 
 @dataclass
@@ -103,6 +106,9 @@ class HiSparseConnectorScheduler:
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
         self.requests: dict[str, Request] = {}
+        # Requests allocated in this pass that received a block released
+        # readable.
+        self._reused_block_fills: set[str] = set()
 
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         assert self.coordinator is None
@@ -120,6 +126,21 @@ class HiSparseConnectorScheduler:
         if host_pool.metrics_collector is not None:
             stats.record_host_evictions(host_pool.metrics_collector.drain_events())
         return stats
+
+    def update_state_after_alloc(
+        self, request: Request, blocks: KVCacheBlocks | None
+    ) -> None:
+        self.requests[request.request_id] = request
+        assert self.coordinator is not None
+        reused = self.coordinator.reused_readable_blocks
+        if (
+            blocks is not None
+            and reused
+            and any(
+                block.block_id in reused for group in blocks.blocks for block in group
+            )
+        ):
+            self._reused_block_fills.add(request.request_id)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -188,6 +209,15 @@ class HiSparseConnectorScheduler:
                     ),
                 ),
             )
+        # A request allocated but not scheduled in this step is filled by an
+        # async load, posted from the worker's CPU and not ordered against the
+        # step still on the GPU. A forward fill is ordered on the stream.
+        fence_async_loads = any(
+            request_id not in scheduler_output.num_scheduled_tokens
+            for request_id in self._reused_block_fills
+        )
+        self._reused_block_fills.clear()
+        self.coordinator.reused_readable_blocks.clear()
         return HiSparseConnectorMetadata(
             command,
             host_block_copies,
@@ -197,6 +227,7 @@ class HiSparseConnectorScheduler:
             self.coordinator.take_residency_updates(
                 scheduler_output.num_scheduled_tokens
             ),
+            fence_async_loads,
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
@@ -323,6 +354,15 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
 
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        assert isinstance(connector_metadata, HiSparseConnectorMetadata)
+        if connector_metadata.fence_async_loads:
+            # MultiConnector binds every connector before any starts its
+            # loads, so this orders this step's async loads after the step
+            # still in flight, which may read the blocks they fill.
+            torch.accelerator.synchronize()
+
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
@@ -386,7 +426,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         num_external_tokens: int,
     ) -> None:
         assert self.connector_scheduler is not None
-        self.connector_scheduler.requests[request.request_id] = request
+        self.connector_scheduler.update_state_after_alloc(request, blocks)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

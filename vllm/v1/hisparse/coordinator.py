@@ -187,6 +187,10 @@ class HiSparseCoordinator:
         self._copy_by_block: dict[int, BlockHashWithGroupId] = {}
         # Unpinned GPU block id -> (request, page) pairs still reading it.
         self._owners: dict[int, set[tuple[str, int]]] = {}
+        # Blocks released readable that the pool handed out in this scheduling
+        # pass. A step still in flight may read them; the connector clears the
+        # set once per pass.
+        self.reused_readable_blocks: set[int] = set()
 
     def _get_request_state(self, request_id: str) -> _HiSparseRequestState:
         state = self.request_states.get(request_id)
@@ -383,6 +387,7 @@ class HiSparseCoordinator:
             self._unpin_page(request_id, state, page_idx)
 
     def _on_block_reused(self, block: KVCacheBlock) -> None:
+        self.reused_readable_blocks.add(block.block_id)
         host_hash = self._copy_by_block.get(block.block_id)
         if host_hash is not None:
             self._drop_copy(host_hash)

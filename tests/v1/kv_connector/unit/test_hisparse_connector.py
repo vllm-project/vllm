@@ -24,7 +24,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+    MultiConnector,
+    MultiKVConnectorMetadata,
+)
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.hisparse import runtime as runtime_module
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
@@ -532,3 +535,133 @@ def test_residency_updates_persist_by_state_row():
 
     assert table[[0, 2], 0].tolist() == [[4, 5, 0, 0], [1, 0, 3, 6]]
     assert table[[0, 2], 1].tolist() == [[14, 15, 0, 0], [11, 0, 13, 16]]
+
+
+def _released_page_pool(async_load: bool, reuse: bool):
+    """A reader whose clean pages HiSparse released (still readable), then a
+    loader allocated either asynchronously (an external load) or for a forward,
+    from those released blocks if ``reuse`` else from never-used ones."""
+    from tests.v1.core.test_prefix_caching import (
+        HISPARSE_BLOCK_SIZE,
+        _allocate_scheduled,
+        _publish_hisparse_pages,
+        make_hisparse_kv_cache_manager,
+        make_request,
+        sha256,
+    )
+    from vllm.v1.core.kv_cache_utils import init_none_hash
+
+    init_none_hash(sha256)
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    scheduler.bind_coordinator(get_hisparse_coordinator(manager))
+    connector = object.__new__(HiSparseConnector)
+    connector.connector_scheduler = scheduler
+
+    tokens = list(range(6 * HISPARSE_BLOCK_SIZE))
+    reader = make_request("reader", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, reader, len(tokens))
+    for hot_manager in scheduler.coordinator.hot_managers:
+        hot_manager.require_hot(reader.request_id)
+    assert _allocate_scheduled(manager, reader, len(tokens))
+    scheduler.coordinator.take_residency_updates([reader.request_id])
+    pool = manager.block_pool
+    num_never_used = pool.get_num_free_blocks()
+    _publish_hisparse_pages(manager)
+    if reuse:
+        pool.get_new_blocks(num_never_used)
+
+    loader = make_request(
+        "loader",
+        list(range(1000, 1000 + HISPARSE_BLOCK_SIZE)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+    if async_load:
+        assert manager.allocate_slots(
+            loader,
+            0,
+            num_external_computed_tokens=HISPARSE_BLOCK_SIZE,
+            delay_cache_blocks=True,
+        )
+    else:
+        assert manager.allocate_slots(loader, HISPARSE_BLOCK_SIZE)
+    update = scheduler.coordinator.take_residency_updates([reader.request_id])
+    lost = reader.request_id in update and 0 in update[reader.request_id].block_ids[0]
+    assert lost == reuse
+    connector.update_state_after_alloc(loader, manager.get_blocks(loader.request_id), 0)
+    scheduled = {} if async_load else {loader.request_id: HISPARSE_BLOCK_SIZE}
+    new_reqs = (
+        []
+        if async_load
+        else [
+            SimpleNamespace(
+                req_id=loader.request_id,
+                num_computed_tokens=0,
+                block_ids=manager.get_block_ids(loader.request_id),
+            )
+        ]
+    )
+    scheduler_output = SimpleNamespace(
+        kv_cache_block_copies=None,
+        scheduled_new_reqs=new_reqs,
+        scheduled_cached_reqs=SimpleNamespace(
+            new_block_ids=[], req_ids=[], num_computed_tokens=[]
+        ),
+        num_scheduled_tokens=scheduled,
+    )
+    return scheduler, scheduler_output
+
+
+@pytest.mark.parametrize(
+    "async_load,reuse,fenced",
+    [(True, True, True), (False, True, False), (True, False, False)],
+)
+def test_async_load_into_released_page_waits_for_in_flight_step(
+    async_load, reuse, fenced
+):
+    """A released page stays readable until the pool hands it out, so the step
+    still on the GPU may read it. A forward that fills it runs after that step
+    on the stream; an async external load (e.g. a NIXL read) is posted from the
+    CPU, so its step must tell the worker to wait for the GPU first."""
+    scheduler, scheduler_output = _released_page_pool(async_load, reuse)
+
+    assert scheduler.build_connector_meta(scheduler_output).fence_async_loads == fenced
+
+    idle_output = SimpleNamespace(
+        kv_cache_block_copies=None,
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            new_block_ids=[], req_ids=[], num_computed_tokens=[]
+        ),
+        num_scheduled_tokens={},
+    )
+    assert not scheduler.build_connector_meta(idle_output).fence_async_loads
+
+
+@pytest.mark.parametrize("fence", [False, True])
+def test_fenced_step_waits_for_gpu_before_sibling_loads_start(monkeypatch, fence):
+    """MultiConnector binds every connector before any starts its loads, so a
+    wait at bind time orders a sibling's async load after the in-flight step."""
+    events = []
+    monkeypatch.setattr(
+        torch.accelerator, "synchronize", lambda *args: events.append("synchronize")
+    )
+    sibling = MagicMock()
+    sibling.start_load_kv.side_effect = lambda *args, **kwargs: events.append("load")
+    hisparse = object.__new__(HiSparseConnector)
+    hisparse.start_load_kv = MagicMock()
+    connector = object.__new__(MultiConnector)
+    connector._connectors = [sibling, hisparse]
+    connector._extra_async_saves = {}
+    connector._connector_metadata = None
+    metadata = HiSparseConnectorMetadata(
+        None, (), (), {}, False, {}, fence_async_loads=fence
+    )
+
+    connector.bind_connector_metadata(
+        MultiKVConnectorMetadata(metadata=(MagicMock(), metadata))
+    )
+    connector.start_load_kv(MagicMock())
+
+    assert events == (["synchronize", "load"] if fence else ["load"])
