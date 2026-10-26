@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
@@ -515,6 +516,18 @@ def _humming_input_schema(model_activation_key: QuantKey | None):
     activation_key = _resolve_activation_key(model_activation_key)
     if activation_key is None or envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
         return None
+    if (
+        activation_key == kMxfp8Dynamic
+        and _user_moe_activation_override() is None
+        and current_platform.is_device_capability_family(90)
+    ):
+        # Humming's SM90 W4A8 kernels are tuned for block FP8 activations, so
+        # run a checkpoint's MXFP8 that way. An explicit request is honored.
+        logger.info_once(
+            "Running checkpoint MXFP8 MoE activations as block FP8 "
+            "(group 128) on Hopper."
+        )
+        activation_key = kFp8Dynamic128Sym
     from vllm.model_executor.layers.quantization.utils.humming import (
         quant_key_to_input_schema,
     )
@@ -2217,6 +2230,8 @@ _MXFP4_SCHEME_CANDIDATES: list[tuple[QuantKey, QuantKey | None]] = [
     (kMxfp4Static, kFp8Dynamic128Sym),
     (kMxfp4Static, kFp8StaticTensorSym),
     (kMxfp4Static, None),
+    # gfx942's load-time int4 requant of Kimi-K3's MXFP4 experts
+    (kInt4Static32, None),
 ]
 
 

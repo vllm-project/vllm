@@ -293,6 +293,7 @@ def test_lora_rejected_at_config_time_for_unsupported_model(supported):
     """Models without SupportsLoRA must fail during config validation with a
     clear message, not with a bare assert inside the model constructor."""
     model_config = SimpleNamespace(
+        runner_type="generate",
         is_lora_supported=supported,
         architecture="Zamba2ForCausalLM",
         architectures=["Zamba2ForCausalLM"],
@@ -307,6 +308,22 @@ def test_lora_rejected_at_config_time_for_unsupported_model(supported):
             ValueError, match="LoRA is not supported for Zamba2ForCausalLM"
         ):
             lora_config.verify_with_model_config(model_config)
+
+
+def test_lora_allowed_for_drafter_without_lora_support():
+    """Speculative decoding re-validates the config with the draft model's
+    config, and drafters don't run LoRA adapters."""
+    draft_config = SimpleNamespace(
+        runner_type="draft",
+        is_lora_supported=False,
+        architecture="DeepSeekMTPModel",
+        architectures=["DeepSeekMTPModel"],
+        model="deepseek-ai/DeepSeek-V3",
+        dtype=torch.bfloat16,
+    )
+    lora_config = LoRAConfig()
+    lora_config.verify_with_model_config(draft_config)
+    assert lora_config.lora_dtype == torch.bfloat16
 
 
 def test_mamba_cache_mode_all_is_rejected():
@@ -390,11 +407,9 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
         kv_transfer_config=kv_transfer_config,
     )
 
-    kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
-    )
+    kv_cache_groups = [SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     with caplog.at_level(logging.INFO):
-        config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
+        config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
 
     assert config.parallel_config.cp_kv_cache_interleave_size == 16
     assert "automatically adjusted from 3 to block_size 16" in caplog.text
@@ -416,10 +431,26 @@ def test_kv_offloading_does_not_adjust_dcp_interleave_size():
         ),
     )
 
-    kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    kv_cache_groups = [SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
+
+    assert config.parallel_config.cp_kv_cache_interleave_size == 1
+
+
+def test_empty_kv_cache_groups_preserve_dcp_interleave_size():
+    config = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+            distributed_executor_backend="mp",
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector", kv_role="kv_both"
+        ),
     )
-    config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
+
+    config.adjust_dcp_kv_cache_interleave_size([])
 
     assert config.parallel_config.cp_kv_cache_interleave_size == 1
 
