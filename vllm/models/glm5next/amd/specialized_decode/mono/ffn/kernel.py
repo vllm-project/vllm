@@ -102,6 +102,7 @@ from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import (
     dn_tile,
     down_prefetch_batch,
     down_x_words,
+    kda_split,
     layout,
     sample_wave_batches,
     stage_tasks,
@@ -1323,9 +1324,19 @@ def build_flash_ffn_kernel(
         # (one row without speculative decoding), carrying the conv window and the
         # recurrent state, as vLLM's spec-decode kernels do. A row whose state
         # index is not positive (padding) writes no state and outputs zeros.
+        # In a verify step ``KSPLIT`` tasks share a (request, head), each owning
+        # VS of its value rows (the state's rows are independent); the head's
+        # first task then gathers every row's outputs for the gated RMSNorm and
+        # writes the conv state, which every task reads before its walk.
         QO, KO, VO, G1O, G2O, OO = 0, KD, 2 * KD, 3 * KD, 4 * KD, 5 * KD
         # conv state columns: the 3 taps, plus one a draft token
         STATE_LEN = CONV_TAPS - 1 + tpr - 1
+        KSPLIT = kda_split(W, S, tpr)
+        VS = KD // KSPLIT  # value rows a task
+        LPV = THREADS // VS  # lanes a value row
+        KPL = KD // LPV  # state elements (k) a lane
+        LANE_OFFS = [1 << i for i in range(LPV.bit_length() - 1)]  # a v row's lanes
+        assert KSPLIT == 1 or NREQ * H * KSPLIT <= G
 
         def conv_at(ch, j):
             """Element of channel ``ch``, column ``j`` in a conv state slot, laid out
@@ -1346,17 +1357,30 @@ def build_flash_ffn_kernel(
                     fx.Int32(bo.buffer_load(r_idx, row, vec_width=1, dtype=T.i32))
                 )
 
-            for t in range(start("kda"), NREQ * H, G):
+            def norm_out(h, s, e0, ov, gv):
+                """Gated RMSNorm of row ``s``'s head ``h`` outputs, two a lane of
+                one wave (values ``e0``, ``e0 + 1``) -> o_in."""
+                (o0, o1), (g0, g1) = ov, gv
+                rstd = _rsq(wave_sum(o0 * o0 + o1 * o1) * (1.0 / KD) + O_NORM_EPS)
+                y0 = o0 * rstd * ld_f32(r_won, e0) * sigmoid(g0)
+                y1 = o1 * rstd * ld_f32(r_won, e0 + 1) * sigmoid(g1)
+                put(mb("o_in"), (s * P + h * KD + e0) // 2, bf16_pair(y0, y1))
+
+            for t in range(start("kda"), NREQ * H * KSPLIT, G):
                 t = fx.Int32(t)
                 stamp("kda")
-                s0 = (t // H) * tpr
-                h = t % H
+                if const_expr(KSPLIT == 1):
+                    th, sp = t, fx.Int32(0)
+                else:
+                    th, sp = t // KSPLIT, t % KSPLIT
+                s0 = (th // H) * tpr
+                h = th % H
                 # the window starts at the request's last accepted token: column
                 # (accepted - 1) of the conv state, recurrent slot of that row
                 if const_expr(tpr == 1):
                     off = fx.Int32(0)
                 else:
-                    acc_n = row_idx(S + t // H)
+                    acc_n = row_idx(S + th // H)
                     off = fx.min(fx.max(acc_n - 1, fx.Int32(0)), fx.Int32(tpr - 1))
                 cidx = row_idx(s0)
                 cvalid = cidx > 0
@@ -1372,25 +1396,26 @@ def build_flash_ffn_kernel(
                 keep = [win[1], win[2]]
                 cw = [ld_f32(r_cw, ch * CONV_TAPS + j) for j in range(CONV_TAPS)]
                 amp = _exp(ld_f32(r_a_log, h))
-                vr = tid // 4
-                # the 4 lanes of a v row own interleaved 4-wide k chunks (lane c:
-                # k = 16 q + 4 c .. + 3), so a 16-byte store from each covers 64
-                # contiguous bytes of the row: one CTA writes a head's whole state
-                # every row, and scattered 16-byte pieces made that its slowest step
-                k0 = (tid % 4) * 4
+                vr = sp * VS + tid // LPV
+                # the LPV lanes of a v row own interleaved 4-wide k chunks (lane
+                # c: k = 4 LPV q + 4 c .. + 3), so their 16-byte stores cover
+                # 16 LPV contiguous bytes of the row: a task writes its rows of
+                # the state every row, and scattered 16-byte pieces made that
+                # its slowest step
+                k0 = (tid % LPV) * 4
 
                 def kof(i):
-                    return k0 + 16 * (i // 4) + i % 4
+                    return k0 + 4 * LPV * (i // 4) + i % 4
 
                 rd = fx.Int64(fx.max(row_idx(s0 + off), fx.Int32(0)))
                 r_rd = _rsrc(
                     rec_state + (rd * rec_stride + fx.Int64(h * KD * KD)) * fx.Int64(4)
                 )
                 hv = []
-                for q in range_constexpr(8):
+                for q in range_constexpr(KPL // 4):
                     w4 = fx.Vector(
                         bo.buffer_load(
-                            r_rd, vr * KD + k0 + 16 * q, vec_width=4, dtype=T.f32
+                            r_rd, vr * KD + k0 + 4 * LPV * q, vec_width=4, dtype=T.f32
                         )
                     )
                     hv += [w4[e] for e in range(4)]
@@ -1439,19 +1464,19 @@ def build_flash_ffn_kernel(
                     rq = _rsq(lds_ld(misc, 1) + L2_EPS) * (KD**-0.5)
                     rk = _rsq(lds_ld(misc, 2) + L2_EPS)
                     beta = sigmoid(lds_ld(misc, 0))
-                    kk = [lds_ld(xs, KO + kof(i)) * rk for i in range(32)]
+                    kk = [lds_ld(xs, KO + kof(i)) * rk for i in range(KPL)]
                     dot = fx.Float32(0.0)
-                    for i in range_constexpr(32):
+                    for i in range_constexpr(KPL):
                         hv[i] = hv[i] * lds_ld(xs, G1O + kof(i))
                         dot = dot + hv[i] * kk[i]
-                    for o_ in (1, 2):
+                    for o_ in LANE_OFFS:
                         dot = _xred(dot, o_, lambda a_, b_: a_ + b_)
                     vn = beta * (lds_ld(xs, VO + vr) - dot)
                     o = fx.Float32(0.0)
-                    for i in range_constexpr(32):
+                    for i in range_constexpr(KPL):
                         hv[i] = hv[i] + vn * kk[i]
                         o = o + hv[i] * (lds_ld(xs, QO + kof(i)) * rq)
-                    for o_ in (1, 2):
+                    for o_ in LANE_OFFS:
                         o = _xred(o, o_, lambda a_, b_: a_ + b_)
                     if valid:
                         r_rs = _rsrc(
@@ -1459,40 +1484,51 @@ def build_flash_ffn_kernel(
                             + (fx.Int64(idx) * rec_stride + fx.Int64(h * KD * KD))
                             * fx.Int64(4)
                         )
-                        for q in range_constexpr(8):
+                        for q in range_constexpr(KPL // 4):
                             bo.buffer_store(
                                 fx.Vector.from_elements(
                                     hv[4 * q : 4 * q + 4], fx.Float32
                                 ),
                                 r_rs,
-                                vr * KD + k0 + 16 * q,
+                                vr * KD + k0 + 4 * LPV * q,
                             )
-                    if tid % 4 == 0:
-                        lds_st(
-                            xs, OO + vr, valid.select(bf16_round(o), fx.Float32(0.0))
-                        )
+                    o = valid.select(bf16_round(o), fx.Float32(0.0))
+                    if tid % LPV == 0:
+                        if const_expr(KSPLIT == 1):
+                            lds_st(xs, OO + vr, o)
+                        else:
+                            # the norm spans the head's other value rows
+                            put(mb("o_kda"), s * P + h * KD + vr, o)
                     gpu.barrier()
-                    if wave == 0:
-                        e0 = 2 * lane
-                        o0 = lds_ld(xs, OO + e0)
-                        o1 = lds_ld(xs, OO + e0 + 1)
-                        rstd = _rsq(
-                            wave_sum(o0 * o0 + o1 * o1) * (1.0 / KD) + O_NORM_EPS
-                        )
-                        y0 = (
-                            o0
-                            * rstd
-                            * ld_f32(r_won, e0)
-                            * sigmoid(lds_ld(xs, G2O + e0))
-                        )
-                        y1 = (
-                            o1
-                            * rstd
-                            * ld_f32(r_won, e0 + 1)
-                            * sigmoid(lds_ld(xs, G2O + e0 + 1))
-                        )
-                        put(mb("o_in"), (s * P + h * KD + e0) // 2, bf16_pair(y0, y1))
-                    gpu.barrier()
+                    if const_expr(KSPLIT == 1):
+                        if wave == 0:
+                            e0 = 2 * lane
+                            norm_out(
+                                h,
+                                s,
+                                e0,
+                                (lds_ld(xs, OO + e0), lds_ld(xs, OO + e0 + 1)),
+                                (lds_ld(xs, G2O + e0), lds_ld(xs, G2O + e0 + 1)),
+                            )
+                        gpu.barrier()
+                if const_expr(KSPLIT > 1):
+                    # the head's first task gathers every row from all KSPLIT
+                    # tasks (one wait a request, a wave a row) for the norm
+                    if sp == 0:
+                        if wave < tpr:
+                            sr = s0 + wave
+                            er = 2 * lane
+                            ov, gv = get2_many(
+                                [
+                                    (mb("o_kda"), sr * P + h * KD + er),
+                                    (mb("gates"), sr * 2 * P + P + h * KD + er),
+                                ]
+                            )
+                            norm_out(h, sr, er, ov, gv)
+                        gpu.barrier()
+                    # the others read the window before posting any output, so
+                    # the first task may now rewrite it
+                    cvalid = cvalid & (sp == 0)
                 # the window after the request: the two newest history columns, then
                 # every row's input (vLLM keeps the drafts until acceptance is known)
                 if cvalid:

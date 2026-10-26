@@ -180,3 +180,27 @@ def test_mtp_refusals():
 @pytest.mark.parametrize("tpr, ring", [(1, 4), (2, 8), (5, 8), (6, 16), (8, 16)])
 def test_tail_ring_matches_vllm(tpr, ring):
     assert spec.tail_ring(tpr) == ring
+
+
+@pytest.mark.parametrize("tp", spec.TP_SIZES)
+@pytest.mark.parametrize("k", range(1, 8))
+def test_kda_split_fits_one_grid_pass(tp, k):
+    # a head's first KDA task waits for its siblings, so all must run at once
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
+        KDA_DIM,
+        FlashShard,
+    )
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import (
+        kda_split,
+    )
+    from vllm.models.glm5next.amd.specialized_decode.mono.layout import BLOCKS
+
+    tpr = k + 1
+    heads = FlashShard(tp).kda_heads
+    for width in spec.WIDTHS:
+        assert kda_split(tp, width, 1) == 1
+        if width % tpr:
+            continue
+        split = kda_split(tp, width, tpr)
+        assert split > 1 and KDA_DIM % split == 0
+        assert width // tpr * heads * split <= BLOCKS

@@ -145,6 +145,20 @@ def down_x_words(samples: int, inter: int) -> int:
     return samples * MOE_SLOTS * inter // 4
 
 
+def kda_split(npes: int, samples: int, tpr: int) -> int:
+    """KDA tasks a (request, head) in a verify step, each owning 128 / split of
+    the head's value rows, so the serial walk over a request's rows is shared by
+    that many CTAs. 1 without speculative decoding. A head's first task waits
+    for the others' outputs, so every task must fit one pass of the grid."""
+    if tpr == 1:
+        return 1
+    heads = samples // tpr * FlashShard(npes).kda_heads
+    split = 4
+    while split > 1 and heads * split > BLOCKS:
+        split //= 2
+    return split
+
+
 def _align(size: int, alignment: int = 256) -> int:
     return (size + alignment - 1) // alignment * alignment
 
@@ -173,6 +187,8 @@ def layout(
             ("proj", samples * shard.kda_in_rows * pair_bytes),
             ("gates", samples * 2 * shard.kda_proj * pair_bytes),
             ("o_in", samples * shard.kda_proj // 2 * pair_bytes),
+            # a split verify step's KDA outputs before the gated RMSNorm
+            ("o_kda", samples * shard.kda_proj * pair_bytes),
         ]
     if dsa:
         H = shard.mla_heads
@@ -241,7 +257,7 @@ def stage_tasks(
     """``(stage name, task count)`` pairs in execution order. ``iscore`` is sized
     per row at run time; its count here only places the next stage. With ``tpr``
     tokens a request (speculative verify), ``kda`` and ``cache`` walk a request's
-    rows in order, one task a request (and head)."""
+    rows in order, one task a request (and head, times ``kda_split``)."""
     shard = FlashShard(npes)
     requests = samples // tpr
     attention = []
@@ -268,7 +284,7 @@ def stage_tasks(
             ("agate", samples),
             ("inproj", (shard.kda_in_rows + IN_TILE - 1) // IN_TILE),
             ("fgb", 2 * shard.kda_proj // FGB_TILE),
-            ("kda", requests * shard.kda_heads),
+            ("kda", requests * shard.kda_heads * kda_split(npes, samples, tpr)),
             ("oproj", HIDDEN // O_TILE),
         ]
     return attention + [
