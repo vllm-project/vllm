@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import weakref
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, call
@@ -279,7 +280,7 @@ def test_create_req_context_preserves_kv_hints():
         kv_hints=kv_hints,
     )
 
-    assert _create_req_context(request).kv_hints is kv_hints
+    assert _create_req_context(request, MagicMock()).kv_hints is kv_hints
 
 
 def _reduce_kv_connector_stats(runner):
@@ -2228,6 +2229,56 @@ def test_request_preemption(request_runner, async_scheduling: bool, cpu_hit: boo
 
     # All stores completed before request_finished -> fence index empty.
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+
+
+@pytest.mark.parametrize("registered", [True, False])
+def test_req_context_counts_live_until_request_finished(registered):
+    """Finished counts survive late outputs and request cleanup."""
+
+    class RequestStub(SimpleNamespace):
+        pass
+
+    counts = dict(
+        num_computed_tokens=0,
+        num_in_flight_tokens=16,
+        num_prompt_tokens=64,
+        num_tokens=80,
+    )
+    request = RequestStub(
+        request_id="req", kv_transfer_params=None, kv_hints=None, **counts
+    )
+    request_ref = weakref.ref(request)
+    scheduler = object.__new__(OffloadingConnectorScheduler)
+    scheduler.config = SimpleNamespace(kv_group_configs=())
+    scheduler.manager = MagicMock(spec=OffloadingManager)
+    scheduler._step_region = None
+    scheduler._req_status = {}
+
+    def on_new_request(ctx):
+        assert {name: getattr(ctx, name) for name in counts} == counts
+        return RequestOffloadingContext()
+
+    scheduler.manager.on_new_request.side_effect = on_new_request
+    if registered:
+        scheduler.on_new_request(request)
+        ctx = scheduler.manager.on_new_request.call_args.args[0]
+        for name in counts:
+            counts[name] += 16
+            setattr(request, name, counts[name])
+        assert {name: getattr(ctx, name) for name in counts} == counts
+
+    scheduler.request_finished(request)
+    ctx = scheduler.manager.on_new_request.call_args.args[0]
+    for name in counts:
+        setattr(request, name, 0)
+    assert {name: getattr(ctx, name) for name in counts} == counts
+    scheduler._req_status.clear()
+    del request
+    assert request_ref() is None
+    assert {name: getattr(ctx, name) for name in counts} == counts
+
+    synthetic = ReqContext(req_id="synthetic")
+    assert all(getattr(synthetic, name) is None for name in counts)
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
