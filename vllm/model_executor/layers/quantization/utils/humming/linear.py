@@ -28,8 +28,12 @@ def convert_linear_layer_to_humming_standard(
         delattr(layer, checkpoint_name)
 
         if name == "weight":
-            input_dim = getattr(tensor, "input_dim", 1)
-            output_dim = getattr(tensor, "output_dim", 0)
+            # (input_dim, output_dim) after PWAL, if it transposed the weight.
+            input_dim, output_dim = getattr(
+                layer,
+                "processed_weight_dims",
+                (getattr(tensor, "input_dim", 1), getattr(tensor, "output_dim", 0)),
+            )
 
             if input_dim == 0 and output_dim == 1:
                 tensor = tensor.transpose(1, 0).contiguous()

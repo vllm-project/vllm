@@ -20,6 +20,11 @@ The edges of the build graph represent:
 The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
 requirements remain cached independently of per-commit vLLM wheels and source.
 
+The `vllm-runtime-base` stage explicitly installs the current Ubuntu
+`ca-certificates` package so clients using the system trust store receive
+certificate removals when the image is rebuilt. This complements the Python
+`certifi` bundle used by other HTTP clients.
+
 The `extensions-build` stage can also produce an optional source-built Triton
 wheel. `vllm-openai-base` installs that wheel after its other Python
 dependencies so dependency resolution cannot restore an older Triton version.
@@ -28,6 +33,25 @@ With `BUILD_NIXL=true`, `extensions-build` also builds NIXL, including its NIXL
 EP extension for the installed PyTorch, with `tools/build_nixl_with_torch215_for_rubin.py`.
 `vllm-openai-base` then replaces the NIXL packages installed from the KV-connector
 requirements with these wheels.
+
+The AWS EFA images are built separately by `docker/Dockerfile.efa` on top of a
+`vllm-openai` image built with `INSTALL_KV_CONNECTORS=true`. It adds a minimal
+AWS EFA userspace install (libfabric, aws-ofi-nccl and hwloc), the EFA Mooncake
+wheel (x86_64 only), and DeepEP built for NCCL GIN over EFA. Kernel modules and
+host limits remain host-managed.
+
+```bash
+docker build -f docker/Dockerfile.efa \
+    --build-arg BASE_IMAGE=vllm/vllm-openai:latest -t vllm:openai-efa docker/
+```
+
+The image does not change vLLM's Mooncake protocol default (`rdma`). To use
+EFA, set it per connector:
+
+- `MooncakeConnector`: `"mooncake_protocol": "efa"` in `kv_connector_extra_config`.
+- `MooncakeStoreConnector`: `"protocol": "efa"` in the JSON file at `MOONCAKE_CONFIG_PATH`.
+
+The EFA Mooncake wheel is x86_64-only, so use `tcp` on arm64.
 
   > <figure markdown="span">
   >   ![](../../assets/contributing/dockerfile-stages-dependency.png){ align="center" alt="query" width="100%" }
