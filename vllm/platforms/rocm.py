@@ -376,6 +376,14 @@ def get_cdna_version() -> int:
     return 0
 
 
+def get_rdna_version() -> int:
+    if on_rdna4():
+        return 4
+    if on_gfx11():
+        return 3
+    return 0
+
+
 @cache
 def get_rocm_version() -> tuple[int, ...] | None:
     """Return the installed ROCm release as (major, minor, patch), or None."""
@@ -521,6 +529,7 @@ def _get_backend_priorities(
         backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
+    backends.append(AttentionBackendEnum.ROCM_OCTAVE)
     backends.append(AttentionBackendEnum.ULTRAQUANT)
 
     return backends
@@ -1110,6 +1119,17 @@ class RocmPlatform(Platform):
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
+
+        # Default the gated RMSNorm custom op on for unquantized models. Quantized
+        # is untested in serving.
+        model_config = vllm_config.model_config
+        if (
+            model_config is not None
+            and model_config.quantization is None
+            and "+rms_norm_gated" not in compilation_config.custom_ops
+            and "-rms_norm_gated" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rms_norm_gated")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
