@@ -130,6 +130,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     })
     .await
     .context("failed to connect to engine core")?;
+    let server_info = ServerInfoSnapshot::from_engine(&client)
+        .unwrap_or_else(|| ServerInfoSnapshot::from_config(config));
 
     let llm = Llm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
@@ -149,7 +151,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         AppState::new(served_model_names, chat)
             .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
-            .with_server_info(ServerInfoSnapshot::from_config(config))
+            .with_server_info(server_info)
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_profiler(config.profiler.clone()),
