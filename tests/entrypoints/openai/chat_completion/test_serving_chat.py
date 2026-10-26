@@ -718,23 +718,26 @@ async def _collect_metrics_stream_chunks(
     return chunks
 
 
-def test_chat_logprobs_tolerate_missing_positions():
-    """A token without a logprob position gets no logprob instead of failing
-    the whole response with an IndexError."""
+def test_chat_logprobs_dropped_when_misaligned():
+    """With fewer logprob positions than tokens the alignment is unknown, so the
+    output gets no logprobs instead of an IndexError or misattributed values."""
     serving = OpenAIServingChat.__new__(OpenAIServingChat)
     serving.return_tokens_as_token_ids = False
     tokenizer = MagicMock()
-    tokenizer.decode.return_value = "b"
+    tokenizer.decode.return_value = "t"
 
+    # Token 11's row is missing, so token 11 would line up with token 12's row.
     logprobs = serving._create_chat_logprobs(
-        token_ids=[10, 11],
-        top_logprobs=[{10: Logprob(logprob=-0.1, decoded_token="a")}],
+        token_ids=[10, 11, 12],
+        top_logprobs=[
+            {10: Logprob(logprob=-0.1, decoded_token="a")},
+            {12: Logprob(logprob=-0.3), 11: Logprob(logprob=-2.0)},
+        ],
         tokenizer=tokenizer,
     )
 
     assert logprobs.content is not None
-    assert [entry.token for entry in logprobs.content] == ["a", "b"]
-    assert [entry.logprob for entry in logprobs.content] == [-0.1, -9999.0]
+    assert [entry.logprob for entry in logprobs.content] == [-9999.0] * 3
 
 
 @pytest.mark.asyncio

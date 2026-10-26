@@ -393,14 +393,16 @@ def clamp_prompt_logprobs(
     return prompt_logprobs
 
 
-def get_step_logprobs(
-    top_logprobs: Sequence[dict[int, Logprob] | None], index: int
-) -> dict[int, Logprob] | None:
-    """Logprobs at output position `index`, or None if there is no entry."""
-    if index < len(top_logprobs):
-        return top_logprobs[index]
-    logger.warning_once(
-        "Output has more tokens than logprob positions; returning the extra "
-        "tokens without logprobs."
+def align_step_logprobs(
+    token_ids: Sequence[int], top_logprobs: Sequence[dict[int, Logprob] | None]
+) -> Sequence[dict[int, Logprob] | None]:
+    """`top_logprobs`, or all-None positions if it is shorter than `token_ids`,
+    since its alignment with the tokens is then unknown."""
+    if len(top_logprobs) >= len(token_ids):
+        return top_logprobs
+    logger.warning(
+        "Output has %d tokens but %d logprob positions; returning it without logprobs.",
+        len(token_ids),
+        len(top_logprobs),
     )
-    return None
+    return [None] * len(token_ids)

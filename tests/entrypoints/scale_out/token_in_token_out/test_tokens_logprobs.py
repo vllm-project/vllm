@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -179,10 +179,19 @@ def test_text_logprobs_clamp_a_nan_logprob():
     "create_logprobs",
     [ServingTokens._create_tokens_logprobs, ServingTokens._create_text_logprobs],
 )
-def test_token_without_a_logprob_position_gets_no_logprob(create_logprobs):
-    """A token without a logprob position gets the no-logprob entry instead
-    of failing the whole response with an IndexError."""
-    result = create_logprobs(
-        None, token_ids=[7, 8], top_logprobs=[{7: Logprob(-0.5, rank=1)}]
-    )
-    assert [entry.logprob for entry in result.content] == [-0.5, -9999.0]
+def test_misaligned_logprobs_are_dropped_and_logged(create_logprobs):
+    """With fewer logprob positions than tokens the alignment is unknown, so the
+    output gets no logprobs, and both lengths are logged to trace the cause."""
+    with patch("vllm.entrypoints.generate.base.serving.logger") as logger:
+        result = create_logprobs(
+            None,
+            token_ids=[10, 11, 12],
+            top_logprobs=[
+                {10: Logprob(-0.1, rank=1)},
+                {12: Logprob(-0.3, rank=1), 11: Logprob(-2.0, rank=2)},
+            ],
+        )
+
+    assert [entry.logprob for entry in result.content] == [-9999.0] * 3
+    logger.warning.assert_called_once()
+    assert logger.warning.call_args.args[1:] == (3, 2)

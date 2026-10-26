@@ -1098,21 +1098,25 @@ def test_completion_logprobs_honors_requested_count(
     assert len(logprobs.top_logprobs[0]) == expected
 
 
-def test_completion_logprobs_tolerate_missing_positions():
-    """A token without a logprob position gets no logprob instead of failing
-    the whole response with an IndexError."""
+def test_completion_logprobs_dropped_when_misaligned():
+    """With fewer logprob positions than tokens the alignment is unknown, so the
+    output gets no logprobs instead of an IndexError or misattributed values."""
     tokenizer = MagicMock()
-    tokenizer.decode.return_value = "b"
+    tokenizer.decode.return_value = "t"
 
+    # Token 11's row is missing, so token 11 would line up with token 12's row.
     logprobs = _minimal_serving_completion()._create_completion_logprobs(
-        token_ids=[10, 11],
-        top_logprobs=[{10: Logprob(logprob=-0.1, decoded_token="a")}],
+        token_ids=[10, 11, 12],
+        top_logprobs=[
+            {10: Logprob(logprob=-0.1, decoded_token="a")},
+            {12: Logprob(logprob=-0.3), 11: Logprob(logprob=-2.0)},
+        ],
         num_output_top_logprobs=0,
         tokenizer=tokenizer,
     )
 
-    assert logprobs.tokens == ["a", "b"]
-    assert logprobs.token_logprobs == [-0.1, None]
+    assert logprobs.tokens == ["t", "t", "t"]
+    assert logprobs.token_logprobs == [None, None, None]
 
 
 def test_logprobs_below_minus_one_rejected():
