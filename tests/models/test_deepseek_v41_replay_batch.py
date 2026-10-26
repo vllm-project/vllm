@@ -580,42 +580,53 @@ def test_far_prefill_chunk_replays_one_row(state):
     assert replay is not None
     assert replay.rows.tolist() == [199, *range(400 - WINDOW, 400), 400]
     assert build.replay_start.tolist() == [199, 200 - WINDOW, 0]
-    assert state._skipped_tail_np[:2].tolist() == [True, False]
 
 
-def test_chunk_after_one_row_chunk_reads_only_itself(state):
-    """The rows a one-row chunk skipped hold no replay-layer KV: the next chunk's
-    window starts at its own first row, and it takes the replay batch even when
-    nothing trims."""
-    prompt = 1400  # 200 + 100 + 1100: the first chunk is far, the second is not
-    first = _input_batch([200], [200], [True], prefill_len=[prompt], computed=[0])
+def test_chunks_after_one_row_chunk_read_nothing_it_skipped(state):
+    """The rows a one-row chunk skipped hold no replay-layer KV: every later chunk
+    whose window reaches them starts its window after them and takes the replay
+    batch even when nothing trims."""
+    prompt = 1400  # the first chunk is far from the prompt's end, the rest are not
+
+    def chunk(start, length):
+        end = start + length
+        batch = _input_batch(
+            [length], [end], [True], prefill_len=[prompt], computed=[start]
+        )
+        return _prepare(state, batch, CUDAGraphMode.NONE)
+
+    replay, _ = chunk(0, 200)
+    assert replay.rows.tolist() == [199]
+    # Short chunks keep the floor until the window no longer reaches row 199.
+    for start, length in ((200, 100), (300, 1), (301, 26)):
+        replay, build = chunk(start, length)
+        assert replay is not None and replay.rows.tolist() == list(range(length))
+        assert build.replay_start.tolist() == [200]
+    assert chunk(327, 100) == (None, None)
+
+
+def test_eager_forward_while_a_chunk_reaches_skipped_rows(state):
+    """A step that would keep the whole batch runs eager while a chunk's window
+    reaches rows a one-row chunk skipped; at the trim threshold it takes the
+    replay batch anyway."""
+    first = _input_batch([200], [200], [True], prefill_len=[5000], computed=[0])
     replay, _ = _prepare(state, first, CUDAGraphMode.NONE)
     assert replay.rows.tolist() == [199]
-    second = _input_batch([100], [300], [True], prefill_len=[prompt], computed=[200])
-    replay, build = _prepare(state, second, CUDAGraphMode.NONE)
-    assert replay is not None and replay.rows.tolist() == list(range(100))
-    assert build.replay_start.tolist() == [200]
-    assert not state._skipped_tail_np[0]
-
-
-def test_eager_forward_only_after_a_one_row_chunk(state):
-    """A step that would keep the whole batch runs eager when a chunk follows a
-    one-row chunk; at the trim threshold it takes the replay batch anyway."""
     state.decoder_replay_layers.trim_threshold = 768
-    state._skipped_tail_np[0] = True
 
-    def needs_eager(num_scheduled, skipped=True):
-        state._skipped_tail_np[0] = skipped
+    def needs_eager(num_scheduled, computed=200):
+        n = len(num_scheduled)
         return state.needs_eager_forward(
             num_tokens=int(sum(num_scheduled)),
-            idx_mapping=np.arange(len(num_scheduled)),
-            is_prefilling=np.array([True] + [False] * (len(num_scheduled) - 1)),
-            num_computed_prefill_tokens=np.zeros(len(num_scheduled), np.int32),
+            idx_mapping=np.arange(n),
+            is_prefilling=np.array([True] + [False] * (n - 1)),
+            num_computed_prefill_tokens=np.array([computed] + [0] * (n - 1)),
             num_scheduled_tokens=np.array(num_scheduled),
-            prefill_len=np.full(len(num_scheduled), 5000),
+            prefill_len=np.full(n, 5000),
         )
 
     assert needs_eager([300, 1, 1])
     assert not needs_eager([900, 1, 1])
     assert needs_eager([400, 400])  # uniform: may take a FULL graph
-    assert not needs_eager([300, 1, 1], skipped=False)
+    assert needs_eager([300, 1, 1], computed=200 + WINDOW - 2)
+    assert not needs_eager([300, 1, 1], computed=200 + WINDOW - 1)
