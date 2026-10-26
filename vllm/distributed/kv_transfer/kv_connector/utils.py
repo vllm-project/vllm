@@ -48,9 +48,7 @@ def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
     return blocks[-1:]
 
 
-def get_sliding_window_blocks_per_group(
-    kv_cache_config: KVCacheConfig, default_block_size: int
-) -> list[int]:
+def get_sliding_window_blocks_per_group(kv_cache_config: KVCacheConfig) -> list[int]:
     """Blocks a connector transfers per transfer group, 0 for non-window groups.
 
     A sliding-window group transfers its window plus the tokens retained below
@@ -58,7 +56,6 @@ def get_sliding_window_blocks_per_group(
 
     Args:
         kv_cache_config: Config supplying the transfer groups.
-        default_block_size: Block size used for groups without a window.
 
     Returns:
         One block count per transfer group.
@@ -69,10 +66,9 @@ def get_sliding_window_blocks_per_group(
         params = group.manager_config.params
         if isinstance(params, SlidingWindowManager.Params):
             n_tokens = params.sliding_window + params.extra_retained_tokens
-            block_size = group.block_size
+            blocks_per_sw.append(cdiv(n_tokens, group.block_size) + 1)
         else:
-            n_tokens, block_size = 0, default_block_size
-        blocks_per_sw.append(cdiv(n_tokens, block_size) + 1 if n_tokens else 0)
+            blocks_per_sw.append(0)
     return blocks_per_sw
 
 
