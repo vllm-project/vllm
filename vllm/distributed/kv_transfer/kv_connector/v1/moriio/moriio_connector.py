@@ -2304,14 +2304,14 @@ class MoRIIOConnectorWorker:
 
         remote_mode = getattr(remote, "mode", "")
         local_mode = self.mode.value
-        if remote_mode and local_mode:
-            if remote_mode == local_mode:
-                logger.warning(
-                    "Remote engine %s has the same mode (%s) as local; "
-                    "transfers require complementary READ/WRITE modes",
-                    remote_engine_id,
-                    remote_mode,
-                )
+        if remote_mode and local_mode and remote_mode != local_mode:
+            logger.warning(
+                "Remote engine %s mode (%s) differs from local (%s); "
+                "both sides of a transfer must use the same mode",
+                remote_engine_id,
+                remote_mode,
+                local_mode,
+            )
 
         if remote.block_len != self.block_len:
             raise HandshakeError(
