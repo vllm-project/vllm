@@ -111,6 +111,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops import flashmla
 from vllm.v1.hisparse import runtime as hisparse_runtime
+from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseRuntime,
@@ -2929,6 +2930,7 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
         for _ in resident_caches
     )
     worker = object.__new__(HiSparseConnectorWorker)
+    worker.backend = get_hisparse_backend()
     worker.is_host_writer = True
     worker.kernel_block_size = block_size
     worker.resident_caches = resident_caches
@@ -2940,7 +2942,7 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
         )
         for _ in resident_caches
     ]
-    worker.dma_stream = torch.cuda.Stream(device=device)
+    worker.dma_stream = torch.Stream(device=device)
     worker.host_write_event = torch.Event()
     worker._dma_free_descriptors = []
     worker._pending_dma_descriptors = deque()
@@ -3592,8 +3594,10 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
         .to(device)
     )
 
-    staged = HiSparseRuntime.gather_prefill_cache(
-        None, host_cache, plan, resident_cache=resident_cache
+    runtime = _make_hisparse_runtime(row_width=row_width, block_size=block_size)
+    runtime.bind_source_cache(host_cache)
+    staged = runtime.gather_prefill_cache(
+        host_cache, plan, resident_cache=resident_cache
     )
 
     staged_flat = staged.view(-1, row_width).cpu()

@@ -186,7 +186,6 @@ def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
     worker._submitted_mirror_layers = set()
     main_stream = MagicMock()
     monkeypatch.setattr(torch.accelerator, "current_stream", lambda: main_stream)
-    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
 
     handle.slot_mapping = torch.tensor([7, 8], dtype=torch.int64)
     worker._stage_row_mirror_mapping(2)
@@ -724,7 +723,6 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     event = MagicMock()
     swap_blocks_batch = MagicMock()
     monkeypatch.setattr(torch.accelerator, "current_stream", lambda: current_stream)
-    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
     monkeypatch.setattr(torch, "Event", lambda: event)
     monkeypatch.setattr(worker.backend, "swap_blocks_batch", swap_blocks_batch)
 
