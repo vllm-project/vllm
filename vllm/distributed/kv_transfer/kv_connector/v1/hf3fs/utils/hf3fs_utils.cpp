@@ -12,7 +12,10 @@ void read_shm(const torch::Tensor& shm, const torch::Tensor& pin,
   // Copy from shared memory to pinned memory
   char* shm_ptr = static_cast<char*>(shm.data_ptr());
   char* src_ptr = static_cast<char*>(pin.data_ptr());
-  std::memcpy(src_ptr, shm_ptr, shm.numel() * shm.element_size());
+  size_t shm_bytes = shm.numel() * shm.element_size();
+  TORCH_CHECK(static_cast<size_t>(pin.numel()) * pin.element_size() >= shm_bytes,
+              "pin buffer is smaller than shm tensor");
+  std::memcpy(src_ptr, shm_ptr, shm_bytes);
 
   // Copy from pinned memory to GPU tensors
   size_t current = 0;
@@ -48,7 +51,10 @@ void write_shm(const std::vector<torch::Tensor> src, torch::Tensor& shm,
 
   // Copy from pinned memory to shared memory
   char* shm_ptr = static_cast<char*>(shm.data_ptr());
-  std::memcpy(shm_ptr, dst_ptr, shm.numel() * shm.element_size());
+  size_t shm_bytes = shm.numel() * shm.element_size();
+  TORCH_CHECK(static_cast<size_t>(pin.numel()) * pin.element_size() >= shm_bytes,
+              "pin buffer is smaller than shm tensor");
+  std::memcpy(shm_ptr, dst_ptr, shm_bytes);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
