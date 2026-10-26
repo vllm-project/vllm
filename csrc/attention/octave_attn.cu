@@ -430,7 +430,9 @@ __global__ void __launch_bounds__(128)
             half_bits_to_f(ps[2] & 0xFFFF) * (1.0f / LUT_ONE);
       }
 
-  #pragma unroll
+      // Rows two at a time: unrolling all of them kept too much live and
+      // spilled to scratch on gfx11.
+  #pragma unroll 2
       for (int r = 0; r < ROWS; ++r) {
         const int* qr = q8[r];
         float sk = 0.f;
@@ -464,7 +466,10 @@ __global__ void __launch_bounds__(128)
           sk += q_bs[r][B0 + b] * ks[B0 + b] * (float)dn;
         }
         const float sc = sk * (sm_scale_log2 / LUT_ONE);
-        S[r][wave * 32 + lane] = tok < klen[r / G] ? sc : -INFINITY;
+        int kl = klen[0];  // klen by constant index only (no scratch)
+  #pragma unroll
+        for (int j = 1; j < QG; ++j) kl = r / G == j ? klen[j] : kl;
+        S[r][wave * 32 + lane] = tok < kl ? sc : -INFINITY;
       }
     } else {
   #pragma unroll

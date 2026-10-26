@@ -392,10 +392,12 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
                  X;
       };
 
+      // V of a tile is loaded after its QK (softmax hides it): holding it
+      // through the QK, next to O, the four S tiles and the raw K, spilled.
+      const uint8_t* tcur = nullptr;
       if (start < end) {
-        const uint8_t* t0 = SP ? nullptr : tile_ptr(start);
-        load_k(t0, start, 0.f);
-        load_v(t0, start, 0.f);
+        tcur = SP ? nullptr : tile_ptr(start);
+        load_k(tcur, start, 0.f);
       }
 
       for (int base = start; base < end; base += 16) {
@@ -445,6 +447,7 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
           __builtin_amdgcn_sched_barrier(0);
         }
 
+        load_v(tcur, base, S[0][0]);
         // Next tile's K and scales now: softmax and PV hide them.
         const bool next = base + 16 < end;
         const uint8_t* tn = next && !SP ? tile_ptr(base + 16) : nullptr;
@@ -538,8 +541,7 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
             O[c] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, pb16, O[c]);
           }
         }
-        // Next tile's V, issued after the last PV WMMA.
-        if (next) load_v(tn, base + 16, O[15][0]);
+        tcur = tn;
       }
 
       l += xhalf(l);
