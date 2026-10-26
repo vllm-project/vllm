@@ -228,16 +228,6 @@ def _aiter_mla_non_causal_asm_kernels() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
-def _aiter_gather_kv_b_proj():
-    """Load AITER's gather_kv_b_proj if it exists in build"""
-    try:
-        from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
-    except ImportError:
-        return None
-    return gather_kv_b_proj
-
-
-@functools.lru_cache(maxsize=1)
 def _gluon_mla_decode_supported() -> bool:
     """The small-head Gluon MLA decode kernel only has a gfx950 (CDNA4) build.
 
@@ -990,10 +980,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             if num_gpu_blocks is None
             else num_gpu_blocks * kv_cache_spec.page_size_bytes
         )
-        self._supports_fused_gather = (
-            _aiter_gather_kv_b_proj() is not None
-            and self._kv_cache_dtype_str != "fp8_ds_mla"
-        )
+        self._supports_fused_gather = self._kv_cache_dtype_str != "fp8_ds_mla"
         # MLAAttention quantizes decode Q to FP8 before calling this backend
         # whenever the KV cache is FP8 and supports_quant_query_input is true.
         q_dtype = (
@@ -2415,7 +2402,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             and self.kv_lora_rank == 512
             and prefill_metadata.q_data_type != current_platform.fp8_dtype()
             and q.dtype in (torch.bfloat16, torch.float16)
-            and _aiter_gather_kv_b_proj() is not None
             and kv_c_and_k_pe_cache.is_contiguous()
             and weight is not None
             and weight.dtype in (torch.bfloat16, torch.float16)
@@ -2432,6 +2418,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         out_dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather one context chunk and expand it into (k, v)."""
+        from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
+
         num_blocks, block_size, cache_width = kv_c_and_k_pe_cache.shape
         rope_dim = cache_width - self.kv_lora_rank
         num_rows = chunk.num_context_tokens
@@ -2448,7 +2436,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         if num_rows == 0:
             return k, v
 
-        _aiter_gather_kv_b_proj()(
+        gather_kv_b_proj(
             kv_c_and_k_pe_cache.view(num_blocks * block_size, 1, cache_width),
             k_scale,
             chunk.cu_seq_lens,

@@ -21,16 +21,14 @@ from vllm.utils.math_utils import cdiv
 def _fused_gather_available() -> bool:
     if not (current_platform.is_rocm() and torch.cuda.is_available()):
         return False
-    from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
-        _aiter_gather_kv_b_proj,
-    )
+    from vllm._aiter_ops import is_aiter_found_and_supported
 
-    return _aiter_gather_kv_b_proj() is not None
+    return is_aiter_found_and_supported()
 
 
 pytestmark = pytest.mark.skipif(
     not _fused_gather_available(),
-    reason="needs ROCm and an AITER build that ships gather_kv_b_proj",
+    reason="needs ROCm and AITER",
 )
 
 KV_LORA_RANK = 512  # gather_kv_b_proj asserts KV_CDim == 4 * 128
@@ -208,7 +206,6 @@ def test_fused_prefill_context_matches_unfused(
 ):
     """gather_kv_b_proj + LSE merge reproduce the gather -> GEMM -> copy path."""
     from vllm.model_executor.layers.attention.mla_attention import MLACommonImpl
-    from vllm.v1.attention.backends.mla import rocm_aiter_mla
 
     torch.manual_seed(0)
     device = torch.device("cuda")
@@ -226,7 +223,9 @@ def test_fused_prefill_context_matches_unfused(
     k_scale = torch.ones(1, dtype=torch.float32, device=device)
 
     # A silent fallback must not pass as base-vs-base.
-    gather_kv_b_proj = rocm_aiter_mla._aiter_gather_kv_b_proj()
+    import aiter.ops.triton.gather_kv_b_proj as aiter_gather
+
+    gather_kv_b_proj = aiter_gather.gather_kv_b_proj
     launches = 0
 
     def counted(*args, **kwargs):
@@ -234,7 +233,7 @@ def test_fused_prefill_context_matches_unfused(
         launches += 1
         return gather_kv_b_proj(*args, **kwargs)
 
-    monkeypatch.setattr(rocm_aiter_mla, "_aiter_gather_kv_b_proj", lambda: counted)
+    monkeypatch.setattr(aiter_gather, "gather_kv_b_proj", counted)
 
     output, lse = impl._compute_prefill_context(q, kv_cache, metadata, k_scale)
     assert launches == expected_chunks
