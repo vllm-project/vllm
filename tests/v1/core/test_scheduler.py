@@ -16,6 +16,7 @@ from vllm.config import (
     KVTransferConfig,
     LoRAConfig,
     ModelConfig,
+    ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
@@ -448,6 +449,249 @@ def test_scheduler_stats_route_to_existing_output_client():
     assert 0 not in engine_core_outputs
     assert engine_core_outputs[1].scheduler_stats is not None
     assert len(engine_core_outputs[1].outputs) == 1
+
+
+def test_scheduler_publishes_lookahead_blocks_at_allocation():
+    """A lookahead block is published once its lookahead token exists: prompt
+    blocks at their own allocation, the block ending at the first sampled
+    token at the allocation after it is sampled."""
+    block_size = 2
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_num_batched_tokens=16,
+    )
+
+    def make_request(request_id: str, prompt_token_ids: list[int]) -> Request:
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=SamplingParams(max_tokens=3, ignore_eos=True),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(block_size, sha256, 1),
+        )
+
+    def num_cached_tokens(prompt_token_ids: list[int]) -> int:
+        probe = make_request("probe", prompt_token_ids)
+        return scheduler.kv_cache_manager.get_computed_blocks(probe)[1]
+
+    request = make_request("first", [0, 1, 2, 3])
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    # Block [2, 4) waits for its lookahead token, the first sampled one.
+    assert num_cached_tokens([0, 1, 2, 3, 5, 7]) == block_size
+
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[5]],
+        ),
+    )
+    scheduler.schedule()
+    assert num_cached_tokens([0, 1, 2, 3, 5, 7]) == 2 * block_size
+    assert num_cached_tokens([0, 1, 2, 3, 6, 7]) == block_size
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("lookahead", [0, 1])
+@pytest.mark.parametrize("ending", ["prefill", "accepted", "stop", "rejected"])
+def test_finished_spec_request_caches_completed_blocks(
+    async_scheduling, lookahead, ending
+):
+    """Final output can make a computed block's hash available before freeing it."""
+    block_size = 4
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        num_speculative_tokens=2,
+        speculative_method="ngram_gpu",
+        async_scheduling=async_scheduling,
+    )
+    hasher = get_request_block_hasher(block_size, sha256, lookahead)
+    prompt = list(range(4 if ending == "prefill" else 2))
+    request = Request(
+        request_id="producer",
+        prompt_token_ids=prompt,
+        sampling_params=SamplingParams(
+            max_tokens={"prefill": 1, "rejected": 2}.get(ending, 4),
+            ignore_eos=True,
+            stop_token_ids=[4] if ending == "stop" else None,
+        ),
+        pooling_params=None,
+        block_hasher=hasher,
+    )
+
+    def finish_step(output, tokens):
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[tokens],
+            ),
+        )
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    if ending == "prefill":
+        finish_step(output, [4])
+    else:
+        finish_step(output, [2])
+        scheduler.update_draft_token_ids(
+            DraftTokenIds(req_ids=[request.request_id], draft_token_ids=[[3, 4]])
+        )
+        output = scheduler.schedule()
+        finish_step(output, [8] if ending == "rejected" else [3, 4, 5])
+
+    assert request.is_finished()
+    assert request.num_output_placeholders == 0
+    probe = Request(
+        request_id="probe",
+        prompt_token_ids=list(request.all_token_ids) + [99] * block_size,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=hasher,
+    )
+    expected = 0 if ending == "rejected" else block_size
+    assert scheduler.kv_cache_manager.get_computed_blocks(probe)[1] == expected
+
+
+@pytest.mark.parametrize("num_spec_tokens", [None, 2])
+def test_async_output_does_not_cache_inflight_tokens(num_spec_tokens):
+    """A returned token ID does not prove that its next-step KV is ready."""
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=1,
+        async_scheduling=True,
+        num_speculative_tokens=num_spec_tokens,
+        speculative_method="ngram_gpu" if num_spec_tokens else None,
+    )
+    hasher = get_request_block_hasher(1, sha256)
+    request = Request(
+        request_id="producer",
+        prompt_token_ids=[0, 1],
+        sampling_params=SamplingParams(max_tokens=16, ignore_eos=True),
+        pooling_params=None,
+        block_hasher=hasher,
+    )
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    second = scheduler.schedule()
+    assert second.num_scheduled_tokens[request.request_id] > 0
+    scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[2]],
+        ),
+    )
+    probe = Request(
+        request_id="probe",
+        prompt_token_ids=[0, 1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=hasher,
+    )
+    assert scheduler.kv_cache_manager.get_computed_blocks(probe)[1] == 2
+
+
+@pytest.mark.parametrize("recovery", ["resident", "preempt", "reset"])
+def test_streaming_lookahead_hashes_follow_recomputed_kv(recovery):
+    """Recomputation uses the continuation's tokens without re-keying resident KV."""
+    block_size = 4
+    model_config = ModelConfig(
+        model="Qwen/Qwen3-Next-80B-A3B-Instruct",
+        max_model_len=128,
+        skip_tokenizer_init=True,
+    )
+    scheduler = create_scheduler(
+        model=model_config.model,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        enable_prefix_caching=True,
+        block_size=block_size,
+        speculative_config=SpeculativeConfig(
+            method="mtp",
+            num_speculative_tokens=1,
+            target_model_config=model_config,
+            target_parallel_config=ParallelConfig(),
+        ),
+    )
+    assert scheduler.num_hash_lookahead_tokens == 1
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(block_size, sha256, 1)
+
+    def request(request_id, tokens, max_tokens=16, resumable=False):
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=list(tokens),
+            sampling_params=SamplingParams(max_tokens=max_tokens, ignore_eos=True),
+            pooling_params=None,
+            block_hasher=hasher,
+            resumable=resumable,
+        )
+
+    session = request("session", [1, 2, 3], max_tokens=2, resumable=True)
+    scheduler.add_request(session)
+
+    def step(token):
+        output = scheduler.schedule()
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[session.request_id],
+                req_id_to_index={session.request_id: 0},
+                sampled_token_ids=[[token]],
+            ),
+        )
+
+    step(4)
+    step(5)
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    manager = scheduler.kv_cache_manager
+    old_block = manager.get_blocks(session.request_id).blocks[0][0]
+    old_key = old_block.block_hash
+    old_hash = session.block_hashes[0]
+    assert old_key is not None
+    old_probe = request("old", [1, 2, 3, 4, 5, 100])
+    assert manager.get_computed_blocks(old_probe)[1] == block_size
+
+    scheduler.add_request(request("session", [42, 43, 44], resumable=True))
+    assert list(session.all_token_ids) == [1, 2, 3, 4, 42, 43, 44]
+    step(99)
+    assert session.block_hashes[0] == old_hash
+    assert old_block.block_hash == old_key
+    current = request("current", session.all_token_ids)
+    assert current.block_hashes[0] != old_hash
+    assert manager.get_computed_blocks(current)[1] == 0
+    if recovery == "resident":
+        return
+
+    if recovery == "reset":
+        assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    else:
+        scheduler.running.remove(session)
+        scheduler._preempt_request(session, 0.0)
+    assert session.num_computed_tokens == 0
+    output = scheduler.schedule()
+    assert session.block_hashes == current.block_hashes
+    assert output.num_scheduled_tokens[session.request_id] == session.num_tokens
+    new_blocks, hit_tokens, _ = manager.get_computed_blocks(current)
+    assert hit_tokens == block_size
+    old_blocks, old_hit_tokens, _ = manager.get_computed_blocks(old_probe)
+    if recovery == "reset":
+        assert old_hit_tokens == 0
+    else:
+        assert old_hit_tokens == block_size
+        assert old_blocks.blocks[0][0] is old_block
+        assert new_blocks.blocks[0][0] is not old_block
+        assert old_block.block_hash == old_key
 
 
 def test_schedule_multimodal_requests():
@@ -4743,6 +4987,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
+    scheduler.num_spec_tokens = 0
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 
