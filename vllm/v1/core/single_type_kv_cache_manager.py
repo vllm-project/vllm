@@ -55,10 +55,17 @@ class SingleTypeKVCacheManager(ABC):
 
     # Whether a running request's step changes nothing beyond the base class
     # conditions, so ``has_running_step_work`` can rule it out (see there).
+    # Not inherited: a subclass may change those steps, so it opts in itself.
     running_step_uses_base_conditions: ClassVar[bool] = False
 
     # Keep this group's longer prefix until external cache lookup completes.
     retains_longer_hit: bool = False
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.running_step_uses_base_conditions = cls.__dict__.get(
+            "running_step_uses_base_conditions", False
+        )
 
     @property
     def has_positionally_stable_blocks(self) -> bool:
@@ -749,9 +756,9 @@ class SingleTypeKVCacheManager(ABC):
         up to ``num_cacheable_tokens`` (0 when the group is not cached).
         ``allocate_slots`` skips those steps when every group returns False.
 
-        Returns True unless ``running_step_uses_base_conditions`` is set; a
-        subclass that changes state elsewhere in those steps must unset it or
-        override this method.
+        Returns True unless the class itself sets
+        ``running_step_uses_base_conditions``; a subclass that changes state
+        elsewhere in those steps overrides this method instead.
         """
         if not self.running_step_uses_base_conditions:
             return True
@@ -971,9 +978,6 @@ class RSWAManager(FullAttentionManager):
     bounds per-request KV memory at O(prefix_len + rswa_window) instead of
     growing linearly with decode length.
     """
-
-    # The gap freed below is not the skipped prefix the base conditions cover.
-    running_step_uses_base_conditions: ClassVar[bool] = False
 
     def __init__(self, kv_cache_spec: RSWASpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
@@ -2280,6 +2284,8 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 
 
 class SinkFullAttentionManager(FullAttentionManager):
+    running_step_uses_base_conditions: ClassVar[bool] = True
+
     def __init__(
         self,
         kv_cache_spec: SinkFullAttentionSpec,
@@ -2313,8 +2319,6 @@ class HiSparseSourceManager(FullAttentionManager):
     coordinator: "HiSparseCoordinator | None" = None
     # The host tier keeps prefixes the device groups have already lost.
     retains_longer_hit = True
-    # Host allocation and publishing follow their own conditions.
-    running_step_uses_base_conditions: ClassVar[bool] = False
 
     @property
     def records_new_block_ids(self) -> bool:

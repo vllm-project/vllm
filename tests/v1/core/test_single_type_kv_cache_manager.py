@@ -1153,6 +1153,7 @@ def test_skipped_running_steps_change_no_state(
         assert _group_state(manager, request.request_id) == _group_state(
             reference, request.request_id
         )
+        assert manager.take_new_block_ids() == reference.take_new_block_ids()
         # Settle the step: keep the accepted tokens, roll back rejected drafts.
         num_accepted = rng.randint(0, num_spec_tokens)
         request.append_output_token_ids([7] * (num_accepted + 1))
@@ -1160,3 +1161,14 @@ def test_skipped_running_steps_change_no_state(
         # With async scheduling one step stays in flight while the next one
         # is scheduled.
         in_flight = num_new_tokens if async_scheduling else 0
+
+
+def test_running_step_fast_path_is_not_inherited():
+    """A subclass may change what a running step does, so it opts in itself."""
+
+    class DerivedManager(SlidingWindowManager):
+        pass
+
+    assert SlidingWindowManager.running_step_uses_base_conditions
+    assert not DerivedManager.running_step_uses_base_conditions
+    assert not RSWAManager.running_step_uses_base_conditions
