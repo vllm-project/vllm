@@ -85,21 +85,25 @@ def test_kv_balanced_backend_rejects_unsupported(monkeypatch):
     assert any("kv_lora_rank 512" in reason for reason in reasons())
 
 
-def test_kv_balanced_impl_falls_back_to_tokenspeed(monkeypatch):
-    """A step the KV-balanced decode doesn't run is TokenSpeed's forward_mqa."""
+def test_kv_balanced_impl_runs_only_the_kernel(monkeypatch):
+    """forward_mqa is the KV-balanced decode; TokenSpeed's decode never runs."""
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend import (
         KimiK3KvBalancedMLAImpl,
     )
     from vllm.v1.attention.backends.mla.tokenspeed_mla import TokenspeedMLAImpl
 
-    calls = []
-    monkeypatch.setattr(
-        TokenspeedMLAImpl, "forward_mqa", lambda self, *args: ("tokenspeed", None)
-    )
+    def tokenspeed(*args):
+        raise AssertionError("TokenSpeed's decode ran")
+
+    monkeypatch.setattr(TokenspeedMLAImpl, "forward_mqa", tokenspeed)
     impl = object.__new__(KimiK3KvBalancedMLAImpl)
-    impl.kv_balanced = lambda *args: calls.append(args) or None
-    assert impl.forward_mqa("q", "cache", "metadata", "layer") == ("tokenspeed", None)
-    impl.kv_balanced = lambda *args: ("kv_balanced", None)
+    calls = []
+
+    def kv_balanced(*args):
+        calls.append(args)
+        return "kv_balanced", None
+
+    impl.kv_balanced = kv_balanced
     assert impl.forward_mqa("q", "cache", "metadata", "layer") == ("kv_balanced", None)
     assert calls == [(impl, "q", "cache", "metadata", "layer")]
 
@@ -360,7 +364,6 @@ def _layer(monkeypatch, lengths, cp, lse):
     kv_balanced = decode.KvBalancedDecode(heads // world)
 
     def mqa(query, metadata):
-        """The decode, or None for a step left to TokenSpeed's decode."""
         return kv_balanced(impl, query, cache, metadata, attn_layer)
 
     def reference():
@@ -380,11 +383,11 @@ def _layer(monkeypatch, lengths, cp, lse):
 
 
 @requires_sm100
-def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
+def test_kv_balanced_mqa_plans_once_per_forward_and_rejects_unsupported(
     monkeypatch, workspace_init
 ):
     """The per-layer dispatch: the first layer of a forward plans and later layers
-    reuse it; steps the kernel can't run are left to TokenSpeed's decode."""
+    reuse it; a step the kernel can't run raises."""
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla import core, decode
 
     torch.manual_seed(0)
@@ -414,18 +417,22 @@ def test_kv_balanced_mqa_plans_once_per_forward_and_falls_back(
     assert len(plans) == 2
 
     requests = metadata.num_decodes
-    assert mqa(query.to(torch.bfloat16), metadata) is None
+    with pytest.raises(ValueError, match="FP8 query"):
+        mqa(query.to(torch.bfloat16), metadata)
     many = SimpleNamespace(
         **{**vars(metadata), "num_decodes": 5, "num_decode_tokens": 5 * q}
     )
-    assert mqa(_cat([query] * 3)[: 5 * q], many) is None
+    with pytest.raises(ValueError, match="5 requests"):
+        mqa(_cat([query] * 3)[: 5 * q], many)
     longer = SimpleNamespace(
         **{**vars(metadata), "num_decode_tokens": requests * (q + 1)}
     )  # more query rows per request than the reserved buffers hold
-    assert mqa(_cat([query, query[:requests]]), longer) is None
+    with pytest.raises(ValueError, match="at most 5 each"):
+        mqa(_cat([query, query[:requests]]), longer)
     # The heads of a wider (padded) query buffer: not packed.
     wide = torch.cat([query.view(torch.uint8)] * 2, dim=1).view(torch.float8_e4m3fn)
-    assert mqa(wide[:, : query.shape[1]], metadata) is None
+    with pytest.raises(ValueError, match="contiguous"):
+        mqa(wide[:, : query.shape[1]], metadata)
 
 
 @requires_sm100

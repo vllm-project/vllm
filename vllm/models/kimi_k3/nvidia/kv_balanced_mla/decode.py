@@ -4,18 +4,13 @@
 the KV-balanced kernel. It covers the target verify and the DSpark draft, with or
 without DCP. Per forward, the first MLA layer of each decode shape plans the split-KV
 work list from this rank's KV lengths, and every later layer of that forward reuses
-it. Under DCP the kernel reads this rank's KV shard, masks
-causally in global positions and returns the log2 LSE that the DCP combine merges,
-like TokenSpeed.
+it. Under DCP the kernel reads this rank's KV shard, masks causally in global
+positions and returns the log2 LSE that the DCP combine merges, like TokenSpeed.
 
 The layers share one set of plan buffers per micro-batch lane, reserved with the
 split-KV scratch (the decode workspace TokenSpeed also uses) when the layers are
-built, so the KV cache is sized around them. A step the kernel does not run uses
-TokenSpeed's decode: a shape TokenSpeed runs on its M64 tiles (64 query rows or fewer
-per request; the kernel needs the 2-CTA M128 tiles), more requests than its partials
-can address, a strided query, a micro-batch lane first seen after the workspace is
-locked, or the first call for a shape inside CUDA graph capture (the eager warmup
-runs first).
+built, so the KV cache is sized around them. Every decode step runs on the kernel;
+one it can't run raises instead of running some other decode.
 """
 
 from typing import TYPE_CHECKING
@@ -43,9 +38,8 @@ logger = init_logger(__name__)
 LATENT, ROPE = 512, 64
 
 
-# The kernel per (heads, q, causal): the target verify and the DSpark draft. None:
-# unsupported.
-_SHAPES: dict[tuple[int, int, bool], "KvBalancedMla | None"] = {}
+# The kernel per (heads, q, causal): the target verify and the DSpark draft.
+_SHAPES: dict[tuple[int, int, bool], "KvBalancedMla"] = {}
 # Per plan buffer (``work``): the (forward context, KV lengths, kernel) of the plan it
 # holds. The context is held so that its identity can't be reused by a later forward.
 _PLANNED: dict[int, tuple[object, int, "KvBalancedMla"]] = {}
@@ -69,25 +63,22 @@ class KvBalancedDecode:
             current_platform.device_type, torch.accelerator.current_device_index()
         )
         if not core.supports(self.heads, self.max_q, device):
-            raise RuntimeError(
+            raise ValueError(
                 "KIMI_K3_KV_BALANCED_MLA needs more than 64 query rows per request "
                 f"(heads x query length), got {self.heads} x {self.max_q}"
             )
         if config.attention_config.tokenspeed_mla_min_split_kv > 1:
             logger.warning_once(
-                "Kimi K3 KV-balanced MLA decode plans its own KV splits; "
-                "tokenspeed_mla_min_split_kv applies only to the TokenSpeed decode it "
-                "falls back to"
+                "KIMI_K3_KV_BALANCED_MLA plans its own KV splits and ignores "
+                "tokenspeed_mla_min_split_kv"
             )
-        max_seqs = config.scheduler_config.max_num_seqs
-        self.max_requests = min(
-            max_seqs, core.max_planned_requests(self.heads, self.max_q)
-        )
-        if self.max_requests < max_seqs:
-            logger.warning_once(
-                "Kimi K3 KV-balanced MLA decode: steps above %d requests use the "
-                "TokenSpeed decode",
-                self.max_requests,
+        self.max_requests = config.scheduler_config.max_num_seqs
+        max_planned = core.max_planned_requests(self.heads, self.max_q)
+        if self.max_requests > max_planned:
+            raise ValueError(
+                f"KIMI_K3_KV_BALANCED_MLA plans at most {max_planned} requests per "
+                f"step at {self.heads} heads x {self.max_q} query tokens; lower "
+                f"max_num_seqs ({self.max_requests})"
             )
         clusters = core.max_active_clusters(device)
         self._key = ("kimi_k3_kv_balanced_mla", self.heads, self.max_q)
@@ -119,37 +110,30 @@ class KvBalancedDecode:
         workspace = manager.get_simultaneous(((self._workspace_bytes,), torch.int8))[0]
         return counts, work, workspace
 
-    def _core(self, heads: int, qlen: int, causal: bool) -> "KvBalancedMla | None":
+    def _core(self, heads: int, qlen: int, causal: bool) -> "KvBalancedMla":
         key = (heads, qlen, causal)
         if key not in _SHAPES:
+            shape = f"heads={heads} q={qlen} causal={causal}"
             if torch.cuda.is_current_stream_capturing():
-                logger.warning_once(
-                    "Kimi K3 KV-balanced MLA decode: first call for heads=%d q=%d "
-                    "causal=%s inside CUDA graph capture; using the TokenSpeed decode",
-                    heads,
-                    qlen,
-                    causal,
+                raise ValueError(
+                    f"KIMI_K3_KV_BALANCED_MLA: first decode with {shape} inside CUDA "
+                    "graph capture; the eager warmup must run every decode shape first"
                 )
-                return None
             from .core import KvBalancedMla, supports
 
             device = torch.device(
                 current_platform.device_type, torch.accelerator.current_device_index()
             )
-            core = (
-                KvBalancedMla(heads, qlen, self.max_requests, causal, device)
-                if supports(heads, qlen, device)
-                else None
-            )
-            _SHAPES[key] = core
+            if not supports(heads, qlen, device):
+                raise ValueError(
+                    f"KIMI_K3_KV_BALANCED_MLA can't decode {shape}: the kernel needs "
+                    "more than 64 query rows per request (heads x query length)"
+                )
+            _SHAPES[key] = KvBalancedMla(heads, qlen, self.max_requests, causal, device)
             logger.info(
-                "Kimi K3 KV-balanced MLA decode: heads=%d q=%d causal=%s %s",
-                heads,
-                qlen,
-                causal,
-                f"max_requests={self.max_requests}"
-                if core is not None
-                else "unsupported, using the TokenSpeed decode",
+                "Kimi K3 KV-balanced MLA decode: %s max_requests=%d",
+                shape,
+                self.max_requests,
             )
         return _SHAPES[key]
 
@@ -160,40 +144,48 @@ class KvBalancedDecode:
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: "MLACommonMetadata",
         layer: "AttentionLayer",
-    ) -> tuple[torch.Tensor, torch.Tensor | None] | None:
-        """``impl``'s ``forward_mqa`` on the kernel, or None for a step it doesn't
-        run."""
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """``impl``'s ``forward_mqa`` on the kernel."""
         if isinstance(q, tuple) or q.dtype != torch.float8_e4m3fn:
-            return None
+            raise ValueError(
+                "KIMI_K3_KV_BALANCED_MLA needs the packed FP8 query, got "
+                + ("a (q_nope, q_pe) tuple" if isinstance(q, tuple) else str(q.dtype))
+            )
         decode = attn_metadata.decode
         requests = attn_metadata.num_decodes
         tokens = attn_metadata.num_decode_tokens
-        if (
-            decode is None
-            or requests == 0
-            or requests > self.max_requests
-            or tokens % requests
-            or tokens // requests > self.max_q
-            or q.shape[0] != tokens
-            or q.shape[1] != self.heads
-            or q.shape[-1] != LATENT + ROPE
-            or not q.is_contiguous()
-        ):
-            return None
+        assert decode is not None and requests > 0
+        unsupported = [
+            reason
+            for reason, failed in (
+                (
+                    f"{requests} requests (at most {self.max_requests})",
+                    requests > self.max_requests,
+                ),
+                (
+                    f"{tokens} tokens over {requests} requests (uniform, at most "
+                    f"{self.max_q} each)",
+                    tokens % requests or tokens // requests > self.max_q,
+                ),
+                (
+                    f"a query of shape {tuple(q.shape)} (expected "
+                    f"({tokens}, {self.heads}, {LATENT + ROPE}), contiguous)",
+                    q.shape != (tokens, self.heads, LATENT + ROPE)
+                    or not q.is_contiguous(),
+                ),
+            )
+            if failed
+        ]
+        if unsupported:
+            raise ValueError(
+                "KIMI_K3_KV_BALANCED_MLA can't decode " + "; ".join(unsupported)
+            )
         qlen = tokens // requests
         causal = bool(attn_metadata.causal)
         core = self._core(self.heads, qlen, causal)
-        if core is None:
-            return None
-        try:
-            counts, work, workspace = self._buffers()
-        except AssertionError:
-            # A micro-batch lane whose buffers were not reserved before the lock.
-            logger.warning_once(
-                "Kimi K3 KV-balanced MLA decode: no buffers for this micro-batch lane; "
-                "using the TokenSpeed decode"
-            )
-            return None
+        # The workspace manager raises for a micro-batch lane whose buffers were not
+        # reserved before it was locked.
+        counts, work, workspace = self._buffers()
 
         # One plan per forward, made by its first MLA layer.
         context, lens = get_forward_context(), decode.seq_lens.data_ptr()

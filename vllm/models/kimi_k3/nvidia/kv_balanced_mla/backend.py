@@ -7,7 +7,8 @@ Selected with ``--attention-backend KIMI_K3_KV_BALANCED_MLA`` (and the speculati
 config's ``attention_backend`` for the DSpark draft); it is never chosen
 automatically. Everything but the decode attention is TOKENSPEED_MLA's: the KV cache
 layout, the decode metadata, the FP8 query, the log2 LSE the DCP combine merges, and
-prefill. A step the kernel doesn't run (``decode.py``) uses TokenSpeed's decode.
+prefill. Every decode step runs on the kernel (``decode.py``), which raises for a
+step it can't run.
 """
 
 from typing import ClassVar
@@ -88,7 +89,4 @@ class KimiK3KvBalancedMLAImpl(TokenspeedMLAImpl):
         attn_metadata: MLACommonMetadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        out = self.kv_balanced(self, q, kv_c_and_k_pe_cache, attn_metadata, layer)
-        if out is None:
-            out = super().forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
-        return out
+        return self.kv_balanced(self, q, kv_c_and_k_pe_cache, attn_metadata, layer)
