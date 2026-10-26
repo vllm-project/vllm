@@ -3,6 +3,7 @@
 import functools
 
 import torch
+import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 import vllm.envs as envs
@@ -23,6 +24,89 @@ from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
 # most this many experts per group.
 AITER_SUPPORTED_NUM_GRP = (1, 2, 4, 8)
 AITER_MAX_EXPERTS_PER_GROUP = 32
+
+# Expert counts instantiated by topkGatingSoftplusSqrtKernelLauncher in
+# csrc/moe/topk_softplus_sqrt_kernels.cu. Other counts use the torch fallback.
+_FUSED_SOFTPLUS_SQRT_EXPERTS = frozenset(
+    (1, 2, 4, 8, 16, 32, 64, 128, 192, 256, 320, 384, 448, 512, 576)
+)
+
+
+def _topk_softplus_sqrt_torch(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    routed_scaling_factor: float,
+    e_score_correction_bias: torch.Tensor | None,
+    input_tokens: torch.Tensor | None,
+    hash_indices_table: torch.Tensor | None,
+    is_padding: torch.Tensor | None,
+    bias_vl: torch.Tensor | None,
+    image_sentinel_lo: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Torch fallback for expert counts the fused kernel does not instantiate.
+
+    Mirrors the fused kernel: expert selection uses sqrt(softplus(logits)) plus
+    the correction bias (or the hash table / vision bias when configured),
+    while the returned weights use the unbiased scores. Padding rows get
+    weight 0 and expert id -1.
+    """
+    scores = F.softplus(gating_output.float()).sqrt()
+    topk = topk_indices.shape[1]
+
+    if hash_indices_table is not None:
+        assert input_tokens is not None
+        input_ids = input_tokens.long()
+        selected = hash_indices_table[input_ids]
+        if bias_vl is not None and image_sentinel_lo > 0:
+            image_mask = (
+                (input_ids >= image_sentinel_lo) & (input_ids < image_sentinel_lo + 5)
+            ).unsqueeze(-1)
+            vl_ids = (scores + bias_vl).topk(topk, dim=-1).indices
+            selected = torch.where(image_mask, vl_ids.to(selected.dtype), selected)
+    else:
+        if bias_vl is not None and image_sentinel_lo > 0:
+            assert input_tokens is not None
+            input_ids = input_tokens.long()
+            image_mask = (
+                (input_ids >= image_sentinel_lo) & (input_ids < image_sentinel_lo + 5)
+            ).unsqueeze(-1)
+            text_bias = (
+                e_score_correction_bias
+                if e_score_correction_bias is not None
+                else torch.zeros_like(bias_vl)
+            )
+            scores_for_choice = scores + torch.where(
+                image_mask, bias_vl.unsqueeze(0), text_bias.unsqueeze(0)
+            )
+        elif e_score_correction_bias is not None:
+            scores_for_choice = scores + e_score_correction_bias.unsqueeze(0)
+        else:
+            scores_for_choice = scores
+        # Match the fused kernel's deterministic tie-break: lower expert ids
+        # win when scores are equal.
+        selected = torch.argsort(
+            scores_for_choice, dim=-1, descending=True, stable=True
+        )[:, :topk]
+
+    weights = scores.gather(1, selected.long())
+    if renormalize:
+        weights = weights / weights.sum(dim=-1, keepdim=True)
+    if routed_scaling_factor != 1.0:
+        weights = weights * routed_scaling_factor
+    weights = weights.to(torch.float32)
+    selected = selected.to(topk_indices.dtype)
+
+    if is_padding is not None:
+        weights = torch.where(is_padding.unsqueeze(-1), 0.0, weights)
+        selected = torch.where(
+            is_padding.unsqueeze(-1), torch.full_like(selected, -1), selected
+        )
+
+    topk_weights.copy_(weights)
+    topk_indices.copy_(selected)
+    return topk_weights, topk_indices
 
 
 def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
@@ -89,6 +173,21 @@ def vllm_topk_softplus_sqrt(
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, ...]:
+    if gating_output.shape[-1] not in _FUSED_SOFTPLUS_SQRT_EXPERTS:
+        return _topk_softplus_sqrt_torch(
+            topk_weights,
+            topk_indices,
+            gating_output,
+            renormalize,
+            routed_scaling_factor,
+            e_score_correction_bias,
+            input_tokens,
+            hash_indices_table,
+            _get_padding_mask(topk_indices.shape[0]),
+            bias_vl,
+            image_sentinel_lo,
+        )
+
     ops.topk_hash_softplus_sqrt(
         topk_weights,
         topk_indices,

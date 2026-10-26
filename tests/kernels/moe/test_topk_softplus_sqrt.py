@@ -325,6 +325,98 @@ def test_fused_topk_softplus_sqrt_hash(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize("use_hash", [False, True])
+@pytest.mark.parametrize("renormalize", [True, False])
+@pytest.mark.parametrize("use_padding", [False, True])
+def test_fused_topk_softplus_sqrt_unsupported_expert_count(
+    use_hash: bool,
+    renormalize: bool,
+    use_padding: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Unsupported expert counts fall back to the torch router."""
+    torch.manual_seed(0)
+    num_tokens = 7
+    hidden_size = 1024
+    num_experts = 144
+    topk = 6
+    routed_scaling_factor = 1.5
+
+    hidden_states = torch.randn(
+        (num_tokens, hidden_size), dtype=torch.float32, device="cuda"
+    )
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=torch.float32, device="cuda"
+    )
+    e_score_correction_bias = None
+    if not use_hash:
+        e_score_correction_bias = torch.randn(
+            (num_experts,), dtype=torch.float32, device="cuda"
+        )
+
+    input_ids = None
+    hash_indices_table = None
+    if use_hash:
+        vocab_size = 64
+        hash_indices_table = torch.stack(
+            [torch.randperm(num_experts)[:topk] for _ in range(vocab_size)]
+        ).to(device="cuda", dtype=torch.long)
+        input_ids = torch.randint(
+            0, vocab_size, (num_tokens,), dtype=torch.long, device="cuda"
+        )
+
+    is_padding = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
+    is_padding[1::2] = True
+    if use_padding:
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.fused_moe.router."
+            "fused_topk_bias_router._get_padding_mask",
+            lambda _: is_padding,
+        )
+        gating_output[is_padding] = float("nan")
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=renormalize,
+        routed_scaling_factor=routed_scaling_factor,
+        e_score_correction_bias=e_score_correction_bias,
+        input_ids=input_ids,
+        hash_indices_table=hash_indices_table,
+    )
+    if use_padding:
+        topk_weights_ref[is_padding] = 0
+        topk_ids_ref[is_padding] = -1
+
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=e_score_correction_bias,
+        topk=topk,
+        renormalize=renormalize,
+        input_tokens=input_ids,
+        hash_indices_table=hash_indices_table,
+        routed_scaling_factor=routed_scaling_factor,
+    )
+
+    rows = ~is_padding if use_padding else slice(None)
+    if use_padding:
+        assert (topk_ids[is_padding] == -1).all()
+        assert (topk_weights[is_padding] == 0).all()
+    sorted_ref_ids, idx_ref = topk_ids_ref[rows].sort(dim=-1)
+    sorted_ids, idx_ops = topk_ids[rows].sort(dim=-1)
+    torch.testing.assert_close(sorted_ref_ids, sorted_ids, atol=0, rtol=0)
+
+    sorted_w_ref = topk_weights_ref[rows].gather(1, idx_ref)
+    sorted_w = topk_weights[rows].gather(1, idx_ops)
+    torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="The DeepSeek V4 fast path is CUDA-only.",
 )
