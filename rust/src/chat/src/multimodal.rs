@@ -1444,7 +1444,7 @@ mod tests {
         assert_eq!(info.placeholder_token(Modality::Video), None);
     }
 
-    // Token IDs from the Muse-Spark-1.2 checkpoint's `tokenizer_config.json`.
+    // Token IDs from the Muse Spark Open checkpoint's `tokenizer_config.json`.
     fn muse_spark_tokenizer() -> TestTokenizer {
         TestTokenizer::new()
             .with_regular_token("<|audio|>", 200038)
