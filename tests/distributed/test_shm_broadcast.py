@@ -1245,6 +1245,7 @@ def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
     unregister memory it never registered."""
     writer, (reader,) = _make_arena(n_reader=1)
     cudart = mock.MagicMock()
+    monkeypatch.setattr(shm_tensor_arena, "CudaRTLibrary", lambda: cudart)
     cudart.cudaHostRegister.return_value = 0
     cudart.cudaHostUnregister.return_value = 0
     monkeypatch.setattr(
@@ -1252,13 +1253,109 @@ def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
         "current_platform",
         SimpleNamespace(is_cuda_alike=lambda: True, cudart=lambda: cudart),
     )
-    reader._ensure_pinned()
+    reader._ensure_pinned(0, 1)
     assert reader._pinned
     ptr = cudart.cudaHostRegister.call_args.args[0]
     del reader
     cudart.cudaHostUnregister.assert_called_once_with(ptr)
     del writer  # never pinned -> no unregister
     cudart.cudaHostUnregister.assert_called_once()
+
+
+@pytest.mark.parametrize("unregister_error", [0, 2])
+def test_arena_growth_failure_keeps_h2d_source_safe(monkeypatch, unregister_error):
+    """Never hand CUDA a source spanning pinned and unregistered pages."""
+    writer, (reader,) = _make_arena(n_reader=1, slot_bytes=16 << 20, n_slots=1)
+    cudart = mock.MagicMock()
+    monkeypatch.setattr(shm_tensor_arena, "CudaRTLibrary", lambda: cudart)
+    cudart.cudaHostRegister.side_effect = [0, 2]
+    cudart.cudaHostUnregister.return_value = unregister_error
+    monkeypatch.setattr(
+        shm_tensor_arena,
+        "current_platform",
+        SimpleNamespace(is_cuda_alike=lambda: True, cudart=lambda: cudart),
+    )
+    first = torch.ones(8 << 20, dtype=torch.uint8)
+    idx = writer.write_tensor(first)
+    view = _get_view(reader, idx, first)
+    del view
+    _drain(reader)
+    larger = torch.full((9 << 20,), 7, dtype=torch.uint8)
+    assert writer.write_tensor(larger) == idx
+    result = _get_view(reader, idx, larger)
+    assert torch.equal(result, larger)
+    assert cudart.cudaGetLastError.call_count == 1
+    if not unregister_error:
+        # Registration failed after unpinning: the entire source is pageable.
+        assert reader._pinned_sizes[idx] == 0
+        assert writer.write_tensor(first) is None
+        del result
+    # Failed unpinning leaves a partial registration; the source owns a copy.
+    _drain(reader)
+    assert writer.write_tensor(first) == idx
+    if unregister_error:
+        assert torch.equal(result, larger)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_arena_registration_failure_leaves_cuda_runtime_usable(monkeypatch):
+    """Optional pinning failures must not poison the next CUDA operation."""
+    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+
+    cudart = CudaRTLibrary()
+    register = cudart.cudaHostRegister
+    errors = []
+
+    def reject_registration(ptr, nbytes, flags):
+        result = register(0, 0, flags)
+        errors.append(result)
+        return result
+
+    monkeypatch.setattr(cudart, "cudaHostRegister", reject_registration)
+    # Exercise the same real runtime error with the old and new arena paths.
+    monkeypatch.setattr(
+        shm_tensor_arena, "CudaRTLibrary", lambda: cudart, raising=False
+    )
+    monkeypatch.setattr(shm_tensor_arena.current_platform, "cudart", lambda: cudart)
+    writer, (reader,) = _make_arena(n_reader=1)
+    src = torch.arange(1024, dtype=torch.float32)
+    idx = writer.write_tensor(src)
+    view = _get_view(reader, idx, src)
+    pending_error = cudart.cudaGetLastError()
+    assert errors and all(error != 0 for error in errors)
+    assert pending_error == 0
+    assert not reader._pinned
+    assert torch.equal(view.to("cuda").cpu(), src)
+    del view
+    _drain(reader)
+    assert writer.write_tensor(src) is not None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_arena_growing_registered_prefix_h2d():
+    """Register only the used slot; growth must preserve H2D and reuse ordering."""
+    writer, (reader,) = _make_arena(n_reader=1, slot_bytes=32 << 20, n_slots=3)
+    # Keep the first two slots busy without registering them on the reader.
+    writer.write_tensor(torch.ones(1))
+    writer.write_tensor(torch.ones(1))
+    for size, pinned in (
+        (9 << 20, 16 << 20),
+        (17 << 20, 32 << 20),
+        (9 << 20, 32 << 20),
+    ):
+        src = torch.arange(size, dtype=torch.uint8)
+        idx = writer.write_tensor(src)
+        assert idx == 2
+        view = _get_view(reader, idx, src)
+        assert reader._pinned_sizes == [0, 0, pinned]
+        assert view.is_pinned()
+        dev = view.to("cuda", non_blocking=True)
+        del view
+        reader.flush_releases()
+        assert writer.write_tensor(src) is None
+        torch.accelerator.synchronize()
+        _drain(reader)
+        assert torch.equal(dev.cpu(), src)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -1270,7 +1367,7 @@ def test_arena_event_gated_release():
     needed as the H2D source, while the GPU tensor is what's retained for the
     rest of the step."""
     writer, (reader,) = _make_arena(n_reader=1)
-    reader._ensure_pinned()
+    reader._ensure_pinned(0, 2 << 20)
     if not reader._pinned:
         pytest.skip("cudaHostRegister unavailable in this environment")
     src = torch.randn(512, 1024)

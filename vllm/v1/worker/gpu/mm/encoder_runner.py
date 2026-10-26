@@ -142,8 +142,9 @@ class EncoderRunner:
             dummy_encoder_outputs,
             expected_num_items=max_mm_items_per_batch,
         )
-        self.encoder_cache.encoder_outputs.update(
-            (f"tmp_{i}", output) for i, output in enumerate(dummy_encoder_outputs)
+        self.encoder_cache.add_encoder_outputs(
+            [f"tmp_{i}" for i in range(len(dummy_encoder_outputs))],
+            dummy_encoder_outputs,
         )
 
     @torch.inference_mode()
