@@ -840,6 +840,7 @@ pytest==9.1.1
     #   pytest-asyncio
     #   pytest-cov
     #   pytest-forked
+    #   pytest-mock
     #   pytest-rerunfailures
     #   pytest-shard
     #   pytest-timeout
@@ -849,6 +850,8 @@ pytest-asyncio==1.4.0
 pytest-cov==7.1.0
     # via -r requirements/test/xpu.in
 pytest-forked==1.7.5
+    # via -r requirements/test/xpu.in
+pytest-mock==3.14.0
     # via -r requirements/test/xpu.in
 pytest-rerunfailures==16.6
     # via -r requirements/test/xpu.in
