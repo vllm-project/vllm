@@ -219,12 +219,12 @@ def gemma4_fused_routing_kernel_triton(
     return weights, ids
 
 
-def gemma4_routing_function_xpu(
+def gemma4_routing_function_topk_softmax(
     gating_output: torch.Tensor,
     topk: int,
     per_expert_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Gemma4 routing on XPU with the SYCL ``topk_softmax`` from vllm-xpu-kernels.
+    """Gemma4 routing with the ``topk_softmax`` MoE custom op.
 
     ``topk_softmax(renormalize=True)`` is the Gemma4 routing (softmax over all
     experts, top-k, renormalize over the selected k); the per-expert scale is
@@ -378,8 +378,9 @@ class Gemma4Router(nn.Module):
         local) so that torch.func.functional_call parameter substitution
         reaches the routing function correctly.
         """
+        # tl.sort in the Triton kernel is slow on XPU; topk_softmax is not.
         if current_platform.is_xpu():
-            return gemma4_routing_function_xpu(
+            return gemma4_routing_function_topk_softmax(
                 gating_output, topk, self.per_expert_scale
             )
         if current_platform.is_cuda_alike():
