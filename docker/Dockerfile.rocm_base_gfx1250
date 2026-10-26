@@ -8,8 +8,8 @@ ARG TRITON_VERSION=3.8.0+git66b3f9ff.rocm10.2.0a20261014
 ARG APEX_VERSION=1.13.0+rocm10.2.0a20261014
 
 
-ARG FA_BRANCH="jpvillam/gfx1250_wip"
-ARG FA_REPO="https://github.com/jpvillam-amd/flash-attention.git"
+ARG FA_BRANCH="98c1cee0ed59307833841cdbf567fe336ceec13a"
+ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="f85b24b"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="2958fce6"
@@ -224,6 +224,9 @@ FROM base AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
 ARG USE_SCCACHE
+ENV FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE
+RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/aiter_install \
+    pip install --no-deps /aiter_install/*.whl
 RUN mkdir -p /app/install; \
     git clone ${FA_REPO} \
     && cd flash-attention \
