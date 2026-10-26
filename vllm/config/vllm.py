@@ -63,13 +63,13 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
     from vllm.sampling_params import BeamSearchParams, SamplingParams
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 else:
     PreTrainedConfig = Any
 
     QuantizationConfig = Any
 
-    KVCacheConfig = Any
+    KVCacheGroupSpec = Any
 
 logger = init_logger(__name__)
 
@@ -673,6 +673,23 @@ class VllmConfig:
             return self.num_speculative_tokens
         # Eagle-family drafters read only the immediate next token.
         return 1
+
+    @property
+    def num_hash_lookahead_tokens(self) -> int:
+        """Tokens after each block that its hash covers; 0 keeps the legacy hashes."""
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or not speculative_config.use_eagle_block_drop()
+            or speculative_config.disable_lookahead_block_hashes
+            or not self.cache_config.enable_prefix_caching
+        ):
+            return 0
+        # KV connectors, including HiSparse's, keep the legacy hashes.
+        if self.kv_transfer_config is not None:
+            return 0
+        # The drafter's KV at a block's last position reads this far ahead.
+        return self.num_prefill_lookahead_tokens
 
     @property
     def uniform_decode_query_len(self) -> int:
@@ -3320,13 +3337,19 @@ class VllmConfig:
             )
 
     def adjust_dcp_kv_cache_interleave_size(
-        self, kv_cache_config: "KVCacheConfig"
+        self, kv_cache_groups: list["KVCacheGroupSpec"]
     ) -> None:
-        """Normalize DCP interleave size against block_size for NIXL P/D.
+        """Resolve the NIXL P/D DCP interleave from the global KV cache groups.
 
-        Called by each worker (via ensure_kv_transfer_initialized), once it knows its
-        own final block_size via kv_cache_config.
+        Called once by the engine core before profiling; workers only assign the
+        result via ``set_kv_cache_layout``.
         """
+        if (
+            not kv_cache_groups
+            or self.kv_transfer_config is None
+            or not self.kv_transfer_config.is_kv_transfer_instance
+        ):
+            return
         dcp_size = self.parallel_config.decode_context_parallel_size
         if dcp_size <= 1:
             return
@@ -3343,18 +3366,14 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
-            "NixlConnector"
-        ):
+        if not self.kv_transfer_config.has_connector("NixlConnector"):
             return
         if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
             return
 
         # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
         # scaling by dcp_size (we need the local block_size here).
-        local_block_size = min(
-            g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
-        )
+        local_block_size = min(g.kv_cache_spec.block_size for g in kv_cache_groups)
         if self.parallel_config.cp_kv_cache_interleave_size != local_block_size:
             interleave = self.parallel_config.cp_kv_cache_interleave_size
             self.parallel_config.cp_kv_cache_interleave_size = local_block_size
@@ -3377,7 +3396,7 @@ class VllmConfig:
         block_size = self.cache_config.block_size
 
         # Skip DCP interleave-size compatibility for NIXL P/D: the interleave
-        # size is pinned to block_size by each worker.
+        # size is finalized from the global KV cache groups.
         nixl_pd_active = (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("NixlConnector")

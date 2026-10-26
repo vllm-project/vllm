@@ -64,6 +64,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
 )
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
@@ -1000,10 +1001,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_reqs, self.input_buffers
         )
 
-        # NOTE(woosuk): During the initial memory profiling, the sampler may skip
-        # top_k, top_p, and logprobs, using less GPU memory than what is possible
-        # during actual execution.
         assert self.sampler is not None
+        # Default pass: compiles the kernels the first real step uses (logits in
+        # the model dtype, no per-request processing).
+        self.sampler(logits, dummy_input_batch)
+        if current_platform.is_cpu():
+            # The CPU worker sizes the KV cache from process RSS, which would
+            # keep the extra pass's buffers, and has no warmup OOM to prevent.
+            return
+        # Warmup-param pass: warmup_kernels (run after the KV cache is sized)
+        # pays for the fp32 logits pipeline, so the profiled peak must too.
+        warmup_params = SamplingParams.for_sampler_warmup()
+        for req_idx in range(num_reqs):
+            self.sampler.add_request(req_idx, warmup_params)
+        self.sampler.apply_staged_writes()
         self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()
@@ -1130,7 +1141,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
-                    if self.adaptive_verification is not None:
+                    if self.adaptive_verification is not None and not profile_only:
                         with self.step_timing.collect() as timings:
                             for batch in self.adaptive_verification.batches_to_profile(
                                 self.cudagraph_manager.captured_token_counts()
@@ -1770,6 +1781,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.free_states(scheduler_output)
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
+            if self.encoder_cache is not None:
+                # add_requests initializes RoPE positions from CPU metadata first.
+                for req_id, updates in scheduler_output.encoder_input_updates.items():
+                    self.encoder_cache.update_encoder_inputs(req_id, updates)
             self.block_tables.apply_staged_writes()
             if self.aux_output_connector is not None:
                 # Register this step before the GPU forward.
