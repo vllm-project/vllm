@@ -54,6 +54,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 
 from .base import Base
+from .utils import infer_dynamic_arg_dims
 
 if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
@@ -939,8 +940,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                 "Multimodal encoder compilation with the Transformers modeling backend "
                 "is an experimental feature. It relies on:\n"
                 "- The encoder being torch compilable.\n"
-                "- All encoder tensor inputs must be type hinted as either "
-                "`torch.Tensor` or `torch.FloatTensor`.\n"
+                "- All encoder tensor inputs must be either unannotated or type hinted "
+                "as a `torch` tensor type.\n"
                 "- The 0-th dimension of all tensor inputs to the encoder being the "
                 "dynamic dimension (e.g. sequence length, number of patches).\n"
                 "Please report any issues you encounter to help us improve it."
@@ -949,9 +950,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             for encoder_cls in dict.fromkeys(encoder_classes.values()):
                 self._decorate_cls_for_torch_compile(
                     cls=encoder_cls,
-                    # TODO: properly infer dynamic_arg_dims based on the encoder's
-                    # forward method signature. We assume dim 0 for all tensor inputs.
-                    dynamic_arg_dims=None,
+                    dynamic_arg_dims=infer_dynamic_arg_dims(encoder_cls),
                     enable_if=should_torch_compile_mm_encoder,
                     is_encoder=True,
                 )

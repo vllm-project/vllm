@@ -15,7 +15,9 @@ import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModel, PreTrainedConfig
 
+from vllm.compilation.counter import compilation_counter
 from vllm.config import ModelConfig, VllmConfig
+from vllm.config.compilation import CompilationMode
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
@@ -132,6 +134,43 @@ def test_models(
         num_fused=num_fused,
         model_impl=model_impl,
     )
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
+@pytest.mark.parametrize(
+    ("compile_mm_encoder", "expected_models"),
+    [
+        # The language model is always compiled. The encoder adds one more.
+        pytest.param(False, 1, id="disabled"),
+        pytest.param(True, 2, id="enabled"),
+    ],
+)
+def test_compile_mm_encoder(
+    vllm_runner: type[VllmRunner],
+    monkeypatch: pytest.MonkeyPatch,
+    compile_mm_encoder: bool,
+    expected_models: int,
+) -> None:
+    """The encoder's `forward` does not annotate `pixel_values`."""
+    # Disable multiprocessing so that the counter is in the same process
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    with (
+        compilation_counter.expect(num_models_seen=expected_models),
+        vllm_runner(
+            "HuggingFaceTB/SmolVLM-256M-Instruct",
+            model_impl="transformers",
+            max_model_len=2048,
+            limit_mm_per_prompt={"image": 1},
+            gpu_memory_utilization=0.5,
+            compilation_config={
+                "mode": CompilationMode.VLLM_COMPILE,
+                "compile_mm_encoder": compile_mm_encoder,
+            },
+        ) as _,
+    ):
+        pass
 
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
