@@ -607,7 +607,8 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             dtype=torch.int32,
             device=self.device,
         )
-        # Only the aiter prefill reads the ragged prefill SWA indices.
+        # The ragged prefill SWA indices are only read by the aiter prefill, so
+        # build them under the same head-count gate the attention layer uses.
         self._use_aiter_sparse_mla_prefill = _aiter_sparse_mla_prefill_enabled(
             self.vllm_config.model_config.get_num_attention_heads(
                 self.vllm_config.parallel_config
