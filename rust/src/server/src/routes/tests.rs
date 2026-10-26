@@ -3462,6 +3462,62 @@ async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() 
     );
 }
 
+/// Media the request got wrong is a 400: a data URL that is not base64 or not
+/// an image, and a `file://` URL, which this frontend never reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_rejects_invalid_media_as_bad_request() {
+    // Each request fails while its media is fetched, so the mock engine task
+    // is never awaited.
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-invalid-media",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+    )
+    .await;
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let mut rendered = Vec::new();
+    for url in [
+        "data:image/png;base64,not base64!",
+        "data:image/png;base64,aGVsbG8=",
+        "file:///etc/hosts",
+    ] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe "},
+                        {"type": "image_url", "image_url": {"url": url}}
+                    ]
+                }]
+            }),
+        )
+        .await;
+        let error = &json["error"];
+        rendered.push(format!(
+            "{} {}: {}",
+            status.as_u16(),
+            error["type"].as_str().unwrap_or_default(),
+            error["message"].as_str().unwrap_or_default()
+        ));
+    }
+    expect_test::expect![[r#"
+        400 BadRequestError: base64 decode error: Invalid symbol 32, offset 3.
+        400 BadRequestError: image decode error: The image format could not be determined
+        400 BadRequestError: invalid media URL: file:///etc/hosts"#]]
+    .assert_eq(&rendered.join("\n"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn selected_logprobs_invalid_requests_return_client_errors() {

@@ -42,6 +42,10 @@ pub enum Error {
     InvalidPreprocessedMultimodal { message: String },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
+    // Not a `#[source]`: a 400 body shows only `Display`, so it carries the
+    // whole chain; reqwest keeps the cause (a refused connection) in its source.
+    #[error("{}", .0.as_report())]
+    Media(llm_multimodal::MediaConnectorError),
     #[error("{kind} parsing is not available for model `{model_id}`")]
     ParserUnavailableForModel {
         kind: &'static str,
@@ -127,6 +131,9 @@ impl Error {
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::MmLimitExceeded { .. } => true,
+            // A media host that timed out or failed, and a decoder that failed
+            // on this side, stay server errors, as in Python.
+            Self::Media(error) => error.fault() == llm_multimodal::MediaFault::Client,
 
             _ => false,
         }
@@ -144,13 +151,16 @@ impl Error {
 
 impl From<llm_multimodal::MediaConnectorError> for Error {
     fn from(error: llm_multimodal::MediaConnectorError) -> Self {
-        Self::Multimodal(error.to_report_string())
+        Self::Media(error)
     }
 }
 
 impl From<llm_multimodal::MultiModalError> for Error {
     fn from(error: llm_multimodal::MultiModalError) -> Self {
-        Self::Multimodal(error.to_report_string())
+        match error {
+            llm_multimodal::MultiModalError::Media(error) => Self::Media(error),
+            error => Self::Multimodal(error.to_report_string()),
+        }
     }
 }
 
@@ -172,5 +182,42 @@ fn available_parser_hint(available_names: &[String]) -> String {
         String::new()
     } else {
         format!(" (choose from: {})", available_names.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use expect_test::expect;
+    use itertools::Itertools as _;
+    use llm_multimodal::{MediaConnectorError, MultiModalError};
+
+    use super::*;
+
+    /// Only media the request got wrong is a validation error; a media host
+    /// that timed out and a decoder that failed on this side are not.
+    #[test]
+    fn media_error_is_request_validation_error_only_when_the_request_is_at_fault() {
+        let errors = [
+            MediaConnectorError::DataUrl("missing comma".to_string()),
+            MediaConnectorError::Timeout {
+                url: "https://example.com/a.png".to_string(),
+                budget: Duration::from_secs(5),
+            },
+            MediaConnectorError::DecodeIo(std::io::Error::other("broken pipe")),
+        ];
+        let rendered = errors
+            .into_iter()
+            .map(|error| {
+                let error = Error::from(MultiModalError::Media(error));
+                format!("{}: {error}", error.is_request_validation_error())
+            })
+            .join("\n");
+        expect![[r#"
+            true: data URL parse error: missing comma
+            false: media fetch of https://example.com/a.png timed out after 5s
+            false: I/O error while decoding media: broken pipe"#]]
+        .assert_eq(&rendered);
     }
 }
