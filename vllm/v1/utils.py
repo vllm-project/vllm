@@ -818,7 +818,7 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
         view_dtype = NUMPY_VIEW_DTYPES.get(tensor.dtype)
         try:
             if view_dtype is not None:
-                return memoryview(tensor.view(view_dtype).numpy()).cast("B")
+                tensor = tensor.view(torch.uint8)
             return memoryview(tensor.numpy()).cast("B")
         except (TypeError, RuntimeError):
             pass
