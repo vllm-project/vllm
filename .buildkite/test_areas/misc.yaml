@@ -88,6 +88,7 @@ steps:
     - tests/v1/kv_offload
     - tests/v1/simple_kv_offload
     - tests/v1/worker
+    - tests/v1/spec_decode/test_dflash_prepare_inputs.py
     - tests/v1/streaming_input
     - tests/v1/kv_connector/unit
     - tests/v1/ec_connector/unit
@@ -116,6 +117,7 @@ steps:
     # split the test to avoid interference
     - pytest -v -s v1/executor
     - pytest -v -s v1/worker
+    - pytest -v -s v1/spec_decode/test_dflash_prepare_inputs.py
     - pytest -v -s v1/streaming_input
   mirror:
     amd:

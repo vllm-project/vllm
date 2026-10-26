@@ -92,6 +92,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.context_positions = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
+        self._context_selection: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._compact_context_states: torch.Tensor | None = None
 
         # Fixed-address inputs of the FULL graph's context step: the target's aux
         # hidden states and, for an anchor that reads them, the rejected counts.
@@ -168,6 +170,8 @@ class DFlashSpeculator(DraftModelSpeculator):
 
     def capture(self) -> None:
         logger.info("Capturing model for %s speculator...", self._speculator_name)
+        self._context_selection = None
+        self._compact_context_states = None
         # Padded sample rows must not scatter into a live request during capture.
         self.sample_indices.zero_()
         self.sample_pos.zero_()
@@ -379,6 +383,25 @@ class DFlashSpeculator(DraftModelSpeculator):
     def _precompute_context_kv(
         self, start: int, end: int, dummy_run: bool = False
     ) -> None:
+        if self._compact_context_states is not None:
+            assert self._context_selection is not None and not dummy_run
+            indices, valid = self._context_selection
+            valid = valid & (indices >= start) & (indices < end)
+            slots = [
+                torch.where(valid, mapping.index_select(0, indices), PAD_SLOT_ID)
+                for mapping in self._context_slot_mappings
+            ]
+            compact_slots = (
+                [slots[gidx] for gidx in self._layer_group_idx]
+                if self._layer_group_idx is not None
+                else slots[0]
+            )
+            self.model.precompute_and_store_context_kv(
+                self._compact_context_states,
+                self.context_positions.index_select(0, indices),
+                compact_slots,
+            )
+            return
         if dummy_run:
             context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
         elif self._layer_group_idx is not None:
@@ -413,6 +436,20 @@ class DFlashSpeculator(DraftModelSpeculator):
                 out=self._aux_staging[:start],
             )
         if start == num_tokens:
+            return
+        if self._context_selection is not None:
+            indices, _ = self._context_selection
+            if aux_hidden_states:
+                self._compact_context_states = self.model.combine_hidden_states(
+                    torch.cat(
+                        [h.index_select(0, indices) for h in aux_hidden_states],
+                        dim=-1,
+                    )
+                )
+            else:
+                self._compact_context_states = last_hidden_states.index_select(
+                    0, indices
+                )
             return
         if aux_hidden_states:
             hidden_states = self.model.combine_hidden_states(
@@ -469,6 +506,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs = min(num_reqs, dp_sync_state.num_reqs)
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req
+        self._context_selection = None
+        self._compact_context_states = None
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
         self.draft_max_seq_len = min(
             max_seq_len + self.num_query_per_req, self.max_model_len
@@ -546,6 +585,21 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.sample_from_anchor,
                 num_reqs,
             )
+
+        if (
+            not dummy_run
+            and self.pcp_manager is None
+            and self.dcp_size == 1
+            and num_target_tokens > 2 * num_reqs * (self.num_speculative_steps + 1)
+        ):
+            context_window = getattr(self.model, "get_draft_context_window", None)
+            if context_window is not None:
+                # Rejection moves the earliest draft anchor back by N positions.
+                keep = context_window() + self.num_speculative_steps
+                if num_target_tokens > 2 * num_reqs * keep:
+                    self._context_selection = select_context_window_indices(
+                        input_batch.query_start_loc, num_reqs, keep
+                    )
 
         if num_speculative_tokens == 0:
             # No drafts are needed: store the context K/V to keep the drafter in
@@ -636,6 +690,39 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
 
         return self.draft_tokens[:num_reqs]
+
+
+@triton.jit
+def _select_context_window_indices_kernel(
+    query_start_loc,
+    indices,
+    valid,
+    KEEP: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    req = tl.program_id(0)
+    begin = tl.load(query_start_loc + req).to(tl.int64)
+    end = tl.load(query_start_loc + req + 1).to(tl.int64)
+    offset = tl.arange(0, BLOCK)
+    row = tl.maximum(begin, end - KEEP) + offset
+    is_valid = (offset < KEEP) & (row < end)
+    dest = req.to(tl.int64) * KEEP + offset
+    tl.store(indices + dest, tl.where(is_valid, row, 0), offset < KEEP)
+    tl.store(valid + dest, is_valid, offset < KEEP)
+
+
+def select_context_window_indices(
+    query_start_loc: torch.Tensor, num_reqs: int, keep: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack bounded context suffixes without reading GPU request lengths."""
+    indices = torch.empty(
+        num_reqs * keep, dtype=torch.int64, device=query_start_loc.device
+    )
+    valid = torch.empty_like(indices, dtype=torch.bool)
+    _select_context_window_indices_kernel[(num_reqs,)](
+        query_start_loc, indices, valid, keep, triton.next_power_of_2(keep)
+    )
+    return indices, valid
 
 
 @triton.jit

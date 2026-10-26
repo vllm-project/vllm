@@ -331,6 +331,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         # layer, named by its prefix.
         return [layer.attn.swa_cache_layer.prefix for layer in self.model.layers]
 
+    def get_draft_context_window(self) -> int:
+        """Target features are consumed only by the draft's sliding-window KV."""
+        return max(layer.attn.window_size for layer in self.model.layers)
+
     def precompute_and_store_context_kv(
         self,
         context_states: torch.Tensor,
