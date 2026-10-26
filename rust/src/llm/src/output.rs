@@ -12,7 +12,7 @@ use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
 use vllm_engine_core_client::protocol::output::{
-    EngineCoreFinishReason, RequestSpecDecodeMetrics, StopReason,
+    EngineCoreFinishReason, RequestError, RequestSpecDecodeMetrics, StopReason,
 };
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
@@ -65,6 +65,8 @@ pub struct CollectedGenerateOutput {
     /// Per-request speculative-decoding metrics from the terminal output.
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Routed-expert rows for the whole request.
+    pub routed_experts: Option<WireNdArray>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -95,8 +97,9 @@ pub enum FinishReason {
     Length,
     /// The request was aborted by the client.
     Abort,
-    /// A retryable request-level internal error occurred.
-    Error,
+    /// A request-level internal error occurred, with the engine's details
+    /// when it sent any (e.g. a retryable rejection by a paused engine).
+    Error(Option<Box<RequestError>>),
     /// A repetitive token pattern was detected.
     Repetition(Option<StopReason>),
 }
@@ -115,7 +118,7 @@ impl FinishReason {
             Self::Stop(_) => "stop",
             Self::Length => "length",
             Self::Abort => "abort",
-            Self::Error => "error",
+            Self::Error(_) => "error",
             Self::Repetition(_) => "repetition",
         }
     }
@@ -144,12 +147,13 @@ impl FinishReason {
 fn finish_reason_from_engine(
     finish_reason: Option<EngineCoreFinishReason>,
     stop_reason: Option<StopReason>,
+    error: Option<Box<RequestError>>,
 ) -> Option<FinishReason> {
     finish_reason.map(|reason| match reason {
         EngineCoreFinishReason::Stop => FinishReason::Stop(stop_reason),
         EngineCoreFinishReason::Length => FinishReason::Length,
         EngineCoreFinishReason::Abort => FinishReason::Abort,
-        EngineCoreFinishReason::Error => FinishReason::Error,
+        EngineCoreFinishReason::Error => FinishReason::Error(error),
         EngineCoreFinishReason::Repetition => FinishReason::Repetition(stop_reason),
     })
 }
@@ -184,6 +188,8 @@ pub struct GenerateOutput {
     pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
     /// Weight-version spans over all output tokens, set on terminal outputs only.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Routed-expert rows for the whole request, set on terminal outputs only.
+    pub routed_experts: Option<Box<WireNdArray>>,
     /// Snapshot of engine lifecycle timestamps after this output.
     ///
     /// Every output carries a snapshot because text decoding may finish the
@@ -244,6 +250,7 @@ impl GenerateOutput {
         self.ec_transfer_params = next.ec_transfer_params;
         self.spec_decode_metrics = next.spec_decode_metrics;
         self.weight_versions = next.weight_versions;
+        self.routed_experts = next.routed_experts;
         self.timestamps = next.timestamps;
     }
 }
@@ -274,6 +281,7 @@ impl GenerateOutput {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
+            routed_experts: None,
             timestamps: RequestTimestamps::default(),
         }
     }
@@ -287,11 +295,14 @@ impl GenerateOutput {
 /// - For errors or unexpected engine-side closes, the stream terminates with an error.
 pub struct GenerateOutputStream {
     pending_prompt_info: Option<Box<GeneratePromptInfo>>,
+    remote_prefill_cached_tokens: Option<usize>,
     raw_stream: EngineCoreOutputStream,
     request_metrics: RequestMetricsTracker,
     /// (weight version, first output-token index) for each span.
     weight_version_starts: Vec<(Arc<str>, usize)>,
     num_output_tokens: usize,
+    /// Routed-expert rows received so far, concatenated on the terminal output.
+    routed_experts_chunks: Vec<WireNdArray>,
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
@@ -302,11 +313,13 @@ impl GenerateOutputStream {
     /// output stream.
     pub(crate) fn new(
         prompt_token_ids: Arc<[u32]>,
+        remote_prefill_cached_tokens: Option<usize>,
         raw_stream: EngineCoreOutputStream,
         request_metrics: RequestMetricsTracker,
         request_guard: RequestGuard,
     ) -> Self {
         Self {
+            remote_prefill_cached_tokens,
             pending_prompt_info: Some(Box::new(GeneratePromptInfo {
                 prompt_token_ids,
                 prompt_logprobs: None,
@@ -316,6 +329,7 @@ impl GenerateOutputStream {
             request_metrics,
             weight_version_starts: Vec::new(),
             num_output_tokens: 0,
+            routed_experts_chunks: Vec::new(),
             _request_guard: request_guard,
         }
     }
@@ -358,6 +372,9 @@ impl GenerateOutputStream {
         self.num_output_tokens += num_new_tokens;
 
         let raw = raw.output;
+        if let Some(rows) = raw.routed_experts {
+            self.routed_experts_chunks.push(*rows);
+        }
 
         // Populate the one-time prompt info on the first output.
         if let Some(info) = &mut self.pending_prompt_info
@@ -383,18 +400,27 @@ impl GenerateOutputStream {
                 row_count: mask.rows.len(),
             });
         }
-        let cached_token_count = raw
-            .prefill_stats
-            .as_ref()
-            .map(|stats| stats.num_cached_tokens as usize)
+        let cached_token_count = self
+            .remote_prefill_cached_tokens
+            .or_else(|| raw.prefill_stats.as_ref().map(|stats| stats.num_cached_tokens as usize))
             .unwrap_or(0);
 
-        let finish_reason = finish_reason_from_engine(raw.finish_reason, raw.stop_reason);
-        if let Some(finish_reason) = finish_reason.as_ref() {
+        // An engine error means the request was rejected before it ran.
+        let rejected = raw.error.is_some();
+        let finish_reason =
+            finish_reason_from_engine(raw.finish_reason, raw.stop_reason, raw.error);
+        if let Some(finish_reason) = finish_reason.as_ref()
+            && !rejected
+        {
             self.request_metrics.record_finished(received_at, finish_reason.clone());
         }
         let weight_versions = if finish_reason.is_some() {
             self.weight_version_spans()
+        } else {
+            None
+        };
+        let routed_experts = if finish_reason.is_some() {
+            self.take_routed_experts(&raw.request_id)?
         } else {
             None
         };
@@ -411,10 +437,39 @@ impl GenerateOutputStream {
             sampling_mask,
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
+            routed_experts,
             timestamps: self.request_metrics.timestamps(),
         };
 
         Ok(output)
+    }
+
+    /// Concatenate the routed-expert rows received so far along the token
+    /// axis, like Python's `np.concatenate`.
+    fn take_routed_experts(&mut self, request_id: &str) -> Result<Option<Box<WireNdArray>>> {
+        let chunks = std::mem::take(&mut self.routed_experts_chunks);
+        let Some(first) = chunks.first() else {
+            return Ok(None);
+        };
+        let row_shape = first.shape.get(1..);
+        let mut num_rows = 0;
+        let mut data = Vec::new();
+        for chunk in &chunks {
+            if chunk.dtype != first.dtype || chunk.shape.get(1..) != row_shape {
+                return Err(crate::Error::RoutedExpertsShapeMismatch {
+                    request_id: request_id.to_string(),
+                });
+            }
+            num_rows += chunk.shape[0];
+            data.extend_from_slice(chunk.data.as_raw_view().expect("resolved on decode"));
+        }
+        let mut shape = first.shape.clone();
+        shape[0] = num_rows;
+        Ok(Some(Box::new(WireNdArray::from_raw(
+            first.dtype,
+            shape,
+            data,
+        ))))
     }
 
     /// Spans over the output so far; `[]` for no tokens, `None` if no label was reported.
@@ -529,7 +584,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         prompt_token_id_logprobs: prompt_token_id_logprobs.take(),
                         token_ids: output.token_ids,
                         logprobs: output.logprobs,
-                        finish_reason: FinishReason::Error,
+                        finish_reason: FinishReason::Error(None),
                         usage: TokenUsage {
                             prompt_token_count: prompt_token_ids.as_ref().map_or(0, Vec::len),
                             output_token_count: 0,
@@ -540,6 +595,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         sampling_mask,
                         spec_decode_metrics: None,
                         weight_versions: None,
+                        routed_experts: None,
                     });
                 }
 
@@ -555,6 +611,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     collected.ec_transfer_params = output.ec_transfer_params.map(|value| *value);
                     collected.spec_decode_metrics = output.spec_decode_metrics.map(|value| *value);
                     collected.weight_versions = output.weight_versions;
+                    collected.routed_experts = output.routed_experts.map(|value| *value);
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {
