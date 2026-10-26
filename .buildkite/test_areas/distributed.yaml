@@ -88,7 +88,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
@@ -120,7 +120,7 @@ steps:
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
       - vllm/v1/executor/
-      - vllm/worker/worker_base.py
+      - vllm/v1/worker/worker_base.py
       - vllm/v1/engine/
       - vllm/v1/worker/
       - tests/v1/distributed
@@ -139,7 +139,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/compile/test_wrapper.py
@@ -163,7 +163,7 @@ steps:
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
       - vllm/v1/executor/
-      - vllm/worker/worker_base.py
+      - vllm/v1/worker/worker_base.py
       - vllm/v1/engine/
       - vllm/v1/worker/
       - tests/compile/test_wrapper.py
@@ -184,7 +184,7 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/v1/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/distributed/
@@ -223,86 +223,94 @@ steps:
       - HIP_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
       - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
-- label: ":nvidia: (L4) Distributed Torchrun + Examples"
-  key: distributed-torchrun-examples-4-gpus
-  timeout_in_minutes: 45
-  working_dir: "/vllm-workspace"
-  device: l4
-  num_devices: 4
-  source_file_dependencies:
-  - vllm/distributed/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/distributed/test_torchrun_example.py
-  - tests/distributed/test_torchrun_example_moe.py
-  - examples/rl/
-  - examples/features/data_parallel/data_parallel_offline.py
-  commands:
-  # https://github.com/NVIDIA/nccl/issues/1838
-  - export NCCL_CUMEM_HOST_ENABLE=0
-  # test with torchrun tp=2 and external_dp=2
-  - torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
-  # test with torchrun tp=2 and pp=2
-  - PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
-  # test with torchrun tp=4 and dp=1
-  - TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-  # test with torchrun tp=2, pp=2 and dp=1
-  - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-  # test with torchrun tp=1 and dp=4 with ep
-  - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-  # test with torchrun tp=2 and dp=2 with ep
-  - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-  # test with internal dp
-  - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager
-  # rlhf examples (each launches its own `vllm serve` and tears it down)
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
-  # sharded RDT: 2 FSDP2 trainer ranks -> 2 vLLM DP ranks with EP. Its data
-  # plane is NIXL, which ships only in the kv-connector set, and the script
-  # also drops the nixl-cu wheel variant that does not match this image. Kept
-  # last so the commands above run in an unmodified environment. RDT_MODEL swaps
-  # the script's reference MoE for a tiny one: no weights are downloaded either
-  # way, but every trainer rank builds the model before sharding it, and the
-  # default does not fit an L4.
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
-  mirror:
-    amd:
-      label: ":amd: (MI355) Distributed Torchrun + Examples"
-      dind: false
-      device: mi355_4
-      timeout_in_minutes: 55
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - vllm/distributed/
-      - "!vllm/distributed/kv_transfer/"
-      - tests/distributed/test_torchrun_example.py
-      - tests/distributed/test_torchrun_example_moe.py
-      - examples/rl/
-      - examples/features/data_parallel/data_parallel_offline.py
-      - .buildkite/scripts/install-kv-connectors.sh
-      - requirements/kv_connectors_rocm.txt
-      - requirements/test/rocm.in
-      - requirements/test/rocm.txt
-      - vllm/platforms/rocm.py
-      commands:
-      # Sharded RDT needs Ray >= 2.56; keep the ROCm image's dependencies.
-      - uv pip install --system --no-deps 'ray==2.56.1'
-      - export NCCL_CUMEM_HOST_ENABLE=0
-      - torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
-      - PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
-      - TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-      - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-      - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-      - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-      - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager
-      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
-      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
-      - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-      - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
+# Disabled until the KV connectors installation is locked.
+# - label: ":nvidia: (L4) [Nightly] Distributed Torchrun + Examples"
+#   key: distributed-torchrun-examples-4-gpus
+#   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+#   optional: true
+#   timeout_in_minutes: 45
+#   working_dir: "/vllm-workspace"
+#   device: l4
+#   num_devices: 4
+#   source_file_dependencies:
+#   - vllm/distributed/
+#   - "!vllm/distributed/kv_transfer/"
+#   - tests/distributed/test_torchrun_example.py
+#   - tests/distributed/test_torchrun_example_moe.py
+#   - examples/rl/
+#   - examples/features/data_parallel/data_parallel_offline.py
+#   commands:
+#   # https://github.com/NVIDIA/nccl/issues/1838
+#   - export NCCL_CUMEM_HOST_ENABLE=0
+#   # test with torchrun tp=2 and external_dp=2
+#   - torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
+#   # test with torchrun tp=2 and pp=2
+#   - PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
+#   # test with torchrun tp=4 and dp=1
+#   - TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+#   # test with torchrun tp=2, pp=2 and dp=1
+#   - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+#   # test with torchrun tp=1 and dp=4 with ep
+#   - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+#   # test with torchrun tp=2 and dp=2 with ep
+#   - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+#   # test with internal dp
+#   - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager
+#   # rlhf examples (each launches its own `vllm serve` and tears it down)
+#   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
+#   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
+#   # sharded RDT: 2 FSDP2 trainer ranks -> 2 vLLM DP ranks with EP. Its data
+#   # plane is NIXL, which ships only in the kv-connector set, and the script
+#   # also drops the nixl-cu wheel variant that does not match this image. Kept
+#   # last so the commands above run in an unmodified environment. RDT_MODEL swaps
+#   # the script's reference MoE for a tiny one: no weights are downloaded either
+#   # way, but every trainer rank builds the model before sharding it, and the
+#   # default does not fit an L4.
+#   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+#   - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
+#   mirror:
+#     amd:
+#       # Run on PRs even when the L4 step is optional (nightly only).
+#       optional: false
+#       label: ":amd: (MI355) Distributed Torchrun + Examples"
+#       dind: false
+#       device: mi355_4
+#       timeout_in_minutes: 55
+#       depends_on:
+#       - image-build-amd
+#       source_file_dependencies:
+#       - vllm/distributed/
+#       - "!vllm/distributed/kv_transfer/"
+#       - tests/distributed/test_torchrun_example.py
+#       - tests/distributed/test_torchrun_example_moe.py
+#       - examples/rl/
+#       - examples/features/data_parallel/data_parallel_offline.py
+#       - .buildkite/scripts/install-kv-connectors.sh
+#       - requirements/kv_connectors_rocm.txt
+#       - requirements/test/rocm.in
+#       - requirements/test/rocm.txt
+#       - vllm/platforms/rocm.py
+#       commands:
+#       # Sharded RDT needs Ray >= 2.56; keep the ROCm image's dependencies.
+#       - uv pip install --system --no-deps 'ray==2.56.1'
+#       - export NCCL_CUMEM_HOST_ENABLE=0
+#       - torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
+#       - PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
+#       - TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+#       - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+#       - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+#       - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+#       # Loading weights from the shared HF cache can exceed the default 300s --timeout.
+#       - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager --timeout 900
+#       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
+#       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
+#       - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+#       - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
 
-- label: ":nvidia: (L4) Distributed DP Extended"
+- label: ":nvidia: (L4) [Nightly] Distributed DP Extended"
   key: distributed-dp-tests-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
@@ -331,6 +339,8 @@ steps:
   - pytest -v -s distributed/test_engram_dp_shard.py
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ':amd: (MI355) Distributed DP Extended'
       dind: false
       automatic_shard: true
@@ -356,8 +366,10 @@ steps:
       - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
       - pytest -v -s distributed/test_utils.py
 
-- label: ":nvidia: (L4) Distributed Compile + Comm"
+- label: ":nvidia: (L4) [Nightly] Distributed Compile + Comm"
   key: distributed-compile-comm-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 70
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -379,6 +391,8 @@ steps:
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ':amd: (MI355) Distributed Compile + Comm'
       dind: false
       device: mi355_4
@@ -399,7 +413,7 @@ steps:
       - pytest -v -s distributed/test_symm_mem_allreduce.py
       - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
 
-- label: ":nvidia: (H100) Distributed DP + EP"
+- label: ":nvidia: (H100) [Nightly] Distributed DP + EP"
   key: distributed-tests-8xh100
   timeout_in_minutes: 20
   optional: true
@@ -447,7 +461,7 @@ steps:
       - export TORCH_CPP_LOG_LEVEL=INFO
       - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
-- label: ":nvidia: (A100) Distributed"
+- label: ":nvidia: (A100) [Nightly] Distributed"
   key: distributed-tests-4xa100
   device: a100
   optional: true
@@ -485,7 +499,7 @@ steps:
       - pytest -v -s -x lora/test_mixtral.py
       - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
 
-- label: ":nvidia: (H100) Distributed Features"
+- label: ":nvidia: (H100) [Nightly] Distributed Features"
   key: distributed-tests-2xh100-2xmi300
   timeout_in_minutes: 30
   device: h100
@@ -494,6 +508,7 @@ steps:
   num_devices: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
+    - pytest -v -s tests/distributed/test_dcp_direct_a2a_lse_reduce.py -k direct_a2a_matches_reference
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
     - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py
@@ -511,7 +526,6 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/distributed/
-      - vllm/v1/distributed/
       - vllm/model_executor/layers/fused_moe/
       - vllm/v1/attention/backends/
       - vllm/v1/attention/selector.py
@@ -555,7 +569,7 @@ steps:
       - pytest -v -s tests/distributed/test_quick_all_reduce.py
       - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
 
-- label: ":nvidia: (B200) Distributed"
+- label: ":nvidia: (B200) [Nightly] Distributed"
   key: distributed-tests-2xb200
   device: b200-k8s
   optional: true
@@ -630,7 +644,7 @@ steps:
       commands:
       - pytest -v -s tests/kernels/test_rocm_gemm_rs_ar.py
 
-- label: ":nvidia: (L4) Distributed 2-Node"
+- label: ":nvidia: (L4) [Nightly] Distributed 2-Node"
   key: 2-node-test-4-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
@@ -649,8 +663,10 @@ steps:
   commands:
     - ./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 $IMAGE_TAG "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py" "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' && NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' && python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code"
 
-- label: ":nvidia: (L4) Pipeline + Context Parallelism"
+- label: ":nvidia: (L4) [Nightly] Pipeline + Context Parallelism"
   key: pipeline-context-parallelism-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   automatic_shard: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
@@ -666,12 +682,17 @@ steps:
   - vllm/v1/worker/gpu_worker.py
   - tests/distributed/
   - tests/v1/distributed/test_pp_dp_v2.py
+  - vllm/benchmarks/forward/
+  - tests/benchmarks/test_forward_cli.py
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
+  - pytest -v -s benchmarks/test_forward_cli.py::test_bench_forward_pipeline
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI250) Pipeline + Context Parallelism"
       dind: false
       device: mi250_4
@@ -691,8 +712,10 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (L4) RayExecutorV2"
+- label: ":nvidia: (L4) [Nightly] RayExecutorV2"
   key: rayexecutorv2-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
@@ -714,6 +737,8 @@ steps:
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ':amd: (MI355) RayExecutorV2'
       dind: false
       automatic_shard: true
@@ -736,3 +761,30 @@ steps:
       - pytest -v -s distributed/test_ray_v2_executor_e2e.py
       - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
       - TARGET_TEST_SUITE=MI355 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
+
+- label: ":nvidia: (L4) Distributed Preload"
+  key: preload-2-gpus
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+  - tests/model_executor/model_loader/test_weight_cache.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
+  mirror:
+    amd:
+      label: ":amd: (MI355) Distributed Preload"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/model_loader/weight_cache/
+      - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+      - tests/model_executor/model_loader/test_weight_cache.py
+      - vllm/platforms/rocm.py

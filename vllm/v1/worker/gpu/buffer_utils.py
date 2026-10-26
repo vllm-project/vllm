@@ -20,6 +20,9 @@ logger = init_logger(__name__)
 # concurrent in-flight steps (engine batch_queue_size).
 _DEFAULT_MAX_CONCURRENCY = 2
 
+# Elements copied per program in `_apply_write_kernel`.
+_WRITE_BLOCK_SIZE = 1024
+
 
 def set_default_max_concurrency(n: int) -> None:
     global _DEFAULT_MAX_CONCURRENCY
@@ -166,6 +169,7 @@ class StagedWriteTensor:
         self._staged_write_starts: list[int] = []
         self._staged_write_contents: list[int | float] = []
         self._staged_write_cu_lens: list[int] = []
+        self._staged_write_max_len = 0
 
         new_buffer = partial(UvaBufferPool, max_concurrency=max_concurrency)
 
@@ -183,8 +187,11 @@ class StagedWriteTensor:
             return
         self._staged_write_indices.append(index)
         self._staged_write_starts.append(start)
+        prev_len = len(self._staged_write_contents)
         self._staged_write_contents.extend(x)
-        self._staged_write_cu_lens.append(len(self._staged_write_contents))
+        cu_len = len(self._staged_write_contents)
+        self._staged_write_cu_lens.append(cu_len)
+        self._staged_write_max_len = max(self._staged_write_max_len, cu_len - prev_len)
 
     def stage_write_elem(self, index: int, x: int) -> None:
         assert index >= 0
@@ -192,6 +199,7 @@ class StagedWriteTensor:
         self._staged_write_starts.append(0)
         self._staged_write_contents.append(x)
         self._staged_write_cu_lens.append(len(self._staged_write_contents))
+        self._staged_write_max_len = max(self._staged_write_max_len, 1)
 
     def apply_write(self) -> None:
         n = len(self._staged_write_indices)
@@ -212,7 +220,7 @@ class StagedWriteTensor:
             )
 
         # Write diffs to the GPU buffer
-        _apply_write_kernel[(n,)](
+        _apply_write_kernel[(n, _num_write_chunks(self._staged_write_max_len))](
             self.gpu,
             self.gpu.stride(0),
             indices_uva,
@@ -220,7 +228,7 @@ class StagedWriteTensor:
             write_contents,
             cu_lens_uva,
             None,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=_WRITE_BLOCK_SIZE,
             MULTI_GROUP=False,
         )
         # Clear the staged writes
@@ -231,6 +239,7 @@ class StagedWriteTensor:
         self._staged_write_starts.clear()
         self._staged_write_contents.clear()
         self._staged_write_cu_lens.clear()
+        self._staged_write_max_len = 0
 
 
 class FusedStagedWriter:
@@ -260,6 +269,7 @@ class FusedStagedWriter:
         starts: list[int] = []
         contents: list[int | float] = []
         cu_lens: list[int] = []
+        max_len = 0
 
         for group_id, t in enumerate(tensors):
             n = len(t._staged_write_indices)
@@ -272,6 +282,7 @@ class FusedStagedWriter:
             content_base = len(contents)
             contents.extend(t._staged_write_contents)
             cu_lens.extend(content_base + cu_len for cu_len in t._staged_write_cu_lens)
+            max_len = max(max_len, t._staged_write_max_len)
 
         if not group_ids:
             return
@@ -282,7 +293,7 @@ class FusedStagedWriter:
         cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
         contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
 
-        _apply_write_kernel[(len(group_ids),)](
+        _apply_write_kernel[(len(group_ids), _num_write_chunks(max_len))](
             output_ptrs,
             output_strides,
             indices_uva,
@@ -290,11 +301,16 @@ class FusedStagedWriter:
             contents_gpu,
             cu_lens_uva,
             group_ids_uva,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=_WRITE_BLOCK_SIZE,
             MULTI_GROUP=True,
         )
         for t in tensors:
             t.clear_staged_writes()
+
+
+def _num_write_chunks(max_len: int) -> int:
+    # One program per _WRITE_BLOCK_SIZE-element chunk.
+    return max(triton.cdiv(max_len, _WRITE_BLOCK_SIZE), 1)
 
 
 @triton.jit
@@ -328,11 +344,10 @@ def _apply_write_kernel(
         row_stride = output_stride
     row_ptr += row_idx * row_stride + start_idx
 
-    for i in range(0, content_len, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < content_len
-        content = tl.load(write_contents_ptr + cu_start + block, mask=mask)
-        tl.store(row_ptr + block, content, mask=mask)
+    block = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < content_len
+    content = tl.load(write_contents_ptr + cu_start + block, mask=mask)
+    tl.store(row_ptr + block, content, mask=mask)
 
 
 @triton.jit
