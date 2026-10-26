@@ -1814,6 +1814,185 @@ def test_flashinfer_nvfp4_decode_correctness(
 
 @pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
+    or not current_platform.is_device_capability_family(120),
+    reason="FlashInfer NVFP4+sinks prefill uses fa2 with an LSE sink "
+    "epilogue on SM12x.",
+)
+@pytest.mark.parametrize("use_cuda_graph", [False, True])
+def test_flashinfer_nvfp4_sink_prefill_correctness(default_vllm_config, use_cuda_graph):
+    """Sinks over an NVFP4 paged cache match an SDPA-with-sink oracle.
+
+    On SM12x the NVFP4 route serves prefill with the plain fa2 paged wrapper
+    at return_lse=True plus the out * sigmoid(ln2 * lse - sinks) epilogue,
+    eager and under CUDA-graph capture. Each route is checked against an fp32
+    SDPA-with-sink oracle over that route's own effective K/V: exact bf16 for
+    the sink-wrapper route, and the dequantized NVFP4 cache contents for the
+    fa2 route, so the check covers sink routing plus the kernel's read/write
+    quantization convention instead of baking random-input quantization error
+    into the tolerance. The batch mixes a long-context single-token request
+    (decode), two pure prefills, and a long-context short extend.
+    """
+    set_random_seed(0)
+    # Decode-class requests must come first in the batch.
+    seq_lens, bs, d = [300, 40, 1027, 512], 16, 256
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        max_model_len=max(seq_lens),
+        block_size=bs,
+        dtype="bfloat16",
+    )
+    # GQA 6 at head_dim 256, as in test_flashinfer_nvfp4_decode_correctness.
+    config.model_config.model_arch_config = replace(
+        config.model_config.model_arch_config,
+        total_num_attention_heads=24,
+        total_num_kv_heads=4,
+        head_size=d,
+    )
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    q, k, v = (
+        torch.randn(sum(seq_lens), h, d).bfloat16().to(device) for h in (24, 4, 4)
+    )
+    sinks = torch.rand(24, dtype=torch.float32, device=device) * 2.0 - 0.5
+
+    # Request i owns consecutive pages from starts[i]; page 0 stays null.
+    pages = [0] + [cdiv(s, bs) for s in seq_lens[:-1]]
+    starts = 1 + torch.tensor(pages).cumsum(0)
+    max_pages = cdiv(max(seq_lens), bs)
+    block_table = (starts[:, None] + torch.arange(max_pages)).int().to(device)
+    num_pages = int(starts[-1]) + max_pages
+    full_dim = nvfp4_kv_cache_full_dim(d)
+    caches = {
+        "nvfp4": torch.zeros(
+            num_pages, bs, 8, full_dim, dtype=torch.uint8, device=device
+        ).transpose(1, 2),
+        "auto": torch.zeros(
+            num_pages, bs, 4, 2 * d, dtype=torch.bfloat16, device=device
+        ).transpose(1, 2),
+    }
+
+    def run(query_lens, kv_cache_dtype, use_cuda_graph=False):
+        is_nvfp4 = kv_cache_dtype == "nvfp4"
+        config.cache_config.cache_dtype = kv_cache_dtype
+        spec = FullAttentionSpec(
+            block_size=bs,
+            num_kv_heads=4,
+            head_size=d,
+            dtype=torch.uint8 if is_nvfp4 else torch.bfloat16,
+            kv_quant_mode=KVQuantMode.NVFP4 if is_nvfp4 else KVQuantMode.NONE,
+        )
+        req = torch.repeat_interleave(torch.arange(4), torch.tensor(query_lens))
+        pos = torch.cat([torch.arange(s - n, s) for s, n in zip(seq_lens, query_lens)])
+        rows = pos + torch.tensor([0, *seq_lens]).cumsum(0)[req]
+        metadata = replace(
+            create_common_attn_metadata(BatchSpec(seq_lens, query_lens), bs, device),
+            block_table_tensor=block_table,
+            slot_mapping=(starts[req] * bs + pos).to(device),
+        )
+        with set_current_vllm_config(config):
+            return rows, run_attention_backend(
+                AttentionBackendEnum.FLASHINFER,
+                spec,
+                ["placeholder"],
+                config,
+                device,
+                metadata,
+                q[rows],
+                k[rows],
+                v[rows],
+                caches[kv_cache_dtype],
+                kv_cache_dtype=kv_cache_dtype,
+                sinks=sinks,
+                use_cuda_graph=use_cuda_graph,
+                # gs rides the layer scales in the real nvfp4 model path;
+                # bf16 layers keep the default unit scales.
+                layer_k_scale=0.02 if is_nvfp4 else 1.0,
+                layer_v_scale=0.03 if is_nvfp4 else 1.0,
+            )
+
+    # Each route is checked against an fp32 SDPA-with-sink oracle over that
+    # route's own effective K/V. The NVFP4 oracle reads the dequantized cache
+    # contents: lo nibble at even elements, per-16-element block scale
+    # e4m3(amax / (6 * gs)), dequantized value q * sc * gs (all measured
+    # against the quantize-append kernel on SM120).
+    from vllm.v1.attention.backends.flashinfer import _nvfp4_kv_views
+
+    e2m1 = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+        + [0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+        device=device,
+    )
+    req_idx = torch.repeat_interleave(
+        torch.arange(4, device=device), torch.tensor(seq_lens, device=device)
+    )
+    tok_pos = torch.cat([torch.arange(s, device=device) for s in seq_lens])
+    tok_page = block_table.long()[req_idx, tok_pos // bs]
+    tok_off = tok_pos % bs
+
+    def dequant_cache(data, scales, gs):
+        packed = data[tok_page, tok_off].long()
+        q_vals = torch.stack((e2m1[packed & 0xF], e2m1[(packed >> 4) & 0xF]), dim=-1)
+        blk_scale = scales[tok_page, tok_off].float().repeat_interleave(16, dim=-1)
+        return q_vals.flatten(2) * blk_scale * gs
+
+    sm_scale = d**-0.5
+    bounds = [0, *torch.tensor(seq_lens).cumsum(0).tolist()]
+
+    def sdpa_with_sinks(q_rows, k_eff, v_eff, query_lens):
+        outs, row = [], 0
+        for r, (s, n) in enumerate(zip(seq_lens, query_lens)):
+            qi = q_rows[row : row + n].float()
+            ki = k_eff[bounds[r] : bounds[r + 1]].repeat_interleave(6, dim=1).float()
+            vi = v_eff[bounds[r] : bounds[r + 1]].repeat_interleave(6, dim=1).float()
+            scores = torch.einsum("nhd,shd->hns", qi, ki) * sm_scale
+            kv_idx = torch.arange(s, device=device)
+            q_idx = torch.arange(s - n, s, device=device)
+            scores.masked_fill_(kv_idx[None, :] > q_idx[:, None], float("-inf"))
+            sink_col = sinks.view(-1, 1, 1).expand(-1, n, -1)
+            weights = torch.softmax(torch.cat((scores, sink_col), dim=-1), dim=-1)
+            outs.append(torch.einsum("hns,shd->nhd", weights[..., :s], vi))
+            row += n
+        return torch.cat(outs)
+
+    # A full prefill per route writes every token through its cache; the
+    # incremental phase only rewrites the same values at the same slots, so
+    # one NVFP4 readout feeds all oracles.
+    _, out_full_nvfp4 = run(seq_lens, "nvfp4")
+    _, out_full_bf16 = run(seq_lens, "auto")
+    (k_data, v_data), (k_scale, v_scale), _ = _nvfp4_kv_views(caches["nvfp4"], 4)
+    k_fp4 = dequant_cache(k_data, k_scale, 0.02)
+    v_fp4 = dequant_cache(v_data, v_scale, 0.03)
+    torch.testing.assert_close(
+        out_full_bf16.float(),
+        sdpa_with_sinks(q, k, v, seq_lens),
+        atol=2e-2,
+        rtol=2e-2,
+    )
+    torch.testing.assert_close(
+        out_full_nvfp4.float(),
+        sdpa_with_sinks(q, k_fp4, v_fp4, seq_lens),
+        atol=2e-2,
+        rtol=2e-2,
+    )
+
+    mixed_query_lens = [1, 40, 1027, 8]
+    rows, out_nvfp4 = run(mixed_query_lens, "nvfp4", use_cuda_graph)
+    _, out_bf16 = run(mixed_query_lens, "auto", use_cuda_graph)
+    torch.testing.assert_close(
+        out_bf16.float(),
+        sdpa_with_sinks(q[rows], k, v, mixed_query_lens),
+        atol=2e-2,
+        rtol=2e-2,
+    )
+    torch.testing.assert_close(
+        out_nvfp4.float(),
+        sdpa_with_sinks(q[rows], k_fp4, v_fp4, mixed_query_lens),
+        atol=2e-2,
+        rtol=2e-2,
+    )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
     or current_platform.has_device_capability(90),
     reason="FlashInfer fa2 spec decode runs before SM90.",
 )
