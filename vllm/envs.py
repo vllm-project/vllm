@@ -138,6 +138,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
+    VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -147,7 +148,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
-    VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
@@ -1278,6 +1278,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", "fp32"
     ).lower(),
+    # Muse Spark on ROCm: online-quantize routed experts ("" or "mxfp4"; first
+    # and last layer stay BF16).
+    "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
+        "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
+    ).lower(),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -1327,16 +1332,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
-    ),
-    # Kernel for causal multi-token (spec-decode) verify steps under decode
-    # context parallelism: "asm" uses AITER's round-robin ASM decode (gfx950),
-    # "segmented" the Triton segmented MLA path. "auto" (default) takes "asm"
-    # wherever it can serve the shape and "segmented" otherwise.
-    "VLLM_ROCM_AITER_MLA_DCP_VERIFY": env_with_choices(
-        "VLLM_ROCM_AITER_MLA_DCP_VERIFY",
-        "auto",
-        ["auto", "asm", "segmented"],
-        case_sensitive=False,
     ),
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts
     # (e.g. Kimi-K3: 12 heads/rank at TP8, 6 at TP16) can decode either through
