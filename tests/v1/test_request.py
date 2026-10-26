@@ -29,9 +29,11 @@ def test_request_decodes_int32_token_bytes_from_rust_frontend():
         cache_salt=None,
         data_parallel_rank=None,
     )
-    decoded = MsgpackDecoder(EngineCoreRequest).decode(
-        MsgpackEncoder().encode(engine_request)
-    )
+    frames = MsgpackEncoder().encode(engine_request)
+    decoded = MsgpackDecoder(EngineCoreRequest).decode(frames)
+    # Decoded without a copy, as a view of the received frame.
+    assert isinstance(decoded.prompt_token_ids, memoryview)
+    assert decoded.prompt_token_ids.obj is frames[0]
     request = Request.from_engine_core_request(decoded, block_hasher=None)
     assert request.prompt_token_ids == ids and request.num_prompt_tokens == 3
     assert type(request.prompt_token_ids[0]) is int
@@ -46,6 +48,15 @@ def test_request_token_ids_hold_no_int_references():
     for tokens in (request.prompt_token_ids, request._all_token_ids):
         assert not any(isinstance(r, int) for r in gc.get_referents(tokens))
     assert request.all_token_ids.copy() == list(range(1024))
+
+
+@pytest.mark.parametrize("wrap", [bytes, bytearray, memoryview])
+def test_token_buffer_from_packed_bytes(wrap):
+    ids = [1, 70000, 129279]
+    tokens = TokenBuffer(wrap(struct.pack(f"<{len(ids)}i", *ids)))
+    assert type(tokens) is TokenBuffer and tokens == ids
+    with pytest.raises(ValueError):
+        TokenBuffer(wrap(b"\x01\x02\x03"))
 
 
 @pytest.mark.parametrize("protocol", range(pickle.HIGHEST_PROTOCOL + 1))

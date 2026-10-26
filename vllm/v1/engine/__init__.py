@@ -145,8 +145,9 @@ class EngineCoreRequest(
         prompt_token_ids: list[int] | None
     else:
         # Also little-endian int32 bytes from vllm-rs, which only the engine core
-        # receives; Request turns them into a TokenBuffer.
-        prompt_token_ids: list[int] | bytes | None
+        # receives. They decode as a memoryview of the received frame, which
+        # Request copies into a TokenBuffer.
+        prompt_token_ids: list[int] | memoryview | None
     mm_features: list[MultiModalFeatureSpec] | None
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None

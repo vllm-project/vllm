@@ -62,7 +62,7 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt_token_ids: list[int] | bytes | None,
+        prompt_token_ids: list[int] | bytes | memoryview | None,
         sampling_params: SamplingParams | None,
         pooling_params: PoolingParams | None,
         client_index: int = 0,

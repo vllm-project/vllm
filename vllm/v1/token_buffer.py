@@ -27,6 +27,12 @@ else:
         __slots__ = ()
 
         def __new__(cls, tokens: Iterable[int] = ()):
+            if isinstance(tokens, (bytes, bytearray, memoryview)):
+                # Packed int32 ids. array("i", memoryview) would instead take
+                # each byte as a token.
+                buf = super().__new__(cls, "i")
+                buf.frombytes(tokens)
+                return buf
             # From another array of the same type this is a memcpy.
             return super().__new__(cls, "i", tokens)
 
