@@ -325,6 +325,24 @@ def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
     assert kvcr.backend_configs.local_dram is None
 
 
+@pytest.mark.parametrize("guard_service", [False, True])
+def test_kvcr_tier_stops_idle_polling_during_shutdown(monkeypatch, guard_service):
+    tier = _make_tier(
+        monkeypatch,
+        RecordingKVCR(),
+        kvcr_service_socket_path="/tmp/kvcr.sock" if guard_service else None,
+        compatibility_digest="Opaque-Digest" if guard_service else None,
+    )
+    assert tier.has_pending_work()
+
+    monkeypatch.setattr(kvcr_manager, "_KVCR_SHUTDOWN", True)
+    assert not tier.has_pending_work()
+    tier.submit_load(_job(1, ReqContext(req_id="shutdown")))
+    assert tier.has_pending_work()
+    assert list(tier.get_finished_jobs()) == [JobResult(1, True)]
+    assert not tier.has_pending_work()
+
+
 def test_kvcr_tier_converts_g3_paths(monkeypatch, tmp_path):
     """Convert user-provided G3 paths to KVCR's typed configuration."""
     kvcr = RecordingKVCR()
