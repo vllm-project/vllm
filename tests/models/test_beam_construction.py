@@ -17,6 +17,7 @@ from torch import nn
 
 from vllm import LLM, SamplingParams
 from vllm.models.beam import model as beam
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.beam import BeamConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -60,7 +61,7 @@ TINY_CONFIG = {
 
 
 @pytest.mark.skipif(
-    not torch.accelerator.is_available(), reason="This test requires an accelerator"
+    not current_platform.is_cuda_alike(), reason="Beam targets CUDA and ROCm"
 )
 @pytest.mark.usefixtures("enable_pickle")
 @pytest.mark.parametrize(

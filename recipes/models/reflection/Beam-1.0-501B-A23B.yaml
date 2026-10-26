@@ -320,12 +320,6 @@ guide: |
     --enable-auto-tool-choice
   ```
 
-  `VLLM_ROCM_USE_AITER=1`, `--attention-backend ROCM_AITER_UNIFIED_ATTN` and
-  `--moe-backend triton` are what the command builder emits on AMD; the
-  builder also keeps the KV cache in BF16. **DEP is not available on AMD:**
-  the ROCm model path raises on sequence-parallel MoE, so only TP and
-  TP + expert parallel are offered.
-
   ### Tuning
 
   - **KV cache dtype:** the NVFP4 and FP8 commands use
@@ -335,7 +329,7 @@ guide: |
   - **Parallelism:** tensor parallelism is the recommended single-node layout.
     TEP (`--enable-expert-parallel`) and DEP (`--data-parallel-size 8
     --enable-expert-parallel`) are also supported on NVIDIA; DEP is better
-    suited to very large batch sizes. On AMD only TP and TEP are offered.
+    suited to very large batch sizes.
 
   ### MegaMoE with attention DP (NVFP4, Blackwell)
 
