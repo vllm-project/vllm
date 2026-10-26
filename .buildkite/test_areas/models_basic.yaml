@@ -145,16 +145,17 @@ steps:
       commands:
       - pytest -v -s models/inkling/rocm
 
-- label: ":nvidia: (B200) Flint"
-  key: flint-unit-tests-b200
-  timeout_in_minutes: 30
-  device: b200-k8s
-  source_file_dependencies:
-  - vllm/models/flint/
-  - tests/models/flint/
-  commands:
-    - uv pip install --system 'gguf>=0.19.0'
-    - pytest -v -s models/flint
+# Disabled until the gguf installation is locked.
+# - label: ":nvidia: (B200) Flint"
+#   key: flint-unit-tests-b200
+#   timeout_in_minutes: 30
+#   device: b200-k8s
+#   source_file_dependencies:
+#   - vllm/models/flint/
+#   - tests/models/flint/
+#   commands:
+#     - uv pip install --system 'gguf>=0.19.0'
+#     - pytest -v -s models/flint
 
 - label: ":nvidia: (B200) Kimi K3"
   key: kimi-k3-unit-tests-b200
@@ -186,29 +187,30 @@ steps:
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/amd_specialized_decode
 
-- label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
-  key: kimi-k3-prefix-cache-4xb200
-  # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
-  optional: true
-  automatic_shard: true
-  timeout_in_minutes: 75
-  device: b200-k8s
-  num_devices: 4
-  source_file_dependencies:
-  - vllm/models/kimi_k3/
-  - vllm/v1/core/
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
-  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
-  - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/
-  - vllm/distributed/mooncake_store.py
-  - vllm/v1/simple_kv_offload/
-  - vllm/v1/spec_decode/
-  - vllm/model_executor/layers/mamba/
-  - tests/models/kimi_k3/test_prefix_cache.py
-  - .buildkite/scripts/install-kv-connectors.sh
-  commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - pytest -v -s models/kimi_k3/test_prefix_cache.py
+# Disabled until the KV connectors installation is locked.
+# - label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
+#   key: kimi-k3-prefix-cache-4xb200
+#   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
+#   optional: true
+#   automatic_shard: true
+#   timeout_in_minutes: 75
+#   device: b200-k8s
+#   num_devices: 4
+#   source_file_dependencies:
+#   - vllm/models/kimi_k3/
+#   - vllm/v1/core/
+#   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+#   - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+#   - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/
+#   - vllm/distributed/mooncake_store.py
+#   - vllm/v1/simple_kv_offload/
+#   - vllm/v1/spec_decode/
+#   - vllm/model_executor/layers/mamba/
+#   - tests/models/kimi_k3/test_prefix_cache.py
+#   - .buildkite/scripts/install-kv-connectors.sh
+#   commands:
+#   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+#   - pytest -v -s models/kimi_k3/test_prefix_cache.py
 
 - label: ":nvidia: (H200) Step5"
   key: step5-unit-tests
