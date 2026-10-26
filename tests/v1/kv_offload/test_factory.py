@@ -1,0 +1,767 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Unit tests for native offloading specs and their factory."""
+
+import os
+import uuid
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+import torch
+
+from tests.v1.kv_offload.conftest import make_offloading_config
+from vllm.v1.kv_offload.base import (
+    CanonicalKVCaches,
+    OffloadingHistogramMetadata,
+    OffloadingManager,
+    OffloadingSpec,
+    OffloadingWorker,
+)
+from vllm.v1.kv_offload.config import (
+    OffloadingGroupConfig,
+)
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+from vllm.v1.kv_offload.tiering.manager import CPUPrimaryTierOffloadingManager
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+
+
+@pytest.fixture(autouse=True)
+def restore_registry():
+    original = dict(OffloadingSpecFactory._registry)
+    yield
+    OffloadingSpecFactory._registry = original
+
+
+def _create_spec(**kwargs: Any) -> OffloadingSpec:
+    return OffloadingSpecFactory.create_spec(make_offloading_config(**kwargs))
+
+
+def _capacity_tokens(spec: OffloadingSpec) -> str | int | float | bool:
+    """The token capacity the manager of the spec publishes as an info label."""
+    (info,) = spec.get_manager().config_info()
+    return info["cpu_kv_cache_size_tokens"]
+
+
+class SingleArgExternalOffloadingSpec(OffloadingSpec):
+    def get_manager(self) -> OffloadingManager:
+        raise NotImplementedError
+
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        raise NotImplementedError
+
+
+def test_pre_registered_specs_can_be_imported():
+    for name in OffloadingSpecFactory._registry:
+        cls = OffloadingSpecFactory._registry[name]()
+        assert issubclass(cls, OffloadingSpec)
+
+
+def test_cpu_spec_registered():
+    cls = OffloadingSpecFactory._registry["CPUOffloadingSpec"]()
+    assert cls is CPUOffloadingSpec
+
+
+def test_tiering_spec_registered():
+    cls = OffloadingSpecFactory._registry["TieringOffloadingSpec"]()
+    assert cls is TieringOffloadingSpec
+
+
+def test_get_spec_cls_returns_registered_class():
+    spec_cls = OffloadingSpecFactory.get_spec_cls(make_offloading_config().extra_config)
+    assert spec_cls is CPUOffloadingSpec
+
+
+def test_get_spec_cls_defaults_to_cpu():
+    spec_cls = OffloadingSpecFactory.get_spec_cls(
+        make_offloading_config(spec_name=None).extra_config
+    )
+    assert spec_cls is CPUOffloadingSpec
+
+
+def test_create_cpu_offloading_spec():
+    spec = _create_spec()
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks > 0
+
+
+def test_cpu_spec_sizes_normalized_worker_layout():
+    # The CPU spec now rounds the offloaded row up to the mmap page size
+    # (matching the shared region), so kv_bytes_per_chunk picks up padding
+    # while cpu_page_size_per_worker stays the un-padded per-worker slot.
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 3,
+        worker_kv_bytes_per_block=16,
+        blocks_per_chunk=2,
+        world_size=6,
+        tp_size=3,
+        pp_size=2,
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.cpu_page_size_per_worker == 32
+    assert spec.kv_bytes_per_chunk == alignment
+    assert spec.num_chunks == 3
+
+
+def test_cpu_spec_zero_worker_bytes_produces_empty_cache():
+    spec = _create_spec(worker_kv_bytes_per_block=0, world_size=4)
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.cpu_page_size_per_worker == 0
+    assert spec.kv_bytes_per_chunk == 0
+    assert spec.num_chunks == 0
+
+
+@pytest.mark.parametrize("blocks_per_chunk", [1, 2, 4])
+def test_cpu_config_info_converts_slots_to_tokens(blocks_per_chunk: int):
+    """One uncapped group makes the capacity the slot count in KV tokens.
+
+    A slot holds blocks_per_chunk blocks of tokens_per_block tokens each, so
+    dropping either factor understates the tier.
+    """
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    tokens_per_block = 8
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 12,
+        worker_kv_bytes_per_block=alignment,
+        blocks_per_chunk=blocks_per_chunk,
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",), 0),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks == 12 // blocks_per_chunk
+    assert _capacity_tokens(spec) == (
+        spec.num_chunks * blocks_per_chunk * tokens_per_block
+    )
+
+
+@pytest.mark.parametrize("world_size", [1, 2, 4])
+def test_cpu_config_info_capacity_accounts_for_tensor_parallel_copies(
+    world_size: int,
+):
+    """A slot holds every worker's copy of the block, so capacity divides by TP.
+
+    Without the num_copies factor a TP=4 tier would be reported at four times
+    the tokens it can hold.
+    """
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    tokens_per_block = 8
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 12,
+        worker_kv_bytes_per_block=alignment,
+        world_size=world_size,
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",), 0),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks == 12 // world_size
+    assert _capacity_tokens(spec) == spec.num_chunks * tokens_per_block
+
+
+def test_cpu_config_info_capacity_dedups_a_replicated_layout(monkeypatch):
+    """A replicated layout stores one copy, so capacity does not divide by TP.
+
+    Same TP=4 sizing as the test above, which yields 3 slots; deduplicating to a
+    single copy yields 12.
+    """
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    # Pin the ROCm answer too: on a ROCm runner the shared-region path is off,
+    # and the dedup under test never engages.
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    tokens_per_block = 8
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 12,
+        worker_kv_bytes_per_block=alignment,
+        world_size=4,
+        replicated_layout=True,
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",), 0),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks == 12
+    assert _capacity_tokens(spec) == 12 * tokens_per_block
+
+
+def test_cpu_config_info_mirrors_spec_sizing():
+    """The published labels are the facts of the spec, not a second derivation.
+
+    The frontend turns these keys into Prometheus label names, so a renamed key
+    renames a label. The "cpu_" prefix keeps one name for the cache, standalone
+    or as the primary tier of a tiering manager.
+    """
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    tokens_per_block = 16
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 5,
+        worker_kv_bytes_per_block=alignment,
+        blocks_per_chunk=1,
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.get_manager().config_info() == [
+        {
+            "cpu_num_chunks": spec.num_chunks,
+            "cpu_blocks_per_chunk": spec.blocks_per_chunk,
+            "cpu_kv_cache_size_bytes": spec.num_chunks * spec.kv_bytes_per_chunk,
+            "cpu_kv_cache_size_tokens": spec.num_chunks * tokens_per_block,
+        }
+    ]
+
+
+def test_cpu_config_info_zero_capacity_is_exact_not_unknown():
+    """A tier sized to nothing holds zero tokens; that is known, not unknown."""
+    spec = _create_spec(
+        worker_kv_bytes_per_block=0,
+        groups=(OffloadingGroupConfig(16, ("layer",), 0),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks == 0
+    assert _capacity_tokens(spec) == 0
+
+
+def test_cpu_config_info_capacity_shrinks_when_a_second_group_shares_slots():
+    """Two groups take two chunks for one request, so the capacity halves."""
+    one_group = _create_spec(groups=(OffloadingGroupConfig(16, ("full_layer",), 0),))
+    two_groups = _create_spec(
+        groups=(
+            OffloadingGroupConfig(16, ("full_layer",), 0),
+            OffloadingGroupConfig(16, ("swa_layer",), 1),
+        ),
+    )
+
+    assert isinstance(one_group, CPUOffloadingSpec)
+    assert isinstance(two_groups, CPUOffloadingSpec)
+    assert two_groups.num_chunks == one_group.num_chunks
+    one_capacity = _capacity_tokens(one_group)
+    assert isinstance(one_capacity, int)
+    assert _capacity_tokens(two_groups) == one_capacity // 2
+
+
+def test_cpu_config_info_no_token_capacity_without_a_kv_cache_group():
+    """A model with no KV cache has no group whose chunk size to apply."""
+    spec = _create_spec(groups=())
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks > 0
+    assert _capacity_tokens(spec) == "None"
+
+
+def test_cpu_config_info_no_token_capacity_without_max_model_len():
+    """The capacity holds at max_model_len, so an unknown length gives None."""
+    spec = _create_spec(max_model_len=0)
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks > 0
+    assert _capacity_tokens(spec) == "None"
+
+
+def test_tiering_primary_tier_publishes_the_cpu_labels():
+    """The primary tier must keep the labels, because it renders them itself.
+
+    TieringOffloadingManager.config_info() does not touch a primary tier label,
+    so a CPU fact keeps one name in both managers. The tiering spec passes the
+    same config info as the CPU spec.
+    """
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_chunks=5,
+        mmap_region=MagicMock(),
+        info=CPUOffloadingInfo.from_config(
+            make_offloading_config(blocks_per_chunk=2, max_model_len=1024),
+            num_chunks=5,
+            kv_bytes_per_chunk=4096,
+        ),
+    )
+
+    assert primary_tier.config_info() == [
+        {
+            "cpu_num_chunks": 5,
+            "cpu_blocks_per_chunk": 2,
+            "cpu_kv_cache_size_bytes": 5 * 4096,
+            # 5 slots of 32 tokens each, over a request of 32 chunks.
+            "cpu_kv_cache_size_tokens": 160,
+        }
+    ]
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
+def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier():
+    """The tiering spec must give the primary tier the facts that it publishes.
+
+    The spec builds a real shared region before the primary tier, so this test
+    needs /dev/shm. It is the only test that runs the argument list of
+    TieringOffloadingSpec.get_manager(). Both the chunk size and the
+    configuration have a default, so a dropped argument gives no type error.
+    A unique engine_id keeps the region path of this test separate.
+    """
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        engine_id=f"test-tiering-{uuid.uuid4().hex}",
+        blocks_per_chunk=2,
+        max_model_len=1024,
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+
+    manager = spec.get_manager()
+    try:
+        (primary_info,) = manager.config_info()
+        assert primary_info == {
+            "tier": "0:primary",
+            "cpu_num_chunks": spec.num_chunks,
+            "cpu_blocks_per_chunk": 2,
+            "cpu_kv_cache_size_bytes": spec.num_chunks * spec.kv_bytes_per_chunk,
+            # 32 tokens for each chunk, over a request of 32 chunks.
+            "cpu_kv_cache_size_tokens": spec.num_chunks * 32,
+        }
+    finally:
+        manager.shutdown()
+
+
+def test_tiering_spec_aligns_row_size():
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        cpu_bytes_to_use=alignment * 3,
+        worker_kv_bytes_per_block=16,
+        blocks_per_chunk=2,
+        world_size=6,
+        tp_size=3,
+        pp_size=2,
+    )
+
+    assert isinstance(spec, TieringOffloadingSpec)
+    assert spec.cpu_page_size_per_worker == 32
+    assert spec.kv_bytes_per_chunk == alignment
+    assert spec.num_chunks == 3
+
+
+@pytest.mark.parametrize("world_size", [2, 4, 8])
+def test_tiering_spec_replicated_sizing_removes_world_factor(world_size: int):
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=world_size,
+        replicated_layout=True,
+    )
+
+    assert isinstance(spec, TieringOffloadingSpec)
+    assert spec.replicated_layout is True
+    assert spec.cpu_page_size_per_worker == worker_kv_bytes_per_block
+    assert spec.kv_bytes_per_chunk == worker_kv_bytes_per_block
+    assert spec.num_chunks == 8
+
+
+def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monkeypatch):
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=4,
+        replicated_layout=True,
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+
+    region = MagicMock()
+    region_calls: list[dict[str, Any]] = []
+    worker_calls: list[dict[str, Any]] = []
+
+    def fake_region_ctor(**kwargs):
+        region_calls.append(kwargs)
+        return region
+
+    def fake_worker_ctor(**kwargs):
+        worker_calls.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
+
+    kv_caches = MagicMock()
+    spec.create_worker(kv_caches)
+
+    assert region_calls[0]["rank"] == 0
+    assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
+    assert worker_calls[0]["kv_caches"] is kv_caches
+    assert worker_calls[0]["mmap_region"] is region
+
+
+def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypatch):
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        rank=1,
+        world_size=4,
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+
+    region_calls: list[dict[str, Any]] = []
+
+    def fake_region_ctor(**kwargs):
+        region_calls.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", MagicMock())
+    monkeypatch.setattr(
+        torch.accelerator,
+        "current_device_index",
+        lambda: 6,
+    )
+
+    spec.create_worker(MagicMock())
+
+    assert region_calls[0]["rank"] == 1
+
+
+@pytest.mark.parametrize("world_size", [2, 4, 8])
+def test_cpu_spec_replicated_sizing_on_shared_region(monkeypatch, world_size: int):
+    # On CUDA the default spec honors
+    # replicated layout: a single MLA copy (num_copies=1), matching tiering.
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=world_size,
+        replicated_layout=True,
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.replicated_layout is True
+    assert spec.cpu_page_size_per_worker == worker_kv_bytes_per_block
+    assert spec.kv_bytes_per_chunk == worker_kv_bytes_per_block
+    assert spec.num_chunks == 8
+
+
+@pytest.mark.parametrize("rocm", [False, True], ids=["non-cuda-alike", "rocm"])
+@pytest.mark.parametrize("world_size", [2, 4, 8])
+def test_cpu_spec_replicated_disabled_without_shared_region(
+    monkeypatch, world_size: int, rocm: bool
+):
+    # Data-loss guard: platforms without shared regions keep a private pinned
+    # tensor (no shared medium), so replicated layout MUST stay off. Otherwise
+    # the rank-0 writer gate would ack rank>0 stores without writing, leaving
+    # those private buffers empty and corrupting subsequent loads.
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: rocm)
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: rocm)
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=worker_kv_bytes_per_block * world_size * 2,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=world_size,
+        replicated_layout=True,
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.replicated_layout is False
+    assert spec.cpu_page_size_per_worker == worker_kv_bytes_per_block
+    assert spec.kv_bytes_per_chunk == worker_kv_bytes_per_block * world_size
+    assert spec.num_chunks == 2
+
+
+@pytest.mark.parametrize("config_replicated", [True, False])
+@pytest.mark.parametrize(
+    ("cuda_alike", "rocm", "shared_region"),
+    [(True, False, True), (True, True, False), (False, False, False)],
+    ids=["cuda", "rocm", "non-cuda-alike"],
+)
+def test_cpu_spec_replicated_layout_truth_matrix(
+    monkeypatch,
+    cuda_alike: bool,
+    rocm: bool,
+    shared_region: bool,
+    config_replicated: bool,
+):
+    # replicated_layout is enabled iff the config gate passes AND the deployment
+    # actually allocates on the shared region.
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(
+        cpu_spec_module.current_platform, "is_cuda_alike", lambda: cuda_alike
+    )
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: rocm)
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=4,
+        replicated_layout=config_replicated,
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.replicated_layout is (shared_region and config_replicated)
+
+
+def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=4,
+    )
+    assert isinstance(spec, CPUOffloadingSpec)
+
+    region = MagicMock()
+    region_calls: list[dict[str, Any]] = []
+    worker_calls: list[dict[str, Any]] = []
+
+    def fake_region_ctor(**kwargs):
+        region_calls.append(kwargs)
+        return region
+
+    def fake_worker_ctor(**kwargs):
+        worker_calls.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
+
+    kv_caches = MagicMock()
+    spec.create_worker(kv_caches)
+
+    assert region_calls[0]["engine_id"] == "test-engine"
+    assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block * 4
+    assert worker_calls[0]["kv_caches"] is kv_caches
+    assert worker_calls[0]["mmap_region"] is region
+
+
+@pytest.mark.parametrize("rocm", [False, True], ids=["non-cuda-alike", "rocm"])
+def test_cpu_spec_create_worker_uses_tensor_path_without_shared_region(
+    monkeypatch, rocm
+):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    spec = _create_spec(worker_kv_bytes_per_block=4096, world_size=4)
+    assert isinstance(spec, CPUOffloadingSpec)
+
+    region_calls: list[dict[str, Any]] = []
+    worker_calls: list[dict[str, Any]] = []
+
+    def fake_region_ctor(**kwargs):
+        region_calls.append(kwargs)
+        return MagicMock()
+
+    def fake_worker_ctor(**kwargs):
+        worker_calls.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: rocm)
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: rocm)
+    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
+
+    spec.create_worker(MagicMock())
+
+    # ROCm and non-CUDA-alike platforms use the per-rank pinned-tensor path.
+    assert region_calls == []
+    assert worker_calls[0]["mmap_region"] is None
+
+
+def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    # worker_kv_bytes_per_block=0 yields num_chunks=0; a zero-byte region cannot
+    # be mmap'd, so even on CUDA this must fall back to the tensor path.
+    spec = _create_spec(worker_kv_bytes_per_block=0, world_size=4)
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks == 0
+
+    region_calls: list[dict[str, Any]] = []
+    worker_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(
+        cpu_spec_module,
+        "SharedOffloadRegion",
+        lambda **kwargs: region_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        cpu_spec_module,
+        "CPUOffloadingWorker",
+        lambda **kwargs: worker_calls.append(kwargs),
+    )
+
+    spec.create_worker(MagicMock())
+
+    assert region_calls == []
+    assert worker_calls[0]["mmap_region"] is None
+
+
+@pytest.mark.parametrize(
+    ("replicated_layout", "rank", "device_index", "world_size", "expected_rank"),
+    [
+        (True, 1, 5, 4, 0),
+        (True, 0, 0, 4, 0),
+        (False, 1, 5, 4, 1),
+        (False, 3, 6, 4, 3),
+    ],
+)
+def test_cpu_spec_create_worker_rank_assignment(
+    monkeypatch, replicated_layout, rank, device_index, world_size, expected_rank
+):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        rank=rank,
+        world_size=world_size,
+        replicated_layout=replicated_layout,
+    )
+    assert isinstance(spec, CPUOffloadingSpec)
+
+    region_calls: list[dict[str, Any]] = []
+
+    def fake_region_ctor(**kwargs):
+        region_calls.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", MagicMock())
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: device_index)
+
+    spec.create_worker(MagicMock())
+
+    assert region_calls[0]["rank"] == expected_rank
+
+
+def test_offloading_spec_has_replicated_layout_default():
+    spec = SingleArgExternalOffloadingSpec(make_offloading_config())
+    assert spec.replicated_layout is False
+
+
+def test_offloading_spec_uses_normalized_chunk_geometry():
+    groups = (
+        OffloadingGroupConfig(12, ("full_layer",), 0),
+        OffloadingGroupConfig(16, ("mla_layer",), 1),
+    )
+    spec = _create_spec(
+        groups=groups,
+        tokens_per_hash=4,
+        blocks_per_chunk=2,
+    )
+
+    assert spec.tokens_per_block == (12, 16)
+    assert spec.tokens_per_hash == 4
+    assert spec.blocks_per_chunk == 2
+
+
+def test_create_dynamic_spec_receives_config():
+    config = make_offloading_config(
+        spec_name="SingleArgExternalOffloadingSpec",
+        extra_config={"spec_module_path": "tests.v1.kv_offload.test_factory"},
+    )
+
+    spec = OffloadingSpecFactory.create_spec(config)
+
+    assert isinstance(spec, SingleArgExternalOffloadingSpec)
+    assert spec.config is config
+
+
+def test_dynamic_load_via_spec_module_path():
+    del OffloadingSpecFactory._registry["CPUOffloadingSpec"]
+    config = make_offloading_config(
+        extra_config={"spec_module_path": "vllm.v1.kv_offload.cpu.spec"}
+    )
+
+    spec_cls = OffloadingSpecFactory.get_spec_cls(config.extra_config)
+
+    assert spec_cls is CPUOffloadingSpec
+
+
+def test_unregistered_spec_without_module_path_raises():
+    config = make_offloading_config(spec_name="NonexistentSpec")
+    with pytest.raises(ValueError, match="Unsupported spec type"):
+        OffloadingSpecFactory.get_spec_cls(config.extra_config)
+
+    with pytest.raises(ValueError, match="Unsupported spec type"):
+        OffloadingSpecFactory.create_spec(config)
+
+
+def test_cpu_spec_missing_cpu_bytes_to_use_raises():
+    with pytest.raises(Exception, match="cpu_bytes_to_use must be specified"):
+        _create_spec(cpu_bytes_to_use=None)
+
+
+def test_duplicate_registration_raises():
+    with pytest.raises(ValueError, match="is already registered"):
+        OffloadingSpecFactory.register_spec(
+            "CPUOffloadingSpec", "some.module", "SomeClass"
+        )
+
+
+def test_build_metric_definitions_below_threshold():
+    from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+
+    extra_config = {"store_threshold": 1}
+    spec_cls = OffloadingSpecFactory.get_spec_cls({"spec_name": "CPUOffloadingSpec"})
+    metrics = spec_cls.build_metric_definitions(extra_config)
+
+    assert CPUOffloadingMetrics.STORES_SKIPPED not in metrics
+    assert CPUOffloadingMetrics.CPU_ALLOCATION_SIZE in metrics
+
+
+def test_build_metric_definitions_allocation_size_histogram():
+    from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+
+    spec_cls = OffloadingSpecFactory.get_spec_cls({"spec_name": "CPUOffloadingSpec"})
+    metrics = spec_cls.build_metric_definitions({})
+    metadata = metrics[CPUOffloadingMetrics.CPU_ALLOCATION_SIZE]
+
+    assert isinstance(metadata, OffloadingHistogramMetadata)
+    assert metadata.buckets == (
+        1,
+        4,
+        16,
+        64,
+        256,
+        1024,
+        4096,
+        16384,
+        65536,
+        262144,
+    )
+
+
+def test_build_metric_definitions_returns_counter_at_threshold():
+    from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+
+    extra_config = {"store_threshold": 2}
+    spec_cls = OffloadingSpecFactory.get_spec_cls({"spec_name": "CPUOffloadingSpec"})
+    metrics = spec_cls.build_metric_definitions(extra_config)
+
+    assert CPUOffloadingMetrics.STORES_SKIPPED in metrics

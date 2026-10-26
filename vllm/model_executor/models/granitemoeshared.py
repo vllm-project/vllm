@@ -4,6 +4,10 @@
 
 The architecture is the same as granitemoe but with the addition of shared
 experts.
+
+Also serves the `granitemoe_swa` checkpoints (`GraniteMoeSWAForCausalLM`), which
+add the same per-layer sliding window, attention sink and per-layer RoPE support
+as `granite_swa` (see `granite.py`).
 """
 
 from collections.abc import Iterable
@@ -31,7 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.sequence import IntermediateTensors
 
 from .granitemoe import GraniteMoeAttention, GraniteMoeModel, GraniteMoeMoE
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import EagleModelMixin, SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import AutoWeightsLoader, make_layers, maybe_prefix
 
 
@@ -85,11 +89,11 @@ class GraniteMoeSharedDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = GraniteMoeAttention(
+            config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            rope_parameters=config.rope_parameters,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -147,7 +151,7 @@ class GraniteMoeSharedDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class GraniteMoeSharedModel(nn.Module):
+class GraniteMoeSharedModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -186,7 +190,7 @@ class GraniteMoeSharedModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -196,8 +200,14 @@ class GraniteMoeSharedModel(nn.Module):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, None)
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer)
+        ):
             hidden_states = layer(positions, hidden_states)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, None
+            )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {
@@ -205,48 +215,16 @@ class GraniteMoeSharedModel(nn.Module):
                 }
             )
         hidden_states = self.norm(hidden_states)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        new_weights = {}
-        for n, p in weights:
-            if n.endswith(".block_sparse_moe.input_linear.weight"):
-                for e in range(p.size(0)):
-                    w1_name = n.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.routed_experts.{e}.w1.weight",
-                    )
-                    w3_name = n.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.routed_experts.{e}.w3.weight",
-                    )
-                    w1_param, w3_param = p[e].chunk(2, dim=0)
-                    assert w1_name not in new_weights
-                    assert w3_name not in new_weights
-                    new_weights[w1_name] = w1_param
-                    new_weights[w3_name] = w3_param
-            elif n.endswith(".block_sparse_moe.output_linear.weight"):
-                for e in range(p.size(0)):
-                    w2_name = n.replace(
-                        ".block_sparse_moe.output_linear.weight",
-                        f".block_sparse_moe.experts.routed_experts.{e}.w2.weight",
-                    )
-                    w2_param = p[e]
-                    assert w2_name not in new_weights
-                    new_weights[w2_name] = w2_param
-            elif n.endswith(".block_sparse_moe.router.layer.weight"):
-                gate_name = n.replace(
-                    ".block_sparse_moe.router.layer.weight",
-                    ".block_sparse_moe.gate.weight",
-                )
-                assert gate_name not in new_weights
-                new_weights[gate_name] = p
-            else:
-                new_weights[n] = p
-        return GraniteMoeModel._load_weights(self, new_weights.items())
+    hf_to_vllm_mapper = GraniteMoeModel.hf_to_vllm_mapper
+    load_weights = GraniteMoeModel.load_weights
 
 
-class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -281,7 +259,7 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(
             config.vocab_size,
@@ -320,8 +298,5 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

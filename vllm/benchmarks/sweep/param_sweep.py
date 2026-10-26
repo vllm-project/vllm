@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import os
-from typing import Any
 
 
 class ParameterSweep(list["ParameterSweepItem"]):
@@ -19,14 +18,14 @@ class ParameterSweep(list["ParameterSweepItem"]):
 
     @classmethod
     def read_from_dict(cls, data: dict[str, dict[str, object]]):
-        """
-        Read parameter sweep from a dict format where keys are names.
+        """Read parameter sweep from a dict format where keys are names.
 
         Example:
             {
                 "experiment1": {"max_tokens": 100, "temperature": 0.7},
                 "experiment2": {"max_tokens": 200, "temperature": 0.9}
             }
+
         """
         records = [{"_benchmark_name": name, **params} for name, params in data.items()]
         return cls.from_records(records)
@@ -62,13 +61,12 @@ class ParameterSweepItem(dict[str, object]):
 
         return cls(record)
 
-    def __or__(self, other: dict[str, Any]):
-        return type(self)(super().__or__(other))
+    def __or__(self, other: dict[str, object], /) -> "ParameterSweepItem":  # type: ignore[override]
+        return ParameterSweepItem(super().__or__(other))
 
     @property
     def name(self) -> str:
-        """
-        Get the name for this parameter sweep item.
+        """Get the name for this parameter sweep item.
 
         Returns the '_benchmark_name' field if present, otherwise returns a text
         representation of all parameters.
@@ -104,8 +102,7 @@ class ParameterSweepItem(dict[str, object]):
         return any(k in self for k in self._iter_param_key_candidates(param_key))
 
     def _normalize_cmd_kv_pair(self, k: str, v: object) -> list[str]:
-        """
-        Normalize a key-value pair into command-line arguments.
+        """Normalize a key-value pair into command-line arguments.
 
         Returns a list containing either:
         - A single element for boolean flags (e.g., ['--flag'] or ['--flag=true'])

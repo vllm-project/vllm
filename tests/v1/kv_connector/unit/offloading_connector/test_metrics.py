@@ -2,17 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from prometheus_client import Counter, Gauge, Histogram
 
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorLogging
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    KV_OFFLOAD_CONFIG_INFO,
     OffloadingConnectorStats,
     OffloadPromMetrics,
+    _ConnectorMetricName,
     _MetricType,
     _StatsKey,
     _TransferMetricName,
+    get_connector_metric_definitions,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -22,7 +26,8 @@ from vllm.v1.kv_offload.base import (
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
 )
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 
 LOAD_BYTES = _TransferMetricName.LOAD_BYTES
 LOAD_TIME = _TransferMetricName.LOAD_TIME
@@ -33,6 +38,44 @@ STORE_SIZE = _TransferMetricName.STORE_SIZE
 STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
 PENDING_STORES = "vllm:kv_offload_pending_stores"
 LOOKUP_LATENCY = "vllm:kv_offload_lookup_latency_seconds"
+MY_COUNTER = "my_counter"
+MY_LABEL = "my_label"
+
+
+def test_connector_metric_histogram_buckets():
+    metadata = get_connector_metric_definitions()
+
+    sync_delay = metadata[_ConnectorMetricName.LOOKUP_SYNC_DELAY]
+    assert isinstance(sync_delay, OffloadingHistogramMetadata)
+    assert sync_delay.buckets == (
+        0.00001,
+        0.00005,
+        0.0001,
+        0.0005,
+        0.001,
+        0.005,
+        0.01,
+        0.05,
+        0.1,
+        0.5,
+        1,
+    )
+
+    async_delay = metadata[_ConnectorMetricName.LOOKUP_ASYNC_DELAY]
+    assert isinstance(async_delay, OffloadingHistogramMetadata)
+    assert async_delay.buckets == (
+        0.0001,
+        0.0005,
+        0.001,
+        0.005,
+        0.01,
+        0.05,
+        0.1,
+        0.5,
+        1,
+        5,
+        10,
+    )
 
 
 class _FakeMetric:
@@ -61,10 +104,35 @@ class _FakeMetric:
 
 
 class _FakeVllmConfig:
-    def __init__(self, store_threshold: int = 2):
-        self.kv_transfer_config = SimpleNamespace(
-            kv_connector_extra_config={"store_threshold": store_threshold}
-        )
+    def __init__(
+        self,
+        store_threshold: int = 2,
+        extra_config: dict[str, Any] | None = None,
+    ):
+        config = {"store_threshold": store_threshold}
+        if extra_config is not None:
+            config.update(extra_config)
+        self.kv_transfer_config = SimpleNamespace(kv_connector_extra_config=config)
+
+
+def _spec_cls_with_metric_definitions(
+    metric_definitions: dict[str, Any],
+    info_keys: tuple[str, ...] = (),
+) -> type:
+    """Build a fake offloading spec class reporting the given metric
+    definitions and info label names, so tests don't need to patch the real
+    CPU spec."""
+
+    class _FakeOffloadingSpec:
+        @staticmethod
+        def build_metric_definitions(extra_config):
+            return metric_definitions
+
+        @staticmethod
+        def config_info_keys(extra_config):
+            return info_keys
+
+    return _FakeOffloadingSpec
 
 
 def _metric_metadata():
@@ -96,7 +164,15 @@ def _metric_metadata():
         LOOKUP_LATENCY: OffloadingHistogramMetadata(
             documentation="lookup latency",
         ),
+        MY_COUNTER: OffloadingCounterMetadata(
+            documentation="counter with a label",
+            labelnames=(MY_LABEL,),
+        ),
     }
+
+
+def _unlabeled(values: dict[str, Any], metric_name: str) -> Any:
+    return values[metric_name][()]
 
 
 def test_build_kv_connector_stats_with_none():
@@ -131,13 +207,13 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
             STORES_SKIPPED: _MetricType.COUNTER,
         },
         _StatsKey.DATA: {
-            LOAD_BYTES: 24,
-            LOAD_TIME: 1.5,
-            LOAD_SIZE: [16, 8],
-            STORE_BYTES: 3,
-            STORE_TIME: 0.3,
-            STORE_SIZE: [1, 2],
-            STORES_SKIPPED: 5,
+            LOAD_BYTES: {(): 24},
+            LOAD_TIME: {(): 1.5},
+            LOAD_SIZE: {(): [16, 8]},
+            STORE_BYTES: {(): 3},
+            STORE_TIME: {(): 0.3},
+            STORE_SIZE: {(): [1, 2]},
+            STORES_SKIPPED: {(): 5},
         },
     }
 
@@ -145,22 +221,28 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
 
     assert isinstance(stats, OffloadingConnectorStats)
     values = stats.data[_StatsKey.DATA]
-    assert values[LOAD_BYTES] == 24
-    assert values[LOAD_TIME] == 1.5
-    assert values[LOAD_SIZE] == [16, 8]
-    assert values[STORE_BYTES] == 3
-    assert values[STORE_TIME] == 0.3
-    assert values[STORE_SIZE] == [1, 2]
-    assert values[STORES_SKIPPED] == 5
+    assert _unlabeled(values, LOAD_BYTES) == 24
+    assert _unlabeled(values, LOAD_TIME) == 1.5
+    assert _unlabeled(values, LOAD_SIZE) == [16, 8]
+    assert _unlabeled(values, STORE_BYTES) == 3
+    assert _unlabeled(values, STORE_TIME) == 0.3
+    assert _unlabeled(values, STORE_SIZE) == [1, 2]
+    assert _unlabeled(values, STORES_SKIPPED) == 5
 
 
 def _make_stats_data(
     metric_data: dict[str, Any],
     metric_metadata: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a structured data dict from flat metric data and metadata."""
+    """Build a structured data dict from flat metric data and metadata.
+
+    Values for unlabeled metrics may be passed flat (wrapped here under the
+    empty label tuple); values for labeled metrics must already be passed as
+    a ``{labelvalues: value}`` map.
+    """
     metric_types = {}
-    for key in metric_data:
+    data = {}
+    for key, value in metric_data.items():
         md = metric_metadata[key]
         if isinstance(md, OffloadingCounterMetadata):
             metric_types[key] = _MetricType.COUNTER
@@ -168,9 +250,10 @@ def _make_stats_data(
             metric_types[key] = _MetricType.GAUGE
         elif isinstance(md, OffloadingHistogramMetadata):
             metric_types[key] = _MetricType.HISTOGRAM
+        data[key] = value if md.labelnames else {(): value}
     return {
         _StatsKey.TYPES: metric_types,
-        _StatsKey.DATA: metric_data,
+        _StatsKey.DATA: data,
     }
 
 
@@ -215,34 +298,106 @@ def test_aggregate_same_connector():
 
     assert result is stats1  # Should return self
     values = result.data[_StatsKey.DATA]
-    assert values[LOAD_BYTES] == 34
-    assert values[LOAD_TIME] == 2.6
-    assert values[LOAD_SIZE] == [16, 8, 3, 7]
-    assert values[STORE_BYTES] == 19
-    assert values[STORE_TIME] == 2.3
-    assert values[STORE_SIZE] == [1, 2, 16]
-    assert values[STORES_SKIPPED] == 4
-    assert values[PENDING_STORES] == 1
-    assert values[LOOKUP_LATENCY] == [0.1, 0.2, 0.3]
+    assert _unlabeled(values, LOAD_BYTES) == 34
+    assert _unlabeled(values, LOAD_TIME) == 2.6
+    assert _unlabeled(values, LOAD_SIZE) == [16, 8, 3, 7]
+    assert _unlabeled(values, STORE_BYTES) == 19
+    assert _unlabeled(values, STORE_TIME) == 2.3
+    assert _unlabeled(values, STORE_SIZE) == [1, 2, 16]
+    assert _unlabeled(values, STORES_SKIPPED) == 4
+    assert _unlabeled(values, PENDING_STORES) == 1
+    assert _unlabeled(values, LOOKUP_LATENCY) == [0.1, 0.2, 0.3]
+
+
+def test_aggregate_labeled_metrics():
+    metadata = _metric_metadata()
+    stats1 = OffloadingConnectorStats(
+        data=_make_stats_data(
+            {
+                MY_COUNTER: {
+                    ("a",): 10,
+                    ("b",): 3,
+                },
+            },
+            metadata,
+        ),
+    )
+    stats2 = OffloadingConnectorStats(
+        data=_make_stats_data(
+            {
+                MY_COUNTER: {
+                    ("a",): 7,
+                    ("c",): 5,
+                },
+            },
+            metadata,
+        ),
+    )
+
+    stats1.aggregate(stats2)
+
+    values = stats1.data[_StatsKey.DATA][MY_COUNTER]
+    assert values[("a",)] == 17
+    assert values[("b",)] == 3
+    assert values[("c",)] == 5
+
+
+def test_aggregate_labeled_metric_missing_from_self():
+    """Aggregating a labeled metric that self doesn't have at all yet."""
+    metadata = _metric_metadata()
+    stats1 = OffloadingConnectorStats()
+    stats2 = OffloadingConnectorStats(
+        data=_make_stats_data(
+            {
+                MY_COUNTER: {
+                    ("a",): 7,
+                    ("b",): 5,
+                },
+            },
+            metadata,
+        ),
+    )
+
+    stats1.aggregate(stats2)
+
+    values = stats1.data[_StatsKey.DATA][MY_COUNTER]
+    assert values[("a",)] == 7
+    assert values[("b",)] == 5
+    assert stats1.data[_StatsKey.TYPES][MY_COUNTER] == _MetricType.COUNTER
+
+
+def test_helper_methods_accept_labeled_metrics():
+    stats = OffloadingConnectorStats()
+
+    stats.increase_counter(MY_COUNTER, 3, ("a",))
+    stats.increase_counter(MY_COUNTER, 4, ("a",))
+    stats.set_gauge(PENDING_STORES, 2, ("b",))
+    stats.observe_histogram(LOOKUP_LATENCY, 0.1, ("b",))
+    stats.observe_histogram(LOOKUP_LATENCY, 0.2, ("b",))
+
+    values = stats.data[_StatsKey.DATA]
+    assert values[MY_COUNTER][("a",)] == 7
+    assert values[PENDING_STORES][("b",)] == 2
+    assert values[LOOKUP_LATENCY][("b",)] == [0.1, 0.2]
 
 
 def test_aggregate_merges_types():
     stats1 = OffloadingConnectorStats(
         data={
             _StatsKey.TYPES: {LOAD_BYTES: _MetricType.COUNTER},
-            _StatsKey.DATA: {LOAD_BYTES: 1},
+            _StatsKey.DATA: {LOAD_BYTES: {(): 1}},
         },
     )
     stats2 = OffloadingConnectorStats(
         data={
             _StatsKey.TYPES: {PENDING_STORES: _MetricType.GAUGE},
-            _StatsKey.DATA: {PENDING_STORES: 2},
+            _StatsKey.DATA: {PENDING_STORES: {(): 2}},
         },
     )
 
     result = stats1.aggregate(stats2)
 
-    assert result.data[_StatsKey.DATA][PENDING_STORES] == 2
+    assert _unlabeled(result.data[_StatsKey.DATA], PENDING_STORES) == 2
     assert result.data[_StatsKey.TYPES][PENDING_STORES] == _MetricType.GAUGE
 
 
@@ -283,6 +438,26 @@ def test_reduce():
     assert reduced[f"{LOOKUP_LATENCY}_sum"] == sum([0.1, 0.2, 0.3])
 
 
+def test_reduce_labeled_metrics():
+    metadata = _metric_metadata()
+    stats = OffloadingConnectorStats(
+        data=_make_stats_data(
+            {
+                MY_COUNTER: {
+                    ("a",): 17,
+                    ("b",): 3,
+                },
+            },
+            metadata,
+        ),
+    )
+
+    reduced = stats.reduce()
+
+    assert reduced[f"{MY_COUNTER}:{('a',)}"] == 17
+    assert reduced[f"{MY_COUNTER}:{('b',)}"] == 3
+
+
 def test_reset():
     """Test that reset() resets all connector stats."""
     metadata = _metric_metadata()
@@ -313,7 +488,7 @@ def test_reset():
 
 def test_prom_metrics_observes_manager_counter():
     prom_metrics = OffloadPromMetrics(
-        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        vllm_config=_FakeVllmConfig(),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -326,11 +501,11 @@ def test_prom_metrics_observes_manager_counter():
     prom_metrics.observe(
         {
             _StatsKey.TYPES: {STORES_SKIPPED: _MetricType.COUNTER},
-            _StatsKey.DATA: {STORES_SKIPPED: 7},
+            _StatsKey.DATA: {STORES_SKIPPED: {(): 7}},
         }
     )
 
-    counter = prom_metrics.offloading_metrics[(0, STORES_SKIPPED)]
+    counter = prom_metrics.offloading_metrics[(0, STORES_SKIPPED, ())]
     assert counter.increments == [7]
     counter_def = prom_metrics._offloading_metric_defs[STORES_SKIPPED]
     assert counter_def.kwargs["name"] == "vllm:kv_offload_stores_skipped"
@@ -339,7 +514,7 @@ def test_prom_metrics_observes_manager_counter():
 
 def test_prom_metrics_observes_flat_transfer_metrics_and_legacy_metrics():
     prom_metrics = OffloadPromMetrics(
-        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        vllm_config=_FakeVllmConfig(),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -360,22 +535,22 @@ def test_prom_metrics_observes_flat_transfer_metrics_and_legacy_metrics():
                 STORE_SIZE: _MetricType.HISTOGRAM,
             },
             _StatsKey.DATA: {
-                LOAD_BYTES: 24,
-                LOAD_TIME: 1.5,
-                LOAD_SIZE: [16, 8],
-                STORE_BYTES: 3,
-                STORE_TIME: 0.3,
-                STORE_SIZE: [1, 2],
+                LOAD_BYTES: {(): 24},
+                LOAD_TIME: {(): 1.5},
+                LOAD_SIZE: {(): [16, 8]},
+                STORE_BYTES: {(): 3},
+                STORE_TIME: {(): 0.3},
+                STORE_SIZE: {(): [1, 2]},
             },
         }
     )
 
-    assert prom_metrics.offloading_metrics[(0, LOAD_BYTES)].increments == [24]
-    assert prom_metrics.offloading_metrics[(0, LOAD_TIME)].increments == [1.5]
-    assert prom_metrics.offloading_metrics[(0, LOAD_SIZE)].observed == [16, 8]
-    assert prom_metrics.offloading_metrics[(0, STORE_BYTES)].increments == [3]
-    assert prom_metrics.offloading_metrics[(0, STORE_TIME)].increments == [0.3]
-    assert prom_metrics.offloading_metrics[(0, STORE_SIZE)].observed == [1, 2]
+    assert prom_metrics.offloading_metrics[(0, LOAD_BYTES, ())].increments == [24]
+    assert prom_metrics.offloading_metrics[(0, LOAD_TIME, ())].increments == [1.5]
+    assert prom_metrics.offloading_metrics[(0, LOAD_SIZE, ())].observed == [16, 8]
+    assert prom_metrics.offloading_metrics[(0, STORE_BYTES, ())].increments == [3]
+    assert prom_metrics.offloading_metrics[(0, STORE_TIME, ())].increments == [0.3]
+    assert prom_metrics.offloading_metrics[(0, STORE_SIZE, ())].observed == [1, 2]
 
     assert prom_metrics.counter_kv_bytes[(0, "CPU_to_GPU")].increments == [24]
     assert prom_metrics.counter_kv_transfer_time[(0, "CPU_to_GPU")].increments == [1.5]
@@ -396,10 +571,12 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
         ),
     }
     with patch.object(
-        CPUOffloadingSpec, "build_metric_definitions", return_value=metric_definitions
+        OffloadingSpecFactory,
+        "get_spec_cls",
+        return_value=_spec_cls_with_metric_definitions(metric_definitions),
     ):
         prom_metrics = OffloadPromMetrics(
-            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            vllm_config=_FakeVllmConfig(store_threshold=0),
             metric_types={
                 Gauge: _FakeMetric,
                 Counter: _FakeMetric,
@@ -416,23 +593,94 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
                 LOOKUP_LATENCY: _MetricType.HISTOGRAM,
             },
             _StatsKey.DATA: {
-                PENDING_STORES: 5,
-                LOOKUP_LATENCY: [0.2, 0.4],
+                PENDING_STORES: {(): 5},
+                LOOKUP_LATENCY: {(): [0.2, 0.4]},
             },
         }
     )
 
-    gauge = prom_metrics.offloading_metrics[(0, PENDING_STORES)]
-    histogram = prom_metrics.offloading_metrics[(0, LOOKUP_LATENCY)]
+    gauge = prom_metrics.offloading_metrics[(0, PENDING_STORES, ())]
+    histogram = prom_metrics.offloading_metrics[(0, LOOKUP_LATENCY, ())]
     assert gauge.set_values == [5]
     assert histogram.observed == [0.2, 0.4]
     histogram_def = prom_metrics._offloading_metric_defs[LOOKUP_LATENCY]
     assert histogram_def.kwargs["buckets"] == (0.1, 1.0)
 
 
+def test_prom_metrics_lazily_observes_labeled_metric():
+    metric_definitions = {
+        MY_COUNTER: OffloadingCounterMetadata(
+            documentation="counter with a label",
+            labelnames=(MY_LABEL,),
+        ),
+    }
+    with patch.object(
+        OffloadingSpecFactory,
+        "get_spec_cls",
+        return_value=_spec_cls_with_metric_definitions(metric_definitions),
+    ):
+        prom_metrics = OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"]},
+        )
+
+    assert (0, MY_COUNTER, ("a",)) not in prom_metrics.offloading_metrics
+
+    prom_metrics.observe(
+        {
+            _StatsKey.TYPES: {MY_COUNTER: _MetricType.COUNTER},
+            _StatsKey.DATA: {MY_COUNTER: {("a",): 7}},
+        }
+    )
+
+    counter = prom_metrics.offloading_metrics[(0, MY_COUNTER, ("a",))]
+    assert counter.increments == [7]
+    assert counter.labelvalues == ("model", "0", "a")
+    counter_def = prom_metrics._offloading_metric_defs[MY_COUNTER]
+    assert counter_def.kwargs["labelnames"] == ["model_name", "engine", MY_LABEL]
+
+
+def test_prom_metrics_rejects_wrong_label_count():
+    metric_definitions = {
+        MY_COUNTER: OffloadingCounterMetadata(
+            documentation="counter with a label",
+            labelnames=(MY_LABEL,),
+        ),
+    }
+    with patch.object(
+        OffloadingSpecFactory,
+        "get_spec_cls",
+        return_value=_spec_cls_with_metric_definitions(metric_definitions),
+    ):
+        prom_metrics = OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"]},
+        )
+
+    with pytest.raises(AssertionError, match="expects 1 labels"):
+        prom_metrics.observe(
+            {
+                _StatsKey.TYPES: {MY_COUNTER: _MetricType.COUNTER},
+                _StatsKey.DATA: {MY_COUNTER: {("a", "extra"): 7}},
+            }
+        )
+
+
 def test_prom_metrics_uses_configured_manager_metrics():
     prom_metrics = OffloadPromMetrics(
-        vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+        vllm_config=_FakeVllmConfig(store_threshold=0),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -443,6 +691,30 @@ def test_prom_metrics_uses_configured_manager_metrics():
     )
 
     assert STORES_SKIPPED not in prom_metrics._offloading_metric_metadata
+
+
+def test_prom_metrics_registers_tiering_metrics_from_spec():
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(
+            store_threshold=0,
+            extra_config={
+                "spec_name": "TieringOffloadingSpec",
+                "secondary_tiers": [],
+            },
+        ),
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    metric = prom_metrics._offloading_metric_defs[
+        TieringOffloadingMetrics.CHUNK_QUERIES
+    ]
+    assert metric.kwargs["labelnames"] == ["model_name", "engine", "tier"]
 
 
 def test_aggregate_into_empty_stats():
@@ -458,9 +730,9 @@ def test_aggregate_into_empty_stats():
                 PENDING_STORES: _MetricType.GAUGE,
             },
             _StatsKey.DATA: {
-                LOAD_BYTES: 42,
-                LOAD_SIZE: [10, 20],
-                PENDING_STORES: 3,
+                LOAD_BYTES: {(): 42},
+                LOAD_SIZE: {(): [10, 20]},
+                PENDING_STORES: {(): 3},
             },
         },
     )
@@ -469,15 +741,15 @@ def test_aggregate_into_empty_stats():
 
     assert result is empty
     values = result.data[_StatsKey.DATA]
-    assert values[LOAD_BYTES] == 42
-    assert values[LOAD_SIZE] == [10, 20]
-    assert values[PENDING_STORES] == 3
+    assert _unlabeled(values, LOAD_BYTES) == 42
+    assert _unlabeled(values, LOAD_SIZE) == [10, 20]
+    assert _unlabeled(values, PENDING_STORES) == 3
 
 
 def test_prom_metrics_multi_engine_routing():
     """Metrics are routed to the correct engine index."""
     prom_metrics = OffloadPromMetrics(
-        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        vllm_config=_FakeVllmConfig(),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -490,21 +762,20 @@ def test_prom_metrics_multi_engine_routing():
     prom_metrics.observe(
         {
             _StatsKey.TYPES: {LOAD_BYTES: _MetricType.COUNTER},
-            _StatsKey.DATA: {LOAD_BYTES: 100},
+            _StatsKey.DATA: {LOAD_BYTES: {(): 100}},
         },
         engine_idx=1,
     )
 
-    engine0 = prom_metrics.offloading_metrics[(0, LOAD_BYTES)]
-    engine1 = prom_metrics.offloading_metrics[(1, LOAD_BYTES)]
-    assert engine0.increments == []
+    assert (0, LOAD_BYTES, ()) not in prom_metrics.offloading_metrics
+    engine1 = prom_metrics.offloading_metrics[(1, LOAD_BYTES, ())]
     assert engine1.increments == [100]
 
 
 def test_prom_metrics_rejects_undeclared_metric():
     """observe() asserts if a metric was never declared in metadata."""
     prom_metrics = OffloadPromMetrics(
-        vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+        vllm_config=_FakeVllmConfig(store_threshold=0),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -518,6 +789,336 @@ def test_prom_metrics_rejects_undeclared_metric():
         prom_metrics.observe(
             {
                 _StatsKey.TYPES: {"unknown:metric": _MetricType.COUNTER},
-                _StatsKey.DATA: {"unknown:metric": 1},
+                _StatsKey.DATA: {"unknown:metric": {(): 1}},
             }
         )
+
+
+def _prom_metrics(
+    metric_definitions: dict[str, Any] | None = None,
+    info_keys: tuple[str, ...] = (),
+):
+    """Build OffloadPromMetrics over fake metric classes, with one engine."""
+    spec_cls = _spec_cls_with_metric_definitions(metric_definitions or {}, info_keys)
+    with patch.object(OffloadingSpecFactory, "get_spec_cls", return_value=spec_cls):
+        return OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"], 1: ["model", "1"]},
+        )
+
+
+def test_prom_metrics_keeps_a_gauge_declared_multiprocess_mode():
+    """A gauge that declares its own multiprocess_mode keeps it.
+
+    The value on OffloadingGaugeMetadata must stay a default. A hardcoded
+    "mostrecent" in _create_metric passes the info-gauge test below and
+    silently overrides a gauge that needs another merge, for example a real
+    cross-frontend sum.
+    """
+    prom_metrics = _prom_metrics(
+        {
+            PENDING_STORES: OffloadingGaugeMetadata(
+                documentation="gauge declaring a non-default multiprocess mode.",
+                multiprocess_mode="sum",
+            ),
+        }
+    )
+
+    gauge_def = prom_metrics._offloading_metric_defs[PENDING_STORES]
+    assert gauge_def.kwargs["multiprocess_mode"] == "sum"
+
+
+def test_prom_metrics_omits_multiprocess_mode_outside_a_gauge():
+    """multiprocess_mode reaches a gauge only.
+
+    prometheus_client accepts the argument on Gauge alone, so hoisting the
+    kwarg out of the gauge branch breaks construction of a real Counter or
+    Histogram.
+    """
+    prom_metrics = _prom_metrics(
+        {
+            MY_COUNTER: OffloadingCounterMetadata(documentation="a counter."),
+            LOOKUP_LATENCY: OffloadingHistogramMetadata(
+                documentation="a histogram.",
+                buckets=(0.1, 1),
+            ),
+        }
+    )
+
+    counter_def = prom_metrics._offloading_metric_defs[MY_COUNTER]
+    histogram_def = prom_metrics._offloading_metric_defs[LOOKUP_LATENCY]
+    assert "multiprocess_mode" not in counter_def.kwargs
+    assert "multiprocess_mode" not in histogram_def.kwargs
+
+
+def test_prom_metrics_declares_the_info_gauge_from_the_spec_keys():
+    """The API-server process holds no manager, but it does hold the spec, so
+    it declares the gauge at startup, before any payload."""
+    prom_metrics = _prom_metrics(info_keys=("cpu_num_chunks", "root_dir_name"))
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["name"] == KV_OFFLOAD_CONFIG_INFO
+    assert gauge_def.kwargs["labelnames"] == [
+        "model_name",
+        "engine",
+        "cpu_num_chunks",
+        "root_dir_name",
+    ]
+    # The frontend declares the metric and binds no label values, so an engine
+    # that never reports exposes no series.
+    assert gauge_def.children == []
+
+    prom_metrics.observe(
+        {_StatsKey.INFO: [{"cpu_num_chunks": 512, "root_dir_name": "a"}]}
+    )
+
+    # Every value renders as a label value, and the metric itself is pinned
+    # to 1.
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0", "512", "a")
+    assert gauge.set_values == [1]
+
+
+def test_prom_metrics_reads_the_info_payload_by_label_name():
+    """A manager orders config_info() as it likes, and msgpack keeps that
+    order, so the frontend must key on the name rather than on the position."""
+    prom_metrics = _prom_metrics(info_keys=("first", "second"))
+
+    prom_metrics.observe({_StatsKey.INFO: [{"second": 2, "first": 1}]})
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0", "1", "2")
+
+
+def test_prom_metrics_reports_one_info_series_for_each_mapping():
+    """A manager reports one mapping for each series, and a label of its own
+    tells the series apart. Two mappings of one kind agree on every other value,
+    so without that label they collapse into one series."""
+    prom_metrics = _prom_metrics(info_keys=("source", "root_dir_name"))
+
+    prom_metrics.observe(
+        {
+            _StatsKey.INFO: [
+                {"source": "1", "root_dir_name": "a"},
+                {"source": "2", "root_dir_name": "b"},
+            ]
+        }
+    )
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert [child.labelvalues for child in gauge_def.children] == [
+        ("model", "0", "1", "a"),
+        ("model", "0", "2", "b"),
+    ]
+    assert [child.set_values for child in gauge_def.children] == [[1], [1]]
+
+
+def test_prom_metrics_declares_the_info_gauge_as_most_recent():
+    """The info gauge must merge across frontends by freshest write.
+
+    Offloading stats reach one frontend per step as complete per-engine
+    snapshots, so summing would report the number of participating API-server
+    processes instead of the 1 an info gauge is pinned to -- wrong only under
+    multiprocess deployment, and silently, since the facts ride the labels.
+    """
+    prom_metrics = _prom_metrics(info_keys=("cpu_num_chunks",))
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["multiprocess_mode"] == "mostrecent"
+
+
+def test_prom_metrics_reports_the_info_gauge_without_manager_labels():
+    """A spec that declares no fact still yields the metric, so its presence
+    alone answers whether offloading runs."""
+    prom_metrics = _prom_metrics()
+
+    prom_metrics.observe({_StatsKey.INFO: [{}]})
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["labelnames"] == ["model_name", "engine"]
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0")
+
+
+def test_prom_metrics_empties_a_declared_info_label_no_manager_fills():
+    """A name the spec declares and the manager skips must publish empty.
+
+    PromQL reads an empty label value as an absent label, so the series still
+    matches both shapes. This code runs on the engine output path of the API
+    server, where an exception ends the output handler, so it warns and goes
+    on rather than drop the whole series.
+    """
+    prom_metrics = _prom_metrics(info_keys=("filled", "skipped"))
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics.logger"
+    ) as mock_logger:
+        prom_metrics.observe({_StatsKey.INFO: [{"filled": 512}]})
+
+    assert mock_logger.warning_once.call_count == 1
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0", "512", "")
+
+
+def test_prom_metrics_keeps_quiet_when_a_name_belongs_to_another_series():
+    """A name that one series owns reads empty on the other series by design.
+
+    The declaration holds the names of every series, so the frontend checks the
+    payload as a whole. A per-series check would read this normal shape as a
+    disagreement, and warn at every start of a server that reports several
+    series.
+    """
+    prom_metrics = _prom_metrics(info_keys=("source", "root_dir_name", "bucket"))
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics.logger"
+    ) as mock_logger:
+        prom_metrics.observe(
+            {
+                _StatsKey.INFO: [
+                    {"source": "1", "root_dir_name": "kv_a"},
+                    {"source": "2", "bucket": "kv_bucket"},
+                ]
+            }
+        )
+
+    mock_logger.warning_once.assert_not_called()
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert [child.labelvalues for child in gauge_def.children] == [
+        ("model", "0", "1", "kv_a", ""),
+        ("model", "0", "2", "", "kv_bucket"),
+    ]
+
+
+def test_prom_metrics_drops_an_info_label_the_spec_did_not_declare():
+    """A Prometheus metric binds its label names once, so a name that the spec
+    did not declare cannot join the gauge. It warns and publishes the rest."""
+    prom_metrics = _prom_metrics(info_keys=("declared",))
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics.logger"
+    ) as mock_logger:
+        prom_metrics.observe({_StatsKey.INFO: [{"declared": 512, "undeclared": 1}]})
+
+    assert mock_logger.warning_once.call_count == 1
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["labelnames"] == ["model_name", "engine", "declared"]
+    (gauge,) = gauge_def.children
+    assert gauge.labelvalues == ("model", "0", "512")
+
+
+def test_prom_metrics_reports_the_info_of_every_engine():
+    """Every engine of one instance runs one offloading config, so they share
+    the gauge and differ by the engine label alone."""
+    prom_metrics = _prom_metrics(info_keys=("cpu_num_chunks",))
+
+    prom_metrics.observe({_StatsKey.INFO: [{"cpu_num_chunks": 512}]}, engine_idx=0)
+    prom_metrics.observe({_StatsKey.INFO: [{"cpu_num_chunks": 512}]}, engine_idx=1)
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert [child.labelvalues for child in gauge_def.children] == [
+        ("model", "0", "512"),
+        ("model", "1", "512"),
+    ]
+
+
+def test_stats_hold_the_config_info_without_an_observation():
+    """An info-only payload must survive the scheduler gate, which drops an
+    empty payload, and must add no line to the interval log."""
+    stats = OffloadingConnectorStats()
+    assert stats.is_empty()
+
+    stats.set_info([{"cpu_num_chunks": 512}])
+
+    assert not stats.is_empty()
+    assert stats.reduce() == {}
+
+
+def test_aggregate_keeps_the_config_info_of_the_other_payload():
+    """The scheduler payload holds the info and merges into the worker payload
+    (v1/core/sched/scheduler.py), so a dropped info would hide the metric on
+    every step that also transfers, which is every step that matters."""
+    worker_stats = OffloadingConnectorStats()
+    worker_stats.increase_counter(LOAD_BYTES, 100)
+    scheduler_stats = OffloadingConnectorStats()
+    scheduler_stats.set_info([{"cpu_num_chunks": 512}])
+
+    worker_stats.aggregate(scheduler_stats)
+
+    assert worker_stats.data[_StatsKey.INFO] == [{"cpu_num_chunks": 512}]
+    assert worker_stats.data[_StatsKey.DATA][LOAD_BYTES] == {(): 100}
+
+
+def test_aggregate_keeps_the_config_info_of_a_later_payload():
+    """The scheduler sends the info once, so a later payload must not clear
+    it."""
+    stats = OffloadingConnectorStats()
+    stats.set_info([{"cpu_num_chunks": 512}])
+    later_stats = OffloadingConnectorStats()
+    later_stats.increase_counter(LOAD_BYTES, 100)
+
+    stats.aggregate(later_stats)
+
+    assert stats.data[_StatsKey.INFO] == [{"cpu_num_chunks": 512}]
+
+
+def test_metric_sections_leave_out_the_config_info():
+    """A manager accesses its own metrics by a walk over the metric sections, as
+    KVCRSecondaryTierManager does in v1/kv_offload/tiering/kvcr/manager.py. The
+    info section holds label names, not metric names, so it stays out of that
+    walk."""
+    stats = OffloadingConnectorStats()
+    stats.increase_counter(MY_COUNTER, 2, ("remote_deliver",))
+    stats.set_info([{"info_label": "local"}])
+
+    info = stats.data[_StatsKey.INFO]
+    sections = stats.metric_sections()
+
+    assert not any(section is info for section in sections)
+    assert sections == (stats.data[_StatsKey.TYPES], stats.data[_StatsKey.DATA])
+
+
+def test_logging_writes_no_line_for_an_info_only_payload():
+    """An info-only payload reaches the logging path, and reduce() drops the info.
+
+    The info belongs to the Prometheus frontend only. Without the guard in
+    KVConnectorLogging.log(), such a payload writes "KV Transfer metrics: "
+    with an empty body.
+    """
+    stats = OffloadingConnectorStats()
+    stats.set_info([{"info_label": "local"}])
+    assert not stats.is_empty()
+    assert stats.reduce() == {}
+
+    kv_logging = KVConnectorLogging(None)
+    kv_logging.transfer_stats_accumulator = stats
+    log_fn = MagicMock()
+
+    kv_logging.log(log_fn=log_fn)
+
+    log_fn.assert_not_called()
+    assert kv_logging.transfer_stats_accumulator is None
+
+
+def test_scheduler_sends_the_config_info_once(request_runner):
+    """MockOffloadingSpec publishes no fact, so the payload holds one empty
+    mapping, which still yields the metric."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+
+    stats = runner.connector_scheduler.get_stats()
+
+    assert stats is not None
+    assert stats.data[_StatsKey.INFO] == [{}]
+    assert runner.connector_scheduler.get_stats() is None

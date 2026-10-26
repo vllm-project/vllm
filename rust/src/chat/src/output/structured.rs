@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Adapts parsed assistant updates into structured chat events.
 //!
 //! This module remains the final assembly stage in `vllm-chat`. Token-to-text
@@ -7,12 +10,14 @@
 
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{StreamExt as _, pin_mut};
+use vllm_llm::RequestTimestamps;
 use vllm_text::DecodedLogprobs;
 
 use super::{AssistantEvent, AssistantEventStream};
 use crate::error::Error;
 use crate::event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantToolCall, ChatEvent,
+    ChatTokenUsage,
 };
 use crate::{FinishReason, Result};
 
@@ -53,16 +58,23 @@ struct StructuredEventState {
     open_tool_call: Option<OpenToolCall>,
     /// Next OpenAI-compatible tool-call ordinal.
     next_tool_call_index: usize,
+    /// Maximum number of tool calls surfaced northbound, or `None` for no
+    /// limit. Later parsed calls are suppressed.
+    max_tool_calls: Option<usize>,
+    /// Whether the current tool-call parse is being suppressed.
+    suppressing_tool_call: bool,
 }
 
 impl StructuredEventState {
     /// Create one fresh assembly state for a new streamed response.
-    fn new() -> Self {
+    fn new(max_tool_calls: Option<usize>) -> Self {
         Self {
             message: AssistantMessage::default(),
             open_text_block: None,
             open_tool_call: None,
             next_tool_call_index: 0,
+            max_tool_calls,
+            suppressing_tool_call: false,
         }
     }
 
@@ -71,10 +83,11 @@ impl StructuredEventState {
         &mut self,
         kind: AssistantBlockKind,
         delta: String,
+        token_count: Option<usize>,
     ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         self.close_open_tool_call(&mut events);
-        self.push_text_delta(kind, delta, &mut events);
+        self.push_text_delta(kind, delta, token_count, &mut events);
         Ok(events)
     }
 
@@ -98,6 +111,12 @@ impl StructuredEventState {
 
         let index = self.next_tool_call_index;
         self.next_tool_call_index += 1;
+        if self.max_tool_calls.is_some_and(|max| index >= max) {
+            self.suppressing_tool_call = true;
+            return Ok(events);
+        }
+
+        self.suppressing_tool_call = false;
         self.open_tool_call = Some(OpenToolCall {
             index,
             id: id.clone(),
@@ -110,6 +129,10 @@ impl StructuredEventState {
 
     /// Append one incremental tool-call arguments delta.
     fn push_tool_call_arguments(&mut self, delta: String) -> Result<Vec<ChatEvent>> {
+        if self.suppressing_tool_call {
+            return Ok(Vec::new());
+        }
+
         let mut events = Vec::new();
         let Some(open_tool_call) = self.open_tool_call.as_mut() else {
             return Err(Error::ToolCallStreamInvariant {
@@ -127,20 +150,22 @@ impl StructuredEventState {
     /// Close any open block and emit the terminal `Done` event.
     fn finish(
         &mut self,
-        prompt_token_count: usize,
-        output_token_count: usize,
+        usage: ChatTokenUsage,
+        timestamps: RequestTimestamps,
         finish_reason: FinishReason,
-        kv_transfer_params: Option<serde_json::Value>,
+        kv_transfer_params: Option<Box<serde_json::Value>>,
+        ec_transfer_params: Option<Box<serde_json::Value>>,
     ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         self.close_open_text_block(&mut events);
         self.close_open_tool_call(&mut events);
         events.push(ChatEvent::Done {
             message: self.message.clone(),
-            prompt_token_count,
-            output_token_count,
+            usage,
+            timestamps,
             finish_reason,
             kv_transfer_params,
+            ec_transfer_params,
         });
         Ok(events)
     }
@@ -151,6 +176,7 @@ impl StructuredEventState {
         &mut self,
         kind: AssistantBlockKind,
         delta: String,
+        token_count: Option<usize>,
         events: &mut Vec<ChatEvent>,
     ) {
         if delta.is_empty() {
@@ -165,6 +191,7 @@ impl StructuredEventState {
                     index: open_block.index,
                     kind,
                     delta,
+                    token_count,
                 });
             }
             // Otherwise, close the currently open block (if any) and start a
@@ -178,7 +205,12 @@ impl StructuredEventState {
                     text: delta.clone(),
                 });
                 events.push(ChatEvent::BlockStart { index, kind });
-                events.push(ChatEvent::BlockDelta { index, kind, delta });
+                events.push(ChatEvent::BlockDelta {
+                    index,
+                    kind,
+                    delta,
+                    token_count,
+                });
             }
         }
     }
@@ -209,6 +241,11 @@ impl StructuredEventState {
 
     /// Finalize the currently open tool call, if present.
     fn close_open_tool_call(&mut self, events: &mut Vec<ChatEvent>) {
+        if self.suppressing_tool_call {
+            self.suppressing_tool_call = false;
+            return;
+        }
+
         let Some(open_tool_call) = self.open_tool_call.take() else {
             return;
         };
@@ -231,11 +268,12 @@ impl StructuredEventState {
 #[try_stream]
 pub(crate) async fn structured_chat_event_stream(
     stream: impl AssistantEventStream,
+    max_tool_calls: Option<usize>,
     mut y: TryYielder<ChatEvent, Error>,
 ) -> Result<()> {
     pin_mut!(stream);
 
-    let mut state = StructuredEventState::new();
+    let mut state = StructuredEventState::new(max_tool_calls);
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
@@ -249,8 +287,12 @@ pub(crate) async fn structured_chat_event_stream(
                 })
                 .await;
             }
-            AssistantEvent::TextDelta { kind, delta } => {
-                for next in state.process_text_delta(kind, delta)? {
+            AssistantEvent::TextDelta {
+                kind,
+                delta,
+                token_count,
+            } => {
+                for next in state.process_text_delta(kind, delta, token_count)? {
                     y.yield_ok(next).await;
                 }
             }
@@ -273,16 +315,18 @@ pub(crate) async fn structured_chat_event_stream(
                 }
             }
             AssistantEvent::Done {
-                prompt_token_count,
-                output_token_count,
+                usage,
+                timestamps,
                 finish_reason,
                 kv_transfer_params,
+                ec_transfer_params,
             } => {
                 for next in state.finish(
-                    prompt_token_count,
-                    output_token_count,
+                    usage,
+                    timestamps,
                     finish_reason,
                     kv_transfer_params,
+                    ec_transfer_params,
                 )? {
                     y.yield_ok(next).await;
                 }
@@ -299,7 +343,7 @@ mod tests {
     use super::structured_chat_event_stream;
     use crate::FinishReason;
     use crate::error::Error;
-    use crate::event::{AssistantBlockKind, AssistantMessageExt as _, ChatEvent};
+    use crate::event::{AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatTokenUsage};
     use crate::output::AssistantEvent;
 
     #[tokio::test]
@@ -313,14 +357,19 @@ mod tests {
                 delta: r#"{"city":"Paris"}"#.to_string(),
             }),
             Ok(AssistantEvent::Done {
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                }),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
-        let events = structured_chat_event_stream(events)
+        let events = structured_chat_event_stream(events, None)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -364,14 +413,19 @@ mod tests {
                 delta: r#"{"b":2}"#.to_string(),
             }),
             Ok(AssistantEvent::Done {
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                }),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
-        let events = structured_chat_event_stream(events)
+        let events = structured_chat_event_stream(events, None)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -403,6 +457,7 @@ mod tests {
             Ok(AssistantEvent::TextDelta {
                 kind: AssistantBlockKind::Text,
                 delta: "before".to_string(),
+                token_count: None,
             }),
             Ok(AssistantEvent::ToolCallStart {
                 id: "call_1".to_string(),
@@ -412,14 +467,19 @@ mod tests {
                 delta: r#"{"city":"Paris"}"#.to_string(),
             }),
             Ok(AssistantEvent::Done {
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                }),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
-        let events = structured_chat_event_stream(events)
+        let events = structured_chat_event_stream(events, None)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -458,16 +518,22 @@ mod tests {
             Ok(AssistantEvent::TextDelta {
                 kind: AssistantBlockKind::Text,
                 delta: "done".to_string(),
+                token_count: None,
             }),
             Ok(AssistantEvent::Done {
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                }),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
-        let events = structured_chat_event_stream(events)
+        let events = structured_chat_event_stream(events, None)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -495,7 +561,7 @@ mod tests {
             delta: "{}".to_string(),
         })]);
 
-        let err = structured_chat_event_stream(events)
+        let err = structured_chat_event_stream(events, None)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -504,5 +570,110 @@ mod tests {
             .expect_err("expected invariant error");
 
         assert!(matches!(err, Error::ToolCallStreamInvariant { .. }));
+    }
+
+    #[tokio::test]
+    async fn structured_stream_suppresses_later_tool_calls_when_parallel_disabled() {
+        let events = stream::iter(vec![
+            Ok(AssistantEvent::ToolCallStart {
+                id: "call_1".to_string(),
+                name: "first".to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallArgumentsDelta {
+                delta: r#"{"a":1}"#.to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallStart {
+                id: "call_2".to_string(),
+                name: "second".to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallArgumentsDelta {
+                delta: r#"{"b":2}"#.to_string(),
+            }),
+            Ok(AssistantEvent::Done {
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                }),
+                timestamps: Default::default(),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let events = structured_chat_event_stream(events, Some(1))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(matches!(
+            events[0],
+            ChatEvent::ToolCallStart { index: 0, .. }
+        ));
+        assert!(matches!(
+            events[1],
+            ChatEvent::ToolCallArgumentsDelta { index: 0, .. }
+        ));
+        assert!(matches!(events[2], ChatEvent::ToolCallEnd { index: 0, .. }));
+        let ChatEvent::Done { message, .. } = &events[3] else {
+            panic!("expected done");
+        };
+        let tool_calls = message.tool_calls().collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "first");
+    }
+
+    #[tokio::test]
+    async fn structured_stream_forwards_reasoning_token_count() {
+        let events = stream::iter(vec![
+            Ok(AssistantEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(AssistantEvent::TextDelta {
+                kind: AssistantBlockKind::Reasoning,
+                delta: "think".to_string(),
+                token_count: Some(3),
+            }),
+            Ok(AssistantEvent::Done {
+                usage: ChatTokenUsage {
+                    engine: vllm_llm::TokenUsage {
+                        prompt_token_count: 1,
+                        output_token_count: 4,
+                        cached_token_count: 0,
+                    },
+                    reasoning_tokens: 3,
+                },
+                timestamps: Default::default(),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let events = structured_chat_event_stream(events, None)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(matches!(events[0], ChatEvent::Start { .. }));
+        assert!(matches!(
+            events[2],
+            ChatEvent::BlockDelta {
+                kind: AssistantBlockKind::Reasoning,
+                token_count: Some(3),
+                ..
+            }
+        ));
+        let ChatEvent::Done { usage, .. } = &events[4] else {
+            panic!("expected done");
+        };
+        assert_eq!(usage.reasoning_tokens, 3);
+        assert_eq!(usage.output_token_count, 4);
     }
 }

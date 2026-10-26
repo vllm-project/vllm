@@ -185,8 +185,11 @@ def test_deepseek_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_gptoss_mxfp4bf16_moe_flashinfer(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "1")
-    can_initialize("openai/gpt-oss-20b", hf_overrides=HF_OVERRIDE_TEXT)
+    can_initialize(
+        "openai/gpt-oss-20b",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=flashinfer_trtllm"],
+    )
 
 
 def test_gptoss_mxfp4mxfp8_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
@@ -280,7 +283,7 @@ def test_nemotron_fp8_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
     )
 
 
-def test_nemotron_fp4_moe_flashinfer_throughput(monkeypatch: pytest.MonkeyPatch):
+def test_nemotron_fp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
         hf_overrides=HF_OVERRIDE_TEXT,
@@ -288,16 +291,99 @@ def test_nemotron_fp4_moe_flashinfer_throughput(monkeypatch: pytest.MonkeyPatch)
     )
 
 
-@pytest.mark.skip(
-    reason=(
-        "FP4 MoE backend FLASHINFER_TRTLLM does not support the "
-        "deployment configuration since kernel does not support "
-        "hidden_dim % 512 != 0."
-    )
-)
-def test_nemotron_fp4_moe_flashinfer_latency(monkeypatch: pytest.MonkeyPatch):
+def test_nemotron_fp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
         hf_overrides=HF_OVERRIDE_TEXT,
         extra_args=["--moe-backend=flashinfer_trtllm"],
     )
+
+
+def test_nemotron_nvfp4_per_token_moe_flashinfer_trtllm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    can_initialize(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=[
+            "--moe-backend=flashinfer_trtllm",
+            "--quantization-config.moe.activation=nvfp4_per_token",
+        ],
+    )
+
+
+def test_modelopt_nvfp4_dummy_scales(tmp_path, monkeypatch, vllm_runner):
+    """Dummy NVFP4 MoE weights load with valid scales and produce finite logits."""
+    import math
+
+    import torch
+    from transformers import Qwen3MoeConfig
+
+    from vllm import SamplingParams
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4FusedMoE,
+    )
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    config = Qwen3MoeConfig(
+        vocab_size=128,
+        hidden_size=512,
+        intermediate_size=512,
+        moe_intermediate_size=512,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        head_dim=64,
+        num_experts=8,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+    )
+    config.architectures = ["Qwen3MoeForCausalLM"]
+    config.quantization_config = {
+        "quant_method": "modelopt",
+        "quant_algo": "NVFP4",
+        "group_size": 16,
+        "kv_cache_quant_algo": None,
+        "exclude_modules": ["lm_head", "model.layers.*.self_attn.*"],
+    }
+    config.save_pretrained(tmp_path)
+
+    def check_scales(model):
+        experts = [m for m in model.modules() if isinstance(m, RoutedExperts)]
+        assert len(experts) == 1
+        layer = experts[0]
+        assert isinstance(layer.quant_method, ModelOptNvFp4FusedMoE)
+        assert layer.moe_config.moe_backend == "flashinfer_trtllm"
+        for name, param in layer.named_parameters():
+            if "scale" in name:
+                values = param.float()
+                assert torch.isfinite(values).all(), name
+                assert (values > 0).all(), name
+
+    with vllm_runner(
+        str(tmp_path),
+        dtype="bfloat16",
+        load_format="dummy",
+        moe_backend="flashinfer_trtllm",
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        enable_flashinfer_autotune=False,
+        max_model_len=32,
+        max_num_seqs=1,
+        max_num_batched_tokens=32,
+        kv_cache_memory_bytes=16 << 20,
+    ) as llm:
+        llm.apply_model(check_scales)
+        outputs = llm.get_llm().generate(
+            [{"prompt_token_ids": [1, 2, 3]}],
+            SamplingParams(temperature=0, max_tokens=2, ignore_eos=True, logprobs=1),
+        )
+        completion = outputs[0].outputs[0]
+        assert len(completion.token_ids) == 2
+        assert len(completion.logprobs) == 2
+        assert all(
+            math.isfinite(value.logprob)
+            for step in completion.logprobs
+            for value in step.values()
+        )

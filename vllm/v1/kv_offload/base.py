@@ -1,36 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Core abstractions for KV cache offloading in vLLM v1.
-"""
+"""Core abstractions for KV cache offloading in vLLM v1."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Iterator, Sequence
-from dataclasses import dataclass
-from enum import Enum
-from typing import TYPE_CHECKING, Any, NewType
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, field, fields
+from enum import Enum, auto
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 
 import numpy as np
 import torch
-from typing_extensions import override
-
-from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
         OffloadingConnectorStats,
     )
-    from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.kv_offload.worker.worker import OffloadingHandler
+
+from vllm.v1.kv_hints import KvHintsEnvelope
+from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
 # its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
 # Use the helper functions below to construct / decompose keys.
 OffloadKey = NewType("OffloadKey", bytes)
-
-logger = init_logger(__name__)
 
 
 def make_offload_key(block_hash: bytes, group_idx: int) -> OffloadKey:
@@ -48,40 +42,118 @@ def get_offload_group_idx(key: OffloadKey) -> int:
     return int.from_bytes(key[-4:], "big", signed=False)
 
 
+_T = TypeVar("_T")
+
+
+class Medium(Enum):
+    """Storage medium of an offloading tier."""
+
+    CPU = "CPU"
+    STORAGE = "STORAGE"
+
+
+class Locality(Enum):
+    """Locality of a tier's storage relative to the publishing instance."""
+
+    LOCAL = "LOCAL"
+    REMOTE = "REMOTE"
+
+
+class TierMatcher(NamedTuple):
+    medium: Medium | None = None
+    locality: Locality | None = None
+
+    def matches(self, medium: Medium | None, locality: Locality | None) -> bool:
+        medium_matches = self.medium is None or medium is None or self.medium == medium
+        locality_matches = (
+            self.locality is None or locality is None or self.locality == locality
+        )
+        return medium_matches and locality_matches
+
+
+@dataclass(frozen=True)
+class TierFilter:
+    """Per-request filter controlling which tiers participate."""
+
+    matchers: tuple[TierMatcher, ...] = ()
+
+    ALL: ClassVar["TierFilter"]
+
+    def allows(self, medium: Medium | None, locality: Locality | None) -> bool:
+        if self is TierFilter.ALL:
+            return True
+        return any(m.matches(medium, locality) for m in self.matchers)
+
+
+TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
+
+
 @dataclass
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+    kv_hints: KvHintsEnvelope | None = None
+    load_tier_filter: TierFilter = TierFilter.ALL
+    # Per-request scratch space keyed by value type, so a tier can parse
+    # kv_transfer_params and kv_hints once (in on_new_request) and read the
+    # result back on later calls for the same request.
+    _state: dict[type, Any] = field(default_factory=dict, repr=False, init=False)
+    # End-token position for each key in this request. The scheduler records
+    # these positions so managers can recover prefix order even when store
+    # calls arrive out of order (for example, SWA backfills).
+    _offload_key_positions: dict[OffloadKey, int] = field(
+        default_factory=dict, repr=False, init=False
+    )
+
+    def set_state(self, val: Any) -> None:
+        self._state[type(val)] = val
+
+    def get_state(self, cls: type[_T]) -> _T | None:
+        return self._state.get(cls)
+
+    def set_offload_key_position(self, key: OffloadKey, end_token: int) -> None:
+        self._offload_key_positions[key] = end_token
+
+    def get_offload_key_position(self, key: OffloadKey) -> int | None:
+        return self._offload_key_positions.get(key)
+
+
+class LookupResult(Enum):
+    """Result of OffloadingManager.lookup()."""
+
+    MISS = auto()
+    HIT = auto()
+    HIT_PENDING = auto()
+    RETRY = auto()
 
 
 class OffloadPolicy(Enum):
-    # Offload only newly-computed blocks as they arrive; prefix-hit
-    # blocks (already offloaded by a prior request) are skipped.
-    BLOCK_LEVEL = "block_level"
-    # Offload all blocks for the request, including prefix hits.
+    # Offload only newly-computed chunks as they arrive; prefix-hit
+    # chunks (already offloaded by a prior request) are skipped.
+    CHUNK_LEVEL = "chunk_level"
+    # Offload all chunks for the request, including prefix hits.
     # Used by tiers that need the complete KV context for a request.
     REQUEST_LEVEL = "request_level"
 
 
 @dataclass
 class RequestOffloadingContext:
-    policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
+    policy: OffloadPolicy = OffloadPolicy.CHUNK_LEVEL
 
 
-class LoadStoreSpec(ABC):
-    """
-    Abstract metadata that encapsulates information allowing a worker
+class ScheduleEndContext(NamedTuple):
+    """Per-step scheduling info passed to on_schedule_end()."""
+
+    # Request IDs scheduled for the first time this step.
+    new_req_ids: Collection[str]
+    # Request IDs preempted this step.
+    preempted_req_ids: Collection[str]
+
+
+class LoadStoreSpec:
+    """Metadata that encapsulates information allowing a worker
     to load, and optionally also to store, blocks of KV data.
     """
-
-    @staticmethod
-    @abstractmethod
-    def medium() -> str:
-        """
-        Returns a string representation of the medium type
-        this store/load targets.
-        """
-        pass
 
 
 @dataclass
@@ -94,9 +166,15 @@ class PrepareStoreOutput:
 @dataclass
 class OffloadingEvent:
     keys: list[OffloadKey]
-    medium: str
+    medium: Medium
     # True if blocks are removed, False if stored
     removed: bool
+    locality: Locality | None = None
+    # Secondary tier identifier that generated the event, or None for primary.
+    ownership: str | None = None
+    removal_expected: bool = False
+    # Failed allocations release metadata without announcing a public eviction.
+    metadata_only: bool = False
 
 
 """
@@ -123,12 +201,23 @@ The class provides the following primitives:
         as well as a list of blocks that were evicted as a result.
     complete_store() - marks a previous store as completed.
         Following this call, the given blocks will become loadable.
+
+Exclusion:
+    lock is a context manager guarding a manager's whole state subtree: the
+    manager itself, every tier it composes, and any front-end state those
+    tiers own. Manager methods never take the lock themselves, so a caller
+    holds it across as many operations as its invariants need -- notably a
+    lookup() HIT and the prepare_load() that pins the result, which must not
+    be separated by another thread's eviction. The default is a no-op;
+    managers that can be entered from more than one thread supply a real
+    lock.
 """
 
 
 @dataclass(frozen=True)
 class OffloadingMetricMetadata:
     documentation: str
+    labelnames: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -138,7 +227,12 @@ class OffloadingCounterMetadata(OffloadingMetricMetadata):
 
 @dataclass(frozen=True)
 class OffloadingGaugeMetadata(OffloadingMetricMetadata):
-    pass
+    # Gauge-only in prometheus_client: how MultiProcessCollector merges samples
+    # written by different API-server processes. Offloading stats reach one
+    # frontend per step as complete per-engine snapshots, so the freshest write
+    # is the correct value and summing would multiply it by the number of
+    # participating frontends.
+    multiprocess_mode: str = "mostrecent"
 
 
 @dataclass(frozen=True)
@@ -146,23 +240,94 @@ class OffloadingHistogramMetadata(OffloadingMetricMetadata):
     buckets: tuple[float, ...] | None = None
 
 
+@dataclass(frozen=True)
+class OffloadingKVEventsConfig:
+    # Global vLLM KV event publishing flag. When false, connector-specific
+    # event capture must stay inert because take_events() is not drained.
+    enable_kv_cache_events: bool
+    # OffloadingConnector opt-in for self-describing BlockStored payloads.
+    # Effective only when enable_kv_cache_events is true.
+    self_describing_kv_events: bool
+
+
+# The labels of one info metric series: a label name mapped to its value.
+ConfigInfoMapping = Mapping[str, str | int | float | bool]
+
+
+@dataclass(frozen=True)
+class ConfigInfo:
+    """Static facts that one component publishes on vllm:kv_offload_config_info.
+
+    Each field is one label. The OffloadingSpec declares the names with
+    config_info_keys(), and the OffloadingManager fills the values with
+    as_config_info(). A declared name that the manager does not fill reads
+    empty, and an undeclared name is dropped. The values must stay fixed for
+    the process lifetime. Document each field in
+    docs/features/kv_offloading_usage.md. See CPUOffloadingInfo for an example.
+    """
+
+    @classmethod
+    def config_info_keys(cls) -> tuple[str, ...]:
+        """Return one label name for each field, in field order."""
+        return tuple(info.name for info in fields(cls))
+
+    def as_config_info(self) -> ConfigInfoMapping:
+        """Return the label values. A None value becomes "None", not empty."""
+        values = (getattr(self, info.name) for info in fields(self))
+        return {
+            key: "None" if value is None else value
+            for key, value in zip(self.config_info_keys(), values)
+        }
+
+
 class OffloadingManager(ABC):
-    @abstractmethod
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    @property
+    def lock(self) -> AbstractContextManager[Any]:
+        """Context manager granting exclusive access to this manager's state.
+
+        Scope is the manager, every tier it composes, and any front-end state
+        those tiers own (e.g. a tier's async lookup front end). Every caller of
+        an OffloadingManager method, except shutdown(), must hold it. Manager
+        methods never enter it themselves, so a caller may hold it across an
+        arbitrary sequence of operations -- which is required wherever one call
+        establishes a fact a later call relies on, such as a lookup() HIT
+        followed by the prepare_load() that pins it.
+
+        The default is a no-op, for managers that are only ever entered from
+        one thread. A manager that may be entered from another thread -- its
+        own background thread, say -- returns a real lock instead. Callers must
+        not assume either: always enter it, and never re-enter it while held,
+        since a real lock need not be reentrant.
         """
-        Checks whether a single block is offloaded and ready to be read.
+        return nullcontext()
+
+    @abstractmethod
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        """Checks whether a single block is offloaded and ready to be read.
 
         Args:
             key: the key identifying the block to lookup.
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            True if the block is offloaded and ready, False if not,
-            or None if the lookup should be retried later.
-            Returning None will delay the request handling by the vLLM
-            scheduler.
+            HIT if the block is offloaded and ready, MISS if not found,
+            HIT_PENDING if found but not yet readable, or RETRY if the
+            lookup should be retried later.
+
         """
         pass
+
+    def get_load_source(
+        self, key: OffloadKey, req_context: ReqContext
+    ) -> CacheHitSource:
+        """Return the cache tier that supplied a successful lookup.
+
+        This is queried only after ``lookup`` resolves to ``HIT``. Composing
+        managers can override it to retain the origin across asynchronous
+        promotion into a primary tier. The default keeps out-of-tree managers
+        compatible while making unknown provenance explicit.
+        """
+        return CacheHitSource.EXTERNAL_UNSPECIFIED
 
     @abstractmethod
     def prepare_load(
@@ -170,8 +335,7 @@ class OffloadingManager(ABC):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> LoadStoreSpec:
-        """
-        Prepare the given blocks to be read.
+        """Prepare the given blocks to be read.
         The given blocks will be protected from eviction until
         complete_load is called.
         It assumes all given blocks are offloaded.
@@ -183,27 +347,28 @@ class OffloadingManager(ABC):
         Returns:
             A LoadStoreSpec that can be used by a worker to locate and load
             the actual offloaded KV data.
+
         """
         pass
 
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """
-        Mark the given blocks as recently used.
+        """Mark the given blocks as recently used.
         This could in practice mean moving them to the end of an LRU list.
 
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+
         """
         return
 
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """
-        Marks previous blocks that were prepared to load as done loading.
+        """Marks previous blocks that were prepared to load as done loading.
 
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+
         """
         return
 
@@ -213,8 +378,7 @@ class OffloadingManager(ABC):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
-        """
-        Prepare the given blocks to be offloaded.
+        """Prepare the given blocks to be offloaded.
         The given blocks will be protected from eviction until
         complete_store is called.
 
@@ -227,6 +391,7 @@ class OffloadingManager(ABC):
             where to store them (LoadStoreSpec), and list of blocks that
             were evicted as a result.
             None is returned if the blocks cannot be stored.
+
         """
         pass
 
@@ -236,8 +401,7 @@ class OffloadingManager(ABC):
         req_context: ReqContext,
         success: bool = True,
     ):
-        """
-        Marks blocks which were previously prepared to be stored, as stored.
+        """Marks blocks which were previously prepared to be stored, as stored.
         Following this call, the blocks become loadable.
         If success is False, blocks that were not marked as stored will be
         removed.
@@ -246,76 +410,122 @@ class OffloadingManager(ABC):
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
             success: whether the blocks were stored successfully.
+
         """
         return
 
     @abstractmethod
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        """
-        Called when a new request is first seen by the scheduler.
+        """Called when a new request is first seen by the scheduler.
 
         Returns a RequestOffloadingContext indicating how this request's
         blocks should be offloaded.
 
         Args:
             req_context: per-request context.
+
         """
         pass
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        """
-        Called when a request has finished.
+        """Called when a request has finished.
+
+        By the time this is called, the scheduler will issue no more
+        submit-side calls for this request, such as prepare_store() and
+        prepare_load(). Completion callbacks for already-submitted transfers
+        (complete_store() and complete_load()) may still arrive afterward.
+
+        This hook does NOT imply the data has been persisted. Asynchronous
+        transfers already submitted for this request may still be in flight.
+        Managers that cascade to lower tiers should delay those tiers'
+        on_request_finished() calls until no more lower-tier submit calls can
+        be issued for this request.
 
         Args:
             req_context: per-request context.
+
         """
         return
 
     def take_events(self) -> Iterable[OffloadingEvent]:
-        """
-        Take the offloading events from the manager.
+        """Take the offloading events from the manager.
+
+        A tier manager emits only events for storage state it owns. A
+        composing manager may aggregate child event streams, but should not
+        synthesize events on behalf of a child tier.
 
         Yields:
             New OffloadingEvents collected since the last call.
+
         """
         return ()
 
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.
+
+        This is the last manager call of a step: every lookup(), prepare_load(),
+        prepare_store() and on_request_finished() for the step has already been
+        issued.
 
         Managers may override this to flush deferred work accumulated
         during the step (e.g., batched promotions).
         """
         return
 
+    def has_pending_work(self) -> bool:
+        """Whether this manager needs the engine to keep stepping.
+
+        While True, on_schedule_end() and get_finished_jobs() continue
+        to be called even when no requests are scheduled.
+        """
+        return False
+
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
+        return
+
+    def on_reset_flushed(self) -> None:
+        """Called once workers have reported every job in flight at the last
+        reset_cache(); blocks it freed are no longer written by them."""
         return
 
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""
         return None
 
+    def config_info(self) -> Sequence[ConfigInfoMapping]:
+        """Return the info metric labels, one mapping for each series.
+
+        The scheduler reads this once. See ConfigInfo.
+        """
+        return [{}]
+
     def shutdown(self) -> None:
-        """Shutdown the manager and release any resources."""
+        """Shutdown the manager and release any resources.
+
+        The one exception to the rule that callers hold ``lock``: call this
+        without it. A manager with a background thread stops that thread here
+        and may need the lock to do so.
+        """
         return
 
 
 class BlockIDsLoadStoreSpec(LoadStoreSpec, ABC):
-    """
-    Spec for loading/storing KV blocks from given block numbers.
+    """Spec for loading/storing KV blocks from given block numbers.
+
+    Subclass semantics differ: GPULoadStoreSpec.block_ids are GPU block
+    indices; CPULoadStoreSpec.block_ids are CPU cache chunk indices.
     """
 
     def __init__(self, block_ids: list[int]):
-        self.block_ids = np.array(block_ids, dtype=np.int64)
+        self.block_ids = np.array(block_ids, dtype=np.int32)
 
     def __repr__(self) -> str:
         return repr(self.block_ids)
 
 
 class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
-    """
-    Spec for loading/storing a KV block to GPU memory.
+    """Spec for loading/storing a KV block to GPU memory.
 
     If there are multiple KV groups, the blocks are expected to be
     ordered by the group index.
@@ -346,21 +556,13 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
         self.group_sizes: Sequence[int] = group_sizes
         self.block_indices: Sequence[int] = block_indices
 
-    @staticmethod
-    @override
-    def medium() -> str:
-        return "GPU"
-
 
 @dataclass
 class CanonicalKVCacheTensor:
-    """
-    A canonicalized KV cache tensor whose first dimension is num_blocks.
+    """A canonicalized KV cache tensor whose first dimension is num_blocks.
 
-    For attention backends where the raw tensor has num_blocks at a
-    non-leading physical dimension (e.g. FlashAttention's
-    (2, num_blocks, ...) layout), the tensor is split so that each
-    resulting CanonicalKVCacheTensor starts with (num_blocks, ...).
+    With standardized layouts (RFC #42082) num_blocks is always the leading
+    logical dimension.
     """
 
     # The KV cache tensor with shape (num_blocks, ...)
@@ -369,10 +571,51 @@ class CanonicalKVCacheTensor:
     page_size_bytes: int
 
 
+@dataclass(frozen=True)
+class CopyRun:
+    """A strided byte correspondence between this worker's physical page and
+    a canonical page: for i in range(num_fragments), fragment i spans
+    [local_offset + i * local_stride, +fragment_size) in the worker's page and
+    [canonical_offset + i * canonical_stride, +fragment_size) canonically."""
+
+    local_offset: int
+    canonical_offset: int
+    fragment_size: int
+    num_fragments: int
+    local_stride: int
+    canonical_stride: int
+
+
+@dataclass(frozen=True)
+class CanonicalPageMapping:
+    """How this worker's page maps into a canonical (parallelism-free) page.
+    In-process only, never serialized. Runs cover the full local page in both
+    directions; ranks holding identical bytes take turns writing them.
+    """
+
+    # Size of the canonical page in bytes
+    canonical_page_size_bytes: int
+    # Size of this worker's (un-padded) page in bytes
+    local_page_size_bytes: int
+    # Byte correspondences between this worker's page and a canonical page
+    runs: tuple[CopyRun, ...]
+    # Number of ranks holding these exact bytes
+    num_writers: int
+    # This worker's index among those ranks
+    writer_index: int
+    # Canonical bytes identical under any parallel config with this block span
+    parallelism_agnostic: bool
+
+    def is_writer(self, block_id: int) -> bool:
+        """Whether this worker stores the canonical page of the given block.
+        Rotating by block spreads writes across ranks holding identical bytes.
+        """
+        return block_id % self.num_writers == self.writer_index
+
+
 @dataclass
 class CanonicalKVCacheRef:
-    """
-    Per-layer (or group of layers) reference to a specific (by index)
+    """Per-layer (or group of layers) reference to a specific (by index)
     CanonicalKVCacheTensor and records the un-padded page size used by that layer.
     """
 
@@ -380,12 +623,13 @@ class CanonicalKVCacheRef:
     tensor_idx: int
     # The un-padded page size per block in bytes
     page_size_bytes: int
+    # How this worker's page maps into a canonical page; None = uncertified
+    mapping: CanonicalPageMapping | None = None
 
 
 @dataclass
 class CanonicalKVCaches:
-    """
-    Canonicalized block-level representation of the KV caches.
+    """Canonicalized block-level representation of the KV caches.
 
     Composed of:
         - Unique list of KV cache data tensors,
@@ -402,6 +646,49 @@ class CanonicalKVCaches:
     group_data_refs: list[list[CanonicalKVCacheRef]]
 
 
+@dataclass
+class TransferResult:
+    job_id: int
+    success: bool
+    transfer_size: int | None = None
+    transfer_time: float | None = None
+
+
+class OffloadingWorker(ABC):
+    """Runs in the worker process. Performs async KV transfers for ONE
+    offloaded medium (e.g. CPU). Direction is explicit via submit_store /
+    submit_load, so there is no (src_medium, dst_medium) routing."""
+
+    @abstractmethod
+    def submit_store(
+        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        """Async GPU -> offloaded medium."""
+
+    @abstractmethod
+    def submit_load(
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: GPULoadStoreSpec,
+        expedited: bool = False,
+    ) -> bool:
+        """Async offloaded medium -> GPU.
+
+        An expedited load is waited on within the step, so it should not queue
+        behind regular loads. Submission itself must still not block.
+        """
+
+    @abstractmethod
+    def get_finished(self) -> list[TransferResult]: ...
+
+    @abstractmethod
+    def wait(self, job_ids: set[int]) -> None: ...
+
+    def shutdown(self) -> None:
+        return
+
+
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
 
@@ -412,17 +699,28 @@ class OffloadingSpec(ABC):
         """Return Prometheus metric definitions emitted by this spec."""
         return {}
 
-    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
-        logger.warning(
-            "Initializing OffloadingSpec. This API is experimental and "
-            "subject to change in the future as we iterate the design."
-        )
-        self.vllm_config = vllm_config
-        self.kv_cache_config = kv_cache_config
+    @classmethod
+    def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the info metric label names that the manager fills.
 
-        kv_transfer_config = vllm_config.kv_transfer_config
-        assert kv_transfer_config is not None
-        self.extra_config = kv_transfer_config.kv_connector_extra_config
+        See ConfigInfo.
+
+        Args:
+            extra_config: kv_connector_extra_config of this instance.
+
+        """
+        return ()
+
+    def __init__(self, config: OffloadingConfig):
+        self.config = config
+        self.extra_config = config.extra_config
+        self.replicated_layout: bool = False
+        self.kv_events_config = OffloadingKVEventsConfig(
+            enable_kv_cache_events=config.enable_kv_cache_events,
+            self_describing_kv_events=bool(
+                self.extra_config.get("self_describing_kv_events", False)
+            ),
+        )
 
         # When True, only prompt (prefill) blocks are offloaded; decode-phase
         # blocks (KV generated after the prompt) are skipped. Useful when prior
@@ -432,69 +730,27 @@ class OffloadingSpec(ABC):
             self.extra_config.get("offload_prompt_only", True)
         )
 
-        parallel_config = vllm_config.parallel_config
-        context_parallel_factor = (
-            parallel_config.decode_context_parallel_size
-            * parallel_config.prefill_context_parallel_size
-        )
-
-        # gpu block size per group
-        self.gpu_block_size: tuple[int, ...] = tuple(
-            kv_cache_group.kv_cache_spec.block_size * context_parallel_factor
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-        )
-
-        # hash_block_size must match what the scheduler uses for
-        # Request.block_hashes (resolved via resolve_kv_cache_block_sizes).
-        _, self.hash_block_size = resolve_kv_cache_block_sizes(
-            kv_cache_config, vllm_config
-        )
-
-        for block_size in self.gpu_block_size:
-            assert block_size % self.hash_block_size == 0, (
-                f"gpu_block_size={block_size} not divisible by "
-                f"hash_block_size={self.hash_block_size}. "
-                f"Hybrid models (e.g. Mamba+Attention) need "
-                f"--enable-prefix-caching to align block sizes."
-            )
-
-        # offloaded_block_size / gpu_block_size
-        self.block_size_factor: int = 1
-
-        offloaded_block_size = self.extra_config.get("block_size")
-        if offloaded_block_size is not None:
-            offloaded_block_size_int = int(offloaded_block_size)
-            gpu_block_sizes = set(self.gpu_block_size)
-            assert len(gpu_block_sizes) == 1, (
-                "If 'block_size' is specified in kv_connector_extra_config, "
-                "there must be at least one KV cache group, "
-                "and all groups must have the same block size."
-            )
-            gpu_block_size = gpu_block_sizes.pop()
-
-            assert offloaded_block_size_int % gpu_block_size == 0
-            self.block_size_factor = offloaded_block_size_int // gpu_block_size
+        self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)
+        self.tokens_per_hash = config.cache.tokens_per_hash
+        self.blocks_per_chunk = config.cache.blocks_per_chunk
 
     @abstractmethod
     def get_manager(self) -> OffloadingManager:
-        """
-        Get an OffloadingManager that will be used
+        """Get an OffloadingManager that will be used
         by the scheduler-side offloading connector to track
         offloaded blocks and manage evictions.
         """
         pass
 
     @abstractmethod
-    def get_handlers(
-        self, kv_caches: CanonicalKVCaches
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], "OffloadingHandler"]]:
-        """
-        Get offloading handlers along with their respective src and dst types.
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        """Get an OffloadingWorker that handles async KV transfers for this spec.
 
         Args:
             kv_caches: Canonicalized KV caches.
 
-        Yields:
-            Tuples of (src_type, dst_type, offloading_handler).
+        Returns:
+            An OffloadingWorker instance for this medium.
+
         """
         pass

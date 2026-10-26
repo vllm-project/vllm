@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Shared setuptools-rust build entry for the vllm-rs binary."""
+"""Shared setuptools-rust build entry for Rust artifacts."""
 
 from __future__ import annotations
 
@@ -11,11 +11,41 @@ from pathlib import Path
 
 from setuptools import setup
 from setuptools_rust import Binding, RustExtension
+from setuptools_scm import get_version
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+VLLM_RS_BUILD_VERSION = "VLLM_RS_BUILD_VERSION"
+
+# Select vLLM release tags, excluding crate tags such as "proto-v0.3.0".
+VLLM_GIT_DESCRIBE_COMMAND = [
+    "git",
+    "describe",
+    "--dirty",
+    "--tags",
+    "--long",
+    "--abbrev=40",
+    "--match",
+    "v[0-9]*",
+]
 
 
-def rust_extensions(*, optional: bool) -> list[RustExtension]:
+def prepare_build_environment() -> str | None:
+    """Set the device-independent vLLM source version for Rust artifacts."""
+    version = os.getenv(VLLM_RS_BUILD_VERSION) or None
+    if version is None:
+        try:
+            version = get_version(
+                root=ROOT_DIR,
+                git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
+            )
+        except LookupError:
+            return None
+
+    os.environ[VLLM_RS_BUILD_VERSION] = version
+    return version
+
+
+def rust_extensions(*, optional: bool = False) -> list[RustExtension]:
     return [
         RustExtension(
             target="vllm.vllm-rs",
@@ -25,7 +55,29 @@ def rust_extensions(*, optional: bool) -> list[RustExtension]:
             binding=Binding.Exec,
             optional=optional,
         ),
+        # Example PyO3 module (the removed tool-parser bridge):
+        # RustExtension(
+        #     target="vllm._rust_tool_parser",
+        #     path="rust/src/parser/python/Cargo.toml",
+        #     features=["pyo3/abi3-py38"],
+        #     binding=Binding.PyO3,
+        #     optional=optional,
+        #     py_limited_api=True,
+        # ),
     ]
+
+
+def rust_py_extension_module_names() -> list[str]:
+    module_names = []
+    for extension in rust_extensions():
+        if extension.binding != Binding.PyO3:
+            continue
+
+        for target_name in extension.target.values():
+            if target_name.startswith("vllm._rust_"):
+                module_names.append(target_name.rsplit(".", 1)[-1])
+
+    return module_names
 
 
 def build_binary(build_rust_args: list[str]) -> None:
@@ -40,6 +92,7 @@ def build_binary(build_rust_args: list[str]) -> None:
 
 
 def main() -> None:
+    prepare_build_environment()
     build_binary(sys.argv[1:])
 
 

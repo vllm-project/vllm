@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import socket
+import threading
 import time
 
 import msgspec
@@ -13,14 +14,33 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
+    OffloadingConnectorWorker,
+)
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
+from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 
-CPU_BLOCK_SIZES: int = 64 if current_platform.is_xpu() else 48
+# The offloaded block size must stay a whole number of GPU blocks.
+CPU_BLOCK_SIZES: int
+if current_platform.is_xpu():
+    CPU_BLOCK_SIZES = 64
+elif current_platform.is_rocm():
+    # ROCM_AITER_UNIFIED_ATTN prefers 64-token GPU blocks, so 192 covers both that
+    # and the 16-token default.
+    CPU_BLOCK_SIZES = 192
+else:
+    CPU_BLOCK_SIZES = 48
+
 _ATTN_BACKENDS: list[str] = []
 if current_platform.is_cuda():
     _ATTN_BACKENDS = ["FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"]
 elif current_platform.is_rocm():
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
     _ATTN_BACKENDS = ["TRITON_ATTN"]
+    if is_aiter_found_and_supported():
+        _ATTN_BACKENDS.append("ROCM_AITER_UNIFIED_ATTN")
 elif current_platform.is_xpu():
     _ATTN_BACKENDS = ["FLASH_ATTN", "TRITON_ATTN"]
 
@@ -45,7 +65,7 @@ if current_platform.is_cuda():
         # Falcon-H1: parallel hybrid (every layer has both attention and SSM).
         # The mamba and attention groups end up with different GPU block sizes
         # after page-size unification, so we leave cpu_block_size=None
-        # (block_size_factor stays 1).
+        # (blocks_per_chunk stays 1).
         ("tiiuae/Falcon-H1-0.5B-Instruct", None, None, True),
     ]
 
@@ -62,7 +82,7 @@ _EVENT_DRAIN_TIMEOUT = 60
 
 
 class MockSubscriber:
-    """Helper class to receive and verify published events"""
+    """Helper class to receive and verify published events."""
 
     def __init__(
         self,
@@ -107,7 +127,7 @@ class MockSubscriber:
         return cpu_stored_events
 
     def close(self):
-        """Clean up resources"""
+        """Clean up resources."""
         self.sub.close()
 
 
@@ -119,10 +139,6 @@ def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> Non
     ``False``. Between retries we send a dummy single-token prefill to force
     the engine to step, which polls the worker for completed transfers and
     frees GPU blocks.
-
-    Args:
-        llm: The LLM instance to reset.
-        reset_connector: If True, also reset the KV connector state.
     """
     _dummy_params = SamplingParams(max_tokens=1)
     deadline = time.monotonic() + _RESET_CACHE_TIMEOUT
@@ -141,9 +157,11 @@ def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> Non
         )
 
 
-def _latency_test(
-    llm: LLM, subscriber: MockSubscriber | None, reset_connector: bool = False
-):
+def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
+    # TODO: Reintroduce latency test on ROCm once MRV2 supports cross
+    # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947
+    if current_platform.is_rocm():
+        return
     sampling_params = SamplingParams(max_tokens=1)
 
     num_times_cpu_better_than_cold = 0
@@ -173,7 +191,7 @@ def _latency_test(
 
         # Wait for the async CPU offload to finish, then reset prefix cache
         # so the next generate() must reload from CPU rather than GPU.
-        _wait_for_prefix_cache_reset(llm, reset_connector=reset_connector)
+        _wait_for_prefix_cache_reset(llm)
 
         # Verify CPU stored events arrived (offload is done before we
         # attempt to load from CPU).
@@ -214,12 +232,21 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber | None):
     if subscriber is not None:
         subscriber.get_new_cpu_stored_events()
 
-    # Pad prompt so its token count is a multiple of cpu_block_size.
-    # Use the tokenizer directly to avoid expensive llm.generate() calls.
+    # Align the reusable prefix; the final token must be recomputed for logits.
     tokenizer = llm.get_tokenizer()
-    prompt = "Let's count to 10. One, two, three, four,"
-    while len(tokenizer.encode(prompt)) % cpu_block_size != 0:
-        prompt = ". " + prompt
+    prompt_token_ids = tokenizer.encode("Let's count to 10. One, two, three, four,")
+    reusable_prefix = prompt_token_ids[:-1]
+    final_token = prompt_token_ids[-1:]
+
+    [padding_token_id] = tokenizer.encode(".", add_special_tokens=False)
+    padding = [padding_token_id] * (-len(reusable_prefix) % cpu_block_size)
+    insert_at = int(reusable_prefix[0] == tokenizer.bos_token_id)
+    reusable_prefix[insert_at:insert_at] = padding
+    assert len(reusable_prefix) % cpu_block_size == 0
+
+    prompt = TokensPrompt(
+        prompt_token_ids=reusable_prefix + final_token,
+    )
 
     # Seed the CPU cache with the prompt.
     llm.generate(prompt, sampling_params, use_tqdm=False)
@@ -240,9 +267,7 @@ def test_cpu_offloading(
     cpu_block_size: int | None,
     uses_hma: bool,
 ) -> None:
-    """
-    Tests OffloadingConnector with CPUOffloadingSpec.
-    """
+    """Tests OffloadingConnector with CPUOffloadingSpec."""
     # configure OffloadingConnector (spec_name=CPUOffloadingSpec by default)
     extra_config: dict = {"cpu_bytes_to_use": 500 << 20}
     if cpu_block_size is not None:
@@ -253,23 +278,19 @@ def test_cpu_offloading(
         kv_connector_extra_config=extra_config,
     )
 
-    # KV events are incompatible with HMA (setting kv_events_config
-    # would force HMA off), so only enable them for non-HMA models.
     subscriber: MockSubscriber | None = None
-    kv_events_config: KVEventsConfig | None = None
-    if not uses_hma:
-        port: int
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("0.0.0.0", 0))
-            port = s.getsockname()[1]
+    port: int
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("0.0.0.0", 0))
+        port = s.getsockname()[1]
 
-        events_endpoint = f"tcp://*:{port}"
-        kv_events_config = KVEventsConfig(
-            enable_kv_cache_events=True,
-            publisher="zmq",
-            endpoint=events_endpoint,
-            topic="test",
-        )
+    events_endpoint = f"tcp://*:{port}"
+    kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint=events_endpoint,
+        topic="test",
+    )
 
     # Attention-free / hybrid models disable prefix caching by default
     # (ModelConfig.is_prefix_caching_supported returns False).  Without it,
@@ -291,9 +312,8 @@ def test_cpu_offloading(
         **({"max_num_seqs": 1} if current_platform.is_rocm() else {}),
     )
 
-    if kv_events_config is not None:
-        events_endpoint = events_endpoint.replace("*", "127.0.0.1")
-        subscriber = MockSubscriber(events_endpoint, topic=kv_events_config.topic)
+    events_endpoint = events_endpoint.replace("*", "127.0.0.1")
+    subscriber = MockSubscriber(events_endpoint, topic=kv_events_config.topic)
 
     try:
         _latency_test(llm, subscriber)
@@ -301,6 +321,80 @@ def test_cpu_offloading(
     finally:
         if subscriber is not None:
             subscriber.close()
+        del llm
+
+
+def _sliding_window_partial_chunk_test(llm: LLM) -> None:
+    vllm_config = llm.llm_engine.vllm_config
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    assert extra_config["store_threshold"] == 2
+    blocks_per_chunk = extra_config["blocks_per_chunk"]
+    block_size = vllm_config.cache_config.block_size
+    model_config = vllm_config.model_config
+    window = model_config.get_sliding_window()
+    assert window is not None
+    window_blocks = cdiv(window - 1, block_size)
+    assert window_blocks % blocks_per_chunk == 0
+    # Leaves blocks_per_chunk - 1 null sliding-window blocks in B's chunk 0.
+    hit_blocks = window_blocks + blocks_per_chunk - 1
+    vocab_size = model_config.get_vocab_size()
+
+    def token_ids(n: int, seed: int) -> list[int]:
+        return [10 + (seed + 37 * i) % (vocab_size - 10) for i in range(n)]
+
+    prompt_a = token_ids(hit_blocks * block_size + 4, seed=0)
+    prompt_b = prompt_a + [prompt_a[0]]
+    prompt_c = prompt_a[: window_blocks * block_size] + token_ids(40, seed=1)
+    one_token = SamplingParams(max_tokens=1)
+    greedy = SamplingParams(max_tokens=8, temperature=0.0, logprobs=5)
+
+    llm.generate(TokensPrompt(prompt_token_ids=prompt_a), one_token, use_tqdm=False)
+    [out_b] = llm.generate(
+        TokensPrompt(prompt_token_ids=prompt_b), one_token, use_tqdm=False
+    )
+    assert out_b.num_cached_tokens == hit_blocks * block_size
+    _wait_for_prefix_cache_reset(llm)
+    [out_c] = llm.generate(
+        TokensPrompt(prompt_token_ids=prompt_c), greedy, use_tqdm=False
+    )
+
+    _wait_for_prefix_cache_reset(llm, reset_connector=True)
+    [cold_c] = llm.generate(
+        TokensPrompt(prompt_token_ids=prompt_c), greedy, use_tqdm=False
+    )
+
+    assert out_c.outputs[0].token_ids == cold_c.outputs[0].token_ids
+    logprobs = out_c.outputs[0].logprobs
+    cold_logprobs = cold_c.outputs[0].logprobs
+    assert logprobs is not None and cold_logprobs is not None
+    assert logprobs[0].keys() == cold_logprobs[0].keys()
+    for token_id, cold in cold_logprobs[0].items():
+        assert logprobs[0][token_id].logprob == pytest.approx(cold.logprob, abs=1e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_cpu_offloading_sliding_window_partial_chunk() -> None:
+    """Tests offloaded chunks that span null sliding-window blocks."""
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 500 << 20,
+            "blocks_per_chunk": 8,
+            "store_threshold": 2,
+        },
+    )
+    llm = LLM(
+        model="google/gemma-3-1b-it",
+        max_model_len=2048,
+        gpu_memory_utilization=0.5,
+        kv_transfer_config=kv_transfer_config,
+        disable_hybrid_kv_cache_manager=False,
+        enable_prefix_caching=True,
+    )
+    try:
+        _sliding_window_partial_chunk_test(llm)
+    finally:
         del llm
 
 
@@ -388,22 +482,6 @@ def test_cpu_offloading_metrics() -> None:
                             continue
                         total += sample.value
             return total
-
-        # Stats are drained asynchronously — if the transfer finishes
-        # after the last engine step for that generate() call, the metrics
-        # won't appear until a subsequent step.  Retry with dummy generates
-        # to force additional stats drains.
-        deadline = time.monotonic() + _RESET_CACHE_TIMEOUT
-        while time.monotonic() < deadline:
-            store_bytes = _get_counter_value("vllm:kv_offload_store_bytes")
-            load_bytes = _get_counter_value("vllm:kv_offload_load_bytes")
-            if store_bytes > 0 and load_bytes > 0:
-                break
-            llm.generate(
-                [TokensPrompt(prompt_token_ids=[0])],
-                SamplingParams(max_tokens=1),
-                use_tqdm=False,
-            )
 
         # New flat counter metrics
         store_bytes = _get_counter_value("vllm:kv_offload_store_bytes")
@@ -549,8 +627,219 @@ def test_fs_tiering_offloading(tmp_path) -> None:
         topic=kv_events_config.topic,
     )
     try:
-        _latency_test(llm, subscriber, reset_connector=True)
+        _latency_test(llm, subscriber)
         _accuracy_test(llm, subscriber)
     finally:
         subscriber.close()
+        del llm
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="HMA mamba-align CPU offload test is CUDA-only",
+)
+@pytest.mark.parametrize(
+    "model,block_size,tp_size",
+    [
+        # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
+        # ("tiiuae/falcon-mamba-7b", 16, 1),
+        ("state-spaces/mamba-1.4b-hf", 16, 1),
+    ],
+)
+def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 4 << 30,
+            "block_size": block_size,
+        },
+    )
+    llm = LLM(
+        model=model,
+        max_model_len=block_size * 10,
+        gpu_memory_utilization=0.85,
+        tensor_parallel_size=tp_size,
+        kv_transfer_config=kv_transfer_config,
+        language_model_only=True,
+        enable_prefix_caching=True,
+        # Use lossless state storage so this exact-equality regression isolates
+        # offload boundary selection from low-precision Mamba checkpointing.
+        mamba_cache_dtype="float32",
+        mamba_ssm_cache_dtype="float32",
+        disable_hybrid_kv_cache_manager=False,
+    )
+
+    _PROMPT_SIZE: int = block_size * 2
+    # Cold prefill and offload-resume are not bit-exact (selective_scan_fn over
+    # the whole prompt vs selective_state_update for the recomputed token), so
+    # exact-text equality only holds while the rounding difference never flips a
+    # greedy argmax. Use a long, highly predictable prompt: it needs no "...."
+    # padding and keeps top-1 ahead of top-2 by >2.8 logprobs at every step.
+    _PROMPT_TEXT = (
+        "The cat sat on the mat. The cat sat on the mat. The cat sat on the mat. "
+        "The cat sat on the mat. The cat sat on the mat. The cat sat on the mat. "
+    )
+
+    # build prompt ids to match prompt_size
+    tokenizer = llm.get_tokenizer()
+    raw_ids: list[int] = tokenizer.encode(_PROMPT_TEXT)
+    while len(raw_ids) < _PROMPT_SIZE:
+        raw_ids = tokenizer.encode("....") + raw_ids
+    initial_ids: list[int] = raw_ids[:_PROMPT_SIZE]
+
+    sampling_params = SamplingParams(max_tokens=128, temperature=0, ignore_eos=True)
+
+    failures: list[str] = []
+
+    def _get_output_str(outputs):
+        return outputs[0].outputs[0].text
+
+    def _verify(llm, prompt, label: str):
+        cold_outputs = llm.generate([prompt], sampling_params, use_tqdm=False)
+        _wait_for_prefix_cache_reset(llm)
+        cpu_outputs = llm.generate([prompt], sampling_params, use_tqdm=False)
+
+        cold_text = _get_output_str(cold_outputs)
+        cpu_text = _get_output_str(cpu_outputs)
+        print(f"{label} : cold outputs\n{cold_text}")
+        print(f"{label} : cpu outputs\n{cpu_text}")
+
+        if cold_text != cpu_text:
+            failures.append(
+                f"{label}: mismatch\n  cold: {cold_text!r}\n  cpu:  {cpu_text!r}"
+            )
+
+    try:
+        # A cached Mamba entry is a point state. CPU cache stores are triggered
+        # at offload block boundaries. When the prompt is exactly at a boundary,
+        # CPU offload must not load that boundary's cached state because it already
+        # includes the last token that must be recomputed.
+        # This is fine for other attention types as we have all the necessary
+        # token KV values in the hit blocks.
+        prompt = TokensPrompt(prompt_token_ids=initial_ids)
+        _verify(llm, prompt, "block-boundary-prompt")
+
+        # Test for prompt token ids at non-block boundaries.
+        # Reuse is okay for this case.
+        prompt = TokensPrompt(prompt_token_ids=[0] + initial_ids)
+        _verify(llm, prompt, "block-mid-prompt")
+
+        assert not failures, "\n\n".join(failures)
+
+    finally:
+        del llm
+
+
+def _poll_until(condition, timeout_s: float, what: str) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not condition():
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"timed out after {timeout_s} s waiting for {what}")
+        time.sleep(0.05)
+
+
+def _num_fs_tier_files(root_dir) -> int:
+    """Chunks the fs tier has finished writing."""
+    return sum(1 for _ in root_dir.rglob("*.bin"))
+
+
+def test_tiering_cache_reset_resumes_promotions_on_idle_engine(
+    tmp_path, monkeypatch
+) -> None:
+    """A cache reset that flushes in-flight stores holds promotions until the
+    workers report those stores. The engine must keep stepping to collect the
+    reports even with no request left, or secondary-tier hits stay misses."""
+    # The engine core and its worker run in this process, so the test can
+    # withhold the worker's reports and step the engine itself.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    reports_open = threading.Event()
+    reports_open.set()
+    build_worker_meta = OffloadingConnectorWorker.build_connector_worker_meta
+
+    def gated_worker_meta(self):
+        # Withheld reports accumulate until the gate opens.
+        return build_worker_meta(self) if reports_open.is_set() else None
+
+    monkeypatch.setattr(
+        OffloadingConnectorWorker, "build_connector_worker_meta", gated_worker_meta
+    )
+    held = threading.Event()
+    released = threading.Event()
+    reset_cache = TieringOffloadingManager.reset_cache
+    on_reset_flushed = TieringOffloadingManager.on_reset_flushed
+
+    def record_reset(self) -> None:
+        reset_cache(self)
+        held.set()
+
+    def record_flushed(self) -> None:
+        released.set()
+        on_reset_flushed(self)
+
+    monkeypatch.setattr(TieringOffloadingManager, "reset_cache", record_reset)
+    monkeypatch.setattr(TieringOffloadingManager, "on_reset_flushed", record_flushed)
+
+    fs_root = tmp_path / "fs_tier"
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 256 << 20,
+            "block_size": CPU_BLOCK_SIZES,
+            "spec_name": "TieringOffloadingSpec",
+            "secondary_tiers": [{"type": "fs", "root_dir": str(fs_root)}],
+        },
+    )
+    sampling_params = SamplingParams(max_tokens=1)
+    # A prefix of whole offloaded blocks, plus the token to recompute.
+    num_prefix_chunks = 4
+    prefix = [100 + i for i in range(num_prefix_chunks * CPU_BLOCK_SIZES)]
+    prompt = TokensPrompt(prompt_token_ids=prefix + [7])
+
+    llm = LLM(
+        model="facebook/opt-125m",
+        max_model_len=2048,
+        gpu_memory_utilization=0.2,
+        # One step must schedule, run and collect its worker reports.
+        async_scheduling=False,
+        kv_transfer_config=kv_transfer_config,
+    )
+    engine = llm.llm_engine
+
+    def step_until(condition, what: str) -> None:
+        def stepped() -> bool:
+            engine.step()
+            return condition()
+
+        _poll_until(stepped, timeout_s=60, what=what)
+
+    try:
+        llm.generate(prompt, sampling_params, use_tqdm=False)
+        step_until(
+            lambda: _num_fs_tier_files(fs_root) >= num_prefix_chunks,
+            "the prompt to reach the fs tier",
+        )
+
+        # The workers keep the filler's stores unreported, so the reset
+        # flushes them in flight.
+        reports_open.clear()
+        filler = [5000 + i for i in range(num_prefix_chunks * CPU_BLOCK_SIZES)]
+        llm.generate(TokensPrompt(prompt_token_ids=filler + [7]), sampling_params)
+        # Steps that issue the finished filler's stores.
+        for _ in range(3):
+            engine.step()
+        assert not held.is_set()
+        llm.reset_prefix_cache(reset_connector=True)
+        assert held.is_set() and not released.is_set()
+
+        # No request is left, yet the engine must step until the workers'
+        # reports arrive.
+        reports_open.set()
+        step_until(released.is_set, "promotions to resume")
+        output = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+        # The reset emptied the GPU and CPU tiers: the prefix is promoted
+        # from the fs tier.
+        assert output.num_cached_tokens == len(prefix)
+    finally:
         del llm

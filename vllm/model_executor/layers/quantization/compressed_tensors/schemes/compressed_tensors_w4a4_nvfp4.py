@@ -3,10 +3,12 @@
 from collections.abc import Callable
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
+from vllm.model_executor.layers.fusion.quant_activation import (
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -15,6 +17,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 
 logger = init_logger(__name__)
 
@@ -87,6 +90,8 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             )
             layer.register_parameter("input_global_scale", input_global_scale)
 
+        expose_input_quant_key(layer, self.kernel)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Rename CT checkpoint names to standardized names
         layer.weight = layer.weight_packed
@@ -104,9 +109,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
         # Process weight global scale (CT stores as divisors, i.e. 1/scale)
         weight_global_scale = layer.weight_global_scale.max().to(torch.float32)
-        layer.weight_global_scale = Parameter(
-            1.0 / weight_global_scale, requires_grad=False
-        )
+        replace_parameter(layer, "weight_global_scale", 1.0 / weight_global_scale)
 
         if not self.use_a16:
             if torch.unique(layer.input_global_scale).numel() != 1:
@@ -119,17 +122,16 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                 )
             # Process input global scale and pre-compute alpha for W4A4 mode
             input_global_scale_inv = layer.input_global_scale.max().to(torch.float32)
-            layer.input_global_scale = Parameter(
-                (1.0 / input_global_scale_inv).to(torch.float32), requires_grad=False
+            replace_parameter(
+                layer,
+                "input_global_scale",
+                (1.0 / input_global_scale_inv).to(torch.float32),
             )
 
             # Pre-compute alpha and inverse for runtime quantization
-            layer.input_global_scale_inv = Parameter(
-                input_global_scale_inv, requires_grad=False
-            )
-            layer.alpha = Parameter(
-                layer.input_global_scale * layer.weight_global_scale,
-                requires_grad=False,
+            replace_parameter(layer, "input_global_scale_inv", input_global_scale_inv)
+            replace_parameter(
+                layer, "alpha", layer.input_global_scale * layer.weight_global_scale
             )
 
         # Convert layer to NVFP4 linear kernel format

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -9,6 +10,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
@@ -28,11 +30,13 @@ from vllm.distributed.utils import is_weak_contiguous  # noqa: E402, F401
 
 
 class QuickReduceRegime(Enum):
+    # Keep integer ids aligned with csrc/rocm/quickreduce/quick_reduce.h
     FP = 0
     INT8 = 1
     INT6 = 2
     INT4 = 3
-    NONE = 4
+    INT3 = 4
+    NONE = 5
 
 
 KB = 1024
@@ -43,24 +47,31 @@ class QuickAllReduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
     # The following data is based on kernel tests.
-    # In this order [FP, INT8, INT6, INT4].
+    # In this order [FP, INT8, INT6, INT4, INT3].
     _QR_MIN_SIZE = {
-        (torch.float16, 2): [1 * MB, 2 * MB, 2 * MB, 1 * MB],
-        (torch.float16, 4): [1 * MB, 16 * MB, 4 * MB, 2 * MB],
-        (torch.float16, 8): [16 * MB, 4 * MB, 4 * MB, 2 * MB],
-        (torch.bfloat16, 2): [2 * MB, 8 * MB, 8 * MB, 8 * MB],
-        (torch.bfloat16, 4): [8 * MB, 64 * MB, 64 * MB, 16 * MB],
-        (torch.bfloat16, 8): [16 * MB, 2048 * MB, 2048 * MB, 2048 * MB],
+        (torch.float16, 2): [1 * MB, 2 * MB, 2 * MB, 1 * MB, 1 * MB],
+        (torch.float16, 4): [1 * MB, 16 * MB, 4 * MB, 2 * MB, 2 * MB],
+        (torch.float16, 8): [16 * MB, 4 * MB, 4 * MB, 2 * MB, 2 * MB],
+        (torch.bfloat16, 2): [2 * MB, 8 * MB, 8 * MB, 8 * MB, 8 * MB],
+        (torch.bfloat16, 4): [8 * MB, 64 * MB, 64 * MB, 16 * MB, 16 * MB],
+        (torch.bfloat16, 8): [
+            16 * MB,
+            2048 * MB,
+            2048 * MB,
+            2048 * MB,
+            2048 * MB,
+        ],
     }
 
     def __init__(self, group: ProcessGroup, device: int | str | torch.device) -> None:
-        """
-        Custom allreduce provides non-destructive acceleration and is
+        """Custom allreduce provides non-destructive acceleration and is
         available for CUDA and ROCm MI300 series.
 
         Custom quick allreduce leverages quantization for further
-        acceleration on ROCm. It currently supports Q8, Q6, and Q4
-        quantization formats and FP(float16, bfloat16).
+        acceleration on ROCm. It currently supports Q8, Q6, Q4, and Q3
+        quantization formats and FP(float16, bfloat16). Q3 (INT3) is
+        restricted to TP2 (world_size == 2) due to poor performance on
+        larger world sizes.
 
         Quick allreduce is designed as a complement to custom allreduce.
         Its initialization requires even stricter conditions.
@@ -76,8 +87,10 @@ class QuickAllReduce:
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
+
         """
         self.disabled = True
+        self._flydsl_int4: Any = None
         if not self._rocm_arch_available():
             logger.debug(
                 "Custom quick allreduce is only supported on ROCm MI300 series."
@@ -129,12 +142,10 @@ class QuickAllReduce:
         assert isinstance(device, torch.device)
         self.device = device
 
-        cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
-        if cuda_visible_devices:
-            device_ids = list(map(int, cuda_visible_devices.split(",")))
-        else:
-            device_ids = list(range(current_platform.device_count()))
-        physical_device_id = device_ids[device.index]
+        # device.index is a visible ordinal, not a logical local ID.
+        physical_device_id = current_platform.visible_device_id_to_physical_device_id(
+            device.index
+        )
         tensor = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")
         gather_list = [
             torch.tensor([0], dtype=torch.int, device="cpu")
@@ -180,6 +191,23 @@ class QuickAllReduce:
             )
             return
         self.qr_quant_level = QuickReduceRegime[regime_str]
+
+        # INT3 is only enabled for TP2 (world_size == 2).
+        # Kernel benchmarks show INT3 all-reduce on TP4/TP8 has poor
+        # performance (the extra ranks make the 3-bit codec's pack/unpack
+        # overhead outweigh the reduced communication volume), so INT3 is
+        # restricted to 2-GPU tensor parallelism. For TP4/TP8 use a wider
+        # codec (e.g. INT4) or NONE instead.
+        if self.qr_quant_level == QuickReduceRegime.INT3 and self.world_size != 2:
+            logger.warning(
+                "Custom quick allreduce is disabled: INT3 quantization is "
+                "only supported for TP2 (world_size == 2), but world_size "
+                "is %d. INT3 on TP4/TP8 is disabled due to poor kernel "
+                "performance. Use INT4/NONE for this world size.",
+                self.world_size,
+            )
+            return
+
         self.qr_quantization_min_size = self._get_qr_quantization_min_size()
         vllm_config = get_current_vllm_config_or_none()
         if (
@@ -231,7 +259,40 @@ class QuickAllReduce:
                 self.qr_quantization_min_size // KB,
             )
         self.create_shared_buffer()
+        self._flydsl_int4 = self._init_flydsl_int4(vllm_config)
         self.disabled = False
+
+    def _init_flydsl_int4(self, vllm_config) -> Any:
+        if (
+            self.qr_quant_level != QuickReduceRegime.INT4
+            or not rocm_aiter_ops.is_flydsl_quick_reduce_available()
+        ):
+            return None
+        flydsl_int4 = rocm_aiter_ops.create_flydsl_quick_all_reduce_int4(
+            group=self.group,
+            device=self.device,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+        # compile() runs a real all-reduce on every rank. It moves the JIT
+        # out of the first prefill and out of CUDA graph capture.
+        warmup = torch.empty(MB, dtype=torch.bfloat16, device=self.device)
+        flydsl_int4.compile(warmup, torch.empty_like(warmup))
+        torch.accelerator.synchronize(self.device)
+        logger.info(
+            "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads; other "
+            "payloads use the HIP QuickReduce kernels."
+        )
+        if (
+            vllm_config is not None
+            and vllm_config.compilation_config.pass_config.fuse_allreduce_rms
+        ):
+            logger.warning_once(
+                "fuse_allreduce_rms is on, but FlyDSL QuickReduce has no fused "
+                "kernels yet: the payloads it takes run all-reduce plus a "
+                "separate RMSNorm, so the fusion does nothing for them."
+            )
+        return flydsl_int4
 
     @staticmethod
     def _get_qr_min_size(qr_max_size: int | None) -> int | None:
@@ -276,8 +337,7 @@ class QuickAllReduce:
             return False
 
     def create_shared_buffer(self):
-        """
-        Creates a shared buffer for quickreduce.
+        """Creates a shared buffer for quickreduce.
         Has to be called after init_custom_qr
         """
         handle = ops.qr_get_handle(self._ptr)
@@ -287,9 +347,7 @@ class QuickAllReduce:
         ops.qr_open_handles(self._ptr, handles)
 
     def should_quick_allreduce(self, inp: torch.Tensor):
-        """
-        Check if quickreduce is available
-        """
+        """Check if quickreduce is available."""
         if self.disabled:
             return False
         if inp.dtype not in self._SUPPORTED_DTYPES:
@@ -317,10 +375,26 @@ class QuickAllReduce:
         # as QR uses static IPC buffer.
         if out is None:
             out = torch.empty_like(inp)
+        if self._use_flydsl_int4(inp):
+            self._flydsl_int4.allreduce(inp, out)
+            return out
         ops.qr_all_reduce(
             self._ptr, inp, out, self._get_qr_quant_level(inp), self.use_fp16_kernels
         )
         return out
+
+    def _use_flydsl_int4(self, inp: torch.Tensor) -> bool:
+        return (
+            self._flydsl_int4 is not None
+            and inp.dtype == torch.bfloat16
+            and inp.is_contiguous()
+            and inp.data_ptr() % 16 == 0
+            and self._get_qr_quant_level(inp) == QuickReduceRegime.INT4.value
+        )
+
+    def uses_flydsl_int4(self, inp: torch.Tensor) -> bool:
+        """Whether `all_reduce` runs `inp` through FlyDSL QuickReduce."""
+        return self.should_quick_allreduce(inp) and self._use_flydsl_int4(inp)
 
     def _get_qr_quant_level(self, inp: torch.Tensor) -> int:
         quantization_min_size = self.qr_quantization_min_size
@@ -332,6 +406,9 @@ class QuickAllReduce:
         return self.qr_quant_level.value
 
     def close(self):
+        if self._flydsl_int4 is not None:
+            self._flydsl_int4.close()
+            self._flydsl_int4 = None
         if not self.disabled and getattr(self, "_ptr", None):
             if ops is not None:
                 ops.qr_destroy(self._ptr)

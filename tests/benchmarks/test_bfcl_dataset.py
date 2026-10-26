@@ -21,7 +21,7 @@ def _patch_hf_api(side_effect):
 
 @pytest.fixture(scope="session")
 def hf_tokenizer() -> PreTrainedTokenizerBase:
-    return AutoTokenizer.from_pretrained("gpt2")
+    return AutoTokenizer.from_pretrained("openai-community/gpt2")
 
 
 _FAKE_ROWS = {

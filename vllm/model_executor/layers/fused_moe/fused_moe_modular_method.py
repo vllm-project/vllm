@@ -15,7 +15,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernel,
-    FusedMoEPrepareAndFinalizeModular,
 )
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
@@ -46,20 +45,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     @property
     def wraps_legacy_quant_method(self) -> bool:
         return not self.old_quant_method.supports_internal_mk
-
-    @staticmethod
-    def make(
-        routed_experts: "RoutedExperts",
-        old_quant_method: FusedMoEMethodBase,
-        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-    ) -> "FusedMoEModularMethod":
-        return FusedMoEModularMethod(
-            old_quant_method,
-            FusedMoEKernel(
-                prepare_finalize,
-                old_quant_method.select_gemm_impl(prepare_finalize, routed_experts),
-            ),
-        )
 
     @property
     def skip_forward_padding(self) -> bool:
@@ -92,6 +77,25 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         self, layer: "RoutedExperts"
     ) -> FusedMoEQuantConfig | None:
         return self.moe_quant_config
+
+    def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
+        old_kernel = self.old_quant_method.moe_kernel
+        self.old_quant_method.process_weights_after_loading(layer)
+        new_kernel = self.old_quant_method.moe_kernel
+        if new_kernel is old_kernel:
+            return
+        assert self.moe_kernel is not None and new_kernel is not None
+        for old, new in (
+            (self.moe_kernel.fused_experts, new_kernel.fused_experts),
+            (self.moe_kernel.prepare_finalize, new_kernel.prepare_finalize),
+        ):
+            context = getattr(old, "_lora_context", None)
+            if context is not None:
+                assert hasattr(new, "set_lora_context")
+                new.set_lora_context(context)
+        self.moe_kernel.impl = new_kernel.impl
+        self.old_quant_method.moe_kernel = self.moe_kernel
+        self.moe_quant_config = self.old_quant_method.moe_quant_config
 
     def apply(
         self,

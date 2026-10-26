@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for Helion kernel registration.
+"""Unit tests for Helion kernel registration.
 
 Tests ConfiguredHelionKernel, HelionKernelWrapper, and PresetConfigSearch
 including config picker registration and custom autotuner integration.
@@ -398,6 +397,7 @@ class TestHelionKernelWrapper:
             )
 
             assert wrapper._disabled is True
+            assert wrapper._disabled_reason is not None
             assert "No configs available" in wrapper._disabled_reason
 
     def test_disabled_wrapper_raises_on_call(self, sample_kernel):
@@ -713,6 +713,7 @@ class TestHelionKernelWrapper:
 
         new_op = Mock()
         registered_ops: dict[str, Mock] = {}
+        mutates_args = ["y"]
 
         class MockNamespace:
             def __getattr__(self, name):
@@ -748,6 +749,7 @@ class TestHelionKernelWrapper:
                 raw_kernel_func=sample_kernel,
                 op_name="test_kernel",
                 fake_impl=fake_impl,
+                mutates_args=mutates_args,
                 config_picker=default_picker,
             )
             result = wrapper._get_or_register_custom_op()
@@ -755,6 +757,7 @@ class TestHelionKernelWrapper:
             mock_register.assert_called_once()
             assert result is new_op
             assert mock_register.call_args[1]["op_func"] is mock_decorated
+            assert mock_register.call_args[1]["mutates_args"] is mutates_args
 
 
 class TestKernelRegistry:
@@ -1017,7 +1020,6 @@ class TestTorchCompileHOP:
     )
     def test_inductor_backend_compiles_helion_hop(self):
         """Test torch.compile with inductor backend and Helion fusion enabled."""
-
         configs: dict[CaseKey, helion.Config] = {
             CaseKey.default(): helion.Config(block_sizes=[4, 4])
         }

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -25,9 +26,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
 )
+
+if TYPE_CHECKING:
+    from aiter import ActivationType
 
 
 class QuantMethod(IntEnum):
@@ -231,6 +236,41 @@ def rocm_aiter_grouped_topk(
     return topk_weights, topk_ids
 
 
+def aiter_moe_pads(
+    hidden_pad: int,
+    intermediate_pad: int,
+    activation: MoEActivation,
+    use_mxfp4_w4a4: bool,
+    tp_size: int,
+) -> tuple[int, int]:
+    """Round the padding deltas to what AITER's MoE dispatch expects.
+
+    SITU's A16W4 FlyDSL kernel pads per gate/up half, so its pads pass through
+    unrounded. Otherwise the pads are rounded to AITER's CK/FlyDSL tile
+    granularity, and at tp_size == 1 the intermediate pad is doubled for the
+    fused gate/up weight. The W4A4 SiLU path doubles it inside AITER, so it is
+    passed undoubled; doubling it here as well masks live intermediate rows.
+
+    Where AITER doubles it (v0.1.24.post1):
+    - CK-Tile stage 1, aiter/fused_moe.py:
+      ``n_pad_zeros=intermediate_pad // 64 * 64 * (2 if use_g1u1 else 1)``.
+    - FlyDSL stage 1 takes ``inter_dim_pad`` unchanged and doubles it in the
+      kernel, aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage_common.py:
+      ``inter_dim_pad_total = 2 * inter_dim_pad`` is subtracted from the fused
+      gate/up width. Stage 2 masks the K tail with the undoubled value
+      (``base_k < inter_dim - inter_dim_pad``).
+    So both stage 1 kernels expect the undoubled pad. Recheck these lines on an
+    AITER bump.
+    """
+    if activation == MoEActivation.SITU:
+        return hidden_pad, intermediate_pad
+    double = tp_size == 1 and not (use_mxfp4_w4a4 and activation == MoEActivation.SILU)
+    return (
+        hidden_pad // 128 * 128,
+        intermediate_pad // 64 * 64 * (2 if double else 1),
+    )
+
+
 def rocm_aiter_fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -240,31 +280,44 @@ def rocm_aiter_fused_experts(
     moe_config: FusedMoEConfig,
     activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
-    expert_map: torch.Tensor | None = None,
+    expert_mask: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
     a1q_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
     moe_sorting_dispatch_policy: int = 0,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
+    # Gate/up interleave hint; only the SWIGLUOAI activations override it.
+    activation_interleave = None
+    activation_method: ActivationMethod | ActivationType
     if activation == MoEActivation.SILU:
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
         activation_method = ActivationMethod.GELU
     elif activation == MoEActivation.SWIGLUOAI:
         activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
+    elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
+        activation_interleave = False
+    elif activation == MoEActivation.SITU:
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("situ")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
+    if activation_method is None:
+        raise ValueError(f"AITER does not support activation: {activation}")
 
     # All AITER Fused MoE kernels are expecting the following datatypes
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
-
-    expert_mask = expert_map if expert_map is not None else None
 
     # w8a8 per-channel quantization
     if (
@@ -335,21 +388,57 @@ def rocm_aiter_fused_experts(
         intermediate_pad = 0
         assert moe_config.hidden_dim_unpadded is not None
         assert moe_config.intermediate_size_per_partition_unpadded is not None
-        hidden_pad = hidden_states.shape[1] - moe_config.hidden_dim_unpadded
+        hidden_size = hidden_states.shape[1]
+        if hidden_states.dtype == torch.float4_e2m1fn_x2:
+            # Pre-quantized MXFP4 from MoRI dispatch, packed two per byte.
+            hidden_size *= 2
+        hidden_pad = hidden_size - moe_config.hidden_dim_unpadded
         intermediate_pad = (
-            moe_config.intermediate_size_per_partition
-            - moe_config.intermediate_size_per_partition_unpadded
+            (
+                moe_config.intermediate_size_per_partition
+                - moe_config.intermediate_size_per_partition_unpadded
+            )
+            if moe_config.intermediate_pad is None
+            else moe_config.intermediate_pad
         )
-        # Round hidden_pad/intermediate_pad to match AITER's CK/FlyDSL MoE
-        # dispatch (currently pinned to v0.1.13.post1):
-        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1073
-        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1099
-        # TODO: Revisit this once we bump AITER to 0.1.15 with padding fixes
-        # for CK/FlyDSL MoE GEMM e.g. https://github.com/ROCm/aiter/pull/3401
-        hidden_pad = hidden_pad // 128 * 128
-        intermediate_pad = (
-            intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
+
+        hidden_pad, intermediate_pad = aiter_moe_pads(
+            hidden_pad,
+            intermediate_pad,
+            activation,
+            quant_config.use_mxfp4_w4a4,
+            moe_config.tp_size,
         )
+
+        # AITER's stage1 GEMM needs gate_mode to match how weights were
+        # shuffled at load time (oracle/mxfp4.py). gpt-oss uses INTERLEAVE;
+        # DeepSeek V4.1 a4w4 uses SEPARATED (see below).
+        from aiter.ops.flydsl.moe_common import GateMode
+
+        gate_mode = ""
+        q_dtype_a = None
+        if activation == MoEActivation.SITU:
+            gate_mode = (
+                GateMode.INTERLEAVE.value
+                if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+                else GateMode.SEPARATED.value
+            )
+        elif quant_config.use_mxfp4_w4a16:
+            if moe_config.use_mxfp4_w4a4_dsv4:
+                # Opt-in a4w4 for DeepSeek V4.1 (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1).
+                # Must match the SEPARATED weight shuffle from load time.
+                from aiter import dtypes
+
+                gate_mode = GateMode.SEPARATED.value
+                q_dtype_a = dtypes.fp4x2
+            else:
+                gate_mode = GateMode.INTERLEAVE.value
+        elif activation_interleave is not None:
+            gate_mode = (
+                GateMode.INTERLEAVE.value
+                if activation_interleave
+                else GateMode.SEPARATED.value
+            )
 
         return rocm_aiter_ops.fused_moe(
             hidden_states,
@@ -369,16 +458,32 @@ def rocm_aiter_fused_experts(
             output_dtype=output_dtype,
             hidden_pad=hidden_pad,
             intermediate_pad=intermediate_pad,
+            gate_mode=gate_mode,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
             moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
+            swiglu_limit=(
+                0.0
+                if moe_config.swiglu_limit is None
+                else float(moe_config.swiglu_limit)
+            ),
+            beta=moe_config.activation_situ_beta,
+            linear_beta=moe_config.activation_situ_linear_beta,
+            shared_w1=shared_w1,
+            shared_w2=shared_w2,
+            shared_w1_scale=shared_w1_scale,
+            shared_w2_scale=shared_w2_scale,
+            shared_expert_id=shared_expert_id,
+            q_dtype_a=q_dtype_a,
         )
 
 
 class AiterExperts(mk.FusedMoEExpertsModular):
+    consumes_expert_mask = True
+
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # When paired with MoRI, the prepare/finalize handles FP8
+        # When paired with MoRI, the prepare/finalize handles FP8 or MXFP4
         # quantization during dispatch to reduce network traffic,
         # so we should not defer input quantization.
         # Otherwise, AITER fused MoE kernels handle input quantization
@@ -413,35 +518,13 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         return False
 
     @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        SUPPORTED_W_A = [
-            (None, None),
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-            (kFp8StaticTensorSym, kFp8StaticTensorSym),
-            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
-            (kMxfp4Static, None),
-            (kMxfp4Static, kMxfp4Dynamic),
-        ]
-        if (weight_key, activation_key) not in SUPPORTED_W_A:
-            return False
-        # CK MXFP4 MoE kernels are only supported on gfx950.
-        if weight_key == kMxfp4Static:
-            from vllm.platforms.rocm import on_gfx950
-
-            if not on_gfx950():
-                return False
-        return True
-
-    @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -468,7 +551,12 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # Workspaces are managed internally by AITER.
         workspace1 = (0,)
         workspace2 = (0,)
-        output = (M, K)
+        # MoRI dispatches MXFP4 activations packed two per byte, so K is
+        # half the hidden size there.
+        packed_fp4_input = (
+            self.moe_config.use_mori_kernels and self.quant_config.use_mxfp4_w4a4
+        )
+        output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)
 
     def apply(
@@ -506,7 +594,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             topk_ids=topk_ids,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=expert_map,
+            expert_mask=expert_map,
             quant_config=self.quant_config,
             moe_config=self.moe_config,
             a1q_scale=a1q_scale,
@@ -526,3 +614,80 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             output.set_(result)
         else:
             output.copy_(result)
+
+
+class AiterUnquantizedExperts(AiterExperts):
+    """Unquantized (bf16/fp16) weights and activations."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [(None, None)]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class AiterFp8BlockExperts(AiterExperts):
+    """128x128 block-quantized weight scale, 128-grouped dynamic
+    activation scale."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [(kFp8Static128BlockSym, kFp8Dynamic128Sym)]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class AiterFp8TensorExperts(AiterExperts):
+    """Per-tensor static weight scale, either per-tensor static or
+    per-tensor dynamic activation scale."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class AiterFp8ChannelExperts(AiterExperts):
+    """Per-output-channel static weight scale, per-token dynamic
+    activation scale."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [(kFp8StaticChannelSym, kFp8DynamicTokenSym)]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class AiterMxfp4Experts(AiterExperts):
+    """MXFP4-quantized weights, with either unquantized (bf16/fp16) or
+    MXFP4-quantized dynamic activations. gfx950-only (not gfx1250), except for
+    Kimi-K3's MXFP4 experts requantized to packed int4 at load on gfx942."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        from vllm.platforms.rocm import on_gfx942, on_gfx950, on_gfx1250
+
+        if (weight_key, activation_key) == (kInt4Static32, None):
+            return on_gfx942()
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+            (kMxfp4Static, kMxfp4Dynamic),
+        ]
+        if (weight_key, activation_key) not in SUPPORTED_W_A:
+            return False
+        return on_gfx950() and not on_gfx1250()

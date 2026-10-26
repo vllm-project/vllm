@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -39,8 +39,10 @@ REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
 
 @pytest.fixture(scope="module")
-def test_tokenizer():
-    tokenizer = AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
+def test_tokenizer() -> PreTrainedTokenizerBase:
+    tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
+        REASONING_MODEL_NAME
+    )
     # Add custom test tokens
     test_tokens = ["<test:think>", "</test:think>", "<alt:start>", "<alt:end>"]
     existing_tokens = set(tokenizer.get_vocab().keys())
@@ -51,8 +53,7 @@ def test_tokenizer():
 
 
 class TestBaseThinkingReasoningParserInit:
-    """
-    Test initialization and basic properties of
+    """Test initialization and basic properties of
     BaseThinkingReasoningParser.
     """
 
@@ -274,8 +275,7 @@ class TestBaseThinkingReasoningParserStreaming:
 
     @pytest.mark.parametrize("streaming", [True, False])
     def test_simple_reasoning_extraction(self, test_tokenizer, streaming):
-        """
-        Test basic reasoning extraction in both
+        """Test basic reasoning extraction in both
         streaming and non-streaming modes.
         """
         parser = TestThinkingReasoningParser(test_tokenizer)
@@ -369,14 +369,12 @@ class TestBaseThinkingReasoningParserStreaming:
 
 
 class TestBaseThinkingReasoningParserMultipleImplementations:
-    """
-    Test that multiple implementations of
+    """Test that multiple implementations of
     BaseThinkingReasoningParser work correctly.
     """
 
     def test_different_token_implementations(self, test_tokenizer):
-        """
-        Test that different implementations
+        """Test that different implementations
         with different tokens work independently.
         """
         parser1 = TestThinkingReasoningParser(test_tokenizer)

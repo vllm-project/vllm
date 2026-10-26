@@ -37,7 +37,7 @@ DFLASH_CONFIG = SpeculatorTestConfig(
     acceptance_len_rtol=0.15,
     expected_per_pos_acceptance_rates=(0.795, 0.611, 0.429, 0.282),
     per_pos_rtol=0.15,
-    quantization="fp8",
+    quantization="fp8_per_tensor",
 )
 
 PEAGLE_CONFIG = SpeculatorTestConfig(
@@ -53,9 +53,39 @@ PEAGLE_CONFIG = SpeculatorTestConfig(
     parallel_drafting=True,
 )
 
+QWEN3_EAGLE3_CONFIG = SpeculatorTestConfig(
+    model_path=(
+        "inference-optimization/"
+        "Qwen3-8B-from-Qwen3-8B_regen-speculators.eagle3-qwen3arch-ckpt1"
+    ),
+    method="eagle3",
+    display_name="Qwen3 Eagle3",
+    expected_gsm8k_accuracy=0.88,
+    accuracy_rtol=0.05,
+    expected_acceptance_len=2.67,
+    acceptance_len_rtol=0.10,
+    expected_per_pos_acceptance_rates=(0.76, 0.55, 0.36),
+    per_pos_rtol=0.10,
+)
+
+QWEN3_PEAGLE_CONFIG = SpeculatorTestConfig(
+    model_path="inference-optimization/Qwen3-8B-speculators.peagle-qwen3arch-ckpt4",
+    method="eagle3",
+    display_name="Qwen3 PEagle",
+    expected_gsm8k_accuracy=0.88,
+    accuracy_rtol=0.05,
+    expected_acceptance_len=3.42,
+    acceptance_len_rtol=0.15,
+    expected_per_pos_acceptance_rates=(0.78, 0.59, 0.43, 0.29, 0.18, 0.10, 0.05),
+    per_pos_rtol=0.10,
+    parallel_drafting=True,
+)
+
 SPECULATOR_CONFIGS = [
     pytest.param(DFLASH_CONFIG, id="dflash"),
     pytest.param(PEAGLE_CONFIG, id="peagle"),
+    pytest.param(QWEN3_EAGLE3_CONFIG, id="qwen3arch_eagle3"),
+    pytest.param(QWEN3_PEAGLE_CONFIG, id="qwen3arch_peagle"),
 ]
 
 
@@ -104,8 +134,7 @@ def print_spec_decode_stats(stats: dict) -> None:
 
 @pytest.mark.parametrize("config", SPECULATOR_CONFIGS)
 def test_speculators_model(vllm_runner, example_prompts, monkeypatch, config):
-    """
-    Test speculators model properly initializes speculative decoding.
+    """Test speculators model properly initializes speculative decoding.
 
     Verifies:
     1. Speculative config is automatically initialized from speculators config
@@ -155,8 +184,7 @@ def test_speculators_model(vllm_runner, example_prompts, monkeypatch, config):
 @large_gpu_mark(min_gb=40)
 @pytest.mark.parametrize("config", SPECULATOR_CONFIGS)
 def test_speculators_correctness(monkeypatch, config):
-    """
-    E2E correctness test via the speculators auto-detect path.
+    """E2E correctness test via the speculators auto-detect path.
 
     Evaluates GSM8k accuracy to ensure the speculators-format model produces
     correct outputs, and checks that acceptance length does not collapse under
@@ -176,6 +204,7 @@ def test_speculators_correctness(monkeypatch, config):
 
     results = evaluate_gsm8k_offline(spec_llm)
     accuracy = results["accuracy"]
+    print(f"GSM8K Accuracy: {accuracy:.4f}")
     accuracy_threshold = config.expected_gsm8k_accuracy * (1 - config.accuracy_rtol)
     assert accuracy >= accuracy_threshold, (
         f"Expected GSM8K accuracy >= {accuracy_threshold:.3f}, got {accuracy:.3f}"

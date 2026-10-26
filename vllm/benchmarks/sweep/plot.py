@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Self
 
-from typing_extensions import Self, override
+from typing_extensions import override
 
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.collection_utils import full_groupby
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -30,10 +31,10 @@ class PlotFilterBase(ABC):
     def parse_str(cls, s: str):
         for op_key in PLOT_FILTERS:
             if op_key in s:
-                key, value = s.split(op_key)
+                key, _, value = s.partition(op_key)
                 return PLOT_FILTERS[op_key](
-                    key,
-                    value.removeprefix(op_key).strip("'").strip('"'),
+                    key.strip(),
+                    value.removeprefix(op_key).strip().strip("'").strip('"'),
                 )
         else:
             raise ValueError(
@@ -47,15 +48,29 @@ class PlotFilterBase(ABC):
         raise NotImplementedError
 
 
+def _parse_filter_target(series, target: str) -> float | bool | str:
+    """Parse a filter target using the column's value type when needed."""
+    if target.casefold() in ("true", "false"):
+        dtype_kind = getattr(series.dtype, "kind", None)
+        non_null_values = series.dropna()
+        is_boolean = dtype_kind == "b" or (
+            len(non_null_values) > 0
+            and all(isinstance(value, bool) for value in non_null_values)
+        )
+        if is_boolean:
+            return target.casefold() == "true"
+
+    try:
+        return float(target)
+    except ValueError:
+        return target
+
+
 @dataclass
 class PlotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
-        try:
-            target = float(self.target)
-        except ValueError:
-            target = self.target
-
+        target = _parse_filter_target(df[self.var], self.target)
         return df[df[self.var] == target]
 
 
@@ -63,11 +78,7 @@ class PlotEqualTo(PlotFilterBase):
 class PlotNotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
-        try:
-            target = float(self.target)
-        except ValueError:
-            target = self.target
-
+        target = _parse_filter_target(df[self.var], self.target)
         return df[df[self.var] != target]
 
 
@@ -134,8 +145,10 @@ class PlotBinner:
     def parse_str(cls, s: str):
         for op_key in PLOT_BINNERS:
             if op_key in s:
-                key, value = s.split(op_key)
-                return PLOT_BINNERS[op_key](key, float(value.removeprefix(op_key)))
+                key, _, value = s.partition(op_key)
+                return PLOT_BINNERS[op_key](
+                    key.strip(), float(value.removeprefix(op_key).strip())
+                )
         else:
             raise ValueError(
                 f"Invalid operator for plot binner '{s}'. "
@@ -175,14 +188,13 @@ def _json_load_bytes(path: Path) -> list[dict[str, object]]:
 
 
 def _convert_inf_nan_strings(data: list[dict[str, object]]) -> list[dict[str, object]]:
-    """
-    Convert string values "inf", "-inf", and "nan" to their float equivalents.
+    """Convert string values "inf", "-inf", and "nan" to their float equivalents.
 
     This handles the case where JSON serialization represents inf/nan as strings.
     """
     converted_data = []
     for record in data:
-        converted_record = {}
+        converted_record: dict[str, object] = {}
         for key, value in record.items():
             if isinstance(value, str):
                 if value in ["inf", "-inf", "nan"]:
@@ -531,7 +543,7 @@ class SweepPlotArgs:
         )
 
     @classmethod
-    def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         parser.add_argument(
             "EXPERIMENT_DIR",
             type=str,
@@ -682,7 +694,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=SweepPlotArgs.parser_help)
+    parser = FlexibleArgumentParser(description=SweepPlotArgs.parser_help)
     SweepPlotArgs.add_cli_args(parser)
 
     main(parser.parse_args())

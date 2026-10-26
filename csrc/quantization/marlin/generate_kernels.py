@@ -75,14 +75,14 @@ QUANT_CONFIGS = [
         "b_type": "kU4B8",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": THREAD_M_BLOCKS,
-        "group_blocks": [-1, 0, 2, 4, 8],
+        "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT8
     {
         "b_type": "kU8B128",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": THREAD_M_BLOCKS,
-        "group_blocks": [-1, 0, 2, 4, 8],
+        "group_blocks": [-1, 2, 4, 8],
     },
     # FP8
     {
@@ -161,12 +161,15 @@ QUANT_CONFIGS = [
     },
 ]
 
+# Kernels are written next to the kernel.h / marlin_template.h they include.
+OUTPUT_DIR = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(__file__)
+
 
 def remove_old_kernels():
-    for filename in glob.glob(os.path.dirname(__file__) + "/*kernel_*.cu"):
+    for filename in glob.glob(OUTPUT_DIR + "/*kernel_*.cu"):
         subprocess.call(["rm", "-f", filename])
 
-    filename = os.path.dirname(__file__) + "/kernel_selector.h"
+    filename = OUTPUT_DIR + "/kernel_selector.h"
     subprocess.call(["rm", "-f", filename])
 
 
@@ -297,17 +300,17 @@ def generate_new_kernels():
 
             filename = filename.lower()
 
-            with open(os.path.join(os.path.dirname(__file__), filename), "w") as f:
+            with open(os.path.join(OUTPUT_DIR, filename), "w") as f:
                 f.write(file_content)
 
     if not SUPPORT_FP8 and kernel_selector_str != FILE_HEAD_COMMENT:
         kernel_selector_str += (
             "else if (a_type == vllm::kFE4M3fn)\n"
-            "  TORCH_CHECK(false, "
+            "  STD_TORCH_CHECK(false, "
             '"marlin kernel with fp8 activation is not built.");'
         )
 
-    with open(os.path.join(os.path.dirname(__file__), "kernel_selector.h"), "w") as f:
+    with open(os.path.join(OUTPUT_DIR, "kernel_selector.h"), "w") as f:
         f.write(kernel_selector_str)
 
 

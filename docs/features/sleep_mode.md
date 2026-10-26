@@ -18,7 +18,7 @@ Key benefits:
 
 ## Sleep levels
 
-Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the KV cache (while the model's buffers are kept in CPU, like rope scaling tensors). The content of both the model weights and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed, e.g. RLHF weight update.
+Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the KV cache (while the model's buffers are kept in CPU, like rope scaling tensors). The content of both the model weights and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed, e.g. RLHF weight update. Level 2 sleep is also useful when there is not enough CPU memory to back up the model weights, e.g. when a colocated trainer already uses CPU memory for offloading its own state; since nothing is backed up, restore the weights after waking up with `collective_rpc("reload_weights")`.
 
 ## Usage
 
@@ -74,6 +74,119 @@ llm.wake_up(tags=["weights"])
 llm.wake_up(tags=["kv_cache"])
 ```
 
+#### Retaining frozen weights during RLHF updates
+
+Set `sleep_preserve_parameter_names` (CLI: `--sleep-preserve-parameter-names`)
+to runtime parameter-name glob patterns for weights that stay frozen during
+training. It covers two use cases:
+
+- **Frozen Engram tables (original use case):** retain table weights and scales
+  omitted by the trainer, without retransmitting them after every sleep.
+- **Frozen draft weights:** retain draft-private parameters when the trainer
+  updates only the target model.
+
+Target patterns match
+`model.named_parameters()`; checkpoint names and `requires_grad` are not used.
+
+Level-2 sleep backs up selected GPU parameters to pageable CPU memory; weights
+wake-up restores them in place and releases the backups. CPU parameters need no
+copy. Allow enough host memory for backups. Level-1 behavior is unchanged.
+
+The trainer must omit these parameters from updates, and reload/post-processing
+must preserve their values and storage (including avoiding replacement with meta
+tensors). This option does not filter updates.
+
+For frozen Engram tables omitted by the trainer, select the target table weights
+and scales. For example, DeepSeek V4.1 uses these runtime parameter names:
+
+```bash
+VLLM_SERVER_DEV_MODE=1 vllm serve deepseek-ai/DeepSeek-V4.1-Flash --enable-sleep-mode \
+    --sleep-preserve-parameter-names '*.engram.embed_tokens.weight*'
+```
+
+CPU-offloaded tables remain on CPU without an extra backup copy. Engram's
+[inference-time CPU offload](engram.md#cpu-offload) is configured separately;
+this option preserves the frozen tables across level-2 sleep and weight updates.
+
+To retain a frozen drafter while updating only target weights, use `draft.*`:
+
+```bash
+VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3.8-27B --enable-sleep-mode \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
+    --sleep-preserve-parameter-names 'draft.*'
+```
+
+vLLM selects all draft-private parameters internally; you do not need to list
+them individually. Use `draft.<name>` to select specific draft parameters.
+Parameters shared with the target are excluded from the draft selection, so
+target updates remain authoritative. An empty `draft.*` selection is valid.
+The Engram and draft patterns can be supplied together.
+
+#### Release only KV cache memory
+
+`LLM.release_kv_cache_memory()` discards KV cache physical memory while keeping model weights resident. It requires a completed pause and all executor memory to be resident: full sleep, partial wake-up, and repeated release without restoring memory are rejected. Requests retained with `mode="keep"` are recomputed after wake-up.
+
+Use the default `cumem` backend with managed allocations: `enable_cumem_allocator=True` on CUDA/ROCm (also enabled by `enable_sleep_mode=True`), or `enable_sleep_mode=True` on XPU. Other backends must implement selective discard; CPU and unmanaged allocations are unsupported.
+
+```python
+llm.sleep(level=0, mode="keep")  # Wait for the pause to complete.
+llm.release_kv_cache_memory()
+llm.wake_up(tags=["kv_cache"])  # Reallocate KV cache and resume scheduling.
+```
+
+#### Offloading CUDA graph memory
+
+By default, CUDA graph memory stays on the GPU while asleep. With
+`sleep_mode_offload_cudagraph=True` (off by default), CUDA graphs are captured
+into a cuMem pool that sleep backs up to CPU memory at both levels and any wake
+restores in place, so graphs are replayed, not recaptured. It needs the default
+`cumem` backend, CUDA or ROCm, and CUDA graphs; otherwise it has no effect.
+
+```python
+llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, sleep_mode_offload_cudagraph=True)
+```
+
+or `vllm serve <model> --enable-sleep-mode --sleep-mode-offload-cudagraph`.
+
+The cost is pinned host memory for the pool's backup, also at level 2, and one
+extra copy per captured custom allreduce (about 3% decode latency at batch
+size 1). `NCCL_GRAPH_REGISTER` defaults to `0`, since NCCL graph registration
+would pin the pool; an explicit value is kept with a warning. Graph executables
+outside PyTorch pools stay resident.
+
+#### Releasing NCCL communicator memory
+
+By default, NCCL communicators keep their GPU buffers while asleep. With
+`enable_nccl_comm_suspend=True` (off by default, experimental), sleep releases
+them with `ncclCommSuspend` and wake restores them with `ncclCommResume`. The
+communicators keep their topology, so they are not re-created. It needs NCCL
+2.29.7 or newer; with an older library, a warning is logged and the memory stays
+on the GPU.
+
+```python
+llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, enable_nccl_comm_suspend=True)
+```
+
+or `vllm serve <model> --enable-sleep-mode --enable-nccl-comm-suspend`.
+
+#### Choosing a sleep-mode backend
+
+`sleep_mode_backend` selects how GPU memory is freed and restored. The default
+is the built-in `cumem` backend. Plugins can register other backends with
+`SleepModeBackendFactory.register_backend` from a `vllm.general_plugins` entry
+point, and you select one by name:
+
+```python
+llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, sleep_mode_backend="my_backend")
+```
+
+or `vllm serve <model> --enable-sleep-mode --sleep-mode-backend my_backend`.
+
+An unregistered name is not caught at startup; it fails the first time the
+backend is used, such as on the first sleep. CUDA graph offloading and
+`release_kv_cache_memory()` have their own backend requirements, described
+above.
+
 ### Online Serving
 
 To enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server.
@@ -107,9 +220,18 @@ curl -X POST 'http://localhost:8000/collective_rpc' -H 'Content-Type: applicatio
 curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 ```
 
+To release only KV cache memory, wait for the level 0 pause to complete before calling the release endpoint. The same resident-memory and backend requirements as the Python API apply.
+
+```bash
+curl -X POST 'http://localhost:8000/sleep?level=0&mode=keep'
+curl -X POST 'http://localhost:8000/release_kv_cache_memory'
+curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
+```
+
 #### HTTP endpoints
 
 - `POST /sleep?level=1` — Put the model to sleep (`level=1`).
+- `POST /release_kv_cache_memory` — Discard KV cache memory after a completed pause, while all executor memory is resident.
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.

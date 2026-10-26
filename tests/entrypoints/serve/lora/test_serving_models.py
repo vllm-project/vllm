@@ -9,13 +9,11 @@ import pytest
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.pooling.base.serving import PoolingServingBase
+from vllm.entrypoints.pooling.base.serving import PoolingBaseServing
 from vllm.entrypoints.pooling.typing import PoolingServeContext
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
@@ -31,7 +29,9 @@ LORA_UNLOADING_SUCCESS_MESSAGE = (
 )
 
 
-async def _async_serving_models_init() -> OpenAIServingModels:
+async def _async_serving_models_init_with_mock() -> tuple[
+    OpenAIServingModels, MagicMock
+]:
     mock_engine_client = MagicMock(spec=EngineClient)
     # Set the max_model_len attribute to avoid missing attribute
     mock_model_config = MagicMock(spec=ModelConfig)
@@ -47,6 +47,13 @@ async def _async_serving_models_init() -> OpenAIServingModels:
     )
     await serving_models.init_static_loras()
 
+    # The mock is returned separately: `engine_client` is typed as the protocol,
+    # so assertion helpers are not visible through it.
+    return serving_models, mock_engine_client
+
+
+async def _async_serving_models_init() -> OpenAIServingModels:
+    serving_models, _ = await _async_serving_models_init_with_mock()
     return serving_models
 
 
@@ -102,6 +109,22 @@ async def test_load_lora_adapter_duplicate():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("load_inplace", [False, True])
+async def test_load_lora_adapter_base_model_name(load_inplace: bool):
+    """A LoRA named after a served model would shadow it for all requests."""
+    serving_models, mock_engine_client = await _async_serving_models_init_with_mock()
+    request = LoadLoRAAdapterRequest(
+        lora_name=MODEL_NAME, lora_path="/path/to/adapter", load_inplace=load_inplace
+    )
+    response = await serving_models.load_lora_adapter(request)
+    assert isinstance(response, ErrorResponse)
+    assert response.error.type == "InvalidUserInput"
+    assert response.error.code == HTTPStatus.BAD_REQUEST
+    assert len(serving_models.lora_requests) == 0
+    mock_engine_client.add_lora.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_unload_lora_adapter_success():
     serving_models = await _async_serving_models_init()
     request = LoadLoRAAdapterRequest(
@@ -110,8 +133,8 @@ async def test_unload_lora_adapter_success():
     response = await serving_models.load_lora_adapter(request)
     assert len(serving_models.lora_requests) == 1
 
-    request = UnloadLoRAAdapterRequest(lora_name="adapter1")
-    response = await serving_models.unload_lora_adapter(request)
+    unload_request = UnloadLoRAAdapterRequest(lora_name="adapter1")
+    response = await serving_models.unload_lora_adapter(unload_request)
     assert response == LORA_UNLOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
     assert len(serving_models.lora_requests) == 0
 
@@ -136,7 +159,7 @@ async def test_unload_lora_adapter_not_found():
     assert response.error.code == HTTPStatus.NOT_FOUND
 
 
-class _ConcretePoolingServing(PoolingServingBase):
+class _ConcretePoolingServing(PoolingBaseServing):
     """Minimal concrete subclass used only in these unit tests."""
 
     request_id_prefix = "test"
@@ -161,7 +184,9 @@ def _make_pooling_serving(lora_name: str) -> _ConcretePoolingServing:
     return serving
 
 
-def _make_pooling_ctx(model_name: str) -> PoolingServeContext:
+def _make_pooling_ctx(
+    model_name: str, serving: PoolingBaseServing
+) -> PoolingServeContext:
     mock_request = MagicMock()
     mock_request.model = model_name
     return PoolingServeContext(
@@ -169,6 +194,9 @@ def _make_pooling_ctx(model_name: str) -> PoolingServeContext:
         model_name=MODEL_NAME,
         request_id="test-id",
         pooling_params=PoolingParams(),
+        lora_request=serving._maybe_get_adapters(mock_request),
+        priorities=0,
+        prompt_extras=None,
     )
 
 
@@ -176,9 +204,7 @@ def test_pooling_maybe_get_adapters_lora_name_sets_lora_request():
     """LoRA adapter name must populate ctx.lora_request without raising."""
     lora_name = "bot-embed-lora"
     serving = _make_pooling_serving(lora_name)
-    ctx = _make_pooling_ctx(lora_name)
-
-    serving._maybe_get_adapters(ctx)
+    ctx = _make_pooling_ctx(lora_name, serving)
 
     assert ctx.lora_request is not None
     assert ctx.lora_request.lora_name == lora_name
@@ -187,7 +213,6 @@ def test_pooling_maybe_get_adapters_lora_name_sets_lora_request():
 def test_pooling_maybe_get_adapters_unknown_model_raises():
     """An unrecognised model name must still raise VLLMNotFoundError."""
     serving = _make_pooling_serving("some-lora")
-    ctx = _make_pooling_ctx("unknown-model")
 
     with pytest.raises(VLLMNotFoundError):
-        serving._maybe_get_adapters(ctx)
+        _make_pooling_ctx("unknown-model", serving)

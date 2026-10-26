@@ -10,7 +10,9 @@ For more details about Mooncake, please refer to [Mooncake project](https://gith
 
 ### Installation
 
-Install mooncake through pip: `uv pip install mooncake-transfer-engine`.
+Install mooncake through pip: `uv pip install mooncake-transfer-engine-cuda13`.
+
+vLLM defaults to CUDA 13. On a CUDA 12 environment install `mooncake-transfer-engine` instead — the two are the same release built against different CUDA majors, and the wrong one fails to import with `libcudart.so.<major>: cannot open shared object file`.
 
 Refer to [Mooncake official repository](https://github.com/kvcache-ai/Mooncake) for more installation instructions
 
@@ -36,6 +38,9 @@ python examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py --p
 
 Now you can send requests to the proxy server through port 8000.
 
+For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
+cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
+
 ## Environment Variables
 
 - `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Mooncake bootstrap server
@@ -43,6 +48,20 @@ Now you can send requests to the proxy server through port 8000.
     - Required only for prefiller instances
     - For headless instances, must be the same as the master instance
     - Each instance needs a unique port on its host; using the same port number across different hosts is fine
+
+- `VLLM_MOONCAKE_CONNECTOR_TIMEOUT`: Per-request timeout (in seconds) for MooncakeConnector HTTP calls to the bootstrap server, including prefiller worker registration at startup and metadata queries. (Optional)
+    - Default: 30.0
+    - Global rank 0 hosts the bootstrap server in the same process that mounts the Mooncake transfer engine's host segment, so a large `MOONCAKE_GLOBAL_SEGMENT_SIZE` can delay responses for several seconds during startup
+    - Raise this if bootstrap server timeout warnings appear on hosts with very large host-memory segments
+    - Bootstrap registration uses up to 3 attempts internally, with exponential backoff capped at 10 seconds; connection errors and timeouts are both retried
+    - Once registration attempts are exhausted the caller raises instead of blocking, so failures surface rather than hanging
+    - Metadata queries reuse the same timeout and 3-attempt limit, with a fixed 100ms delay between attempts. If all attempts fail, the error is logged and waiting queries are notified
+
+- `WITH_NVIDIA_PEERMEM`: Selects how mooncake registers GPU memory for RDMA. Read by mooncake, not vLLM.
+    - Default: 1, which uses `ibv_reg_mr()` and requires the `nvidia-peermem` kernel module to be loaded
+    - Set to 0 to use the DMA-BUF path, which does not need that module. Required on hosts where `nvidia-peermem` is not loaded, such as GB200
+    - With the container image, pass it at run time: `docker run -e WITH_NVIDIA_PEERMEM=0 ...`
+    - Symptom when left unset on such a host: `Failed to register memory <addr>: Bad address [14]` from `rdma_context.cpp`, and KV transfers fail
 
 - `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`: Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request. (Optional)
     - Default: 480
@@ -60,6 +79,31 @@ Now you can send requests to the proxy server through port 8000.
 
 - **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
+- **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
+- **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.
+
+## Prometheus metrics
+
+The following Prometheus metrics are exported when MooncakeConnector is active, each with the standard `model_name` and `engine` labels:
+
+| Metric name | Type | Description |
+| ------------- | ------ | ------------- |
+| `vllm:mooncake_xfer_time_seconds` | Histogram | Per-transfer copy duration (seconds). |
+| `vllm:mooncake_bytes_transferred` | Histogram | Bytes moved per transfer. |
+| `vllm:mooncake_num_descriptors` | Histogram | Descriptor count per transfer. |
+| `vllm:mooncake_num_failed_transfers` | Counter | Cumulative count of failed KV-block transfers. |
+| `vllm:mooncake_num_failed_recvs` | Counter | Cumulative count of failed KV-block receives. |
+| `vllm:mooncake_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). |
+
+!!! note
+    Mooncake is push-based: the prefiller (P) performs the transfer, so the
+    three histograms are only populated on P instances, while the decoder (D)
+    reports only the failures it observes.
+
+!!! tip
+    High `vllm:mooncake_num_kv_expired_reqs` indicates that the prefiller's
+    lease duration is too short for your network or workload. Increase it via
+    `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`.
 
 ## Example Scripts/Code
 

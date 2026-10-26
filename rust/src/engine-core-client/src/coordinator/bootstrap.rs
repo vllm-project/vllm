@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -60,28 +63,22 @@ async fn wait_for_engine_subscriptions(
                     timeout: ready_timeout,
                 }
             })??;
-        if message.len() != 1 {
+        if !is_engine_subscription(&message) {
             bail_unexpected_handshake_message!(
-                "expected 1 frame for coordinator subscription, got {}",
-                message.len()
-            );
-        }
-
-        let frame = message
-            .into_vec()
-            .into_iter()
-            .next()
-            .expect("single-frame coordinator subscription message");
-        if frame.as_ref() != [0x01] {
-            bail_unexpected_handshake_message!(
-                "expected coordinator subscription frame [0x01], got {:?}",
-                frame.as_ref()
+                "expected coordinator subscription [0x01], got {message:?}"
             );
         }
         received += 1;
     }
 
     Ok(())
+}
+
+/// Whether `message` is the single-frame subscribe-all notification (`[0x01]`)
+/// that an engine's XSUB sends whenever it connects or reconnects to the
+/// coordinator broadcast socket.
+pub(super) fn is_engine_subscription(message: &ZmqMessage) -> bool {
+    message.len() == 1 && message.get(0).is_some_and(|frame| frame.as_ref() == [0x01])
 }
 
 /// Send the coordinator READY marker to all subscribed engines.
