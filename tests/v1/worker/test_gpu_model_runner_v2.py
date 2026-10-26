@@ -369,7 +369,8 @@ def test_capture_model_excludes_adaptive_verification_profiling_cache(
     """Adaptive verification's cost-profiling dummy runs execute inside
     capture_model's free-memory window. The activations they leave in the
     allocator cache must not be counted as CUDA graph memory, which is taken
-    from the KV cache."""
+    from the KV cache. The memory-profiling pass skips them entirely: it runs
+    on a throwaway KV cache and the real capture recalibrates."""
     runner = _make_capture_runner(monkeypatch, captured=True)
     monkeypatch.setattr(
         runner.cudagraph_manager, "captured_token_counts", lambda: [1, 2], raising=False
@@ -398,7 +399,7 @@ def test_capture_model_excludes_adaptive_verification_profiling_cache(
     monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
 
     assert runner.capture_model(profile_only=profile_only) == 0
-    assert curves == [[]]
+    assert curves == ([] if profile_only else [[]])
 
 
 @pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
