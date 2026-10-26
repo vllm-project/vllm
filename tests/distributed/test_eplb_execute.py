@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -26,9 +27,31 @@ from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_tp_group,
 )
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.platforms import current_platform
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
+
+
+@pytest.mark.parametrize("dtype", [torch.float8_e8m0fnu, torch.float4_e2m1fn_x2])
+def test_set_eplb_state_registers_byte_dtypes_as_uint8_views(dtype):
+    """NCCL lacks these dtypes, so EPLB must see their bytes as uint8 views
+    sharing storage with the parameter the kernel reads."""
+    weight = torch.zeros(2, 8, dtype=torch.int32)
+    scale = torch.zeros(2, 4, dtype=torch.uint8).view(dtype)
+    layer = SimpleNamespace(
+        get_expert_weights=lambda: [weight, scale],
+        set_eplb_state=lambda **_: None,
+    )
+    model = SimpleNamespace(moe_layers=[layer])
+    empty = torch.empty(0)
+    MixtureOfExperts.set_eplb_state(model, empty, empty, empty)
+
+    registered_weight, registered_scale = model.expert_weights[0]
+    assert registered_weight is weight
+    assert registered_scale.dtype == torch.uint8
+    registered_scale.fill_(127)
+    assert torch.equal(scale.view(torch.uint8), registered_scale)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

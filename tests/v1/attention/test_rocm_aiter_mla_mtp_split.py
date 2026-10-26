@@ -1210,6 +1210,7 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
 
     assert metadata.max_qo_len == 1
     assert torch.equal(metadata.paged_kv_indptr, expected_paged_kv_indptr)
+    assert metadata.paged_kv_indices is not None
     assert torch.equal(
         metadata.paged_kv_indices[: expected_indices.numel()],
         expected_indices,

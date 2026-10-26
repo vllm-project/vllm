@@ -57,6 +57,16 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_3BIT_NC = 9
     NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
     ULTRAQUANT_4BIT = 11  # packed FP4 values + UE8M0 group scales
+    # Hadamard-rotated Lloyd-Max codes, packed K+V per slot (ROCm).
+    OCTAVE_K3V4 = 12
+    OCTAVE_K3V3 = 13
+    OCTAVE_K3V3_COMPACT = 14
+
+    # Backend self-manages kernel dispatch. Reads as quantized but matches no
+    # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
+    # False). Registered handlers return this when they own kernel selection
+    # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
+    CUSTOM = 12
 
     @property
     def is_per_token_head(self) -> bool:
@@ -73,6 +83,15 @@ class KVQuantMode(IntEnum):
         return self == KVQuantMode.NVFP4
 
     @property
+    def is_octave(self) -> bool:
+        """True for any Octave quantization mode."""
+        return self in (
+            KVQuantMode.OCTAVE_K3V4,
+            KVQuantMode.OCTAVE_K3V3,
+            KVQuantMode.OCTAVE_K3V3_COMPACT,
+        )
+
+    @property
     def is_turboquant(self) -> bool:
         """True for any turboquant quantization mode."""
         return self in (
@@ -87,9 +106,25 @@ class KVQuantMode(IntEnum):
         """True for the UltraQuant 4-bit KV-cache format."""
         return self == KVQuantMode.ULTRAQUANT_4BIT
 
+    @property
+    def is_custom_mode(self) -> bool:
+        """True when a platform backend fully self-manages kernel dispatch.
+
+        The attention selector should defer to the backend's own kernel
+        selection rather than a generic per-token-head / fp8 / turboquant
+        path. Distinct from NONE (which means non-quantized): CUSTOM is
+        quantized, just with no generic kernel mode.
+        """
+        return self == KVQuantMode.CUSTOM
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+    from vllm.config.cache import get_kv_cache_dtype_handler
+
+    handler = get_kv_cache_dtype_handler(kv_cache_dtype)
+    if handler is not None:
+        return handler.quant_mode()
     if kv_cache_dtype == "int4_per_token_head":
         return KVQuantMode.INT4_PER_TOKEN_HEAD
     if kv_cache_dtype == "int8_per_token_head":
@@ -104,6 +139,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
+        return KVQuantMode[kv_cache_dtype.upper()]
+    if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("octave_"):
         return KVQuantMode[kv_cache_dtype.upper()]
     if kv_cache_dtype == "ultraquant_4bit":
         return KVQuantMode.ULTRAQUANT_4BIT
