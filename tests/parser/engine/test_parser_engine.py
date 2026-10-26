@@ -2450,12 +2450,8 @@ class TestIncrementalArgRewrite:
         tool = _make_tool("f", {"a": {"type": "integer"}})
         properties = find_tool_properties([tool], "f")
         string_keys = ParserEngine._streamable_string_keys(properties)
-        cache = _StreamingArgs()
-        corrected, safe, streams, stop = _StreamingArgs.full_pass(
-            '{"a": 1}', properties, string_keys
-        )
-        cache.reset('{"a": 1}', corrected, safe, streams, stop)
-        assert cache.delta('{"a": 2}', properties, string_keys) is None
+        cache = _StreamingArgs('{"a": 1}', properties, string_keys)
+        assert cache.delta('{"a": 2}') is None
 
 
 class TestIncrementalArgRewriteAfterGiveUp:

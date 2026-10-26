@@ -153,8 +153,7 @@ class K2HorizonToolParser(ToolParser):
 
     @staticmethod
     def _coerce_json_value(value: Any, schema: Any) -> Any:
-        value, _ = sanitize_non_finite(value)
-        coerced, _ = coerce_typed_value(value, schema)
+        coerced, _ = coerce_typed_value(sanitize_non_finite(value), schema)
         return coerced
 
     @classmethod

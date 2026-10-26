@@ -339,24 +339,24 @@ class TestSchemaAdmitsAnyValue:
 
 class TestSanitizeNonFinite:
     def test_nonfinite_scalars_become_strings(self):
-        assert sanitize_non_finite(float("nan")) == ("NaN", True)
-        assert sanitize_non_finite(float("inf")) == ("Infinity", True)
-        assert sanitize_non_finite(float("-inf")) == ("-Infinity", True)
+        assert sanitize_non_finite(float("nan")) == "NaN"
+        assert sanitize_non_finite(float("inf")) == "Infinity"
+        assert sanitize_non_finite(float("-inf")) == "-Infinity"
 
     def test_finite_values_are_unchanged(self):
-        assert sanitize_non_finite(1.5) == (1.5, False)
-        assert sanitize_non_finite("text") == ("text", False)
+        assert sanitize_non_finite(1.5) == 1.5
+        assert sanitize_non_finite("text") == "text"
 
     def test_nested_containers_are_sanitized_in_place(self):
         value = {"x": [float("nan"), {"y": float("inf")}, 1]}
-        result, changed = sanitize_non_finite(value)
-        assert changed
+        result = sanitize_non_finite(value)
         assert result is value
         assert result == {"x": ["NaN", {"y": "Infinity"}, 1]}
 
-    def test_clean_container_reports_unchanged(self):
+    def test_clean_container_is_unchanged(self):
         value = {"x": [1, {"y": 2.5}]}
-        assert sanitize_non_finite(value) == (value, False)
+        assert sanitize_non_finite(value) is value
+        assert value == {"x": [1, {"y": 2.5}]}
 
 
 class TestExtractTypesFromSchema:

@@ -123,6 +123,9 @@ _NUMBER_CHARS = frozenset("0123456789+-.eE")
 # A bare non-finite literal token, not the same text inside a string (e.g.
 # "banaNaNa"): the no-schema fast path only needs to parse when one exists.
 _NON_FINITE_RE = re.compile(r'(?<![\w"])(?:NaN|Infinity)(?![\w"])')
+# Characters of a non-finite literal that can precede a delta boundary.
+_NON_FINITE_OVERLAP = len("Infinity") - 1
+_JSON_STRING_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
 
 
 def _has_non_finite_literal(text: str) -> bool:
@@ -133,19 +136,24 @@ def _has_non_finite_literal(text: str) -> bool:
     return _NON_FINITE_RE.search(text) is not None
 
 
-def _literal_type(literal: str) -> str | None:
-    """JSON type of a complete bare literal token, or ``None`` if not one."""
-    if literal in ("true", "false"):
-        return "boolean"
-    if literal == "null":
-        return "null"
+def _is_literal(literal: str) -> bool:
+    """Whether *literal* is a complete bare boolean, null, or number token."""
+    if literal in ("true", "false", "null"):
+        return True
     if all(c in _NUMBER_CHARS for c in literal):
         try:
             float(literal)
         except ValueError:
-            return None
-        return "number"
-    return None
+            return False
+        return True
+    return False
+
+
+def _next_non_ws(text: str, i: int) -> int:
+    n = len(text)
+    while i < n and text[i] in _JSON_WS:
+        i += 1
+    return i
 
 
 def _changes_value(literal: str, coerced: object) -> bool:
@@ -190,6 +198,9 @@ class _ArgsRewriter:
         self._force_parse = force_parse
         self._out: list[str] = []
         self._depth = 0
+        # Schema id -> (schema, types).  Holding the schema keeps its id()
+        # from being reused by a different dict.
+        self._types_cache: dict[int, tuple[dict, list[str]]] = {}
         # Offset where the first unparsable token made the rewriter copy the
         # rest verbatim, or ``None`` if it parsed to the end.
         self.stop: int | None = None
@@ -212,12 +223,9 @@ class _ArgsRewriter:
         return "".join(self._out)
 
     def _skip_ws(self, i: int) -> int:
-        text = self._text
-        j = i
-        while j < len(text) and text[j] in _JSON_WS:
-            j += 1
+        j = _next_non_ws(self._text, i)
         if j > i:
-            self._out.append(text[i:j])
+            self._out.append(self._text[i:j])
         return j
 
     def _scan_string(self, i: int) -> tuple[str | None, int] | None:
@@ -228,21 +236,16 @@ class _ArgsRewriter:
         giving up on everything after it.
         """
         text = self._text
-        escape = False
-        for j in range(i + 1, len(text)):
-            c = text[j]
-            if escape:
-                escape = False
-            elif c == "\\":
-                escape = True
-            elif c == '"':
-                if "\\" in text[i + 1 : j]:
-                    try:
-                        return json.loads(text[i : j + 1]), j + 1
-                    except ValueError:
-                        return None, j + 1
-                return text[i + 1 : j], j + 1
-        return None
+        m = _JSON_STRING_RE.match(text, i)
+        if m is None:
+            return None
+        j = m.end()
+        if text.find("\\", i + 1, j) != -1:
+            try:
+                return json.loads(text[i:j]), j
+            except ValueError:
+                return None, j
+        return text[i + 1 : j - 1], j
 
     def _truncated(self, i: int, *, give_up: bool = True) -> int:
         # A give-up is final; a wait for more text is not.  Both copy the
@@ -253,11 +256,21 @@ class _ArgsRewriter:
         return len(self._text)
 
     def _delimited(self, j: int) -> bool:
-        text = self._text
-        k = j
-        while k < len(text) and text[k] in _JSON_WS:
-            k += 1
-        return k < len(text) and text[k] in ",}]"
+        k = _next_non_ws(self._text, j)
+        return k < len(self._text) and self._text[k] in ",}]"
+
+    def _coercion_types(self, schema: dict) -> list[str]:
+        """Types a literal under *schema* coerces to; ``[]`` for none."""
+        cached = self._types_cache.get(id(schema))
+        if cached is not None:
+            return cached[1]
+        types = (
+            []
+            if schema_admits_any_value(schema)
+            else extract_types_from_schema(schema, fallback=[])
+        )
+        self._types_cache[id(schema)] = (schema, types)
+        return types
 
     def _object(self, i: int, props: dict | None) -> int:
         text, out = self._text, self._out
@@ -361,20 +374,11 @@ class _ArgsRewriter:
             # Not valid JSON as a bare literal; the quoted string form is.
             out.append(f'"{literal}"')
             return j
-        if (
-            isinstance(schema, dict)
-            and self._delimited(j)
-            and not schema_admits_any_value(schema)
-        ):
-            types = extract_types_from_schema(schema, fallback=[])
-            if types and _literal_type(literal) is not None:
-                # Integral floats normalize (5.0 -> 5) and values whose type
-                # the schema does not admit are re-encoded (5 -> "5").  A
-                # numeric literal that no declared type can represent
-                # (1e999 under "number") comes back as its own text: leave it
-                # verbatim rather than turn a number field into a string.
-                # So does a re-encoding that preserves the value (5e3 ->
-                # 5000.0 under an integer schema).
+        if isinstance(schema, dict) and self._delimited(j):
+            types = self._coercion_types(schema)
+            if types and _is_literal(literal):
+                # Keep value-preserving re-encodings (5e3 under integer) and
+                # unrepresentable numbers (1e999 under number) verbatim.
                 coerced = coerce_to_schema_type(literal, types)
                 dumped = json.dumps(coerced, ensure_ascii=False)
                 if (
@@ -417,10 +421,8 @@ def _top_level_commas(text: str, depth: int) -> list[int]:
 
 def _member_start(text: str, i: int) -> bool:
     """Whether the member following offset *i* begins with a quoted key."""
-    n = len(text)
-    while i < n and text[i] in _JSON_WS:
-        i += 1
-    return i < n and text[i] == '"'
+    i = _next_non_ws(text, i)
+    return i < len(text) and text[i] == '"'
 
 
 def _resume_point(
@@ -448,16 +450,16 @@ def _resume_point(
     return None
 
 
-def _unescaped_quote(text: str, escape: bool) -> tuple[bool, bool]:
-    """Whether *text* contains an unescaped quote; returns (closes, escape)."""
+def _unescaped_quote(text: str, escape: bool) -> bool:
+    """Whether *text*, starting after an open escape if *escape*, has a quote."""
     for c in text:
         if escape:
             escape = False
         elif c == "\\":
             escape = True
         elif c == '"':
-            return True, escape
-    return False, escape
+            return True
+    return False
 
 
 class _StreamingArgs:
@@ -480,92 +482,61 @@ class _StreamingArgs:
     """
 
     __slots__ = (
+        "_properties",
+        "_string_keys",
         "_raw",
         "_raw_boundary",
         "_corrected_boundary",
         "_emitted",
-        "_streams",
+        "streams",
         "_at_end",
-        "_escape",
         "_stop",
         "_nonfinite",
+        "safe",
     )
 
-    def __init__(self) -> None:
-        self._raw: str | None = None
-        self._raw_boundary = 0
-        self._corrected_boundary = 0
-        self._emitted = 0
-        self._streams = False
-        self._at_end = False
-        self._escape = False
-        self._stop: int | None = None
-        self._nonfinite = False
-
-    @staticmethod
-    def full_pass(
-        args_json: str, properties: dict | None, string_keys: set[str] | None
-    ) -> tuple[str, str, bool, int | None]:
-        """Return (corrected text, safe prefix, value_streams, stop offset).
-
-        The correction rewrites value tokens in place (see
-        :class:`_ArgsRewriter`), so the corrected text of one delta extends
-        the corrected text of every earlier delta and the prefix invariant
-        holds however the model formats its JSON.  Trailing literals are
-        treated as still growing: they are only corrected once delimited.
-        """
+    def __init__(
+        self, args_json: str, properties: dict | None, string_keys: set[str] | None
+    ) -> None:
+        """Run a full pass; ``safe`` is the emittable corrected prefix."""
+        self._properties = properties
+        self._string_keys = string_keys
         rewriter = _ArgsRewriter(args_json, properties, final=False)
         corrected = rewriter.rewrite()
-        safe, streams = ParserEngine._safe_arg_prefix(corrected, string_keys)
-        return corrected, safe, streams, rewriter.stop
-
-    def reset(
-        self,
-        args_json: str,
-        corrected: str,
-        safe: str,
-        streams: bool,
-        stop: int | None = None,
-    ) -> None:
+        self.safe, self.streams = ParserEngine._safe_arg_prefix(corrected, string_keys)
         self._raw = args_json
         self._raw_boundary = 0
         self._corrected_boundary = 0
-        self._emitted = len(safe)
-        self._streams = streams
-        self._at_end = len(safe) == len(corrected)
-        self._escape = _is_escaped(args_json, len(args_json)) if streams else False
-        self._stop = stop
+        self._emitted = len(self.safe)
+        self._at_end = len(self.safe) == len(corrected)
+        self._stop = rewriter.stop
         self._nonfinite = _has_non_finite_literal(args_json)
-        point = _resume_point(args_json, corrected, len(safe), 0)
-        if point is not None and (stop is None or point[0] <= stop):
+        point = _resume_point(args_json, corrected, len(self.safe), 0)
+        if point is not None and (self._stop is None or point[0] <= self._stop):
             self._raw_boundary, self._corrected_boundary = point
 
-    def delta(
-        self, args_json: str, properties: dict | None, string_keys: set[str] | None
-    ) -> tuple[str, bool] | None:
+    def delta(self, args_json: str) -> tuple[str, bool] | None:
         """Return (newly safe text, value_streams), or ``None`` for a full pass."""
         raw = self._raw
-        if raw is None or not args_json.startswith(raw) or not raw.startswith("{"):
+        if not args_json.startswith(raw) or not raw.startswith("{"):
             return None
-        if not properties and not self._nonfinite:
+        if not self._properties and not self._nonfinite:
             # A non-finite literal introduced after the cache was built may
             # rewrite text the full pass left verbatim after a give-up.
-            added = args_json[max(0, len(raw) - 7) :]
+            added = args_json[max(0, len(raw) - _NON_FINITE_OVERLAP) :]
             if _has_non_finite_literal(added):
                 return None
-        if self._streams and self._at_end:
+        if self.streams and self._at_end:
             delta = args_json[len(raw) :]
-            closes, escape = _unescaped_quote(delta, self._escape)
-            if not closes:
+            if not _unescaped_quote(delta, _is_escaped(raw, len(raw))):
                 self._raw = args_json
-                self._escape = escape
                 self._emitted += len(delta)
                 return delta, True
         skip = 1 if self._raw_boundary else 0
         base = self._raw_boundary
         tail = "{" + args_json[base:] if skip else args_json
         rewriter = _ArgsRewriter(
-            tail, properties, final=False, force_parse=self._nonfinite
+            tail, self._properties, final=False, force_parse=self._nonfinite
         )
         tail_out = rewriter.rewrite()
         if rewriter.stop is not None:
@@ -573,27 +544,21 @@ class _StreamingArgs:
             # The first structural give-up is final: everything after it is
             # copied verbatim, so a tail scan may not resume beyond it.
             self._stop = stop if self._stop is None else min(self._stop, stop)
-        safe_tail, streams = ParserEngine._safe_arg_prefix(tail_out, string_keys)
+        safe_tail, streams = ParserEngine._safe_arg_prefix(tail_out, self._string_keys)
+        body = tail_out[skip:]
         emit_rel = max(len(safe_tail) - skip, 0)
         end = self._corrected_boundary + emit_rel
-        point = _resume_point(args_json[base:], tail_out[skip:], emit_rel, skip)
-        if point is not None and (self._stop is None or base + point[0] <= self._stop):
-            new_raw = base + point[0]
-            new_corrected = self._corrected_boundary + point[1]
-        else:
-            new_raw = None
+        point = _resume_point(args_json[base:], body, emit_rel, skip)
         delta = ""
         if end > self._emitted:
-            body = tail_out[skip:]
             delta = body[self._emitted - self._corrected_boundary : emit_rel]
             self._emitted = end
         self._raw = args_json
-        self._streams = streams
-        self._at_end = end == self._corrected_boundary + len(tail_out) - skip
-        self._escape = _is_escaped(args_json, len(args_json)) if streams else False
-        if new_raw is not None:
-            self._raw_boundary = new_raw
-            self._corrected_boundary = new_corrected
+        self.streams = streams
+        self._at_end = end == self._corrected_boundary + len(body)
+        if point is not None and (self._stop is None or base + point[0] <= self._stop):
+            self._raw_boundary = base + point[0]
+            self._corrected_boundary += point[1]
         return delta, streams
 
 
@@ -871,13 +836,8 @@ class ParserEngine(Parser):
     def _fix_arg_types(self, args_json: str, func_name: str) -> str:
         """Correct argument values in place using the tool schema.
 
-        Values are coerced via :func:`coerce_typed_value` and non-finite
-        float literals are replaced by their quoted string form, so the
-        object's values stay valid JSON, whether or not a schema is
-        available.
-        Everything else is kept verbatim — see :class:`_ArgsRewriter` for
-        why re-serializing instead would break streamed arguments.  A
-        truncated object is corrected as far as its complete tokens allow.
+        See :class:`_ArgsRewriter`; non-finite literals are quoted even
+        without a schema.
         """
         return _ArgsRewriter(
             args_json, find_tool_properties(self._tools, func_name), final=True
@@ -1358,6 +1318,13 @@ class ParserEngine(Parser):
             )
             state.history_tool_call_cnt += 1
 
+    def _bind_tool(self, slot: ToolCallSlot, name: str) -> None:
+        slot.name = name
+        slot.name_sent = True
+        slot.properties = find_tool_properties(self._tools, name)
+        slot.string_keys = self._streamable_string_keys(slot.properties)
+        self._ensure_tool_id(slot, name)
+
     def _handle_tool_name(self, event: SemanticEvent) -> None:
         idx = event.tool_index
         self._tool_slots[idx].name += event.value
@@ -1371,11 +1338,7 @@ class ParserEngine(Parser):
         if name is None or not self._accept_tool_name(name):
             return
         slot = self._tool_slots[idx]
-        slot.name = name
-        slot.name_sent = True
-        slot.properties = find_tool_properties(self._tools, name)
-        slot.string_keys = self._streamable_string_keys(slot.properties)
-        self._ensure_tool_id(slot, name)
+        self._bind_tool(slot, name)
         deltas.append(
             DeltaToolCall(
                 index=idx,
@@ -1428,11 +1391,7 @@ class ParserEngine(Parser):
         if not slot.name_sent:
             name = slot.name or self._try_extract_name(idx) or ""
             if self._accept_tool_name(name):
-                slot.name = name
-                slot.name_sent = True
-                slot.properties = find_tool_properties(self._tools, name)
-                slot.string_keys = self._streamable_string_keys(slot.properties)
-                self._ensure_tool_id(slot, name)
+                self._bind_tool(slot, name)
                 deltas.append(
                     DeltaToolCall(
                         index=idx,
@@ -1521,24 +1480,16 @@ class ParserEngine(Parser):
         if not current_json:
             return None
 
-        # Reached only once the name was accepted, so slot.name is set.
         cache = slot.arg_cache
-        result = (
-            cache.delta(current_json, slot.properties, slot.string_keys)
-            if cache is not None
-            else None
-        )
+        result = cache.delta(current_json) if cache is not None else None
         if result is None:
-            properties, string_keys = slot.properties, slot.string_keys
-            corrected, safe_json, value_streams, stop = _StreamingArgs.full_pass(
-                current_json, properties, string_keys
-            )
+            cache = _StreamingArgs(current_json, slot.properties, slot.string_keys)
+            safe_json, value_streams = cache.safe, cache.streams
             prev = slot.streamed_json
             if prev and not safe_json.startswith(prev):
                 slot.arg_cache = None
                 return None
-            cache = slot.arg_cache = _StreamingArgs()
-            cache.reset(current_json, corrected, safe_json, value_streams, stop)
+            slot.arg_cache = cache
             if not safe_json:
                 return None
             slot.streamed_json = safe_json

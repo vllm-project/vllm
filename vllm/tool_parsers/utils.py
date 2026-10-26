@@ -1144,16 +1144,12 @@ def extract_types_from_schema(
     """Extract all possible type strings from a JSON Schema definition.
 
     Handles ``type`` (string or list), ``enum``/``const`` value inference,
-    and recursive ``anyOf``/``oneOf``/``allOf``.  A schema with no declared
-    type returns *fallback* (default ``["string"]``); ``true`` and ``false``
-    schemas and nesting beyond :data:`MAX_NESTING_DEPTH` also return
-    *fallback*.  Absent (``None``) and other non-dict schemas return
-    ``["string"]`` instead.  The fallback rule includes a schema whose only
-    constraint is an unresolved ``$ref``/``$dynamicRef``: its type is
-    unknown rather than untyped, so the caller's fallback decides how
-    conservative to be — coercion callers pass ``[]`` to leave such values
-    verbatim, while callers needing a concrete type keep the string
-    default.  Explicit ``type``/``enum`` siblings of a ``$ref`` still apply.
+    and recursive ``anyOf``/``oneOf``/``allOf``.  Returns *fallback*
+    (default ``["string"]``) when no type is declared, including ``true``/
+    ``false``, ``$ref``-only, and over-deep (:data:`MAX_NESTING_DEPTH`)
+    schemas; coercion callers pass ``[]`` to leave such values verbatim.
+    Absent (``None``) and other non-dict schemas return ``["string"]``
+    instead.  Explicit ``type``/``enum`` siblings of a ``$ref`` still apply.
     """
     if fallback is None:
         fallback = ["string"]
@@ -1345,35 +1341,23 @@ def coerce_typed_value(value: Any, schema: Any) -> tuple[Any, bool]:
     return coerced, type(coerced) is not type(value) or coerced != value
 
 
-def sanitize_non_finite(value: Any) -> tuple[Any, bool]:
+def sanitize_non_finite(value: Any) -> Any:
     """Replace non-finite floats with their string form, recursively.
 
     ``json.dumps`` renders ``NaN``/``Infinity`` as invalid JSON, so values
     headed for serialization are sanitized first. Containers are updated in
-    place. Returns ``(value, changed)``.
+    place.
     """
     if isinstance(value, float):
-        if math.isfinite(value):
-            return value, False
         # Spell it the way json.dumps spells it ("NaN"/"Infinity").
-        return json.dumps(value), True
+        return value if math.isfinite(value) else json.dumps(value)
     if isinstance(value, dict):
-        changed = False
         for key, item in value.items():
-            sanitized, item_changed = sanitize_non_finite(item)
-            if item_changed:
-                value[key] = sanitized
-                changed = True
-        return value, changed
-    if isinstance(value, list):
-        changed = False
+            value[key] = sanitize_non_finite(item)
+    elif isinstance(value, list):
         for i, item in enumerate(value):
-            sanitized, item_changed = sanitize_non_finite(item)
-            if item_changed:
-                value[i] = sanitized
-                changed = True
-        return value, changed
-    return value, False
+            value[i] = sanitize_non_finite(item)
+    return value
 
 
 def compute_tool_delta(
