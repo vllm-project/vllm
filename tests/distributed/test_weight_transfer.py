@@ -49,6 +49,7 @@ from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferInitInfo,
     IPCWeightTransferUpdateInfo,
 )
+from vllm.distributed.weight_transfer.nccl_common import run_trainer_rendezvous
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerInitInfo,
     NCCLTrainerWeightTransferEngine,
@@ -1669,16 +1670,63 @@ def test_ipc_trainer_init_ships_packed_to_worker():
     assert client.last_init_info == {"packed": True}
 
 
-def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
+def test_nccl_trainer_rendezvous_runs_concurrently_and_waits_for_worker():
+    worker_started = threading.Event()
+    trainer_started = threading.Event()
+    worker_finished = threading.Event()
+    trainer_thread = threading.get_ident()
+
+    def init_worker():
+        assert threading.get_ident() != trainer_thread
+        worker_started.set()
+        assert trainer_started.wait(timeout=5)
+        worker_finished.set()
+
+    def init_trainer():
+        try:
+            assert threading.get_ident() == trainer_thread
+            assert worker_started.wait(timeout=5)
+            assert not worker_finished.is_set()
+        finally:
+            trainer_started.set()
+
+    run_trainer_rendezvous(init_worker=init_worker, init_trainer=init_trainer)
+    assert worker_finished.is_set()
+
+
+@pytest.mark.parametrize("failure_side", ["worker", "trainer"])
+def test_nccl_trainer_rendezvous_propagates_errors_after_worker_exits(failure_side):
+    trainer_started = threading.Event()
+    worker_finished = threading.Event()
+    error = RuntimeError(f"{failure_side} initialization failed")
+
+    def init_worker():
+        assert trainer_started.wait(timeout=5)
+        worker_finished.set()
+        if failure_side == "worker":
+            raise error
+
+    def init_trainer():
+        trainer_started.set()
+        if failure_side == "trainer":
+            raise error
+
+    with pytest.raises(RuntimeError) as exc_info:
+        run_trainer_rendezvous(init_worker=init_worker, init_trainer=init_trainer)
+    assert exc_info.value is error
+    assert worker_finished.is_set()
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed):
     """The sender's trainer_init drives the inference-side init handshake with
     the worker-shaped init info (rank_offset=1) while opening its own endpoint,
     and propagates the must-agree wire params to the worker."""
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
 
     # Bypass the real NCCL rendezvous.
-    monkeypatch.setattr(
-        nccl_engine_mod, "open_trainer_endpoint", lambda info: MagicMock()
-    )
+    group = object()
+    monkeypatch.setattr(nccl_engine_mod, "open_trainer_endpoint", lambda info: group)
 
     client = RecordingClient()
     engine = WeightTransferTrainerFactory.trainer_init(
@@ -1687,7 +1735,7 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
             master_port=29500,
             world_size=3,
             rank=0,
-            packed=True,
+            packed=packed,
             packed_buffer_size_bytes=1024,
             packed_num_buffers=3,
         ),
@@ -1697,17 +1745,58 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
 
     assert isinstance(engine, NCCLTrainerWeightTransferEngine)
     assert engine.is_sender is True
-    assert engine.packed is True
+    assert engine.packed is packed
+    assert engine.model_update_group is group
     assert client.order == ["init"]
     assert client.last_init_info == {
         "master_address": "127.0.0.1",
         "master_port": 29500,
         "rank_offset": 1,
         "world_size": 3,
-        "packed": True,
+        "packed": packed,
         "packed_buffer_size_bytes": 1024,
         "packed_num_buffers": 3,
     }
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_nccl_trainer_init_dispatches_subclass_hooks_only_on_sender(rank):
+    group = object()
+    calls = []
+
+    class Trainer(NCCLTrainerWeightTransferEngine):
+        @classmethod
+        def _build_worker_init_payload(cls, init_info):
+            calls.append(("payload", cls, init_info))
+            payload = super()._build_worker_init_payload(init_info)
+            payload["master_port"] += 1
+            return payload
+
+        def _open_trainer_endpoint(self, init_info):
+            calls.append(("endpoint", self, init_info))
+            self.model_update_group = group
+
+    init_info = NCCLTrainerInitInfo(
+        master_address="127.0.0.1", master_port=29500, world_size=3, rank=rank
+    )
+    client = RecordingClient()
+    engine = Trainer.trainer_init(
+        init_info, client=client, source=ModuleSource(_module_with())
+    )
+
+    assert type(engine) is Trainer
+    if rank == 0:
+        assert calls == [
+            ("payload", Trainer, init_info),
+            ("endpoint", engine, init_info),
+        ]
+        assert client.last_init_info is not None
+        assert client.last_init_info["master_port"] == 29501
+        assert engine.model_update_group is group
+    else:
+        assert calls == []
+        assert client.order == []
+        assert engine.model_update_group is None
 
 
 def test_nccl_worker_learns_wire_params_from_init_handshake(monkeypatch):
@@ -2011,12 +2100,12 @@ def _sparse_patch(device: str = "cpu") -> SparseWeightPatch:
 
 
 def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
-    """The sender's trainer_init drives the init handshake with the
-    worker-shaped init info; sparse ships no packed wire params, so the worker
-    keeps its unpacked defaults. Sparse takes no `source`."""
+    """The sender's trainer_init sends worker-shaped init info with
+    `packed=False` and default buffer settings. Sparse takes no `source`."""
     import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
 
-    monkeypatch.setattr(sparse_mod, "open_trainer_endpoint", lambda info: MagicMock())
+    group = object()
+    monkeypatch.setattr(sparse_mod, "open_trainer_endpoint", lambda info: group)
 
     client = RecordingClient()
     engine = WeightTransferTrainerFactory.trainer_init(
@@ -2030,6 +2119,7 @@ def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
     )
 
     assert isinstance(engine, SparseNCCLTrainerWeightTransferEngine)
+    assert engine.model_update_group is group
     assert client.order == ["init"]
     assert client.last_init_info == {
         "master_address": "127.0.0.1",

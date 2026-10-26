@@ -8,6 +8,7 @@ import torch
 from pydantic import ConfigDict, Field, model_validator
 
 from vllm import envs
+from vllm.config.kernel import MEGA_MOE_BACKENDS, KernelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -133,6 +134,15 @@ class LoRAConfig:
             )
             envs.VLLM_LORA_ENABLE_DUAL_STREAM = False
         return self
+
+    def verify_with_kernel_config(self, kernel_config: KernelConfig) -> None:
+        """Reject MegaMoE backends, which do not support LoRA."""
+        moe_backend = kernel_config.moe_backend
+        if moe_backend in MEGA_MOE_BACKENDS or moe_backend == "aiter_mega_moe":
+            raise ValueError(
+                f"LoRA is not supported with moe_backend={moe_backend!r}. "
+                "Disable LoRA or select a MoE backend that supports LoRA."
+            )
 
     def verify_with_model_config(self, model_config: ModelConfig):
         # Speculative decoding drafters don't run LoRA adapters.
