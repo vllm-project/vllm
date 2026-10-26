@@ -40,6 +40,23 @@ _MAX_NUM_ALLOWED_TOKEN_IDS = 1024
 _bitmask_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
 
+def _validated_allowed_token_ids(result: object, vocab_size: int) -> list[int] | None:
+    """A grammar's direct allowed-token list, or None to use the bitmask path.
+
+    `allowed_token_ids` is an optional hook on a third-party-implementable
+    interface, so its result is checked rather than trusted: the two routes must
+    agree on which tokens are legal, and the bitmask route can only ever produce
+    sorted, de-duplicated, in-range ids. Returns None -- meaning "fall back" --
+    for anything else, including a non-list, a non-integer element, or an id
+    outside the vocabulary.
+    """
+    if not isinstance(result, list):
+        return None
+    if not all(isinstance(i, int) and 0 <= i < vocab_size for i in result):
+        return None
+    return sorted(set(result))
+
+
 def _bitmask_to_token_ids(bitmask_row: torch.Tensor, vocab_size: int) -> list[int]:
     """Convert a packed int32 bitmask row to a list of allowed token IDs."""
     if vocab_size not in _bitmask_cache:
@@ -486,8 +503,22 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 result.append(None)
                 continue
 
-            grammar.fill_bitmask(bitmask, 0)
-            allowed_ids = _bitmask_to_token_ids(bitmask[0], vocab_size)
+            # Ask the grammar for the set directly; unpacking a bitmask costs
+            # O(vocab_size) per beam per step however few tokens are allowed.
+            #
+            # The result is validated rather than trusted. The bitmask path
+            # structurally yields a sorted list of in-range ids; a direct list
+            # cannot, so anything that is not a list of ids below `vocab_size`
+            # falls back instead of constraining the beam differently depending
+            # on which route ran. This also means a grammar that is stubbed or
+            # mocked -- as in the existing watermarking tests -- takes the
+            # bitmask path rather than returning a mock as the allowed set.
+            allowed_ids = _validated_allowed_token_ids(
+                grammar.allowed_token_ids(vocab_size), vocab_size
+            )
+            if allowed_ids is None:
+                grammar.fill_bitmask(bitmask, 0)
+                allowed_ids = _bitmask_to_token_ids(bitmask[0], vocab_size)
 
             if not allowed_ids:
                 result.append(None)

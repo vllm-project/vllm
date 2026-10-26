@@ -90,6 +90,20 @@ class StructuredOutputGrammar(ABC):
 
         """
 
+    def allowed_token_ids(self, vocab_size: int) -> list[int] | None:  # noqa: B027
+        """The tokens allowed as the next step, ascending, or None if unknown.
+
+        A caller that wants the allowed set as ids -- beam search, which puts them
+        on each beam's `SamplingParams` -- otherwise has to fill a bitmask and
+        unpack it again, which costs O(vocab_size) however few tokens are allowed.
+        A grammar that already holds the set can return it and skip the round trip.
+
+        Returning None is always correct and is the default: the caller falls back
+        to `fill_bitmask`. Implementations must restrict the result to ids below
+        `vocab_size`, as the bitmask path does.
+        """
+        return None
+
     @abstractmethod
     def reset(self):
         """Resets the state of the structured output grammar."""
