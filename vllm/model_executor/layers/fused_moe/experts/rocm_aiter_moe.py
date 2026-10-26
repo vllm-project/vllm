@@ -251,6 +251,10 @@ def aiter_moe_pads(
     fused gate/up weight. The W4A4 SiLU path doubles it inside AITER, so it is
     passed undoubled; doubling it here as well masks live intermediate rows.
 
+    The W4A4 SiLU intermediate pad is also passed unrounded: AITER's FLAT MXFP4
+    1-stage kernels need the true pad. CK-Tile rounds it itself (see below),
+    and FlyDSL masks it.
+
     Where AITER doubles it (v0.1.24.post1):
     - CK-Tile stage 1, aiter/fused_moe.py:
       ``n_pad_zeros=intermediate_pad // 64 * 64 * (2 if use_g1u1 else 1)``.
@@ -264,7 +268,9 @@ def aiter_moe_pads(
     """
     if activation == MoEActivation.SITU:
         return hidden_pad, intermediate_pad
-    double = tp_size == 1 and not (use_mxfp4_w4a4 and activation == MoEActivation.SILU)
+    if use_mxfp4_w4a4 and activation == MoEActivation.SILU:
+        return hidden_pad // 128 * 128, intermediate_pad
+    double = tp_size == 1
     return (
         hidden_pad // 128 * 128,
         intermediate_pad // 64 * 64 * (2 if double else 1),
