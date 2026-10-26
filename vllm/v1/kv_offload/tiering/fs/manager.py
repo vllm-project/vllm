@@ -336,7 +336,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self._pool.wait_idle()
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        self._lookup_manager.cleanup(req_context.req_id)
+        self._lookup_manager.cleanup(req_context)
 
     @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:

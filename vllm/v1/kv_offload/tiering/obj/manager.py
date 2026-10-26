@@ -306,7 +306,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         )
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        self._lookup_manager.cleanup(req_context.req_id)
+        self._lookup_manager.cleanup(req_context)
 
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         self._lookup_manager.flush()
