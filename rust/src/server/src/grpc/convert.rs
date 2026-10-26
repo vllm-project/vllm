@@ -4,7 +4,6 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
-use thiserror_ext::AsReport as _;
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
@@ -95,7 +94,7 @@ pub fn to_text_request(
 
     let mut sampling_params =
         build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
-    sampling_params.watermarking = req.watermarking.unwrap_or(true);
+    sampling_params.watermarking = req.watermarking;
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -300,9 +299,6 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
-    params
-        .validate()
-        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
     Ok(Some(params))
 }
 
@@ -398,7 +394,13 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Error => return Err(Status::internal("engine failed during generation")),
+        FinishReason::Error(Some(error)) if error.is_validation_error() => {
+            return Err(Status::invalid_argument(error.message.clone()));
+        }
+        FinishReason::Error(Some(error)) if error.retryable => {
+            return Err(Status::unavailable(error.message.clone()));
+        }
+        FinishReason::Error(_) => return Err(Status::internal("engine failed during generation")),
         FinishReason::Abort | FinishReason::Repetition(_) => (PbFinishReason::Aborted as i32, None),
     };
 
@@ -565,8 +567,9 @@ impl ResponseOpts {
 #[cfg(test)]
 mod tests {
     use prost::Message as _;
-    use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::output::{RequestError, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
     };
@@ -612,6 +615,7 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 &TestTokenizer::new(),
             )
             .unwrap()
@@ -676,6 +680,7 @@ mod tests {
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
+                    StructuredOutputBackend::Xgrammar,
                     &TestTokenizer::new(),
                 )
                 .expect("reasoning controls lower to engine")
@@ -704,10 +709,7 @@ mod tests {
                 let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
                 let text = to_text_request(decoded, stream, &["test-model".to_string()])
                     .expect("convert request");
-                assert_eq!(
-                    text.sampling_params.watermarking,
-                    watermarking.unwrap_or(true)
-                );
+                assert_eq!(text.sampling_params.watermarking, watermarking);
             }
         }
     }
@@ -757,20 +759,6 @@ mod tests {
             .expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
-    }
-
-    #[test]
-    fn grpc_rejects_empty_grammar_before_engine() {
-        use super::pb::decoding_parameters::StructuredOutput;
-        let req = pb::GenerateRequest {
-            decoding: Some(pb::DecodingParameters {
-                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
-                ..Default::default()
-            }),
-            ..base_request()
-        };
-        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
-        assert!(err.message().contains("grammar cannot be an empty string"));
     }
 
     #[test]
@@ -850,6 +838,7 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 1,
                 &TestTokenizer::new(),
             )
@@ -898,6 +887,7 @@ mod tests {
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
+                    StructuredOutputBackend::Xgrammar,
                     &TestTokenizer::new(),
                 )
                 .unwrap()
@@ -1014,6 +1004,35 @@ mod tests {
 
         assert_eq!(info.finish_reason, PbFinishReason::Aborted as i32);
         assert_eq!(info.stop_reason, None);
+    }
+
+    #[test]
+    fn engine_errors_map_to_status_codes() {
+        let error = RequestError {
+            code: "engine_paused".to_string(),
+            message: "Generation is paused.".to_string(),
+            retryable: true,
+        };
+        let fin = finished(FinishReason::Error(Some(Box::new(error))));
+        let status = to_finish_info(&fin, &[]).expect_err("retryable error");
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+
+        let error = RequestError {
+            code: RequestError::VALIDATION_ERROR.to_string(),
+            message: "Invalid structured outputs: Grammar error: bad".to_string(),
+            retryable: false,
+        };
+        let fin = finished(FinishReason::Error(Some(Box::new(error))));
+        let status = to_finish_info(&fin, &[]).expect_err("invalid request");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            "Invalid structured outputs: Grammar error: bad"
+        );
+
+        let fin = finished(FinishReason::Error(None));
+        let status = to_finish_info(&fin, &[]).expect_err("internal error");
+        assert_eq!(status.code(), tonic::Code::Internal);
     }
 
     #[test]
