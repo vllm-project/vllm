@@ -156,10 +156,17 @@ def test_qwen4_exp_mtp_remaps_mixed_precision_layer_indices(backend: str) -> Non
 
 @spawn_new_process_for_each_test
 def test_qwen4_exp_amd_mtp_remaps_quark_layer_names() -> None:
+    from vllm.model_executor.layers.fused_moe import (
+        RoutedExperts,
+        UnquantizedFusedMoEMethod,
+    )
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
     from vllm.models.qwen4_exp.amd import mtp as mtp_module
 
-    exclude = ["lm_head", "mtp.layers.0.mlp.experts.0.gate_proj", r"re:mtp\..*"]
+    # `re:mtp\.fc_hidden`, not a catch-all `re:mtp\..*`: a broad regex would
+    # already exclude layer 48's experts on its own (`re:` entries are never
+    # remapped), masking the bug this test is meant to catch.
+    exclude = ["lm_head", "mtp.layers.0.mlp.experts.0.gate_proj", r"re:mtp\.fc_hidden"]
     checkpoint_config = {
         "exclude": exclude,
         "layer_quant_config": {"mtp.layers.0.self_attn.q_proj": {}},
@@ -181,10 +188,18 @@ def test_qwen4_exp_amd_mtp_remaps_quark_layer_names() -> None:
     assert remapped["exclude"] == [
         "lm_head",
         "mtp.layers.48.mlp.experts.0.gate_proj",
-        r"re:mtp\..*",
+        r"re:mtp\.fc_hidden",
     ]
     assert remapped["layer_quant_config"] == {"mtp.layers.48.self_attn.q_proj": {}}
     assert exclude[1] == "mtp.layers.0.mlp.experts.0.gate_proj"
+
+    # Without the remap, layer 48's experts fall through to the global MXFP4
+    # scheme instead of being treated as unquantized bf16 -- assert the
+    # decision `get_quant_method` actually makes, not just the exclude list.
+    _, _, method_cls = draft_config.quant_config.get_quant_method_target(
+        "mtp.layers.48.mlp.experts", RoutedExperts
+    )
+    assert method_cls is UnquantizedFusedMoEMethod
 
 
 @pytest.mark.parametrize("wrapped_config", [False, True])
