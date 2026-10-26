@@ -16,7 +16,6 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
-from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
     get_dtype_size,
@@ -45,12 +44,6 @@ _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
-
-    def block_size(x, head_dim):
-        return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
-
-    def num_programs(total_tokens):
-        return min(total_tokens, num_compute_units())
 
     @triton.jit
     def cp_mha_gather_cache_kernel(
