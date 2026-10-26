@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode, ParallelConfig
+from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.attention.ops import pcp as attention_pcp
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
@@ -48,6 +50,7 @@ def _make_capture_manager(block_table: torch.Tensor):
         input_block_tables=(block_table,),
         num_kv_cache_groups=1,
         block_sizes=(2,),
+        cp_interleave=1,
     )
     manager = PCPManager(
         pcp_world_size=2,
@@ -142,6 +145,33 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
     assert manager.input_buffers.input_ids.shape == (8,)
     assert manager.input_buffers.positions.shape == (8,)
     assert manager.input_buffers.is_padding.shape == (8,)
+
+
+def test_sync_drafts_writes_logits_to_request_slots(monkeypatch):
+    """Rank 0's draft logits land in each batch request's persistent slot."""
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=1,
+        device=torch.device("cpu"),
+        shard_decode_requests=False,
+        max_num_reqs=4,
+        max_num_tokens=8,
+    )
+    root_tokens = torch.tensor([[11, 12, 13]])
+    root_logits = torch.arange(24, dtype=torch.float32).view(1, 3, 8)
+    broadcasts = iter([root_tokens, root_logits])
+    group = SimpleNamespace(
+        broadcast=lambda tensor, src: tensor.copy_(next(broadcasts))
+    )
+    monkeypatch.setattr(pcp_manager_module, "get_pcp_group", lambda: group)
+    draft_tokens = torch.full((1, 3), -1)
+    draft_logits = torch.full((4, 3, 8), -1.0)
+
+    manager.sync_drafts(draft_tokens, torch.tensor([2]), draft_logits)
+
+    torch.testing.assert_close(draft_tokens, root_tokens)
+    torch.testing.assert_close(draft_logits[2], root_logits[0])
+    assert (draft_logits[[0, 1, 3]] == -1).all()
 
 
 @pytest.mark.parametrize(
@@ -240,9 +270,10 @@ def test_dummy_draft_does_not_reuse_previous_graph_batch():
 
     manager.prepare_draft_prefill(dummy_batch, dummy_batch.input_ids)
 
-    assert (
-        manager.get_draft_input_buffers(manager.input_buffers) is manager.input_buffers
+    draft_inputs, _ = manager.get_draft_input_buffers(
+        manager.input_buffers, dummy_batch.num_tokens_after_padding
     )
+    assert draft_inputs is manager.input_buffers
 
 
 def test_capture_uses_pcp_persistent_inputs():
@@ -256,7 +287,7 @@ def test_capture_uses_pcp_persistent_inputs():
     )
     dummy_batch.input_ids.copy_(torch.arange(4))
     dummy_batch.positions.fill_(7)
-    input_batch = manager.prepare_inputs_to_capture(dummy_batch)
+    input_batch = manager.prepare_inputs_for_capture_or_profile(dummy_batch)
 
     assert input_batch is not dummy_batch
     assert input_batch.req_ids == dummy_batch.req_ids
@@ -264,6 +295,17 @@ def test_capture_uses_pcp_persistent_inputs():
         actual = getattr(input_batch, name)
         torch.testing.assert_close(actual, getattr(dummy_batch, name))
         assert actual.data_ptr() == getattr(manager.input_buffers, name).data_ptr()
+
+
+def test_block_table_rebind_updates_interleave():
+    manager, block_tables = _make_capture_manager(torch.ones((4, 2), dtype=torch.int32))
+    final_block_tables = SimpleNamespace(**vars(block_tables))
+    final_block_tables.cp_interleave = 64
+
+    manager.set_block_tables(final_block_tables)
+
+    assert manager._block_tables is final_block_tables
+    assert manager.cp_interleave == 64
 
 
 def test_dummy_context_updates_pcp_local_block_tables():
@@ -275,7 +317,7 @@ def test_dummy_context_updates_pcp_local_block_tables():
         input_buffers=manager.input_buffers,
         max_query_len=1,
     )
-    input_batch = manager.prepare_inputs_to_capture(input_batch)
+    input_batch = manager.prepare_inputs_for_capture_or_profile(input_batch)
     local_block_tables = manager.get_dummy_block_tables(input_batch.num_reqs)
 
     set_dummy_context(
@@ -709,12 +751,13 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
 
     assert local_batch.dcp_local_seq_lens is None
     assert local_batch.seq_lens.tolist() == [17, 25, 0, 0]
-    assert local_batch.dcp_local_seq_lens_cpu_upper_bound is not None
+    assert local_batch.pcp is not None
+    assert local_batch.pcp.dcp_local_seq_lens_cpu_upper_bound is not None
     expected_dcp_upper_bound = get_dcp_local_seq_lens(
         torch.tensor([17, 25], dtype=torch.int32), 2, 0, 1
     )
     assert torch.equal(
-        local_batch.dcp_local_seq_lens_cpu_upper_bound,
+        local_batch.pcp.dcp_local_seq_lens_cpu_upper_bound,
         torch.cat([expected_dcp_upper_bound, torch.zeros(2, dtype=torch.int32)]),
     )
 
@@ -734,6 +777,49 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
     )
     assert local_batch.dcp_local_seq_lens is not None
     assert torch.equal(local_batch.dcp_local_seq_lens.cpu(), expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs GPU kernels")
+def test_moe_padding_matches_pcp_all_gather(monkeypatch):
+    """The PCP batch carries the all-gather of every rank's local padding mask,
+    the rows the MoE routes, even when ranks own different numbers of tokens."""
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
+    device = torch.device("cuda:0")
+    local_masks, batch_masks = [], []
+    for pcp_rank in range(2):
+        manager = PCPManager(
+            pcp_world_size=2,
+            pcp_rank=pcp_rank,
+            device=device,
+            shard_decode_requests=True,
+            max_num_reqs=4,
+            max_num_tokens=8,
+            moe_gathers_tokens=True,
+        )
+        global_batch = _make_global_decode_batch(
+            [16, 24, 32], InputBuffers(4, 8, device), device
+        )
+        local_batch = manager.partition_batch(
+            global_batch,
+            BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.PIECEWISE, num_tokens=4, num_reqs=None
+            ),
+        )
+        num_tokens = local_batch.num_tokens_after_padding
+        local_masks.append(manager.input_buffers.is_padding[:num_tokens].cpu())
+        batch_masks.append(local_batch.is_padding.clone())
+
+    # Sharded decode puts two requests on rank 0 and one on rank 1.
+    assert [mask.logical_not().sum().item() for mask in local_masks] == [2, 1]
+    for batch_mask in batch_masks:
+        assert torch.equal(batch_mask.cpu(), torch.cat(local_masks))
+        num_tokens = batch_mask.numel()
+        hidden_states = torch.randn(num_tokens, 4, device=device)
+        router_logits = torch.randn(num_tokens, 8, device=device)
+        with set_forward_context(None, VllmConfig(), is_padding=batch_mask):
+            _, topk_ids, _ = fused_topk(hidden_states, router_logits, 2, False)
+        assert (topk_ids[~batch_mask] >= 0).all()
+        assert (topk_ids[batch_mask] == -1).all()
 
 
 @pytest.mark.parametrize(

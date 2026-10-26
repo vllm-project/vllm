@@ -216,7 +216,7 @@ class cmake_build_ext(build_ext):
         # `num_jobs` is either the value of the MAX_JOBS environment variable
         # (if defined) or the number of CPUs available.
         num_jobs = envs.MAX_JOBS
-        if num_jobs is not None:
+        if isinstance(num_jobs, str) and num_jobs.isnumeric():
             num_jobs = int(num_jobs)
             logger.info("Using MAX_JOBS=%d as the number of jobs.", num_jobs)
         else:
@@ -645,8 +645,10 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def rocm_version_to_variant(rocm_version: str) -> str:
-        """Convert a ROCm version string to a wheel variant, e.g. 7.2.3 -> rocm723."""
-        return "rocm" + rocm_version.replace(".", "")
+        """Convert a ROCm version string to a wheel variant from its major and
+        minor version, e.g. 7.2.3 -> rocm72, 10.0.0 -> rocm100.
+        """
+        return "rocm" + "".join(rocm_version.split(".")[:2])
 
     @staticmethod
     def detect_system_rocm_variant() -> str | None:
@@ -1382,7 +1384,9 @@ def get_vllm_version() -> str:
             # Get the Rocm Version
             rocm_version = get_rocm_version() or torch.version.hip
             if rocm_version and rocm_version != envs.VLLM_MAIN_CUDA_VERSION:
-                version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
+                version += sep + precompiled_wheel_utils.rocm_version_to_variant(
+                    rocm_version
+                )
         elif _is_tpu():
             version += f"{sep}tpu"
         elif _is_cpu():
@@ -1512,6 +1516,7 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("rocm.txt")
         if "develop" in sys.argv[1:] and "--no-deps" not in sys.argv[1:]:
             _check_requirements_preinstalled(requirements)
+        requirements += get_rocm_device_requirements()
     elif _is_tpu():
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
@@ -1521,6 +1526,24 @@ def get_requirements() -> list[str]:
     else:
         raise ValueError("Unsupported platform, please use CUDA, ROCm, or CPU.")
     return requirements
+
+
+def get_rocm_device_requirements() -> list[str]:
+    """GPU kernel packages for TheRock builds.
+
+    TheRock ships GPU kernels as separate per-arch wheels selected through
+    ``[device-<arch>]`` extras on torch, torchvision and rocm. Require them for
+    every arch this wheel was compiled for, so ``pip install vllm`` works on
+    any supported GPU.
+    """
+    if not _is_hip() or importlib.util.find_spec("rocm_sdk") is None:
+        return []
+    arches = [a for a in os.getenv("PYTORCH_ROCM_ARCH", "").split(";") if a]
+    return [
+        f"{pkg}[device-{arch}]"
+        for pkg in ("torch", "torchvision", "rocm")
+        for arch in arches
+    ]
 
 
 ext_modules = []
@@ -1688,11 +1711,11 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch==2.14.0.0"],
+        "zen": ["zentorch==2.14.0.1"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],
-        "instanttensor": ["instanttensor >= 0.1.9"],
+        "instanttensor": ["instanttensor >= 0.2.2"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
             "av",

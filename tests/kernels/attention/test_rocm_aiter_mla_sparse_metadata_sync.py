@@ -223,7 +223,7 @@ def _patch_build_deps(monkeypatch, events=None):
     on CPU."""
 
     def fake_generate_sparse_seqlen_triton(
-        query_lens, seq_lens, cu_query_lens, topk_token, num_tokens, max_query_len
+        seq_lens, cu_query_lens, topk_token, num_tokens, max_query_len
     ):
         return torch.zeros(num_tokens, dtype=torch.int32, device="cpu")
 
@@ -274,6 +274,25 @@ def test_build_populates_mixed_split_fields(monkeypatch):
     assert md.num_decode_tokens == 1
     assert md.prefill_max_seq_len == 0
     assert md.prefill is None
+
+
+def test_build_fills_paged_kv_indptr_tail(monkeypatch):
+    """Rows past num_tokens must read as empty: the tail repeats the total."""
+    builder = _make_builder()
+    _patch_build_deps(monkeypatch)
+    monkeypatch.setattr(
+        sparse_mod,
+        "generate_sparse_seqlen_triton",
+        lambda *args, **kwargs: torch.tensor([3, 5], dtype=torch.int32),
+    )
+    builder.paged_kv_indptr[1:].fill_(-1)
+
+    md = builder.build(
+        common_prefix_len=0, common_attn_metadata=_make_common_metadata()
+    )
+
+    assert md.paged_kv_indptr.tolist() == [0, 3, 8]
+    assert builder.paged_kv_indptr.tolist() == [0, 3, 8, 8, 8, 8, 8, 8, 8]
 
 
 def test_sink_build_skips_persistent_metadata(monkeypatch):
@@ -385,10 +404,10 @@ def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
     sparse_call: dict[str, torch.Tensor] = {}
 
     def fake_generate_sparse_seqlen(
-        query_lens, sparse_seq_lens, sparse_query_start_loc, topk, num_tokens, max_q
+        sparse_seq_lens, sparse_query_start_loc, topk, num_tokens, max_q
     ):
         sparse_call.update(
-            query_lens=query_lens.clone(),
+            query_lens=torch.diff(sparse_query_start_loc),
             seq_lens=sparse_seq_lens.clone(),
             query_start_loc=sparse_query_start_loc.clone(),
             num_tokens=num_tokens,
@@ -471,10 +490,10 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
     sparse_call: dict[str, torch.Tensor] = {}
 
     def fake_generate_sparse_seqlen(
-        query_lens, sparse_seq_lens, sparse_query_start_loc, topk, num_tokens, max_q
+        sparse_seq_lens, sparse_query_start_loc, topk, num_tokens, max_q
     ):
         sparse_call.update(
-            query_lens=query_lens.clone(),
+            query_lens=torch.diff(sparse_query_start_loc),
             seq_lens=sparse_seq_lens.clone(),
             query_start_loc=sparse_query_start_loc.clone(),
             num_tokens=num_tokens,
@@ -699,7 +718,7 @@ def test_sparse_metadata_workload_length_dtype_matrix(
     monkeypatch.setattr(
         sparse_mod,
         "generate_sparse_seqlen_triton",
-        lambda *args, **kwargs: torch.ones(args[4], dtype=torch.int32),
+        lambda *args, **kwargs: torch.ones(args[3], dtype=torch.int32),
     )
     get_persistent_metadata = Mock()
     fake_aiter = _FakeAiter("aiter")

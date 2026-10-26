@@ -95,6 +95,10 @@ class BlockStored(KVCacheEvent):
     ownership of the underlying block, which may be shared across sessions.
     """
     session_id: str | None = None
+    """Tokens beyond each block used in its hash, one list per block_hashes entry.
+    None when lookahead hashing is disabled.
+    """
+    lookahead_token_ids: list[list[int]] | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -112,6 +116,9 @@ class BlockStored(KVCacheEvent):
                 self.locality,
                 self.ownership,
                 self.session_id,
+                tuple(map(tuple, self.lookahead_token_ids))
+                if self.lookahead_token_ids is not None
+                else None,
             )
         )
 
@@ -390,6 +397,9 @@ class ZmqEventPublisher(EventPublisher):
         )
         assert self._endpoint is not None
         self._hwm = hwm
+        # ZMQ acks reads only every HWM/2 messages, so the sender can see up to
+        # HWM/2 stale messages; 2x lets a full replay plus marker always fit.
+        self._replay_hwm = 2 * (buffer_steps + 1)
         self._socket_setup()
         snapshot_endpoint = self.offset_endpoint_port(snapshot_endpoint, self._dp_rank)
         self._publisher_config = KVEventsConfig(
@@ -503,6 +513,8 @@ class ZmqEventPublisher(EventPublisher):
         # 3) works in our non‑blocking poll loop alongside PUB
         if self._replay_endpoint is not None:
             self._replay = self._ctx.socket(zmq.ROUTER)
+            # Queue a full replay plus its end marker for slow subscribers.
+            self._replay.setsockopt(zmq.SNDHWM, self._replay_hwm)
             self._replay_endpoint = self._bind(self._replay, self._replay_endpoint)
 
     @staticmethod
