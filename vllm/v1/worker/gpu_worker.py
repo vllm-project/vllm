@@ -653,14 +653,17 @@ class Worker(WorkerBase):
         self._kv_cache_reclaimable = reclaimable
 
     def _init_pp_transport(self) -> None:
-        """Right after the profile run."""
+        """Collective over the PP group, right after the profile run."""
         if get_pp_group().world_size == 1 or self._pp_transport is not None:
             return
         from vllm.distributed.pp_transport import create_pp_transport
 
+        persistent = getattr(self.model_runner, "intermediate_tensors", None)
         profile_send = getattr(self.model_runner, "profile_pp_send", None)
         self._pp_transport = create_pp_transport(
-            None if profile_send is None else profile_send.tensors
+            self.vllm_config,
+            None if persistent is None else persistent.tensors,
+            None if profile_send is None else profile_send.tensors,
         )
         if profile_send is not None:
             # Free the profile run's outputs before memory profiling measures.

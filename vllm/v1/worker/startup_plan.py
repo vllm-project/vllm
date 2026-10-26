@@ -70,6 +70,8 @@ def compute_plan_fingerprint(
         "cuda": torch.version.cuda or "",
         "rank": rank,
         "world_size": world_size,
+        # The PP transport changes the memory reserved beside the KV cache.
+        "pp_transport": envs.VLLM_PP_TRANSPORT,
     }
     digest = hashlib.sha256(json.dumps(factors, sort_keys=True).encode()).hexdigest()
     return digest[:16]
