@@ -77,18 +77,22 @@ def test_scheduler_async_lookup_defers_then_returns_hit(monkeypatch):
         block_hashes=[b"a", b"b"],
     )
 
-    assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
-    for _ in range(3):
+    try:
         assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
-    assert key_calls == 1
-    gate.set()
-    result = (None, False)
-    for _ in range(100):
-        result = scheduler.get_num_new_matched_tokens(request, 0)
-        if result != (None, False):
-            break
-        time.sleep(0.01)
-    scheduler.close()
+        for _ in range(3):
+            assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
+        assert key_calls == 1
+        gate.set()
+        result = (None, False)
+        for _ in range(100):
+            result = scheduler.get_num_new_matched_tokens(request, 0)
+            if result != (None, False):
+                break
+            time.sleep(0.01)
+    finally:
+        # Release the gated lookup so close() does not wait for its timeout.
+        gate.set()
+        scheduler.close()
 
     # The final prompt token must still execute, leaving one reusable block.
     assert result == (16, False)
@@ -147,17 +151,19 @@ def test_scheduler_reset_clears_pending_lookup_state(monkeypatch):
         _SchedulerHandle([]),
         BlockIdentityCodec(UMBPNamespace("reset")),
     )
-    future: Future[list[bool]] = Future()
-    monkeypatch.setattr(scheduler._lookup_executor, "submit", lambda *a: future)
-    request = SimpleNamespace(request_id="req", num_tokens=32, block_hashes=[b"a"])
-    assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
-    scheduler._load_specs["req"] = LoadSpec(0, 16)
+    try:
+        future: Future[list[bool]] = Future()
+        monkeypatch.setattr(scheduler._lookup_executor, "submit", lambda *a: future)
+        request = SimpleNamespace(request_id="req", num_tokens=32, block_hashes=[b"a"])
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (None, False)
+        scheduler._load_specs["req"] = LoadSpec(0, 16)
 
-    assert scheduler.reset_store()
-    assert future.cancelled()
-    assert scheduler._pending_lookups == {}
-    assert scheduler._load_specs == {}
-    scheduler.close()
+        assert scheduler.reset_store()
+        assert future.cancelled()
+        assert scheduler._pending_lookups == {}
+        assert scheduler._load_specs == {}
+    finally:
+        scheduler.close()
 
 
 @pytest.mark.parametrize("failure", [TimeoutError("lookup timeout"), [True, False]])

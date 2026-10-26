@@ -543,10 +543,12 @@ def test_hybrid_model_loads_asynchronously_even_when_sync_is_requested():
         _SchedulerHandle(hits),
         codec,
     )
-    request = make_request("hybrid-sync", block_hashes=block_hashes, num_tokens=33)
+    try:
+        request = make_request("hybrid-sync", block_hashes=block_hashes, num_tokens=33)
 
-    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, True)
-    scheduler.close()
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (32, True)
+    finally:
+        scheduler.close()
 
 
 @pytest.mark.parametrize("lookup_async", [False, True])
@@ -564,40 +566,51 @@ def test_hybrid_lookup_uses_latest_mamba_checkpoint(lookup_async, monkeypatch):
         _SchedulerHandle(hits),
         codec,
     )
-    pool = scheduler._lookup_coordinator.block_pool
-    for operation in ("get_new_blocks", "_insert_block_hash", "touch", "free_blocks"):
-        monkeypatch.setattr(
-            pool, operation, lambda *a, **kw: pytest.fail("lookup must be read-only")
+    try:
+        pool = scheduler._lookup_coordinator.block_pool
+        for operation in (
+            "get_new_blocks",
+            "_insert_block_hash",
+            "touch",
+            "free_blocks",
+        ):
+            monkeypatch.setattr(
+                pool,
+                operation,
+                lambda *a, **kw: pytest.fail("lookup must be read-only"),
+            )
+        request = make_request(
+            "hybrid-lookup", block_hashes=block_hashes, num_tokens=33
         )
-    request = make_request("hybrid-lookup", block_hashes=block_hashes, num_tokens=33)
 
-    matched, is_async = scheduler.get_num_new_matched_tokens(request, 0)
-    deadline = time.monotonic() + 5
-    while matched is None and time.monotonic() < deadline:
-        time.sleep(0.001)
         matched, is_async = scheduler.get_num_new_matched_tokens(request, 0)
+        deadline = time.monotonic() + 5
+        while matched is None and time.monotonic() < deadline:
+            time.sleep(0.001)
+            matched, is_async = scheduler.get_num_new_matched_tokens(request, 0)
 
-    assert (matched, is_async) == (32, True)
-    spec = scheduler._load_specs[request.request_id]
-    assert spec.block_hashes_by_group == (
-        (block_hashes[0], block_hashes[1]),
-        (None, block_hashes[1]),
-    )
+        assert (matched, is_async) == (32, True)
+        spec = scheduler._load_specs[request.request_id]
+        assert spec.block_hashes_by_group == (
+            (block_hashes[0], block_hashes[1]),
+            (None, block_hashes[1]),
+        )
 
-    tracker = RequestTracker()
-    tracker.load_spec = spec
-    plans = scheduler._load_plans_for_external_tokens(
-        request,
-        tracker,
-        ([10, 11], [NULL_BLOCK_ID, 12]),
-        matched,
-    )
-    assert [(plan.group_id, plan.block_id, plan.key) for plan in plans] == [
-        (0, 10, codec.key(block_hashes[0], 0)),
-        (0, 11, codec.key(block_hashes[1], 0)),
-        (1, 12, codec.key(block_hashes[1], 1)),
-    ]
-    scheduler.close()
+        tracker = RequestTracker()
+        tracker.load_spec = spec
+        plans = scheduler._load_plans_for_external_tokens(
+            request,
+            tracker,
+            ([10, 11], [NULL_BLOCK_ID, 12]),
+            matched,
+        )
+        assert [(plan.group_id, plan.block_id, plan.key) for plan in plans] == [
+            (0, 10, codec.key(block_hashes[0], 0)),
+            (0, 11, codec.key(block_hashes[1], 0)),
+            (1, 12, codec.key(block_hashes[1], 1)),
+        ]
+    finally:
+        scheduler.close()
 
 
 @pytest.mark.parametrize("failure_stage", ["lookup", "match"])
@@ -669,8 +682,10 @@ def test_sparse_attention_indexer_forces_async_load(indexer):
     )
 
     # The indexer reads its restored cache before any wait_for_layer_load.
-    assert scheduler.load_async is indexer
-    scheduler.close()
+    try:
+        assert scheduler.load_async is indexer
+    finally:
+        scheduler.close()
 
 
 @pytest.mark.parametrize("boundary", [0, 3, 8, 11, 12, 16])
@@ -802,15 +817,17 @@ def test_hybrid_fine_hash_lookup_is_not_limited_by_gpu_page_count():
         _SchedulerHandle([True] * 62),
         BlockIdentityCodec(UMBPNamespace("many-hashes")),
     )
-    request = make_request(
-        "many-hashes",
-        num_tokens=128,
-        block_hashes=[bytes([index]) for index in range(32)],
-    )
-    for _ in range(2):
-        # Mamba-style groups always load asynchronously.
-        assert scheduler.get_num_new_matched_tokens(request, 0) == (124, True)
-    scheduler.close()
+    try:
+        request = make_request(
+            "many-hashes",
+            num_tokens=128,
+            block_hashes=[bytes([index]) for index in range(32)],
+        )
+        for _ in range(2):
+            # Mamba-style groups always load asynchronously.
+            assert scheduler.get_num_new_matched_tokens(request, 0) == (124, True)
+    finally:
+        scheduler.close()
 
 
 def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
