@@ -7,6 +7,7 @@ import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 import math
 import os
 import sys
+from typing import TYPE_CHECKING, cast
 
 import psutil
 import torch
@@ -26,6 +27,9 @@ from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.worker_base import CompilationTimes
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
 logger = init_logger(__name__)
 
 
@@ -41,7 +45,9 @@ class CPUWorker(Worker):
         # TODO: use numactl for process setup
         # TODO: optimize for `interleaved` policy
         # Bind memory node
-        allowed_memory_nodes = get_visible_memory_node()
+        allowed_memory_nodes = get_visible_memory_node(
+            vllm_config.parallel_config.assigned_physical_gpu_ids
+        )
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
 
@@ -74,25 +80,6 @@ class CPUWorker(Worker):
         self.requested_cpu_memory = math.ceil(
             memory_status.total_memory * memory_fraction
         )
-        available_memory = memory_status.available_memory
-
-        if (
-            vllm_config.cache_config.kv_cache_memory_bytes is None
-            and self.requested_cpu_memory > available_memory
-        ):
-            raise ValueError(
-                f"Available memory on node {cpu_core.numa_node} "
-                f"({format_gib(available_memory)}/"
-                f"{format_gib(memory_status.total_memory)} GiB) on startup "
-                f"is less than desired CPU memory utilization "
-                f"({vllm_config.cache_config.gpu_memory_utilization}, "
-                f"{format_gib(self.requested_cpu_memory)} GiB). "
-                "On the CPU backend, the `--gpu-memory-utilization` flag "
-                "controls the fraction of CPU memory reserved (despite its "
-                "name). To resolve: decrease `--gpu-memory-utilization` "
-                "(e.g. `--gpu-memory-utilization 0.5`) "
-                "or reduce CPU memory used by other processes."
-            )
 
         super().__init__(
             vllm_config,
@@ -234,10 +221,24 @@ class CPUWorker(Worker):
         else:
             consumed_memory = psutil.Process(os.getpid()).memory_info().rss
             requested_memory_for_kv = int(self.requested_cpu_memory - consumed_memory)
-            if (
-                requested_memory_for_kv <= 0
-                or requested_memory_for_kv > available_memory
-            ):
+            if requested_memory_for_kv <= 0:
+                # The worker's own footprint already fills its reservation, so
+                # freeing memory elsewhere cannot help: only a larger
+                # reservation or an explicit KV cache size can.
+                in_use = math.ceil(consumed_memory / memory_status.total_memory * 100)
+                raise ValueError(
+                    f"The worker already uses {format_gib(consumed_memory)} GiB "
+                    "(model weights and runtime), more than the "
+                    f"{format_gib(self.requested_cpu_memory)} GiB of CPU memory "
+                    f"reserved for it on node {cpu_core.numa_node}, leaving none "
+                    "for the KV cache. On the CPU backend, the "
+                    "`--gpu-memory-utilization` flag controls the fraction of CPU "
+                    "memory reserved (despite its name). To resolve: increase "
+                    f"`--gpu-memory-utilization` to more than {in_use / 100:.2f}, "
+                    "or set the KV cache size explicitly with "
+                    "`--kv-cache-memory-bytes` or VLLM_CPU_KVCACHE_SPACE."
+                )
+            if requested_memory_for_kv > available_memory:
                 raise ValueError(
                     f"Available memory on node {cpu_core.numa_node} "
                     f"({format_gib(available_memory)}/"
@@ -266,6 +267,17 @@ class CPUWorker(Worker):
         # Only compile here for models without kv cache
         if len(self.model_runner.kv_caches) == 0 and self._should_warm_up_model():
             self.model_runner.warming_up_model()
+        # profile_run skips the MRV2 scheduler-driven kernels, so without this
+        # their Triton JIT lands in the first request's TTFT.
+        kernel_config = self.vllm_config.kernel_config
+        if self.use_v2_model_runner and kernel_config.enable_jit_warmup:
+            from vllm.v1.worker.gpu.warmup import warmup_kernels
+
+            warmup_kernels(
+                cast("GPUModelRunner", self.model_runner),
+                self.execute_model,
+                self.sample_tokens,
+            )
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(

@@ -189,10 +189,11 @@ class _CheckpointingMambaLayer(MambaBase):
         return (torch.float32,)
 
 
-@pytest.mark.parametrize("alignment", [1, 16, None])
-def test_layer_checkpoint_alignment_reaches_the_kv_cache_spec(alignment):
-    """The scheduler learns a layer's checkpoint grid only from its spec, and a
-    checkpoint block reserved without one would cache a state never written."""
+def _first_layer_spec(alignments: list[int | None]) -> MambaSpec:
+    layers = {
+        f"layer.{i}": _CheckpointingMambaLayer(alignment)
+        for i, alignment in enumerate(alignments)
+    }
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             mamba_block_size=64,
@@ -200,11 +201,28 @@ def test_layer_checkpoint_alignment_reaches_the_kv_cache_spec(alignment):
             mamba_cache_mode="align",
             use_replayssm=False,
         ),
+        compilation_config=SimpleNamespace(static_forward_context=layers),
         num_speculative_tokens=0,
     )
-
-    spec = _CheckpointingMambaLayer(alignment).get_kv_cache_spec(vllm_config)
-
+    spec = layers["layer.0"].get_kv_cache_spec(vllm_config)
     assert isinstance(spec, MambaSpec)
+    return spec
+
+
+@pytest.mark.parametrize("alignment", [1, 16, None])
+def test_layer_checkpoint_alignment_reaches_the_kv_cache_spec(alignment):
+    """The scheduler learns a layer's checkpoint grid only from its spec, and a
+    checkpoint block reserved without one would cache a state never written."""
+    spec = _first_layer_spec([alignment])
+
     assert spec.num_prefill_checkpoint_blocks == int(alignment is not None)
     assert spec.prefill_checkpoint_alignment == alignment
+
+
+def test_no_checkpoint_block_unless_every_mamba_layer_declares_one():
+    """If any Mamba layer cannot export checkpoints, the scheduler splits the
+    prefill, so a checkpoint block would never be written."""
+    spec = _first_layer_spec([1, None])
+
+    assert spec.num_prefill_checkpoint_blocks == 0
+    assert spec.prefill_checkpoint_alignment is None
