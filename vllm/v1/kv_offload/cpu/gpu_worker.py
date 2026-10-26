@@ -36,21 +36,6 @@ from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
 logger = init_logger(__name__)
 
 
-def _copy_sizes(
-    layer_refs_per_group: list[list[CanonicalKVCacheRef]],
-    canonical_layout: bool,
-) -> list[int]:
-    """Byte sizes of the copies a handler submits: whole pages in the direct
-    layout, mapped fragments in the canonical layout."""
-    sizes: list[int] = []
-    for ref in (r for g in layer_refs_per_group for r in g):
-        if canonical_layout and ref.mapping is not None:
-            sizes.extend(run.fragment_size for run in ref.mapping.runs)
-        else:
-            sizes.append(ref.page_size_bytes)
-    return sizes
-
-
 def _select_swap_blocks_fn(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]],
     gpu_to_cpu: bool,
@@ -69,9 +54,22 @@ def _select_swap_blocks_fn(
     # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
     if not HAS_TRITON or current_platform.is_xpu() or current_platform.is_rocm():
         return ops.swap_blocks_batch
-    sizes = _copy_sizes(layer_refs_per_group, canonical_layout)
+    copy_sizes = [
+        size
+        for group in layer_refs_per_group
+        for ref in group
+        for size in (
+            [run.fragment_size for run in ref.mapping.runs]
+            if canonical_layout and ref.mapping is not None
+            else [ref.page_size_bytes]
+        )
+    ]
     # Triton wins only on small, 8-byte-aligned payloads.
-    if not sizes or max(sizes) >= THRESHOLD_BYTES or any(s % 8 for s in sizes):
+    if (
+        not copy_sizes
+        or max(copy_sizes) >= THRESHOLD_BYTES
+        or any(size % 8 for size in copy_sizes)
+    ):
         return ops.swap_blocks_batch
     # The chunk still follows the page: sizing it to 512-byte fragments was
     # slower than the page-sized chunk.

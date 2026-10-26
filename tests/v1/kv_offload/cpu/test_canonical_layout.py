@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import time
 import uuid
 
@@ -7,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalPageMapping,
@@ -22,6 +24,7 @@ from vllm.v1.kv_offload.cpu.gpu_worker import (
     pin_mmap_region,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.swap_blocks_triton import MIN_N, swap_blocks_batch
 
 
 def _ref(mapping: CanonicalPageMapping, tensor_idx: int = 0) -> CanonicalKVCacheRef:
@@ -88,9 +91,19 @@ def _tp2_rank_mapping(rank: int) -> CanonicalPageMapping:
     return CanonicalPageMapping(2048, 1024, runs, 1, 0, True)
 
 
-def _whole_page_mapping() -> CanonicalPageMapping:
-    identity = CopyRun(0, 0, 2048, 1, 2048, 2048)
-    return CanonicalPageMapping(2048, 2048, (identity,), 1, 0, True)
+def _tp2_split_kv_mapping(rank: int, half: int) -> CanonicalPageMapping:
+    # split K/V HND page, tp=2: the rank's heads are contiguous, so K and V
+    # each copy as one fragment of half the local page
+    runs = (
+        CopyRun(0, rank * half, half, 1, half, half),
+        CopyRun(half, (2 + rank) * half, half, 1, half, half),
+    )
+    return CanonicalPageMapping(4 * half, 2 * half, runs, 1, 0, True)
+
+
+def _whole_page_mapping(page: int) -> CanonicalPageMapping:
+    identity = CopyRun(0, 0, page, 1, page, page)
+    return CanonicalPageMapping(page, page, (identity,), 1, 0, True)
 
 
 def _transfer(handler, num_blocks: int, gpu_to_cpu: bool) -> None:
@@ -123,30 +136,50 @@ def _canonical_handler(gpu_tensor, cpu_tensor, mapping, gpu_to_cpu):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
+@pytest.mark.parametrize(
+    "rank_mapping,load_uses_triton",
+    [
+        (_tp2_rank_mapping, True),
+        # 32 KiB page, above the Triton threshold, loaded as 2 x 16 KiB
+        (functools.partial(_tp2_split_kv_mapping, half=16 * 1024), True),
+        # the kernel copies whole 8-byte words, so unaligned fragments use DMA
+        (functools.partial(_tp2_split_kv_mapping, half=508), False),
+    ],
+    ids=["per_token_128B", "split_kv_16KiB", "split_kv_unaligned"],
+)
+def test_gpu_roundtrip_assembles_canonical_page_across_ranks(
+    rank_mapping, load_uses_triton: bool
+):
     """Two TP2-style rank handlers must scatter into one shared canonical
     CPU page such that each rank reloads bit-exact and a whole-page (TP1)
-    reader sees both shards — the cross-topology contract."""
+    reader sees both shards — the cross-topology contract. Loads pick their
+    copy path by fragment size, not page size."""
     torch.manual_seed(0)
-    num_blocks = 4
+    num_blocks = 8
+    local_page = rank_mapping(0).local_page_size_bytes
+    canonical_page = rank_mapping(0).canonical_page_size_bytes
     gpu_rank = [
-        torch.randint(-128, 128, (num_blocks, 1024), dtype=torch.int8, device="cuda")
+        torch.randint(
+            -128, 128, (num_blocks, local_page), dtype=torch.int8, device="cuda"
+        )
         for _ in range(2)
     ]
-    cpu_canonical = torch.zeros(num_blocks, 2048, dtype=torch.int8, pin_memory=True)
+    cpu_canonical = torch.zeros(
+        num_blocks, canonical_page, dtype=torch.int8, pin_memory=True
+    )
 
     for rank in (0, 1):
         store = _canonical_handler(
-            gpu_rank[rank], cpu_canonical, _tp2_rank_mapping(rank), gpu_to_cpu=True
+            gpu_rank[rank], cpu_canonical, rank_mapping(rank), gpu_to_cpu=True
         )
         _transfer(store, num_blocks, gpu_to_cpu=True)
     torch.accelerator.synchronize()
 
     # independent oracle: replay each rank's runs in numpy
-    expected = np.zeros((num_blocks, 2048), dtype=np.int8)
+    expected = np.zeros((num_blocks, canonical_page), dtype=np.int8)
     for rank in (0, 1):
         local = gpu_rank[rank].cpu().numpy()
-        for run in _tp2_rank_mapping(rank).runs:
+        for run in rank_mapping(rank).runs:
             for i in range(run.num_fragments):
                 lo = run.local_offset + i * run.local_stride
                 co = run.canonical_offset + i * run.canonical_stride
@@ -156,18 +189,24 @@ def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
     assert np.array_equal(cpu_canonical.numpy(), expected)
 
     # each rank reloads its shard bit-exact
-    gpu_back = torch.zeros(num_blocks, 1024, dtype=torch.int8, device="cuda")
+    gpu_back = torch.zeros(num_blocks, local_page, dtype=torch.int8, device="cuda")
     load = _canonical_handler(
-        gpu_back, cpu_canonical, _tp2_rank_mapping(0), gpu_to_cpu=False
+        gpu_back, cpu_canonical, rank_mapping(0), gpu_to_cpu=False
     )
+    # ROCm keeps every load on DMA
+    uses_triton = getattr(load._swap_blocks_batch, "func", None) is swap_blocks_batch
+    assert uses_triton == (load_uses_triton and current_platform.is_cuda())
+    # enough descriptors that the Triton wrapper runs its kernel
+    num_frags = sum(run.num_fragments for run in rank_mapping(0).runs)
+    assert num_blocks * num_frags >= MIN_N
     _transfer(load, num_blocks, gpu_to_cpu=False)
     torch.accelerator.synchronize()
     assert torch.equal(gpu_back, gpu_rank[0])
 
     # a whole-page reader (TP1 topology) sees the assembled page
-    gpu_full = torch.zeros(num_blocks, 2048, dtype=torch.int8, device="cuda")
+    gpu_full = torch.zeros(num_blocks, canonical_page, dtype=torch.int8, device="cuda")
     load_full = _canonical_handler(
-        gpu_full, cpu_canonical, _whole_page_mapping(), gpu_to_cpu=False
+        gpu_full, cpu_canonical, _whole_page_mapping(canonical_page), gpu_to_cpu=False
     )
     _transfer(load_full, num_blocks, gpu_to_cpu=False)
     torch.accelerator.synchronize()
