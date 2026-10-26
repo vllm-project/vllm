@@ -9,7 +9,11 @@ import torch
 
 from vllm.entrypoints.pooling.scoring.serving import ServingScores
 from vllm.entrypoints.pooling.typing import PoolingEngineInput, PoolingServeContext
-from vllm.exceptions import GenerationError, RetryableRequestError
+from vllm.exceptions import (
+    GenerationError,
+    RetryableRequestError,
+    VLLMValidationError,
+)
 from vllm.inputs import tokens_input
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.pooling_params import LateInteractionParams, PoolingParams
@@ -99,7 +103,6 @@ async def test_flash_late_interaction_cleans_up_queries_on_failure(
     serving.engine_client.collective_rpc.assert_awaited_once_with(
         "release_late_interaction_query_cache",
         args=(["query-key"],),
-        wait_for_inflight_batches=True,
     )
 
 
@@ -147,9 +150,16 @@ async def test_colliding_request_ids_use_distinct_late_interaction_keys(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retryable", [False, True])
+@pytest.mark.parametrize(
+    ("code", "retryable", "error_type"),
+    [
+        ("failed", False, GenerationError),
+        ("failed", True, RetryableRequestError),
+        ("validation_error", False, VLLMValidationError),
+    ],
+)
 async def test_late_interaction_output_error_stops_pending_producers(
-    retryable, monkeypatch
+    code, retryable, error_type, monkeypatch
 ):
     """An error output must stop the batch even while another request is pending."""
     started, stopped, blocked = (asyncio.Event() for _ in range(3))
@@ -162,7 +172,7 @@ async def test_late_interaction_output_error_stops_pending_producers(
             prompt_token_ids=[1],
             num_cached_tokens=0,
             finished=True,
-            error=RequestError("failed", "scoring failed", retryable=retryable),
+            error=RequestError(code, "scoring failed", retryable=retryable),
         )
 
     async def pending():
@@ -177,7 +187,6 @@ async def test_late_interaction_output_error_stops_pending_producers(
     monkeypatch.setattr(
         serving, "_prepare_generators", AsyncMock(return_value=[failing(), pending()])
     )
-    error_type = RetryableRequestError if retryable else GenerationError
     with pytest.raises(error_type, match="scoring failed"):
         await asyncio.wait_for(
             serving._collect_late_interaction_batch(_make_context()), timeout=5
@@ -227,7 +236,7 @@ async def test_repeated_cancellation_releases_requests_and_queries(
         pending.difference_update(request_ids)
         runner.on_requests_finished(request_ids)
 
-    async def collective_rpc(method, *, args, wait_for_inflight_batches=False):
+    async def collective_rpc(method, *, args):
         if cleanup_stage == "rpc":
             cleanup_entered.set()
             await release.wait()

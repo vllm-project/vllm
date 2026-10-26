@@ -11,7 +11,6 @@ from fastapi.responses import JSONResponse, Response
 from vllm import PoolingParams
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
-from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.tasks import SCORE_TYPE_MAP, SupportedTask
@@ -238,7 +237,6 @@ class ServingScores(PoolingServing):
             await self.engine_client.collective_rpc(
                 "release_late_interaction_query_cache",
                 args=(query_keys,),
-                wait_for_inflight_batches=True,
             )
 
     async def _collect_late_interaction_batch(self, ctx: ScoringServeContext):
@@ -248,9 +246,7 @@ class ServingScores(PoolingServing):
             final_result = None
             async for result in generator:
                 if result.error is not None:
-                    if result.error.retryable:
-                        raise RetryableRequestError(result.error.message)
-                    raise GenerationError(result.error.message)
+                    raise result.error.to_exception()
                 final_result = result
             if final_result is None:
                 raise ValueError("Failed to generate results for all prompts")

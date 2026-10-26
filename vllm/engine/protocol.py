@@ -279,10 +279,8 @@ class EngineClient(ABC):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict | None = None,
-        *,
-        wait_for_inflight_batches: bool = False,
     ):
-        """Run a worker RPC, optionally waiting for submitted batches first."""
+        """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
     async def compute_weight_checksums(self) -> list[dict[str, str]]:

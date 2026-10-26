@@ -1252,16 +1252,10 @@ class AsyncLLM(EngineClient):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict | None = None,
-        *,
-        wait_for_inflight_batches: bool = False,
     ):
-        """Run a worker RPC, optionally waiting for submitted batches first."""
+        """Perform a collective RPC call to the given path."""
         return await self.engine_core.collective_rpc_async(
-            method,
-            timeout,
-            args,
-            kwargs,
-            wait_for_inflight_batches=wait_for_inflight_batches,
+            method, timeout, args, kwargs
         )
 
     async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
