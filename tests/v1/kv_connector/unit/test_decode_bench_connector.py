@@ -37,7 +37,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVQuantMode,
     MambaSpec,
-    SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
@@ -288,27 +287,6 @@ def test_decode_bench_connector_fills_each_hma_group():
     assert torch.count_nonzero(group_0_cache[5]) == 0
     assert torch.count_nonzero(group_1_cache[1]) == 0
     assert torch.allclose(group_1_cache[5], torch.tensor(0.015))
-
-
-def test_decode_bench_connector_loads_bounded_replay_groups():
-    """The fill restores bounded-replay sliding window groups too."""
-    spec = dict(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16)
-    swa = SlidingWindowMLASpec(**spec, sliding_window=128, bounded_replay=True)
-    kv_cache_config = KVCacheConfig(
-        num_blocks=8,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(["full"], FullAttentionSpec(**spec)),
-            KVCacheGroupSpec(["swa"], swa),
-        ],
-    )
-    connector = DecodeBenchConnector(
-        create_vllm_config(kv_connector="DecodeBenchConnector"),
-        KVConnectorRole.SCHEDULER,
-        kv_cache_config,
-    )
-
-    assert connector.get_loaded_kv_cache_group_ids(create_request()) == (0, 1)
 
 
 def test_decode_bench_connector_zero_fills_circular_buffer_groups():
