@@ -598,6 +598,25 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
 
 
 @pytest.mark.parametrize(
+    "cpu_offload,use_thp", [(False, False), (True, False), (True, True)]
+)
+def test_engram_meta_initialization_does_not_allocate_host_tables(
+    dist_init, cpu_offload, use_thp
+):
+    """Encoder-only language-model placeholders must not allocate host storage."""
+    with torch.device("meta"):
+        layer = ParallelEngramEmbedding(
+            36, 64, (17, 19), cpu_offload=cpu_offload, use_thp=use_thp
+        )
+
+    assert layer.weight.is_meta and layer.weight_scale_inv.is_meta
+    assert layer.weight.shape == (36, 64)
+    assert layer.weight_scale_inv.shape == (36, 2)
+    assert layer.weight.dtype == torch.float8_e4m3fn
+    assert layer.weight_scale_inv.dtype == torch.uint8
+
+
+@pytest.mark.parametrize(
     "tp_size,dp_size,n_heads", [(1, 4, 5), (2, 2, 5), (4, 1, 6), (8, 1, 6)]
 )
 def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch):
