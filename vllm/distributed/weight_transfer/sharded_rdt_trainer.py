@@ -926,7 +926,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         # nothing orders the two. Without this sync it packs bytes the copy has
         # not written yet -- silent corruption, and only for ring-packed tensors.
         if slot.is_cuda:
-            torch.cuda.current_stream(slot.device).synchronize()
+            torch.accelerator.current_stream(slot.device).synchronize()
         return {sid: reduce_args}, views, refs
 
     def _publish_async(self, group_idx: int, entries):

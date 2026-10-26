@@ -17,11 +17,11 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention, DeepseekV32Indexer
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 
 class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
@@ -256,6 +256,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
+            skip_scale=self._k_scale_float == 1.0,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
             kv_c_out=kv_c_out,
