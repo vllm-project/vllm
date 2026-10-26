@@ -376,7 +376,7 @@ def disable_compile_cache() -> bool:
 
 
 def use_aot_compile() -> bool:
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
+    from vllm.utils.torch_version import is_torch_equal_or_newer
 
     default_value = (
         "1"
@@ -388,7 +388,7 @@ def use_aot_compile() -> bool:
 
 
 def use_mega_aot_artifact():
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
+    from vllm.utils.torch_version import is_torch_equal_or_newer
 
     default_value = (
         "1" if is_torch_equal_or_newer("2.12.0.dev") and use_aot_compile() else "0"
