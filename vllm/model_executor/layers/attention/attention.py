@@ -519,7 +519,10 @@ class Attention(nn.Module, AttentionLayerBase):
             )
 
             # check if query quantization is supported
-            if self.impl.supports_quant_query_input:
+            if (
+                self.impl.supports_quant_query_input
+                and query.dtype != current_platform.fp8_dtype()
+            ):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if output_shape is None:

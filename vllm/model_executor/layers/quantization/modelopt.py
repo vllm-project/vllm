@@ -355,8 +355,8 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             else:
                 kv_cache_quant_method = None
 
-            # "ignore" is the key in config.json
-            exclude_modules = config.get("ignore", [])
+            # ModelOpt checkpoints use either key across export versions.
+            exclude_modules = config.get("ignore", config.get("exclude_modules", []))
             group_size_raw = config.get("group_size")
 
         if not quant_method:

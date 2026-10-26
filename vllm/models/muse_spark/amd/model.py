@@ -213,7 +213,7 @@ class MuseSpark1xMoE(nn.Module):
         hidden_size = config.moe_hidden_size
         # Plain F.linear: AITER's gfx950 tuned-GEMM table picks lossy split-K
         # BF16-accumulating kernels for these shapes.
-        self.pooler = ReplicatedLinear(
+        self.pooler: ReplicatedLinear | None = ReplicatedLinear(
             config.hidden_size,
             hidden_size,
             bias=False,
@@ -221,7 +221,7 @@ class MuseSpark1xMoE(nn.Module):
             prefix=f"{prefix}.pooler",
         )
         self.pooler.quant_method = MuseSparkTorchLinearMethod()
-        self.unpooler = ReplicatedLinear(
+        self.unpooler: ReplicatedLinear | None = ReplicatedLinear(
             hidden_size,
             config.hidden_size,
             bias=False,
@@ -230,28 +230,33 @@ class MuseSpark1xMoE(nn.Module):
         )
         self.unpooler.quant_method = MuseSparkTorchLinearMethod()
 
-        self.pre_expert_norm = MuseSpark1xRMSNorm(
-            hidden_size=hidden_size,
-            eps=config.rms_norm_eps,
-            has_weight=True,
-            is_post_norm=False,
-            zero_centered_gamma=True,
-            post_norm_gain_center_type="one",
-            residual_id=2 * layer_idx + 2,
-            output_norm_gain_center_type="zero",
-        )
+        if self.pooler is not None:
+            self.pre_expert_norm: MuseSpark1xRMSNorm | None = MuseSpark1xRMSNorm(
+                hidden_size=hidden_size,
+                eps=config.rms_norm_eps,
+                has_weight=True,
+                is_post_norm=False,
+                zero_centered_gamma=True,
+                post_norm_gain_center_type="one",
+                residual_id=2 * layer_idx + 2,
+                output_norm_gain_center_type="zero",
+            )
+        else:
+            self.pre_expert_norm = None
 
         self.intermediate_size = config.moe_intermediate_size
 
-        self.post_expert_norm = MuseSpark1xRMSNormWithInputScale(
-            hidden_size=hidden_size,
-            eps=config.post_norm_eps,
-            has_weight=True,
-            is_post_norm=True,
-            zero_centered_gamma=True,
-            post_norm_gain_center_type="one",
-            residual_id=None,
-            output_norm_gain_center_type="zero",
+        self.post_expert_norm: MuseSpark1xRMSNorm | None = (
+            MuseSpark1xRMSNormWithInputScale(
+                hidden_size=hidden_size,
+                eps=config.post_norm_eps,
+                has_weight=True,
+                is_post_norm=True,
+                zero_centered_gamma=True,
+                post_norm_gain_center_type="one",
+                residual_id=None,
+                output_norm_gain_center_type="zero",
+            )
         )
         self.experts: nn.Module = FusedMoEFactory(
             num_experts=config.num_local_experts,
@@ -318,13 +323,21 @@ class MuseSpark1xMoE(nn.Module):
     def _experts_take_expanded_input(self) -> bool:
         """Whether the experts consume one input row per route (AITER MXFP4)."""
         norm = self.pre_expert_norm
-        return norm.variance_size_override is None and isinstance(
-            self.experts.routed_experts.quant_method, MuseSparkQuarkOCPMXFusedMoE
+        return (
+            norm is not None
+            and norm.variance_size_override is None
+            and isinstance(
+                self.experts.routed_experts.quant_method, MuseSparkQuarkOCPMXFusedMoE
+            )
         )
 
     def _pool(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.pooler is None:
+            return hidden_states
         hidden_states, _ = self.pooler(hidden_states)
         norm = self.pre_expert_norm
+        if norm is None:
+            return hidden_states
         if self._experts_take_expanded_input and hidden_states.is_contiguous():
             return fused_rmsnorm_expand(
                 hidden_states,
@@ -349,7 +362,8 @@ class MuseSpark1xMoE(nn.Module):
             router_logits=router_logits,
         )
 
-        experts_out, _ = self.unpooler(experts_out)
+        if self.unpooler is not None:
+            experts_out, _ = self.unpooler(experts_out)
 
         if self.is_sequence_parallel:
             experts_out = tensor_model_parallel_all_gather(experts_out, 0)
