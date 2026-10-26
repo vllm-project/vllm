@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from itertools import chain, islice
 from typing import Any, NamedTuple
@@ -17,6 +18,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
     TransferJob,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    _group_kv_bytes_per_block,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
     OffloadingEventsTracker,
@@ -30,11 +34,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import eagle_proof_margin
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
@@ -63,6 +66,9 @@ from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
+# A cache reset fence held this long is reported once.
+_RESET_FENCE_WARN_S = 60
+
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
 MATCHER_LOCALITY_KEY = "locality"
@@ -79,6 +85,8 @@ class TransferJobStatus:
     # Offload keys this job covers; passed to manager.complete_*().
     keys: set[OffloadKey]
     is_store: bool
+    # Unlike an async load, store jobs may be created next to it.
+    is_sync_load: bool = False
     # Store source blocks fenced after the request finishes.
     deferred_fence_block_ids: list[int] | None = None
     # Store source blocks fenced when the transfer is created.
@@ -126,32 +134,6 @@ class GroupOffloadConfig(NamedTuple):
         return window
 
 
-def get_sliding_window_size_in_chunks(
-    kv_cache_spec: KVCacheSpec, tokens_per_chunk: int
-) -> int | None:
-    if isinstance(kv_cache_spec, SlidingWindowSpec):
-        assert kv_cache_spec.sliding_window > 0
-        return max(
-            cdiv(kv_cache_spec.sliding_window, tokens_per_chunk),
-            cdiv(
-                kv_cache_spec.sliding_window - 1 + kv_cache_spec.extra_retained_tokens,
-                tokens_per_chunk,
-            ),
-        )
-
-    if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
-        # Attention never reaches back past one chunk
-        assert kv_cache_spec.attention_chunk_size > 0
-        return cdiv(kv_cache_spec.attention_chunk_size, tokens_per_chunk)
-
-    if isinstance(kv_cache_spec, MambaSpec):
-        # Mamba depends on a single state
-        return 1
-
-    assert isinstance(kv_cache_spec, FullAttentionSpec)
-    return None
-
-
 def resolve_mamba_align_size(
     spec: "OffloadingSpec", kv_cache_config: KVCacheConfig
 ) -> int | None:
@@ -183,6 +165,9 @@ class SchedulerOffloadConfig(NamedTuple):
     alignment_tokens: int | None = None
     retention_interval: int | None = None
     dcp_world_size: int = 1
+    sync_load_budget_bytes: int = 0
+    # KV bytes per token on one worker, summed over the offloaded groups.
+    kv_bytes_per_token: int = 0
 
     @classmethod
     def from_spec(
@@ -198,13 +183,10 @@ class SchedulerOffloadConfig(NamedTuple):
         # architectures like DeepSeek V4 (MLA + SWA groups).
         full_attn_tokens_per_chunk: set[int] = set()
         for group in spec.config.groups:
-            tokens_per_block = group.tokens_per_block
-            kv_spec = kv_cache_config.kv_cache_groups[group.group_id].kv_cache_spec
-            sw = get_sliding_window_size_in_chunks(
-                kv_spec, tokens_per_block * spec.blocks_per_chunk
-            )
-            if sw is None:
-                full_attn_tokens_per_chunk.add(tokens_per_block * spec.blocks_per_chunk)
+            if group.sliding_window_size_in_chunks is None:
+                full_attn_tokens_per_chunk.add(
+                    group.tokens_per_block * spec.blocks_per_chunk
+                )
 
         # Only apply the optimization if there's a single consistent
         # full-attention alignment size.  For pure SWA/Mamba models (no
@@ -235,10 +217,9 @@ class SchedulerOffloadConfig(NamedTuple):
         )
         if use_eagle_block_drop and not eagle_groups:
             # No group is annotated as holding drafter layers. This happens
-            # for shared-group MTP models (e.g. Qwen3.5-style), whose drafter
-            # is a regular decoder layer merged into the target's
-            # full-attention group, and for separate-draft models that miss
-            # annotation. Treating every group as a drafter group here makes
+            # when the drafter owns no KV cache (e.g. KV-sharing drafters) or
+            # the model runner does not tag draft layers' KV cache specs.
+            # Treating every group as a drafter group here makes
             # the volatile-tail pop apply to ALL groups, which can zero the
             # whole request's offload hit whenever any group's servable
             # window is a single chunk (issue #52735). Drafter KV served one
@@ -264,9 +245,6 @@ class SchedulerOffloadConfig(NamedTuple):
             tokens_per_block = group.tokens_per_block
             kv_cache_group = kv_cache_config.kv_cache_groups[group_id]
             kv_spec = kv_cache_group.kv_cache_spec
-            sw = get_sliding_window_size_in_chunks(
-                kv_spec, tokens_per_block * spec.blocks_per_chunk
-            )
             manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
             assert manager_cls is not None, (
                 f"No manager found for KV cache spec {type(kv_spec).__name__}"
@@ -280,7 +258,7 @@ class SchedulerOffloadConfig(NamedTuple):
                         (tokens_per_block * spec.blocks_per_chunk)
                         // spec.tokens_per_hash
                     ),
-                    sliding_window_size_in_chunks=sw,
+                    sliding_window_size_in_chunks=group.sliding_window_size_in_chunks,
                     kv_cache_spec=kv_spec,
                     manager_cls=manager_cls,
                     kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),
@@ -300,7 +278,8 @@ class SchedulerOffloadConfig(NamedTuple):
         )
         # Partial tails currently require one physical block per offload chunk
         # and uniform, non-windowed groups so one boundary identifies every
-        # group's source. EAGLE and DCP need additional hand-off semantics.
+        # group's source. EAGLE groups key their partial tail at a proof
+        # position past the boundary. DCP needs additional hand-off semantics.
         supports_partial_tail = (
             spec.blocks_per_chunk == 1
             and len(group_block_sizes) == 1
@@ -310,7 +289,6 @@ class SchedulerOffloadConfig(NamedTuple):
                 or config.requires_cow_source
                 for config in kv_group_configs
             )
-            and not any(config.is_eagle_group for config in kv_group_configs)
             and vllm_config.parallel_config.decode_context_parallel_size == 1
         )
 
@@ -341,6 +319,15 @@ class SchedulerOffloadConfig(NamedTuple):
             alignment_tokens=alignment_tokens,
             retention_interval=retention_interval,
             dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
+            # Per-step KV bytes (per worker) loaded within the step (0 disables).
+            sync_load_budget_bytes=int(
+                spec.extra_config.get("sync_load_budget_bytes", 0)
+            ),
+            kv_bytes_per_token=sum(
+                _group_kv_bytes_per_block(kv_cache_config.kv_cache_groups[g.group_id])
+                // g.tokens_per_block
+                for g in spec.config.groups
+            ),
         )
 
 
@@ -353,6 +340,9 @@ class RequestGroupState:
     # Number of offloaded chunks hit (including GPU prefix cache)
     # when the request first started
     num_hit_chunks: int = 0
+    # End (exclusive) of the chunks that the current complete-chunk lookup
+    # confirmed as ready hits, including a popped EAGLE chunk.
+    lookup_hit_end_chunk_idx: int = 0
 
 
 @dataclass(slots=True)
@@ -377,6 +367,8 @@ class RequestOffloadState:
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
+    # True once a load from the offload tier was scheduled for this request.
+    loaded_from_offload: bool = False
     # Loaded attention keys cover their token positions. Recurrent state
     # supports the whole reused external prefix.
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
@@ -545,18 +537,58 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
     return TierFilter(matchers=tuple(matchers))
 
 
-def _create_req_context(req: Request) -> ReqContext:
+class _RequestTokens(NamedTuple):
+    num_computed_tokens: int
+    num_in_flight_tokens: int
+    num_prompt_tokens: int
+    num_tokens: int
+
+
+@dataclass
+class _VllmReqContext(ReqContext):
+    _scheduler: "OffloadingConnectorScheduler" = field(
+        kw_only=True, repr=False, compare=False
+    )
+
+    @property
+    def _request_tokens(self) -> Request | _RequestTokens:
+        tokens = self.get_state(_RequestTokens)
+        if tokens is not None:
+            return tokens
+        return self._scheduler._req_status[self.req_id].req
+
+    @property
+    def num_computed_tokens(self) -> int:
+        return self._request_tokens.num_computed_tokens
+
+    @property
+    def num_in_flight_tokens(self) -> int:
+        return self._request_tokens.num_in_flight_tokens
+
+    @property
+    def num_prompt_tokens(self) -> int:
+        return self._request_tokens.num_prompt_tokens
+
+    @property
+    def num_tokens(self) -> int:
+        return self._request_tokens.num_tokens
+
+
+def _create_req_context(
+    req: Request, scheduler: "OffloadingConnectorScheduler"
+) -> ReqContext:
     params = req.kv_transfer_params
     load_filter = TierFilter.ALL
     if params:
         raw = params.get(KV_LOAD_TIERS_KEY)
         if raw is not None:
             load_filter = _parse_tier_filter(raw)
-    return ReqContext(
+    return _VllmReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
         kv_hints=req.kv_hints,
         load_tier_filter=load_filter,
+        _scheduler=scheduler,
     )
 
 
@@ -607,6 +639,29 @@ class OffloadingConnectorScheduler:
             if self.config.supports_partial_tail
             else 0
         )
+        # Core's prefix cache matches an EAGLE group this many tokens past a
+        # hit and then drops them. A partial tail stores and looks up EAGLE
+        # groups at that proof position, with the margin rule of the core
+        # coordinator.
+        alignment = kv_cache_config.cache_hit_alignment_tokens
+        partial_hash_hits = (
+            alignment is not None and alignment < self._partial_tail_block_size
+        )
+        self._eagle_proof_margins: dict[int, int] = {
+            config.group_idx: eagle_proof_margin(
+                self._partial_tail_block_size,
+                self.config.tokens_per_hash,
+                partial_hash_hits
+                and config.manager_cls.supports_fine_grained_hash_lookup,
+            )
+            for config in self.config.kv_group_configs
+            if self.config.supports_partial_tail
+            and config.is_eagle_group
+            and not config.requires_cow_source
+        }
+        self._max_eagle_proof_margin = max(
+            self._eagle_proof_margins.values(), default=0
+        )
         self._cow_source_groups = frozenset(
             config.group_idx
             for config in self.config.kv_group_configs
@@ -615,6 +670,9 @@ class OffloadingConnectorScheduler:
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
+        # Requests loading synchronously in the current engine step
+        self._current_batch_sync_loads: set[ReqId] = set()
+        self._current_batch_sync_load_bytes = 0
         self._current_batch_jobs_to_flush: set[int] = set()
         # GPU block IDs allocated in the current engine step
         self._current_batch_allocated_block_ids: set[int] = set()
@@ -629,6 +687,12 @@ class OffloadingConnectorScheduler:
         # Threshold value for stale jobs. All job ids >= _stale_job_threshold are
         # active jobs.
         self._stale_job_threshold: int = 0
+        # Jobs flushed by a cache reset -> worker reports still due. Their
+        # chunks are released at once, but a worker may still write them (a
+        # late DMA) until it reports; the manager learns through
+        # on_reset_flushed() once every one has.
+        self._reset_fence: dict[int, int] = {}
+        self._reset_fence_since = 0.0
         self._jobs: dict[int, TransferJobStatus] = {}
 
         # block_id -> pending store job_ids. Used to track jobs that needs
@@ -638,7 +702,78 @@ class OffloadingConnectorScheduler:
         # be freed before a request finishes).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
-        self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
+        self._events_tracker = OffloadingEventsTracker(
+            spec.kv_events_config,
+            {
+                group.group_idx: group.kv_event_group_spec
+                for group in self.config.kv_group_configs
+            },
+        )
+
+    # Holds the manager lock for the current schedule(), or None between steps.
+    # Read and written only by the scheduler thread, so it needs no
+    # synchronization of its own. Declared on the class so an instance built
+    # without __init__ still reads None rather than raising.
+    _step_region: ExitStack | None = None
+
+    # ------------------------------------------------------------------
+    # Manager exclusion
+    #
+    # The manager is entered from the scheduler thread and, for managers that
+    # run one, from a tier-poll thread. Manager methods never take their
+    # own lock, so the exclusion boundary lives here. manager.lock may be a
+    # no-op for a manager that needs no exclusion; it is entered regardless.
+    #
+    # schedule() holds one region for the whole step: opened by the first
+    # manager-touching hook and closed at the end of build_connector_meta.
+    # That span is required, not tidiness -- get_num_new_matched_tokens
+    # establishes lookup() HITs that update_state_after_alloc later pins with
+    # prepare_load(), and prepare_store() evicts after both. Releasing between
+    # them would let another thread evict a block the step already treated as
+    # present.
+    #
+    # Hooks outside schedule() use a short region instead, so the manager is
+    # free while the engine runs the model.
+    #
+    # The step region outlives any single call, so it cannot be a with-block;
+    # an ExitStack carries the entered lock from open to close instead.
+    # ------------------------------------------------------------------
+
+    def _acquire_step(self) -> None:
+        """Open the step-scoped region. Idempotent within a step."""
+        if self._step_region is not None:
+            return
+        region = ExitStack()
+        region.enter_context(self.manager.lock)
+        self._step_region = region
+
+    def _release_step(self) -> None:
+        """Close the step-scoped region, letting other threads in."""
+        region = self._step_region
+        if region is None:
+            return
+        self._step_region = None
+        region.close()
+
+    @contextmanager
+    def _manager_locked(self) -> Iterator[None]:
+        """Hold the manager for the duration of one hook outside schedule().
+
+        None of these hooks can legitimately run inside the step-scoped region:
+        on_new_request comes from add_request, has_pending_push_work from the
+        engine's liveness check before schedule(), the rest from output
+        processing or a client RPC. So finding the region open here means a
+        previous schedule() raised between _acquire_step() and the release in
+        build_connector_meta. Recover instead of deadlocking.
+        """
+        if self._step_region is not None:
+            logger.error(
+                "Offloading manager lock was left held by a previous "
+                "schedule(); releasing it before continuing."
+            )
+            self._release_step()
+        with self.manager.lock:
+            yield
 
     def _maybe_observe_lookup_async_delay(
         self, req_status: RequestOffloadState
@@ -690,7 +825,7 @@ class OffloadingConnectorScheduler:
         for local_idx, key in enumerate(keys):
             result = self.manager.lookup(key, req_context)
             match result:
-                case LookupResult.HIT:
+                case LookupResult.HIT | LookupResult.HIT_PENDING:
                     self._events_tracker.record_lookup(
                         req,
                         group_config,
@@ -698,9 +833,7 @@ class OffloadingConnectorScheduler:
                         key,
                     )
                     hit_count += 1
-                case LookupResult.HIT_PENDING:
-                    defer_lookup = True
-                    hit_count += 1
+                    defer_lookup |= result is LookupResult.HIT_PENDING
                 case LookupResult.RETRY:
                     # Don't break: keep scanning to let manager kick off
                     # async lookups (until a miss is detected).
@@ -790,6 +923,8 @@ class OffloadingConnectorScheduler:
         num_hit_tokens: int = 0
         defer_lookup = False
         lookup_groups = self._lookup_groups
+        for state in req_status.group_states:
+            state.lookup_hit_end_chunk_idx = 0
 
         # Tracks which eagle groups have already popped their volatile trailing chunk
         # in the current convergence iteration. Reset when a non-eagle group
@@ -858,6 +993,9 @@ class OffloadingConnectorScheduler:
                         req_status.req,
                         group_config,
                         start_chunk_idx,
+                    )
+                    group_state.lookup_hit_end_chunk_idx = start_chunk_idx + (
+                        num_hit_chunks or 0
                     )
                 else:
                     required_window = sliding_window_size_in_chunks
@@ -980,8 +1118,20 @@ class OffloadingConnectorScheduler:
         local_tokens = req_status.num_locally_computed_tokens
         complete_boundary = local_tokens + complete_hit
         tokens_per_hash = self.config.tokens_per_hash
-        block_end = complete_boundary + self._partial_tail_block_size
+        # A partial tail carries its own EAGLE proof, so it may also lie in
+        # the block after the chunk that the complete-chunk lookup pops.
+        num_search_blocks = 2 if self._max_eagle_proof_margin else 1
+        block_end = complete_boundary + (
+            num_search_blocks * self._partial_tail_block_size
+        )
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
+        if self._max_eagle_proof_margin:
+            # The proof key needs a hash of this request past the boundary.
+            max_boundary = min(
+                max_boundary,
+                len(req_status.req.block_hashes) * tokens_per_hash
+                - self._max_eagle_proof_margin,
+            )
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
         if req_status.max_load_tokens is not None:
@@ -993,52 +1143,113 @@ class OffloadingConnectorScheduler:
         if max_boundary <= complete_boundary:
             return complete_hit
 
+        # A boundary past the block of complete_boundary also loads that
+        # block's complete chunk. Look it up once, and only if it is needed.
+        # Partial tails use one block per chunk, so a block index is a chunk
+        # index.
+        block_size = self._partial_tail_block_size
+        bridge_chunk_idx = complete_boundary // block_size
+        bridge_boundary = (bridge_chunk_idx + 1) * block_size
+        # Bridge keys that the complete-chunk lookup did not confirm.
+        unconfirmed_bridge_keys: list[tuple[GroupOffloadConfig, OffloadKey]] = []
         pending = False
-        for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
-            boundary_pending = False
-            boundary_missed = False
-            boundary_keys = []
-            for group_config in self.config.kv_group_configs:
-                key = self._make_boundary_key(
-                    req_status.req,
-                    group_config.group_idx,
-                    boundary,
-                    req_status.req_context,
-                )
-                boundary_keys.append(key)
+        if max_boundary >= bridge_boundary:
+            for group_config, group_state in zip(
+                self.config.kv_group_configs, req_status.group_states
+            ):
+                if group_config.requires_cow_source:
+                    continue
+                key = group_state.offload_keys[bridge_chunk_idx]
+                pending |= key in (self._chunks_being_loaded or ())
+                # An EAGLE group always confirmed the chunk that it popped.
+                if group_state.lookup_hit_end_chunk_idx <= bridge_chunk_idx:
+                    unconfirmed_bridge_keys.append((group_config, key))
+            for _, key in unconfirmed_bridge_keys:
                 result = self.manager.lookup(key, req_status.req_context)
                 if result is LookupResult.MISS:
-                    boundary_missed = True
+                    max_boundary = bridge_boundary - tokens_per_hash
                     break
-                if result in (LookupResult.HIT_PENDING, LookupResult.RETRY):
-                    boundary_pending = True
-
-            pending |= boundary_pending
-            if not boundary_missed and not boundary_pending:
-                for group_config, key in zip(
-                    self.config.kv_group_configs, boundary_keys
-                ):
-                    self._events_tracker.record_partial_lookup(
-                        req_status.req, group_config, boundary, key
-                    )
+                pending |= result is not LookupResult.HIT
+        bridge_pending = pending
+        for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
+            loads_bridge = boundary >= bridge_boundary
+            hit, boundary_pending = self._lookup_partial_tail(
+                req_status, boundary, loads_bridge and bridge_pending
+            )
+            if hit:
+                # The complete-chunk lookup recorded the confirmed bridge keys.
+                if loads_bridge:
+                    for group_config, key in unconfirmed_bridge_keys:
+                        self._events_tracker.record_lookup(
+                            req_status.req, group_config, bridge_chunk_idx, key
+                        )
                 req_status.partial_tail_boundary = boundary
                 return boundary - local_tokens
+            pending |= boundary_pending
 
         if pending and complete_hit == 0:
             return None
         return complete_hit
 
+    def _partial_tail_key_tokens(
+        self, group_config: GroupOffloadConfig, boundary: int
+    ) -> int:
+        """Token position whose hash keys a group's partial-tail block."""
+        return boundary + self._eagle_proof_margins.get(group_config.group_idx, 0)
+
+    def _lookup_partial_tail(
+        self,
+        req_status: RequestOffloadState,
+        boundary: int,
+        bridge_pending: bool,
+    ) -> tuple[bool, bool]:
+        """Look up every key a partial-tail hit at ``boundary`` loads.
+
+        ``bridge_pending`` is True if a complete chunk that the hit also loads
+        is not ready yet.
+        Returns ``(hit, pending)``. ``hit`` is True only if every key is ready.
+        ``pending`` is True if a key looked up before the first miss is not
+        ready yet.
+        """
+        req = req_status.req
+        req_context = req_status.req_context
+        pending = bridge_pending
+        boundary_keys: list[tuple[GroupOffloadConfig, int, OffloadKey]] = []
+        for group_config in self.config.kv_group_configs:
+            key_tokens = self._partial_tail_key_tokens(group_config, boundary)
+            key = self._make_boundary_key(
+                req, group_config.group_idx, key_tokens, req_context
+            )
+            result = self.manager.lookup(key, req_context)
+            if result is LookupResult.MISS:
+                return False, pending
+            pending |= result is not LookupResult.HIT
+            boundary_keys.append((group_config, key_tokens, key))
+
+        if pending:
+            return False, True
+        for group_config, key_tokens, key in boundary_keys:
+            self._events_tracker.record_partial_lookup(
+                req, group_config, key_tokens, key
+            )
+        return True, False
+
     def on_new_request(self, request: Request) -> None:
         """Called when a new request is added to the scheduler."""
-        req_context = _create_req_context(request)
-        offloading_context = self.manager.on_new_request(req_context)
+        req_context = _create_req_context(request, self)
         req_status = RequestOffloadState(
             config=self.config,
             req=request,
             req_context=req_context,
-            offloading_context=offloading_context,
+            offloading_context=RequestOffloadingContext(),
         )
         self._req_status[request.request_id] = req_status
+        try:
+            with self._manager_locked():
+                req_status.offloading_context = self.manager.on_new_request(req_context)
+        except Exception:
+            del self._req_status[request.request_id]
+            raise
 
     def get_num_new_matched_tokens(
         self,
@@ -1067,9 +1278,15 @@ class OffloadingConnectorScheduler:
                   (between scheduler steps).
 
         """
+        # First manager-touching hook of a step: opens the step-scoped region,
+        # closed at the end of build_connector_meta.
+        self._acquire_step()
+
         req_status = self._req_status[request.request_id]
         for group_state in req_status.group_states:
             group_state.block_ids.clear()
+            # Restarting at token 0: offer every chunk again.
+            group_state.next_stored_chunk_idx = 0
 
         if req_status.transfer_jobs:
             logger.debug(
@@ -1098,7 +1315,35 @@ class OffloadingConnectorScheduler:
                 self._maybe_observe_lookup_async_delay(req_status)
         req_status.update_num_hit_chunks(num_computed_tokens + (num_hit_tokens or 0))
 
-        return num_hit_tokens, bool(num_hit_tokens)
+        sync_load = self._reserve_sync_load(
+            req_status, num_computed_tokens, num_hit_tokens
+        )
+        return num_hit_tokens, bool(num_hit_tokens) and not sync_load
+
+    def _reserve_sync_load(
+        self,
+        req_status: RequestOffloadState,
+        num_computed_tokens: int,
+        num_hit_tokens: int | None,
+    ) -> bool:
+        """Reserve the step's sync-load budget for a hit, if it fits."""
+        req_id = req_status.req.request_id
+        self._current_batch_sync_loads.discard(req_id)
+        # Keep at least one token to compute, or the request can't be scheduled.
+        if (
+            not self.config.sync_load_budget_bytes
+            or not num_hit_tokens
+            or num_computed_tokens + num_hit_tokens >= req_status.req.num_tokens
+        ):
+            return False
+        # Overestimates sliding-window and recurrent groups, which load less.
+        num_bytes = num_hit_tokens * self.config.kv_bytes_per_token
+        budget = self.config.sync_load_budget_bytes
+        if self._current_batch_sync_load_bytes + num_bytes > budget:
+            return False
+        self._current_batch_sync_load_bytes += num_bytes
+        self._current_batch_sync_loads.add(req_id)
+        return True
 
     def get_external_cache_hit_sources(
         self,
@@ -1161,7 +1406,13 @@ class OffloadingConnectorScheduler:
         if num_external_tokens == 0:
             return
 
+        # prepare_load() below pins keys that get_num_new_matched_tokens()
+        # already saw as HIT, so both must sit inside the same region.
+        self._acquire_step()
+
         req_status = self._req_status[request.request_id]
+        req_status.loaded_from_offload = True
+        sync_load = request.request_id in self._current_batch_sync_loads
 
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
@@ -1197,7 +1448,8 @@ class OffloadingConnectorScheduler:
             load_start_gpu_block_idx = num_gpu_blocks
             for i in range(first_fresh_gpu_block_idx, num_gpu_blocks):
                 block = group_blocks[i]
-                if not block.is_null and block.block_hash is None:
+                # Sync-load blocks are hashed at allocation: match by position.
+                if not block.is_null and (sync_load or block.block_hash is None):
                     load_start_gpu_block_idx = i
                     break
 
@@ -1225,7 +1477,9 @@ class OffloadingConnectorScheduler:
                         self._make_boundary_key(
                             request,
                             group_config.group_idx,
-                            partial_tail_boundary,
+                            self._partial_tail_key_tokens(
+                                group_config, partial_tail_boundary
+                            ),
                             req_status.req_context,
                         )
                     )
@@ -1271,6 +1525,7 @@ class OffloadingConnectorScheduler:
             req_id=request.request_id,
             src_spec=src_spec,
             dst_spec=dst_spec,
+            sync=sync_load,
         )
         # a load can only be issued when no other jobs are pending.
         assert not req_status.transfer_jobs
@@ -1280,9 +1535,11 @@ class OffloadingConnectorScheduler:
             pending_count=self.config.num_workers,
             keys=set(keys_to_load),
             is_store=False,
+            is_sync_load=sync_load,
         )
 
-        if self._chunks_being_loaded is not None:
+        # A sync load completes before this step's forward pass.
+        if self._chunks_being_loaded is not None and not sync_load:
             self._chunks_being_loaded.update(keys_to_load)
         req_status.partial_tail_boundary = None
 
@@ -1293,23 +1550,23 @@ class OffloadingConnectorScheduler:
         # Used to detect sliding window blocks that got re-allocated.
         new_block_ids_end: dict[str, tuple[int, ...]] = {}
 
-        for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
+        for req_id, block_id_groups, is_full_table in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
             req_status.update_offload_keys()
 
-            if preempted:
+            if is_full_table:
                 for group_state in req_status.group_states:
                     group_state.block_ids.clear()
 
-            if new_block_id_groups:
+            if block_id_groups:
                 if self._sliding_window_groups:
                     new_block_ids_end[req_id] = tuple(
                         len(req_status.group_states[grp_idx].block_ids)
                         for grp_idx in self._sliding_window_groups
                     )
-                req_status.update_block_id_groups(new_block_id_groups)
+                req_status.update_block_id_groups(block_id_groups)
                 for group_config in self.config.kv_group_configs:
-                    new_blocks = new_block_id_groups[group_config.group_idx]
+                    new_blocks = block_id_groups[group_config.group_idx]
                     for bid in new_blocks:
                         if bid != 0:
                             self._current_batch_allocated_block_ids.add(bid)
@@ -1432,6 +1689,10 @@ class OffloadingConnectorScheduler:
                 continue
             req_status = self._req_status.get(req_id)
             assert req_status is not None
+            if self._max_eagle_proof_margin and not req_status.loaded_from_offload:
+                # Requests that did not load from the offload tier keep their
+                # EAGLE tail in the GPU prefix cache; skip the store.
+                continue
             boundaries = {boundary for _, _, boundary in entries}
             assert len(boundaries) == 1
             boundary = boundaries.pop()
@@ -1450,6 +1711,20 @@ class OffloadingConnectorScheduler:
             assert boundary % self.config.tokens_per_hash == 0
             assert boundary <= max_boundary
 
+            if self._max_eagle_proof_margin:
+                # The CoW hand-off arrives on the step that computes the prompt
+                # tokens past the boundary, and it is not offered again. Workers
+                # submit a store at the next step's start, after this step's
+                # forward, so count the prompt tokens this step computes.
+                prompt_tokens_after_step = min(
+                    req.num_computed_tokens
+                    + scheduler_output.num_scheduled_tokens.get(req_id, 0),
+                    req.num_prompt_tokens,
+                )
+                if boundary + self._max_eagle_proof_margin > prompt_tokens_after_step:
+                    # The EAGLE proof is not computed by the end of this step.
+                    continue
+
             cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
             assert self._cow_source_groups.issubset(cow_blocks)
 
@@ -1461,11 +1736,15 @@ class OffloadingConnectorScheduler:
                 for group in self.config.kv_group_configs
             ):
                 continue
+            key_tokens = [
+                self._partial_tail_key_tokens(group, boundary)
+                for group in self.config.kv_group_configs
+            ]
             keys = [
                 self._make_boundary_key(
-                    req, group.group_idx, boundary, req_status.req_context
+                    req, group.group_idx, tokens, req_status.req_context
                 )
-                for group in self.config.kv_group_configs
+                for group, tokens in zip(self.config.kv_group_configs, key_tokens)
             ]
             block_ids = [
                 cow_blocks[group.group_idx]
@@ -1484,10 +1763,12 @@ class OffloadingConnectorScheduler:
             if not store_output.keys_to_store:
                 continue
 
-            for group_config, key in zip(self.config.kv_group_configs, keys):
+            for group_config, tokens, key in zip(
+                self.config.kv_group_configs, key_tokens, keys
+            ):
                 if key in store_output.keys_to_store:
                     self._events_tracker.record_partial_store(
-                        req, group_config, boundary, key
+                        req, group_config, tokens, key
                     )
 
             group_by_key = {key: idx for idx, key in enumerate(keys)}
@@ -1731,6 +2012,17 @@ class OffloadingConnectorScheduler:
                         for b in range(blocks_per_chunk)
                     ):
                         continue
+                    # A reachable null block would leave part of the chunk unwritten.
+                    chunk_start = abs_chunk_idx * blocks_per_chunk
+                    if any(
+                        group_state.block_ids[chunk_start + b] == 0
+                        and (
+                            block_mask is None
+                            or block_mask[key_idx * blocks_per_chunk + b]
+                        )
+                        for b in range(blocks_per_chunk)
+                    ):
+                        continue
                     new_offload_keys.append(offload_key)
 
             if not new_offload_keys:
@@ -1811,7 +2103,8 @@ class OffloadingConnectorScheduler:
             # a store can only be issued when no load is pending.
             if req_status.transfer_jobs:
                 any_jid = next(iter(req_status.transfer_jobs))
-                assert self._jobs[any_jid].is_store
+                any_job = self._jobs[any_jid]
+                assert any_job.is_store or any_job.is_sync_load
             req_status.transfer_jobs.add(job_id)
 
             # Watch sliding window blocks as they may get evicted
@@ -1854,21 +2147,52 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        # A step that scheduled nothing reaches build_connector_meta without
+        # any earlier manager touch, so open the region here too.
+        self._acquire_step()
+        try:
+            return self._build_connector_meta(scheduler_output)
+        finally:
+            # The step is over: hand the manager back.
+            self._release_step()
+
+    def _build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        # Every step reaches here, including the empty steps a held fence
+        # keeps the engine taking when no request is left.
+        if (
+            self._reset_fence
+            and time.monotonic() - self._reset_fence_since > _RESET_FENCE_WARN_S
+        ):
+            logger.warning_once(
+                "KV offloading: workers have not reported %d jobs a cache "
+                "reset flushed for over %d s",
+                len(self._reset_fence),
+                _RESET_FENCE_WARN_S,
+            )
         self._update_req_states(scheduler_output)
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
             preempted_req_ids=scheduler_output.preempted_req_ids or (),
         )
-        self.manager.on_schedule_end(schedule_end_context)
 
         # Flush jobs for preempted requests.
         for req_id in scheduler_output.preempted_req_ids or ():
             req_status = self._req_status.get(req_id)
-            if req_status is None or not req_status.transfer_jobs:
+            if req_status is None:
                 continue
-            any_jid = next(iter(req_status.transfer_jobs))
-            assert self._jobs[any_jid].is_store
-            self._current_batch_jobs_to_flush.update(req_status.transfer_jobs)
+            # A cache reset can preempt and reload a request in the same step.
+            # These new loads have not been submitted to the worker yet.
+            jobs_to_flush = (
+                req_status.transfer_jobs - self._current_batch_load_jobs.keys()
+            )
+            if not jobs_to_flush:
+                continue
+            any_jid = next(iter(jobs_to_flush))
+            any_job = self._jobs[any_jid]
+            assert any_job.is_store or any_job.is_sync_load
+            self._current_batch_jobs_to_flush.update(jobs_to_flush)
 
         # Flush jobs that contain re-allocated blocks.
         if (
@@ -1903,8 +2227,16 @@ class OffloadingConnectorScheduler:
             if not req_status.transfer_jobs:
                 del self._req_status[req_id]
         self._current_batch_load_jobs = {}
+        self._current_batch_sync_loads = set()
+        self._current_batch_sync_load_bytes = 0
         self._current_batch_jobs_to_flush = set()
         self._current_batch_allocated_block_ids = set()
+
+        # Last manager call of the step, after every prepare_store and
+        # on_request_finished above. on_schedule_end is documented as running at
+        # the end of the step, and callers rely on that to bound the step's
+        # exclusive access to the manager.
+        self.manager.on_schedule_end(schedule_end_context)
         return meta
 
     def has_pending_push_work(self) -> bool:
@@ -1912,8 +2244,20 @@ class OffloadingConnectorScheduler:
 
         While True, build_connector_meta() and update_connector_output()
         continue to be called even when no requests are scheduled.
+
+        Must use a short region, never the step-scoped one. The engine asks this
+        before schedule() and returns early when the answer is False, so a
+        step-scoped acquire here would never reach build_connector_meta's
+        release and would hold the manager for good -- which is precisely the
+        state an idle engine settles into.
+
+        A cache reset fence also keeps it stepping: the flush must reach the
+        workers and their reports come back before on_reset_flushed().
         """
-        return bool(self._jobs) or self.manager.has_pending_work()
+        if self._jobs or self._reset_fence:
+            return True
+        with self._manager_locked():
+            return self.manager.has_pending_work()
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
@@ -1923,6 +2267,10 @@ class OffloadingConnectorScheduler:
                 connectors output.
 
         """
+        with self._manager_locked():
+            self._update_connector_output(connector_output)
+
+    def _update_connector_output(self, connector_output: KVConnectorOutput):
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
@@ -1960,6 +2308,16 @@ class OffloadingConnectorScheduler:
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._stale_job_threshold:
+                if job_id in self._reset_fence:
+                    self._reset_fence[job_id] -= count
+                    if self._reset_fence[job_id] <= 0:
+                        del self._reset_fence[job_id]
+                        if not self._reset_fence:
+                            self.manager.on_reset_flushed()
+                            logger.info(
+                                "KV offloading: workers reported every job "
+                                "the cache reset flushed"
+                            )
                 logger.debug(
                     "Skipping stale completed job %d (pre-reset counter: %d)",
                     job_id,
@@ -2001,7 +2359,8 @@ class OffloadingConnectorScheduler:
             stats = self._connector_stats
             self._connector_stats = OffloadingConnectorStats()
 
-        manager_stats = self.manager.get_stats()
+        with self._manager_locked():
+            manager_stats = self.manager.get_stats()
         if manager_stats is not None:
             if stats is None:
                 stats = manager_stats
@@ -2033,13 +2392,27 @@ class OffloadingConnectorScheduler:
 
         """
         req_status = self._req_status.get(request.request_id)
+        req_context = (
+            req_status.req_context
+            if req_status is not None
+            else _create_req_context(request, self)
+        )
+        # Freeze at logical completion, independent of deferred tier callbacks.
+        req_context.set_state(
+            _RequestTokens(
+                request.num_computed_tokens,
+                request.num_in_flight_tokens,
+                request.num_prompt_tokens,
+                request.num_tokens,
+            )
+        )
 
         if req_status is None:
             # Untracked request (offloading never started): no in-flight jobs,
             # nothing was deferred, so finalize immediately.
-            req_context = _create_req_context(request)
-            self.manager.on_new_request(req_context)
-            self.manager.on_request_finished(req_context)
+            with self._manager_locked():
+                self.manager.on_new_request(req_context)
+                self.manager.on_request_finished(req_context)
             return False, None
 
         self._maybe_observe_lookup_async_delay(req_status)
@@ -2071,15 +2444,32 @@ class OffloadingConnectorScheduler:
             the underlying :class:`OffloadingEvent` stream.
 
         """
-        yield from self._events_tracker.take_events(self.manager.take_events())
+        # Drain the manager eagerly, inside the region. manager.take_events() is
+        # itself a generator whose backing list is cleared once exhausted, so
+        # iterating it lazily would both hold the manager for as long as the
+        # consumer takes and let a concurrent writer append events that the
+        # clear then discards unpublished.
+        with self._manager_locked():
+            manager_events = list(self.manager.take_events())
+        # Still a generator, so callers testing the result for truthiness keep
+        # seeing a non-empty object the way they do today.
+        yield from self._events_tracker.take_events(manager_events)
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""
         # reset_cache cannot be called in the middle of a schedule step
         assert not self._current_batch_load_jobs
+        assert not self._current_batch_sync_loads
         assert not self._current_batch_jobs_to_flush
         assert not self._current_batch_allocated_block_ids
 
+        # Held for the whole reset. manager.reset_cache() drains tiers by
+        # polling them itself, so a tier-poll thread locked out here loses
+        # nothing; it simply skips rounds until the reset completes.
+        with self._manager_locked():
+            self._reset_cache()
+
+    def _reset_cache(self) -> None:
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
 
@@ -2101,6 +2491,18 @@ class OffloadingConnectorScheduler:
 
         # Discard jobs and save job_counter to be able to discard worker responses
         self._stale_job_threshold = self._job_counter
+        if self._jobs:
+            self._reset_fence.update(
+                (job_id, job.pending_count) for job_id, job in self._jobs.items()
+            )
+            self._reset_fence_since = time.monotonic()
+            logger.info(
+                "KV offloading: waiting for workers to report %d jobs "
+                "flushed by the cache reset",
+                len(self._reset_fence),
+            )
+        elif not self._reset_fence:
+            self.manager.on_reset_flushed()
         self._jobs.clear()
         self._block_id_to_pending_jobs.clear()
 

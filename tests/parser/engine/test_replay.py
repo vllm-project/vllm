@@ -70,7 +70,8 @@ def _discover_parsers() -> list[_ParserInfo]:
             # token, so it does not fit this TOOL_END-based replay harness.
             # It is covered by tests/parser/mistral/ instead.
             continue
-        cfg = obj(bare_tok, None).parser_engine_config
+        # Concrete parsers supply parser_engine_config themselves
+        cfg = obj(bare_tok, None).parser_engine_config  # type: ignore[call-arg]
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
             continue
@@ -308,7 +309,7 @@ class TestParserEngineAdjustRequest:
         tokenizer = make_mock_tokenizer(sample)
         parser = parser_cls(tokenizer, sample.tools)
         request = _test_request()
-        assert request.skip_special_tokens is True
+        assert request.to_sampling_params(1, {}).skip_special_tokens is True
         adjusted = parser.adjust_request(request)
         assert adjusted.skip_special_tokens is False
 
