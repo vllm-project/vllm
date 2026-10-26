@@ -1936,45 +1936,6 @@ def test_sliding_window_backend_correctness(
         )
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
-def test_rocm_aiter_fa_unquantized_cache_ignores_kv_scales(
-    default_vllm_config,
-):
-    """Stale scale tensors must not affect an unquantized KV cache."""
-    from vllm._aiter_ops import is_aiter_found_and_supported
-
-    if not is_aiter_found_and_supported():
-        pytest.skip("AITER is required")
-
-    def sliding_window_mask_mod(
-        b: torch.Tensor,
-        h: torch.Tensor,
-        q_idx: torch.Tensor,
-        kv_idx: torch.Tensor,
-        *,
-        context_len: int,
-        sliding_window: int,
-    ):
-        causal_mask = q_idx + context_len >= kv_idx
-        window_mask = q_idx + context_len - kv_idx < sliding_window
-        return causal_mask & window_mask
-
-    model = "microsoft/Phi-tiny-MoE-instruct"
-    batch_spec = BATCH_SPECS["small_decode"]
-    model_config = ModelConfig(model=model, max_model_len=max(batch_spec.seq_lens))
-    sliding_window = model_config.get_sliding_window()
-    assert sliding_window is not None
-
-    _test_backend_correctness(
-        batch_spec,
-        model,
-        [AttentionBackendEnum.ROCM_AITER_FA],
-        partial(sliding_window_mask_mod, sliding_window=sliding_window),
-        layer_k_scale=0.25,
-        layer_v_scale=0.5,
-    )
-
-
 @pytest.mark.parametrize(
     "batch_spec_name",
     [

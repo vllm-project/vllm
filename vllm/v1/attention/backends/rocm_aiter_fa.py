@@ -974,10 +974,8 @@ class AiterFlashAttentionBackend(AttentionBackend):
             # pa_fwd_asm strides between pages by a whole dense page, so the two
             # head slots customize_spec publishes have to be separate planes
             # spanning every block: H outermost. Under LBHNC the slots alternate
-            # block by block, doubling the stride the kernel assumes. LBHNC
-            # stays listed for models whose mixed HNC shapes need a
-            # block-compact layout; those read K/V by stride instead.
-            return (KVCacheLayout.LHBNC, KVCacheLayout.LBHNC)
+            # block by block and shuffle decode cannot read them.
+            return (KVCacheLayout.LHBNC,)
         # K and V come out of the content dim as transposed views rather than
         # copies, so the head dim may sit on either side of the block dim, but
         # the layer must stay outermost.
