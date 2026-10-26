@@ -8,7 +8,7 @@ import math
 from collections import Counter
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, fields, replace
-from enum import Enum, IntEnum
+from enum import Enum, IntEnum, unique
 from fractions import Fraction
 from functools import cached_property
 from math import prod
@@ -37,6 +37,7 @@ _SpecT = TypeVar("_SpecT", bound="KVCacheSpec")
 # ---------------------------------------------------------------------------
 
 
+@unique
 class KVQuantMode(IntEnum):
     """KV cache quantization mode.
 
@@ -66,7 +67,7 @@ class KVQuantMode(IntEnum):
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
     # False). Registered handlers return this when they own kernel selection
     # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
-    CUSTOM = 12
+    CUSTOM = 15
 
     @property
     def is_per_token_head(self) -> bool:

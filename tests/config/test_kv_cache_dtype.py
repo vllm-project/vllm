@@ -117,6 +117,9 @@ def test_backend_sentinel_properties():
     assert mode != KVQuantMode.NONE
     assert mode.is_per_token_head is False
     assert mode.is_nvfp4 is False
+    assert mode.is_turboquant is False
+    assert mode.is_octave is False
+    assert not any(m.is_custom_mode for m in KVQuantMode if m is not mode)
 
 
 def test_no_snapshot_of_shared_dtype_registry():
