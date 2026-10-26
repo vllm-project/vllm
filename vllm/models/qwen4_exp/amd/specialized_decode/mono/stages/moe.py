@@ -47,6 +47,7 @@ from vllm.models.qwen4_exp.amd.specialized_decode.mono.common.plan import (
     THREADS,
     WAVES,
 )
+from vllm.models.qwen4_exp.amd.specialized_decode.mono.common.sync import POLL_MAX
 from vllm.models.qwen4_exp.amd.specialized_decode.mono.stages import gemv
 
 E = 512
@@ -851,14 +852,20 @@ def load_inter(c):
     nb = rip // 32
     n = s * kt * ri // 2
     per = (n + THREADS - 1) // THREADS
-    got = c["poll"](
-        [(c["inter"], 2 * fx.min(tid + THREADS * i, n - 1), 2) for i in range(per)]
-    )
+    got = []
     for i in range_constexpr(per):
+        # a poll batch at a time: holding every pick's words spills at 16 rows
+        if const_expr(i % POLL_MAX == 0):
+            got = c["poll"](
+                [
+                    (c["inter"], 2 * fx.min(tid + THREADS * j, n - 1), 2)
+                    for j in range(i, min(i + POLL_MAX, per))
+                ]
+            )
         p = fx.min(tid + THREADS * i, n - 1)
         pick = p // (ri // 2)
         cp = p % (ri // 2)
-        h0, h1 = f32_of(got[i][0]), f32_of(got[i][1])
+        h0, h1 = f32_of(got[i % POLL_MAX][0]), f32_of(got[i % POLL_MAX][1])
         amax = fx.max(fx.Float32(fmath.absf(h0)), fx.Float32(fmath.absf(h1)))
         for off in range_constexpr(4):
             amax = xred(amax, 1 << off, fx.max)
