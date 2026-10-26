@@ -1,0 +1,42 @@
+# ROCM_AITER_FA per-rank shape of Qwen/Qwen3-235B-A22B at TP8.
+# Shapes come from tests/v1/attention/model_shapes.py; CI stores the JSON
+# output per commit and compares PRs with their merge base.
+description: "ROCM_AITER_FA, Qwen/Qwen3-235B-A22B at TP8"
+
+model:
+  num_layers: 10
+  num_q_heads: 8
+  num_kv_heads: 1
+  head_dim: 128
+  block_size: 16
+
+batch_specs:
+  # Prefill: 2048 / 4096 / 8192 tokens
+  - "q2k"
+  - "q4k"
+  - "q8k"
+  # Decode: 1 / 16 / 128 requests x 2k / 4k / 8k context
+  - "q1s2k"
+  - "q1s8k"
+  - "16q1s2k"
+  - "16q1s4k"
+  - "16q1s8k"
+  - "128q1s2k"
+  - "128q1s4k"
+  - "128q1s8k"
+  # Extend (chunked prefill / prefix-cache hit)
+  - "q512s4k"
+  - "4q512s8k"
+  # Speculative decode (uniform multi-token decode)
+  - "16q4s4k"
+  - "128q4s2k"
+  # Mixed
+  - "2q2k_64q1s4k"
+  - "q512s8k_16q1s4k_q1k"
+
+backends:
+  - ROCM_AITER_FA
+
+kv_cache_dtype: auto
+cuda_graphs: true
+device: "cuda:0"
