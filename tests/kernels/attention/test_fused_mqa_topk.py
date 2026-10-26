@@ -15,7 +15,6 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_min_keys,
     fused_mqa_topk_prefill,
     get_fused_mqa_topk_workspace,
-    use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
 from vllm.utils.deep_gemm import (
@@ -295,22 +294,6 @@ def test_cuda_graph_replay():
         graph.replay()
     torch.accelerator.synchronize()
     _check(out, q, k, scales, weights, starts, ends)
-
-
-@requires_fused
-def test_dispatch_predicate():
-    """use_fused_mqa_topk: FP8 32x128 queries, top-k 512/1024/2048, full
-    context, no FP4 cache / FP4 queries / candidate selection."""
-    q = _inputs(16, 4096)[0]
-    ok = dict(fp4_cache=False, full_context=True)
-    assert use_fused_mqa_topk(q, None, 2048, **ok)
-    assert not use_fused_mqa_topk(q, None, 768, **ok)
-    assert not use_fused_mqa_topk(q[:, :16], None, 2048, **ok)
-    assert not use_fused_mqa_topk(q.float(), None, 2048, **ok)
-    assert not use_fused_mqa_topk(q, torch.ones(16, device="cuda"), 2048, **ok)
-    assert not use_fused_mqa_topk(q, None, 2048, fp4_cache=True, full_context=True)
-    assert not use_fused_mqa_topk(q, None, 2048, fp4_cache=False, full_context=False)
-    assert not use_fused_mqa_topk(q, None, 2048, candidate_selection=True, **ok)
 
 
 @requires_fused

@@ -155,9 +155,8 @@ def sparse_attn_indexer_kpool(
     # Fused MQA+top-k prefill over the pools for this layer (per chunk:
     # fused_mqa_topk_chunk). Pure DCP needs the per-shard top-k merge.
     fused = use_fused_mqa_topk(
-        q_quant,
-        q_scale,
-        topk_tokens // max(index_kpool, 1),
+        query_shape=q_quant.shape[1:],
+        topk=topk_tokens // max(index_kpool, 1),
         fp4_cache=use_fp4_cache,
         full_context=dcp_world_size == 1,
     )

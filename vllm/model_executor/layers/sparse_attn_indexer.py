@@ -500,9 +500,8 @@ def sparse_attn_indexer(
     # Fused MQA+top-k prefill for this layer (per chunk: fused_mqa_topk_chunk).
     # Under PCP every rank ranks its rows over the whole (gathered) context.
     fused = use_fused_mqa_topk(
-        q_quant,
-        q_scale,
-        topk_tokens,
+        query_shape=q_quant.shape[1:],
+        topk=topk_tokens,
         fp4_cache=use_fp4_cache,
         full_context=use_pcp or dcp_world_size == 1,
         candidate_selection=candidate_blocks is not None,

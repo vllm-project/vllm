@@ -4,18 +4,17 @@
 indexer path (CPU only; the kernel is tested in
 tests/kernels/attention/test_fused_mqa_topk.py)."""
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
 import vllm.envs as envs
+import vllm.model_executor.kernels.attention.dsa.fused_mqa_topk as fused_mqa_topk
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     FUSED_MQA_TOPK_MAX_KEYS,
     FUSED_MQA_TOPK_MAX_ROWS,
     fused_mqa_topk_chunk,
     fused_mqa_topk_min_keys,
-    fused_mqa_topk_model_supported,
+    use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import dense_logits_rows
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
@@ -97,25 +96,37 @@ def test_fused_chunk_thresholds(topk):
 @pytest.mark.parametrize(
     "heads, head_dim, topk, kpool, supported",
     [
-        (32, 128, 2048, None, True),  # GLM-5.2
-        (32, 128, 512, None, True),  # DeepSeek-V4.1-Flash
+        (32, 128, 2048, 1, True),  # GLM-5.2
+        (32, 128, 512, 1, True),  # DeepSeek-V4.1-Flash
         (32, 128, 2048, 4, True),  # GLM-5.3-Flash: top-512 pools
-        (64, 128, 2048, None, False),  # DeepSeek-V3.2: 64 index heads
-        (32, 64, 2048, None, False),
-        (32, 128, 256, None, False),
+        (64, 128, 2048, 1, False),  # DeepSeek-V3.2: 64 index heads
+        (32, 64, 2048, 1, False),
+        (32, 128, 256, 1, False),
         (32, 128, 2048, 3, False),  # 682 pools
-        (32, 128, None, None, False),  # no indexer
     ],
 )
-def test_model_supported(heads, head_dim, topk, kpool, supported):
-    """The chunk planner only plans fused chunks for indexer shapes the kernel
-    serves; other DSA models keep the logits-budget planning."""
-    config = SimpleNamespace(
-        index_n_heads=heads, index_head_dim=head_dim, index_topk=topk
+def test_use_fused_mqa_topk(monkeypatch, heads, head_dim, topk, kpool, supported):
+    """The single eligibility rule of the planner and the indexer layers."""
+    monkeypatch.setattr(fused_mqa_topk, "fused_mqa_topk_available", lambda: True)
+    monkeypatch.setattr(envs, "VLLM_USE_FUSED_MQA_TOPK", True)
+    ok = dict(
+        query_shape=(heads, head_dim),
+        topk=topk // kpool,
+        fp4_cache=False,
+        full_context=True,
     )
-    if kpool is not None:
-        config.index_kpool = kpool
-    assert fused_mqa_topk_model_supported(config) == supported
+    assert use_fused_mqa_topk(**ok) == supported
+    if supported:
+        assert not use_fused_mqa_topk(**{**ok, "fp4_cache": True})
+        assert not use_fused_mqa_topk(**{**ok, "full_context": False})
+        assert not use_fused_mqa_topk(**ok, candidate_selection=True)
+        # A flattened [tokens, heads * head_dim] query does not match.
+        assert not use_fused_mqa_topk(**{**ok, "query_shape": (heads * head_dim,)})
+        monkeypatch.setattr(envs, "VLLM_USE_FUSED_MQA_TOPK", False)
+        assert not use_fused_mqa_topk(**ok)
+        monkeypatch.setattr(fused_mqa_topk, "fused_mqa_topk_available", lambda: False)
+        monkeypatch.setattr(envs, "VLLM_USE_FUSED_MQA_TOPK", True)
+        assert not use_fused_mqa_topk(**ok)
 
 
 def test_dense_logits_rows_fits_budget(monkeypatch):

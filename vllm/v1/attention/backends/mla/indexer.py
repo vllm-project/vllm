@@ -13,8 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     FUSED_MQA_TOPK_MAX_KEYS,
     FUSED_MQA_TOPK_MAX_ROWS,
-    fused_mqa_topk_available,
-    fused_mqa_topk_model_supported,
+    use_fused_mqa_topk,
 )
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
@@ -1033,16 +1032,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
         self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
         # Plan prefill chunks for the fused MQA+top-k kernel (not bounded by
-        # the logits budget). Pure DCP and the FP4 cache stay dense; PCP + DCP
-        # has its own planner.
+        # the logits budget). PCP + DCP has its own planner. v4.1 candidate
+        # selection is not excluded: its pre-candidate indexers take the
+        # fused kernel and the others row-split their dense logits. Indexers
+        # that pad their heads to 32 run fused on budget-planned chunks.
         model_config = self.vllm_config.model_config
-        self.plan_fused_mqa_topk = (
-            envs.VLLM_USE_FUSED_MQA_TOPK
-            and not self.indexer_uses_fp4
-            and self.dcp_world_size == 1
-            and model_config is not None
-            and fused_mqa_topk_model_supported(model_config.hf_text_config)
-            and fused_mqa_topk_available()
+        cfg = model_config.hf_text_config if model_config is not None else None
+        self.plan_fused_mqa_topk = cfg is not None and use_fused_mqa_topk(
+            query_shape=(
+                getattr(cfg, "index_n_heads", 0),
+                getattr(cfg, "index_head_dim", 0),
+            ),
+            topk=getattr(cfg, "index_topk", 0)
+            // (getattr(cfg, "index_kpool", None) or 1),
+            fp4_cache=self.indexer_uses_fp4,
+            full_context=self.dcp_world_size == 1,
         )
 
         next_n = self.num_speculative_tokens + 1

@@ -17,7 +17,6 @@ smaller key counts are supported but not optimized.
 
 import functools
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 
@@ -91,51 +90,33 @@ def fused_mqa_topk_available() -> bool:
     )
 
 
-def fused_mqa_topk_model_supported(hf_text_config: Any) -> bool:
-    """Whether a sparse-attention model's indexer shape fits the fused kernel:
-    32 index heads of dimension 128 and a per-row top-k (per pool for kpool
-    indexers) of 512, 1024 or 2048. Lets the prefill chunk planner skip the
-    fused planning for models the kernel cannot serve (e.g. DeepSeek-V3.2, 64
-    index heads)."""
-    topk = getattr(hf_text_config, "index_topk", None)
-    kpool = getattr(hf_text_config, "index_kpool", None) or 1
-    return (
-        getattr(hf_text_config, "index_n_heads", None) == FUSED_MQA_TOPK_HEADS
-        and getattr(hf_text_config, "index_head_dim", None) == FUSED_MQA_TOPK_HEAD_DIM
-        and topk is not None
-        and topk // kpool in FUSED_MQA_TOPK_TOPKS
-    )
-
-
 def use_fused_mqa_topk(
-    q: torch.Tensor,
-    q_scale: torch.Tensor | None,
-    topk_tokens: int,
     *,
+    query_shape: tuple[int, ...],
+    topk: int,
     fp4_cache: bool,
     full_context: bool,
     candidate_selection: bool = False,
 ) -> bool:
-    """Whether an indexer layer call may use the fused kernel for its prefill
-    chunks (each chunk then also needs fused_mqa_topk_chunk).
+    """The one eligibility rule of the fused kernel, shared by the prefill
+    chunk planner and the indexer layers (each prefill chunk then also needs
+    fused_mqa_topk_chunk).
 
-    q / q_scale: the layer's quantized indexer queries; topk_tokens: the top-k
-    the kernel selects (pools for kpool indexers). full_context: every rank
-    ranks its rows over the whole context (no DCP, or PCP after the KV
-    all-gather); pure DCP needs the per-shard top-k merge. The FP4 cache, FP4
-    queries and v4.1 candidate selection stay on the dense path.
+    query_shape: one token's indexer queries, (heads, head_dim) = (32, 128);
+    topk: the per-row
+    top-k (pools for kpool indexers) in {512, 1024, 2048}; fp4_cache: the
+    MXFP4 indexer cache (and its FP4 queries) stays dense; full_context: every
+    rank ranks its rows over the whole context (no DCP, or PCP after the KV
+    all-gather); pure DCP needs the per-shard top-k merge; candidate_selection:
+    v4.1 two-level selection needs the logits.
     """
     return (
         envs.VLLM_USE_FUSED_MQA_TOPK
-        and full_context
         and not fp4_cache
-        and q_scale is None
+        and full_context
         and not candidate_selection
-        and topk_tokens in FUSED_MQA_TOPK_TOPKS
-        and q.dtype == torch.float8_e4m3fn
-        and q.dim() == 3
-        and tuple(q.shape[1:]) == (FUSED_MQA_TOPK_HEADS, FUSED_MQA_TOPK_HEAD_DIM)
-        and q.is_cuda
+        and tuple(query_shape) == (FUSED_MQA_TOPK_HEADS, FUSED_MQA_TOPK_HEAD_DIM)
+        and topk in FUSED_MQA_TOPK_TOPKS
         and fused_mqa_topk_available()
     )
 
