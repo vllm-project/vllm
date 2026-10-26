@@ -956,7 +956,7 @@ impl MultimodalModelInfo {
     /// GLM-5.3-Flash keeps 32 evenly-spread frames and resamples at the
     /// configured `fps`). `None` when the model has no video lane; the
     /// tracker then keeps its connector defaults.
-    fn video_sampling_policy(&self) -> Option<(FrameSampling, Option<f32>)> {
+    fn video_sampling_policy(&self) -> Option<(FrameSampling, Option<f64>)> {
         let video = self.video.as_ref()?;
         let config = &video.config;
         Some((
@@ -1218,15 +1218,16 @@ mod tests {
 
     #[test]
     fn video_sampling_policy_comes_from_the_video_spec() {
-        // GLM-5.3-Flash: the loader keeps 32 evenly-spread frames, then the
-        // processor resamples at the video config's `fps` (default 2.0).
+        // GLM-5.3-Flash: the GLM-5 family's own loader rule walks the clip
+        // at the configured rate (`RateWalk`), and the processor resamples
+        // at the video config's `fps` (default 2.0).
         let info = glm53_flash_info(glm53_flash_video_config());
         assert_eq!(
             info.video_sampling_policy(),
             Some((
-                FrameSampling::UpToThenRate {
-                    max_frames: 32,
-                    rate_max_frames: 2048
+                FrameSampling::RateWalk {
+                    max_frames: 2048,
+                    temporal_patch_size: 2
                 },
                 Some(1.0)
             ))
@@ -1235,9 +1236,9 @@ mod tests {
         assert_eq!(
             info.video_sampling_policy(),
             Some((
-                FrameSampling::UpToThenRate {
-                    max_frames: 32,
-                    rate_max_frames: 2048
+                FrameSampling::RateWalk {
+                    max_frames: 2048,
+                    temporal_patch_size: 2
                 },
                 Some(2.0)
             ))
@@ -1444,7 +1445,7 @@ mod tests {
         assert_eq!(info.placeholder_token(Modality::Video), None);
     }
 
-    // Token IDs from the Muse-Spark-1.2 checkpoint's `tokenizer_config.json`.
+    // Token IDs from the Muse Spark Open checkpoint's `tokenizer_config.json`.
     fn muse_spark_tokenizer() -> TestTokenizer {
         TestTokenizer::new()
             .with_regular_token("<|audio|>", 200038)
