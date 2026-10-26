@@ -480,7 +480,12 @@ def test_separate_bolt_t8_commits_only_accepted_prefix(fmt):
 
 @pytest.mark.parametrize(
     "fmt,tokens,heads,groups",
-    [("fp8", 1, 16, 2), ("fp8", 8, 128, 8), ("nvfp4", 8, 128, 8)],
+    [
+        ("fp8", 1, 16, 2),
+        ("nvfp4", 1, 16, 2),
+        ("fp8", 8, 128, 8),
+        ("nvfp4", 8, 128, 8),
+    ],
 )
 def test_separate_pending_general_arithmetic(fmt, tokens, heads, groups):
     """Check the MMA axes and decayed readout against a CPU FP32 recurrence."""

@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Accepted-prefix ReplaySSM for SM121, using register-based warp MMA.
 
-The read kernel reuses one quantized state tile across all candidate tokens.
-Only the commit kernel reads the FP16 recurrence checkpoint. Its BF16 MMA
-operands accumulate in FP32. Candidate readout accumulates in FP32.
+Group-level B*C products are shared by all heads in each group. The update
+kernel commits accepted history before reading the quantized checkpoint.
+Only the commit path reads FP16 recurrence state. BF16 MMA operands and
+candidate readout accumulate in FP32.
 """
 
 from functools import cache
@@ -113,6 +114,24 @@ def _sr_half(value, random, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def _store_e4m3_pair(address, a, b, *, loc=None, ip=None):
+    llvm.inline_asm(
+        None,
+        [
+            Int64(address).ir_value(loc=loc, ip=ip),
+            Float32(a).ir_value(loc=loc, ip=ip),
+            Float32(b).ir_value(loc=loc, ip=ip),
+        ],
+        "{ .reg .b16 q; cvt.rn.satfinite.e4m3x2.f32 q,$2,$1; st.global.b16 [$0],q; }",
+        "l,f,f",
+        has_side_effects=True,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
 def _e2m1_pair(a, b, *, loc=None, ip=None):
     result = llvm.inline_asm(
         T.i32(),
@@ -154,13 +173,12 @@ def _scale_offset(head, row, block):
 
 
 class PendingKernel:
-    def __init__(self, heads, groups, length, max_tokens, nvfp4, commit):
+    def __init__(self, heads, groups, length, max_tokens, nvfp4):
         self.heads = heads
         self.groups = groups
         self.length = length
         self.max_tokens = max_tokens
         self.nvfp4 = nvfp4
-        self.commit = commit
 
     @cute.jit
     def __call__(
@@ -183,41 +201,40 @@ class PendingKernel:
         ids,
         cu,
         control,
+        cb_products,
         out,
         seed,
         stream: CUstream,
     ):
-        if cutlass.const_expr(self.commit):
-            self.commit_kernel(
-                state, read, scale, meta, parity, xc, dc, bc, a, ids, control, seed
-            ).launch(
-                grid=(ids.shape[0], self.heads, 1), block=(128, 1, 1), stream=stream
-            )
-        else:
-            self.read_kernel(
-                read,
-                scale,
-                meta,
-                xc,
-                dc,
-                bc,
-                x,
-                dt,
-                a,
-                b,
-                c,
-                d,
-                bias,
-                ids,
-                cu,
-                control,
-                out,
-            ).launch(
-                grid=(ids.shape[0], self.heads, 1), block=(128, 1, 1), stream=stream
-            )
+        self.products_kernel(bc, b, c, ids, cu, control, cb_products).launch(
+            grid=(ids.shape[0], self.groups, 24), block=(32, 1, 1), stream=stream
+        )
+        self.update_kernel(
+            state,
+            parity,
+            seed,
+            read,
+            scale,
+            meta,
+            xc,
+            dc,
+            bc,
+            x,
+            dt,
+            a,
+            b,
+            c,
+            d,
+            bias,
+            ids,
+            cu,
+            control,
+            cb_products,
+            out,
+        ).launch(grid=(ids.shape[0], self.heads, 1), block=(128, 1, 1), stream=stream)
 
-    @cute.kernel
-    def commit_kernel(
+    @cute.jit
+    def _commit_state(
         self, state, read, scale, meta, parity, xc, dc, bc, a, ids, control, seed
     ):
         batch, head, _ = cute.arch.block_idx()
@@ -230,7 +247,7 @@ class PendingKernel:
             old = Int32(control[batch, 0])
             smem = cutlass.utils.SmemAllocator()
             weights = smem.allocate_array(Float32, 16)
-            total = smem.allocate(Float32)
+            total = smem.allocate_array(Float32, 2)
             if tid == 0:
                 accum = Float32(0.0)
                 for i in cutlass.range(16, unroll=1):
@@ -238,11 +255,13 @@ class PendingKernel:
                     accum += dc[slot, head, ri] * Float32(a[head])
                     weights[i] = accum
                 total[0] = cute.math.exp(accum, fastmath=True)
-                for i in cutlass.range(16, unroll=1):
-                    ri = i if i < old else 16 + i - old
-                    weights[i] = dc[slot, head, ri] * cute.math.exp(
-                        accum - weights[i], fastmath=True
-                    )
+                total[1] = accum
+            cute.arch.sync_threads()
+            if tid < 16:
+                ri = tid if tid < old else 16 + tid - old
+                weights[tid] = dc[slot, head, ri] * cute.math.exp(
+                    total[1] - weights[tid], fastmath=True
+                )
             cute.arch.sync_threads()
             row = warp * 16 + lane // 4
             k = lane % 4 * 2
@@ -342,16 +361,52 @@ class PendingKernel:
                                 Uint8(_e2m1_pair(v0 * inverse, v1 * inverse))
                             )
                         else:
-                            read[slot, (head * 64 + row + r * 8) * 128 + col] = (
-                                cutlass.Float8E4M3FN(v0 / row_scale)
+                            offset = cute.crd2idx(
+                                (slot, (head * 64 + row + r * 8) * 128 + col),
+                                read.layout,
                             )
-                            read[slot, (head * 64 + row + r * 8) * 128 + col + 1] = (
-                                cutlass.Float8E4M3FN(v1 / row_scale)
+                            _store_e4m3_pair(
+                                (read.iterator + offset).toint(),
+                                v0 / row_scale,
+                                v1 / row_scale,
                             )
 
     @cute.kernel
-    def read_kernel(
+    def products_kernel(self, bc, b, c, ids, cu, control, cb_products):
+        batch, group, i = cute.arch.block_idx()
+        lane, _, _ = cute.arch.thread_idx()
+        slot = ids[batch]
+        start = cu[batch]
+        tokens = cu[batch + 1] - start
+        remain = Int32(control[batch, 3])
+        if slot > 0 and i < remain + tokens:
+            old = Int32(control[batch, 0])
+            crossed = control[batch, 2] != 0
+            bv = cute.make_rmem_tensor(4, Float32)
+            for n in cutlass.range_constexpr(4):
+                col = lane + n * 32
+                if i < remain:
+                    ri = i if i < old else 16 + i - old
+                    if crossed:
+                        ri = 32 - old + i
+                    bv[n] = Float32(bc[slot, group, ri, col])
+                else:
+                    bv[n] = Float32(b[start + i - remain, group, col])
+            for t in cutlass.range(tokens, unroll=1):
+                if i <= remain + t:
+                    acc = Float32(0.0)
+                    for n in cutlass.range_constexpr(4):
+                        acc += bv[n] * Float32(c[start + t, group, lane + n * 32])
+                    acc = cute.arch.warp_reduction_sum(acc)
+                    if lane == 0:
+                        cb_products[batch, group, i, t] = acc
+
+    @cute.kernel
+    def update_kernel(
         self,
+        state,
+        parity,
+        seed,
         read,
         scale,
         meta,
@@ -368,8 +423,13 @@ class PendingKernel:
         ids,
         cu,
         control,
+        cb_products,
         out,
     ):
+        self._commit_state(
+            state, read, scale, meta, parity, xc, dc, bc, a, ids, control, seed
+        )
+        cute.arch.sync_threads()
         batch, head, _ = cute.arch.block_idx()
         tid, _, _ = cute.arch.thread_idx()
         slot = ids[batch]
@@ -386,53 +446,40 @@ class PendingKernel:
             cumulative = smem.allocate_array(Float32, 24)
             deltas = smem.allocate_array(Float32, 24)
             products = smem.allocate_array(Float32, 24 * self.max_tokens)
+            if tid < remain + tokens:
+                i = tid
+                delta = Float32(0.0)
+                if i < remain:
+                    ri = i if i < old else 16 + i - old
+                    if crossed:
+                        ri = 32 - old + i
+                    delta = dc[slot, head, ri]
+                else:
+                    value = Float32(dt[start + i - remain, head]) + Float32(bias[head])
+                    delta = value
+                    if value <= 20.0:
+                        delta = cute.math.log(
+                            Float32(1.0) + cute.math.exp(value, fastmath=True),
+                            fastmath=True,
+                        )
+                deltas[i] = delta
+            cute.arch.sync_threads()
             if tid == 0:
                 accum = Float32(0.0)
                 for i in cutlass.range(remain + tokens, unroll=1):
-                    delta = Float32(0.0)
-                    if i < remain:
-                        ri = i if i < old else 16 + i - old
-                        if crossed:
-                            ri = 32 - old + i
-                        delta = dc[slot, head, ri]
-                    else:
-                        value = Float32(dt[start + i - remain, head]) + Float32(
-                            bias[head]
-                        )
-                        delta = value
-                        if value <= 20.0:
-                            delta = cute.math.log(
-                                Float32(1.0) + cute.math.exp(value, fastmath=True),
-                                fastmath=True,
-                            )
-                    deltas[i] = delta
-                    accum += delta * Float32(a[head])
+                    accum += deltas[i] * Float32(a[head])
                     cumulative[i] = accum
             cute.arch.sync_threads()
-            # Each warp computes one history row. B is reused across candidates.
-            for i in cutlass.range(warp, remain + tokens, 4, unroll=1):
-                bv = cute.make_rmem_tensor(4, Float32)
-                for n in cutlass.range_constexpr(4):
-                    col = lane + n * 32
-                    if i < remain:
-                        ri = i if i < old else 16 + i - old
-                        if crossed:
-                            ri = 32 - old + i
-                        bv[n] = Float32(bc[slot, group, ri, col])
-                    else:
-                        bv[n] = Float32(b[start + i - remain, group, col])
-                for t in cutlass.range(tokens, unroll=1):
-                    acc = Float32(0.0)
-                    for n in cutlass.range_constexpr(4):
-                        acc += bv[n] * Float32(c[start + t, group, lane + n * 32])
-                    acc = cute.arch.warp_reduction_sum(acc)
-                    if lane == 0:
-                        weight = Float32(0.0)
-                        if i <= remain + t:
-                            weight = deltas[i] * cute.math.exp(
-                                cumulative[remain + t] - cumulative[i], fastmath=True
-                            )
-                        products[i * self.max_tokens + t] = acc * weight
+            for index in cutlass.range(
+                tid, (remain + tokens) * self.max_tokens, 128, unroll=1
+            ):
+                i = index // self.max_tokens
+                t = index % self.max_tokens
+                if t < tokens and i <= remain + t:
+                    weight = deltas[i] * cute.math.exp(
+                        cumulative[remain + t] - cumulative[i], fastmath=True
+                    )
+                    products[index] = cb_products[batch, group, i, t] * weight
             cute.arch.sync_threads()
             row = warp * 16 + lane // 4
             accumulators = cute.make_rmem_tensor(4, Float32)
@@ -494,7 +541,7 @@ class PendingKernel:
 
 
 @cache
-def _compile(heads, groups, length, max_tokens, nvfp4, commit, strides, inputs):
+def _compile(heads, groups, length, max_tokens, nvfp4, strides, inputs):
     batch, slots, tokens = cute.sym_int(), cute.sym_int(), cute.sym_int()
     read_dtype = Uint8 if nvfp4 else cutlass.Float8E4M3FN
     scale_dtype = Uint8 if nvfp4 else Float32
@@ -534,12 +581,13 @@ def _compile(heads, groups, length, max_tokens, nvfp4, commit, strides, inputs):
         make_fake_tensor(Int32, (batch,), divisibility=1),
         make_fake_tensor(Int32, (cute.sym_int(),), divisibility=1),
         make_fake_tensor(Int64, (batch, 5), divisibility=1),
+        make_fake_tensor(Float32, (batch, groups, 24, max_tokens), divisibility=1),
         make_fake_tensor(BFloat16, (tokens, heads, 64)),
         Uint32(0),
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
     ]
     return cute.compile(
-        PendingKernel(heads, groups, length, max_tokens, nvfp4, commit),
+        PendingKernel(heads, groups, length, max_tokens, nvfp4),
         *arguments,
         options="--enable-tvm-ffi",
     )
@@ -572,9 +620,24 @@ def run_pending_kernels(
     ]
     strides = tuple(t.stride(0) for t in tensors)
     inputs = tuple((t.dtype, tuple(t.stride())) for t in (x, dt, a, b, c, d, bias))
-    args = (*tensors, x, dt, a, b, c, d, bias, ids, cu, control, out, seed & 0xFFFFFFFF)
-    # Compile both variants on the first eager call, before graph capture.
-    for commit in (True, False):
-        _compile(heads, groups, length, max_tokens, nvfp4, commit, strides, inputs)(
-            *args
-        )
+    cb_products = torch.empty(
+        (ids.numel(), groups, 24, max_tokens), dtype=torch.float32, device=x.device
+    )
+    args = (
+        *tensors,
+        x,
+        dt,
+        a,
+        b,
+        c,
+        d,
+        bias,
+        ids,
+        cu,
+        control,
+        cb_products,
+        out,
+        seed & 0xFFFFFFFF,
+    )
+    # The first eager call compiles both kernels before graph capture.
+    _compile(heads, groups, length, max_tokens, nvfp4, strides, inputs)(*args)
