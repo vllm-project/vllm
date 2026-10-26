@@ -488,6 +488,34 @@ def test_varlen_decode_graphs_take_the_decode_cap_as_a_token_budget(monkeypatch)
     assert varlen_tokens([8, 64]) == varlen_tokens([24]) == [1, 2, 4, 8, 16]
 
 
+def test_decode_graphs_stay_within_the_recorded_max(monkeypatch):
+    """A drafter that runs a query length at more requests than the target does
+    (DFlash's K + 1 under dynamic speculative decoding) captures no graph wider
+    than the recorded max_cudagraph_capture_size, which backends size by."""
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None
+    )
+    vllm_config = _create_decode_vllm_config(
+        [1, 2, 4, 8, 16, 24],
+        num_speculative_tokens=3,
+        dynamic_spec_schedule=[(1, 2, 3), (3, 8, 1)],
+        decode_sizes=[1, 2, 4, 8],
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_lens={4: 8},
+    )
+    widest = max(d.num_tokens for d in manager._capture_descs[CUDAGraphMode.FULL])
+    assert widest <= vllm_config.compilation_config.max_cudagraph_capture_size
+
+
 def test_decode_graph_must_hold_every_request(monkeypatch):
     """A decode batch with more requests than its tokens imply (prefill context
     parallel shards the tokens) takes no decode graph too small for it, and

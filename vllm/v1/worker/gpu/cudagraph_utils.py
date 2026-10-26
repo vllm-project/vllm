@@ -291,11 +291,12 @@ class CudaGraphManager:
         if decode_sizes is None:
             decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes
         decode_sizes = decode_sizes or []
-        max_decode_tokens = self.max_num_reqs * self.decode_query_len
+        max_decode_tokens = (
+            self.max_num_reqs * self.vllm_config.uniform_decode_query_len
+        )
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
-        max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
 
         decode_descs: list[BatchExecutionDescriptor] = []
         token_keyed_descs: list[BatchExecutionDescriptor] = []
@@ -320,8 +321,15 @@ class CudaGraphManager:
                     )
                 )
         elif capture_decode:
+            # Attention backends size CUDA graph buffers and pick graph-compatible
+            # paths by the recorded max (e.g. FA3 max_num_splits, FlashInfer's
+            # CUDA graph decode wrappers), so a wider graph would compute wrongly.
+            # TODO(#59537): when multi-token drafters extend past the target's
+            # cap, record their shapes in the recorded max too.
             decode_shapes = decode_cudagraph_capture_shapes(
-                decode_sizes, self.decode_max_reqs, max_num_tokens
+                decode_sizes,
+                self.decode_max_reqs,
+                compilation_config.max_cudagraph_capture_size,
             )
             for (n, q), num_active_loras in product(
                 decode_shapes, self.lora_capture_cases

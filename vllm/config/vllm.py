@@ -2852,6 +2852,11 @@ class VllmConfig:
             )
         compilation_config.cudagraph_capture_sizes = sorted(token_sizes)
         compilation_config.max_cudagraph_capture_size = max(token_sizes, default=0)
+        if not token_sizes:
+            logger.info_once(
+                "No CUDA graph capture sizes are left; setting cudagraph_mode to NONE."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
     def _set_compile_ranges(self):
         """Set the compile ranges for the compilation config."""
