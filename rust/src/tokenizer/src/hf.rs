@@ -248,8 +248,12 @@ impl HuggingFaceTokenizer {
     pub fn new_hf(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with huggingface tokenizers");
         let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
-        let t = serde_json::from_value::<HfTokenizer>(tokenizer_json)
+        let mut t = serde_json::from_value::<HfTokenizer>(tokenizer_json)
             .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
+        // Like `new_fastokens`: the Python frontend never applies `tokenizer.json`'s
+        // truncation and padding.
+        t.with_truncation(None).expect("clearing truncation cannot fail");
+        t.with_padding(None);
         Ok(Self::from_hf_backend(t))
     }
 
@@ -541,21 +545,14 @@ mod tests {
                 "fused={fused}, text={text:?}",
             );
         }
-        let ordinary_len = tokenizer
-            .encode_ordinary("hello <|regular|> Cafe\u{301} <|special|> tail")
-            .unwrap()
-            .len();
-        if matches!(&tokenizer.backend, super::Backend::Hf(_)) {
-            assert_eq!(
-                ordinary_len, 24,
-                "HF post-processing must retain configured truncation",
-            );
-        } else {
-            assert!(
-                ordinary_len > 24,
-                "fastokens must ignore configured truncation, like the Python frontend",
-            );
-        }
+        assert!(
+            tokenizer
+                .encode_ordinary("hello <|regular|> Cafe\u{301} <|special|> tail")
+                .unwrap()
+                .len()
+                > 24,
+            "configured truncation must be ignored, like the Python frontend",
+        );
     }
 
     #[test]
