@@ -162,6 +162,10 @@ A code example can be found here: [examples/basic/offline_inference/score.py](..
 
 ## Online Serving
 
+Flash late-interaction scoring caches query embeddings while the associated
+documents are scored. Cancelling a request stops its pending query and document
+work and releases its cached query embeddings, preserving other requests' caches.
+
 ### Score API
 
 Our Score API (`/score`, `/v1/score`) is similar to `LLM.score`, compute similarity scores between two input prompts.
