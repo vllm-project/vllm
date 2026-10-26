@@ -36,6 +36,11 @@ import regex as re
 DEPS_HEADER = re.compile(r"^(.+): #deps (\d+), deps mtime \d+ \((VALID|STALE)\)$")
 TARGET = re.compile(r"(?:^|/)CMakeFiles/([^/]+)\.dir/")
 
+# ROCm 10.0's clang names device bundles hipv4- and emits objects. ROCm 10.1's
+# clang uses the new offload driver, which names them hip- and emits bitcode.
+DEVICE_BUNDLES = ("hipv4-amdgcn-", "hip-amdgcn-")
+DEVICE_EMIT_ACTIONS = ("-emit-obj", "-emit-llvm-bc")
+
 
 def run(command: list[str], *, cwd: Path | None = None, diagnostics=False) -> str:
     result = subprocess.run(
@@ -153,9 +158,9 @@ def device_symbols(obj: Path, tools: dict[str, str]) -> tuple[list[str], list[st
                 "--list",
             ]
         ).splitlines()
-        device_targets = [t for t in targets if t.startswith("hipv4-amdgcn-")]
+        device_targets = [t for t in targets if t.startswith(DEVICE_BUNDLES)]
         unexpected = [
-            t for t in targets if not t.startswith(("host-", "hipv4-amdgcn-"))
+            t for t in targets if not t.startswith(("host-", *DEVICE_BUNDLES))
         ]
         if not device_targets or unexpected:
             raise ValueError(f"unsupported offload bundles: {targets}")
@@ -396,7 +401,7 @@ def device_dependencies(
     expected = set()
     for target in targets:
         match = re.fullmatch(
-            r"hipv4-amdgcn-amd-amdhsa--(gfx[0-9a-z]+)((?::(?:sramecc|xnack)[+-])*)",
+            r"hip(?:v4)?-amdgcn-amd-amdhsa--(gfx[0-9a-z]+)((?::(?:sramecc|xnack)[+-])*)",
             target,
         )
         if not match:
@@ -431,7 +436,7 @@ def device_dependencies(
 
         if (
             option(frontend, "-triple") != "amdgcn-amd-amdhsa"
-            or "-emit-obj" not in frontend
+            or not any(a in frontend for a in DEVICE_EMIT_ACTIONS)
         ):
             raise ValueError("unsupported device compiler frontend")
         features = []
@@ -443,6 +448,11 @@ def device_dependencies(
                     "xnack",
                 ):
                     features.append(feature[1:] + feature[0])
+        # ROCm 10.1 passes the same features as -msramecc / -mno-xnack.
+        for arg in frontend:
+            match = re.fullmatch(r"-m(no-)?(sramecc|xnack)", arg)
+            if match:
+                features.append(match[2] + ("-" if match[1] else "+"))
         arch = (
             option(frontend, "-target-cpu"),
             tuple(sorted(features)),
@@ -475,7 +485,7 @@ def device_dependencies(
                 ):
                     if next(arguments, None) is None:
                         raise ValueError(f"missing compiler output argument: {arg}")
-                elif arg in ("-emit-obj", "-MP") or arg.startswith(
+                elif arg in (*DEVICE_EMIT_ACTIONS, "-MP") or arg.startswith(
                     ("-ftime-trace", "-stats-file=")
                 ):
                     continue
