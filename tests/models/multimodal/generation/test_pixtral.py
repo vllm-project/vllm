@@ -102,6 +102,22 @@ def test_packed_sequence_metadata(backend: AttentionBackendEnum) -> None:
         assert sequence_lengths is None
 
 
+def test_packed_sequence_metadata_flashinfer_fp8() -> None:
+    # FP8 quantizes Q/K/V into separate contiguous tensors, so the V offsets
+    # must use the same per-token stride as Q/K/O (not the packed-QKV 3x).
+    cu_seqlens, _, _ = _make_packed_sequence_metadata(
+        [4, 6],
+        AttentionBackendEnum.FLASHINFER,
+        hidden_size=64,
+        tp_size=1,
+        device=torch.device("cpu"),
+        fp8_padded_hidden_size=64,
+    )
+    half = len(cu_seqlens) // 2
+    assert cu_seqlens[:half].tolist() == cu_seqlens[half:].tolist()
+    assert cu_seqlens[:3].tolist() == [0, 4 * 64, 10 * 64]
+
+
 def test_real_rotary_emb_vit_matches_complex() -> None:
     """The real RoPE used under torch.compile must match the eager one."""
     num_patches, num_heads, head_dim = 12, 4, 64
