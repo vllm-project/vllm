@@ -5,7 +5,9 @@ absl-py==2.5.0
     #   -r requirements/test/xpu.in
     #   rouge-score
 accelerate==1.14.0
-    # via -r requirements/test/xpu.in
+    # via
+    #   -r requirements/test/xpu.in
+    #   peft
 aiohappyeyeballs==2.7.1
     # via aiohttp
 aiohttp==3.14.5
@@ -318,6 +320,7 @@ huggingface-hub==1.31.0
     #   datasets
     #   evaluate
     #   open-clip-torch
+    #   peft
     #   sentence-transformers
     #   timm
     #   tokenizers
@@ -569,6 +572,7 @@ numpy==2.2.6
     #   numba
     #   opencv-python-headless
     #   pandas
+    #   peft
     #   pytrec-eval-terrier
     #   rouge-score
     #   runai-model-streamer
@@ -688,6 +692,7 @@ packaging==26.3
     #   lm-format-enforcer
     #   matplotlib
     #   modelscope
+    #   peft
     #   pooch
     #   pytest
     #   pytest-rerunfailures
@@ -702,6 +707,8 @@ partial-json-parser==0.2.1.1.post7
     # via -r requirements/test/../common.txt
 pathvalidate==3.3.1
     # via pytablewriter
+peft==0.21.2
+    # via -r requirements/test/xpu.in
 pillow==13.0.0
     # via
     #   -c requirements/common.txt
@@ -757,6 +764,7 @@ psutil==7.2.2
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
+    #   peft
     #   tensorizer
 py-cpuinfo==9.0.0
     # via -r requirements/test/../common.txt
@@ -886,6 +894,7 @@ pyyaml==6.0.3
     #   datasets
     #   huggingface-hub
     #   lm-format-enforcer
+    #   peft
     #   schemathesis
     #   timm
     #   transformers
@@ -973,6 +982,7 @@ safetensors==0.8.0
     #   -r requirements/test/../common.txt
     #   accelerate
     #   open-clip-torch
+    #   peft
     #   timm
     #   transformers
 schemathesis==4.24.3
@@ -1112,6 +1122,7 @@ torch==2.14.0+xpu
     #   compressed-tensors
     #   mteb
     #   open-clip-torch
+    #   peft
     #   runai-model-streamer
     #   sentence-transformers
     #   tensorizer
@@ -1137,6 +1148,7 @@ tqdm==4.70.0
     #   nltk
     #   open-clip-torch
     #   openai
+    #   peft
     #   pqdm
     #   sentence-transformers
     #   transformers
@@ -1151,6 +1163,7 @@ transformers==5.20.2
     #   -r requirements/test/xpu.in
     #   compressed-tensors
     #   mteb
+    #   peft
     #   sentence-transformers
     #   xgrammar
 triton==3.8.0+xpu

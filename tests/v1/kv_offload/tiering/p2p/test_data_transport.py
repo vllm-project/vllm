@@ -796,9 +796,10 @@ class TestNixlAgentConfigSelection:
         config_fn.assert_called_once_with(backends=["MOONCAKE"], capture_telemetry=True)
         # num_threads must NOT be passed on the non-UCX branch.
         assert "num_threads" not in config_fn.call_args.kwargs
+        agent_cls.return_value.create_backend.assert_not_called()
 
-    def test_ucx_only_passes_num_threads(self):
-        """UCX-only configuration passes num_threads + telemetry, no backends."""
+    def test_ucx_only_creates_backend_without_rc_gda(self):
+        """UCX-only creates the UCX backend itself, excluding rc_gda lanes."""
         agent_cls = MagicMock()
         config_fn = MagicMock(return_value=MagicMock(name="cfg"))
         with (
@@ -809,8 +810,10 @@ class TestNixlAgentConfigSelection:
         ):
             NixlTransport("test:1", self._make_view(), num_threads=8)
 
-        config_fn.assert_called_once_with(num_threads=8, capture_telemetry=True)
-        assert "backends" not in config_fn.call_args.kwargs
+        config_fn.assert_called_once_with(backends=[], capture_telemetry=True)
+        agent_cls.return_value.create_backend.assert_called_once_with(
+            "UCX", {"engine_config": "TLS=^rc_gda", "num_threads": "8"}
+        )
 
     def test_default_backends_is_ucx_only(self):
         """No backends arg → defaults to UCX-only branch."""
@@ -824,5 +827,8 @@ class TestNixlAgentConfigSelection:
         ):
             NixlTransport("test:1", self._make_view())
 
-        # Default num_threads=4, no backends kwarg.
-        config_fn.assert_called_once_with(num_threads=4, capture_telemetry=True)
+        # Default num_threads=4.
+        config_fn.assert_called_once_with(backends=[], capture_telemetry=True)
+        agent_cls.return_value.create_backend.assert_called_once_with(
+            "UCX", {"engine_config": "TLS=^rc_gda", "num_threads": "4"}
+        )
