@@ -236,6 +236,12 @@ __device__ __forceinline__ int32_t translate_topk_entry(
   return g >= host_rows ? -1 : g;
 }
 
+// Phase 1 parks host rows in hot_indices as values below -1, distinct from
+// resident rows (>= 0) and invalid positions (-1).
+__device__ __forceinline__ int32_t encode_host_row(const int32_t g) {
+  return -2 - g;
+}
+
 // Write the hot index of one reference to a resolved union entry and tally it.
 __device__ __forceinline__ void write_entry_index(
     const int32_t entry, const int row, const int i, const int32_t top_k,
@@ -287,7 +293,8 @@ __device__ __forceinline__ void write_entry_index(
 //   s_evict_off[nbc + 1]     prefix sums for evictable compaction
 //   s_counters[5]            distinct hits, union size, per-row valid count,
 //                            misses, per-entry hits
-//   s_done[nbc]              positions phase 3 resolved, one word per chunk
+//   s_done[nbc]              hot slots holding a union row (phase 2), then
+//                            positions phase 3 resolved, one word per chunk
 //   s_lru_out[hot_size]      int16, compacted slots: [hits fwd | evict bwd]
 // Valid global ids must be unique within each row.
 __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
@@ -378,11 +385,6 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       device_global_indices + static_cast<int64_t>(state_row) * region_stride;
   int16_t* row_lru = lru_slots + static_cast<int64_t>(state_row) * hot_size;
 
-  // Use a slice sized to this request's rows so single-row requests
-  // initialize a small table. Legal unions always leave an empty slot.
-  const int table_size =
-      min(hash_size, kHashLoadInverse * (end_row - first_row) * top_k);
-
   extern __shared__ char smem_raw[];
   int32_t* s_hash_keys = reinterpret_cast<int32_t*>(smem_raw);
   int32_t* s_hash_vals = s_hash_keys + hash_size;
@@ -393,10 +395,6 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       reinterpret_cast<unsigned int*>(s_counters + kResidencyCounters);
   int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_done + num_buffer_chunks);
 
-  for (int i = tid; i < table_size; i += blockDim.x) {
-    s_hash_keys[i] = kHashEmpty;
-    s_hash_vals[i] = INT32_MAX;
-  }
   for (int i = tid; i < num_buffer_chunks + 1; i += blockDim.x) {
     s_chunk_off[i] = 0;
     s_evict_off[i] = 0;
@@ -406,74 +404,105 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   }
   __syncthreads();
 
-  // Phase 1: translate every row's request-relative positions, resolve
-  // resident rows directly, and collect the union of host rows.
-  for (int row = first_row; row < end_row; ++row) {
-    const int32_t* row_topk =
-        global_indices + static_cast<int64_t>(row) * input_row_stride;
+  // Phase 1: translate every row's request-relative positions in one pass,
+  // resolve resident rows directly, and count the host-backed positions.
+  // s_chunk_off holds per-row valid counts until phase 2.
+  int32_t* s_row_valid = s_chunk_off;
+  const int num_positions = (end_row - first_row) * top_k;
+  for (int position = tid; position < num_positions; position += blockDim.x) {
+    const int row = first_row + position / top_k;
+    const int i = position % top_k;
     int32_t* row_out = hot_indices + static_cast<int64_t>(row) * top_k;
     int32_t* row_attention =
         attention_indices != nullptr
             ? attention_indices +
                   static_cast<int64_t>(row) * attention_row_stride
             : nullptr;
-    int32_t* row_miss = miss_mask != nullptr
-                            ? miss_mask + static_cast<int64_t>(row) * top_k
-                            : nullptr;
-    for (int i = tid; i < top_k; i += blockDim.x) {
-      int32_t resident_row;
-      const int32_t g = translate_topk_entry(
-          row_topk[i], request_row, state_row, source_block_table,
-          resident_block_table, host_rows, source_bt_stride, source_num_reqs,
-          source_num_blocks, source_block_size, resident_bt_stride,
-          resident_num_reqs, resident_num_blocks, resident_block_size,
-          resident_null_block, resident_row);
-      if (resolved_global_indices != nullptr) {
-        resolved_global_indices[static_cast<int64_t>(row) * top_k + i] = g;
-      }
-      if (resident_row >= 0 || g >= 0) atomicAdd(&s_counters[2], 1);
-      if (row_miss != nullptr) row_miss[i] = 0;
-      if (resident_row >= 0) {
-        store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
-                        attention_block_stride);
-      } else if (g < 0) {
-        store_hot_index(row_out, row_attention, i, -1, hot_block_size,
-                        attention_block_stride);
-      } else {
-        int h = hash_slot(g, table_size);
-        bool inserted = false;
-        for (int probe = 0; probe < table_size; ++probe) {
-          const int32_t old = atomicCAS(&s_hash_keys[h], kHashEmpty, g);
-          if (old == kHashEmpty) {
-            atomicAdd(&s_counters[1], 1);
-            inserted = true;
-            break;
-          }
-          if (old == g) {
-            inserted = true;
-            break;
-          }
-          h = next_slot(h, table_size);
-        }
-        if (inserted) {
-          atomicMin(&s_hash_vals[h], (row - first_row) * top_k + i);
-        } else {
-          // A full table: push the union count past the cap so the check
-          // below traps.
-          atomicAdd(&s_counters[1], max_union_rows + 1);
-        }
-      }
+    int32_t resident_row;
+    const int32_t g = translate_topk_entry(
+        global_indices[static_cast<int64_t>(row) * input_row_stride + i],
+        request_row, state_row, source_block_table, resident_block_table,
+        host_rows, source_bt_stride, source_num_reqs, source_num_blocks,
+        source_block_size, resident_bt_stride, resident_num_reqs,
+        resident_num_blocks, resident_block_size, resident_null_block,
+        resident_row);
+    if (resolved_global_indices != nullptr) {
+      resolved_global_indices[static_cast<int64_t>(row) * top_k + i] = g;
     }
-    __syncthreads();
-    if (tid == 0) {
-      if (valid_counts != nullptr) {
-        valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
-            s_counters[2];
-      }
-      s_counters[2] = 0;
+    if (resident_row >= 0 || g >= 0)
+      atomicAdd(&s_row_valid[row - first_row], 1);
+    if (miss_mask != nullptr)
+      miss_mask[static_cast<int64_t>(row) * top_k + i] = 0;
+    if (resident_row >= 0) {
+      store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
+                      attention_block_stride);
+    } else if (g < 0) {
+      store_hot_index(row_out, row_attention, i, -1, hot_block_size,
+                      attention_block_stride);
+    } else {
+      // Stash the host row in its output slot; later phases overwrite it.
+      row_out[i] = encode_host_row(g);
+      atomicAdd(&s_counters[3], 1);
     }
-    __syncthreads();
   }
+  __syncthreads();
+  for (int row = first_row + tid; row < end_row; row += blockDim.x) {
+    if (valid_counts != nullptr) {
+      valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
+          s_row_valid[row - first_row];
+    }
+    s_row_valid[row - first_row] = 0;
+  }
+  // Fully resident rows need only request-relative page translation. Avoid
+  // building the table or touching the hot LRU when no row can consult it.
+  const int host_positions = s_counters[3];
+  if (host_positions == 0) {
+    for (int row = first_row + tid; row < end_row; row += blockDim.x) {
+      if (swap_counts != nullptr) swap_counts[row] = 0;
+    }
+    return;
+  }
+
+  // Use a slice sized to this request's rows so single-row requests
+  // initialize a small table. Legal unions always leave an empty slot.
+  const int table_size =
+      min(hash_size, kHashLoadInverse * (end_row - first_row) * top_k);
+  for (int i = tid; i < table_size; i += blockDim.x) {
+    s_hash_keys[i] = kHashEmpty;
+    s_hash_vals[i] = INT32_MAX;
+  }
+  __syncthreads();
+
+  // Phase 1b: collect the union of host rows.
+  for (int position = tid; position < num_positions; position += blockDim.x) {
+    const int32_t stashed =
+        hot_indices[static_cast<int64_t>(first_row) * top_k + position];
+    if (stashed > -2) continue;
+    const int32_t g = encode_host_row(stashed);
+    int h = hash_slot(g, table_size);
+    bool inserted = false;
+    for (int probe = 0; probe < table_size; ++probe) {
+      const int32_t old = atomicCAS(&s_hash_keys[h], kHashEmpty, g);
+      if (old == kHashEmpty) {
+        atomicAdd(&s_counters[1], 1);
+        inserted = true;
+        break;
+      }
+      if (old == g) {
+        inserted = true;
+        break;
+      }
+      h = next_slot(h, table_size);
+    }
+    if (inserted) {
+      atomicMin(&s_hash_vals[h], position);
+    } else {
+      // A full table: push the union count past the cap so the check
+      // below traps.
+      atomicAdd(&s_counters[1], max_union_rows + 1);
+    }
+  }
+  __syncthreads();
   // Hash capacity can exceed the union bound; eviction slots cannot.
   if (s_counters[1] > max_union_rows) {
     if (tid == 0) {
@@ -484,50 +513,65 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     }
     __trap();
   }
-  // Fully resident rows need only request-relative page translation. Avoid
-  // scanning or rewriting the hot LRU when no selected row can consult it.
-  if (s_counters[1] == 0) {
-    for (int row = first_row + tid; row < end_row; row += blockDim.x) {
-      if (swap_counts != nullptr) swap_counts[row] = 0;
-    }
-    return;
-  }
 
-  // Phase 2: walk hot slots in LRU order, classify hit / evictable, and
-  // compact them (hits forward, evictables backward) into s_lru_out. A hit
-  // records its slot on the union entry.
+  // Phase 2: scan hot slots in slot order so device_global_indices is read
+  // coalesced, recording each hit's slot on its union entry and in s_done.
+  constexpr int kSlotBatch = 4;
+  for (int base = 0; base < hot_size; base += kSlotBatch * blockDim.x) {
+    int32_t cached_g[kSlotBatch];
+#pragma unroll
+    for (int b = 0; b < kSlotBatch; ++b) {
+      const int slot = base + b * blockDim.x + tid;
+      cached_g[b] = slot < hot_size ? row_dgi[slot] : -1;
+    }
+#pragma unroll
+    for (int b = 0; b < kSlotBatch; ++b) {
+      const int slot = base + b * blockDim.x + tid;
+      // Every lane makes its first probe, then the warp iterates together
+      // until no lane is still probing, so the warp is converged at the
+      // ballot. CUDA 12.8-13.2.1 ptxas can fail to reconverge a per-lane
+      // probe loop before a ballot on sm_100.
+      const int32_t g = cached_g[b];
+      int h = hash_slot(g, table_size);
+      int32_t k = s_hash_keys[h];
+      bool is_hit = g >= 0 && k == g;
+      bool probing = g >= 0 && !is_hit && k != kHashEmpty;
+      while (__any_sync(0xFFFFFFFF, probing)) {
+        if (probing) h = next_slot(h, table_size);
+        k = probing ? s_hash_keys[h] : kHashEmpty;
+        const bool found = probing && k == g;
+        is_hit |= found;
+        probing = probing && !found && k != kHashEmpty;
+      }
+      if (is_hit) s_hash_vals[h] = kEntryHit | slot;
+      const unsigned int hit_bits = __ballot_sync(0xFFFFFFFF, is_hit);
+      if (lane_id == 0 && slot < hot_size) {
+        s_done[slot / kWarpSize] = hit_bits;
+      }
+    }
+  }
+  __syncthreads();
+
+  // Walk hot slots in LRU order, classify hit / evictable, and compact them
+  // (hits forward, evictables backward) into s_lru_out.
   const int iters_buffer = (num_buffer_chunks + NUM_WARPS - 1) / NUM_WARPS;
   int total_hit_count = 0;
   int total_evict_count = 0;
+  int16_t next_lru = tid < hot_size ? row_lru[tid] : int16_t(-1);
   for (int iter = 0; iter < iters_buffer; iter++) {
     const int chunk_idx = warp_id + iter * NUM_WARPS;
     const bool has_valid_chunk = chunk_idx < num_buffer_chunks;
 
     const int pos = chunk_idx * kWarpSize + lane_id;
     const bool has_valid_pos = has_valid_chunk && (pos < hot_size);
-    const int16_t slot = has_valid_pos ? row_lru[pos] : int16_t(-1);
-    // Corruption tripwire: lru/dgi are long-lived device state; if some
-    // external writer (e.g. stray RDMA into reused VRAM) corrupts a slot
-    // out of [0, region_stride), treat it as no-hit so it degrades to a
-    // re-miss instead of an unbounded dgi read (phase 3 bounds the write
-    // side).
-    const int32_t cached_g =
-        (slot >= 0 && slot < region_stride) ? row_dgi[slot] : -1;
-
-    bool is_hit = false;
-    if (cached_g >= 0) {
-      int h = hash_slot(cached_g, table_size);
-      while (true) {
-        const int32_t k = s_hash_keys[h];
-        if (k == cached_g) {
-          s_hash_vals[h] = kEntryHit | slot;
-          is_hit = true;
-          break;
-        }
-        if (k == kHashEmpty) break;
-        h = next_slot(h, table_size);
-      }
-    }
+    const int16_t slot = has_valid_pos ? next_lru : int16_t(-1);
+    const int next_pos = pos + NUM_WARPS * kWarpSize;
+    next_lru = next_pos < hot_size ? row_lru[next_pos] : int16_t(-1);
+    // Corruption tripwire: lru is long-lived device state; an out-of-range
+    // slot is treated as no-hit so it degrades to a re-miss (phase 3 bounds
+    // the write side).
+    const bool is_hit = slot >= 0 && slot < hot_size &&
+                        (s_done[slot / kWarpSize] >> (slot % kWarpSize)) & 1u;
     const bool is_evictable = has_valid_pos && !is_hit;
 
     int local_hit_off = 0;
@@ -579,7 +623,6 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   // device_global_indices. Swaps fill the rows' swap segments in order; the
   // union never exceeds their combined capacity, and position chunks never
   // exceed buffer chunks because hot_size covers every row's top-k.
-  const int num_positions = (end_row - first_row) * top_k;
   const int num_position_chunks = (num_positions + kWarpSize - 1) / kWarpSize;
   const int iters_position = (num_position_chunks + NUM_WARPS - 1) / NUM_WARPS;
   int miss_running_total = 0;
@@ -595,17 +638,10 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     int32_t entry = 0;
     bool is_miss = false;
     if (has_valid_chunk && position < num_positions) {
-      const int row = first_row + position / top_k;
-      int32_t resident_row;
-      g = translate_topk_entry(
-          global_indices[static_cast<int64_t>(row) * input_row_stride +
-                         position % top_k],
-          request_row, state_row, source_block_table, resident_block_table,
-          host_rows, source_bt_stride, source_num_reqs, source_num_blocks,
-          source_block_size, resident_bt_stride, resident_num_reqs,
-          resident_num_blocks, resident_block_size, resident_null_block,
-          resident_row);
-      if (resident_row < 0 && g >= 0) {
+      const int32_t stashed =
+          hot_indices[static_cast<int64_t>(first_row) * top_k + position];
+      if (stashed < -1) {
+        g = encode_host_row(stashed);
         h = hash_slot(g, table_size);
         while (s_hash_keys[h] != g) {
           h = next_slot(h, table_size);
@@ -702,16 +738,10 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
         continue;
       }
       const int row = first_row + position / top_k;
-      int32_t resident_row;
-      const int32_t g = translate_topk_entry(
-          global_indices[static_cast<int64_t>(row) * input_row_stride +
-                         position % top_k],
-          request_row, state_row, source_block_table, resident_block_table,
-          host_rows, source_bt_stride, source_num_reqs, source_num_blocks,
-          source_block_size, resident_bt_stride, resident_num_reqs,
-          resident_num_blocks, resident_block_size, resident_null_block,
-          resident_row);
-      if (resident_row >= 0 || g < 0) continue;
+      const int32_t stashed =
+          hot_indices[static_cast<int64_t>(first_row) * top_k + position];
+      if (stashed > -2) continue;
+      const int32_t g = encode_host_row(stashed);
       int h = hash_slot(g, table_size);
       while (s_hash_keys[h] != g) {
         h = next_slot(h, table_size);
