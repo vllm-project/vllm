@@ -431,6 +431,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         """Publish context features required by a draft's candidate head. Runs
         inside the FULL graph, so it must not sync with the host."""
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
+
     @torch.inference_mode()
     def propose(
         self,

@@ -87,6 +87,8 @@ def test_dspark_revisited_position_uses_step_seed(use_fp64):
     spec.seeds = torch.arange(batch, dtype=torch.int64, device=device)
     spec._step_cols = torch.arange(2, dtype=torch.int32, device=device)
     spec.draft_logits = torch.empty(batch, 2, 2, device=device)
+    spec.draft_logits_num_shards = 1
+    spec.draft_logits_shard_idx = 0
     logits = torch.tensor([0.7, 0.3], device=device).log().expand(batch, -1)
     mapping = torch.arange(batch, device=device)
     positions = torch.full((batch,), 22, dtype=torch.int64, device=device)

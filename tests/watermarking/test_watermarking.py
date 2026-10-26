@@ -1861,6 +1861,8 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
 def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
     speculator = object.__new__(DSparkSpeculator)
     speculator.draft_logits = torch.zeros(2, 1, 8)
+    speculator.draft_logits_num_shards = 1
+    speculator.draft_logits_shard_idx = 0
     speculator._d2t_scatter_index = torch.tensor([1, 5])
     speculator._draft_scatter_buf = torch.full((2, 8), float("-inf"))
     speculator.temperature = torch.ones(2)
@@ -1905,6 +1907,8 @@ def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
 def test_dspark_target_only_watermarking_leaves_drafts_unwatermarked(monkeypatch):
     speculator = object.__new__(DSparkSpeculator)
     speculator.draft_logits = torch.zeros(2, 1, 8)
+    speculator.draft_logits_num_shards = 1
+    speculator.draft_logits_shard_idx = 0
     speculator._d2t_scatter_index = None
     speculator.temperature = torch.ones(2)
     speculator.seeds = torch.zeros(2, dtype=torch.int64)
