@@ -757,7 +757,11 @@ fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
     let mime_type = match format {
         Some(format) if format.eq_ignore_ascii_case("wav") => "audio/wav",
         Some(format) if format.eq_ignore_ascii_case("mp3") => "audio/mpeg",
-        Some(format) => bail_multimodal!("unsupported input_audio format `{format}`"),
+        Some(format) => {
+            return Err(Error::UnsupportedInputAudioFormat {
+                format: format.to_owned(),
+            });
+        }
         None => "application/octet-stream",
     };
     Ok(format!("data:{mime_type};base64,{data}"))
@@ -1735,7 +1739,11 @@ mod tests {
             input_audio_data_url("CCCC", None).unwrap(),
             "data:application/octet-stream;base64,CCCC"
         );
-        assert!(input_audio_data_url("AAAA", Some("flac")).is_err());
+        assert!(
+            input_audio_data_url("AAAA", Some("flac"))
+                .unwrap_err()
+                .is_request_validation_error()
+        );
     }
 
     #[test]
