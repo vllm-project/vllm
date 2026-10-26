@@ -19,7 +19,10 @@ import torch
 
 from vllm.compilation.cudagraph_pool import capture_pool
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.config.compilation import decode_cudagraph_capture_shapes
+from vllm.config.compilation import (
+    decode_cudagraph_capture_max_tokens,
+    decode_cudagraph_capture_shapes,
+)
 from vllm.logger import init_logger
 from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
 from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
@@ -105,14 +108,14 @@ class AttnMetadataCudaGraphs:
         narrower tiers build their metadata eagerly.
         """
         config = self._vllm_config.compilation_config
-        scheduler_config = self._vllm_config.scheduler_config
         query_len = self._decode_query_len
+        max_reqs = self._vllm_config.get_decode_cudagraph_query_lens(query_len)
         graph_reqs = [
             n
             for n, _ in decode_cudagraph_capture_shapes(
                 config.decode_cudagraph_capture_request_sizes or (),
-                {query_len: scheduler_config.max_num_seqs},
-                scheduler_config.max_num_batched_tokens,
+                {query_len: max_reqs.get(query_len, 0)},
+                decode_cudagraph_capture_max_tokens(config),
             )
         ]
         keys: list[GraphKey] = []

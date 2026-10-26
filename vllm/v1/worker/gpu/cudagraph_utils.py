@@ -25,7 +25,11 @@ from vllm.compilation.cudagraph_pool import (
 )
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.config.compilation import CUDAGraphMode, decode_cudagraph_capture_shapes
+from vllm.config.compilation import (
+    CUDAGraphMode,
+    decode_cudagraph_capture_max_tokens,
+    decode_cudagraph_capture_shapes,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     graph_capture,
@@ -329,11 +333,7 @@ class CudaGraphManager:
             decode_shapes = decode_cudagraph_capture_shapes(
                 decode_sizes,
                 self.decode_max_reqs,
-                min(
-                    compilation_config.max_cudagraph_capture_size,
-                    compilation_config.max_decode_cudagraph_capture_tokens
-                    or compilation_config.max_cudagraph_capture_size,
-                ),
+                decode_cudagraph_capture_max_tokens(compilation_config),
             )
             for (n, q), num_active_loras in product(
                 decode_shapes, self.lora_capture_cases

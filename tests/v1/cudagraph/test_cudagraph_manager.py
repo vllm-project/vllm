@@ -318,6 +318,7 @@ def _create_decode_vllm_config(
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
     decode_sizes: list[int] | None = None,
+    max_decode_tokens: int | None = None,
 ) -> MagicMock:
     if decode_sizes is None:
         # The deprecated shared sizes set both kinds of graphs.
@@ -331,6 +332,7 @@ def _create_decode_vllm_config(
             cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
             prefill_cudagraph_capture_token_sizes=capture_sizes,
             decode_cudagraph_capture_request_sizes=decode_sizes,
+            max_decode_cudagraph_capture_tokens=max_decode_tokens,
         )
 
     vllm_config = MagicMock(spec=VllmConfig)
@@ -514,6 +516,57 @@ def test_decode_graphs_stay_within_the_recorded_max(monkeypatch):
     )
     widest = max(d.num_tokens for d in manager._capture_descs[CUDAGraphMode.FULL])
     assert widest <= vllm_config.compilation_config.max_cudagraph_capture_size
+
+
+@pytest.mark.parametrize(
+    "max_decode_tokens,dynamic_spec_schedule",
+    [(None, None), (32, None), (40, None), (None, [(1, 2, 3), (3, 16, 1)])],
+)
+def test_deepseek_v41_metadata_graphs_match_the_forward_graphs(
+    monkeypatch, max_decode_tokens, dynamic_spec_schedule
+):
+    """DeepSeek-V4.1's recorded metadata builds serve exactly the FULL decode
+    graphs: a budget-truncated boundary graph has its key, and no key is
+    recorded past the budget or the widest query length's reach."""
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime import (
+        metadata_graphs,
+    )
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None
+    )
+    vllm_config = _create_decode_vllm_config(
+        [8, 16, 32, 64],
+        num_speculative_tokens=3,
+        dynamic_spec_schedule=dynamic_spec_schedule,
+        max_num_seqs=16,
+        decode_sizes=[1, 2, 4, 8, 12, 16],
+        max_decode_tokens=max_decode_tokens,
+    )
+    vllm_config.get_decode_cudagraph_query_lens = (
+        lambda q: VllmConfig.get_decode_cudagraph_query_lens(vllm_config, q)
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_lens=vllm_config.get_decode_cudagraph_query_lens(4),
+    )
+    forward = {
+        d.num_reqs
+        for d in manager._capture_descs[CUDAGraphMode.FULL]
+        if d.uniform_token_count == 4 and d.num_reqs is not None
+    }
+
+    keys = metadata_graphs.AttnMetadataCudaGraphs(vllm_config, 4).capture_keys()
+
+    assert {padded for _, padded, _, _ in keys} == forward
+    assert sorted(n for n, _, _, _ in keys) == list(range(1, max(forward) + 1))
 
 
 def test_decode_graph_must_hold_every_request(monkeypatch):

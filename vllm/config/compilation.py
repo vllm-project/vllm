@@ -69,6 +69,13 @@ def decode_cudagraph_capture_shapes(
     return sorted(shapes, key=lambda shape: (shape[1], shape[0]))
 
 
+def decode_cudagraph_capture_max_tokens(config: "CompilationConfig") -> int:
+    """The most tokens a uniform decode graph holds: the recorded max, which
+    attention backends size their buffers by, within the decode token budget."""
+    max_tokens = config.max_cudagraph_capture_size or 0
+    return min(max_tokens, config.max_decode_cudagraph_capture_tokens or max_tokens)
+
+
 def _walk_grid(limit: int, step: Callable[[int], float]) -> list[int]:
     """Sizes 1, ..., `limit`, each the next multiple of the largest power of two
     not above `step(size)`."""
