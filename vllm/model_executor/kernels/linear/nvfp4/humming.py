@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     quant_key_to_input_schema,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
@@ -58,13 +59,11 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
             del layer.weight
         # The CT linear scheme inverts the global scale (1/scale) for
         # marlin/cutlass; humming wants the original.
-        layer.weight_global_scale = torch.nn.Parameter(
-            1.0 / layer.weight_global_scale, requires_grad=False
-        )
+        replace_parameter(layer, "weight_global_scale", 1.0 / layer.weight_global_scale)
         input_quant_key = None
         if hasattr(layer, "input_global_scale"):
-            layer.input_scale_2 = torch.nn.Parameter(
-                layer.input_global_scale.reshape(-1), requires_grad=False
+            replace_parameter(
+                layer, "input_scale_2", layer.input_global_scale.reshape(-1)
             )
             input_quant_key = kNvfp4Dynamic
         input_schema = quant_key_to_input_schema(input_quant_key)

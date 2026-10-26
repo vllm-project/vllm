@@ -173,6 +173,8 @@ class OffloadingEvent:
     # Secondary tier identifier that generated the event, or None for primary.
     ownership: str | None = None
     removal_expected: bool = False
+    # Failed allocations release metadata without announcing a public eviction.
+    metadata_only: bool = False
 
 
 """
@@ -660,9 +662,17 @@ class OffloadingWorker(ABC):
 
     @abstractmethod
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: GPULoadStoreSpec,
+        expedited: bool = False,
     ) -> bool:
-        """Async offloaded medium -> GPU."""
+        """Async offloaded medium -> GPU.
+
+        An expedited load is waited on within the step, so it should not queue
+        behind regular loads. Submission itself must still not block.
+        """
 
     @abstractmethod
     def get_finished(self) -> list[TransferResult]: ...

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from typing_extensions import override
 
@@ -65,12 +65,13 @@ class CPUOffloadingManager(OffloadingManager):
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
+        info: CPUOffloadingInfo | None = None,
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
-        self._config_info: ConfigInfoMapping = CPUOffloadingInfo(
-            cpu_num_chunks=num_chunks
-        ).as_config_info()
+        self._config_info: ConfigInfoMapping = (
+            info.as_config_info() if info is not None else {}
+        )
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
@@ -374,6 +375,7 @@ class CPUOffloadingManager(OffloadingManager):
         success: bool = True,
     ) -> None:
         stored_keys: list[OffloadKey] = []
+        removed_keys: list[OffloadKey] = []
 
         if success:
             for key in keys:
@@ -391,6 +393,17 @@ class CPUOffloadingManager(OffloadingManager):
                     self._num_write_pending_chunks -= 1
                     self._policy.remove(key)
                     self._free_chunk(chunk)
+                    removed_keys.append(key)
+
+        if removed_keys and self.events is not None:
+            self.events.append(
+                OffloadingEvent(
+                    keys=removed_keys,
+                    medium=self.medium,
+                    removed=True,
+                    metadata_only=True,
+                )
+            )
 
         if stored_keys and self.events is not None:
             self.events.append(
@@ -447,9 +460,19 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
-        if self.events is not None:
-            yield from self.events
-            self.events.clear()
+        if self.events is None:
+            return
+        # Detach the batch up front so a partially consumed drain cannot
+        # replay cleanup against a key a retry has since re-allocated.
+        events, self.events = self.events, []
+        for event in events:
+            if event.metadata_only:
+                # A retry may already own this key before cleanup is drained.
+                keys = [key for key in event.keys if self._policy.get(key) is None]
+                if not keys:
+                    continue
+                event = replace(event, keys=keys)
+            yield event
 
     @override
     def config_info(self) -> Sequence[ConfigInfoMapping]:

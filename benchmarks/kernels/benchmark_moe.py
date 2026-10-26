@@ -901,7 +901,11 @@ def get_model_params(config):
         topk = text_config.num_experts_per_tok
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
-    elif architecture == "DiffusionGemmaForBlockDiffusion":
+    elif architecture in (
+        "DiffusionGemmaForBlockDiffusion",
+        "Gemma4ForCausalLM",
+        "Gemma4ForConditionalGeneration",
+    ):
         text_config = config.get_text_config()
         E = text_config.num_experts
         topk = text_config.top_k_experts
@@ -938,10 +942,15 @@ def get_model_params(config):
         # Support for llama4
         config = config.get_text_config()
         # Default: Mixtral.
-        E = config.num_local_experts
-        topk = config.num_experts_per_tok
+        E = getattr(config, "num_local_experts", None)
+        topk = getattr(config, "num_experts_per_tok", None)
         intermediate_size = config.intermediate_size
         hidden_size = config.hidden_size
+    if not E:
+        raise ValueError(
+            f"{architecture} has no MoE experts in its config; "
+            "benchmark_moe.py only tunes MoE layers."
+        )
     return E, topk, intermediate_size, hidden_size
 
 

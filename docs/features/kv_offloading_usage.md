@@ -110,8 +110,47 @@ vllm serve <model> \
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
+| `sync_load_budget_bytes` | no | `0` | both | Per-step budget of KV bytes (per GPU) loaded within the same step, so those requests run immediately instead of waiting a step for an async load. Hits that don't fit the remaining budget, or would leave nothing to compute, stay async. `0` disables. |
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Partial recurrent tails emit the hash-aligned portion from the physical block start through the tail boundary. Other sliding-window/SSM chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
+| `canonical_layout` | no | `false` | both | Store each offloaded block in a common canonical representation instead of each worker's local GPU page (enables sharing across TP sizes and single-copy storage of replicated KV). See [Canonical Layout](#canonical-layout). |
+
+## Canonical Layout
+
+By default, each worker copies its own GPU page to the CPU tier unchanged, so an offloaded block is stored in whatever form that worker happens to hold it.
+
+With `"canonical_layout": true`, workers instead convert their local pages into one common representation, the canonical page: the block's complete KV (every KV head and every token), with each worker writing its slice into a fixed position. The format is versioned and doesn't depend on how a particular engine splits the KV across its workers.
+
+Having a single, well-defined representation enables several things:
+
+- **Sharing across tensor-parallel sizes.** Engines with different TP sizes, such as a TP=2 prefiller and a TP=4 decoder, read and write the same canonical pages, so secondary tiers (FS, object store, P2P) store them under one shared namespace.
+- **One copy of replicated KV.** For models where ranks hold identical KV bytes (for example MLA, or GQA with fewer KV heads than TP ranks), the ranks take turns storing each block, so the CPU tier holds one copy instead of one per rank.
+- **A well-defined storage format.** The byte layout of an offloaded block is fixed by a format version rather than by the writer's runtime configuration.
+
+```bash
+vllm serve <model> \
+  --tensor-parallel-size 4 \
+  --kv-transfer-config '{
+    "kv_connector": "OffloadingConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "spec_name": "TieringOffloadingSpec",
+      "cpu_bytes_to_use": 64000000000,
+      "canonical_layout": true,
+      "secondary_tiers": [{"type": "fs", "root_dir": "/mnt/kv"}]
+    }
+  }'
+```
+
+Enable it on **every** instance that shares a secondary tier. The canonical format identity (format version and KV layout family) is part of the storage namespace, so canonical and direct-layout blocks never mix; an instance without `canonical_layout` doesn't see canonical blocks, and the reverse.
+
+Requirements and limitations:
+
+- Supported layers: full and sliding-window attention whose KV heads divide evenly across TP ranks, and MLA attention. Per-token-head KV-cache quantization isn't supported.
+- Tensor parallelism only: pipeline parallelism, prefill context parallelism (PCP), and decode context parallelism (DCP) are not supported, and the offload workers must be exactly the TP group.
+- Packed and cross-layer KV cache layouts are not supported.
+- If a layer can't be mapped to the canonical layout, the engine fails at startup with an error that says to remove `canonical_layout`, rather than silently storing non-portable bytes.
+- Every load and store goes through a scatter/gather copy instead of a straight page copy, which adds some transfer overhead. Leave it off if you need none of the capabilities above.
 
 ## Info Metric Labels
 
@@ -122,11 +161,14 @@ The gauge holds one series for each configuration that the manager reports. A ma
 | Label | Declared by | Meaning | Notes |
 | --- | --- | --- | --- |
 | `tier` | `TieringOffloadingSpec` | The tier that this series reports. | `<index>:<type>`. Index `0` is the CPU primary tier, and a secondary tier index starts at 1. `<type>` is the `type` key of the tier config, such as `1:fs`. |
-| `cpu_num_chunks` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Chunk slots in the CPU tier. | Chunks, not GPU blocks. `cpu_bytes_to_use` divided by the bytes of one chunk. |
+| `cpu_num_chunks` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Chunk slots in the CPU tier. | Chunks, not GPU blocks. |
+| `cpu_blocks_per_chunk` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | GPU blocks in one chunk. | The chunk-to-block conversion factor. Set by `blocks_per_chunk`, or derived from `block_size`. |
+| `cpu_kv_cache_size_bytes` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Size of the CPU tier in bytes. | `cpu_num_chunks` times the bytes of one chunk slot. Each slot is rounded up to the host page size, so this can include padding. |
+| `cpu_kv_cache_size_tokens` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | KV tokens the tier holds for requests of `max_model_len` tokens. | Computed like the GPU `kv_cache_size_tokens`. A group with a sliding window keeps a fixed chunk count, so this value can be larger than the byte capacity suggests. Reads `None` when `max_model_len` is 0 or the model has no KV cache group. |
 
-The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series.
+`CPUOffloadingSpec` publishes the four `cpu_` labels on its one series. `TieringOffloadingSpec` publishes them on the `0:primary` series.
 
-`CPUOffloadingSpec` publishes `cpu_num_chunks` on its one series. `TieringOffloadingSpec` publishes it on the `0:primary` series. For a worked example of a secondary tier, the `example` tier publishes one label, `example_info`.
+The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series. For a worked example, the `example` secondary tier publishes one label, `example_info`.
 
 A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
 
@@ -386,7 +428,7 @@ Implement `SecondaryTierManager` (`vllm/v1/kv_offload/tiering/base.py`) in your 
 - For single-tier (CPU-only) setups, set `cpu_bytes_to_use` larger than the aggregate GPU KV cache. Because offloading is immediate, a smaller CPU tier just mirrors what the GPU already holds and adds no hit rate.
 - `block_size` / `blocks_per_chunk`: larger offloaded chunks reduce per-block bookkeeping overhead but increase the granularity of lookups.
 - FS thread counts: tune `n_read_threads` and `n_write_threads` to the parallelism your storage can sustain. Reads are latency-sensitive on the prefill path, so prefer more read threads when prefill hit rates are high.
-- Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, and dtype share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory; old ones are orphaned but harmless. Delete them to reclaim disk.
+- Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, and dtype share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory; old ones are orphaned but harmless. Delete them to reclaim disk. To share files between instances with different TP sizes, see [`canonical_layout`](#canonical-layout).
 
 ## Per-Request Selective Offload
 
@@ -439,6 +481,13 @@ requested count exceeds a worker's capacity. For the `disk` backend the count
 selects disk slots and is checked against `disk_capacity_bytes`. Omitting
 `num_cpu_blocks` preserves automatic per-worker sizing. This option applies
 to `SimpleCPUOffloadConnector`, separately from `OffloadingConnector` above.
+
+## Chunked-local attention with `SimpleCPUOffloadConnector`
+
+For chunked-local attention, CPU cache reuse requires the GPU-local prefix to
+end at an attention-chunk boundary for every chunked-local cache group. Otherwise,
+the connector keeps the GPU prefix and recomputes the remaining tokens. Requests
+with no GPU-local prefix, or with a chunk-aligned prefix, can still reuse CPU KV.
 
 ## Further Reading
 
