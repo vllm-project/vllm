@@ -336,14 +336,13 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
       V0 += (s.x + s.y);                                             \
     }
 #elif defined(__HIP__GFX1X__)
-  // gfx1x: v_dot2_f32_f16 (VOP3-P, dot10-insts, available on gfx11+gfx12)
-  #define DOT2C(V0, V2, V3)                                               \
-    if constexpr (std::is_same_v<scalar_t, half>) {                       \
-      asm("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3)); \
-    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {      \
-      float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *       \
-                 __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));        \
-      V0 += (s.x + s.y);                                                  \
+  // gfx1x: v_dot2_f32_f16 and v_dot2_f32_bf16 (VOP3-P, gfx11 and gfx12). The
+  // bf16 dot keeps the weights packed instead of widening them to f32.
+  #define DOT2C(V0, V2, V3)                                                \
+    if constexpr (std::is_same_v<scalar_t, half>) {                        \
+      asm("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3));  \
+    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {       \
+      asm("v_dot2_f32_bf16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3)); \
     }
 #endif
 
