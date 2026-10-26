@@ -3,7 +3,8 @@
 """KIMI_K3_KV_BALANCED_MLA: the TOKENSPEED_MLA backend with its FP8 decode on the
 KV-balanced kernel.
 
-Selected with ``--attention-backend KIMI_K3_KV_BALANCED_MLA``; it is never chosen
+Selected with ``--attention-backend KIMI_K3_KV_BALANCED_MLA`` (and the speculative
+config's ``attention_backend`` for the DSpark draft); it is never chosen
 automatically. Everything but the decode attention is TOKENSPEED_MLA's: the KV cache
 layout, the decode metadata, the FP8 query, the log2 LSE the DCP combine merges, and
 prefill. A step the kernel doesn't run (``decode.py``) uses TokenSpeed's decode.
@@ -25,7 +26,7 @@ from vllm.v1.attention.backends.mla.tokenspeed_mla import (
 from .decode import LATENT, KvBalancedDecode
 
 
-class KvBalancedMLABackend(TokenspeedMLABackend):
+class KimiK3KvBalancedMLABackend(TokenspeedMLABackend):
     # The kernel writes a BF16 latent.
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
 
@@ -34,8 +35,8 @@ class KvBalancedMLABackend(TokenspeedMLABackend):
         return "KIMI_K3_KV_BALANCED_MLA"
 
     @staticmethod
-    def get_impl_cls() -> type["KvBalancedMLAImpl"]:
-        return KvBalancedMLAImpl
+    def get_impl_cls() -> type["KimiK3KvBalancedMLAImpl"]:
+        return KimiK3KvBalancedMLAImpl
 
     @classmethod
     def supports_combination(
@@ -75,7 +76,7 @@ class KvBalancedMLABackend(TokenspeedMLABackend):
         return reason
 
 
-class KvBalancedMLAImpl(TokenspeedMLAImpl):
+class KimiK3KvBalancedMLAImpl(TokenspeedMLAImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.kv_balanced = KvBalancedDecode(self.num_heads)

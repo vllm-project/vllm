@@ -26,8 +26,8 @@ def test_kv_balanced_backend_is_registered_and_opt_in():
     """KIMI_K3_KV_BALANCED_MLA resolves to the TOKENSPEED_MLA backend with the
     KV-balanced decode, and the platforms never pick it on their own."""
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend import (
-        KvBalancedMLABackend,
-        KvBalancedMLAImpl,
+        KimiK3KvBalancedMLABackend,
+        KimiK3KvBalancedMLAImpl,
     )
     from vllm.platforms.cuda import _get_backend_priorities
     from vllm.platforms.interface import DeviceCapability
@@ -37,11 +37,11 @@ def test_kv_balanced_backend_is_registered_and_opt_in():
     )
 
     backend = AttentionBackendEnum.KIMI_K3_KV_BALANCED_MLA
-    assert backend.get_class() is KvBalancedMLABackend
-    assert KvBalancedMLABackend.get_name() == backend.name
-    assert issubclass(KvBalancedMLABackend, TokenspeedMLABackend)
-    assert issubclass(KvBalancedMLABackend.get_impl_cls(), TokenspeedMLAImpl)
-    assert KvBalancedMLABackend.get_impl_cls() is KvBalancedMLAImpl
+    assert backend.get_class() is KimiK3KvBalancedMLABackend
+    assert KimiK3KvBalancedMLABackend.get_name() == backend.name
+    assert issubclass(KimiK3KvBalancedMLABackend, TokenspeedMLABackend)
+    assert issubclass(KimiK3KvBalancedMLABackend.get_impl_cls(), TokenspeedMLAImpl)
+    assert KimiK3KvBalancedMLABackend.get_impl_cls() is KimiK3KvBalancedMLAImpl
     for major in (9, 10, 12):
         assert backend not in _get_backend_priorities(
             use_mla=True, device_capability=DeviceCapability(major, 0)
@@ -53,7 +53,7 @@ def test_kv_balanced_backend_rejects_unsupported(monkeypatch):
     checks: a non-BF16 model or a kv_lora_rank other than 512."""
     import vllm.config
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend import (
-        KvBalancedMLABackend,
+        KimiK3KvBalancedMLABackend,
     )
     from vllm.platforms.interface import DeviceCapability
 
@@ -65,7 +65,7 @@ def test_kv_balanced_backend_rejects_unsupported(monkeypatch):
     monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: config)
 
     def reasons(dtype=torch.bfloat16):
-        return KvBalancedMLABackend.validate_configuration(
+        return KimiK3KvBalancedMLABackend.validate_configuration(
             head_size=576,
             dtype=dtype,
             kv_cache_dtype="fp8",
@@ -87,14 +87,16 @@ def test_kv_balanced_backend_rejects_unsupported(monkeypatch):
 
 def test_kv_balanced_impl_falls_back_to_tokenspeed(monkeypatch):
     """A step the KV-balanced decode doesn't run is TokenSpeed's forward_mqa."""
-    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend import KvBalancedMLAImpl
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend import (
+        KimiK3KvBalancedMLAImpl,
+    )
     from vllm.v1.attention.backends.mla.tokenspeed_mla import TokenspeedMLAImpl
 
     calls = []
     monkeypatch.setattr(
         TokenspeedMLAImpl, "forward_mqa", lambda self, *args: ("tokenspeed", None)
     )
-    impl = object.__new__(KvBalancedMLAImpl)
+    impl = object.__new__(KimiK3KvBalancedMLAImpl)
     impl.kv_balanced = lambda *args: calls.append(args) or None
     assert impl.forward_mqa("q", "cache", "metadata", "layer") == ("tokenspeed", None)
     impl.kv_balanced = lambda *args: ("kv_balanced", None)
