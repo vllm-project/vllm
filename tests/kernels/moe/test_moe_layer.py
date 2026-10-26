@@ -164,7 +164,7 @@ BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
     "mori_high_throughput":        (True, False, False,  True),
     "mori_low_latency":            (True, False, False,  True),
     "flashinfer_nvlink_two_sided": (False, True, False, False),
-    "flashinfer_nvlink_one_sided": (False, True, False, False),
+    "flashinfer_nvlink_one_sided": (True,  True, False, False),
     "deepep_low_latency":          (True, False, False,  True),
     "deepep_high_throughput":      (True, False, False,  True),
     "nixl_ep":                     (True, False, False,  True),
@@ -378,16 +378,21 @@ class MoETestConfig:
         return MoETestConfig(*values)
 
 
-def _group_deepep_ll_configs(
+def _group_configs_by_buffer_requirements(
     test_configs: list[MoETestConfig],
 ) -> list[list[MoETestConfig]]:
-    """Group configs that can share one DeepEP low-latency buffer."""
+    """Group configs that can share one persistent all-to-all buffer."""
     groups: dict[tuple[int, int, int], list[MoETestConfig]] = {}
     for test_config in test_configs:
         # max_num_tokens and the remaining buffer arguments are fixed for one
         # outer pytest item. These are the arguments that can vary here.
+        hidden_size = (
+            test_config.k // 2
+            if test_config.use_routed_input_transform
+            else test_config.k
+        )
         buffer_key = (
-            test_config.k,
+            hidden_size,
             test_config.ep_size,
             test_config.num_experts,
         )
@@ -396,7 +401,8 @@ def _group_deepep_ll_configs(
 
 
 @pytest.mark.cpu_test
-def test_group_deepep_ll_configs_by_buffer_requirements():
+@pytest.mark.parametrize("backend", ["deepep_low_latency", "nixl_ep"])
+def test_group_configs_by_buffer_requirements(backend):
     config_a = MoETestConfig(
         1,
         128,
@@ -408,7 +414,7 @@ def test_group_deepep_ll_configs_by_buffer_requirements():
         False,
         False,
         False,
-        backend="deepep_low_latency",
+        backend=backend,
         ep_size=2,
         dp_size=2,
     )
@@ -416,16 +422,20 @@ def test_group_deepep_ll_configs_by_buffer_requirements():
     config_a_later = replace(config_a, m=32)
     config_c = replace(config_a, k=4096)
     config_d = replace(config_a, ep_size=4, dp_size=4)
+    config_latent = replace(
+        config_a, use_shared_experts=True, use_routed_input_transform=True
+    )
 
-    assert _group_deepep_ll_configs(
-        [config_a, config_b, config_a_later, config_c, config_d]
+    assert _group_configs_by_buffer_requirements(
+        [config_a, config_b, config_a_later, config_c, config_d, config_latent]
     ) == [
         [config_a, config_a_later],
         [config_b],
         [config_c],
         [config_d],
+        [config_latent],
     ]
-    assert _group_deepep_ll_configs([]) == []
+    assert _group_configs_by_buffer_requirements([]) == []
 
 
 def generate_valid_test_configs(
@@ -1118,6 +1128,17 @@ def make_fused_moe_layer(
         ("w2_input_scale", qw.w2_input_scale),
     ]:
         if value is not None:
+            if quantization is None and name in ("w13_weight", "w2_weight"):
+                param = layer.routed_experts.get_parameter(name)
+                if param.shape != value.shape:
+                    # Preserve backend-required hidden-size padding for latent MoE.
+                    hidden_dim = 2 if name == "w13_weight" else 1
+                    unpadded = param.narrow(hidden_dim, 0, value.size(hidden_dim))
+                    assert unpadded.shape == value.shape
+                    with torch.no_grad():
+                        param.zero_()
+                        unpadded.copy_(value)
+                    continue
             layer.routed_experts.register_parameter(
                 name, torch.nn.Parameter(value, requires_grad=False)
             )
@@ -1402,6 +1423,7 @@ def _test_body_eplb(
         ),
     )
 
+    assert eplb_moe_layer.router.eplb_state is not None
     eplb_moe_layer.router.eplb_state.should_record_tensor = torch.ones(
         (), dtype=torch.bool, device=device
     )
@@ -1802,6 +1824,24 @@ def _parallel_worker(
             local_failed = True
             local_error = traceback.format_exc()
         finally:
+            # Independent test configs can change top_k and num_experts, unlike
+            # the layers sharing a one-sided manager in a single model.
+            if test_config.backend == "flashinfer_nvlink_one_sided":
+                from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
+
+                from vllm.distributed.device_communicators.all2all import (
+                    FlashInferNVLinkOneSidedManager,
+                )
+
+                torch.accelerator.synchronize()
+                communicator = get_ep_group().device_communicator
+                assert communicator is not None
+                manager = communicator.all2all_manager
+                if manager is not None:
+                    assert isinstance(manager, FlashInferNVLinkOneSidedManager)
+                    manager.cleanup()
+                # Run cached tensor deleters before their JIT library unloads.
+                MoeAlltoAll._WORKSPACE_CACHE.clear()
             # DeepEP managers are not reliably reusable across many subtests in
             # a single worker process. Tear them down after each DeepEP case so
             # later subtests do not inherit stale communication state. Skip this
@@ -1809,7 +1849,9 @@ def _parallel_worker(
             # buffer is destroyed in the same process.
             if current_platform.is_cuda() and test_config.backend in DEEPEP_BACKENDS:
                 torch.accelerator.synchronize()
-                all2all_manager = get_ep_group().device_communicator.all2all_manager
+                device_communicator = get_ep_group().device_communicator
+                assert device_communicator is not None
+                all2all_manager = device_communicator.all2all_manager
                 if all2all_manager is not None:
                     all2all_manager.destroy()
             elif (
@@ -1820,7 +1862,9 @@ def _parallel_worker(
                 # The manager cache is weak. Keep its handle alive until the
                 # launcher hard-exits this ROCm worker, otherwise each subtest
                 # implicitly destroys and recreates the DeepEP buffer.
-                all2all_manager = get_ep_group().device_communicator.all2all_manager
+                device_communicator = get_ep_group().device_communicator
+                assert device_communicator is not None
+                all2all_manager = device_communicator.all2all_manager
                 if all2all_manager is not None:
                     handle_cache = getattr(all2all_manager, "handle_cache", None)
                     if handle_cache is not None and not deep_ep_handle_keepalive:
@@ -2187,11 +2231,13 @@ def test_moe_layer(
         failure_report_path = failure_report_file.name
 
     test_config_batches = [test_configs]
-    if current_platform.is_rocm() and backend == "deepep_low_latency":
-        # rocSHMEM cannot destroy one low-latency buffer and initialize a
-        # differently sized one in the same process. Use one worker lifetime
-        # per compatible buffer shape while preserving every matrix case.
-        test_config_batches = _group_deepep_ll_configs(test_configs)
+    if backend == "nixl_ep" or (
+        current_platform.is_rocm() and backend == "deepep_low_latency"
+    ):
+        # NIXL retains a process-wide buffer with fixed geometry. Likewise,
+        # rocSHMEM cannot recreate a differently sized low-latency buffer.
+        # Use fresh workers for incompatible shapes, retaining every subcase.
+        test_config_batches = _group_configs_by_buffer_requirements(test_configs)
 
     rocm_deepep = current_platform.is_rocm() and backend in DEEPEP_BACKENDS
     parallel_worker = _parallel_worker_rocm_deepep if rocm_deepep else _parallel_worker

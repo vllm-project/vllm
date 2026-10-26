@@ -25,6 +25,8 @@ const TOOL_CALL_START: &str = "<|tool_call>";
 const TOOL_CALL_END: &str = "<tool_call|>";
 const STRING_DELIM: &str = "<|\"|>";
 const CALL_PREFIX: &str = "call:";
+/// Bare header prefix some Gemma4 checkpoints emit instead of [`CALL_PREFIX`].
+const BARE_CALL_PREFIX: &str = ":";
 
 type Gemma4Input<'i> = Partial<&'i str>;
 
@@ -273,7 +275,7 @@ fn tool_call_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event
 /// Parse a Gemma4 tool-call header.
 fn tool_call_header_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     let (name,) = seq!(
-        _: literal(CALL_PREFIX),
+        _: alt((literal(CALL_PREFIX), literal(BARE_CALL_PREFIX))),
         gemma4_tool_name,
         _: literal("{"),
     )
@@ -772,6 +774,44 @@ mod tests {
             serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
             json!({ "location": "London" })
         );
+    }
+
+    #[test]
+    fn gemma4_accepts_bare_tool_call_opener_at_every_split() {
+        let wire = concat!(
+            "Hello: world",
+            "<|tool_call>:get_weather{location:<|\"|>London<|\"|>}<tool_call|>",
+            "<|tool_call>call:set{flag:true}<tool_call|>",
+        );
+        let assert_output = |output: &UnifiedParserOutput, case: &str| {
+            assert_eq!(output.normal_text(), "Hello: world", "{case}");
+            let calls = output
+                .calls()
+                .into_iter()
+                .map(|call| {
+                    let arguments = serde_json::from_str::<Value>(&call.arguments).unwrap();
+                    (call.name.clone(), arguments)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                calls,
+                [
+                    (
+                        Some("get_weather".to_string()),
+                        json!({ "location": "London" })
+                    ),
+                    (Some("set".to_string()), json!({ "flag": true })),
+                ],
+                "{case}"
+            );
+        };
+
+        let output = test_parser().parse_complete(wire).unwrap();
+        assert_output(&output, "complete");
+        for split in 0..=wire.len() {
+            let output = collect_stream(&[&wire[..split], &wire[split..]]);
+            assert_output(&output, &format!("split {split}"));
+        }
     }
 
     #[test]

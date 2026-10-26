@@ -190,6 +190,7 @@ class EngineCoreClient(ABC):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -297,6 +298,7 @@ class EngineCoreClient(ABC):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -419,12 +421,14 @@ class InprocClient(EngineCoreClient):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         self.engine_core.profile(
             is_start,
             profile_prefix,
             delay_iterations=delay_iterations,
             max_iterations=max_iterations,
+            profiler_kwargs=profiler_kwargs,
         )
 
     def reset_mm_cache(self) -> None:
@@ -1070,6 +1074,7 @@ class SyncMPClient(MPClient):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         self.call_utility(
             "profile",
@@ -1077,6 +1082,7 @@ class SyncMPClient(MPClient):
             profile_prefix,
             delay_iterations,
             max_iterations,
+            profiler_kwargs,
         )
 
     def reset_mm_cache(self) -> None:
@@ -1344,6 +1350,11 @@ class AsyncMPClient(MPClient):
     ) -> None:
         await self.call_utility_async("pause_scheduler", mode, clear_cache)
 
+    async def pause_generation_async(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> None:
+        await self.call_utility_async("pause_generation", mode, clear_cache)
+
     async def resume_scheduler_async(self) -> None:
         await self.call_utility_async("resume_scheduler")
 
@@ -1356,6 +1367,7 @@ class AsyncMPClient(MPClient):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         await self.call_utility_async(
             "profile",
@@ -1363,6 +1375,7 @@ class AsyncMPClient(MPClient):
             profile_prefix,
             delay_iterations,
             max_iterations,
+            profiler_kwargs,
         )
 
     async def reset_mm_cache_async(self) -> None:

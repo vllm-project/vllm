@@ -41,6 +41,7 @@ def make_request(
     session_id: str | None = None,
     mm_positions: list[PlaceholderRange] | None = None,
     mm_hashes: list[str] | None = None,
+    num_hash_lookahead_tokens: int = 0,
 ) -> Request:
     mm_features = []
     if mm_positions is not None:
@@ -63,7 +64,9 @@ def make_request(
         mm_features=mm_features if mm_features else None,
         sampling_params=sampling_params,
         pooling_params=None,
-        block_hasher=get_request_block_hasher(hash_block_size, hash_fn),
+        block_hasher=get_request_block_hasher(
+            hash_block_size, hash_fn, num_hash_lookahead_tokens
+        ),
         session_id=session_id,
     )
 
@@ -131,7 +134,10 @@ def test_boundary_hashes_reuse_fine_grained_chain():
 
 
 @pytest.mark.parametrize("report_all_hash_boundaries", [False, True])
-def test_cache_partial_block_kv_cache_events(report_all_hash_boundaries: bool):
+@pytest.mark.parametrize("num_hash_lookahead_tokens", [0, 1, 2])
+def test_cache_partial_block_kv_cache_events(
+    report_all_hash_boundaries: bool, num_hash_lookahead_tokens: int
+):
     hash_block_size = 4
     block_size = 12
     kv_cache_group_id = 2
@@ -141,13 +147,15 @@ def test_cache_partial_block_kv_cache_events(report_all_hash_boundaries: bool):
         enable_caching=True,
         hash_block_size=hash_block_size,
         enable_kv_cache_events=True,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
     req = make_request(
         "req_partial_events",
-        prompt_token_ids=list(range(hash_block_size * 2)),
+        prompt_token_ids=list(range(hash_block_size * 2 + num_hash_lookahead_tokens)),
         hash_block_size=hash_block_size,
         hash_fn=sha256,
         session_id="agent-session-partial",
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
     block = pool.get_new_blocks(1)[0]
@@ -176,7 +184,20 @@ def test_cache_partial_block_kv_cache_events(report_all_hash_boundaries: bool):
         else kv_cache_utils.maybe_convert_block_hash(req.block_hashes[0])
     )
     assert (
-        stored_event.token_ids == req.all_token_ids[first_hash_idx * hash_block_size :]
+        stored_event.token_ids
+        == req.all_token_ids[first_hash_idx * hash_block_size : hash_block_size * 2]
+    )
+    assert stored_event.lookahead_token_ids == (
+        [
+            req.all_token_ids[end : end + num_hash_lookahead_tokens]
+            for end in range(
+                (first_hash_idx + 1) * hash_block_size,
+                hash_block_size * 2 + 1,
+                hash_block_size,
+            )
+        ]
+        if num_hash_lookahead_tokens
+        else None
     )
     assert stored_event.block_size == 4
     assert stored_event.group_idx == kv_cache_group_id
@@ -266,18 +287,33 @@ def test_reported_partial_hashes_follow_block_lifecycle(operation: str):
     )
 
 
-def test_dense_partial_event_splits_multimodal_extra_keys():
-    pool = BlockPool(2, True, 2, enable_kv_cache_events=True)
+@pytest.mark.parametrize("num_hash_lookahead_tokens", [0, 1, 2])
+def test_dense_partial_event_splits_multimodal_extra_keys(
+    num_hash_lookahead_tokens: int,
+):
+    pool = BlockPool(
+        2,
+        True,
+        2,
+        enable_kv_cache_events=True,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+    )
+    mm_positions = [
+        PlaceholderRange(offset=6, length=5),
+        PlaceholderRange(offset=11, length=3),
+    ]
+    if num_hash_lookahead_tokens:
+        mm_positions.append(
+            PlaceholderRange(offset=14, length=num_hash_lookahead_tokens)
+        )
     req = make_request(
         "multimodal",
-        list(range(14)),
+        list(range(14 + num_hash_lookahead_tokens)),
         2,
         sha256,
-        mm_positions=[
-            PlaceholderRange(offset=6, length=5),
-            PlaceholderRange(offset=11, length=3),
-        ],
-        mm_hashes=["A", "B"],
+        mm_positions=mm_positions,
+        mm_hashes=["A", "B", "C"],
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
     pool.cache_partial_block(
         req,
@@ -289,7 +325,19 @@ def test_dense_partial_event_splits_multimodal_extra_keys():
     )
     event = pool.take_events()[0]
     assert isinstance(event, BlockStored)
-    assert event.extra_keys == [(("A", -2),), (("A", -4), ("B", 1)), (("B", -1),)]
+    assert event.extra_keys == [
+        (("A", -2), ("B", 3)) if num_hash_lookahead_tokens == 2 else (("A", -2),),
+        (("A", -4), ("B", 1)),
+        (("B", -1), ("C", 2)) if num_hash_lookahead_tokens else (("B", -1),),
+    ]
+    assert event.lookahead_token_ids == (
+        [
+            req.all_token_ids[end : end + num_hash_lookahead_tokens]
+            for end in (10, 12, 14)
+        ]
+        if num_hash_lookahead_tokens
+        else None
+    )
     assert len(event.block_hashes) == len(event.extra_keys) == 3
     assert event.token_ids == req.all_token_ids[8:14]
 
