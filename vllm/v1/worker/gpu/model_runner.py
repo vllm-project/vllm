@@ -1141,7 +1141,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
-                    if self.adaptive_verification is not None:
+                    if self.adaptive_verification is not None and not profile_only:
                         with self.step_timing.collect() as timings:
                             for batch in self.adaptive_verification.batches_to_profile(
                                 self.cudagraph_manager.captured_token_counts()
@@ -2320,6 +2320,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_speculative_tokens=num_spec_tokens,
                     dp_sync_state=dp_sync_state,
                     mm_inputs=mm_inputs,
+                )
+            if self.pcp_manager is not None:
+                self.pcp_manager.sync_drafts(
+                    draft_tokens, input_batch.idx_mapping, self.speculator.draft_logits
                 )
             if num_spec_tokens < self.num_speculative_steps:
                 draft_tokens[:, num_spec_tokens:] = -1
