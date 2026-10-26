@@ -10,6 +10,10 @@ REGISTRY=$1
 REPO=$2
 BUILDKITE_COMMIT=$3
 IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-xpu"
+PYTORCH_NIGHTLY_ARGS=()
+if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
+  PYTORCH_NIGHTLY_ARGS+=(--build-arg PYTORCH_NIGHTLY=1)
+fi
 
 # authenticate with AWS ECR
 aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY" || true
@@ -25,6 +29,7 @@ else
     --file docker/Dockerfile.xpu \
     --build-arg max_jobs=16 \
     --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
+    "${PYTORCH_NIGHTLY_ARGS[@]}" \
     --tag "$IMAGE" \
     --progress plain .
   # push
