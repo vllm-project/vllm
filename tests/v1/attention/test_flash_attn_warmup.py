@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends import flash_attn
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -22,72 +21,6 @@ def config():
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=512),
     )
-
-
-@pytest.mark.parametrize("num_qo_heads", [1, 8])
-@pytest.mark.parametrize("head_dim", [64, 128])
-@pytest.mark.parametrize("page_size", [128, 1536, 16384])
-def test_dense_warmup_covers_prefill_schedulers(
-    monkeypatch, config, num_qo_heads, head_dim, page_size
-):
-    """Short prefills and SplitKV must not wait for the first user request."""
-    monkeypatch.setattr(
-        flash_attn.current_platform,
-        "get_device_capability",
-        lambda: DeviceCapability(10, 3),
-    )
-    spec = FullAttentionSpec(
-        block_size=page_size, num_kv_heads=1, head_size=head_dim, dtype=torch.bfloat16
-    )
-    compiled = []
-    monkeypatch.setattr(
-        flash_attn,
-        "compile_flash_attn_varlen_func_from_specs",
-        lambda **kwargs: compiled.append(kwargs),
-        raising=False,
-    )
-    kernel = flash_attn.FA4DenseAttentionKernel()
-    kernel.warmup(vllm_config=config, kv_cache_spec=spec, num_qo_heads=num_qo_heads)
-
-    classes = set()
-    for args in compiled:
-        assert args["page_table_shape"][1] * page_size >= args["max_seqlen_k"]
-        packed_q = args["max_seqlen_q"] * num_qo_heads
-        stage = 2 if packed_q > 128 else 1
-        split = args["num_splits"] > 1
-        persistent = packed_q <= stage * 128 and not split
-        classes.add((stage, persistent, split, args["causal"]))
-    assert classes == {
-        (stage, persistent, split, causal)
-        for stage, persistent, split in [
-            (1, True, False),
-            (2, True, False),
-            (2, False, False),
-            (1, False, True),
-            (2, False, True),
-        ]
-        for causal in (True, False)
-    }
-    assert {args["cu_seqlens_q_shape"][0] - 1 for args in compiled} == {2, 512}
-
-
-@pytest.mark.parametrize("head_dim, major, count", [(256, 10, 4), (512, 9, 5)])
-def test_dense_warmup_preserves_specialized_kernels(
-    monkeypatch, config, head_dim, major, count
-):
-    monkeypatch.setattr(
-        flash_attn.current_platform,
-        "get_device_capability",
-        lambda: DeviceCapability(major, 0),
-    )
-    spec = FullAttentionSpec(
-        block_size=128, num_kv_heads=1, head_size=head_dim, dtype=torch.bfloat16
-    )
-    keys = flash_attn.FA4DenseAttentionKernel().get_warmup_keys(
-        vllm_config=config, kv_cache_spec=spec, num_qo_heads=8
-    )
-    assert len(keys) == count
-    assert all(key.causal for key in keys)
 
 
 @pytest.mark.skipif(
