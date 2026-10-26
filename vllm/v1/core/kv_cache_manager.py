@@ -625,14 +625,15 @@ class KVCacheManager:
         return self.create_kv_cache_blocks(new_blocks)
 
     def free(self, request: Request) -> None:
-        """Free the blocks allocated for the request.
-        We free the blocks in reverse order so that the tail blocks are evicted
-        first when caching is enabled.
+        """Free the blocks allocated for the request. Blocks that no prefix hit
+        can reach lose their hashes first; the request's tail token positions
+        are evicted first across all groups.
 
         Args:
             request: The request to free the blocks.
 
         """
+        self.coordinator.drop_unreachable_tail(request)
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
@@ -658,15 +659,16 @@ class KVCacheManager:
     def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:
         """Pop the request's bookkeeping and return its blocks without
         returning them to the block pool. The caller must eventually free
-        them in reverse order (so that tail blocks are evicted first).
+        them in the returned order.
 
         Args:
             request: The request to pop the blocks for.
 
         Returns:
-            The request's blocks in allocation order.
+            The request's blocks in eviction order, the first evicted first.
 
         """
+        self.coordinator.drop_unreachable_tail(request)
         return self.coordinator.pop_blocks_for_free(request.request_id)
 
     def evict_blocks(self, block_ids: set[int]) -> None:

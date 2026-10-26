@@ -11,7 +11,9 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
     eagle_proof_margin,
+    null_head_len,
     partial_hash_hits_enabled,
+    trim_null_head,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -404,27 +406,68 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
 
         """
-        for manager in self.single_type_managers:
-            manager.free(request_id)
+        self.block_pool.free_blocks(self.pop_blocks_for_free(request_id))
+
+    def drop_unreachable_tail(self, request: Request) -> None:
+        """Uncache the request's blocks that no prefix hit can reach. Call it
+        before the request's blocks are freed.
+
+        Args:
+            request: The request.
+
+        """
+        return None
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         """Pop the request's bookkeeping from all single-type managers and
-        return its blocks without returning them to the block pool. The
-        caller must eventually pass the returned blocks to
-        `block_pool.free_blocks`, freeing them in reverse order (so that
-        tail blocks are evicted first).
+        return its blocks in eviction order, without returning them to the
+        block pool. The caller must eventually pass the returned blocks to
+        `block_pool.free_blocks` in this order.
+
+        A prefix hit must be covered by every group, so blocks are ordered by
+        the token position they end at, tail first across all groups. Under
+        pool pressure the request's remaining blocks then still form a prefix
+        that every group can hit, rather than one group losing its head while
+        the other groups' blocks stay cached but unusable.
 
         Args:
             request_id: The request ID.
 
         Returns:
-            The request's blocks in allocation order.
+            The request's blocks, the first to be evicted first. Null blocks
+            may remain; `block_pool.free_blocks` skips them.
 
         """
-        blocks: list[KVCacheBlock] = []
-        for manager in self.single_type_managers:
-            blocks.extend(manager.pop_blocks_for_free(request_id))
-        return blocks
+        managers = self.single_type_managers
+        tables = [manager.pop_blocks_for_free(request_id) for manager in managers]
+        if len(tables) == 1:
+            return trim_null_head(tables[0])[::-1]
+        starts = [null_head_len(table) for table in tables]
+        # The group with the most blocks is copied in reversed slices; only the
+        # other groups' blocks are positioned one by one and merged into it.
+        base = max(range(len(tables)), key=lambda k: len(tables[k]) - starts[k])
+        base_table, base_block_size = tables[base], managers[base].block_size
+        inserts = [
+            ((i + 1) * managers[k].block_size, k, tables[k][i])
+            for k in range(len(tables))
+            if k != base
+            for i in range(starts[k], len(tables[k]))
+            if not tables[k][i].is_null
+        ]
+        # Later end positions first; at the same position, the lower group.
+        inserts.sort(key=lambda entry: (-entry[0], entry[1]))
+        ordered: list[KVCacheBlock] = []
+        hi = len(base_table)
+        for end, k, block in inserts:
+            # Base blocks ending later (or at `end`, from a lower group) go first.
+            lo = end // base_block_size - (base < k and end % base_block_size == 0)
+            lo = max(starts[base], lo)
+            if lo < hi:
+                ordered.extend(reversed(base_table[lo:hi]))
+                hi = lo
+            ordered.append(block)
+        ordered.extend(reversed(base_table[starts[base] : hi]))
+        return ordered
 
     def remove_skipped_blocks(
         self,
@@ -929,6 +972,38 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
         )
         return cache_hit_blocks, hit_length, num_uncached_common_prefix_tokens
+
+    def drop_unreachable_tail(self, request: Request) -> None:
+        """Uncache the request's blocks past the longest hit on its own tokens.
+
+        A hybrid hit ends where every group can resume, e.g. at the last
+        cached Mamba state. Blocks that start past that point can never serve
+        a hit, but freed with their hashes they would outlive older cache that
+        can. Without hashes they are reused first. Blocks that another request
+        still holds are left alone.
+
+        A group that retains a longer hit than the device groups (HiSparse's
+        host tier, which also publishes pages after the request ends) can
+        extend the reachable hit later, so nothing is dropped then.
+
+        Args:
+            request: The request.
+
+        """
+        if any(manager.retains_longer_hit for manager in self.single_type_managers):
+            return
+        _, hit_length, _ = self.find_longest_cache_hit(
+            request.block_hashes, len(request.block_hashes) * self.hash_block_size
+        )
+        if self.eagle_group_ids:
+            # The lookup drops one EAGLE unit at the end of the request's own
+            # tokens; a longer prompt can still hit it.
+            hit_length += self.scheduler_block_size
+        for manager in self.single_type_managers:
+            blocks = manager.req_to_blocks.get(request.request_id, [])
+            for block in blocks[cdiv(hit_length, manager.block_size) :]:
+                if block.ref_cnt == 1 and block.block_hash is not None:
+                    self.block_pool._maybe_evict_cached_block(block)
 
     def find_longest_cache_hit_per_group(
         self,

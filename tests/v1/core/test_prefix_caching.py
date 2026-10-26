@@ -840,7 +840,7 @@ def test_hisparse_deferred_free_retains_host_blocks_until_fence():
     blocks = manager.pop_blocks_for_free(request)
     assert host_pool.get_num_free_blocks() < host_free
     assert blocks and any(host_pool.blocks[b.block_id] is b for b in blocks)
-    manager.block_pool.free_blocks(reversed(blocks))
+    manager.block_pool.free_blocks(blocks)
     assert host_pool.get_num_free_blocks() == host_free
     assert manager.block_pool.get_num_free_blocks() == device_free
 
@@ -2937,6 +2937,87 @@ def test_evict():
     )
     assert blocks is not None and blocks.get_block_ids() == ([6],)
     assert manager.block_pool.free_block_queue.num_free_blocks == 7
+
+
+@pytest.mark.parametrize(
+    "free",
+    [
+        KVCacheManager.free,
+        lambda manager, req: manager.block_pool.free_blocks(
+            manager.pop_blocks_for_free(req)
+        ),
+    ],
+    ids=["free", "deferred_free"],
+)
+def test_hybrid_eviction_keeps_a_prefix_every_group_can_hit(free):
+    """A hit needs every group, so evicting part of a finished hybrid request
+    must cost its tail positions in all groups, not one group's head while
+    the other groups' blocks stay cached but unusable."""
+    block_size = 16
+    # One full-attention and two sliding-window groups, with 9 blocks each
+    # for the request below.
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(block_size, 28, sliding_window_blocks=2),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    prompt = list(range(8 * block_size + 1))
+    req0 = make_request("0", prompt, block_size, sha256)
+    assert manager.allocate_slots(req0, len(prompt)) is not None
+    free(manager, req0)
+
+    # Takes the 3 uncached partial blocks and 12 of the 24 cached blocks.
+    req1 = make_request(
+        "1", list(range(1000, 1000 + 5 * block_size)), block_size, sha256
+    )
+    assert manager.allocate_slots(req1, 5 * block_size) is not None
+    assert manager.block_pool.get_num_free_blocks() == 12
+
+    req2 = make_request("2", prompt, block_size, sha256)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req2)
+    assert num_computed_tokens == 4 * block_size
+
+
+def _prefill_in_blocks(manager: KVCacheManager, request: Request) -> None:
+    """Prefill one block per step, as a block-sized chunked prefill would."""
+    computed_blocks, num_hit, _ = manager.get_computed_blocks(request)
+    request.num_computed_tokens = num_hit
+    while request.num_computed_tokens < request.num_tokens:
+        num_new = min(16, request.num_tokens - request.num_computed_tokens)
+        assert manager.allocate_slots(
+            request, num_new, len(computed_blocks.blocks[0]) * 16, computed_blocks
+        )
+        computed_blocks = manager.empty_kv_cache_blocks
+        request.num_computed_tokens += num_new
+        manager.remove_skipped_blocks(
+            request.request_id, request.num_computed_tokens, request.num_prompt_tokens
+        )
+        manager.new_step_starts()
+
+
+def test_hybrid_unreachable_tail_is_reused_before_older_cache():
+    """Full-attention blocks past a hybrid request's last cached Mamba state can
+    never be hit. Freed without their hashes, they are reused before another
+    request's older cache, which therefore stays hittable."""
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(16, 13, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=16,
+        retention_interval=0,
+    )
+    old_prompt = list(range(48))
+    # With sparse retention the Mamba state survives only at 32, so the old
+    # request's third full-attention block is unreachable.
+    for request_id, prompt in [("old", old_prompt), ("new", list(range(100, 148)))]:
+        request = make_request(request_id, prompt, 16, sha256)
+        _prefill_in_blocks(manager, request)
+        manager.free(request)
+    _prefill_in_blocks(manager, make_request("fill", list(range(200, 248)), 16, sha256))
+
+    probe = make_request("probe", old_prompt + list(range(48, 64)), 16, sha256)
+    assert manager.get_computed_blocks(probe)[1] == 32
 
 
 def test_hash_block_correct_reuse():

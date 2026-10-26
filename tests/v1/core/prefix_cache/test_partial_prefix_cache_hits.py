@@ -1820,7 +1820,7 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     # Copy step still in flight: deferred with its fence.
     free(mock, list(blocks), fence_seq=3)
     assert not freed
-    assert mock.deferred_frees == deque([(3, blocks[::-1])])
+    assert mock.deferred_frees == deque([(3, blocks)])
 
     # Copy step processed: freed immediately.
     mock.processed_step_seq = 3
