@@ -2279,6 +2279,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             and kv_c_and_k_pe_cache.is_contiguous()
             and weight is not None
             and weight.dtype in (torch.bfloat16, torch.float16)
+            and weight.is_contiguous()
             and getattr(self.kv_b_proj, "weight_scale", None) is None
         )
 
