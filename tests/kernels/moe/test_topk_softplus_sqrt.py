@@ -81,32 +81,11 @@ def _torch_topk_softplus_sqrt(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
-@pytest.mark.parametrize("has_hash_routing", [False, True])
-@pytest.mark.parametrize(
-    "backend,expected_experts",
-    [
-        ("aiter_triton_mxfp4_bf16", "AiterW4A16ExpertsMonolithic"),
-        ("aiter", "AiterExperts"),
-        ("triton_unfused", "UnfusedOAITritonExperts"),
-    ],
-)
-def test_hash_routing_backend_selection(
-    dist_init,
-    default_vllm_config,
-    monkeypatch,
-    has_hash_routing,
-    backend,
-    expected_experts,
-):
-    """Hash tables must reach backend selection; modular AITER remains eligible."""
+def _dsv4_moe_config(monkeypatch, default_vllm_config, has_hash_routing, backend):
     from dataclasses import replace
 
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
-    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-        select_deepseek_v4_mxfp4_moe_backend,
-    )
     from vllm.platforms import rocm
 
     # Exercise both native MX and monolithic AITER selection on any ROCm device.
@@ -130,14 +109,64 @@ def test_hash_routing_backend_selection(
         ),
         prefix="hash_routing_selection",
     )
-    config = replace(layer.routed_experts.moe_config, moe_backend=backend)
+    return layer, replace(layer.routed_experts.moe_config, moe_backend=backend)
 
-    if has_hash_routing and backend == "aiter_triton_mxfp4_bf16":
-        with pytest.raises(ValueError, match="hash routing"):
-            select_deepseek_v4_mxfp4_moe_backend(config)
-    else:
-        _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
-        assert experts_cls.__name__ == expected_experts
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
+@pytest.mark.parametrize("has_hash_routing", [False, True])
+@pytest.mark.parametrize(
+    "backend,expected_experts",
+    [
+        ("aiter_triton_mxfp4_bf16", "AiterW4A16ExpertsMonolithic"),
+        ("aiter", "AiterMxfp4Experts"),
+        ("triton_unfused", "UnfusedOAITritonExperts"),
+    ],
+)
+def test_hash_routing_backend_selection(
+    dist_init,
+    default_vllm_config,
+    monkeypatch,
+    has_hash_routing,
+    backend,
+    expected_experts,
+):
+    """Hash tables reach backend selection and hash-capable kernels."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        select_deepseek_v4_mxfp4_moe_backend,
+    )
+
+    layer, config = _dsv4_moe_config(
+        monkeypatch, default_vllm_config, has_hash_routing, backend
+    )
+    _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    assert experts_cls is not None
+    assert experts_cls.__name__ == expected_experts
+    # Monolithic kernels route internally, so they read the table from the layer.
+    assert (layer.routed_experts.hash_indices_table is not None) == has_hash_routing
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
+def test_hash_routing_rejects_monolithic_without_support(
+    dist_init, default_vllm_config, monkeypatch
+):
+    """A monolithic kernel that does not implement hash routing is rejected."""
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
+        AiterW4A16ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        select_deepseek_v4_mxfp4_moe_backend,
+    )
+
+    monkeypatch.setattr(
+        AiterW4A16ExpertsMonolithic,
+        "_supports_hash_routing",
+        staticmethod(lambda: False),
+    )
+    _, config = _dsv4_moe_config(
+        monkeypatch, default_vllm_config, True, "aiter_triton_mxfp4_bf16"
+    )
+    with pytest.raises(ValueError, match="hash routing"):
+        select_deepseek_v4_mxfp4_moe_backend(config)
 
 
 def test_torch_topk_softplus_sqrt_breaks_ties_by_expert_id():
@@ -302,15 +331,18 @@ def test_fused_topk_softplus_sqrt_hash(
 @pytest.mark.parametrize(
     ("num_tokens", "num_experts", "indices_type"),
     [
-        (0, 256, torch.uint32),
-        (17, 256, torch.uint32),
+        (0, 256, torch.int32),
+        (17, 256, torch.int32),
         (17, 384, torch.int64),
     ],
 )
+@pytest.mark.parametrize("use_padding", [False, True])
 def test_dsv4_fast_topk(
     num_tokens: int,
     num_experts: int,
     indices_type: torch.dtype,
+    use_padding: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     torch.manual_seed(0)
     gating_output = torch.randn(
@@ -325,8 +357,25 @@ def test_dsv4_fast_topk(
         routed_scaling_factor=1.5,
         e_score_correction_bias=correction_bias,
     )
-    topk_weights, topk_ids = dsv4_topk(
-        gating_output, correction_bias, indices_type, 1.5
+    is_padding = torch.arange(num_tokens, device="cuda") % 2 == 1
+    if use_padding:
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.fused_moe.router."
+            "fused_topk_bias_router._get_padding_mask",
+            lambda _: is_padding,
+        )
+        gating_output[is_padding] = float("nan")
+        topk_weights_ref[is_padding] = 0
+        topk_ids_ref[is_padding] = -1
+    topk_weights, topk_ids = fused_topk_bias(
+        gating_output,
+        gating_output,
+        "sqrtsoftplus",
+        correction_bias,
+        6,
+        True,
+        indices_type=indices_type,
+        routed_scaling_factor=1.5,
     )
 
     assert topk_ids.dtype == indices_type
@@ -338,135 +387,16 @@ def test_dsv4_fast_topk(
         rtol=2e-5,
     )
 
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="The DeepSeek V4 fast path is CUDA-only.",
-)
-def test_dsv4_fast_topk_padding_uint32_falls_back(monkeypatch: pytest.MonkeyPatch):
-    """Padded rows need the -1 sentinel, which uint32 cannot represent: the
-    router must skip the dsv4 fast path and still route the real rows."""
-    torch.manual_seed(0)
-    num_tokens = 17
-    num_experts = 256
-    hidden_states = torch.randn((num_tokens, 64), dtype=torch.float32, device="cuda")
-    gating_output = torch.randn(
-        (num_tokens, num_experts), dtype=torch.float32, device="cuda"
-    )
-    correction_bias = torch.randn(num_experts, dtype=torch.float32, device="cuda")
-    is_padding = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
-    is_padding[1::2] = True
-    gating_output[is_padding] = float("nan")
-
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.fused_moe.router."
-        "fused_topk_bias_router._get_padding_mask",
-        lambda _: is_padding,
-    )
-    # uint32 + padding would trip dsv4_topk's signed-indices assertion; the
-    # generic path must take over instead.
-    topk_weights, topk_ids = fused_topk_bias(
-        hidden_states=hidden_states,
-        gating_output=gating_output,
-        scoring_func="sqrtsoftplus",
-        e_score_correction_bias=correction_bias,
-        topk=6,
-        renormalize=True,
-        indices_type=torch.uint32,
-        routed_scaling_factor=1.5,
-    )
-
-    assert topk_ids.dtype == torch.uint32
-    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
-        gating_output=gating_output[~is_padding],
-        topk=6,
-        renormalize=True,
-        routed_scaling_factor=1.5,
-        e_score_correction_bias=correction_bias,
-    )
-    # uint32 CUDA tensors do not support boolean-mask indexing; widen first.
-    torch.testing.assert_close(
-        topk_ids.to(torch.int64)[~is_padding],
-        topk_ids_ref.to(torch.int64),
-        atol=0,
-        rtol=0,
-    )
-    torch.testing.assert_close(
-        topk_weights[~is_padding], topk_weights_ref, atol=2e-5, rtol=2e-5
-    )
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="The DeepSeek V4 fast path is CUDA-only.",
-)
-def test_dsv4_fast_topk_padding(monkeypatch: pytest.MonkeyPatch):
-    """Verify the DSV4 fast path removes graph-padding rows from routing."""
-    torch.manual_seed(0)
-    num_tokens = 17
-    num_experts = 256
-    hidden_states = torch.randn((num_tokens, 64), dtype=torch.float32, device="cuda")
-    gating_output = torch.randn(
-        (num_tokens, num_experts), dtype=torch.float32, device="cuda"
-    )
-    correction_bias = torch.randn(num_experts, dtype=torch.float32, device="cuda")
-    is_padding = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
-    is_padding[1::2] = True
-    gating_output[is_padding] = float("nan")
-
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.fused_moe.router."
-        "fused_topk_bias_router._get_padding_mask",
-        lambda _: is_padding,
-    )
-    topk_weights, topk_ids = fused_topk_bias(
-        hidden_states=hidden_states,
-        gating_output=gating_output,
-        scoring_func="sqrtsoftplus",
-        e_score_correction_bias=correction_bias,
-        topk=6,
-        renormalize=True,
-        routed_scaling_factor=1.5,
-    )
-
-    assert torch.equal(topk_ids[is_padding], torch.full_like(topk_ids[is_padding], -1))
-    assert torch.equal(
-        topk_weights[is_padding], torch.zeros_like(topk_weights[is_padding])
-    )
-
-    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
-        gating_output=gating_output[~is_padding],
-        topk=6,
-        renormalize=True,
-        routed_scaling_factor=1.5,
-        e_score_correction_bias=correction_bias,
-    )
-    torch.testing.assert_close(topk_ids[~is_padding], topk_ids_ref, atol=0, rtol=0)
-    torch.testing.assert_close(
-        topk_weights[~is_padding], topk_weights_ref, atol=2e-5, rtol=2e-5
-    )
-
-    # The mask buffer is persistent under CUDA graph replay, but its contents
-    # change with every batch. Verify that the kernel reads those contents at
-    # runtime rather than specializing on the mask captured above.
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        graph_weights, graph_ids = dsv4_topk(
-            gating_output,
-            correction_bias,
-            torch.int32,
-            1.5,
-            is_padding=is_padding,
-        )
-
-    is_padding.logical_not_()
-    graph.replay()
-    assert torch.equal(
-        graph_ids[is_padding], torch.full_like(graph_ids[is_padding], -1)
-    )
-    assert torch.equal(
-        graph_weights[is_padding], torch.zeros_like(graph_weights[is_padding])
-    )
+    if use_padding and num_tokens:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            weights, ids = dsv4_topk(
+                gating_output, correction_bias, indices_type, 1.5, is_padding=is_padding
+            )
+        is_padding.fill_(True)
+        graph.replay()
+        assert (ids == -1).all()
+        assert (weights == 0).all()
 
 
 @pytest.mark.skipif(

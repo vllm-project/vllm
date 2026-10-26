@@ -20,6 +20,8 @@ def _triton_mrope_forward(
     cos,
     sin,
     num_tokens,
+    q_token_stride,
+    k_token_stride,
     n_qh: tl.constexpr,
     n_kh: tl.constexpr,
     hd: tl.constexpr,
@@ -39,9 +41,10 @@ def _triton_mrope_forward(
     # and supports cos and sin cache with shape (3, num_tokens, rotary_dim // 2)
     # instead of (3, bsz, seq_len, head_dim), also supports interleaved rotary
     pid = tl.program_id(0)
-    # locate start address
-    q_ptr = q_ptr + pid * (n_qh * hd)
-    k_ptr = k_ptr + pid * (n_kh * hd)
+    # locate start address (int64: num_tokens * row_stride exceeds 2^31 for
+    # worst-case ViT forwards, e.g. MiniMax M3 packs ~768k patches/item)
+    q_ptr = q_ptr + pid.to(tl.int64) * q_token_stride
+    k_ptr = k_ptr + pid.to(tl.int64) * k_token_stride
 
     # ####################################################################
     # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
@@ -186,6 +189,10 @@ def triton_mrope(
             adjacent (GPT-J) layout.
 
     """
+    # The kernel indexes each token row through an explicit row stride and
+    # requires dense rows.
+    assert q.dim() == 2 and q.stride(-1) == 1
+    assert k.dim() == 2 and k.stride(-1) == 1
     n_row, n_q_head_head_dim = q.shape
     n_q_head = n_q_head_head_dim // head_size
     n_kv_head = k.shape[1] // head_size
@@ -193,10 +200,6 @@ def triton_mrope(
     pad_n_q_head = triton.next_power_of_2(n_q_head)
     pad_n_kv_head = triton.next_power_of_2(n_kv_head)
 
-    # ensure tensors passed into the kernel are contiguous.
-    # It will be no-op if they are already contiguous
-    q = q.contiguous()
-    k = k.contiguous()
     cos = cos.contiguous()
     sin = sin.contiguous()
 
@@ -211,6 +214,8 @@ def triton_mrope(
         cos,
         sin,
         n_row,
+        q.stride(0),
+        k.stride(0),
         n_q_head,
         n_kv_head,
         head_size,
@@ -310,8 +315,9 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         dtype: torch.dtype,
         mrope_section: list[int] | None = None,
         mrope_interleaved: bool = False,
-        # YaRN parameters.
         *,
+        positions_factor: int = 4,
+        # YaRN parameters.
         scaling_factor: float | None = None,
         beta_fast: int = 32,
         beta_slow: int = 1,
@@ -340,8 +346,9 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
 
         # In Qwen2.5-VL, the maximum index value is related to the duration of
         # the input video. We enlarge max_position_embeddings to 4 times to get
-        # a larger the cos and sin cache.
-        self.cache_max_position_num = max_position_embeddings * 4
+        # a larger the cos and sin cache. Models whose positions never exceed
+        # the token count pass `positions_factor=1`.
+        self.cache_max_position_num = max_position_embeddings * positions_factor
         super().__init__(
             head_size,
             rotary_dim,

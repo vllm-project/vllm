@@ -20,6 +20,7 @@ from vllm.config.kernel import KernelConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
+from vllm.config.logging import LoggingConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.mamba import MambaConfig
 from vllm.config.model import (
@@ -61,6 +62,7 @@ from vllm.config.vllm import (
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
+from vllm.config.watchdog_config import WatchdogConfig
 from vllm.config.watermarking import WatermarkConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 
@@ -97,6 +99,8 @@ __all__ = [
     "KVTransferConfig",
     # From vllm.config.load
     "LoadConfig",
+    # From vllm.config.logging
+    "LoggingConfig",
     # From vllm.config.lora
     "LoRAConfig",
     # From vllm.config.mamba
@@ -150,6 +154,7 @@ __all__ = [
     "get_current_vllm_config_or_none",
     "set_current_vllm_config",
     "get_layers_from_vllm_config",
+    "WatchdogConfig",
     "WeightTransferConfig",
     "WatermarkConfig",
 ]

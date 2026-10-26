@@ -44,7 +44,6 @@ steps:
   timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/model_executor/layers
-  - vllm/sampling_metadata.py
   - tests/samplers
   - tests/conftest.py
   - vllm/entrypoints/generate/beam_search
@@ -53,9 +52,9 @@ steps:
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data
   mirror:
     amd:
-      label: ":amd: (MI355) Samplers Multimodal Beam Search"
+      label: ":amd: (MI355 DPX) Samplers Multimodal Beam Search"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 45
       working_dir: /vllm-workspace/tests
@@ -63,7 +62,6 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/model_executor/layers
-      - vllm/sampling_metadata.py
       - vllm/v1/sample/
       - vllm/entrypoints/generate/beam_search/
       - tests/samplers
