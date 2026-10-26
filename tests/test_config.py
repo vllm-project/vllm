@@ -4,6 +4,7 @@
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -63,6 +64,7 @@ from vllm.transformers_utils.config import (
     get_sentence_transformers_activation_fn,
     try_get_dense_modules,
 )
+from vllm.transformers_utils.repo_utils import get_non_weight_snapshot_path
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
@@ -2466,6 +2468,7 @@ def _sigmoid_override(hf_config):
     return hf_config
 
 
+@pytest.mark.parametrize("saved_act_fn", [None, _SIGMOID])
 @pytest.mark.parametrize(
     ("hf_overrides", "expected"),
     [
@@ -2475,15 +2478,23 @@ def _sigmoid_override(hf_config):
         (_sigmoid_override, PoolerClassify),
     ],
 )
-def test_sentence_transformers_cross_encoder_activation_fn(hf_overrides, expected):
+def test_sentence_transformers_cross_encoder_activation_fn(
+    tmp_path, saved_act_fn, hf_overrides, expected
+):
     """Sentence Transformers v6 saves the CrossEncoder activation (here
-    Identity) in config_sentence_transformers.json instead of config.json.
-    An explicit hf_overrides activation, as a dict or a callable, still takes
-    precedence."""
-    model_config = ModelConfig(
-        "tomaarsen/ettin-encoder-150m-reranker-msmarco524k-1e-4-20261014",
-        hf_overrides=hf_overrides,
-    )
+    Identity) in config_sentence_transformers.json, which wins over an older
+    copy in config.json. An explicit hf_overrides activation, as a dict or a
+    callable, wins over both, even when it matches config.json."""
+    model = "tomaarsen/ettin-encoder-150m-reranker-msmarco524k-1e-4-20261014"
+    if saved_act_fn is not None:
+        shutil.copytree(
+            get_non_weight_snapshot_path(model), tmp_path, dirs_exist_ok=True
+        )
+        config = json.loads((tmp_path / "config.json").read_text())
+        config["sentence_transformers"] = {"activation_fn": saved_act_fn}
+        _write_json(tmp_path / "config.json", config)
+        model = str(tmp_path)
+    model_config = ModelConfig(model, hf_overrides=hf_overrides)
 
     assert isinstance(get_act_fn(model_config.hf_config), expected)
 

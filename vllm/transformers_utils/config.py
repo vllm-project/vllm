@@ -1485,35 +1485,35 @@ def get_sentence_transformers_activation_fn(
     if not isinstance(st_config, dict) or st_config.get("model_type") != "CrossEncoder":
         return None
     if modules is not None:
-        types = [m.get("type", "") if isinstance(m, dict) else "" for m in modules]
-        if not (
-            len(types) == 1
-            and types[0].startswith("sentence_transformers.")
-            and types[0].endswith(".Transformer")
-        ):
+        types = [m.get("type") if isinstance(m, dict) else None for m in modules]
+        if not (len(types) == 1 and types[0] in _ST_TRANSFORMER_MODULE_TYPES):
             return None
     activation_fn = st_config.get("activation_fn")
     return activation_fn if isinstance(activation_fn, str) else None
 
 
 def is_cross_encoder_activation_overridden(
-    hf_config: PreTrainedConfig,
-    model: str | Path,
-    revision: str | None = None,
+    hf_overrides: dict[str, Any] | Callable[[PreTrainedConfig], PreTrainedConfig],
 ) -> bool:
-    """Whether `hf_overrides` changed the CrossEncoder activation that
-    `config.json` declares, through a dict or a callable."""
-    try:
-        saved = get_hf_file_to_dict("config.json", model, revision) or {}
-    except Exception:
-        logger.debug("Failed to read config.json", exc_info=True)
-        return False
-    return (
-        (getattr(hf_config, "sentence_transformers", None) or {}).get("activation_fn")
-        != (saved.get("sentence_transformers") or {}).get("activation_fn")
-    ) or (
-        getattr(hf_config, "sbert_ce_default_activation_function", None)
-        != saved.get("sbert_ce_default_activation_function")
+    """Whether `hf_overrides` sets the CrossEncoder activation, either
+    `sentence_transformers.activation_fn` or the legacy
+    `sbert_ce_default_activation_function`, as a dict or a callable."""
+    if callable(hf_overrides):
+        # Like the model_type probe in HFConfigParser: run the callable on a
+        # dummy config and check whether it sets either key.
+        dummy = hf_overrides(
+            PreTrainedConfig(
+                sentence_transformers={}, sbert_ce_default_activation_function=None
+            )
+        )
+        return (
+            "activation_fn" in (getattr(dummy, "sentence_transformers", None) or {})
+            or getattr(dummy, "sbert_ce_default_activation_function", None) is not None
+        )
+    sentence_transformers = hf_overrides.get("sentence_transformers")
+    return "sbert_ce_default_activation_function" in hf_overrides or (
+        isinstance(sentence_transformers, dict)
+        and "activation_fn" in sentence_transformers
     )
 
 

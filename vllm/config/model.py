@@ -796,16 +796,12 @@ class ModelConfig:
 
             # Sentence Transformers v6 saves the CrossEncoder activation outside
             # config.json; put it where the classifier activation lookup reads it,
-            # unless hf_overrides already changed the activation.
+            # unless hf_overrides sets the activation explicitly.
             if (
                 act_fn := get_sentence_transformers_activation_fn(
                     self.model, self.revision
                 )
-            ) and not is_cross_encoder_activation_overridden(
-                self.hf_config,
-                self.hf_config_path or self.model,
-                self._hf_config_revision or self.revision,
-            ):
+            ) and not is_cross_encoder_activation_overridden(self.hf_overrides):
                 self.hf_config.sentence_transformers = {
                     **(getattr(self.hf_config, "sentence_transformers", None) or {}),
                     "activation_fn": act_fn,
