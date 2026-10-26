@@ -677,6 +677,7 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer = MoRIIOWriter.__new__(MoRIIOWriter)
     writer._worker_ref = lambda: fake_worker
     writer._write_task_q = Queue()
+    writer._finalize_q = Queue()
     writer._write_state_lock = threading.Lock()
     writer._scheduled_writes = defaultdict(int)
     writer._scheduled_layers = defaultdict(set)
