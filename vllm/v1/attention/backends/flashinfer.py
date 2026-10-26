@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+import math
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
@@ -676,15 +677,15 @@ class FlashInferBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        # has_sink+nvfp4 is served by the plain fa2 prefill wrapper plus an
+        # LSE-based sink epilogue (see FlashInferImpl.forward).
         if (
             kv_cache_dtype is not None
             and kv_cache_dtype.startswith("nvfp4")
             and device_capability.major in (8, 9, 12)
+            and head_size == 64
         ):
-            if head_size == 64:
-                return "fa2 prefill misreads an NVFP4 KV cache at head_size 64"
-            if has_sink:
-                return "the sink prefill wrapper cannot read an NVFP4 KV cache"
+            return "fa2 prefill misreads an NVFP4 KV cache at head_size 64"
         return None
 
     @classmethod
@@ -1090,7 +1091,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.use_trtllm_dcp_prefill:
             logger.info_once("Using the trtllm-gen context kernel for DCP prefill.")
         self.has_sinks = self.global_hyperparameters.has_sinks
-        if self.has_sinks and (self.nvfp4_fa2 or not FlashInferBackend.supports_sink()):
+        if (
+            self.has_sinks
+            and not self.nvfp4_fa2
+            and not FlashInferBackend.supports_sink()
+        ):
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
                 "sinks, please use trtllm on blackwell or flash attention on "
@@ -1394,9 +1399,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     "NVFP4 KV cache."
                 )
             if self._noncausal_prefill_wrapper is None:
-                if self.has_sinks and (
-                    current_platform.is_device_capability(90)
-                    or current_platform.is_device_capability_family(120)
+                if (
+                    self.has_sinks
+                    and not self.nvfp4_fa2
+                    and (
+                        current_platform.is_device_capability(90)
+                        or current_platform.is_device_capability_family(120)
+                    )
                 ):
                     self._noncausal_prefill_wrapper = (
                         BatchAttentionWithAttentionSinkWrapper(
@@ -1429,9 +1438,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     use_trtllm_context=self.use_trtllm_dcp_prefill,
                 )
             else:
-                if self.has_sinks and (
-                    current_platform.is_device_capability(90)
-                    or current_platform.is_device_capability_family(120)
+                if (
+                    self.has_sinks
+                    and not self.nvfp4_fa2
+                    and (
+                        current_platform.is_device_capability(90)
+                        or current_platform.is_device_capability_family(120)
+                    )
                 ):
                     assert not self.is_kvcache_nvfp4
                     self._prefill_wrapper = BatchAttentionWithAttentionSinkWrapper(
@@ -2428,7 +2441,32 @@ class FlashInferImpl(AttentionImpl):
                     else:
                         out_prefill = output[num_decode_tokens:]
 
-                    if isinstance(
+                    if (
+                        self.sinks is not None
+                        and self.nvfp4_fa2
+                        and isinstance(
+                            prefill_wrapper, BatchPrefillWithPagedKVCacheWrapper
+                        )
+                    ):
+                        # The plain fa2 JIT kernel reads the NVFP4 KV cache and
+                        # returns row-wise LSE in the log2 domain; apply the
+                        # attention sink exactly as an epilogue rescale:
+                        # out / (1 + exp(sink - ln2 * lse)).
+                        assert self.sinks is not None
+                        out_pre, lse = prefill_wrapper.run(
+                            prefill_query,
+                            kv_cache_for_fi,
+                            q_scale=1.0,
+                            k_scale=layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
+                            kv_cache_sf=kv_cache_sf,
+                            return_lse=True,
+                        )
+                        sink_corr = torch.sigmoid(math.log(2.0) * lse - self.sinks)
+                        out_prefill.copy_(
+                            out_pre * sink_corr.unsqueeze(-1).to(out_pre.dtype)
+                        )
+                    elif isinstance(
                         prefill_wrapper, BatchAttentionWithAttentionSinkWrapper
                     ):
                         assert self.sinks is not None
