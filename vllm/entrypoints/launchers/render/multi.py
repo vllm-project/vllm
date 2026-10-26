@@ -10,34 +10,17 @@ from multiprocessing.process import BaseProcess
 
 import uvloop
 
-from vllm import AsyncEngineArgs, envs
-from vllm.config import VllmConfig
 from vllm.logger import configure_logging_from_args, init_logger
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.utils import shutdown
 
 from ..launcher import setup_server
-from .entry import build_and_serve_renderer
+from .entry import build_and_serve_renderer, build_vllm_config
 
 logger = init_logger(__name__)
 
 
-def _build_vllm_config(args: argparse.Namespace) -> VllmConfig:
-    """Build a fresh ``VllmConfig`` for a render server worker."""
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    model_config = engine_args.create_model_config()
-    model_config.quantization = None
-
-    envs.VLLM_CPU_KVCACHE_SPACE = 0
-
-    return VllmConfig(
-        model_config=model_config,
-        logging_config=engine_args.create_logging_config(),
-        structured_outputs_config=engine_args.create_structured_outputs_config(),
-    )
-
-
-def run_server_worker_proc(
+def run_worker_proc(
     args: argparse.Namespace,
     api_process_rank: int = 0,
 ) -> None:
@@ -58,21 +41,17 @@ def run_server_worker_proc(
     decorate_logs()
 
     # Build VllmConfig locally to avoid pickling it across ``spawn``.
-    vllm_config = _build_vllm_config(args)
+    vllm_config = build_vllm_config(args)
     vllm_config.parallel_config._api_process_rank = api_process_rank
     vllm_config.parallel_config._api_process_count = args.api_server_count
 
     async def _serve() -> None:
-        listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
-        try:
-            shutdown_task = await build_and_serve_renderer(
-                vllm_config, listen_address, sock, args
-            )
-            await shutdown_task
-        finally:
-            sock.close()
+        await build_and_serve_renderer(vllm_config, listen_address, sock, args)
 
-    uvloop.run(_serve())
+    with contextlib.ExitStack() as exit_stack:
+        listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
+        exit_stack.callback(sock.close)
+        uvloop.run(_serve())
 
 
 def _run_multi_launch(
@@ -89,7 +68,7 @@ def _run_multi_launch(
 
     for i in range(num_api_servers):
         proc = spawn_context.Process(
-            target=run_server_worker_proc,
+            target=run_worker_proc,
             name=f"ApiServer_{i}",
             args=(args, i),
         )
@@ -97,13 +76,13 @@ def _run_multi_launch(
         proc.start()
 
     # Block until all workers exit.
-    for proc in processes:
-        proc.join()
-        if proc.exitcode not in (0, None):
+    for p in processes:
+        p.join()
+        if p.exitcode not in (0, None):
             logger.error(
                 "API server worker %s exited unexpectedly with code %s",
-                proc.name,
-                proc.exitcode,
+                p.name,
+                p.exitcode,
             )
             break
 
