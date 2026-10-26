@@ -10,7 +10,7 @@ Known Issues:
 
 import sys
 from types import MethodType, SimpleNamespace
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 import torch
@@ -241,7 +241,9 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     )
     from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseImpl
 
-    impl = object.__new__(FlashInferMLASparseSM120Impl if sm120 else FlashMLASparseImpl)
+    impl: Any = object.__new__(
+        FlashInferMLASparseSM120Impl if sm120 else FlashMLASparseImpl
+    )
     impl.kv_lora_rank = kv_lora_rank
     impl.qk_rope_head_dim = rope_dim
     layer = SimpleNamespace(
