@@ -434,9 +434,8 @@ def device_dependencies(
         if "-fcuda-is-device" not in frontend:
             continue
 
-        if (
-            option(frontend, "-triple") != "amdgcn-amd-amdhsa"
-            or not any(a in frontend for a in DEVICE_EMIT_ACTIONS)
+        if option(frontend, "-triple") != "amdgcn-amd-amdhsa" or not any(
+            a in frontend for a in DEVICE_EMIT_ACTIONS
         ):
             raise ValueError("unsupported device compiler frontend")
         features = []
