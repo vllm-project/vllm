@@ -50,7 +50,7 @@ use vllm_engine_core_client::{
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
+use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
 use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -60,7 +60,9 @@ use super::{
     build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
     build_router_with_scale_out_endpoints, render::build_router as build_render_router,
 };
-use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::config::{
+    ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
+};
 use crate::lora::LoadLoraError;
 use crate::render::RenderState;
 use crate::state::AppState;
@@ -1404,6 +1406,20 @@ async fn test_app_with_backend_and_engine_request_check<F>(
 where
     F: FnOnce(&EngineCoreRequest) + Send + 'static,
 {
+    test_app_with_chat_and_engine_request_check(
+        |llm| ChatLlm::from_shared_backend(llm, backend),
+        check_request,
+    )
+    .await
+}
+
+async fn test_app_with_chat_and_engine_request_check<F>(
+    build_chat: impl FnOnce(Llm) -> ChatLlm,
+    check_request: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-check-request".to_vec();
@@ -1437,7 +1453,7 @@ where
     .await
     .expect("connect client");
 
-    let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
+    let chat = build_chat(test_llm(client));
     (
         build_router(Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
@@ -3240,6 +3256,77 @@ async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
                 engine_task.await.expect("mock engine task");
             }
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_structured_outputs_use_configured_backend() {
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
+
+    for backend in [
+        StructuredOutputBackend::Xgrammar,
+        StructuredOutputBackend::Guidance,
+    ] {
+        let chat_backend = Arc::new(FakeChatBackend::new());
+        let (app, engine_task) = test_app_with_chat_and_engine_request_check(
+            |llm| {
+                let text = TextLlm::new(llm, chat_backend.clone())
+                    .with_structured_outputs_backend(backend);
+                ChatLlm::new(text, chat_backend)
+                    .with_tool_call_parser(ParserSelection::Explicit("qwen3_coder".to_string()))
+            },
+            move |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                let structured_outputs =
+                    params.structured_outputs.as_ref().expect("structured outputs");
+                assert_eq!(structured_outputs.backend, backend);
+                // Only xgrammar compiles the parser's grammar of the answer or a
+                // call; other backends keep the request's own constraint.
+                let constraint = &structured_outputs.params.constraint;
+                match backend {
+                    StructuredOutputBackend::Xgrammar => {
+                        assert!(constraint.as_structural_tag().is_some(), "{constraint:?}");
+                    }
+                    _ => assert!(constraint.as_json().is_some(), "{constraint:?}"),
+                }
+            },
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 2,
+                            "tools": [{
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup",
+                                    "parameters": {"type": "object"},
+                                    "strict": true,
+                                },
+                            }],
+                            "response_format": {
+                                "type": "json_schema",
+                                "json_schema": {"name": "answer", "schema": {"type": "object"}},
+                            },
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{backend:?}");
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
     }
 }
 
@@ -5213,6 +5300,94 @@ async fn chat_completions_accepts_request_body_larger_than_axum_default() {
     )));
 
     let large_template_arg = "a".repeat(2 * 1024 * 1024);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"large": large_template_arg}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_reject_request_body_above_configured_limit() {
+    let (chat, _engine_task) = test_chat_with_engine_outputs(
+        b"engine-openai-chat-body-limit",
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                request_body_limit_bytes: Some(1024),
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let large_template_arg = "a".repeat(2 * 1024);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"large": large_template_arg}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("length limit exceeded"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_accept_request_body_above_default_limit_when_unlimited() {
+    let (chat, engine_task) = test_chat_with_engine_outputs(
+        b"engine-openai-chat-unlimited-body",
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                request_body_limit_bytes: None,
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let large_template_arg = "a".repeat(DEFAULT_REQUEST_BODY_LIMIT_BYTES + 1);
     let response = app
         .call(
             Request::builder()

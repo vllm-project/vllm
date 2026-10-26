@@ -170,6 +170,46 @@ steps:
   commands:
   - PYTHONPATH=/vllm-workspace pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-monokernels-dsv41-mi355.txt
 
+# DeepSeek-V4-Pro mono decode layer (gfx950).
+- label: ":amd: (MI355) DeepSeek-V4-Pro Mono Decode Host Checks"
+  key: dsv4-mono-decode-host-amd
+  dind: false
+  device: mi355_1
+  num_devices: 1
+  timeout_in_minutes: 15
+  working_dir: /vllm-workspace/
+  source_file_dependencies: &dsv4-mono-deps
+  - vllm/models/deepseek_v4/
+  - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/model_loader/dummy_loader.py
+  - vllm/config/compilation.py
+  - vllm/config/kernel.py
+  - vllm/forward_context.py
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  - docker/Dockerfile.rocm_base
+  - docker/Dockerfile.rocm
+  - docker/docker-bake-rocm.hcl
+  - requirements/rocm.txt
+  - tests/models/test_dsv4_mono_decode.py
+  - tests/models/test_dsv4_mono_numerics.py
+  - tests/models/test_dsv4_mono_layers.py
+  commands:
+  - pytest -v -s tests/models/test_dsv4_mono_decode.py
+
+- label: ":amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics"
+  key: dsv4-mono-decode-numerics-amd
+  dind: false
+  device: mi355_8
+  num_devices: 8
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  source_file_dependencies: *dsv4-mono-deps
+  commands:
+  - pytest -v -s tests/models/test_dsv4_mono_numerics.py
+  - pytest -v -s tests/models/test_dsv4_mono_layers.py
+
 # MiniMax-M3 FFN monokernel (--monokernel), built on DeepSeek-V4.1's mono/common.
 - label: ":amd: (MI355) MiniMax M3 MonoKernel"
   key: minimax-m3-monokernel-mi355

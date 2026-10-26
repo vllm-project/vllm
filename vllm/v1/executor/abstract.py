@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import cached_property
-from typing import TYPE_CHECKING, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
@@ -180,9 +180,13 @@ class Executor(ABC):
         """Layouts each worker's backends support, most preferred first."""
         return self.collective_rpc("get_supported_kv_cache_layouts")
 
-    def set_kv_cache_layout(self, layout_name: str) -> None:
-        """Publish the resolved KV cache layout to the workers."""
-        self.collective_rpc("set_kv_cache_layout", args=(layout_name,))
+    def set_kv_cache_layout(
+        self, layout_name: str, cp_kv_cache_interleave_size: int
+    ) -> None:
+        """Publish the resolved KV cache layout and CP interleave size."""
+        self.collective_rpc(
+            "set_kv_cache_layout", args=(layout_name, cp_kv_cache_interleave_size)
+        )
 
     @overload
     def collective_rpc(
@@ -300,12 +304,15 @@ class Executor(ABC):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
-        kwargs: dict[str, int] = {}
+        kwargs: dict[str, Any] = {}
         if delay_iterations is not None:
             kwargs["delay_iterations"] = delay_iterations
         if max_iterations is not None:
             kwargs["max_iterations"] = max_iterations
+        if profiler_kwargs is not None:
+            kwargs["profiler_kwargs"] = profiler_kwargs
         if kwargs:
             # Reject before dispatch: a failing collective_rpc may leave
             # unread worker replies queued.
