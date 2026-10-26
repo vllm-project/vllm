@@ -341,10 +341,12 @@ class SingleDirectionOffloadingHandler:
             else:
                 assert cpu_page_size == gpu_page_size * blocks_per_chunk
 
-        self.src_tensors: list[torch.Tensor] = (
+        # Keep private containers for each handler. The worker owns the
+        # tensors; handlers only borrow references while transfers are live.
+        self.src_tensors: list[torch.Tensor] = list(
             gpu_tensors if gpu_to_cpu else cpu_tensors
         )
-        self.dst_tensors: list[torch.Tensor] = (
+        self.dst_tensors: list[torch.Tensor] = list(
             cpu_tensors if gpu_to_cpu else gpu_tensors
         )
         self.gpu_to_cpu: bool = gpu_to_cpu
@@ -873,6 +875,11 @@ class CPUOffloadingWorker(OffloadingWorker):
         self._load_handler = make_handler(gpu_to_cpu=False)
         # Own stream, so expedited loads do not queue behind regular loads.
         self._expedited_load_handler = make_handler(gpu_to_cpu=False)
+        # Keep private CPU tensors alive until all handlers and any required
+        # device synchronization have completed.
+        self._private_cpu_tensors: tuple[torch.Tensor, ...] | None = (
+            tuple(cpu_tensors) if mmap_region is None else None
+        )
 
     def submit_store(
         self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
@@ -918,15 +925,21 @@ class CPUOffloadingWorker(OffloadingWorker):
                 logger.exception("Failed to shut down load offloading handler")
                 handler_failed = True
 
+        safe_to_release_private_tensors = True
+        if handler_failed:
+            try:
+                torch.accelerator.synchronize()
+            except Exception:
+                safe_to_release_private_tensors = False
+                logger.warning(
+                    "Device sync after handler shutdown failed; retaining "
+                    "private CPU tensors because completion was not confirmed",
+                    exc_info=True,
+                )
+
         if self._mmap_region is not None:
-            if handler_failed:
-                try:
-                    torch.accelerator.synchronize()
-                except Exception:
-                    logger.warning(
-                        "Device sync before mmap cleanup failed; "
-                        "proceeding with cleanup anyway",
-                        exc_info=True,
-                    )
             self._mmap_region.cleanup()
             self._mmap_region = None
+
+        if safe_to_release_private_tensors:
+            self._private_cpu_tensors = None
