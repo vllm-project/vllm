@@ -497,9 +497,12 @@ class ChunkTiming:
     """(start within the chunk, start in the original audio) of each piece,
     in order."""
 
+    duration_s: float
+    """Length of the chunk audio."""
+
     @classmethod
-    def contiguous(cls, start_s: float) -> "ChunkTiming":
-        return cls(pieces_s=((0.0, start_s),))
+    def contiguous(cls, start_s: float, duration_s: float) -> "ChunkTiming":
+        return cls(pieces_s=((0.0, start_s),), duration_s=duration_s)
 
     @property
     def start_s(self) -> float:
@@ -542,7 +545,10 @@ def _timed_chunks(
     for chunk in chunks:
         timed_chunks.append(
             TimedAudioChunk(
-                audio=chunk, timing=ChunkTiming.contiguous(offset / sample_rate)
+                audio=chunk,
+                timing=ChunkTiming.contiguous(
+                    offset / sample_rate, chunk.shape[-1] / sample_rate
+                ),
             )
         )
         offset += chunk.shape[-1]
@@ -561,7 +567,10 @@ def _join_pieces(
     audio = np.concatenate(
         [audio_data[..., start:end] for start, end in pieces], axis=-1
     )
-    return TimedAudioChunk(audio=audio, timing=ChunkTiming(pieces_s=tuple(pieces_s)))
+    timing = ChunkTiming(
+        pieces_s=tuple(pieces_s), duration_s=chunk_offset / sample_rate
+    )
+    return TimedAudioChunk(audio=audio, timing=timing)
 
 
 def _pack_pieces(
@@ -671,7 +680,8 @@ def split_audio_with_vad(
             else:
                 return [
                     TimedAudioChunk(
-                        audio=audio_data, timing=ChunkTiming.contiguous(0.0)
+                        audio=audio_data,
+                        timing=ChunkTiming.contiguous(0.0, duration),
                     )
                 ]
     else:
@@ -692,7 +702,9 @@ def split_audio_with_vad(
                 return []
         else:
             return [
-                TimedAudioChunk(audio=audio_data, timing=ChunkTiming.contiguous(0.0))
+                TimedAudioChunk(
+                    audio=audio_data, timing=ChunkTiming.contiguous(0.0, duration)
+                )
             ]
 
 

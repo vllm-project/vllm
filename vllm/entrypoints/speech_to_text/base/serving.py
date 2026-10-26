@@ -400,7 +400,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         log_probs: FlatLogprobs | list[dict[int, Logprob]],
         request: SpeechToTextRequest,
         segment_class: type[SpeechToTextSegment],
-        timing: ChunkTiming | None = None,
+        timing: ChunkTiming,
     ) -> list[SpeechToTextSegment]:
         """Convert tokens to verbose segments.
 
@@ -413,8 +413,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         in this implementation and will be None. See docs for details.
         """
         BASE_OFFSET = 0.02
-        if timing is None:
-            timing = ChunkTiming.contiguous(0.0)
         init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
         if tokens[-1] == self.tokenizer.eos_token_id:
             tokens = tokens[:-1]
@@ -707,12 +705,18 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             raise
 
         if request.stream:
+            # VAD drops non-speech audio, so only count the audio the model sees.
+            audio_duration_s = (
+                sum(timing.duration_s for timing in chunk_timings)
+                if request.build_vad_config().enabled
+                else duration_s
+            )
             return stream_generator_method(
                 request,
                 list_result_generator,
                 request_id,
                 request_metadata,
-                duration_s,
+                audio_duration_s,
                 separator,
             )
         # Non-streaming response.
