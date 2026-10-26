@@ -82,6 +82,10 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 logger = init_logger(__name__)
 
@@ -798,6 +802,26 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
         )
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
+
+    def _new_block_residual(
+        self, hidden_states: torch.Tensor, num_blocks: int
+    ) -> torch.Tensor:
+        num_tokens, hidden_size = hidden_states.shape
+        # A non-last PP rank hands the bank to the PP send, so it must not be reused.
+        if not is_workspace_manager_initialized() or not get_pp_group().is_last_rank:
+            return hidden_states.new_empty(num_tokens, num_blocks, hidden_size)
+        # Persistent: a fresh bank sized to each step's token count leaves the
+        # caching allocator holding slightly-too-small ~1.8 GB segments.
+        bank = current_workspace_manager().get_persistent(
+            "kimi_k3_attn_res_block_residual",
+            (self.max_num_batched_tokens, num_blocks, hidden_size),
+            hidden_states.dtype,
+        )
+        assert num_tokens <= bank.shape[0]
+        return bank[:num_tokens]
 
     def make_empty_intermediate_tensors(
         self,
@@ -891,9 +915,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             return hidden_states
 
         attn_res_block_num = cdiv(self.end_layer, self.config.attn_res_block_size)
-        block_residual = hidden_states.new_empty(
-            hidden_states.size(0), attn_res_block_num, hidden_states.size(1)
-        )
+        block_residual = self._new_block_residual(hidden_states, attn_res_block_num)
         if residual is not None:
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
