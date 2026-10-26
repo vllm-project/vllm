@@ -23,25 +23,25 @@ requires_sm100 = pytest.mark.skipif(
 
 
 def test_kv_balanced_backend_is_registered_and_opt_in():
-    """KIMI_K3_KV_BALANCED_MLA resolves to the TOKENSPEED_MLA backend with the
-    KV-balanced decode, and the platforms never pick it on their own."""
+    """KIMI_K3_KV_BALANCED_MLA resolves to the standalone KV-balanced backend, and
+    the platforms never pick it on their own."""
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend import (
         KimiK3KvBalancedMLABackend,
         KimiK3KvBalancedMLAImpl,
+        KimiK3KvBalancedMLAMetadataBuilder,
     )
     from vllm.platforms.cuda import _get_backend_priorities
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.attention.backends.mla.tokenspeed_mla import (
-        TokenspeedMLABackend,
-        TokenspeedMLAImpl,
-    )
 
     backend = AttentionBackendEnum.KIMI_K3_KV_BALANCED_MLA
     assert backend.get_class() is KimiK3KvBalancedMLABackend
     assert KimiK3KvBalancedMLABackend.get_name() == backend.name
-    assert issubclass(KimiK3KvBalancedMLABackend, TokenspeedMLABackend)
-    assert issubclass(KimiK3KvBalancedMLABackend.get_impl_cls(), TokenspeedMLAImpl)
     assert KimiK3KvBalancedMLABackend.get_impl_cls() is KimiK3KvBalancedMLAImpl
+    assert (
+        KimiK3KvBalancedMLABackend.get_builder_cls()
+        is KimiK3KvBalancedMLAMetadataBuilder
+    )
+    assert not KimiK3KvBalancedMLAImpl.lse_base_on_e
     for major in (9, 10, 12):
         assert backend not in _get_backend_priorities(
             use_mla=True, device_capability=DeviceCapability(major, 0)
@@ -49,53 +49,49 @@ def test_kv_balanced_backend_is_registered_and_opt_in():
 
 
 def test_kv_balanced_backend_rejects_unsupported(monkeypatch):
-    """Selection rejects what the kernel can't run on top of TOKENSPEED_MLA's
-    checks: a non-BF16 model or a kv_lora_rank other than 512."""
+    """Selection rejects what the kernel can't run: a non-BF16 model, a non-FP8
+    KV cache, a GPU outside the SM100 family or other MLA dimensions."""
     import vllm.config
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend import (
         KimiK3KvBalancedMLABackend,
     )
     from vllm.platforms.interface import DeviceCapability
 
-    pytest.importorskip("tokenspeed_mla")
     text_config = SimpleNamespace(
         qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128, kv_lora_rank=512
     )
     config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=text_config))
     monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: config)
 
-    def reasons(dtype=torch.bfloat16):
+    def reasons(dtype=torch.bfloat16, kv_cache_dtype="fp8", major=10):
         return KimiK3KvBalancedMLABackend.validate_configuration(
             head_size=576,
             dtype=dtype,
-            kv_cache_dtype="fp8",
+            kv_cache_dtype=kv_cache_dtype,
             block_size=64,
             use_mla=True,
             has_sink=False,
             use_sparse=False,
             use_mm_prefix=False,
             use_per_head_quant_scales=False,
-            device_capability=DeviceCapability(10, 0),
+            device_capability=DeviceCapability(major, 0),
             attn_type=AttentionType.DECODER,
         )
 
     assert reasons() == []
     assert "dtype not supported" in reasons(torch.float16)
+    assert "kv_cache_dtype not supported" in reasons(kv_cache_dtype="auto")
+    assert any("compute capability" in reason for reason in reasons(major=9))
     text_config.kv_lora_rank = 256
-    assert any("kv_lora_rank 512" in reason for reason in reasons())
+    assert any("MLA dimensions" in reason for reason in reasons())
 
 
-def test_kv_balanced_impl_runs_only_the_kernel(monkeypatch):
-    """forward_mqa is the KV-balanced decode; TokenSpeed's decode never runs."""
+def test_kv_balanced_impl_runs_the_kernel():
+    """forward_mqa is the KV-balanced decode."""
     from vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend import (
         KimiK3KvBalancedMLAImpl,
     )
-    from vllm.v1.attention.backends.mla.tokenspeed_mla import TokenspeedMLAImpl
 
-    def tokenspeed(*args):
-        raise AssertionError("TokenSpeed's decode ran")
-
-    monkeypatch.setattr(TokenspeedMLAImpl, "forward_mqa", tokenspeed)
     impl = object.__new__(KimiK3KvBalancedMLAImpl)
     calls = []
 
@@ -330,7 +326,6 @@ def _layer(monkeypatch, lengths, cp, lse):
             decode_context_parallel_size=world, cp_kv_cache_interleave_size=interleave
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=4),
-        attention_config=SimpleNamespace(tokenspeed_mla_min_split_kv=1),
     )
     monkeypatch.setattr(decode, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(decode, "max_decode_query_len", lambda _: q)

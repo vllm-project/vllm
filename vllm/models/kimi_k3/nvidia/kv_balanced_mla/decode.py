@@ -5,10 +5,10 @@ the KV-balanced kernel. It covers the target verify and the DSpark draft, with o
 without DCP. Per forward, the first MLA layer of each decode shape plans the split-KV
 work list from this rank's KV lengths, and every later layer of that forward reuses
 it. Under DCP the kernel reads this rank's KV shard, masks causally in global
-positions and returns the log2 LSE that the DCP combine merges, like TokenSpeed.
+positions and returns the log2 LSE that the DCP combine merges.
 
 The layers share one set of plan buffers per micro-batch lane, reserved with the
-split-KV scratch (the decode workspace TokenSpeed also uses) when the layers are
+split-KV scratch (from the shared decode workspace) when the layers are
 built, so the KV cache is sized around them. Every decode step runs on the kernel;
 one it can't run raises instead of running some other decode.
 """
@@ -66,11 +66,6 @@ class KvBalancedDecode:
             raise ValueError(
                 "KIMI_K3_KV_BALANCED_MLA needs more than 64 query rows per request "
                 f"(heads x query length), got {self.heads} x {self.max_q}"
-            )
-        if config.attention_config.tokenspeed_mla_min_split_kv > 1:
-            logger.warning_once(
-                "KIMI_K3_KV_BALANCED_MLA plans its own KV splits and ignores "
-                "tokenspeed_mla_min_split_kv"
             )
         self.max_requests = config.scheduler_config.max_num_seqs
         max_planned = core.max_planned_requests(self.heads, self.max_q)
