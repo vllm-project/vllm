@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the FlashInfer TRTLLM NvFP4 MoE backend
-(`TrtLlmNvFp4ExpertsModular`).
+(`TrtLlmNvFp4ExpertsModular`) and the Prims-TS backend sharing its arguments and
+weight layout (`PrimsTsNvFp4ExpertsModular`).
 
 Covers the activations the wrapper claims to support — SiLU, RELU^2 (non-gated),
 and GELU — including a Gemma4-shaped case (128 experts, top-k 8,
@@ -9,6 +10,7 @@ intermediate_size 704) that exercises the non-256-aligned padding path.
 """
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -35,8 +37,15 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.experts.prims_ts_nvfp4_moe import (
+    PrimsTsNvFp4ExpertsModular,
+)
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
     TrtLlmNvFp4ExpertsModular,
+)
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
+    select_nvfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_static_weights_for_trtllm_fp4_moe,
@@ -44,6 +53,10 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -100,13 +113,26 @@ if _SITU_OP_NAME not in op_registry:
 SILU_WITH_CLAMP = op_registry[_CLAMP_OP_NAME]
 SITU = op_registry[_SITU_OP_NAME]
 
+EXPERTS_CLASSES = [
+    pytest.param(TrtLlmNvFp4ExpertsModular, id="trtllm_gen"),
+    pytest.param(
+        PrimsTsNvFp4ExpertsModular,
+        id="prims_ts",
+        marks=pytest.mark.skipif(
+            not PrimsTsNvFp4ExpertsModular._supports_current_device(),
+            reason="Requires FlashInfer Prims-TS MoE on SM100/103/107",
+        ),
+    ),
+]
+
 
 def _make_trtllm_fp4_moe_kernel(
     moe_config: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
     per_token_activation: bool = False,
+    experts_cls: type[TrtLlmNvFp4ExpertsModular] = TrtLlmNvFp4ExpertsModular,
 ) -> mk.FusedMoEKernel:
-    experts = TrtLlmNvFp4ExpertsModular(
+    experts = experts_cls(
         moe_config=moe_config,
         quant_config=quant_config,
         per_token_activation=per_token_activation,
@@ -133,6 +159,87 @@ def _make_trtllm_fp4_moe_kernel(
         ),
         experts,
     )
+
+
+def _dequantize_weights(
+    w1_q: torch.Tensor,
+    w2_q: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
+    n: int,
+    k: int,
+    is_gated_act: bool,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The reference weights: make_test_quant_config's weights round-tripped
+    through FP4, so a comparison isolates the kernel from quantization error."""
+    assert quant_config.w1_scale is not None
+    assert quant_config.w2_scale is not None
+    assert quant_config.g1_alphas is not None
+    assert quant_config.g2_alphas is not None
+    e = w1_q.size(0)
+    w1_d = torch.empty(
+        (e, (2 if is_gated_act else 1) * n, k), device="cuda", dtype=dtype
+    )
+    w2_d = torch.empty((e, k, n), device="cuda", dtype=dtype)
+    for idx in range(e):
+        w1_d[idx] = dequantize_nvfp4_to_dtype(
+            w1_q[idx],
+            quant_config.w1_scale[idx],
+            (1 / quant_config.g1_alphas[idx]),
+            dtype=dtype,
+            device=w1_q.device,
+            block_size=16,
+        )
+        w2_d[idx] = dequantize_nvfp4_to_dtype(
+            w2_q[idx],
+            quant_config.w2_scale[idx],
+            (1 / quant_config.g2_alphas[idx]),
+            dtype=dtype,
+            device=w2_q.device,
+            block_size=16,
+        )
+    return w1_d, w2_d
+
+
+def _to_trtllm_layout(
+    w1_q: torch.Tensor,
+    w2_q: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
+    n: int,
+    k: int,
+    is_gated_act: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shuffle make_test_quant_config's weights and swizzled scales into the
+    TRTLLM-Gen layout; the scales are replaced in ``quant_config``."""
+    assert quant_config.w1_scale is not None
+    assert quant_config.w2_scale is not None
+    w1_scale_linear = torch.stack(
+        [
+            convert_swizzled_to_linear(scale, w1_q.size(1), k, 16)
+            for scale in quant_config.w1_scale
+        ]
+    )
+    w2_scale_linear = torch.stack(
+        [
+            convert_swizzled_to_linear(scale, w2_q.size(1), n, 16)
+            for scale in quant_config.w2_scale
+        ]
+    )
+    if is_gated_act:
+        w1_q, w1_scale_linear = reorder_w1w3_to_w3w1(w1_q.clone(), w1_scale_linear)
+    w1_q, w1_scale, w2_q, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
+        w1_q,
+        w2_q,
+        w1_scale_linear,
+        w2_scale_linear,
+        hidden_size=k,
+        intermediate_size=n,
+        num_experts=w1_q.size(0),
+        is_gated_activation=is_gated_act,
+    )
+    quant_config._w1.scale = w1_scale
+    quant_config._w2.scale = w2_scale
+    return w1_q, w2_q
 
 
 ACTIVATION_CASES = [
@@ -170,6 +277,7 @@ ACTIVATION_CASES = [
 ]
 
 
+@pytest.mark.parametrize("experts_cls", EXPERTS_CLASSES)
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", [128])
 @pytest.mark.parametrize("topk", [8])
@@ -180,6 +288,7 @@ ACTIVATION_CASES = [
 )
 @torch.inference_mode()
 def test_trtllm_fp4_moe_no_graph(
+    experts_cls: type[TrtLlmNvFp4ExpertsModular],
     m: int,
     n: int,
     k: int,
@@ -203,6 +312,11 @@ def test_trtllm_fp4_moe_no_graph(
             "for non-gated RELU^2 at intermediate_size=704 "
             "(getValidConfigIndices throws). Tracked upstream."
         )
+    if experts_cls is PrimsTsNvFp4ExpertsModular and n % 128 != 0:
+        pytest.skip(
+            "Prims-TS needs intermediate_size % 128 == 0; vLLM pads it at "
+            "load (prepare_nvfp4_moe_layer_for_fi_or_cutlass), this test does not."
+        )
 
     set_random_seed(7)
     with set_current_vllm_config(
@@ -210,7 +324,6 @@ def test_trtllm_fp4_moe_no_graph(
     ):
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
 
-        quant_blocksize = 16
         is_gated_act = activation.is_gated
 
         w1_q, w2_q, quant_config = make_test_quant_config(
@@ -237,41 +350,10 @@ def test_trtllm_fp4_moe_no_graph(
             # clamp/output-scale coupling in the FlashInfer kernel wrapper.
             quant_config.g1_alphas.fill_(_LARGE_OUTPUT1_SCALE)
 
-        w1_q_linear = w1_q
-        w2_q_linear = w2_q
-        w1_scale_reference = quant_config.w1_scale
-        w2_scale_reference = quant_config.w2_scale
-        assert w1_scale_reference is not None
-        assert w2_scale_reference is not None
-        w1_scale_linear = torch.stack(
-            [
-                convert_swizzled_to_linear(scale, w1_q.size(1), k, quant_blocksize)
-                for scale in w1_scale_reference
-            ]
+        w1_d, w2_d = _dequantize_weights(
+            w1_q, w2_q, quant_config, n, k, is_gated_act, dtype
         )
-        w2_scale_linear = torch.stack(
-            [
-                convert_swizzled_to_linear(scale, w2_q.size(1), n, quant_blocksize)
-                for scale in w2_scale_reference
-            ]
-        )
-        w1_q_for_kernel = w1_q
-        if is_gated_act:
-            w1_q_for_kernel, w1_scale_linear = reorder_w1w3_to_w3w1(
-                w1_q.clone(), w1_scale_linear
-            )
-        w1_q, w1_scale, w2_q, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
-            w1_q_for_kernel,
-            w2_q,
-            w1_scale_linear,
-            w2_scale_linear,
-            hidden_size=k,
-            intermediate_size=n,
-            num_experts=e,
-            is_gated_activation=is_gated_act,
-        )
-        quant_config._w1.scale = w1_scale
-        quant_config._w2.scale = w2_scale
+        w1_q, w2_q = _to_trtllm_layout(w1_q, w2_q, quant_config, n, k, is_gated_act)
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
@@ -299,6 +381,7 @@ def test_trtllm_fp4_moe_no_graph(
             moe_config,
             quant_config,
             per_token_activation=per_token_activation,
+            experts_cls=experts_cls,
         )
         if activation == MoEActivation.SITU:
             assert isinstance(trtllm_experts.fused_experts, TrtLlmNvFp4ExpertsModular)
@@ -319,9 +402,9 @@ def test_trtllm_fp4_moe_no_graph(
         )
         assert isinstance(trtllm_output, torch.Tensor)
 
-        # Reference: round-trip activations and weights through FP4
-        # quant/dequant so the comparison isolates kernel/activation behavior
-        # from quantization error.
+        # Reference: round-trip activations through FP4 quant/dequant as the
+        # weights, so the comparison isolates kernel/activation behavior from
+        # quantization error.
         if per_token_activation:
             from flashinfer import SfLayout, nvfp4_quantize
 
@@ -342,33 +425,9 @@ def test_trtllm_fp4_moe_no_graph(
             a_global_scale,
             dtype=a.dtype,
             device=a.device,
-            block_size=quant_blocksize,
+            block_size=16,
             is_sf_linear_layout=per_token_activation,
         )
-
-        w1_d = torch.empty(
-            (e, (2 if is_gated_act else 1) * n, k), device="cuda", dtype=dtype
-        )
-        w2_d = torch.empty((e, k, n), device="cuda", dtype=dtype)
-        assert quant_config.g1_alphas is not None
-        assert quant_config.g2_alphas is not None
-        for idx in range(e):
-            w1_d[idx] = dequantize_nvfp4_to_dtype(
-                w1_q_linear[idx],
-                w1_scale_reference[idx],
-                (1 / quant_config.g1_alphas[idx]),
-                dtype=dtype,
-                device=w1_q.device,
-                block_size=quant_blocksize,
-            )
-            w2_d[idx] = dequantize_nvfp4_to_dtype(
-                w2_q_linear[idx],
-                w2_scale_reference[idx],
-                (1 / quant_config.g2_alphas[idx]),
-                dtype=dtype,
-                device=w2_q.device,
-                block_size=quant_blocksize,
-            )
 
         torch_output = torch_moe(
             a_in_dtype, w1_d, w2_d, score, topk, activation=torch_activation
@@ -637,9 +696,13 @@ def test_trtllm_fp4_moe_reprocess_does_not_refold_swiglu_params():
             torch.testing.assert_close(experts.gemm1_beta, beta * expected)
 
 
+# Not Prims-TS: no layer defers its finalize, and its unfinalized output
+# doesn't match its own finalize (it rounds the router weights to bf16).
+@pytest.mark.parametrize("experts_cls", [TrtLlmNvFp4ExpertsModular])
 @pytest.mark.parametrize("m,chunk_size", [(1, None), (16, None), (16, 5)])
 @torch.inference_mode()
 def test_trtllm_fp4_moe_deferred_finalize(
+    experts_cls: type[TrtLlmNvFp4ExpertsModular],
     m: int,
     chunk_size: int | None,
     monkeypatch: pytest.MonkeyPatch,
@@ -649,9 +712,7 @@ def test_trtllm_fp4_moe_deferred_finalize(
     e, topk, n, k = 128, 8, 1024, 1024
     dtype = torch.bfloat16
     if chunk_size is not None:
-        monkeypatch.setattr(
-            TrtLlmNvFp4ExpertsModular, "_get_chunk_size", lambda self: chunk_size
-        )
+        monkeypatch.setattr(experts_cls, "_get_chunk_size", lambda self: chunk_size)
 
     set_random_seed(7)
     with set_current_vllm_config(
@@ -681,7 +742,9 @@ def test_trtllm_fp4_moe_deferred_finalize(
             routing_method=RoutingMethodType.TopK,
             max_num_tokens=next_power_of_2(m),
         )
-        kernel = _make_trtllm_fp4_moe_kernel(moe_config, quant_config)
+        kernel = _make_trtllm_fp4_moe_kernel(
+            moe_config, quant_config, experts_cls=experts_cls
+        )
 
         check_deferred_moe_finalize(
             moe_config,
@@ -701,8 +764,223 @@ def test_trtllm_fp4_moe_deferred_finalize(
         )
 
 
+@pytest.mark.parametrize("experts_cls", EXPERTS_CLASSES)
+@pytest.mark.parametrize("m", [16, 256])
+@torch.inference_mode()
+def test_trtllm_fp4_moe_expert_parallel(
+    experts_cls: type[TrtLlmNvFp4ExpertsModular],
+    m: int,
+    workspace_init,
+):
+    """EP as vLLM's allgather and NVLink all2all backends run it: the rank gets
+    every token with its global top-k ids and adds its local experts' share."""
+    e, topk, n, k = 128, 8, 1024, 1024
+    ep_size, ep_rank = 4, 1
+    e_local = e // ep_size
+    dtype = torch.bfloat16
+
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        w1_q, w2_q, quant_config = make_test_quant_config(
+            e_local, n, k, in_dtype=dtype, quant_dtype="nvfp4", is_scale_swizzled=False
+        )
+        w1_d, w2_d = _dequantize_weights(w1_q, w2_q, quant_config, n, k, True, dtype)
+        w1_q, w2_q = _to_trtllm_layout(w1_q, w2_q, quant_config, n, k, True)
+
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e_local,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=replace(
+                FusedMoEParallelConfig.make_no_parallel(),
+                ep_size=ep_size,
+                ep_rank=ep_rank,
+                use_ep=True,
+            ),
+            in_dtype=dtype,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m),
+        )
+        kernel = _make_trtllm_fp4_moe_kernel(
+            moe_config, quant_config, experts_cls=experts_cls
+        )
+        output = kernel.apply(
+            hidden_states=a,
+            w1=w1_q,
+            w2=w2_q,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+        assert quant_config.a1_gscale is not None
+        a_global_scale = quant_config.a1_gscale[0]
+        a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a, a_global_scale)
+        a_in_dtype = dequantize_nvfp4_to_dtype(
+            a_fp4,
+            a_scale_interleaved,
+            a_global_scale,
+            dtype=dtype,
+            device=a.device,
+            block_size=16,
+        )
+        expert_map = torch.full((e,), -1, dtype=torch.int64, device="cuda")
+        expert_map[ep_rank * e_local : (ep_rank + 1) * e_local] = torch.arange(
+            e_local, device="cuda"
+        )
+        torch_output = torch_moe(
+            a_in_dtype,
+            w1_d,
+            w2_d,
+            score,
+            topk,
+            global_num_experts=e,
+            expert_map=expert_map,
+        )
+
+        cosine = torch.nn.functional.cosine_similarity(
+            torch_output.float().flatten(), output.float().flatten(), dim=0
+        )
+        assert cosine > 0.99
+        torch.testing.assert_close(torch_output, output, atol=2e-1, rtol=2e-1)
+
+
+@pytest.mark.skipif(
+    not PrimsTsNvFp4ExpertsModular._supports_current_device(),
+    reason="Requires FlashInfer Prims-TS MoE on SM100/103/107",
+)
+def test_select_prims_ts_backend():
+    """Prims-TS is opt-in: moe_backend selects it, auto does not."""
+    moe_config = FusedMoEConfig(
+        num_experts=128,
+        experts_per_token=8,
+        hidden_dim=1024,
+        intermediate_size=1024,
+        num_local_experts=32,
+        num_logical_experts=128,
+        activation=MoEActivation.SILU,
+        device="cuda",
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+        routing_method=RoutingMethodType.Renormalize,
+        max_num_tokens=256,
+        moe_backend="flashinfer_prims_ts",
+    )
+    assert select_nvfp4_moe_backend(moe_config, kNvfp4Static, kNvfp4Dynamic) == (
+        NvFp4MoeBackend.FLASHINFER_PRIMS_TS,
+        PrimsTsNvFp4ExpertsModular,
+    )
+    moe_config.moe_backend = "auto"
+    backend, _ = select_nvfp4_moe_backend(moe_config, kNvfp4Static, kNvfp4Dynamic)
+    assert backend != NvFp4MoeBackend.FLASHINFER_PRIMS_TS
+
+
+@pytest.mark.skipif(
+    not PrimsTsNvFp4ExpertsModular._supports_current_device(),
+    reason="Requires FlashInfer Prims-TS MoE on SM100/103/107",
+)
+@pytest.mark.parametrize("per_token_activation", [False, True])
+@torch.inference_mode()
+def test_prims_ts_precompile_covers_every_batch_size(
+    per_token_activation: bool, monkeypatch, workspace_init
+):
+    """After the warmup's precompile, no batch size compiles an expert GEMM."""
+    from flashinfer.prims_ts.batched_gemm import batched_gemm_run
+
+    e, topk, n, k = 128, 8, 1024, 1024
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        w1_q, w2_q, quant_config = make_test_quant_config(
+            e,
+            n,
+            k,
+            in_dtype=torch.bfloat16,
+            quant_dtype="nvfp4",
+            block_shape=None,
+            per_act_token_quant=False,
+            make_gate=True,
+            is_scale_swizzled=False,
+        )
+        w1_q, w2_q = _to_trtllm_layout(w1_q, w2_q, quant_config, n, k, True)
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=4096,
+        )
+        kernel = _make_trtllm_fp4_moe_kernel(
+            moe_config,
+            quant_config,
+            per_token_activation=per_token_activation,
+            experts_cls=PrimsTsNvFp4ExpertsModular,
+        )
+        experts = kernel.fused_experts
+        assert isinstance(experts, PrimsTsNvFp4ExpertsModular)
+        layer = SimpleNamespace(
+            w13_weight=w1_q,
+            w2_weight=w2_q,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+        )
+        experts.precompile_untuned(experts.untuned_precompile_kwargs(layer))
+
+        compiled = []
+        compile_for_launch = batched_gemm_run._compile_for_launch
+
+        def recording_compile_for_launch(io, stream):
+            compiled.append(io["cfg"])
+            return compile_for_launch(io, stream)
+
+        monkeypatch.setattr(
+            batched_gemm_run, "_compile_for_launch", recording_compile_for_launch
+        )
+        # With 128 experts and top-8, the untuned tile grows past 256, 512,
+        # 1024 and 2048 tokens.
+        for m in (1, 257, 513, 1025, 2049):
+            a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+            score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
+            topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+            kernel.apply(
+                hidden_states=a,
+                w1=w1_q,
+                w2=w2_q,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+        assert compiled == []
+
+
 if __name__ == "__main__":
     test_trtllm_fp4_moe_no_graph(
+        TrtLlmNvFp4ExpertsModular,
         64,
         704,
         4096,
