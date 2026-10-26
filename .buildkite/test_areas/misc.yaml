@@ -135,6 +135,7 @@ steps:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-offload.sh
     - pytest -v -s v1/kv_offload
     - pytest -v -s v1/simple_kv_offload
+    - pytest -v -s v1/kv_connector/unit/test_offloading_connector.py -k test_cpu_offloading_rejects_canonical_layout
   mirror:
     amd:
       label: ":amd: (MI355 DPX) V1 KV Offload"

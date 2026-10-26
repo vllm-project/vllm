@@ -89,6 +89,7 @@ def _make_offloading_config(
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
+        canonical_layout=bool(normalized_extra_config.get("canonical_layout", False)),
     )
 
 
@@ -134,9 +135,28 @@ def test_get_spec_cls_defaults_to_cpu():
     assert spec_cls is CPUOffloadingSpec
 
 
-def test_create_cpu_offloading_spec():
-    spec = _create_spec()
+@pytest.mark.parametrize("spec_name", [None, "CPUOffloadingSpec"])
+@pytest.mark.parametrize("extra_config", [{}, {"canonical_layout": False}])
+def test_create_cpu_offloading_spec(spec_name, extra_config):
+    spec = _create_spec(spec_name=spec_name, extra_config=extra_config)
     assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks > 0
+    assert spec.config.canonical_layout is False
+
+
+@pytest.mark.parametrize("spec_name", [None, "CPUOffloadingSpec"])
+def test_cpu_spec_rejects_canonical_layout(spec_name):
+    with pytest.raises(ValueError, match="canonical_layout.*CPUOffloadingSpec"):
+        _create_spec(spec_name=spec_name, extra_config={"canonical_layout": True})
+
+
+def test_tiering_spec_accepts_canonical_layout():
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec", extra_config={"canonical_layout": True}
+    )
+
+    assert isinstance(spec, TieringOffloadingSpec)
+    assert spec.config.canonical_layout is True
     assert spec.num_chunks > 0
 
 
