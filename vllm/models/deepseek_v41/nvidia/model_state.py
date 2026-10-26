@@ -224,9 +224,15 @@ class DeepseekV41ModelState(DefaultModelState):
             model, "decoder_replay_layers", None
         )
         if self.decoder_replay_layers is not None:
+            if self.pcp_size > 1:
+                assert self.decoder_replay_layers.window >= 2 * self.pcp_size, (
+                    "PCP replay requires window >= 2 * PCP size so each trimmed "
+                    "request is represented on every rank."
+                )
+                self._pcp_replay_start = UvaBufferPool(max_local_reqs, torch.int32)
             # Requests whose every prompt row is read (prompt logprobs) never trim.
             self._keeps_rows_np = np.zeros(self.max_num_reqs, dtype=np.bool_)
-            self._dropped_before = UvaBufferPool(self.max_num_reqs + 1, torch.int32)
+            self._dropped_before = UvaBufferPool(max_local_reqs + 1, torch.int32)
             # The replay batch's inputs: its rows of the batch, query offsets,
             # positions, slot mappings (sized with the KV cache groups on first
             # use) and the position from which each request holds replay-layer
@@ -235,14 +241,14 @@ class DeepseekV41ModelState(DefaultModelState):
                 self.max_num_tokens, dtype=torch.int64, device=device
             )
             self._kept_query_start_loc = torch.zeros(
-                self.max_num_reqs + 1, dtype=torch.int32, device=device
+                max_local_reqs + 1, dtype=torch.int32, device=device
             )
             self._kept_positions = torch.zeros(
                 self.max_num_tokens, dtype=torch.int64, device=device
             )
             self._kept_slot_mappings: torch.Tensor | None = None
             self._kept_kv_start = torch.zeros(
-                self.max_num_reqs, dtype=torch.int32, device=device
+                max_local_reqs, dtype=torch.int32, device=device
             )
             # The replay layers' and the first one's SWA attention groups.
             self._replay_attn_groups: (
@@ -346,6 +352,17 @@ class DeepseekV41ModelState(DefaultModelState):
                     device=self.device,
                 )
             self._warm_up_replay_kernels(input_batch, slot_mappings)
+        if (
+            self.pcp_size > 1
+            and self.decoder_replay_layers is not None
+            and self._replay_attn_groups is None
+        ):
+            # Initialize replay builders even for untrimmed warmup batches.
+            layers = self.decoder_replay_layers
+            self._replay_attn_groups = (
+                self._copy_attn_groups(attn_groups, layers.metadata_prefixes),
+                self._copy_attn_groups(attn_groups, {layers.first_swa_prefix}),
+            )
         window, cacheable_groups = self._replay
         replay_start: torch.Tensor | None = None
         if window or self.decoder_replay_layers is not None:
@@ -491,40 +508,67 @@ class DeepseekV41ModelState(DefaultModelState):
             return
 
         num_reqs = input_batch.num_reqs
+        idx_mapping_np = input_batch.idx_mapping_np[:num_reqs]
         query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])
-        kept_lens = np.where(
-            self._keeps_rows_np[input_batch.idx_mapping_np[:num_reqs]],
-            query_lens,
-            np.minimum(query_lens, layers.window),
-        )
-        # A batch of context-free non-prefill rows is a dummy (an idle DP rank's):
-        # nothing reads it and its idx_mapping hits stale slots, so keep one row.
         seq_lens = input_batch.seq_lens_cpu_upper_bound[:num_reqs].numpy()
-        is_dummy = not input_batch.is_prefilling_np[:num_reqs].any() and bool(
-            (seq_lens == query_lens).all()
-        )
-        if is_dummy and capture_desc is None:
-            kept_lens = np.zeros_like(kept_lens)
-            kept_lens[0] = 1
-        # Dummy batches (captures, an idle DP rank's) are not prefills: they
-        # keep their rows unless a rank trims.
-        needs_replay_batch = force_replay_batch or bool(
-            (kept_lens < query_lens)[input_batch.is_prefilling_np[:num_reqs]].any()
-        )
+        keeps_rows = self._keeps_rows_np[idx_mapping_np]
+        pcp = input_batch.pcp
+        kv_start: np.ndarray | None = None
+        num_padded: int | None = None
+        if pcp is not None:
+            # Every trimmed request spans all ranks, so each rank can derive
+            # the same global kept count from its local request segments.
+            global_dropped_lens = np.where(
+                keeps_rows, 0, np.maximum(pcp.global_query_lens_np - layers.window, 0)
+            )
+            kv_start = np.where(
+                global_dropped_lens > 0,
+                pcp.global_seq_lens_cpu_upper_bound_np - layers.window,
+                0,
+            )
+            kept_lens = np.clip(seq_lens - kv_start, 0, query_lens)
+            _, first_indices = np.unique(idx_mapping_np, return_index=True)
+            num_dropped_tokens = int(global_dropped_lens[first_indices].sum())
+            num_padded = pcp.global_num_tokens - num_dropped_tokens
+            needs_replay_batch = (
+                force_replay_batch or num_padded < input_batch.num_tokens_after_padding
+            )
+        else:
+            kept_lens = np.where(
+                keeps_rows, query_lens, np.minimum(query_lens, layers.window)
+            )
+            # Idle DP batches have stale request slots and no context; keep one row.
+            is_dummy = not input_batch.is_prefilling_np[:num_reqs].any() and bool(
+                (seq_lens == query_lens).all()
+            )
+            if is_dummy and capture_desc is None:
+                kept_lens = np.zeros_like(kept_lens)
+                kept_lens[0] = 1
+            needs_replay_batch = force_replay_batch or bool(
+                (kept_lens < query_lens)[input_batch.is_prefilling_np[:num_reqs]].any()
+            )
         num_tokens = int(kept_lens.sum())
+        if num_padded is None:
+            num_padded = num_tokens
         dp_tokens = None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
             needs_replay_batch, dp_tokens = self._agree_across_dp(
-                needs_replay_batch, num_tokens
+                needs_replay_batch, num_padded
             )
         if not needs_replay_batch:
             return
 
+        kept_replay_start = replay_start
+        if kv_start is not None:
+            kept_replay_start = torch.maximum(
+                replay_start, self._pcp_replay_start.copy_to_gpu(kv_start)
+            )
+
         cudagraphs, run_graph = self.replay_cudagraphs, None
-        num_padded, cg_mode = num_tokens, CUDAGraphMode.NONE
+        cg_mode = CUDAGraphMode.NONE
         if cudagraphs is not None:
             # Every rank runs the graph that fits the largest rank's batch.
-            dp_max_tokens = num_tokens if dp_tokens is None else int(dp_tokens.max())
+            dp_max_tokens = num_padded if dp_tokens is None else int(dp_tokens.max())
             desc = capture_desc or cudagraphs.dispatch(num_reqs, dp_max_tokens, None, 0)
             if desc.cg_mode == CUDAGraphMode.PIECEWISE:
                 num_padded, cg_mode = desc.num_tokens, desc.cg_mode
@@ -537,7 +581,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 self.vllm_config.parallel_config, num_padded, dp_tokens
             )
         kept_batch, kept_slot_mappings = self._kept_input_batch(
-            input_batch, slot_mappings, replay_start, kept_lens, num_padded
+            input_batch, slot_mappings, kept_replay_start, kept_lens, num_padded
         )
         if self._replay_attn_groups is None:
             self._replay_attn_groups = (
@@ -579,8 +623,10 @@ class DeepseekV41ModelState(DefaultModelState):
                 slot_mapping=build_slot_mappings_by_layer(
                     kept_slot_mappings, kv_cache_config
                 ),
+                is_padding=kept_batch.is_padding if self.pcp_size > 1 else None,
             ),
             run_graph,
+            num_padded if self.pcp_size > 1 else None,
         )
 
     def capture_inner_cudagraphs(
@@ -635,6 +681,10 @@ class DeepseekV41ModelState(DefaultModelState):
             input_batch.query_start_loc_np[: num_reqs + 1] - kept_query_start_loc_np
         )
         assert self._kept_slot_mappings is not None
+        if self.pcp_size > 1:
+            slot_mappings = slot_mappings.chunk(self.pcp_size, dim=1)[
+                get_pcp_group().rank_in_group
+            ]
         kept_slot_mappings = self._kept_slot_mappings[:, :num_padded]
         kept_slot_mappings[:, num_tokens:].fill_(PAD_SLOT_ID)
         _gather_replay_batch_kernel[(num_reqs,)](
@@ -658,6 +708,17 @@ class DeepseekV41ModelState(DefaultModelState):
         # Adaptive verification may lengthen the decodes on the device, up to
         # the batch's bound.
         max_query_len = max(int(kept_lens.max()), input_batch.max_query_len or 0)
+        is_padding = input_batch.is_padding
+        if self.pcp_size > 1:
+            self._kept_positions[num_tokens:num_padded].zero_()
+            is_padding = torch.arange(num_padded, device=self.device) >= num_tokens
+            kept_slot_mappings = get_pcp_group().all_gather(
+                kept_slot_mappings.contiguous(), dim=1
+            )
+            if not self.vllm_config.parallel_config.enable_expert_parallel:
+                is_padding = (
+                    get_pcp_group().all_gather(is_padding.to(torch.uint8), dim=0).bool()
+                )
         kept_batch = replace(
             input_batch,
             num_tokens=num_tokens,
@@ -666,6 +727,7 @@ class DeepseekV41ModelState(DefaultModelState):
             query_start_loc_np=kept_query_start_loc_np,
             max_query_len=max_query_len,
             positions=self._kept_positions[:num_padded],
+            is_padding=is_padding,
             fast_prefill=None,
         )
         return kept_batch, kept_slot_mappings
