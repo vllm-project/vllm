@@ -2852,3 +2852,52 @@ config. Context read with +/- lines before relaying; DM sent to
 **Host commit 89.6 %** (354.3/395.3 GB, margin 41.0 GB) — up 0.9 pt from
 11:41Z, below the 97 % danger line, above the 85 % heavy-work threshold; no
 heavy job from this lane.
+
+### 26/10 15:41Z — stable cruise; fs writes almost quiet, 400 is image-count
+
+Window 13:41:09 -> 15:41:27Z (1 h 59m18s). Read-only cycle; no engine/config
+change. Evening patch window (user GO) remains after EPF classes.
+
+| metric | cumulative at 15:41Z | delta 1 h 59m18s |
+|---|---|---|
+| fs writes | **160.790 GB** | **+0.551 GB = 0.277 GB/h** |
+| prompt tokens | 360.976 M | **+42.829 M = 21.51 M tok/h** |
+| fs reads | 92.233 GB | +0.866 GB = 0.434 GB/h |
+| cached by source | device 249.319 M / host 76.998 M / disk 7.000 M | window: device **96.0 %** / host 1.3 % / disk 0.35 % |
+| computed prefill | — | 0.590 M = **1.38 %** of window prompt |
+| prefix cache | queries 361.426 M / hits 249.319 M | window hit rate **95.4 %** |
+| preemptions | **27** | **+0 for ~5 h 45** |
+| fs chunk hits | 3,395 | +33 |
+| fs tier size | **251G** (`du`) | at the 250 GiB LRU cap |
+
+**Write ratio: 0.551 GB / 42.829 M prompt tokens = 0.0129 KB/token = div 132**
+— a very quiet fs-write window, not an extrapolation: only **7 files touched in
+30 min (4 NEW / 0.10 GB + 3 REWRITES / 0.08 GB)**. Disk-served window share
+0.35 % is below the 1.76 % floor because device serves 96.0 % and computed
+prefill is 1.38 %; cumulative disk share is 1.94 %, still above the floor. No
+new regression and no claim of utility loss: the engine is serving from fast
+tiers, with almost no prefill work in this window.
+
+Engine health: StartedAt still 21:48:52Z, RC=0, OOM=false, 0 OOM lines, 0
+tiering asserts/tracebacks, three containers up, health 200 in 6.5 ms. **No
+new WEDGE after 11:44:39Z**, fail 2/2 count 0, no watchdog restart. VRAM GPU0
+22,487 / GPU1 21,508 MiB; GPU2 111 = idle/free (CoursIA expected). `/dev/shm`
+25G/63G (39 %). Live scheduler: KV 44.5 %, 2 running, 0 waiting.
+
+Traffic census (2 h, 548 req): 525 x 200, 22 x 401, **1 x 400** — 14:22:01Z,
+hairpin, Bun, body 866,039 B, error `At most 4 image(s) may be provided in one
+prompt. (parameter=image)`, **not window+1**. No large-context 400 this
+window. ZOLTRAAK presented two unknown-key 401s at 15:27-15:28Z
+(`ccd500f719e4`, `64a6d7ec06fd`), no access. Both Q40 mobile IPs remain only
+2 x 200 each (no recurrence after 13:05Z); their `x_claudish_client` and
+`x_claudish_machine` fields are empty. nbaudit healthy 15:06Z (Image/), G:
+write OK.
+
+RSM condensation warnings continue at 15:31-15:41Z (`key=MISSING`,
+`OPENAI_BASE_URL ET OPENAI_CHAT_MODEL_ID absentes`), unchanged RSM-side issue
+reported at 13:45Z; no engine error. Host commit **84.2 %** (340.6/404.6 GB,
+margin 64.0 GB) — now below the 85 % heavy-work threshold, but no heavy job
+needed in this cycle. Upstream PR vllm-project/vllm#63551 remains OPEN; latest
+orozery comment (07:14Z) discusses `prepare_load` taking refs and a separate
+`complete_read`; no rework here. PR #211 remains OPEN, unmerged and inactive
+for the evening window. #198 remains OPEN.
