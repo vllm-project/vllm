@@ -418,6 +418,30 @@ class TestTieringOffloadingManager:
         tier1_take_events.assert_called_once_with()
         tier2_take_events.assert_called_once_with()
 
+    def test_guard_only_events_exclude_framework_only_cpu(
+        self, manager_setup, monkeypatch
+    ):
+        primary_event = OffloadingEvent(to_keys([1]), Medium.CPU, removed=False)
+        guard_event = OffloadingEvent(
+            to_keys([2]), Medium.CPU, removed=False, ownership="kvcr"
+        )
+        other_event = OffloadingEvent(to_keys([3]), Medium.STORAGE, removed=False)
+
+        self.secondary_tier1.guard_only_sources = True
+        monkeypatch.setattr(
+            self.primary_tier, "take_events", lambda: iter([primary_event])
+        )
+        monkeypatch.setattr(
+            self.secondary_tier1,
+            "take_events",
+            lambda: iter([guard_event, other_event]),
+        )
+        monkeypatch.setattr(
+            self.secondary_tier2, "take_events", lambda: iter([other_event])
+        )
+
+        assert list(self.manager.take_events()) == [guard_event, other_event]
+
     def test_basic_store_to_primary(self, manager_setup):
         """Test basic store operation to primary tier."""
         chunks = to_keys(range(3))

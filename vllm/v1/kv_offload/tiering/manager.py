@@ -1133,9 +1133,21 @@ class TieringOffloadingManager(OffloadingManager):
             New OffloadingEvents collected by each tier since the last call.
 
         """
-        yield from self.primary_tier.take_events()
+        guard_only = any(
+            getattr(tier, "guard_only_sources", False) for tier in self.secondary_tiers
+        )
+        primary_events = self.primary_tier.take_events()
+        if guard_only:
+            # Framework-only CPU blocks cannot serve Guard-only remote reads.
+            list(primary_events)
+        else:
+            yield from primary_events
         for tier in self.secondary_tiers:
-            yield from tier.take_events()
+            for event in tier.take_events():
+                if not getattr(tier, "guard_only_sources", False) or (
+                    event.ownership == "kvcr"
+                ):
+                    yield event
 
     @override
     def reset_cache(self) -> None:

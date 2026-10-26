@@ -180,6 +180,7 @@ def _make_tier(
     enable_telemetry: bool = False,
     secondary_g2_slots: int = 0,
     kvcr_service_socket_path: str | None = None,
+    guard_only_sources: bool | None = None,
     compatibility_digest: str | None = None,
     enable_kv_cache_events: bool = False,
     self_describing_kv_events: bool = False,
@@ -223,6 +224,8 @@ def _make_tier(
     }
     if backpressure is not None:
         tier_config["backpressure"] = backpressure
+    if guard_only_sources is not None:
+        tier_config["guard_only_sources"] = guard_only_sources
     tier = SecondaryTierFactory.create_secondary_tier(
         tier_config=tier_config,
         offloading_spec=SimpleNamespace(
@@ -318,6 +321,40 @@ def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
     assert (region.size, region.stride or region.size, region.count) == (16, 16, 4)
     assert (region.label, region.mem_type, region.device_Id) == ("", "DRAM", 0)
     assert kvcr.backend_configs.local_dram is None
+    assert kvcr.backend_configs.remote_fw_dram.guard_only_sources is True
+    assert kvcr.config.startup_timeout_seconds == 900
+
+
+def test_kvcr_guard_only_sources_can_be_disabled(monkeypatch):
+    kvcr = RecordingKVCR()
+    tier = _make_tier(
+        monkeypatch,
+        kvcr,
+        kvcr_service_socket_path="/tmp/kvcr.sock",
+        compatibility_digest="Opaque-Digest",
+        guard_only_sources=False,
+    )
+    assert tier.guard_only_sources is False
+    assert kvcr.backend_configs.remote_fw_dram.guard_only_sources is False
+    assert kvcr.config.startup_timeout_seconds is None
+
+
+def test_guard_only_source_keeps_polling_until_shutdown_jobs_finish(monkeypatch):
+    kvcr = RecordingKVCR()
+    tier = _make_tier(
+        monkeypatch,
+        kvcr,
+        kvcr_service_socket_path="/tmp/kvcr.sock",
+        compatibility_digest="Opaque-Digest",
+    )
+    assert tier.has_pending_work()
+    monkeypatch.setattr(kvcr_manager, "_KVCR_SHUTDOWN", True)
+    assert not tier.has_pending_work()
+
+    tier.submit_load(_job(1, ReqContext(req_id="shutdown")))
+    assert tier.has_pending_work()
+    assert tier.get_finished_jobs() == [JobResult(1, True)]
+    assert not tier.has_pending_work()
 
 
 def test_kvcr_tier_converts_g3_paths(monkeypatch, tmp_path):
@@ -346,6 +383,8 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch, backpressure):
     """Factory-created tiers preserve configuration and complete hinted loads."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr, backpressure=backpressure)
+    assert tier.guard_only_sources is False
+    assert kvcr.backend_configs.remote_fw_dram.guard_only_sources is False
     if backpressure is None:
         assert tier.bp_detector is None
     else:
@@ -489,6 +528,7 @@ def test_kvcr_telemetry_is_opt_in_and_namespaced_at_vllm_boundary(monkeypatch):
     )
     assert "vllm:kvcr_duration_seconds" in definitions
     assert "vllm:kvcr_transfer_blocks" in definitions
+    assert "vllm:kvcr_guard_source_events" in definitions
 
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr, enable_telemetry=True)
