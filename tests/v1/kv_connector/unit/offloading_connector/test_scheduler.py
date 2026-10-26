@@ -7751,6 +7751,88 @@ def test_retention_interval_zero_stores_only_replay_boundary(
     )
 
 
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_retention_interval_zero_eagle_window_serves_next_turn(
+    request_runner, async_scheduling: bool
+):
+    """retention_interval=0 keeps enough of an EAGLE sliding-window group for
+    a later turn to hit when the prompt ends mid-chunk.
+
+    The replay boundary's block mask peeks one block past the boundary, into
+    the partial last chunk, which is never stored. The host lookup pops a
+    whole chunk for EAGLE instead, so it needs the window ending at the last
+    complete chunk.
+    """
+    block_size = 4
+    sliding_window = 8
+    num_gpu_blocks = 200
+
+    kv_cache_groups = [
+        make_kv_cache_group(
+            ["target"],
+            AttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        ),
+        make_kv_cache_group(
+            ["draft"],
+            sliding_window_layer(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=sliding_window,
+            ),
+            is_eagle_group=True,
+        ),
+    ]
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+        kv_cache_groups=kv_cache_groups,
+        retention_interval=0,
+    )
+
+    stored_keys: set[OffloadKey] = set()
+
+    def store(keys, req_context, trigger):
+        keys = list(keys)
+        stored_keys.update(keys)
+        return generate_store_output(keys)
+
+    runner.manager.prepare_store.side_effect = store
+    runner.manager.lookup.side_effect = lambda key, req_context: (
+        LookupResult.HIT if key in stored_keys else LookupResult.MISS
+    )
+
+    # 30 tokens: 7 complete chunks and 2 tokens into the eighth.
+    turn = [0] * 30
+    runner.new_request(token_ids=turn)
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        # Group 1 (eagle SWA): 2 window blocks + 1 peek block per boundary.
+        #   replay boundary 29 -> blocks 5, 6, 7 (7 is partial, not stored)
+        #   last complete chunk ends at 27 -> blocks 4, 5, 6
+        expected_stored=tuple((0, i) for i in range(7)) + ((1, 4), (1, 5), (1, 6)),
+    )
+
+    runner.scheduler.reset_prefix_cache()
+
+    # The next turn extends the prompt. The lookup confirms drafter chunks
+    # 4-6, pops chunk 6 and loads 24 tokens: the window for them is 4-5.
+    runner.new_request(token_ids=turn + [1] * 6)
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_loaded=tuple((0, i) for i in range(6)) + ((1, 4), (1, 5)),
+        expected_stored=((0, 6), (0, 7), (0, 8), (1, 6), (1, 7), (1, 8)),
+    )
+
+
 def _shared_kv_mtp_config():
     """Speculative config for a shared-group MTP model: eagle-family method
     whose drafter layer merges into a target KV-cache group, so no group

@@ -8,6 +8,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     RequestOffloadState,
     SchedulerOffloadConfig,
 )
+from vllm.utils.math_utils import round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_offload.base import OffloadKey
@@ -126,6 +127,14 @@ def select_store_candidates(
         ]
         assert len(offload_keys) == len(offload_block_ids)
 
+        group_reachable_boundaries = reachable_boundaries
+        if group_config.is_eagle_group and apply_eagle_drop and reachable_boundaries:
+            # EAGLE lookup drops a stored chunk before resuming. Also retain
+            # the window ending at the prompt's last complete chunk.
+            group_reachable_boundaries += (
+                round_down(req.num_prompt_tokens, group_config.tokens_per_chunk) - 1,
+            )
+
         # Use reachable_block_mask to filter unreachable chunks
         # (SWA/Mamba sparsity + retention interval).
         # reachable_block_mask operates in KV-block coordinates,
@@ -136,7 +145,7 @@ def select_store_candidates(
             start_chunk_idx=start_chunk_idx,
             end_chunk_idx=num_chunks,
             final_segment_end_chunk_idx=store_horizon_chunks,
-            reachable_boundaries=reachable_boundaries,
+            reachable_boundaries=group_reachable_boundaries,
         )
 
         prompt_horizon_block_mask: list[bool] | None = None
