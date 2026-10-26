@@ -478,6 +478,13 @@ selects disk slots and is checked against `disk_capacity_bytes`. Omitting
 `num_cpu_blocks` preserves automatic per-worker sizing. This option applies
 to `SimpleCPUOffloadConnector`, separately from `OffloadingConnector` above.
 
+## Chunked-local attention with `SimpleCPUOffloadConnector`
+
+For chunked-local attention, CPU cache reuse requires the GPU-local prefix to
+end at an attention-chunk boundary for every chunked-local cache group. Otherwise,
+the connector keeps the GPU prefix and recomputes the remaining tokens. Requests
+with no GPU-local prefix, or with a chunk-aligned prefix, can still reuse CPU KV.
+
 ## Further Reading
 
 - [vLLM blog: KV Offloading Connector](https://vllm.ai/blog/2026-01-08-kv-offloading-connector) — motivation, architecture (DMA-based async transfer), and benchmarks (TTFT and throughput).

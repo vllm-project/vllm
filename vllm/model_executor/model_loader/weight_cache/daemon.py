@@ -82,6 +82,7 @@ import gc
 import itertools
 import multiprocessing
 import os
+import select
 import socket
 from collections.abc import Callable
 
@@ -119,15 +120,19 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     send_msg,
     verify_peer_is_owner,
 )
+from vllm.model_executor.model_loader.weight_cache.seed import (
+    SeedConfig,
+    SeedTransport,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import (
-    build_warmup_runner,
     export_model_attrs,
     format_daemon_role,
     is_draft_model_cacheable,
 )
-from vllm.model_executor.warmup.kernel_warmup import flashinfer_autotune
+from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+    FlashInferWarmupCache,
+)
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -212,10 +217,13 @@ class WeightCacheDaemon:
         is_draft: bool = False,
         dp_rank: int = 0,
         pp_rank: int = 0,
+        seed_config: SeedConfig | None = None,
     ):
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
+        self.warmup_caches = [FlashInferWarmupCache()]
+        self.d2d = SeedTransport(self.warmup_caches, seed_config)
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
         self.dp_size = parallel_config.data_parallel_size
@@ -259,6 +267,8 @@ class WeightCacheDaemon:
         self.is_draft = is_draft
         self.role = format_daemon_role(is_draft)
         self.model: torch.nn.Module | None = None
+        # Engine watch connections, held open for the daemon's lifetime.
+        self._watchers: list[socket.socket] = []
         key_dp_size, key_dp_rank = get_engine_dp_placement(vllm_config, dp_rank)
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
@@ -277,39 +287,9 @@ class WeightCacheDaemon:
         )
 
     def warmup(self) -> None:
-        """Run the FlashInfer autotune pass against the cached model."""
-        vllm_config = self.vllm_config
-        # Mirrors the gate in the engine's kernel warmup.
-        if (
-            vllm_config.kernel_config.enable_flashinfer_autotune is False
-            or not has_flashinfer()
-            or not current_platform.has_device_capability(90)
-            or is_draft_model_cacheable(vllm_config.speculative_config)
-        ):
-            return
-        try:
-            current_platform.update_block_size_for_backend(vllm_config)
-            runner = build_warmup_runner(
-                vllm_config,
-                self.local_rank,
-                is_draft=self.is_draft,
-                model_config=self.model_config,
-            )
-            assert self.model is not None, "warmup ran before load_model"
-            runner.load_model(model=self.model)
-            # The V2 runner requires skip_attn when no KV cache exists
-            flashinfer_autotune(runner, skip_attn=vllm_config.use_v2_model_runner)
-            logger.info(
-                "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
-                "configs are in the on-disk autotune cache",
-                self.role,
-                self.global_rank,
-            )
-        finally:
-            # Free the runner and the dummy-run activations; the daemon's
-            # weights are untouched.
-            gc.collect()
-            torch.accelerator.empty_cache()
+        """Run each warmup cache's pass (adopting remote caches via D2D)."""
+        for cache in self.warmup_caches:
+            cache.warmup(self, self.d2d)
 
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.local_rank)
@@ -342,11 +322,11 @@ class WeightCacheDaemon:
         )
 
     def release_distributed(self) -> None:
-        """Tear down the daemon's process groups after loading and warmup.
+        """Release process groups and BLAS workspaces after loading and warmup.
 
         Serving only exports CUDA IPC handles, so the communicators (NCCL,
-        custom all-reduce and FlashInfer workspaces) would otherwise pin GPU
-        memory outside the engine's budget for the daemon's lifetime.
+        custom all-reduce and FlashInfer workspaces) and cached BLAS scratch
+        would otherwise pin GPU memory for the daemon's lifetime.
         """
         free_before, _ = torch.accelerator.get_memory_info()
         # No rank may tear down a communicator while a peer is still in a
@@ -357,10 +337,17 @@ class WeightCacheDaemon:
         destroy_model_parallel()
         destroy_distributed_environment()
         gc.collect()
+        if current_platform.is_cuda():
+            # ATen caches these separately from the model's exported storages.
+            clear_workspaces = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+            if clear_workspaces is not None:
+                clear_workspaces()
+            else:
+                logger.debug("PyTorch does not expose BLAS workspace cleanup")
         torch.accelerator.empty_cache()
         free_after, _ = torch.accelerator.get_memory_info()
         logger.info(
-            "Weight cache %s daemon rank %d released its process groups (%s GiB freed)",
+            "Weight cache %s daemon rank %d released startup resources (%s GiB freed)",
             self.role,
             self.global_rank,
             format_gib(free_after - free_before),
@@ -418,6 +405,7 @@ class WeightCacheDaemon:
         server.bind(socket_path)
         os.chmod(socket_path, 0o600)
         server.listen()
+        self.d2d.start_listener()
         logger.info(
             "Weight cache %s daemon rank %d serving on %s",
             self.role,
@@ -445,6 +433,9 @@ class WeightCacheDaemon:
                             send_msg(conn, {"status": "error", "message": str(e)})
         finally:
             server.close()
+            for watcher in self._watchers:
+                watcher.close()
+            self.d2d.close()
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
             os.close(lock_fd)
@@ -490,6 +481,8 @@ class WeightCacheDaemon:
             )
         elif cmd == "release":
             self._handle_release(conn)
+        elif cmd == "watch":
+            self._handle_watch(conn)
         else:
             send_msg(conn, {"status": "error", "message": f"Unknown command {cmd!r}"})
 
@@ -532,6 +525,30 @@ class WeightCacheDaemon:
             len(aliases),
         )
 
+    def _handle_watch(self, conn: socket.socket) -> None:
+        """Hold the connection open until this daemon exits.
+
+        Zero-copy engines keep serving from the mapped weights after the
+        daemon exits; the closed connection tells them their daemon is gone.
+        """
+        self._prune_watchers()
+        # serve_forever closes conn after the request; keep a duplicate.
+        self._watchers.append(conn.dup())
+        send_msg(conn, {"status": "ok"})
+
+    def _prune_watchers(self) -> None:
+        """Close the watch connections of engines that have exited."""
+        alive = []
+        for watcher in self._watchers:
+            # Engines never write after the request, so a readable watcher
+            # has been closed by its engine.
+            readable, _, _ = select.select([watcher], [], [], 0)
+            if readable:
+                watcher.close()
+            else:
+                alive.append(watcher)
+        self._watchers = alive
+
     def _handle_release(self, conn: socket.socket) -> None:
         self.model = None
         torch.accelerator.empty_cache()
@@ -553,6 +570,7 @@ def _run_daemon(
     is_draft: bool = False,
     dp_rank: int = 0,
     pp_rank: int = 0,
+    seed_config: SeedConfig | None = None,
 ) -> None:
     # Spawned daemons start with logging unconfigured, like engine workers.
     if logging_config := getattr(vllm_config, "logging_config", None):
@@ -566,6 +584,7 @@ def _run_daemon(
         is_draft,
         dp_rank,
         pp_rank,
+        seed_config=seed_config,
     )
     daemon.load_model()
     daemon.warmup()
