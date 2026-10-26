@@ -284,6 +284,11 @@ class SharedOffloadRegion:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
 
+    @property
+    def created_file(self) -> bool:
+        """Whether this process created the backing files and still names them."""
+        return self._creator
+
     def iter_worker_slot_ranges(self) -> Iterator[tuple[int, int]]:
         """Yield this worker's slots as page-aligned (offset, length) ranges."""
         assert self.rank is not None

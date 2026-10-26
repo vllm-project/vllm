@@ -65,6 +65,16 @@ class OffloadingParallelConfig:
     # under any topology; for the canonical layout, the canonical page itself
     # is topology-free.
     is_parallelism_agnostic: bool
+    # Workers of this engine on each node; world_size when unknown.
+    local_world_size: int | None = None
+
+    @property
+    def spans_nodes(self) -> bool:
+        """Whether the executor reports workers on several nodes."""
+        return (
+            self.local_world_size is not None
+            and self.local_world_size < self.world_size
+        )
 
 
 @dataclass(frozen=True)

@@ -767,32 +767,9 @@ def test_build_metric_definitions_returns_counter_at_threshold():
     assert CPUOffloadingMetrics.STORES_SKIPPED in metrics
 
 
-@pytest.mark.parametrize(
-    ("secondary_tiers", "spanning_group", "rejected"),
-    [
-        ([], "tp", False),
-        ([{"type": "example"}], None, False),
-        ([{"type": "example"}], "tp", True),
-        ([{"type": "example"}], "pp", True),
-        ([{"type": "example"}], "pcp", True),
-    ],
-)
-def test_tiering_spec_rejects_secondary_tiers_across_nodes(
-    monkeypatch, secondary_tiers, spanning_group, rejected
-):
+def _fake_node_groups(monkeypatch, spanning_group: str | None) -> list[str]:
+    """Fake the TP, PP and PCP groups; ``spanning_group`` spans two nodes."""
     import vllm.distributed.parallel_state as parallel_state
-    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
-
-    spec = _create_spec(
-        spec_name="TieringOffloadingSpec",
-        worker_kv_bytes_per_block=4096,
-        rank=1,
-        world_size=4,
-        tp_size=2,
-        pp_size=2,
-        extra_config={"secondary_tiers": secondary_tiers},
-    )
-    assert isinstance(spec, TieringOffloadingSpec)
 
     groups = {
         name: MagicMock(world_size=2, cpu_group=name) for name in ("tp", "pp", "pcp")
@@ -807,18 +784,101 @@ def test_tiering_spec_rejects_secondary_tiers_across_nodes(
         return [True, group != spanning_group]
 
     monkeypatch.setattr(parallel_state, "in_the_same_node_as", same_node_as)
+    return queried
+
+
+@pytest.mark.parametrize(
+    ("secondary_tiers", "spanning_group", "mirrored"),
+    [
+        ([], "tp", False),
+        ([{"type": "example"}], None, False),
+        ([{"type": "example"}], "tp", True),
+        ([{"type": "example"}], "pp", True),
+        ([{"type": "example"}], "pcp", True),
+    ],
+)
+def test_tiering_spec_mirrors_secondary_tiers_across_nodes(
+    monkeypatch, secondary_tiers, spanning_group, mirrored
+):
+    """Secondary tiers on an engine that spans nodes get a region mirror."""
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        rank=1,
+        world_size=4,
+        tp_size=2,
+        pp_size=2,
+        extra_config={"secondary_tiers": secondary_tiers},
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+    queried = _fake_node_groups(monkeypatch, spanning_group)
+    topology = MagicMock(rank=1, on_head=True)
+    monkeypatch.setattr(tiering_spec_module, "mirror_topology", lambda: topology)
+    monkeypatch.setattr(
+        tiering_spec_module, "gather_construction_errors", lambda *args: None
+    )
+    attach = MagicMock()
+    monkeypatch.setattr(tiering_spec_module, "attach_region_mirror", attach)
     worker_ctor = MagicMock()
     monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", MagicMock())
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", worker_ctor)
 
-    if rejected:
-        with pytest.raises(NotImplementedError, match="span several nodes"):
-            spec.create_worker(MagicMock())
-        worker_ctor.assert_not_called()
+    worker = spec.create_worker(MagicMock())
+
+    worker_ctor.assert_called_once()
+    if mirrored:
+        assert worker is attach.return_value
+        assert attach.call_args.args[0] is worker_ctor.return_value
+        assert attach.call_args.args[4] is topology
     else:
-        spec.create_worker(MagicMock())
-        worker_ctor.assert_called_once()
+        assert worker is worker_ctor.return_value
+        attach.assert_not_called()
     # Without secondary tiers each node's region serves its own workers. With
     # them every group is queried, even after one spans nodes, since each
     # query is a collective that the group's other ranks also join.
     assert sorted(queried) == (["pcp", "pp", "tp"] if secondary_tiers else [])
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ({"data_parallel_size": 2}, NotImplementedError),
+        ({"replicated_layout": True}, ValueError),
+        ({"secondary_tiers": [{"type": "kvcr"}]}, ValueError),
+    ],
+)
+def test_tiering_spec_rejects_unmirrorable_engines_across_nodes(
+    monkeypatch, change, error
+):
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    kwargs: dict[str, Any] = dict(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        rank=1,
+        world_size=2,
+        extra_config={"secondary_tiers": [{"type": "example"}]},
+    )
+    if "secondary_tiers" in change:
+        kwargs["extra_config"] = change
+    else:
+        kwargs.update(change)
+    if "kvcr" in str(change):
+        # KVCRSecondaryTierManager needs the kvcr package; match it by name.
+        kvcr_cls = type("KVCRSecondaryTierManager", (), {})
+        kvcr_cls.__module__ = "vllm.v1.kv_offload.tiering.kvcr.manager"
+        monkeypatch.setattr(
+            tiering_spec_module.SecondaryTierFactory,
+            "get_tier_class",
+            classmethod(lambda cls, config: kvcr_cls),
+        )
+    spec = _create_spec(**kwargs)
+    _fake_node_groups(monkeypatch, "tp")
+    monkeypatch.setattr(tiering_spec_module, "mirror_topology", MagicMock())
+    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", MagicMock())
+    monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", MagicMock())
+
+    with pytest.raises(error):
+        spec.create_worker(MagicMock())

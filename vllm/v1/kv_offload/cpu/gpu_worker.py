@@ -572,9 +572,17 @@ class SingleDirectionOffloadingHandler:
         writer_mask = cpu_page_ids % mapping.num_writers == mapping.writer_index
         return block_bases_src[writer_mask], block_bases_dst[writer_mask]
 
-    def transfer_async(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
-    ) -> bool:
+    def _fill_ops(
+        self,
+        src_spec: LoadStoreSpec,
+        dst_spec: LoadStoreSpec,
+        all_src: np.ndarray,
+        all_dst: np.ndarray,
+        all_sizes: np.ndarray,
+    ) -> tuple[int, int]:
+        """Fill the copy descriptors of one transfer.
+
+        Returns (number of descriptors filled, bytes they copy)."""
         assert isinstance(src_spec, BlockIDsLoadStoreSpec)
         assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
 
@@ -614,24 +622,6 @@ class SingleDirectionOffloadingHandler:
         # extract block indices from the GPU spec
         block_indices = gpu_spec.block_indices
         assert len(block_indices) == len(self.layer_refs_per_group)
-
-        num_copy_ops = self._estimate_max_copy_ops(group_sizes)
-
-        # reuse a pooled buffer set, growing it if this transfer needs more room
-        batch_src, batch_dst, batch_sizes = (
-            self._buffer_pool.pop()
-            if self._buffer_pool
-            else _new_descriptor_buffers(num_copy_ops)
-        )
-        if batch_src.numel() < num_copy_ops:
-            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
-
-        src = batch_src[:num_copy_ops]
-        dst = batch_dst[:num_copy_ops]
-        sizes = batch_sizes[:num_copy_ops]
-        all_src = src.numpy()
-        all_dst = dst.numpy()
-        all_sizes = sizes.numpy()
 
         src_offset = 0
         dst_offset = 0
@@ -676,6 +666,46 @@ class SingleDirectionOffloadingHandler:
 
         assert src_offset == num_src_blocks
         assert dst_offset == num_dst_blocks
+        assert op_idx <= len(all_sizes)
+        return op_idx, num_transfer_bytes
+
+    def _num_copy_ops(self, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec) -> int:
+        gpu_spec = src_spec if self.gpu_to_cpu else dst_spec
+        assert isinstance(gpu_spec, GPULoadStoreSpec)
+        return self._estimate_max_copy_ops(gpu_spec.group_sizes)
+
+    def copy_ops(
+        self, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The (source address, destination address, size) of every copy one
+        transfer between these specs makes, without running it."""
+        num_copy_ops = self._num_copy_ops(src_spec, dst_spec)
+        all_src = np.empty(num_copy_ops, dtype=np.int64)
+        all_dst = np.empty(num_copy_ops, dtype=np.int64)
+        all_sizes = np.empty(num_copy_ops, dtype=np.int64)
+        op_idx, _ = self._fill_ops(src_spec, dst_spec, all_src, all_dst, all_sizes)
+        return all_src[:op_idx], all_dst[:op_idx], all_sizes[:op_idx]
+
+    def transfer_async(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        num_copy_ops = self._num_copy_ops(src_spec, dst_spec)
+
+        # reuse a pooled buffer set, growing it if this transfer needs more room
+        batch_src, batch_dst, batch_sizes = (
+            self._buffer_pool.pop()
+            if self._buffer_pool
+            else _new_descriptor_buffers(num_copy_ops)
+        )
+        if batch_src.numel() < num_copy_ops:
+            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
+
+        src = batch_src[:num_copy_ops]
+        dst = batch_dst[:num_copy_ops]
+        sizes = batch_sizes[:num_copy_ops]
+        op_idx, num_transfer_bytes = self._fill_ops(
+            src_spec, dst_spec, src.numpy(), dst.numpy(), sizes.numpy()
+        )
         # Writer rotation may skip non-writer blocks, leaving op_idx below
         # the sized upper bound
         assert op_idx <= num_copy_ops
@@ -935,10 +965,30 @@ class CPUOffloadingWorker(OffloadingWorker):
             canonical_layout=canonical_layout,
             host_memory_is_pinned=host_memory_is_pinned,
         )
+        self._gpu_tensors = gpu_tensors
         self._store_handler = make_handler(gpu_to_cpu=True)
         self._load_handler = make_handler(gpu_to_cpu=False)
         # Own stream, so expedited loads do not queue behind regular loads.
         self._expedited_load_handler = make_handler(gpu_to_cpu=False)
+
+    def gpu_memory_ranges(self) -> list[tuple[int, int, int]]:
+        """(address, bytes, device index) of every GPU KV cache tensor."""
+        return [
+            (t.data_ptr(), t.numel() * t.element_size(), t.device.index or 0)
+            for t in self._gpu_tensors
+        ]
+
+    def store_copy_ops(
+        self, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The copies a store makes, as (GPU address, CPU address, size)."""
+        return self._store_handler.copy_ops(src_spec, dst_spec)
+
+    def load_copy_ops(
+        self, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The copies a load makes, as (CPU address, GPU address, size)."""
+        return self._load_handler.copy_ops(src_spec, dst_spec)
 
     def submit_store(
         self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
