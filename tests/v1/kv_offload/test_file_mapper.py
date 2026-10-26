@@ -24,13 +24,12 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
     config = OffloadingConfig(
         groups=tuple(
             OffloadingGroupConfig(
-                tokens_per_block=tokens_per_block,
-                layer_names=(layer_name,),
+                tokens_per_block=g[0],
+                layer_names=(g[1],),
                 group_id=group_id,
+                **({"tokens_per_state": g[2]} if len(g) > 2 else {}),
             )
-            for group_id, (tokens_per_block, layer_name) in enumerate(
-                kwargs.get("groups", ())
-            )
+            for group_id, g in enumerate(kwargs.get("groups", ()))
         ),
         worker_kv_bytes_per_block=0,
         enable_kv_cache_events=False,
@@ -326,3 +325,52 @@ def test_replicated_layout_run_config_tp_invariant():
     tp2 = make_mapper_from_offloading_spec(tp_size=2, world_size=2, rank=0, **shared)
     tp4 = make_mapper_from_offloading_spec(tp_size=4, world_size=4, rank=2, **shared)
     assert tp2.get_run_config() == tp4.get_run_config()
+
+
+def test_tokens_per_state_omitted_when_uncompressed():
+    # Default (1,) must not appear in kv_cache_groups (no hash/base_path change
+    # for uncompressed deployments).
+    fm = make_mapper_from_offloading_spec(groups=((16, "layer0"),))
+    assert fm.fields["kv_cache_groups"] == [
+        {"tokens_per_block": 16, "layer_names": ["layer0"]}
+    ]
+
+
+def test_tokens_per_state_included_when_compressed():
+    fm = make_mapper_from_offloading_spec(groups=((16, "mla_layer", (2,)),))
+    assert fm.fields["kv_cache_groups"] == [
+        {
+            "tokens_per_block": 16,
+            "tokens_per_state": ["2"],
+            "layer_names": ["mla_layer"],
+        }
+    ]
+
+
+def test_tokens_per_state_forks_base_path():
+    uncompressed = make_mapper_from_offloading_spec(groups=((16, "mla_layer"),))
+    compressed = make_mapper_from_offloading_spec(groups=((16, "mla_layer", (2,)),))
+    different_ratio = make_mapper_from_offloading_spec(
+        groups=((16, "mla_layer", (4,)),)
+    )
+    assert uncompressed.base_path != compressed.base_path
+    assert compressed.base_path != different_ratio.base_path
+
+
+def test_tokens_per_state_fraction_stringified():
+    from fractions import Fraction
+
+    fm = make_mapper_from_offloading_spec(
+        groups=((16, "whisper_layer", (Fraction(1, 2),)),)
+    )
+    assert fm.fields["kv_cache_groups"][0]["tokens_per_state"] == ["1/2"]
+
+
+def test_tokens_per_state_mixed_ratio_within_group():
+    # Mixed-ratio UniformTypeKVCacheSpecs group: both values present, order
+    # matters since FileMapper treats the list positionally.
+    fm_a = make_mapper_from_offloading_spec(groups=((16, "mla_group", (2, 4)),))
+    fm_b = make_mapper_from_offloading_spec(groups=((16, "mla_group", (4, 2)),))
+    assert fm_a.fields["kv_cache_groups"][0]["tokens_per_state"] == ["2", "4"]
+    assert fm_b.fields["kv_cache_groups"][0]["tokens_per_state"] == ["4", "2"]
+    assert fm_a.base_path != fm_b.base_path  # order-sensitive

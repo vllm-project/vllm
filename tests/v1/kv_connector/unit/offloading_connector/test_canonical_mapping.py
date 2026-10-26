@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from fractions import Fraction
 from unittest.mock import MagicMock
 
 import pytest
@@ -220,6 +221,18 @@ def test_mla_replicas_rotate_writer():
     assert (rank0.is_writer(1), rank1.is_writer(1)) == (False, True)
 
 
+def test_compressed_mla_replicas_rotate_writer():
+    spec = _mla_spec(tokens_per_state=2)
+    rank0 = _mapping(spec, None, _ctx(rank=0, tp=2))
+    rank1 = _mapping(spec, None, _ctx(rank=1, tp=2))
+    # num_states = 4 // 2 = 2; page = 1 * 2 * 64 = 128B; row = 128 // 2 = 64B
+    assert rank0.canonical_page_size_bytes == 128
+    assert _triples(rank0.runs) == [(0, 0, 128)]
+    assert rank1.runs == rank0.runs
+    assert (rank0.is_writer(0), rank1.is_writer(0)) == (True, False)
+    assert (rank0.is_writer(1), rank1.is_writer(1)) == (False, True)
+
+
 # ---------------------------------------------------------------------------
 # DCP / PCP token sharding
 # ---------------------------------------------------------------------------
@@ -256,6 +269,19 @@ def test_mla_dcp_shards_latent_tokens():
     assert _triples(rank0.runs) == [(o, 2 * o, 64) for o in (0, 64, 128, 192)]
     assert _triples(rank1.runs) == [(o, 2 * o + 64, 64) for o in (0, 64, 128, 192)]
     _verify_tiling("mla-dcp", [rank0, rank1])
+
+
+def test_compressed_mla_dcp_shards_states():
+    spec = _mla_spec(tokens_per_state=2)
+    ctx = lambda rank: _ctx(rank, tp=2, dcp=2)  # noqa: E731
+    rank0 = _mapping(spec, None, ctx(0))
+    rank1 = _mapping(spec, None, ctx(1))
+    # cp_size=2, page=128 -> canonical page is 256B; only 2 states to shard
+    # (not 4 tokens), so each rank gets one 64B state region.
+    assert rank0.canonical_page_size_bytes == 256
+    assert _triples(rank0.runs) == [(o, 2 * o, 64) for o in (0, 64)]
+    assert _triples(rank1.runs) == [(o, 2 * o + 64, 64) for o in (0, 64)]
+    _verify_tiling("compressed-mla-dcp", [rank0, rank1])
 
 
 def test_pcp_tokens_and_tp_heads_compose():
@@ -359,6 +385,15 @@ def test_replica_rotation_round_trip():
         assert _store_all(mappings, pages, 256, block_id) == reference
 
 
+def test_compressed_mla_replica_rotation_round_trip():
+    spec = _mla_spec(tokens_per_state=2)
+    mappings = [_mapping(spec, None, _ctx(rank, tp=2)) for rank in range(2)]
+    reference = bytes((5 + 11 * i) % 256 for i in range(128))
+    pages = [_load_one(m, reference) for m in mappings]
+    for block_id in (0, 1):
+        assert _store_all(mappings, pages, 128, block_id) == reference
+
+
 # ---------------------------------------------------------------------------
 # Fail-closed gates
 # ---------------------------------------------------------------------------
@@ -383,9 +418,18 @@ def test_fail_closed_cases():
     # Per-token-head scales are packed with the data
     quant_spec = _full_spec(kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD)
     assert _try_mapping(quant_spec, _split_nhd_cache(quant_spec), _ctx(0, tp=4)) is None
-    # Compressed MLA slots are not 1:1 with tokens
+    # Block size must divide tokens_per_state
     assert (
-        _try_mapping(_mla_spec(tokens_per_state=2), None, _ctx(0, tp=2, dcp=2)) is None
+        _try_mapping(_mla_spec(tokens_per_state=2), None, _ctx(0, tp=2, dcp=2))
+        is not None
+    )
+    assert (
+        _try_mapping(_mla_spec(tokens_per_state=3), None, _ctx(0, tp=2, dcp=2)) is None
+    )
+    # Fractional tokens_per_state (<1) is the Whisper block-pooling case
+    assert (
+        _try_mapping(_mla_spec(tokens_per_state=Fraction(1, 2)), None, _ctx(0, tp=2))
+        is None
     )
     # Unrecognized physical layouts
     swapped = torch.zeros(
@@ -463,6 +507,18 @@ def test_derive_mixed_model_with_dcp():
         mappings["quant"].canonical_page_size_bytes
         == 4 * quant_spec.unpadded_page_size_bytes
     )
+
+
+def test_derive_includes_compressed_mla_layer():
+    compressed_mla_spec = _mla_spec(tokens_per_state=2)
+    kv_cache_config = _kv_cache_config(
+        [KVCacheGroupSpec(layer_names=["mla"], kv_cache_spec=compressed_mla_spec)]
+    )
+    mappings = derive_canonical_mappings(
+        _vllm_config(tp=2, dcp=1, total_kv_heads=2), kv_cache_config, {}
+    )
+    assert set(mappings) == {"mla"}
+    assert mappings["mla"].canonical_page_size_bytes == 128
 
 
 def test_derive_refuses_foreign_worker_groups():

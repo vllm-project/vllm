@@ -206,8 +206,9 @@ def build_offloading_config(
             if type(spec) is MLAAttentionSpec:
                 return (
                     type(spec.tokens_per_state) is int
+                    and spec.tokens_per_state > 0
                     and spec.block_size % spec.tokens_per_state == 0
-                    and spec.real_page_size_bytes % spec.block_size == 0
+                    and spec.real_page_size_bytes % spec.num_states == 0
                 )
             if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
                 return False
