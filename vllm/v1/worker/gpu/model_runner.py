@@ -717,6 +717,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             additional_attn_cg_support=additional_attn_cg_support,
             copy_admitted_drafts_to_host=self.batch_sharder is not None,
         )
+        if (
+            self.adaptive_verification is not None
+            and getattr(self.speculator, "dyn_draft_mode", None) == "cost"
+        ):
+            self.adaptive_verification.draft_stop_threshold = (
+                self.speculator.dyn_draft_threshold
+            )
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
@@ -1667,6 +1674,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.structured_output_request_ids,
                 grammar_output.num_acceptable_drafts,
             )
+        if (
+            input_batch.num_draft_tokens > 0
+            and getattr(self.speculator, "dyn_draft_mode", None) is not None
+        ):
+            invalid_drafts = mark_skipped_drafts(
+                invalid_drafts,
+                input_batch.expanded_local_pos,
+                self.speculator.num_drafted_per_req[input_batch.expanded_idx_mapping],
+            )
 
         sampler_output: SamplerOutput | None
         if input_batch.num_reqs == 0:
@@ -2283,8 +2299,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             assert self.sampler is not None
             if isinstance(self.speculator, DraftModelSpeculator):
+                num_rejected_drafted = num_rejected
+                if (
+                    input_batch.num_draft_tokens > 0
+                    and getattr(self.speculator, "dyn_draft_mode", None) is not None
+                ):
+                    num_rejected_drafted = rejections_of_drafted(
+                        num_rejected,
+                        input_batch.cu_num_logits,
+                        self.model_state.num_new_sampled_tokens_per_step,
+                        self.speculator.num_drafted_per_req[input_batch.idx_mapping],
+                    )
                 self.speculator.observe_verification(
-                    input_batch.idx_mapping, num_sampled, num_rejected
+                    input_batch.idx_mapping, num_sampled, num_rejected_drafted
                 )
             spec_hidden_states = get_drafter_hidden_states(
                 self.model, draft_hidden_states
@@ -2313,6 +2340,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if num_spec_tokens < self.num_speculative_steps:
                 draft_tokens[:, num_spec_tokens:] = -1
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            if getattr(self.speculator, "dyn_draft_mode", None) is not None:
+                self.speculator.num_drafted_per_req[input_batch.idx_mapping] = (
+                    self.speculator.num_drafted
+                )
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
@@ -2507,3 +2538,34 @@ def sort_batch_req_ids(
         num,
     )
     return sorted(num_tokens_per_req, key=key)
+
+
+def mark_skipped_drafts(
+    invalid_drafts: torch.Tensor | None,
+    expanded_local_pos: torch.Tensor,
+    row_num_drafted: torch.Tensor,
+) -> torch.Tensor:
+    """Adds the logit rows whose draft the drafter skipped to `invalid_drafts`.
+
+    Draft i sits at local position i + 1 (as in grammar_invalid_drafts), and a
+    drafter that chose its draft count on the GPU produced only drafts below
+    `row_num_drafted`. Adaptive verification still admits as many drafts as the
+    CPU budgeted, which the CPU-side batch layout depends on; the rejection
+    sampler treats the skipped ones as placeholders, so verification stops at the
+    first and that position is sampled from the target distribution.
+    """
+    skipped = expanded_local_pos > row_num_drafted
+    return skipped if invalid_drafts is None else invalid_drafts | skipped
+
+
+def rejections_of_drafted(
+    num_rejected: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_bonus_tokens: int,
+    req_num_drafted: torch.Tensor,
+) -> torch.Tensor:
+    """`num_rejected` without the skipped drafts verified as placeholders, so the
+    acceptance estimator grades only positions the drafter produced."""
+    num_verified = cu_num_logits[1:] - cu_num_logits[:-1] - num_bonus_tokens
+    num_skipped = (num_verified - req_num_drafted).clamp_min(0)
+    return (num_rejected - num_skipped).clamp_min(0)
