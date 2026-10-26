@@ -316,9 +316,8 @@ class ShardedRDTWeightTransferEngine(
             raise ValueError(
                 f"The 'sharded_rdt' weight transfer backend requires "
                 f"distributed_executor_backend='ray', got {backend!r}. Pass "
-                f"--distributed-executor-backend ray (and keep "
-                f"VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1, the default, so the "
-                f"workers are RayExecutorV2 actors with tensor transport)."
+                f"--distributed-executor-backend ray so the workers are "
+                f"RayExecutorV2 actors with tensor transport."
             )
         # Ownership table, routing rules, and (once bound) every producer's
         # handle — pulls go to one owner per chunk, but free_group fans out to
@@ -349,7 +348,7 @@ class ShardedRDTWeightTransferEngine(
         # measurably slows the sync.
         self._ring_depth = 1
         self._dest_buffers: list[dict[torch.dtype, torch.Tensor]] = [{}]
-        self._slot_read_done: list[Any] = []  # one torch.cuda.Event per slot
+        self._slot_read_done: list[Any] = []  # one torch.Event per slot
         # Generation counters guarding the events (see _ensure_proc_worker).
         self._slot_queued: list[int] = []
         self._slot_done: list[int] = []
@@ -983,7 +982,7 @@ class ShardedRDTWeightTransferEngine(
         import queue
         import threading
 
-        self._slot_read_done = [torch.cuda.Event() for _ in range(self._ring_depth)]
+        self._slot_read_done = [torch.Event() for _ in range(self._ring_depth)]
         # Generation handshake for the events above: the RPC thread counts items
         # queued per slot, this thread counts records, and a pull may synchronize()
         # only once done[slot] has caught up with queued[slot]. Without it the
@@ -1015,7 +1014,7 @@ class ShardedRDTWeightTransferEngine(
         raises is recorded in ``_proc_error`` and re-raised on the RPC thread /
         at drain, so a failed sync fails loudly rather than corrupting silently.
         """
-        torch.cuda.set_device(self.device)
+        torch.accelerator.set_device_index(self.device.index)
         q = self._proc_queue
         assert q is not None
         while True:
@@ -1312,7 +1311,7 @@ class ShardedRDTWeightTransferEngine(
         results = item.results
         chunk = item.chunk
         with (
-            torch.cuda.device(self.device),
+            torch.accelerator.device_index(self.device.index),
             torch.cuda.stream(self._proc_stream),
             torch.device(self.device),
         ):
@@ -1357,14 +1356,14 @@ class ShardedRDTWeightTransferEngine(
             # Running it in order here stalls the RPC thread's slot handshake by
             # ~0.5-0.75s/iter, since every group's quant delays the next publish.
             if chunk.quant:
-                ready = torch.cuda.Event()
+                ready = torch.Event()
                 ready.record(self._proc_stream)
                 if self._quant_queue is None:
                     self._run_quant(chunk.quant, ready)
                 else:
                     self._quant_queue.put((chunk.quant, ready))
 
-    def _run_quant(self, layers: "list[Any]", ready: "torch.cuda.Event") -> None:
+    def _run_quant(self, layers: "list[Any]", ready: "torch.Event") -> None:
         """Quant/kernel-copy/reset the given COMPLETED leaf modules, exactly as
         _layerwise_process. Runs on the quant thread's own stream, ordered after
         the modules' scatters via ``ready``; touches only the scattered params
@@ -1382,7 +1381,7 @@ class ShardedRDTWeightTransferEngine(
         stream = self._quant_stream or self._proc_stream
         assert stream is not None  # created in _ensure_proc_worker before use
         with (
-            torch.cuda.device(self.device),
+            torch.accelerator.device_index(self.device.index),
             torch.cuda.stream(stream),
             torch.device(self.device),
         ):
@@ -1404,7 +1403,7 @@ class ShardedRDTWeightTransferEngine(
     def _quant_worker_loop(self) -> None:
         """Dedicated quant thread: drains (completed_modules, scatter-done event)
         batches. Errors surface via _proc_error like the scatter thread's."""
-        torch.cuda.set_device(self.device)
+        torch.accelerator.set_device_index(self.device.index)
         q = self._quant_queue
         assert q is not None
         while True:

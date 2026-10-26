@@ -14,6 +14,7 @@ from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 
 # The offloaded block size must stay a whole number of GPU blocks.
 CPU_BLOCK_SIZES: int
@@ -125,7 +126,7 @@ class MockSubscriber:
         self.sub.close()
 
 
-def _wait_for_prefix_cache_reset(llm: LLM) -> None:
+def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> None:
     """Wait for async offload transfers to finish so prefix cache can reset.
 
     The GPU-to-CPU offload runs on a CUDA stream asynchronously. While blocks
@@ -136,7 +137,7 @@ def _wait_for_prefix_cache_reset(llm: LLM) -> None:
     """
     _dummy_params = SamplingParams(max_tokens=1)
     deadline = time.monotonic() + _RESET_CACHE_TIMEOUT
-    while not llm.reset_prefix_cache():
+    while not llm.reset_prefix_cache(reset_connector=reset_connector):
         if time.monotonic() > deadline:
             raise TimeoutError(
                 "reset_prefix_cache did not succeed within "
@@ -315,6 +316,80 @@ def test_cpu_offloading(
     finally:
         if subscriber is not None:
             subscriber.close()
+        del llm
+
+
+def _sliding_window_partial_chunk_test(llm: LLM) -> None:
+    vllm_config = llm.llm_engine.vllm_config
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    assert extra_config["store_threshold"] == 2
+    blocks_per_chunk = extra_config["blocks_per_chunk"]
+    block_size = vllm_config.cache_config.block_size
+    model_config = vllm_config.model_config
+    window = model_config.get_sliding_window()
+    assert window is not None
+    window_blocks = cdiv(window - 1, block_size)
+    assert window_blocks % blocks_per_chunk == 0
+    # Leaves blocks_per_chunk - 1 null sliding-window blocks in B's chunk 0.
+    hit_blocks = window_blocks + blocks_per_chunk - 1
+    vocab_size = model_config.get_vocab_size()
+
+    def token_ids(n: int, seed: int) -> list[int]:
+        return [10 + (seed + 37 * i) % (vocab_size - 10) for i in range(n)]
+
+    prompt_a = token_ids(hit_blocks * block_size + 4, seed=0)
+    prompt_b = prompt_a + [prompt_a[0]]
+    prompt_c = prompt_a[: window_blocks * block_size] + token_ids(40, seed=1)
+    one_token = SamplingParams(max_tokens=1)
+    greedy = SamplingParams(max_tokens=8, temperature=0.0, logprobs=5)
+
+    llm.generate(TokensPrompt(prompt_token_ids=prompt_a), one_token, use_tqdm=False)
+    [out_b] = llm.generate(
+        TokensPrompt(prompt_token_ids=prompt_b), one_token, use_tqdm=False
+    )
+    assert out_b.num_cached_tokens == hit_blocks * block_size
+    _wait_for_prefix_cache_reset(llm)
+    [out_c] = llm.generate(
+        TokensPrompt(prompt_token_ids=prompt_c), greedy, use_tqdm=False
+    )
+
+    _wait_for_prefix_cache_reset(llm, reset_connector=True)
+    [cold_c] = llm.generate(
+        TokensPrompt(prompt_token_ids=prompt_c), greedy, use_tqdm=False
+    )
+
+    assert out_c.outputs[0].token_ids == cold_c.outputs[0].token_ids
+    logprobs = out_c.outputs[0].logprobs
+    cold_logprobs = cold_c.outputs[0].logprobs
+    assert logprobs is not None and cold_logprobs is not None
+    assert logprobs[0].keys() == cold_logprobs[0].keys()
+    for token_id, cold in cold_logprobs[0].items():
+        assert logprobs[0][token_id].logprob == pytest.approx(cold.logprob, abs=1e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_cpu_offloading_sliding_window_partial_chunk() -> None:
+    """Tests offloaded chunks that span null sliding-window blocks."""
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 500 << 20,
+            "blocks_per_chunk": 8,
+            "store_threshold": 2,
+        },
+    )
+    llm = LLM(
+        model="google/gemma-3-1b-it",
+        max_model_len=2048,
+        gpu_memory_utilization=0.5,
+        kv_transfer_config=kv_transfer_config,
+        disable_hybrid_kv_cache_manager=False,
+        enable_prefix_caching=True,
+    )
+    try:
+        _sliding_window_partial_chunk_test(llm)
+    finally:
         del llm
 
 
@@ -583,7 +658,6 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
         kv_transfer_config=kv_transfer_config,
         language_model_only=True,
         enable_prefix_caching=True,
-        mamba_cache_mode="align",
         # Use lossless state storage so this exact-equality regression isolates
         # offload boundary selection from low-precision Mamba checkpointing.
         mamba_cache_dtype="float32",

@@ -78,8 +78,9 @@ torch::Tensor get_scheduler_metadata(
   input.causal = causal;
   input.isa = isa;
   input.enable_kv_split = enable_kv_split;
-  input.dynamic_causal =
-      dynamic_causal.has_value() ? dynamic_causal->data_ptr<bool>() : nullptr;
+  input.dynamic_causal = dynamic_causal.has_value()
+                             ? dynamic_causal->data_ptr<int32_t>()
+                             : nullptr;
 
   const int64_t kv_cache_idx =
       static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
@@ -256,8 +257,9 @@ void cpu_attention_with_kv_cache(
     input.s_aux = nullptr;
     input.s_aux_is_bf16 = false;
   }
-  input.dynamic_causal =
-      dynamic_causal.has_value() ? dynamic_causal->data_ptr<bool>() : nullptr;
+  input.dynamic_causal = dynamic_causal.has_value()
+                             ? dynamic_causal->data_ptr<int32_t>()
+                             : nullptr;
   input.scale = scale;
   input.causal = causal;
   input.sliding_window_size = sliding_window;

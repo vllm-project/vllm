@@ -33,6 +33,9 @@ void wvSplitKQBlockScale(const at::Tensor& weight, const at::Tensor& activation,
                          const at::Tensor& weight_scale, at::Tensor& out,
                          const int64_t CuCount);
 
+torch::Tensor mxfp4_w4a8_gemv_rdna3(const at::Tensor& a, const at::Tensor& b_q,
+                                    const at::Tensor& b_scale);
+
 torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
                               bool use_v2_format);
@@ -59,4 +62,4 @@ void paged_attention(
     int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
-    const std::string& mfma_type);
+    const std::string& mfma_type, bool use_interleaved_v_cache);

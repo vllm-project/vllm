@@ -118,7 +118,10 @@ pub fn safe_text_len<'i, I: MarkerStream<'i>, M: MarkerLike>(
 /// the end of the input for plain markers, and only a genuine special token's
 /// incomplete marker for guarded ones.
 ///
-/// Returns the text length in bytes, and advances the input.
+/// Returns the text length in bytes, and advances the input. Fails with
+/// `Backtrack` when a complete marker starts the input, so another branch can
+/// consume it, and with `Incomplete` when the input is empty or starts with a
+/// marker that needs more input to decide.
 pub fn safe_text_len_mul<'i, I: MarkerStream<'i>, M: MarkerLike>(
     input: &mut I,
     markers: &[M],
@@ -128,12 +131,18 @@ pub fn safe_text_len_mul<'i, I: MarkerStream<'i>, M: MarkerLike>(
     }
 
     let start = input.offset();
-    let stop = match scan_markers(input, markers, start)? {
-        Scan::Found(at) | Scan::Pending(at) | Scan::Clear(at) => at,
+    let (stop, found) = match scan_markers(input, markers, start)? {
+        Scan::Found(at) => (at, true),
+        Scan::Pending(at) | Scan::Clear(at) => (at, false),
     };
     let emit_len = stop - start;
     if emit_len == 0 {
-        return incomplete();
+        // A complete marker starts here: there is no text, whatever input follows.
+        return if found {
+            Err(ErrMode::Backtrack(ContextError::new()))
+        } else {
+            incomplete()
+        };
     }
 
     input.next_slice(emit_len);
@@ -527,6 +536,17 @@ mod tests {
         let error = safe_text_len(&mut input, "<tool_call>").unwrap_err();
 
         assert!(matches!(error, ErrMode::Incomplete(_)));
+    }
+
+    #[test]
+    fn safe_text_len_backtracks_at_complete_marker() {
+        let mut input = Partial::new("<tool_call>body");
+        let checkpoint = input.checkpoint();
+
+        let error = safe_text_len(&mut input, "<tool_call>").unwrap_err();
+
+        assert!(matches!(error, ErrMode::Backtrack(_)));
+        assert_eq!(input.offset_from(&checkpoint), 0);
     }
 
     #[test]
