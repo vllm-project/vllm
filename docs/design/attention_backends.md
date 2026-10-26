@@ -241,3 +241,19 @@ default on NVIDIA is `FLASHINFER_MLA_SPARSE_DSV4` on SM12x and
 `FLASHMLA_SPARSE_DSV4` on other supported CUDA architectures.
 
 --8<-- "gen:table-mla-v4-decode"
+
+#### Experimental gfx950 MXFP4 indexer
+
+On ROCm gfx950, DeepSeek V4 can select the direct-paged AITER FlyDSL
+indexer with `--attention-config '{"indexer_kv_dtype":"mxfp4"}'`.
+The default indexer cache remains FP8. MXFP4 changes indexer Q/K precision
+and can change top-k selection; validate model accuracy for the workload.
+
+This path integrates with AITER FlyDSL FP4 kernels that support explicit
+shared-cache page strides and 64-bit physical-page addressing. If the
+installed AITER build lacks those kernels, vLLM falls back to the default fp8
+indexer rather than using an incompatible layout. It supports 64-token
+compressed pages, C4 compression,
+64 query heads of dimension 128, and DCP/PCP size 1. Speculative rows are
+flattened before C4 length division. AITER builds schedules internally for
+each logits call, and the adapter computes prefill windows per call.

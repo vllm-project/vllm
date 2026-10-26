@@ -1307,6 +1307,11 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
                 if self.sparse_logits and not self.rocm_mxfp4
                 else None
             ),
+            storage_block_size=(
+                self.cache_config.block_size
+                if dsa_indexer_uses_fp4(vllm_config)
+                else None
+            ),
         )
 
     def forward(self): ...
