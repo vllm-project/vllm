@@ -106,9 +106,8 @@ def _use_aiter_tuned_gemm() -> bool:
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.platforms.rocm import get_cdna_version
 
-    # AITER's tuned BF16 table falls back to PyTorch linear for untuned shapes
-    # on CDNA3; on CDNA4 its default backend differs, so keep PyTorch there.
-    return get_cdna_version() == 3 and rocm_aiter_ops.is_linear_enabled()
+    # AITER's tuned BF16 table falls back to PyTorch linear for untuned shapes.
+    return get_cdna_version() in (3, 4) and rocm_aiter_ops.is_linear_enabled()
 
 
 def norm_residual_then_norm(
@@ -151,8 +150,19 @@ def norm_residual_then_norm(
 
 
 class MuseSparkTorchLinearMethod(UnquantizedLinearMethod):
-    """Run Muse Spark's compression projections through PyTorch linear, or
-    through AITER's tuned BF16 GEMM table on CDNA3."""
+    """Run Muse Spark's compression projections through PyTorch linear."""
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return F.linear(x, layer.weight, bias)
+
+
+class MuseSparkTunedLinearMethod(MuseSparkTorchLinearMethod):
+    """PyTorch linear, or AITER's tuned BF16 GEMM table on CDNA3 and CDNA4."""
 
     def apply(
         self,
@@ -164,7 +174,7 @@ class MuseSparkTorchLinearMethod(UnquantizedLinearMethod):
             from aiter.tuned_gemm import tgemm
 
             return tgemm.mm(x, layer.weight, bias)
-        return F.linear(x, layer.weight, bias)
+        return super().apply(layer, x, bias)
 
 
 class MuseSpark1xMoE(nn.Module):
@@ -229,8 +239,8 @@ class MuseSpark1xMoE(nn.Module):
         )
 
         hidden_size = config.moe_hidden_size
-        # Plain F.linear: AITER's gfx950 tuned-GEMM table picks lossy split-K
-        # BF16-accumulating kernels for these shapes.
+        # Pooler on plain F.linear: AITER's gfx950 tuned-GEMM table picks lossy
+        # split-K BF16-accumulating kernels for its shape.
         self.pooler: ReplicatedLinear | None = ReplicatedLinear(
             config.hidden_size,
             hidden_size,
@@ -246,7 +256,7 @@ class MuseSpark1xMoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.unpooler",
         )
-        self.unpooler.quant_method = MuseSparkTorchLinearMethod()
+        self.unpooler.quant_method = MuseSparkTunedLinearMethod()
 
         if self.pooler is not None:
             self.pre_expert_norm: MuseSpark1xRMSNorm | None = MuseSpark1xRMSNorm(
@@ -1215,5 +1225,6 @@ __all__ = [
     "MuseSpark1xMoE",
     "MuseSpark1xModel",
     "MuseSparkTorchLinearMethod",
+    "MuseSparkTunedLinearMethod",
     "norm_residual_then_norm",
 ]

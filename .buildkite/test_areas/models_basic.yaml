@@ -80,6 +80,7 @@ steps:
   - tests/models/test_muse_spark_rocm_loading.py
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
+  - tests/models/test_muse_spark_tuned_linear.py
   commands:
     - >-
       pytest -v -s
@@ -97,6 +98,7 @@ steps:
       models/test_muse_spark_rocm_loading.py
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
+      models/test_muse_spark_tuned_linear.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
@@ -127,6 +129,7 @@ steps:
       - vllm/models/muse_spark/
       - tests/models/test_muse_spark_logits_local.py
       - tests/models/test_muse_spark_rocm_shared_rope.py
+      - tests/models/test_muse_spark_tuned_linear.py
       commands:
       - >-
         pytest -v -s
@@ -147,6 +150,7 @@ steps:
         models/test_deepseek_v4_vl_stream_weights.py
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
+        models/test_muse_spark_tuned_linear.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
       - pytest -v -s models/test_dsv4_mono_decode.py
