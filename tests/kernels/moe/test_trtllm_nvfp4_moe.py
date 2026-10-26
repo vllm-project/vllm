@@ -210,7 +210,7 @@ def _to_trtllm_layout(
     is_gated_act: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Shuffle make_test_quant_config's weights and swizzled scales into the
-    TRTLLM-Gen layout; the scales are replaced in ``quant_config``."""
+    TRTLLM-Gen layout; the scales are replaced in `quant_config`."""
     assert quant_config.w1_scale is not None
     assert quant_config.w2_scale is not None
     w1_scale_linear = torch.stack(
@@ -852,6 +852,7 @@ def test_trtllm_fp4_moe_expert_parallel(
             expert_map=expert_map,
         )
 
+        assert isinstance(output, torch.Tensor)
         cosine = torch.nn.functional.cosine_similarity(
             torch_output.float().flatten(), output.float().flatten(), dim=0
         )

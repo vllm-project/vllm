@@ -22,7 +22,7 @@ class PrimsTsNvFp4ExpertsModular(TrtLlmNvFp4ExpertsModular):
     """NvFp4 MoE with FlashInfer's Prims-TS (CuTe DSL) expert GEMMs.
 
     Routing and finalize stay on TRTLLM-Gen, and the op takes the arguments and
-    the shuffled weight layout of ``trtllm_fp4_block_scale_routed_moe``, so
+    the shuffled weight layout of `trtllm_fp4_block_scale_routed_moe`, so
     only the op differs from TrtLlmNvFp4ExpertsModular.
     """
 
@@ -49,7 +49,7 @@ class PrimsTsNvFp4ExpertsModular(TrtLlmNvFp4ExpertsModular):
         layer.prims_ts_moe_warmup_provider = self
 
     def untuned_precompile_kwargs(self, layer: torch.nn.Module) -> dict[str, Any]:
-        """The arguments of ``precompile_untuned`` for ``layer``'s weights."""
+        """The arguments of `precompile_untuned` for `layer`'s weights."""
         device = layer.w13_weight.device
         num_tokens = _PRECOMPILE_NUM_TOKENS
         if self.expects_unquantized_inputs:
@@ -82,7 +82,7 @@ class PrimsTsNvFp4ExpertsModular(TrtLlmNvFp4ExpertsModular):
 
     @staticmethod
     def precompile_untuned(kwargs: dict[str, Any]) -> int:
-        """Compile the expert GEMMs that untuned launches with ``kwargs``'s
+        """Compile the expert GEMMs that untuned launches with `kwargs`'s
         weights and settings use at any token count. Returns how many FC1/FC2
         configurations that is."""
         import flashinfer

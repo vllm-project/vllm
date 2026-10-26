@@ -13,13 +13,17 @@ from vllm.model_executor.warmup import prims_ts_moe_warmup
 
 def _layer(hidden_size: int = 64, num_experts: int = 8) -> SimpleNamespace:
     """A Prims-TS MoE layer whose precompile kwargs hold fresh tensor data."""
-    experts = object.__new__(PrimsTsNvFp4ExpertsModular)
-    experts.untuned_precompile_kwargs = lambda layer: dict(
-        topk_ids=(torch.randint(8, (4, 2)), torch.rand(4, 2)),
-        hidden_states=torch.rand(4, hidden_size),
-        num_experts=num_experts,
-        routing_bias=None,
-    )
+
+    class WarmupExperts(PrimsTsNvFp4ExpertsModular):
+        def untuned_precompile_kwargs(self, layer: torch.nn.Module) -> dict:
+            return dict(
+                topk_ids=(torch.randint(8, (4, 2)), torch.rand(4, 2)),
+                hidden_states=torch.rand(4, hidden_size),
+                num_experts=num_experts,
+                routing_bias=None,
+            )
+
+    experts = object.__new__(WarmupExperts)
     return SimpleNamespace(prims_ts_moe_warmup_provider=experts)
 
 

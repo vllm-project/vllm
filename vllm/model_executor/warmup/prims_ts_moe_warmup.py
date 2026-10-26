@@ -24,7 +24,7 @@ logger = init_logger(__name__)
 
 
 def _compile_signature(value: Any) -> Any:
-    """``value`` with each tensor reduced to its type and layout."""
+    """`value` with each tensor reduced to its type and layout."""
     if isinstance(value, torch.Tensor):
         return (value.dtype, tuple(value.shape), value.stride(), value.device)
     if isinstance(value, tuple):
@@ -33,7 +33,7 @@ def _compile_signature(value: Any) -> Any:
 
 
 def _distinct_calls(calls: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``calls`` without those that differ from an earlier one in tensor data
+    """`calls` without those that differ from an earlier one in tensor data
     only, which compiles nothing new."""
     distinct: dict[tuple, dict[str, Any]] = {}
     for kwargs in calls:

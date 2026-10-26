@@ -431,7 +431,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         global_num_experts: int,
         a1q_scale: torch.Tensor | None,
     ) -> UnfinalizedMoEOutput | None:
-        """Finalize into ``output``, or stop after GEMM2 when it is None."""
+        """Finalize into `output`, or stop after GEMM2 when it is None."""
         defer = output is not None and self._uses_post_gemm2_hook(topk_ids.shape[0])
         flashinfer_output = self._routed_moe(
             **self._routed_moe_kwargs(
