@@ -1654,7 +1654,7 @@ class DPAsyncMPClient(AsyncMPClient):
                 idx = self._local_engine_index_for_dp_rank(rank)
                 if idx is None or idx >= len(self.lb_engines):
                     continue
-                waiting, running = self.lb_engines[idx]
+                waiting, running = self.lb_engines[idx][:2]
                 if waiting or running:
                     busy_ranks.append(rank)
             if not busy_ranks:
@@ -1764,7 +1764,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         eng_index = 0
         for i in range(num_engines):
             idx = (self.eng_start_index + i) % num_engines
-            waiting, running = current_counts[idx]
+            waiting, running = current_counts[idx][:2]
             score = waiting * 4 + running
             if score < min_score:
                 min_score = score

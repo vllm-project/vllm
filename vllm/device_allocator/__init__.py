@@ -14,7 +14,12 @@ from vllm.platforms import current_platform
 HandleType: TypeAlias = tuple[int, int, int, list[int] | int]
 
 # Selective wake may defer only these; any wake restores every other tag.
-DEFERRABLE_TAGS: tuple[str, ...] = ("weights", "kv_cache")
+DEFERRABLE_TAGS: tuple[str, ...] = (
+    "weights",
+    "shared_weights",
+    "expert_weights",
+    "kv_cache",
+)
 
 
 @dataclasses.dataclass
@@ -26,6 +31,7 @@ class AllocationData:
     # reused by the next sleep to skip the expensive host allocation +
     # page-pinning. See CuMemAllocator._acquire_backup_buffer.
     cpu_backup_cache: torch.Tensor | None = None
+    is_asleep: bool = False
 
 
 class MemAllocator(Protocol):

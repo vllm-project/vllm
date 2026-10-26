@@ -4,7 +4,9 @@
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
+import pytest
 import torch
 
 from vllm.config import CompilationConfig, CompilationMode
@@ -12,6 +14,79 @@ from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
+
+
+def test_v2_reports_logical_sleep_state_and_skips_sleeping_rank(monkeypatch):
+    group = SimpleNamespace(world_size=4, rank=3)
+    monkeypatch.setattr(eplb, "get_ep_group", lambda: group)
+    runner = _make_runner()
+    runner.parallel_config.enable_elastic_ep = True
+    runner.eplb.state = SimpleNamespace(
+        logical_sleep_state=SimpleNamespace(rank_mapping={0: 0, 1: 1, 2: -1, 3: -1})
+    )
+    assert runner.get_ep_sleep_state() == {
+        "ep_world_size": 4,
+        "active_ep_size": 2,
+        "sleeping_ep_ranks": [2, 3],
+    }
+    assert runner._dummy_run(1) == (None, None)
+    assert runner.execute_model(None) is EMPTY_MODEL_RUNNER_OUTPUT
+
+
+@pytest.mark.parametrize("already_sleeping", [False, True])
+def test_v2_resize_remaps_before_masking_and_dp_split(monkeypatch, already_sleeping):
+    calls = []
+    manager = SimpleNamespace(set_masked_ranks=lambda ranks: calls.append("mask"))
+    group = SimpleNamespace(
+        world_size=4, device_communicator=SimpleNamespace(all2all_manager=manager)
+    )
+    monkeypatch.setattr(eplb, "get_ep_group", lambda: group)
+    monkeypatch.setattr(eplb, "get_dp_group", lambda size: calls.append(size))
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    runner = _make_runner()
+    runner.eplb.state = SimpleNamespace(
+        is_logical_sleep_active=lambda: already_sleeping,
+        prepare_logical_sleep=lambda ranks: calls.append("prepare"),
+        resize_logical_sleep=lambda ranks: calls.append("resize"),
+        restore_logical_sleep=lambda: calls.append("restore"),
+    )
+    runner.resize_sleep_ep_ranks([2, 3])
+    assert calls == ["resize" if already_sleeping else "prepare", "mask", 2]
+    calls.clear()
+    runner.resize_sleep_ep_ranks([])
+    assert calls == ["restore", "mask", 4]
+
+
+def test_v2_does_not_run_periodic_eplb_over_sleeping_peers():
+    runner = _make_runner()
+    runner.parallel_config.enable_elastic_ep = True
+    runner.eplb._has_registered_models = True
+    step = Mock()
+    runner.eplb.state = SimpleNamespace(logical_sleep_state=object(), step=step)
+    runner.eplb.step()
+    step.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "connected_ranks,expected_experts", [(1, 64), (2, 128), (4, 256)]
+)
+def test_nixl_dispatch_preserves_local_expert_shape_after_resize(
+    monkeypatch, connected_ranks, expected_experts
+):
+    pytest.importorskip("nixl_ep")
+    from vllm.distributed.device_communicators.all2all import NixlEPAll2AllManager
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.nixl_ep import (
+        NixlEPPrepareAndFinalize,
+    )
+
+    monkeypatch.setattr(
+        NixlEPAll2AllManager,
+        "_buffer",
+        SimpleNamespace(max_num_ep_ranks=4, connected_ep_size=connected_ranks),
+    )
+    prepare = NixlEPPrepareAndFinalize.__new__(NixlEPPrepareAndFinalize)
+    prepare.expert_capacity = 256
+    assert prepare.dispatch_expert_capacity == expected_experts
 
 
 class FakeMemoryProfiler:

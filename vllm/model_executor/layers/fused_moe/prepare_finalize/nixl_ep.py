@@ -6,6 +6,8 @@ import nixl_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed.parallel_state import get_ep_group
+from vllm.distributed.device_communicators.all2all import NixlEPAll2AllManager
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -159,6 +161,13 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         return True
 
     @property
+    def dispatch_expert_capacity(self) -> int:
+        state = NixlEPAll2AllManager._buffer
+        if state is None:
+            return self.expert_capacity
+        return self.expert_capacity * state.connected_ep_size // state.max_num_ep_ranks
+
+    @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
@@ -280,7 +289,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             a1,
             dispatch_topk_ids,
             self.max_tokens_per_rank,
-            self.expert_capacity,
+            self.dispatch_expert_capacity,
             use_fp8=self.use_fp8_dispatch,
             # round_scale needs to be set to dispatch in ue8m0
             round_scale=self.use_ue8m0_dispatch,

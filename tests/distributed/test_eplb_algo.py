@@ -13,6 +13,17 @@ from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
 from vllm.platforms import current_platform
 
 
+@pytest.mark.parametrize("old_slots,new_slots,num_ranks", [(4, 8, 2), (8, 4, 1)])
+def test_rebalance_allows_changed_physical_capacity(old_slots, new_slots, num_ranks):
+    load = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+    old_mapping = torch.arange(old_slots).remainder(4).unsqueeze(0)
+    mapping = DefaultEplbPolicy.rebalance_experts(
+        load, new_slots, 1, 1, num_ranks, old_mapping
+    )
+    assert mapping.shape == (1, new_slots)
+    assert set(mapping[0].tolist()) == {0, 1, 2, 3}
+
+
 def test_eplb_load_stats_reduce_across_ranks():
     num_tokens_per_rank = torch.tensor(
         [

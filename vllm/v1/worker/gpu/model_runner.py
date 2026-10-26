@@ -39,7 +39,7 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
 )
-from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -72,6 +72,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
     DraftTokenIds,
     ECConnectorOutput,
     ModelRunnerOutput,
@@ -549,12 +550,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @property
     def dp_size(self) -> int:
         # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
+        if self.parallel_config.enable_elastic_ep:
+            return get_dp_group().world_size
         return self.parallel_config.data_parallel_size
 
     @property
     def dp_rank(self) -> int:
         # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
+        if self.parallel_config.enable_elastic_ep:
+            return get_dp_group().rank_in_group
         return self.parallel_config.data_parallel_rank
+
+    def get_ep_sleep_state(self) -> dict[str, Any]:
+        return self.eplb.get_sleep_state()
+
+    def resize_sleep_ep_ranks(self, sleeping_ep_ranks: list[int]) -> None:
+        self.eplb.resize_sleep_ranks(sleeping_ep_ranks)
+
+    def post_kv_cache_wake_up(self) -> None:
+        if self.kv_block_zeroer is not None:
+            self.kv_block_zeroer.zero_block_ids([0])
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -828,6 +843,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         randomize_inputs: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if self.eplb.is_sleeping():
+            return None, None
         if skip_attn and not is_profile:
             raise ValueError(
                 "skip_attn must only be True for initial memory profiling."
@@ -1722,6 +1739,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if self.eplb.is_sleeping():
+            self.execute_model_state = None
+            return EMPTY_MODEL_RUNNER_OUTPUT
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()

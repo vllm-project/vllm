@@ -669,27 +669,6 @@ class PyNcclCommunicator:
     def deregister_comm_window(self, window):
         return self.nccl.ncclCommWindowDeregister(self.comm, window)
 
-    def suspend(self):
-        """Release comm GPU memory (collective, idempotent); keeps topology."""
-        if self.disabled or self._suspended:
-            return
-        if not self.nccl.has_symbol("ncclCommSuspend"):
-            logger.warning_once(
-                "ncclCommSuspend is not available in the loaded NCCL/RCCL "
-                "library (requires NCCL >= 2.29.7); skipping communicator "
-                "memory suspension."
-            )
-            return
-        self.nccl.ncclCommSuspend(self.comm, _NCCL_SUSPEND_MEM)
-        self._suspended = True
-
-    def resume(self):
-        """Restore a suspended comm (collective); no-op unless suspended."""
-        if self.disabled or not self._suspended:
-            return
-        self.nccl.ncclCommResume(self.comm)
-        self._suspended = False
-
     def batch_isend_irecv(self, p2p_ops: list, stream=None):
         if self.disabled:
             return

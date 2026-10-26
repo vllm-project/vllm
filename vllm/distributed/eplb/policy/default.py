@@ -323,7 +323,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         # Only apply when the number of GPUs and slots per GPU remain unchanged.
         # Helps to avoid unnecessary weight copying when experts move
         # within the same GPU.
-        if old_phy2log_np is not None:
+        if old_phy2log_np is not None and old_phy2log_np.shape == phy2log_np.shape:
             phy2log_np = cls.preserve_intragpu_slots(
                 phy2log_np, num_ranks, old_phy2log_np
             )

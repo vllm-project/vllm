@@ -443,6 +443,8 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     """
 
     _buffer: _NixlEPBufferState | None = None
+    _mask: torch.Tensor | None = None
+    _last_mask: torch.Tensor | None = None
     _lock = threading.RLock()
     # Cached init args (survives destroy_buffer so ensure_buffer can rebuild).
     _last_init_args: dict[str, int] | None = None
@@ -462,8 +464,10 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
     @property
     def max_num_ep_ranks(self) -> int:
-        assert NixlEPAll2AllManager._buffer is not None
-        return NixlEPAll2AllManager._buffer.max_num_ep_ranks
+        state = NixlEPAll2AllManager._buffer
+        if state is not None:
+            return state.max_num_ep_ranks
+        return self._max_num_ep_ranks
 
     def _init_buffer(
         self,
@@ -482,6 +486,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             else self.world_size
         )
         max_num_global_experts = max_num_ep_ranks * num_experts_per_rank
+        self._max_num_ep_ranks = max_num_ep_ranks
         num_rdma_bytes = Buffer.get_rdma_size_hint(
             num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
             hidden=token_hidden_size,
@@ -494,7 +499,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             "non-torch memory sized for the max EP world (elastic EP), not "
             "the current world_size=%d.",
             num_rdma_bytes / (1024**3),
-            self.max_num_ep_ranks,
+            max_num_ep_ranks,
             num_experts_per_rank,
             max_num_tokens_per_dp_rank,
             token_hidden_size,
@@ -693,6 +698,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             with NixlEPAll2AllManager._lock:
                 NixlEPAll2AllManager._buffer = _NixlEPBufferState(
                     buffer=buffer,
+                    max_num_ep_ranks=self.max_num_ep_ranks,
                     connected_ep_size=self.world_size,
                     active_ep_size=self.world_size,
                     init_args=args,

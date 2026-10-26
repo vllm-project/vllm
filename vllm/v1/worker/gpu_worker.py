@@ -100,7 +100,11 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.sleep_tags import WEIGHT_SLEEP_TAGS, expand_weight_sleep_tags
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.startup_plan import (
+    maybe_apply_startup_plan,
+    maybe_save_startup_plan,
+)
+from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -243,7 +247,6 @@ class Worker(WorkerBase):
         # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
-            self._save_sleep_parameters(model)
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
@@ -253,7 +256,6 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
-        self.sleep_mode_backend.suspend(level)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
 
@@ -296,9 +298,7 @@ class Worker(WorkerBase):
         allocator.wake_up(wake_tags)
 
         # Restore the buffers after level 2 sleep
-        wake_weights = tags is None or "weights" in tags
-        if wake_weights and self._sleep_saved_parameters:
-            self._restore_sleep_parameters(self.model_runner.model)
+        wake_weights = tags is None or any(tag in WEIGHT_SLEEP_TAGS for tag in tags)
         if wake_weights and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
@@ -404,10 +404,7 @@ class Worker(WorkerBase):
             return False
         if self.vllm_config.model_config.enforce_eager:
             return False
-        if (
-            self.vllm_config.compilation_config.cudagraph_mode
-            == CUDAGraphMode.NONE
-        ):
+        if self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             return False
         return current_platform.is_cuda_alike()
 
@@ -679,6 +676,11 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
+        if self.use_v2_model_runner and self.model_config.enable_sleep_mode:
+            from vllm.v1.worker.sleep_tags import retag_moe_sleep_weights
+
+            retag_moe_sleep_weights(self.model_runner.get_model())
+
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
 
@@ -791,9 +793,7 @@ class Worker(WorkerBase):
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         return sorted({ep // tp_size for ep in ep_ranks})
 
-    def disconnect_nixl_from_sleeping(
-        self, sleeping_ep_ranks: list[int]
-    ) -> int:
+    def disconnect_nixl_from_sleeping(self, sleeping_ep_ranks: list[int]) -> int:
         """LIVE ranks only: drop nixl connections to peers that are about
         to be destroyed. Waking / sleeping ranks skip. Called before
         destroy_nixl_buffer during scale-down.
@@ -949,6 +949,8 @@ class Worker(WorkerBase):
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
+        profile_torch_peak = profile_result.after_profile.torch_peak
+
         # Profile CUDA graph memory if graphs will be captured.
         # ROCm is included: #44825 moved the profiler to
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
@@ -1065,7 +1067,7 @@ class Worker(WorkerBase):
             format_gib(self.requested_memory),
             format_gib(profile_result.weights_memory),
             format_gib(self.peak_activation_memory),
-            format_gib(self.non_torch_memory),
+            format_gib(profile_result.non_torch_increase),
             format_gib(cudagraph_memory_estimate),
             format_gib(cudagraph_memory_estimate_applied),
             format_gib(self.available_kv_cache_memory_bytes),

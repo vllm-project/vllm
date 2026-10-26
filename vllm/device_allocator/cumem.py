@@ -10,6 +10,7 @@
 # the only successful approach is to call cuda driver API in C.
 import atexit
 import gc
+import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -26,6 +27,7 @@ from vllm.device_allocator.alloc_conf import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.system_utils import find_loaded_library
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -216,7 +218,6 @@ class CuMemAllocator:
         return warmed
 
     def _python_malloc_callback(self, allocation_handle: HandleType) -> None:
-        """
         py_d_mem = allocation_handle[2]
         self.pointer_to_data[py_d_mem] = AllocationData(
             allocation_handle, self.current_tag
@@ -300,6 +301,7 @@ class CuMemAllocator:
         per_tag_total: dict[str, int] = {}
         per_tag_backup: dict[str, int] = {}
         offload_items: list[tuple[int, AllocationData]] = []
+        has_policy_conflict = False
 
         for ptr, data in self.pointer_to_data.items():
             if data.is_asleep:
@@ -327,6 +329,7 @@ class CuMemAllocator:
                 offload_items.append((ptr, data))
             else:
                 unmap_and_release(handle)
+                data.is_asleep = True
 
         if offload_items:
             if self._async_copy_available():
@@ -354,6 +357,7 @@ class CuMemAllocator:
             # Unmap only after every copy has drained.
             for _, data in offload_items:
                 unmap_and_release(data.handle)
+                data.is_asleep = True
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -430,8 +434,11 @@ class CuMemAllocator:
         """
         restore_items: list[tuple[int, AllocationData]] = []
         for ptr, data in self.pointer_to_data.items():
-            if tags is None or data.tag in tags:
+            if not data.is_asleep:
+                continue
+            if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS:
                 create_and_map(data.handle)
+                data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
                     restore_items.append((ptr, data))
 

@@ -314,9 +314,9 @@ class EplbState:
         """
         self.logical_sleep_state: EplbLogicalSleepState | None = None
         if self.device.type == "cuda":
-            self.cuda_device_index = self.device.index
-            if self.cuda_device_index is None and torch.cuda.is_available():
-                self.cuda_device_index = torch.accelerator.current_device_index()
+            self.device_index = self.device.index
+            if self.device_index is None and torch.cuda.is_available():
+                self.device_index = torch.accelerator.current_device_index()
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -1150,24 +1150,6 @@ class EplbState:
                         )
                     )
 
-                # Update expert weights
-                rearrange_expert_weights_inplace(
-                    eplb_model_state.physical_to_logical_map,
-                    new_physical_to_logical_map,
-                    eplb_model_state.model.expert_weights,
-                    eplb_model_state.expert_buffer,
-                    ep_group,
-                    eplb_model_state.communicator,
-                    is_profile,
-                    rank_mapping,
-                )
-
-                if not is_profile:
-                    _commit_eplb_maps(
-                        eplb_model_state,
-                        new_physical_to_logical_map=stored_physical_to_logical_map,
-                    )
-
                 skip_rearrange = False
                 if (
                     current_platform.is_rocm()
@@ -1240,7 +1222,7 @@ class EplbState:
                     if not is_profile:
                         _commit_eplb_maps(
                             eplb_model_state,
-                            new_physical_to_logical_map=new_physical_to_logical_map,
+                            new_physical_to_logical_map=stored_physical_to_logical_map,
                         )
 
                 if is_main_rank:

@@ -10,7 +10,7 @@ import torch.distributed as dist
 from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
-from vllm.v1.worker.dp_utils import should_skip_dp_coordination
+from vllm.v1.worker.dp_utils import _get_device_and_group, should_skip_dp_coordination
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -63,8 +63,11 @@ def sync_cudagraph_and_dp_padding(
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
-    group = get_dp_group().cpu_group
-    tensor = torch.zeros(6, dp_size, dtype=torch.int32, device="cpu")
+    if parallel_config is None:
+        device, group = "cpu", get_dp_group().cpu_group
+    else:
+        device, group = _get_device_and_group(parallel_config)
+    tensor = torch.zeros(6, dp_size, dtype=torch.int32, device=device)
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
@@ -74,7 +77,11 @@ def sync_cudagraph_and_dp_padding(
     if should_skip_dp_coordination():
         tensor[:] = tensor[:, dp_rank, None].clone()
     else:
-        dist.all_reduce(tensor, group=group)
+        if device == "cpu":
+            dist.all_reduce(tensor, group=group)
+        else:
+            tensor = group.all_reduce(tensor)
+    tensor = tensor.cpu()
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]

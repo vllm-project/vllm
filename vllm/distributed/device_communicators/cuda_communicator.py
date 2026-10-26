@@ -84,6 +84,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
+        self.use_flashinfer_pcie_ipc_allreduce = use_flashinfer_pcie_ipc_allreduce
+        self.use_aiter_allreduce = use_aiter_allreduce
         # Set by from_existing_pynccl when this communicator wraps a split
         # NCCL group; in that path symmetric ops are not registered.
         self.disable_pynccl_symmetric_ops: bool = False
@@ -384,6 +386,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_custom_allreduce = False
         self.use_torch_symm_mem = False
         self.use_flashinfer_allreduce = False
+        self.use_flashinfer_pcie_ipc_allreduce = False
+        self.use_aiter_allreduce = False
+        self.use_aiter_ag_rs = False
+        self.fi_pcie_ipc_ar_comm = None
+        self.aiter_ar_comm = None
         self.ca_comm = None
         self.qr_comm = None
         self.symm_mem_comm = None

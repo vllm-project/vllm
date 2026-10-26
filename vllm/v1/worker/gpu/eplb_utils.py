@@ -11,6 +11,7 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     get_mixture_of_experts_model,
@@ -69,6 +70,45 @@ class EPLBController:
         self.state: EplbState | None = None
         self.suppressed = False
         self._has_registered_models = False
+
+    def get_sleep_state(self) -> dict[str, Any]:
+        ep_size = get_ep_group().world_size
+        sleeping = []
+        if self.state is not None and self.state.logical_sleep_state is not None:
+            sleeping = sorted(
+                rank
+                for rank, mapped in self.state.logical_sleep_state.rank_mapping.items()
+                if mapped == -1
+            )
+        return {
+            "ep_world_size": ep_size,
+            "active_ep_size": ep_size - len(sleeping),
+            "sleeping_ep_ranks": sleeping,
+        }
+
+    def is_sleeping(self) -> bool:
+        if not self.parallel_config.enable_elastic_ep or self.state is None:
+            return False
+        sleep = self.state.logical_sleep_state
+        return sleep is not None and sleep.rank_mapping[get_ep_group().rank] == -1
+
+    def resize_sleep_ranks(self, sleeping_ranks: list[int]) -> None:
+        if not self.parallel_config.enable_eplb or self.state is None:
+            raise RuntimeError("Logical EP sleep requires EPLB")
+        ep_group = get_ep_group()
+        manager = ep_group.device_communicator.all2all_manager
+        if manager is None or not hasattr(manager, "set_masked_ranks"):
+            raise RuntimeError("Logical EP sleep requires NIXL peer masking")
+        if sleeping_ranks:
+            if self.state.is_logical_sleep_active():
+                self.state.resize_logical_sleep(sleeping_ranks)
+            else:
+                self.state.prepare_logical_sleep(sleeping_ranks)
+        else:
+            self.state.restore_logical_sleep()
+        manager.set_masked_ranks(sleeping_ranks)
+        get_dp_group(ep_group.world_size - len(sleeping_ranks))
+        torch.accelerator.synchronize()
 
     def prepare_load(self) -> None:
         self.state = None
@@ -139,6 +179,10 @@ class EPLBController:
             or self.suppressed
             or self.state is None
             or not self._has_registered_models
+            or (
+                self.parallel_config.enable_elastic_ep
+                and self.state.logical_sleep_state is not None
+            )
         ):
             return
 
