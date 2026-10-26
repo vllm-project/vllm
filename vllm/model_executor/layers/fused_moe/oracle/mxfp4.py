@@ -375,6 +375,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "triton": [Mxfp4MoeBackend.TRITON],
         "triton_unfused": [Mxfp4MoeBackend.TRITON_UNFUSED],
         "humming": [Mxfp4MoeBackend.HUMMING],
+        "cutlass": [Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4],
         "marlin": [Mxfp4MoeBackend.MARLIN],
         "aiter": [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
