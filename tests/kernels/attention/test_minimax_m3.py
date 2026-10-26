@@ -1009,6 +1009,11 @@ def test_aiter_indexer_impl_matches_reference(
     num_idx_heads, init_blocks, local_blocks, monkeypatch
 ):
     import vllm.models.minimax_m3.amd.indexer_aiter as indexer_aiter_mod
+    from vllm.models.minimax_m3.amd.indexer_aiter import (
+        MiniMaxM3IndexerAiterImpl,
+        MiniMaxM3IndexerAiterMetadataBuilder,
+    )
+
     import vllm.models.minimax_m3.common.indexer as indexer_mod
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -1017,10 +1022,6 @@ def test_aiter_indexer_impl_matches_reference(
     )
     from vllm.config import set_current_vllm_config
     from vllm.forward_context import set_forward_context
-    from vllm.models.minimax_m3.amd.indexer_aiter import (
-        MiniMaxM3IndexerAiterImpl,
-        MiniMaxM3IndexerAiterMetadataBuilder,
-    )
     from vllm.models.minimax_m3.amd.ops.sparse_pa import (
         PAGES_PER_SPARSE_BLOCK,
         minimax_m3_rebase_block_table_to_page16,
