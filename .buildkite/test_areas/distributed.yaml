@@ -682,10 +682,13 @@ steps:
   - vllm/v1/worker/gpu_worker.py
   - tests/distributed/
   - tests/v1/distributed/test_pp_dp_v2.py
+  - vllm/benchmarks/forward/
+  - tests/benchmarks/test_forward_cli.py
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
+  - pytest -v -s benchmarks/test_forward_cli.py::test_bench_forward_pipeline
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).

@@ -979,6 +979,7 @@ async def test_chat_full_generator_gives_each_choice_parser_the_prompt():
     serving.chat_template = None
     serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
     serving.default_chat_template_kwargs = {}
+    serving.online_renderer = MagicMock(reasoning_effort_map={})
     request_output = _make_metrics_request_output()
     request_output.prompt_token_ids = [7, 8]
     request_output.outputs.append(
