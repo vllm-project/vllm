@@ -5,6 +5,9 @@
 import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    unpack_quantized_values_into_int32,
+)
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 
@@ -24,7 +27,7 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 #       - perform int8 x int8 -> int32 matmul
 #       - dequantize the int32 output to float32/bfloat16 outputs
 class Dynamic4bitLinearKernel(MPLinearKernel):
-    SUPPORTED_QUANT_TYPES = [scalar_types.int4]
+    SUPPORTED_QUANT_TYPES = [scalar_types.int4, scalar_types.uint4b8]
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -36,30 +39,34 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
             return False, "Only CPU is supported"
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return False, f"Unsupported quant type {c.weight_type}"
-        if (
-            current_platform.get_cpu_architecture() == CpuArchEnum.ARM
-            and c.act_type
-            not in [
-                torch.float32,
-                torch.bfloat16,
-                torch.float16,
-            ]
-        ):
+        cpu_arch = current_platform.get_cpu_architecture()
+        if c.weight_type == scalar_types.uint4b8 and cpu_arch != CpuArchEnum.ARM:
+            return False, "uint4b8 packed weights are only supported on Arm"
+        if c.weight_type == scalar_types.uint4b8 and c.zero_points:
+            return False, "Zero points are not supported for uint4b8"
+        if cpu_arch == CpuArchEnum.ARM and c.act_type not in [
+            torch.float32,
+            torch.bfloat16,
+            torch.float16,
+        ]:
             return (
                 False,
                 "Dynamic4bitLinearKernel on Arm requires Float32 or"
                 " BFloat16 or Float16 activations",
             )
-        if c.full_weight_shape[0] % c.group_size != 0:
+        if c.group_size <= 0 or c.partition_weight_shape[0] % c.group_size != 0:
             return (
                 False,
                 f"Group size ({c.group_size}) does not evenly divide"
                 " the number of input features "
-                f"({c.full_weight_shape[0]})",
+                f"({c.partition_weight_shape[0]})",
             )
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+        if c.group_size != c.partition_weight_shape[0] and c.group_size % 32 != 0:
+            return False, "Group size must be a multiple of 32"
+        if cpu_arch == CpuArchEnum.ARM:
             try:
                 # Attempt to retrieve the operation
+                _ = torch.ops.aten._dyn_quant_pack_4bit_weight
                 _ = torch.ops.aten._dyn_quant_matmul_4bit
             except AttributeError:
                 return (
@@ -72,8 +79,21 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         c = self.config
         packed_weight = getattr(layer, self.w_q_name)
-        packed_weight = packed_weight.add(8)
-        uint8_packed = (packed_weight[::, 1::2] << 4 | packed_weight[::, ::2]).to(
+        if c.weight_type == scalar_types.uint4b8:
+            # Compressed-tensors W4A16 checkpoints store eight offset-binary
+            # uint4 values in each int32 along the input dimension. Decode the
+            # nibbles to [0, 15] before converting to the byte-packed layout
+            # expected by the PyTorch/KleidiAI operator.
+            packed_weight = unpack_quantized_values_into_int32(
+                packed_weight, c.weight_type, packed_dim=1
+            )
+        else:
+            # W4A8 checkpoints provide unpacked signed int4 values in int8
+            # storage. Convert [-8, 7] to the same offset-binary [0, 15]
+            # representation.
+            packed_weight = packed_weight.add(8)
+
+        uint8_packed = (packed_weight[:, 1::2] << 4 | packed_weight[:, ::2]).to(
             torch.uint8
         )
 
