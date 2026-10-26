@@ -1007,6 +1007,62 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
     )
 
 
+def map_draft_quant_config(
+    quant_config: "QuantizationConfig | None",
+    weight_mapper: WeightsMapper,
+    prefix: str,
+    start_layer_id: int,
+    num_hidden_layers: int,
+) -> None:
+    """Map draft quantization settings to runtime module names."""
+    if quant_config is None:
+        return
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptQuantConfigBase
+
+    if isinstance(quant_config, ModelOptQuantConfigBase):
+        quant_config.apply_vllm_mapper(weight_mapper.get_rename_mapper())
+        root = rf"(?:{re.escape(prefix)}\.)?" if prefix else ""
+        # Match root-level layers.N, optionally prefixed or wildcarded. Offset
+        # higher IDs first so an offset of 1 cannot cascade from 0 -> 1 -> 2.
+        runtime_names = {
+            re.compile(rf"^({root}\*?)layers\.{index}(?=\.|\*|$)"): (
+                rf"\g<1>layers.{start_layer_id + index}"
+            )
+            for index in reversed(range(num_hidden_layers))
+            if start_layer_id
+        }
+        if prefix:
+            # Preserve leading wildcards and names already rooted at prefix.
+            runtime_names[re.compile(rf"^(?!\*|{re.escape(prefix)}(?:\.|\*|$))")] = (
+                f"{prefix}."
+            )
+        quant_config.apply_vllm_mapper(WeightsMapper(orig_to_new_regex=runtime_names))
+        return
+
+    # Other backends may use semantic keys or suffix rules rather than module
+    # names. Preserve their settings and only add the existing layer aliases.
+    if start_layer_id == 0:
+        return
+    exclusions = getattr(quant_config, "exclude_modules", None)
+    if not isinstance(exclusions, list):
+        return
+
+    def offset_local_layer(match: re.Match[str]) -> str:
+        layer_idx = int(match.group(1))
+        if layer_idx >= num_hidden_layers:
+            return match.group(0)
+        return f"layers.{layer_idx + start_layer_id}"
+
+    for exclusion in tuple(exclusions):
+        # Accept layers.N or *layers.N, excluding nested names such as
+        # lilicorr.layers.N, which are not decoder-layer indices.
+        global_exclusion = re.sub(
+            r"(?<![A-Za-z0-9_.])layers\.(\d+)", offset_local_layer, exclusion
+        )
+        if global_exclusion != exclusion and global_exclusion not in exclusions:
+            exclusions.append(global_exclusion)
+
+
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
     """Extract the layer index from the module name.
 

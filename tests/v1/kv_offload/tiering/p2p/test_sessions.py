@@ -492,6 +492,19 @@ class TestConnectHandshake:
         assert not conn.alive
         assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
 
+    def test_failed_ack_send_marks_connection_dead(self):
+        """A ConnectAckMsg send that raises marks the connection dead."""
+        transport = FakeDataTransport(defer_registration=True)
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+
+        transport.complete_registrations()
+        conn.fail_send = True
+        session.poll()
+
+        assert not conn.alive
+
     def test_duplicate_connect_during_registration_is_rejected(self):
         """A second ConnectMsg mid-registration is a protocol violation."""
         transport = FakeDataTransport(defer_registration=True)
