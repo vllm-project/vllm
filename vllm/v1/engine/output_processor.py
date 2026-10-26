@@ -566,6 +566,7 @@ class OutputProcessor:
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
+        self._pending_input_streams: dict[str, tuple[str, RequestOutputCollector]] = {}
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
         self.admission_stats = admission_stats
@@ -596,6 +597,22 @@ class OutputProcessor:
             assert state.queue is not None
             state.queue.put(e)
 
+    def register_pending_input_stream(
+        self, external_req_id: str, queue: RequestOutputCollector
+    ) -> None:
+        """Make a streaming-input session cancellable before its first ADD."""
+        request_id = queue.request_id
+        entry = (external_req_id, queue)
+        self._pending_input_streams[request_id] = entry
+        task = queue._input_stream_task
+        assert task is not None
+
+        def input_done(_: asyncio.Task) -> None:
+            if self._pending_input_streams.get(request_id) is entry:
+                del self._pending_input_streams[request_id]
+
+        task.add_done_callback(input_done)
+
     def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
         """Abort a list of requests.
 
@@ -611,6 +628,17 @@ class OutputProcessor:
         a parent request, in which case the associated child requests are aborted
         also.
         """
+        if self._pending_input_streams:
+            request_ids = tuple(request_ids)
+            requested_ids = set(request_ids)
+            for internal_id, (external_id, queue) in tuple(
+                self._pending_input_streams.items()
+            ):
+                if (internal_id if internal else external_id) in requested_ids:
+                    del self._pending_input_streams[internal_id]
+                    queue.close()
+                    queue.put(STREAM_FINISHED)
+
         internal_req_ids = []
         for request_id in request_ids:
             if internal:
@@ -669,6 +697,7 @@ class OutputProcessor:
         queue: RequestOutputCollector | None = None,
     ) -> None:
         request_id = request.request_id
+        self._pending_input_streams.pop(request_id, None)
         req_state = self.request_states.get(request_id)
         if req_state is not None:
             self._update_streaming_request_state(req_state, request, prompt)

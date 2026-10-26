@@ -693,6 +693,7 @@ class AsyncLLM(EngineClient):
         self._run_output_handler()
 
         queue._input_stream_task = asyncio.create_task(handle_inputs())
+        self.output_processor.register_pending_input_stream(request_id, queue)
         return queue
 
     def _validate_resumable_request(self) -> None:
@@ -948,7 +949,11 @@ class AsyncLLM(EngineClient):
     async def abort(
         self, request_id: str | Iterable[str], internal: bool = False
     ) -> None:
-        """Abort RequestId in OutputProcessor and EngineCore."""
+        """Abort RequestId in OutputProcessor and EngineCore.
+
+        Streaming-input sessions can also be aborted before their first input
+        chunk arrives. Such sessions finish without yielding an output.
+        """
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )

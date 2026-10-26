@@ -38,6 +38,16 @@ Engine classes for offline and online inference.
 - [vllm.LLMEngine][]
 - [vllm.AsyncLLMEngine][]
 
+### Cancelling streaming input
+
+When [AsyncLLM.generate][vllm.v1.engine.async_llm.AsyncLLM.generate] consumes an
+asynchronous generator of [StreamingInput][vllm.engine.protocol.StreamingInput],
+you can cancel the session with `await engine.abort(request_id)` even while it is
+waiting for its first input chunk. If aborted before that chunk, the input task is
+cancelled and the output iterator ends without yielding any output. No
+configuration change is required, and the same request ID can be reused for a
+subsequent request.
+
 ## Inference Parameters
 
 Inference parameters for vLLM APIs.
