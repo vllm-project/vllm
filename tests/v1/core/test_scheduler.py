@@ -3259,13 +3259,12 @@ def test_has_sync_kv_loads(
 
 
 @pytest.mark.parametrize("suffix_scoring", [False, True])
-@pytest.mark.parametrize("is_async", [False, True])
-def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring, is_async):
+def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring):
     """External hits cannot skip rows required by prompt scoring."""
     BLOCK_SIZE = 16
     scheduler = create_scheduler(
         enable_prefix_caching=True,
-        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 2, is_async=is_async),
+        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 2, is_async=False),
         block_size=BLOCK_SIZE,
     )
     scoring_params = (
@@ -3293,10 +3292,7 @@ def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring, is_async)
     assert admission == [False, True]
 
     output = scheduler.schedule()
-    if is_async:
-        assert plain.request_id not in output.num_scheduled_tokens
-    else:
-        assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
+    assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
     assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
 
 

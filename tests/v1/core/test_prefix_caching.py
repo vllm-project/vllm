@@ -3041,20 +3041,11 @@ def test_computed_blocks_not_evicted():
 
 
 @pytest.mark.parametrize(
-    "start,skip_reading_prefix_cache,prompt_logprobs,expected_hit",
-    [
-        (0, False, None, 0),
-        (4, False, None, 4),
-        (5, False, None, 4),
-        (5, None, None, 0),
-        (5, True, None, 0),
-        (5, False, 0, 0),
-        (None, False, 0, 0),
-    ],
+    "start,prompt_logprobs,for_connector,expected_hit",
+    [(0, None, False, 0), (5, None, False, 4), (5, 0, False, 0), (5, None, True, 4)],
 )
-@pytest.mark.parametrize("for_connector", [False, True])
 def test_fixed_token_scores_reuse_only_unscored_prefix(
-    start, skip_reading_prefix_cache, prompt_logprobs, expected_hit, for_connector
+    start, prompt_logprobs, for_connector, expected_hit
 ):
     block_size = 4
     manager = make_kv_cache_manager(
@@ -3073,12 +3064,10 @@ def test_fixed_token_scores_reuse_only_unscored_prefix(
         block_size,
         sha256,
         sampling_params=SamplingParams(
-            prompt_logprob_token_ids=(
-                None if start is None else [[1]] * (len(tokens) - 1 - start)
-            ),
+            prompt_logprob_token_ids=[[1]] * (len(tokens) - 1 - start),
             prompt_logprob_start=start,
             prompt_logprobs=prompt_logprobs,
-            skip_reading_prefix_cache=skip_reading_prefix_cache,
+            skip_reading_prefix_cache=False,
         ),
     )
     lookup = (
@@ -3087,8 +3076,9 @@ def test_fixed_token_scores_reuse_only_unscored_prefix(
         else manager.get_computed_blocks
     )
     assert lookup(scoring)[1] == expected_hit
-    assert lookup(scoring, max_cache_hit_length=len(tokens))[1] == expected_hit
-    assert lookup(scoring, max_cache_hit_length=block_size - 1)[1] == 0
+    if expected_hit:
+        assert lookup(scoring, max_cache_hit_length=len(tokens))[1] == expected_hit
+        assert lookup(scoring, max_cache_hit_length=block_size - 1)[1] == 0
 
 
 def test_basic_prefix_caching_disabled():

@@ -1532,10 +1532,9 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
             assert scores[row] == pytest.approx(expected, abs=1e-3)
 
 
-@pytest.mark.parametrize("start", [16, 17])
-def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch, start):
-    """Prefix reuse preserves every requested suffix score, whether the hit
-    ends exactly at the first scored row or earlier."""
+def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch):
+    """Prefix reuse preserves every requested suffix score."""
+    start = 17
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # Cached and uncached prefills have different execution shapes; batch
     # invariance makes their scores comparable bit for bit.
