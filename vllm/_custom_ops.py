@@ -2917,9 +2917,16 @@ def concat_and_cache_mla(
     scale: torch.Tensor,
     skip_scale: bool = False,
 ) -> None:
-    torch.ops._C_cache_ops.concat_and_cache_mla(
-        kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale, skip_scale
-    )
+    if current_platform.is_xpu():
+        if skip_scale:
+            raise NotImplementedError("skip_scale is not supported on XPU")
+        torch.ops._C_cache_ops.concat_and_cache_mla(
+            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
+        )
+    else:
+        torch.ops._C_cache_ops.concat_and_cache_mla(
+            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale, skip_scale
+        )
 
 
 def concat_and_cache_mla_grouped(
