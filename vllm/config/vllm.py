@@ -1996,8 +1996,6 @@ class VllmConfig:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if self.cache_config.kv_sharing_fast_prefill:
-            # Gemma4 MTP reads target KV and only samples selected token rows;
-            # it does not need the skipped prompt rows to populate draft KV.
             if (
                 self.speculative_config is not None
                 and self.speculative_config.use_eagle()
