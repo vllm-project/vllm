@@ -20,14 +20,15 @@ import os
 import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from typing import cast
 from urllib.request import urlopen
 
 import openai
 import pytest
 import regex as re
-from transformers import AutoTokenizer
 
 from vllm.benchmarks.datasets import get_samples
+from vllm.tokenizers import get_tokenizer
 
 SERVER_HOST = os.environ.get("SERVER_HOST", "127.0.0.1")
 PROXY_BASE_URL = f"http://{SERVER_HOST}:8192/v1"
@@ -86,7 +87,7 @@ def _get_model_config() -> ModelConfig:
 
 def _get_mt_bench_prompts() -> list[str]:
     """Load MT-Bench prompts via vllm.benchmarks.datasets.get_samples."""
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = get_tokenizer(MODEL_NAME)
     args = SimpleNamespace(
         dataset_name="hf",
         dataset_path="philschmid/mt-bench",
@@ -110,7 +111,7 @@ def _get_mt_bench_prompts() -> list[str]:
         request_id_prefix="",
     )
     samples = get_samples(args, tokenizer)
-    return [sample.prompt for sample in samples]
+    return cast(list[str], [sample.prompt for sample in samples])
 
 
 def _fetch_metric(metric_name: str, port: str = DECODE_PORT) -> float:
@@ -155,7 +156,7 @@ def test_mtp_pd_reuses_last_safe_prefix_block():
 
     aligned_page_size = 544
     prompt_len = 2 * aligned_page_size + 1
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = get_tokenizer(MODEL_NAME)
     source = (
         "The following context is intentionally repeated to exercise prefix "
         "caching across disaggregated prefill and decode nodes. "

@@ -8,6 +8,7 @@ from einops import rearrange
 from torch import nn
 
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide
@@ -43,7 +44,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
 from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
     KimiK3ROCmKDAPrefillCheckpointExporter,
@@ -54,8 +55,6 @@ from vllm.models.kimi_k3.amd.ops.kda_chunk import (
 )
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
     is_fused_kda_decode_supported,
-    make_decode_conv1d_weight_loader,
-    make_decode_norm_weight_loader,
 )
 from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
@@ -79,7 +78,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
-            self.model_config.dtype, self.cache_config.mamba_cache_dtype
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -96,7 +97,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         assert isinstance(spec, MambaSpec)
         # Only the fused path exports the checkpoint snapshots
         can_checkpoint = (
-            self.use_prefill_checkpoint and self.use_fused_chunk and self.use_safe_gate
+            self.use_prefill_checkpoint
+            and self.kda_prefill_backend == "fused"
+            and self.use_safe_gate
         )
         if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
             logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
@@ -132,6 +135,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         self.conv_size = kda_config["short_conv_kernel_size"]
         self.use_full_rank_gate = True
+
+        self._fused_qkv_conv_fn = None
+        if rocm_aiter_ops.is_enabled():
+            from aiter.ops.triton.gated_delta_net import (
+                causal_conv1d_split_qkv_triton_tile_fn,
+            )
+
+            self._fused_qkv_conv_fn = causal_conv1d_split_qkv_triton_tile_fn
 
         # Keep f_a before the narrow beta shard, then pad each TP-local row to
         # select the aligned BF16 GEMM path. The padding also avoids an Inductor
@@ -183,17 +194,24 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # ROCm can fuse the whole decode step (conv + recurrence + gated norm)
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
-        conv_state_dtype, _ = self.get_state_dtype()
-        decode_conv1d_weight = None
-        if is_fused_kda_decode_supported(
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+        # AITER's Gluon kernels currently require FP32 recurrent states.
+        self.use_aiter_decode = recurrent_state_dtype == torch.float32 and bool(
+            rocm_aiter_ops.is_kda_gluon_decode_available()
+        )
+        use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
             self.conv_size,
             self.num_spec,
             vllm_config.model_config.dtype,
             conv_state_dtype,
-        ):
+            recurrent_state_dtype,
+        )
+        if use_hip_decode:
             logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
+        decode_conv1d_weight = None
+        if use_hip_decode or self.use_aiter_decode:
             decode_conv1d_weight = torch.empty(
                 3,
                 self.conv_size,
@@ -204,19 +222,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.register_buffer(
             "decode_conv1d_weight", decode_conv1d_weight, persistent=False
         )
-        if decode_conv1d_weight is None:
-            conv1d_weight_loader = _make_fused_conv1d_weight_loader(
-                [self.projection_size] * 3,
-                self.tp_size,
-                self.tp_rank,
-            )
-        else:
-            conv1d_weight_loader = make_decode_conv1d_weight_loader(
-                [self.projection_size] * 3,
-                self.tp_size,
-                self.tp_rank,
-                decode_conv1d_weight,
-            )
+        conv1d_weight_loader = _make_fused_conv1d_weight_loader(
+            [self.projection_size] * 3,
+            self.tp_size,
+            self.tp_rank,
+        )
         set_weight_attrs(self.conv1d.weight, {"weight_loader": conv1d_weight_loader})
 
         self.A_log = nn.Parameter(
@@ -248,13 +258,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 "The fused KDA chunk kernel requires gfx950 and a build that "
                 "includes it."
             )
-        self.use_fused_chunk = backend == "fused" or (
-            backend == "auto" and is_fused_kda_chunk_supported()
-        )
-        logger.info_once(
-            "Kimi-K3 KDA prefill backend: %s",
-            "fused" if self.use_fused_chunk else "triton",
-        )
+        self.kda_prefill_backend = backend
+        if backend == "auto":
+            if (
+                recurrent_state_dtype == torch.float32
+                and self.use_safe_gate
+                and rocm_aiter_ops.is_kda_gluon_prefill_available()
+            ):
+                self.kda_prefill_backend = "gluon"
+            elif is_fused_kda_chunk_supported():
+                self.kda_prefill_backend = "fused"
+            else:
+                self.kda_prefill_backend = "triton"
+        logger.info_once("Kimi-K3 KDA prefill backend: %s", self.kda_prefill_backend)
         # TODO: Remove the extra config arg once tested
         self.use_prefill_checkpoint = (
             additional_config.get("kda_prefill_checkpoint", True)
@@ -267,19 +283,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         decode_norm_weight = None
-        if decode_conv1d_weight is not None:
+        if use_hip_decode:
             # Upcast once at load time; a BF16 norm weight slows the fused
             # decode kernel's epilogue.
             decode_norm_weight = torch.empty(
                 self.head_dim,
                 dtype=torch.float32,
                 device=self.o_norm.weight.device,
-            )
-            if hasattr(self.o_norm.weight, "weight_loader"):
-                delattr(self.o_norm.weight, "weight_loader")
-            set_weight_attrs(
-                self.o_norm.weight,
-                {"weight_loader": make_decode_norm_weight_loader(decode_norm_weight)},
             )
         self.register_buffer("decode_norm_weight", decode_norm_weight, persistent=False)
         self.o_proj = RowParallelLinear(
@@ -294,6 +304,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    @torch.no_grad()
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        if is_weights_pre_processed():
+            return
+        if self.decode_conv1d_weight is not None:
+            self.decode_conv1d_weight.copy_(
+                self.conv1d.weight.view(
+                    3, self.local_projection_size, self.conv_size
+                ).transpose(1, 2)
+            )
+        if self.decode_norm_weight is not None:
+            self.decode_norm_weight.copy_(self.o_norm.weight)
 
     def rearrange_mixed_qkv(
         self, mixed_qkv: torch.Tensor
@@ -390,6 +413,66 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # DS layout stores it that way directly; SD layout needs a transpose.
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
+
+        if (
+            self.use_aiter_decode
+            and spec_sequence_masks is None
+            and m.num_prefills == 0
+            and m.num_decodes > 0
+        ):
+            assert non_spec_state_indices_tensor is not None
+            rocm_aiter_ops.kda_fused_recurrent_packed_decode(
+                mixed_qkv=mixed_qkv,
+                g=g1[0],
+                beta=beta[0],
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                lower_bound=self.gate_lower_bound,
+                initial_state=recurrent_state,
+                ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+                conv_state=conv_state,
+                conv_weight=self.decode_conv1d_weight,
+                out_gate=g2[:num_actual_tokens],
+                norm_weight=self.o_norm.weight,
+                norm_eps=self.o_norm.eps,
+                out=core_attn_out[0, :num_actual_tokens],
+            )
+            return
+
+        if (
+            self.use_aiter_decode
+            and spec_sequence_masks is not None
+            and m.num_prefills == 0
+        ):
+            # Spec-only batch (gdn_attn never mixes spec and plain decodes).
+            assert spec_state_indices_tensor is not None
+            assert spec_query_start_loc is not None
+            q, k, v = (
+                rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
+                for x in mixed_qkv.split(self.local_projection_size, dim=-1)
+            )
+            n_spec = q.shape[1]
+            rocm_aiter_ops.kda_fused_recurrent_spec_decode(
+                q=q,
+                k=k,
+                v=v,
+                g=g1,
+                beta=beta,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                lower_bound=self.gate_lower_bound,
+                initial_state=recurrent_state,
+                cu_seqlens=spec_query_start_loc[: m.num_spec_decodes + 1],
+                ssm_state_indices=spec_state_indices_tensor,
+                num_accepted_tokens=num_accepted_tokens,
+                conv_state=conv_state,
+                conv_weight=self.decode_conv1d_weight,
+                out_gate=g2[:n_spec].unsqueeze(0),
+                norm_weight=self.o_norm.weight,
+                norm_eps=self.o_norm.eps,
+                out=core_attn_out[:, :n_spec],
+            )
+            return
 
         if (
             self.decode_conv1d_weight is not None
@@ -515,35 +598,48 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None
             if m.num_prefills > 0:
-                q_ns, k_ns, v_ns = mixed_qkv_ns.split(
-                    self.local_projection_size, dim=-1
-                )
-
-                # Packed prefill conv would require copying V solely to make
-                # it dense for KDA. Separate calls accept the strided inputs
-                # and produce dense Q/K/V without that extra traffic.
-                # TODO: Use packed conv once every KDA prefill backend accepts
-                # row-strided Q/K/V directly.
-                def _prefill_conv(
-                    x: torch.Tensor,
-                    state: torch.Tensor,
-                    weight: torch.Tensor,
-                ) -> torch.Tensor:
-                    return causal_conv1d_fn(
-                        x.transpose(0, 1),
-                        weight,
+                if self._fused_qkv_conv_fn is not None:
+                    # One launch (fused qkv) instead of 3
+                    q_ns, k_ns, v_ns = self._fused_qkv_conv_fn(
+                        mixed_qkv_ns.transpose(0, 1),
+                        conv_weights,
                         None,
-                        activation="silu",
-                        conv_states=state,
-                        has_initial_state=has_initial_state,
+                        conv_state,
+                        non_spec_query_start_loc,
+                        self.local_projection_size,
+                        self.local_projection_size,
                         cache_indices=non_spec_state_indices_tensor,
-                        query_start_loc=non_spec_query_start_loc,
+                        has_initial_state=has_initial_state,
+                        activation="silu",
+                        block_m=8,
                         metadata=m,
-                    ).transpose(0, 1)
+                        preserve_input_dtype=True,
+                    )
+                else:
+                    q_ns, k_ns, v_ns = mixed_qkv_ns.split(
+                        self.local_projection_size, dim=-1
+                    )
 
-                q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
-                k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
-                v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
+                    def _prefill_conv(
+                        x: torch.Tensor,
+                        state: torch.Tensor,
+                        weight: torch.Tensor,
+                    ) -> torch.Tensor:
+                        return causal_conv1d_fn(
+                            x.transpose(0, 1),
+                            weight,
+                            None,
+                            activation="silu",
+                            conv_states=state,
+                            has_initial_state=has_initial_state,
+                            cache_indices=non_spec_state_indices_tensor,
+                            query_start_loc=non_spec_query_start_loc,
+                            metadata=m,
+                        ).transpose(0, 1)
+
+                    q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
+                    k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
+                    v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
                 q_ns, k_ns, v_ns = (
                     rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                     for x in (q_ns, k_ns, v_ns)
@@ -633,7 +729,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     cu_seqlens=prefill_query_start_loc,
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
-                    use_fused_chunk=self.use_fused_chunk,
+                    backend=self.kda_prefill_backend,
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
                     checkpoint_state=checkpoint_state,
                     checkpoint_offsets=checkpoint_offsets,
@@ -687,15 +783,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # ---------- merge spec and non-spec outputs ----------
         if core_attn_out_spec is not None and core_attn_out_non_spec is not None:
-            # Mixed batches require indexed placement in the original order.
-            merged = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_spec.dtype,
-                device=core_attn_out_spec.device,
-            )
+            merged = core_attn_out[:, :num_actual_tokens]
             merged.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[0, :num_actual_tokens] = merged[0, :num_actual_tokens]
         elif core_attn_out_non_spec is not None:
             if core_attn_out_non_spec.data_ptr() != core_attn_out.data_ptr():
                 core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[

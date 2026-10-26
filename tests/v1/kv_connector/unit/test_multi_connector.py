@@ -4,7 +4,6 @@ import filecmp
 import shutil
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -13,7 +12,8 @@ import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
 from vllm import LLM, SamplingParams
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, SpeculativeConfig
+from vllm.config.attention import HiSparseConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -200,15 +200,6 @@ def _lookahead_connector_config(supported: bool) -> dict[str, Any]:
             "supports_lookahead_block_hashes": supported,
         },
     }
-
-
-def _enable_eagle(vllm_config) -> None:
-    vllm_config.speculative_config = SimpleNamespace(
-        use_eagle=lambda: True,
-        use_eagle_block_drop=lambda: True,
-        disable_lookahead_block_hashes=False,
-        use_multi_module_mtp=lambda: False,
-    )
 
 
 def test_register_finished_partial_tail_notifies_every_connector():
@@ -866,6 +857,23 @@ class TestMultiConnectorStats:
 
         child_metrics.observe.assert_called_once_with({"transfer_duration": [1.5]}, 2)
 
+    @pytest.mark.parametrize("with_exporter", [False, True])
+    def test_prom_metrics_skips_stats_only_connectors(self, with_exporter):
+        """Stats-only children must not prevent supported metrics from exporting."""
+        child_metrics = MagicMock()
+        metrics = object.__new__(MultiKVConnectorPromMetrics)
+        metrics._prom_metrics = (
+            {"MooncakeStoreConnector": child_metrics} if with_exporter else {}
+        )
+        payload = {"MooncakeConnector": {"bytes_transferred": [1024]}}
+        if with_exporter:
+            payload["MooncakeStoreConnector"] = {"load_get_bytes": [2048]}
+
+        metrics.observe(payload, engine_idx=2)
+
+        if with_exporter:
+            child_metrics.observe.assert_called_once_with({"load_get_bytes": [2048]}, 2)
+
     def test_aggregate_same_connector(self):
         """Test aggregating stats from the same connector type."""
         stats1 = MultiKVConnectorStats(
@@ -1089,11 +1097,30 @@ Options:
 
 
 @pytest.mark.parametrize(
-    ("child_support", "expected"),
-    [([True, True], True), ([True, False], False)],
+    (
+        "child_support",
+        "num_lookahead",
+        "prefix_caching",
+        "disabled",
+        "hisparse",
+        "expected",
+    ),
+    [
+        ([True, True], 1, True, False, False, True),
+        ([True, False], 1, True, False, False, False),
+        ([True, True], 1, False, False, False, True),
+        ([True, True], 2, True, False, False, False),
+        ([True, True], 1, True, True, False, False),
+        ([True, True], 1, True, False, True, False),
+    ],
 )
 def test_factory_configures_multi_connector_lookahead_block_hashes(
-    child_support: list[bool], expected: bool
+    child_support: list[bool],
+    num_lookahead: int,
+    prefix_caching: bool,
+    disabled: bool,
+    hisparse: bool,
+    expected: bool,
 ):
     vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
@@ -1104,8 +1131,17 @@ def test_factory_configures_multi_connector_lookahead_block_hashes(
         },
         kv_role="kv_both",
         disable_hybrid_kv_cache_manager=True,
+        hf_overrides={"num_nextn_predict_layers": num_lookahead},
     )
-    _enable_eagle(vllm_config)
+    # Construct the config without downloading a separate draft model.
+    spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
+    spec.method = "mtp"
+    spec.draft_model_config = vllm_config.model_config
+    spec.disable_lookahead_block_hashes = disabled
+    vllm_config.speculative_config = spec
+    vllm_config.cache_config.enable_prefix_caching = prefix_caching
+    if hisparse:
+        vllm_config.attention_config.hisparse_config = HiSparseConfig()
 
     connector = KVConnectorFactory.create_connector(
         vllm_config,
@@ -1114,6 +1150,7 @@ def test_factory_configures_multi_connector_lookahead_block_hashes(
     )
 
     assert isinstance(connector, MultiConnector)
+    assert vllm_config.get_num_hash_lookahead_tokens(connector) == int(expected)
     assert connector.use_lookahead_block_hashes is expected
     assert all(
         child.use_lookahead_block_hashes is expected for child in connector._connectors

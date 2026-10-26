@@ -29,7 +29,7 @@ use axum::body::Body;
 use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    HttpListenerMode, LoraModulePath, TlsConfig,
+    DEFAULT_LOG_STATS_INTERVAL, HttpListenerMode, LoraModulePath, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -49,6 +49,8 @@ pub use vllm_chat::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
+pub use vllm_metrics::CustomHistogramBuckets;
+use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
 
 use crate::listener::{Listener, MaybeTlsListener};
@@ -76,6 +78,9 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
 /// Build the shared application state for one configured model and one engine
 /// client, including any static LoRA adapters from `--lora-modules`.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
+    // Fix the histogram buckets before the engine connection records metrics.
+    METRICS.set_custom_histogram_buckets(config.custom_histogram_buckets.clone());
+
     // If no served names are specified, fall back to the backend model path so
     // that the API always has at least one valid model ID. Use the same primary
     // public name for frontend-side metrics labels.
@@ -87,11 +92,14 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         &config.model,
         LoadModelBackendsOptions {
             revision: config.revision.clone(),
+            tokenizer: config.tokenizer.clone(),
+            hf_config: config.hf_config.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: config.generation_config,
             renderer: config.renderer,
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
+            trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config
                 .default_chat_template_kwargs
@@ -124,14 +132,18 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .context("failed to connect to engine core")?;
 
     let llm = Llm::new(client)
-        .with_log_stats(!config.disable_log_stats)
+        .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
+        .with_request_id_randomization(!config.disable_request_id_randomization)
         .with_stream_interval(config.stream_interval);
-    let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
+    let text = TextLlm::new(llm, text_backend)
+        .with_max_logprobs(config.max_logprobs)
+        .with_structured_outputs_backend(config.structured_outputs_backend);
 
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())
         .with_reasoning_parser(config.reasoning_parser.clone())
-        .with_tool_strict_level(config.tool_strict_level);
+        .with_tool_strict_level(config.tool_strict_level)
+        .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
 
     let state = Arc::new(
         AppState::new(served_model_names, chat)

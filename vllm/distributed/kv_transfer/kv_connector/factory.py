@@ -16,7 +16,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 from vllm.logger import init_logger
 from vllm.utils.func_utils import supports_kw
-from vllm.v1.core.kv_cache_utils import is_lookahead_block_hashing_enabled
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -75,7 +74,7 @@ class KVConnectorFactory:
         # We build separately to enforce strict separation
         connector = connector_cls(config, role, kv_cache_config)
         connector.set_lookahead_block_hashes(
-            is_lookahead_block_hashing_enabled(config, connector)
+            bool(config.get_num_hash_lookahead_tokens(connector))
         )
         return connector
 

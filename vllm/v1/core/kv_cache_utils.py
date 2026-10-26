@@ -8,7 +8,15 @@ import math
 import os
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    NamedTuple,
+    NewType,
+    TypeAlias,
+    TypeVar,
+    overload,
+)
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -29,7 +37,6 @@ from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 
@@ -215,6 +222,32 @@ class KVCacheBlock:
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
+
+
+def null_head_len(blocks: Sequence[KVCacheBlock]) -> int:
+    """Number of leading null blocks, e.g. a sliding-window table's skipped prefix."""
+    if not blocks or not blocks[0].is_null:
+        return 0
+    lo, hi = 1, len(blocks)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if blocks[mid].is_null:
+            lo = mid + 1
+        else:
+            hi = mid
+    # All null entries are one shared object, so count() checks the run at C speed.
+    if blocks[:lo].count(blocks[0]) == lo:
+        return lo
+    return next(i for i, b in enumerate(blocks) if not b.is_null)
+
+
+_BlockSeq = TypeVar("_BlockSeq", list[KVCacheBlock], Sequence[KVCacheBlock])
+
+
+def trim_null_head(blocks: _BlockSeq) -> _BlockSeq:
+    """``blocks`` without its leading null blocks; ``blocks`` itself if none."""
+    nhl = null_head_len(blocks)
+    return blocks[nhl:] if nhl else blocks
 
 
 class KVCacheBlockCopy(NamedTuple):
@@ -662,33 +695,13 @@ def to_event_extra_keys(
     """
     if not extra_keys:
         return None
-    event_keys = [_untag_extra_keys(keys) for keys in extra_keys]
-    return event_keys or None
-
-
-def to_request_event_extra_keys(
-    extra_keys: Iterable[tuple[Any, ...] | None] | None,
-    use_lookahead_block_hashes: bool,
-) -> list[tuple[Any, ...] | None] | None:
-    """`to_event_extra_keys` for keys from
-    `generate_request_block_hash_extra_keys`. Lookahead keys keep the lookahead
-    token and untag the block and lookahead extra keys."""
-    if not use_lookahead_block_hashes:
-        return to_event_extra_keys(extra_keys)
-    if not extra_keys:
-        return None
-    return [
+    event_keys = [
         None
         if keys is None
-        else (_untag_extra_keys(keys[0]), keys[1], _untag_extra_keys(keys[2]))
+        else tuple(key[1:] if key[0] == "mm" else key[1] for key in keys)
         for keys in extra_keys
-    ] or None
-
-
-def _untag_extra_keys(keys: tuple[Any, ...] | None) -> tuple[Any, ...] | None:
-    if keys is None:
-        return None
-    return tuple(key[1:] if key[0] == "mm" else key[1] for key in keys)
+    ]
+    return event_keys or None
 
 
 def hash_block_tokens(
@@ -937,34 +950,10 @@ def resolve_cache_hit_alignment_tokens(
     return scheduler_block_size
 
 
-def is_lookahead_block_hashing_enabled(
-    vllm_config: VllmConfig,
-    kv_connector: "KVConnectorBase_V1 | None" = None,
-) -> bool:
-    speculative_config = vllm_config.speculative_config
-    if (
-        speculative_config is None
-        or not speculative_config.use_eagle_block_drop()
-        or speculative_config.disable_lookahead_block_hashes
-    ):
-        return False
-    # The hash covers only the next token; multi-module MTP reads further ahead.
-    if vllm_config.num_prefill_lookahead_tokens > 1:
-        return False
-    # HiSparse is not validated with lookahead hashes.
-    if vllm_config.attention_config.hisparse_config is not None:
-        return False
-    if vllm_config.kv_transfer_config is not None:
-        return bool(
-            kv_connector is not None and kv_connector.supports_lookahead_block_hashes
-        )
-    return vllm_config.cache_config.enable_prefix_caching
-
-
 def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
-    use_lookahead_block_hashes: bool = False,
+    num_hash_lookahead_tokens: int = 0,
 ) -> Callable[[Request], list[BlockHash]]:
     """Returns a function which computes the list of un-computed block hashes
     of a request.
@@ -974,14 +963,16 @@ def get_request_block_hasher(
     boundary. Coarser group block sizes and partial-cache boundaries reuse
     these hashes directly (see ``BlockHashListWithBlockSize``).
 
-    With ``use_lookahead_block_hashes``, each hash also covers the token right
-    after its block, which the EAGLE draft KV at the block's last position
-    depends on, so it is emitted only once that token exists.
+    With ``num_hash_lookahead_tokens`` (L) > 0, each hash also covers the L
+    tokens after its block, which the drafter's KV at the block's last position
+    depends on, so it is emitted only once those tokens exist. The block tokens
+    stay the hashed tokens; the extra keys become ``(E, *tokens)``, where ``E``
+    covers the block and those tokens.
     """
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * hash_block_size
-        num_tokens = request.num_tokens - int(use_lookahead_block_hashes)
+        num_tokens = request.num_tokens - num_hash_lookahead_tokens
 
         if start_token_idx + hash_block_size > num_tokens:
             # Early stop when there no new full blocks created.
@@ -1009,13 +1000,26 @@ def get_request_block_hasher(
                 break
 
             # MM and LoRA requests need extra keys for block-hash computation.
-            extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
-                request,
-                start_token_idx,
-                end_token_idx,
-                curr_mm_idx,
-                use_lookahead_block_hashes,
-            )
+            if num_hash_lookahead_tokens:
+                hash_end_token_idx = end_token_idx + num_hash_lookahead_tokens
+                extra_keys, curr_mm_idx = generate_lookahead_block_hash_extra_keys(
+                    request,
+                    start_token_idx,
+                    end_token_idx,
+                    hash_end_token_idx,
+                    curr_mm_idx,
+                )
+                if num_hash_lookahead_tokens == 1:
+                    extra_keys = (extra_keys, request.all_token_ids[end_token_idx])
+                else:
+                    extra_keys = (
+                        extra_keys,
+                        *request.all_token_ids[end_token_idx:hash_end_token_idx],
+                    )
+            else:
+                extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                    request, start_token_idx, end_token_idx, curr_mm_idx
+                )
 
             # Compute the hash of the current block
             block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
@@ -1036,50 +1040,22 @@ def generate_lookahead_block_hash_extra_keys(
     request: Request,
     start_token_idx: int,
     end_token_idx: int,
+    hash_end_token_idx: int,
     start_mm_idx: int,
-) -> tuple[tuple[Any, ...], int]:
-    block_extra_keys, next_block_mm_idx = generate_block_hash_extra_keys(
-        request,
-        start_token_idx,
-        end_token_idx,
-        start_mm_idx,
-    )
-    lookahead_extra_keys, _ = generate_block_hash_extra_keys(
-        request,
-        end_token_idx,
-        end_token_idx + 1,
-        next_block_mm_idx,
-    )
-    return (
-        (
-            block_extra_keys,
-            request.all_token_ids[end_token_idx],
-            lookahead_extra_keys,
-        ),
-        next_block_mm_idx,
-    )
-
-
-def generate_request_block_hash_extra_keys(
-    request: Request,
-    start_token_idx: int,
-    end_token_idx: int,
-    start_mm_idx: int,
-    use_lookahead_block_hashes: bool,
 ) -> tuple[tuple[Any, ...] | None, int]:
-    if use_lookahead_block_hashes:
-        return generate_lookahead_block_hash_extra_keys(
-            request,
-            start_token_idx,
-            end_token_idx,
-            start_mm_idx,
-        )
-    return generate_block_hash_extra_keys(
-        request,
-        start_token_idx,
-        end_token_idx,
-        start_mm_idx,
+    """Generate extra keys for the block and its lookahead tokens.
+
+    Rewind the MM index to retain inputs overlapping the next block.
+    """
+    extra_keys, mm_idx = generate_block_hash_extra_keys(
+        request, start_token_idx, hash_end_token_idx, start_mm_idx
     )
+    while mm_idx > 0:
+        mm_position = request.mm_features[mm_idx - 1].mm_position
+        if mm_position.offset + mm_position.length <= end_token_idx:
+            break
+        mm_idx -= 1
+    return extra_keys, mm_idx
 
 
 def get_max_concurrency_for_kv_cache_config(

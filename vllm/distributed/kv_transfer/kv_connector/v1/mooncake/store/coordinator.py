@@ -27,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -183,7 +184,7 @@ class MooncakeStoreCoordinator:
             # KVCacheCoordinator.verify_and_split_kv_cache_groups.
             if not g.kv_cache_spec.prefix_cacheable:
                 continue
-            spec = _unwrap_spec(g.kv_cache_spec)
+            spec = _coverage_spec(g.kv_cache_spec)
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None, (
                 f"No manager registered for KVCacheSpec {spec}"
@@ -361,7 +362,7 @@ class MooncakeStoreCoordinator:
         )
         masks: list[list[bool] | None] = []
         for g_idx, g in enumerate(self.kv_cache_groups):
-            spec = _unwrap_spec(g.kv_cache_spec)
+            spec = _coverage_spec(g.kv_cache_spec)
             end_chunk = aligned_token_len // spec.block_size
             start_chunk = min(end_chunk, max(0, cdiv(start_token, spec.block_size)))
             if exclude_mamba and isinstance(spec, MambaSpec):
@@ -520,4 +521,21 @@ class MooncakeStoreCoordinator:
 def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
+    return spec
+
+
+def _coverage_spec(spec: KVCacheSpec) -> KVCacheSpec:
+    """The spec whose window covers every block an external hit restores.
+
+    An external SWA hit allocates the MTP re-prefill tail
+    (``extra_retained_tokens``) below the window, so lookup, load and store
+    must cover it too, as the offloading connector does.
+    """
+    spec = _unwrap_spec(spec)
+    if isinstance(spec, SlidingWindowSpec) and spec.extra_retained_tokens:
+        return replace(
+            spec,
+            sliding_window=spec.sliding_window + spec.extra_retained_tokens,
+            extra_retained_tokens=0,
+        )
     return spec
