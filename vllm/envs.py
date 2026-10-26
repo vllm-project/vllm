@@ -163,6 +163,8 @@ if TYPE_CHECKING:
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
+    # torch 2.11.x defaults to False (Inductor is_opaque_type bug,
+    # pytorch#173863); runtime default comes from use_layername().
     VLLM_USE_LAYERNAME: bool = True
     VLLM_USE_RUST_FRONTEND: bool = False
     VLLM_USE_RUST_BENCH: bool = False
@@ -385,6 +387,27 @@ def use_aot_compile() -> bool:
     )
 
     return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
+
+
+def use_layername() -> bool:
+    """Default value for VLLM_USE_LAYERNAME, gated on the torch version.
+
+    Torch 2.11.x Inductor calls is_opaque_type with an instance where a
+    type is expected (pytorch#173863, fixed upstream in 2.12 via
+    is_opaque_value). With LayerName enabled by default on torch >= 2.11,
+    MoE graphs can hit an inductor assert in graph.count_bytes() under
+    metric logging / LOG_TLPARSE=1. Default off on 2.11.x; explicit
+    VLLM_USE_LAYERNAME still wins.
+    """
+    from vllm.utils.torch_version import is_torch_equal_or_newer
+
+    on_2_11 = is_torch_equal_or_newer("2.11.0") and not is_torch_equal_or_newer(
+        "2.12.0.dev"
+    )
+
+    default_value = "0" if on_2_11 else "1"
+
+    return os.environ.get("VLLM_USE_LAYERNAME", default_value) == "1"
 
 
 def use_mega_aot_artifact():
@@ -1442,8 +1465,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
     # If set to "0", disable LayerName opaque type for layer_name
-    # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
-    "VLLM_USE_LAYERNAME": lambda: bool(int(os.getenv("VLLM_USE_LAYERNAME", "1"))),
+    # parameters in custom ops.  Defaults to enabled on torch >= 2.11,
+    # except torch 2.11.x where Inductor misuses is_opaque_type
+    # (pytorch#173863) and can assert on MoE graphs; see use_layername().
+    "VLLM_USE_LAYERNAME": use_layername,
     # If set, use the Rust frontend binary instead of the Python API server
     # process(es).
     "VLLM_USE_RUST_FRONTEND": lambda: bool(
