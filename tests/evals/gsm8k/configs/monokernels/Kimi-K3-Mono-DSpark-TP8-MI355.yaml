@@ -1,8 +1,9 @@
 model_name: "moonshotai/Kimi-K3"
-# Not yet measured with this harness: InferenceX's MI355X Kimi-K3 lane scored
-# 0.969 on GSM8K (recipes/models/moonshotai/Kimi-K3.yaml).
-accuracy_threshold: 0.93
-tolerance: 0.05
+# One run per arm: mono off 0.9568, on 0.9462 (acceptance length 4.673, 4.663).
+# The on/off gap (0.0106) exceeds DeepSeek-V4.1-Flash-Mono-TP4-MI355's
+# run-to-run spread (0.0075). Tolerance: twice the gap.
+accuracy_threshold: 0.9568
+tolerance: 0.022
 min_acceptance_length: 3.0
 num_questions: 1319
 num_fewshot: 5

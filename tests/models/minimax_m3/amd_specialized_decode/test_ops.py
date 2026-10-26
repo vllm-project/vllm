@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Op-level tests of the fused FFN launch (TP=1 builds unless noted) against
-vLLM's and AITER's native ops, with MXFP4 weights from vLLM's real post-load
-path: stage parity, every stage against a float64 reference (TP1 and TP4),
-routing ties, padding, residency, graph replay, fail-stop sites, epoch reset,
-the gfx950 hand-off ISA, and the hand-off stresses (one-GPU cross-XCD; TP4
-over XGMI)."""
+"""Op-level tests of the fused FFN launch (TP=1 builds unless noted), with
+MXFP4 weights from vLLM's real post-load path: every stage against a float64
+reference (TP1 and TP4), routing ties, padding, residency, graph replay,
+fail-stop sites, epoch reset, the gfx950 hand-off ISA, and the hand-off
+stresses (one-GPU cross-XCD; TP4 over XGMI). ``*_match_vllm_ops``: the stages
+against vLLM's and AITER's native ops (nightly)."""
 
 import glob
 import os
@@ -218,7 +218,7 @@ def _run(weights, s, seed=1, inputs=None, slots=None):
 
 
 @pytest.mark.parametrize("s", [1, 3, 16])
-def test_ffn_stages_match_native(weights, s):
+def test_ffn_stages_match_vllm_ops(weights, s):
     """Seam residual (exact), Gemma norm, FP32 router, top-4 and the shared +
     routed A16W4 experts, each against its native op."""
     r = _run(weights, s)
@@ -252,11 +252,9 @@ def test_ffn_stages_match_native(weights, s):
     assert cos > 0.9999 and rel < 1e-2
 
 
-def test_route_ties_and_near_ties(weights):
+def test_route_ties(weights):
     """Experts 0 and 1 share a router row and bias: an exact 4th-place tie,
-    which the kernel gives to the lower expert. Elsewhere the selection matches
-    AITER's on native FP32 logits wherever the 4th/5th margin exceeds the
-    logits' measured difference times the maximal sigmoid slope, twice."""
+    which the kernel gives to the lower expert."""
     w = SimpleNamespace(**vars(weights))
     w.router = weights.router.clone()
     w.router_bias = weights.router_bias.clone()
@@ -269,6 +267,11 @@ def test_route_ties_and_near_ties(weights):
     assert (r.ids[:, :3].sort(-1).values == torch.tensor([10, 11, 12]).cuda()).all()
     assert (r.ids[:, 3] == 0).all()
 
+
+def test_route_near_ties_match_vllm_ops(weights):
+    """The selection matches AITER's on native FP32 logits wherever the 4th/5th
+    margin exceeds the logits' measured difference times the maximal sigmoid
+    slope, twice."""
     r = _run(weights, 16, seed=3)
     logits = r.x.float() @ weights.router.T
     bound = (r.logits - logits).abs().max().item() * 0.25 * 2

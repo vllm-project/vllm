@@ -1,7 +1,8 @@
 model_name: "deepseek-ai/DeepSeek-V4.1-Flash"
-# Mono off: 0.9045, 0.9030 (mean 0.904); on: 0.9045, 0.9105. The runs vary by
-# up to 0.0075, the mono-on mean is 0.004 above the mono-off one. Tolerance: twice
-# the largest distance of a run from the mono-off mean (0.0068).
+# Two runs per arm. Mono off: 0.9045, 0.9030 (mean 0.904); on: 0.9045, 0.9105.
+# The runs vary by up to 0.0075, the mono-on mean is 0.004 above the mono-off
+# one. Tolerance: twice the largest distance of a run from the mono-off mean
+# (0.0068).
 accuracy_threshold: 0.904
 tolerance: 0.015
 num_questions: 1319

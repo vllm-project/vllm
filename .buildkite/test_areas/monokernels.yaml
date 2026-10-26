@@ -72,7 +72,7 @@ steps:
   - pytest -v -s tests/models/test_dsv41_mono_decode.py tests/kernels/models/amd/test_dsv41_gfx942_weights.py tests/kernels/models/amd/test_dsv41_mono_keylist.py tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
   - pytest -v -s tests/kernels/models/amd/test_mono_primitives.py -k dsv41
   # mono/common/sync.py waits without a bound, so a hand-off bug would hang.
-  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/test_dsv41_mono_numerics.py
+  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/test_dsv41_mono_numerics.py -k "not vllm_ops"
   - pytest -v -s --timeout=900 --timeout-method=thread tests/models/test_dsv41_mono_layers.py -k "test_mono_decode_matches_the_model and 2-8"
 
 - label: ":amd: (MI355) [Nightly] DeepSeek-V4.1 Mono E2E"
@@ -88,6 +88,7 @@ steps:
   - vllm/models/deepseek_v4/
   - vllm/v1/worker/gpu/spec_decode/dspark/
   - docker/Dockerfile.rocm_base
+  - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
   - tests/evals/gsm8k/test_gsm8k_correctness.py
   - tests/evals/gsm8k/gsm8k_eval.py
@@ -97,6 +98,7 @@ steps:
   - tests/evals/gsm8k/configs/monokernels/DeepSeek-V4.1-Flash-Mono-TP4-MI355.yaml
   - tests/evals/gsm8k/configs/monokernels/DeepSeek-V4.1-Flash-Mono-DSpark-TP4-MI355.yaml
   commands:
+  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/test_dsv41_mono_numerics.py -k vllm_ops
   - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/test_dsv41_mono_layers.py -k "not (test_mono_decode_matches_the_model and 2-8)"
   - PYTHONPATH=/vllm-workspace pytest -v -s tests/evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/monokernels/models.yaml -k DeepSeek-V4.1
 
@@ -161,7 +163,7 @@ steps:
   - tests/models/mono_reference.py
   commands:
   - pytest -v -s tests/kernels/models/amd/
-  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/test_dsv41_mono_numerics.py
+  - pytest -v -s --timeout=1500 --timeout-method=thread tests/models/test_dsv41_mono_numerics.py -k "not vllm_ops"
   - pytest -v -s --timeout=900 --timeout-method=thread tests/models/test_dsv41_mono_layers.py -k "test_mono_decode_matches_the_model and 4-8"
 
 - label: ":amd: (MI300) [Nightly] DeepSeek-V4.1 gfx942 Mono E2E"
@@ -277,7 +279,7 @@ steps:
   - tests/kernels/models/amd/test_mono_primitives.py
   commands:
   # Separate processes: the TP4 rank-skew stress starts without engine state.
-  - ulimit -c 0 && pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_ops.py tests/models/minimax_m3/amd_specialized_decode/test_runtime.py
+  - ulimit -c 0 && pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_ops.py tests/models/minimax_m3/amd_specialized_decode/test_runtime.py -k "not vllm_ops"
   - pytest -v -s tests/kernels/models/amd/test_mono_primitives.py -k minimax
   - ulimit -c 0 && pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_model.py -k "test_model_matches_native and eager"
 
@@ -294,6 +296,7 @@ steps:
   - vllm/models/deepseek_v41/__init__.py
   - vllm/models/deepseek_v41/amd/mono/common/
   - docker/Dockerfile.rocm_base
+  - tests/models/minimax_m3/amd_specialized_decode/test_ops.py
   - tests/models/minimax_m3/amd_specialized_decode/test_model.py
   - tests/evals/gsm8k/test_gsm8k_correctness.py
   - tests/evals/gsm8k/gsm8k_eval.py
@@ -303,6 +306,7 @@ steps:
   - tests/evals/gsm8k/configs/monokernels/MiniMax-M3-MXFP4-Mono-TP4-MI355.yaml
   - tests/evals/gsm8k/configs/monokernels/MiniMax-M3-MXFP4-Mono-EAGLE3-TP4-MI355.yaml
   commands:
+  - pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_ops.py -k vllm_ops
   - ulimit -c 0 && pytest -v -s tests/models/minimax_m3/amd_specialized_decode/test_model.py -k "not (test_model_matches_native and eager)"
   - PYTHONPATH=/vllm-workspace pytest -v -s tests/evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/monokernels/models.yaml -k MiniMax-M3
 

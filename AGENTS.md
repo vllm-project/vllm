@@ -108,6 +108,10 @@ When adding tests:
   error (never another vLLM, AITER or Triton kernel), plus one engine parity
   smoke; and an optional `[Nightly] Mono E2E` step running the real checkpoint's
   gsm8k with an engagement check. A model that already has steps extends them.
+  Assert accuracy, not which class or code path ran: every tolerance must be
+  derived from the formats and accumulation involved (state the derivation),
+  not tuned until CI passes. Run both steps at least 10 times in a row before
+  submitting them.
 
 For model-specific requirements, see
 [`docs/contributing/model/tests.md`](docs/contributing/model/tests.md).

@@ -18,8 +18,8 @@ vLLM's post-load processing.
 Exact where the arithmetic is (data movement, the rank-order sums, the
 quantization rules on the kernel's own input); the documented rounding chain
 otherwise, with KAPPA for the hardware transcendentals and the scaled MFMA's
-accumulation. The steps of the first test also run the ops vLLM runs for the
-same step and compare against them.
+accumulation. The first test's ``vllm_ops`` cases also run the ops vLLM runs
+for the same step and compare against them.
 
 On gfx942 at TP4, ``test_mono_decode_942_replays`` runs the composed runner on
 the copies of the weights that the model makes at load, at steps of 6, 8 and 42
@@ -28,6 +28,7 @@ CUDA graph. The real model's numerics on gfx942 are checked by
 ``test_dsv41_mono_layers.py``."""
 
 from contextlib import contextmanager
+from functools import partial
 from typing import NamedTuple
 
 import pytest
@@ -585,6 +586,18 @@ def _in_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port, check
 def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     _in_worker(
         monkeypatch, tp_size, pp_size, rank, distributed_init_port, _check_layers
+    )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _mono_numerics_vllm(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _in_worker(
+        monkeypatch,
+        tp_size,
+        pp_size,
+        rank,
+        distributed_init_port,
+        partial(_check_layers, vllm=True),
     )
 
 
@@ -1398,9 +1411,9 @@ def _replay(steps: list, launches: dict) -> None:
         assert torch.equal(ranks, epoch.expand_as(ranks)), ranks.tolist()
 
 
-def _check_layers(rank: int, tp: int, device) -> None:
+def _check_layers(rank: int, tp: int, device, vllm: bool = False) -> None:
     runner, check = _bench(rank, tp, device)
-    steps = [check(Case(1, 1, 6, vllm=True)), check(Case(2, 8, 6, vllm=True))]
+    steps = [check(Case(1, 1, 6, vllm=vllm)), check(Case(2, 8, 6, vllm=vllm))]
     _replay(steps, {runner: 2 * len(steps)})
 
 
@@ -1443,11 +1456,20 @@ def _check_index_source(rank: int, tp: int, device) -> None:
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
+@pytest.mark.parametrize(
+    "target",
+    [
+        pytest.param(_mono_numerics, id="reference"),
+        pytest.param(_mono_numerics_vllm, id="vllm_ops"),
+    ],
+)
 @pytest.mark.parametrize("tp", [2, 4])
-def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int):
+def test_mono_decode_layer_matches_vllm(
+    monkeypatch: pytest.MonkeyPatch, tp: int, target
+):
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
-    multi_process_parallel(monkeypatch, tp, 1, _mono_numerics)
+    multi_process_parallel(monkeypatch, tp, 1, target)
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")

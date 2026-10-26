@@ -1,9 +1,9 @@
 model_name: "deepseek-ai/DeepSeek-V4.1-Flash"
-# Not calibrated yet (one mono-off run on MI355: 0.9045, acceptance length
-# 3.63): DeepSeek-V4.1-Flash-NVFP4-DSpark-TP4.yaml's thresholds, with the
-# run-to-run spread of MiniMax-M3-MXFP4-Mono-TP4-MI355.
-accuracy_threshold: 0.88
-tolerance: 0.05
+# One run per arm: mono off 0.9045, on 0.8923 (acceptance length 3.545, 3.551).
+# The on/off gap (0.0122) exceeds DeepSeek-V4.1-Flash-Mono-TP4-MI355's
+# run-to-run spread (0.0075). Tolerance: twice the gap.
+accuracy_threshold: 0.9045
+tolerance: 0.025
 min_acceptance_length: 2.5
 num_questions: 1319
 num_fewshot: 5
