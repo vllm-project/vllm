@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+from dataclasses import asdict
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     canonical_format_id,
@@ -38,6 +39,8 @@ class FileMapper:
         parallel_agnostic: bool = False,
         replicated_layout: bool = False,
         canonical_format: str | None = None,
+        recurrent_schema: dict | None = None,
+        canonical_storage_layout: dict | None = None,
     ):
         """Initialize the file mapper. Each worker constructs its own, but
         `config.json` is shared across workers since rank lives outside the hash.
@@ -71,6 +74,11 @@ class FileMapper:
         # identity participates in the storage namespace.
         if canonical_format is not None:
             self.fields["canonical_format"] = canonical_format
+        if (recurrent_schema is None) != (canonical_storage_layout is None):
+            raise ValueError("GDN schema and storage layout must be paired")
+        if recurrent_schema is not None:
+            self.fields["recurrent_schema"] = recurrent_schema
+            self.fields["canonical_storage_layout"] = canonical_storage_layout
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
 
     @classmethod
@@ -95,6 +103,21 @@ class FileMapper:
         if config.canonical_layout:
             assert config.kv_cache_layout is not None
             canonical_format = canonical_format_id(config.kv_cache_layout)
+        recurrent_schema: dict | None = None
+        storage_layout: dict | None = None
+        if config.recurrent_schema is not None:
+            if config.canonical_storage_layout is None:
+                raise ValueError("Missing GDN canonical storage layout")
+            recurrent_schema = asdict(config.recurrent_schema)
+            storage_layout = asdict(config.canonical_storage_layout)
+            row = getattr(offloading_spec, "kv_bytes_per_chunk", None)
+            payload = sum(config.canonical_storage_layout.segment_page_sizes)
+            if (
+                not isinstance(row, int)
+                or row < payload * config.cache.blocks_per_chunk
+            ):
+                raise ValueError("Invalid GDN canonical slot row size")
+            storage_layout["row_size_bytes"] = row
         return cls(
             root_dir=root_dir,
             model_name=config.model.name,
@@ -113,6 +136,8 @@ class FileMapper:
             ),
             replicated_layout=(parallel_agnostic and config.replicated_layout),
             canonical_format=canonical_format,
+            recurrent_schema=recurrent_schema,
+            canonical_storage_layout=storage_layout,
         )
 
     def get_file_name(self, key: OffloadKey) -> str:

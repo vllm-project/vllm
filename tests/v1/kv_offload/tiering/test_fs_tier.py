@@ -18,6 +18,9 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+    derive_canonical_mappings,
+)
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -50,6 +53,180 @@ _NUM_BLOCKS = 8
 _BLOCK_ELEMENTS = 128 * mmap.PAGESIZE  # 2MB per block for pagesize 4096.
 _DTYPE: torch.dtype = torch.float32
 _CTX = ReqContext(req_id="test")
+
+
+@pytest.mark.parametrize("writer_tp,reader_tp", [(1, 2), (2, 1)])
+def test_gdn_canonical_fs_cross_tp_and_schema_miss(
+    tmp_path, monkeypatch, writer_tp, reader_tp
+):
+    from dataclasses import replace
+
+    from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+        _gdn_hybrid_profile,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+        build_offloading_config,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.recurrent import (
+        gdn_mapping,
+    )
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+    from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    components = [
+        (torch.arange(s) + i * 43).remainder(251).to(torch.int8)
+        for i, s in enumerate((96, 96, 192, 256))
+    ]
+
+    def local(tp, rank):
+        return torch.cat(
+            [c[rank * (len(c) // tp) : (rank + 1) * (len(c) // tp)] for c in components]
+        )
+
+    config, cache = _gdn_hybrid_profile(writer_tp)
+    writer_spec = TieringOffloadingSpec(build_offloading_config(config, cache))
+    row = writer_spec.kv_bytes_per_chunk
+    source = _page_aligned_zero_tensor(2, row // 4)
+    state_spec = cache.kv_cache_groups[0].kv_cache_spec
+    for rank in range(writer_tp):
+        raw = torch.zeros(
+            cache.num_blocks * state_spec.page_size_bytes, dtype=torch.int8
+        ).as_strided(
+            (cache.num_blocks, 1, 1, state_spec.real_page_size_bytes),
+            (state_spec.page_size_bytes, 1, 1, 1),
+        )
+        mapping = gdn_mapping(state_spec, raw, cache.num_blocks, writer_tp, rank)
+        for run in mapping.runs:
+            for segment in (0, 1):
+                offset = segment * 1024 + run.canonical_offset
+                source.view(torch.int8)[0, offset : offset + run.fragment_size] = local(
+                    writer_tp, rank
+                )[run.local_offset : run.local_offset + run.fragment_size]
+    writer = FileSystemTierManager(
+        writer_spec, memoryview(source.numpy()), "fs", str(tmp_path), 2, 2
+    )
+    try:
+        writer.submit_store(make_job(1, [key(7)], [0]))
+        assert all(r.success for r in drain(writer))
+        namespace = writer.file_mapper.base_path
+    finally:
+        writer.shutdown()
+    config, cache = _gdn_hybrid_profile(reader_tp)
+    reader_spec = TieringOffloadingSpec(build_offloading_config(config, cache))
+    destination = _page_aligned_zero_tensor(2, row // 4)
+    reader = FileSystemTierManager(
+        reader_spec, memoryview(destination.numpy()), "fs", str(tmp_path), 2, 2
+    )
+    try:
+        assert reader.file_mapper.base_path == namespace
+        assert lookup_and_wait(reader, [key(7)]) == [LookupResult.HIT]
+        reader.submit_load(make_job(2, [key(7)], [1], is_promotion=True))
+        assert all(r.success for r in drain(reader))
+        for segment in (0, 1):
+            assert torch.equal(
+                destination.view(torch.int8)[1, segment * 1024 : segment * 1024 + 640],
+                torch.cat(components),
+            )
+    finally:
+        reader.shutdown()
+    state_spec = cache.kv_cache_groups[0].kv_cache_spec
+    cache.kv_cache_groups[0].kv_cache_spec = replace(
+        state_spec, dtypes=(torch.float16, torch.float32)
+    )
+    mismatched_spec = TieringOffloadingSpec(build_offloading_config(config, cache))
+    mismatched = FileSystemTierManager(
+        mismatched_spec, memoryview(destination.numpy()), "fs", str(tmp_path), 2, 2
+    )
+    try:
+        assert lookup_and_wait(mismatched, [key(7)]) == [LookupResult.MISS]
+    finally:
+        mismatched.shutdown()
+        get_conv_state_layout.cache_clear()
+
+
+def test_gdn_global_rejection_reads_legacy_opaque_fs_bytes(tmp_path, monkeypatch):
+    """Locally eligible GDN must not migrate bytes under an unchanged namespace."""
+    from dataclasses import replace
+
+    from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+        _gdn_hybrid_profile,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+        build_offloading_config,
+    )
+    from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+    from vllm.v1.kv_cache_interface import KVQuantMode
+    from vllm.v1.kv_offload.file_mapper import FileMapper
+    from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    config, cache = _gdn_hybrid_profile(2)
+    cache.kv_cache_groups[1].kv_cache_spec = replace(
+        cache.kv_cache_groups[1].kv_cache_spec,
+        kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
+    )
+    resolved = build_offloading_config(config, cache)
+    assert resolved.recurrent_schema is None
+    spec = TieringOffloadingSpec(resolved)
+    page = spec.kv_bytes_per_chunk
+    source = _page_aligned_zero_tensor(2, page // 4)
+    shard0 = torch.arange(320).remainder(251).to(torch.int8)
+    shard1 = (torch.arange(320) + 17).remainder(251).to(torch.int8)
+    source.view(torch.int8)[0, :640] = torch.cat((shard0, shard1))
+    legacy = FileMapper(
+        str(tmp_path),
+        "test-model",
+        16,
+        1,
+        2,
+        1,
+        1,
+        1,
+        0,
+        "bfloat16",
+        kv_cache_groups=[
+            {"tokens_per_block": 16, "layer_names": list(g.layer_names)}
+            for g in resolved.groups
+        ],
+        canonical_format="v1-nhd",
+    )
+    writer = FileSystemTierManager(
+        spec, memoryview(source.numpy()), "fs", str(tmp_path), 2, 2
+    )
+    try:
+        assert writer.file_mapper.base_path == legacy.base_path
+        writer.submit_store(make_job(1, [key(7)], [0]))
+        assert all(r.success for r in drain(writer))
+    finally:
+        writer.shutdown()
+    destination = _page_aligned_zero_tensor(2, page // 4)
+    reader = FileSystemTierManager(
+        spec, memoryview(destination.numpy()), "fs", str(tmp_path), 2, 2
+    )
+    try:
+        assert lookup_and_wait(reader, [key(7)]) == [LookupResult.HIT]
+        reader.submit_load(make_job(2, [key(7)], [1], is_promotion=True))
+        assert all(r.success for r in drain(reader))
+        for rank, expected in enumerate((shard0, shard1)):
+            config.parallel_config.rank = rank
+            mapping = derive_canonical_mappings(
+                config, cache, {}, resolved.recurrent_schema
+            )["gdn0"]
+            assert not mapping.parallelism_agnostic
+            assert len(mapping.runs) == 1
+            run = mapping.runs[0]
+            assert torch.equal(
+                destination.view(torch.int8)[
+                    1, run.canonical_offset : run.canonical_offset + run.fragment_size
+                ],
+                expected,
+            )
+    finally:
+        reader.shutdown()
+        get_conv_state_layout.cache_clear()
 
 
 def _make_offloading_spec(

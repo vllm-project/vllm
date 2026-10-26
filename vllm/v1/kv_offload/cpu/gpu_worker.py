@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
     TransferResult,
 )
+from vllm.v1.kv_offload.config import CanonicalStorageLayout
 from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
@@ -790,6 +791,31 @@ class SingleDirectionOffloadingHandler:
             raise sync_error
 
 
+def _validate_canonical_cpu_views(
+    tensors: list[torch.Tensor],
+    region: SharedOffloadRegion,
+    layout: CanonicalStorageLayout,
+    blocks_per_chunk: int,
+) -> None:
+    """Fail before transfer if the live mmap differs from the named format."""
+    if len(tensors) != len(layout.segment_page_sizes):
+        raise ValueError("GDN canonical CPU segment count mismatch")
+    row_stride = region.total_size_bytes // region.num_chunks
+    offset = 0
+    for tensor, page_size in zip(tensors, layout.segment_page_sizes):
+        width = page_size * blocks_per_chunk
+        if (
+            tensor.device.type != "cpu"
+            or tensor.dtype != torch.int8
+            or tuple(tensor.shape) != (region.num_chunks, width)
+            or tensor.stride() != (row_stride, 1)
+            or tensor.data_ptr() != region.base_tensor.data_ptr() + offset
+            or offset + width > row_stride
+        ):
+            raise ValueError("GDN canonical CPU segment layout mismatch")
+        offset += width
+
+
 class CPUOffloadingWorker(OffloadingWorker):
     """OffloadingWorker for CPU offloading.
 
@@ -805,8 +831,11 @@ class CPUOffloadingWorker(OffloadingWorker):
         num_cpu_chunks: int,
         mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
+        canonical_storage_layout: CanonicalStorageLayout | None = None,
     ):
         assert not canonical_layout or mmap_region is not None
+        if canonical_storage_layout is not None and not canonical_layout:
+            raise ValueError("GDN storage layout requires canonical CPU views")
         # The caller owns mmap_region until this constructor returns. After a
         # successful construction, the worker is the sole owner and releases
         # it after both transfer directions have stopped.
@@ -859,6 +888,12 @@ class CPUOffloadingWorker(OffloadingWorker):
 
             gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
+
+        if canonical_storage_layout is not None:
+            assert mmap_region is not None
+            _validate_canonical_cpu_views(
+                cpu_tensors, mmap_region, canonical_storage_layout, blocks_per_chunk
+            )
 
         self._store_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,

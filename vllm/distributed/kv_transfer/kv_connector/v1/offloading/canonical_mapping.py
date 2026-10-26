@@ -14,6 +14,10 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.recurrent import (
+    derive_gdn_geometry,
+    gdn_mapping,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -24,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
+from vllm.v1.kv_offload.config import RecurrentSchema
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -404,6 +409,7 @@ def derive_canonical_mappings(
     vllm_config: "VllmConfig",
     kv_cache_config: KVCacheConfig,
     kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+    recurrent_schema: RecurrentSchema | None = None,
 ) -> dict[str, CanonicalPageMapping]:
     """Per-layer canonical page mappings for this worker.
 
@@ -415,7 +421,33 @@ def derive_canonical_mappings(
     pcp_size = parallel_config.prefill_context_parallel_size
     group_size = tp_size * pcp_size
     if parallel_config.world_size != group_size:
+        if recurrent_schema is not None:
+            raise ValueError("GDN canonical schema requires TP-only workers")
         return {}
+
+    schema_layers = {}
+    if recurrent_schema is not None:
+        schema_layers = {layer.layer_name: layer for layer in recurrent_schema.layers}
+        mamba_layers = {
+            name
+            for group in kv_cache_config.kv_cache_groups
+            for name in group.layer_names
+            if isinstance(
+                group.kv_cache_spec.kv_cache_specs[name]
+                if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+                else group.kv_cache_spec,
+                MambaSpec,
+            )
+        }
+        if (
+            recurrent_schema.format != "gdn-ds-v1"
+            or not mamba_layers
+            or set(schema_layers) != mamba_layers
+            or len(schema_layers) != len(recurrent_schema.layers)
+            or pcp_size != 1
+            or parallel_config.decode_context_parallel_size != 1
+        ):
+            raise ValueError("Invalid GDN canonical schema coverage or topology")
 
     def ctx(rank: int) -> _RankContext:
         return _RankContext(
@@ -441,10 +473,35 @@ def derive_canonical_mappings(
             spec = per_layer_specs.get(layer_name, group_kv_cache_spec)
             per_rank: list[CanonicalPageMapping] = []
             for rank in range(group_size):
-                mapping = _layer_mapping(
-                    spec, kv_caches.get(layer_name), num_blocks, ctx(rank)
-                )
+                mapping: CanonicalPageMapping | None
+                if layer_name in schema_layers:
+                    geometry = derive_gdn_geometry(spec, tp_size)
+                    if (
+                        geometry is None
+                        or geometry.schema(layer_name, tp_size)
+                        != schema_layers[layer_name]
+                    ):
+                        raise ValueError(f"GDN schema mismatch for layer {layer_name}")
+                    try:
+                        mapping = gdn_mapping(
+                            spec, kv_caches.get(layer_name), num_blocks, tp_size, rank
+                        )
+                        mapping = replace(
+                            mapping, runs=_coalesce_runs(list(mapping.runs))
+                        )
+                    except ValueError as error:
+                        raise ValueError(
+                            f"GDN mapping failed for {layer_name}: {error}"
+                        ) from error
+                else:
+                    mapping = _layer_mapping(
+                        spec, kv_caches.get(layer_name), num_blocks, ctx(rank)
+                    )
                 if mapping is None:
+                    if recurrent_schema is not None:
+                        raise ValueError(
+                            f"Canonical mapping failed for layer {layer_name}"
+                        )
                     break
                 per_rank.append(mapping)
             if len(per_rank) != group_size:

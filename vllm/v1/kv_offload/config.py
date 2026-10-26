@@ -8,6 +8,34 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class GDNLayerSchema:
+    layer_name: str
+    q_shape_global: tuple[int, int]
+    k_shape_global: tuple[int, int]
+    v_shape_global: tuple[int, int]
+    temporal_shape_global: tuple[int, int, int]
+    conv_dtype: str
+    temporal_dtype: str
+    state_type: str = "GDN_ATTN"
+    conv_layout: str = "DS"
+    temporal_order: str = "HvVK"
+    checkpoint_format: str = "align-point-v1"
+
+
+@dataclass(frozen=True)
+class RecurrentSchema:
+    layers: tuple[GDNLayerSchema, ...]
+    format: str = "gdn-ds-v1"
+
+
+@dataclass(frozen=True)
+class CanonicalStorageLayout:
+    segment_page_sizes: tuple[int, ...]
+    group_refs: tuple[tuple[int, ...], ...]
+    format: str = "native-canonical-overlaid-v1"
+
+
+@dataclass(frozen=True)
 class OffloadingGroupConfig:
     # Total token span covered by one block across all workers
     # (accounts for context parallelism).
@@ -88,3 +116,25 @@ class OffloadingConfig:
     canonical_layout: bool = False
     # Resolved KVCacheLayout name of the worker KV cache.
     kv_cache_layout: str | None = None
+    # One resolved format decision, shared by mapping and persisted identity.
+    recurrent_schema: RecurrentSchema | None = None
+    canonical_storage_layout: CanonicalStorageLayout | None = None
+
+    def __post_init__(self) -> None:
+        schema, layout = self.recurrent_schema, self.canonical_storage_layout
+        if (schema is None) != (layout is None):
+            raise ValueError("GDN canonical schema and storage layout must be paired")
+        if schema is None:
+            return
+        if (
+            not self.canonical_layout
+            or not self.parallel.is_parallelism_agnostic
+            or schema.format != "gdn-ds-v1"
+            or not schema.layers
+            or layout is None
+            or layout.format != "native-canonical-overlaid-v1"
+            or not layout.segment_page_sizes
+            or any(size <= 0 for size in layout.segment_page_sizes)
+            or len(layout.group_refs) != len(self.groups)
+        ):
+            raise ValueError("Invalid GDN canonical format decision")
