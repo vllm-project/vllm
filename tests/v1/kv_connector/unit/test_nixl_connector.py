@@ -5132,3 +5132,142 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
         )
+
+
+@pytest.fixture
+def cleanup_worker(recv_worker):
+    """Real lifecycle methods with native resource operations mocked."""
+    w = recv_worker
+    # This fixture constructs no native resources and bypasses __init__.
+    w.shutdown = MagicMock()
+    w._engine_ttl = 10
+    w._engine_last_active = {"peer": time.perf_counter() - 20}
+    w._engine_clock_offset = {"peer": 0.0}
+    w._remote_agents = {"peer": {(0, 0): "agent"}}
+    w._engine_by_address = {("localhost", 1234): "peer"}
+    w.dst_xfer_side_handles = {"peer": {0: 123}}
+    for name in (
+        "kv_caches_base_addr",
+        "dst_num_blocks",
+        "dst_region_num_blocks",
+        "dst_region_group_ids",
+        "dst_uses_region_group_mapping",
+        "dst_region_mem_types",
+        "tp_mappings",
+        "draft_tp_mappings",
+    ):
+        setattr(w, name, {"peer": {}})
+    w._recving_metadata.clear()
+    return w
+
+
+def test_ttl_cleanup_orphan_activity_record(cleanup_worker):
+    """A leftover timestamp must not turn peer eviction into a worker crash."""
+    w = cleanup_worker
+    del w._remote_agents["peer"]
+    w._evict_stale_engines()
+    assert "peer" not in w._engine_last_active
+    assert "peer" not in w.dst_xfer_side_handles
+    w.nixl_wrapper.remove_remote_agent.assert_not_called()
+
+
+def test_ttl_cleanup_is_idempotent(cleanup_worker):
+    w = cleanup_worker
+    w._cleanup_remote_engine("peer")
+    w._cleanup_remote_engine("peer")
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent")
+    w.nixl_wrapper.release_dlist_handle.assert_called_once_with(123)
+
+
+def test_ttl_cleanup_concurrent_sweeps(cleanup_worker):
+    """A second sweep sees the timestamp after agents were popped."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+    w = cleanup_worker
+    native_teardown = threading.Event()
+    finish_teardown = threading.Event()
+    second_started = threading.Event()
+
+    def remove_agent(agent):
+        native_teardown.set()
+        assert finish_teardown.wait(5)
+
+    def second_sweep():
+        second_started.set()
+        w._evict_stale_engines()
+
+    w.nixl_wrapper.remove_remote_agent.side_effect = remove_agent
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(w._evict_stale_engines)
+        try:
+            assert native_teardown.wait(2)
+            second = pool.submit(second_sweep)
+            assert second_started.wait(2)
+            # A serialized sweep waits for native teardown to finish.
+            with contextlib.suppress(TimeoutError):
+                second.result(timeout=0.1)
+        finally:
+            finish_teardown.set()
+        first.result(timeout=2)
+        second.result(timeout=2)
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent")
+    w.nixl_wrapper.release_dlist_handle.assert_called_once_with(123)
+    assert "peer" not in w._engine_last_active
+
+
+def test_ttl_cleanup_does_not_delete_pending_handshake(cleanup_worker):
+    """An orphan timestamp cannot invalidate metadata being re-registered."""
+    w = cleanup_worker
+    del w._remote_agents["peer"]
+    future = Future()
+    w._handshake_futures["peer"] = future
+    w._evict_stale_engines()
+    assert w._handshake_futures["peer"] is future
+    w.nixl_wrapper.release_dlist_handle.assert_not_called()
+
+
+def test_ttl_cleanup_rehandshake_waits_for_native_teardown(cleanup_worker):
+    """Old native cleanup cannot run after a new generation is registered."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+    w = cleanup_worker
+    removing = threading.Event()
+    release = threading.Event()
+    reconnecting = threading.Event()
+    submitted = threading.Event()
+    new_future = Future()
+    w._handshake_initiation_executor = MagicMock()
+
+    def submit(*args):
+        submitted.set()
+        w.dst_xfer_side_handles["peer"] = {0: 456}
+        return new_future
+
+    def reconnect():
+        reconnecting.set()
+        return w._ensure_handshake("peer", "localhost", 1234, 1)
+
+    def remove_agent(agent):
+        removing.set()
+        assert release.wait(5)
+
+    w._handshake_initiation_executor.submit.side_effect = submit
+    w.nixl_wrapper.remove_remote_agent.side_effect = remove_agent
+    with ThreadPoolExecutor(2) as pool:
+        teardown = pool.submit(w._cleanup_remote_engine, "peer")
+        try:
+            assert removing.wait(2)
+            handshake = pool.submit(reconnect)
+            assert reconnecting.wait(2)
+            with contextlib.suppress(TimeoutError):
+                handshake.result(timeout=0.1)
+            assert not submitted.is_set()
+        finally:
+            release.set()
+        teardown.result(timeout=2)
+        assert handshake.result(timeout=2) is new_future
+    new_future.set_result(({(0, 0): "new-agent"}, 0.0))
+    assert w._remote_agents["peer"] == {(0, 0): "new-agent"}
+    assert w.dst_xfer_side_handles["peer"] == {0: 456}
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent")
+    w.nixl_wrapper.release_dlist_handle.assert_called_once_with(123)
