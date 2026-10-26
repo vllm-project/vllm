@@ -14,6 +14,7 @@ import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from tests.v1.core.utils import (
+    get_kv_cache_configs,
     new_kv_cache_spec,
     new_mamba_spec,
     new_mla_spec,
@@ -30,7 +31,6 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
     estimate_max_model_len,
-    get_kv_cache_configs,
     get_kv_cache_groups,
     is_kv_cache_spec_uniform,
     kv_cache_groups_tp_replicas,
@@ -228,10 +228,10 @@ def test_hisparse_pool_must_fit_max_model_len(
     }
 
     if ok:
-        kv_cache_planning.get_kv_cache_configs(config, [specs], [2**34])
+        get_kv_cache_configs(config, [specs], [2**34])
     else:
         with pytest.raises(ValueError, match="max seq len"):
-            kv_cache_planning.get_kv_cache_configs(config, [specs], [2**34])
+            get_kv_cache_configs(config, [specs], [2**34])
 
 
 def new_chunked_local_attention_spec(
