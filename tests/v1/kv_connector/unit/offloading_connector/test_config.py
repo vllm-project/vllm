@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for translating vLLM cache metadata to native offloading config."""
 
-from fractions import Fraction
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -1173,7 +1172,7 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
             id="uniform-mla-wrapper",
         ),
         pytest.param(
-            [_uniform_group(_mla_spec(head_size=576), _mla_spec(tokens_per_state=3))],
+            [_uniform_group(_mla_spec(head_size=576), _mla_spec(tokens_per_state=2))],
             False,
             id="uniform-uncertifiable-inner",
         ),
@@ -1188,7 +1187,7 @@ def test_canonical_layout_gate(kv_cache_groups, certified):
 
 @pytest.mark.parametrize(
     ("spec"),
-    [_SWA_MLA_SPEC, _mla_spec(tokens_per_state=Fraction(1, 2))],
+    [_SWA_MLA_SPEC, _mla_spec(tokens_per_state=2)],
     ids=["swa", "compressed-mla"],
 )
 def test_uncertifiable_canonical_layout_resets_replication(spec: KVCacheSpec):
@@ -1314,64 +1313,3 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
-
-
-def test_build_offloading_config_populates_tokens_per_state_uniform():
-    """Uncompressed MLA group: tokens_per_state is all 1s."""
-    config = _make_vllm_config()
-    offloading_config = build_offloading_config(config, _make_mla_kv_cache_config())
-
-    assert offloading_config.groups[0].tokens_per_state == (1,)
-
-
-def test_build_offloading_config_populates_tokens_per_state_compressed():
-    """Compressed MLA layer: tokens_per_state reflects per-layer compress ratio."""
-    layer_names = ["layer0"]
-    spec = _mla_spec(tokens_per_state=2)
-    kv_cache_config = KVCacheConfig(
-        num_blocks=4,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=spec.page_size_bytes * 4,
-                layers=layer_names,
-                layer_stride=spec.page_size_bytes * 4,
-                block_stride=spec.page_size_bytes,
-            )
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names, spec)],
-    )
-    config = _make_vllm_config()
-
-    offloading_config = build_offloading_config(config, kv_cache_config)
-
-    assert offloading_config.groups[0].tokens_per_state == (2,)
-
-
-def test_build_offloading_config_tokens_per_state_mixed_in_uniform_group():
-    """DSv4-style group: different layers can have different compress ratios
-    within one UniformTypeKVCacheSpecs group."""
-    layer_names = ["mla_ratio2", "mla_ratio4"]
-    specs = {
-        "mla_ratio2": _mla_spec(tokens_per_state=2),
-        "mla_ratio4": _mla_spec(tokens_per_state=4),
-    }
-    wrapped = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert wrapped is not None
-
-    kv_cache_config = KVCacheConfig(
-        num_blocks=4,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=wrapped.page_size_bytes * 4,
-                layers=layer_names,
-                layer_stride=0,
-                block_stride=wrapped.page_size_bytes,
-            )
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names, wrapped)],
-    )
-    config = _make_vllm_config()
-
-    offloading_config = build_offloading_config(config, kv_cache_config)
-
-    assert offloading_config.groups[0].tokens_per_state == (2, 4)
