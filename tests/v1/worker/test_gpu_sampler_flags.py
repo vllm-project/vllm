@@ -143,3 +143,55 @@ def test_logits_processing_cache_only_checks_active_requests():
 
     assert not np.any(sampler.needs_logits_processing[sampling_only])
     assert np.any(sampler.needs_logits_processing[with_processing])
+
+
+@pytest.mark.parametrize(
+    ("sampling_params", "expected"),
+    [
+        pytest.param(SamplingParams(), True, id="defaults"),
+        pytest.param(SamplingParams(temperature=0.0), True, id="greedy"),
+        pytest.param(SamplingParams(temperature=0.7), True, id="temperature-only"),
+        pytest.param(
+            SamplingParams(temperature=0.7, top_p=0.9), False, id="temp-and-top-p"
+        ),
+        pytest.param(SamplingParams(temperature=0.7, top_k=10), False, id="top-k"),
+        pytest.param(SamplingParams(temperature=0.7, min_p=0.1), False, id="min-p"),
+        pytest.param(
+            SamplingParams(thinking_token_budget=3), False, id="thinking-budget"
+        ),
+        pytest.param(SamplingParams(logit_bias={1: 1.0}), False, id="logit-bias"),
+    ],
+)
+def test_needs_only_temperature_scaling_matches_request_features(
+    sampling_params: SamplingParams, expected: bool
+):
+    """rejection_sampler.py's caller-side fast path (skip
+    apply_sampling_params, let rejection_sample() scale on load) is only
+    safe when this returns True."""
+    sampler = _make_sampler()
+    sampler.add_request(3, sampling_params=sampling_params)
+    sampler.sampling_states.apply_staged_writes()
+
+    idx_np = np.array([3], dtype=np.int32)
+    assert sampler.needs_only_temperature_scaling(idx_np) == expected
+
+
+def test_needs_only_temperature_scaling_ignores_restriction_on_greedy_rows():
+    """A restriction (top_p/top_k/min_p) on a greedy row doesn't block the
+    fast path for the batch; greedy sampling ignores it either way."""
+    sampler = _make_sampler()
+    sampler.add_request(0, SamplingParams(temperature=0.7))
+    sampler.add_request(1, SamplingParams(temperature=0.0, top_p=0.9))
+    sampler.sampling_states.apply_staged_writes()
+
+    assert sampler.needs_only_temperature_scaling(np.array([0, 1], dtype=np.int32))
+
+
+def test_needs_only_temperature_scaling_blocked_by_any_restricted_row():
+    sampler = _make_sampler()
+    sampler.add_request(0, SamplingParams(temperature=0.7))
+    sampler.add_request(1, SamplingParams(temperature=0.7, top_p=0.9))
+    sampler.sampling_states.apply_staged_writes()
+
+    assert sampler.needs_only_temperature_scaling(np.array([0], dtype=np.int32))
+    assert not sampler.needs_only_temperature_scaling(np.array([0, 1], dtype=np.int32))

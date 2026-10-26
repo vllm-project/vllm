@@ -83,6 +83,10 @@ class Sampler:
             TraceReplayState(req_states) if enable_trace_replay else None
         )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
+        # Thinking-budget forcing and logits processors (bias/penalties/bad
+        # words/custom); these mutate logit values directly, so they always
+        # matter, greedy or not, unlike temperature/min_p/top_k/top_p below.
+        self.needs_other_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -94,13 +98,14 @@ class Sampler:
         )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
-        needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
-        needs_processing |= self.thinking_budget_state.add_request(
+        needs_temp_or_restriction = self.sampling_states.add_request(
             req_idx, sampling_params
         )
+        needs_other = self.thinking_budget_state.add_request(req_idx, sampling_params)
         for processor in self.logits_processors:
-            needs_processing |= processor.add_request(req_idx, sampling_params)
-        self.needs_logits_processing[req_idx] = needs_processing
+            needs_other |= processor.add_request(req_idx, sampling_params)
+        self.needs_other_processing[req_idx] = needs_other
+        self.needs_logits_processing[req_idx] = needs_temp_or_restriction or needs_other
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
@@ -222,6 +227,19 @@ class Sampler:
             sampling_mask_tensors=sampling_mask_tensors,
         )
         return sampler_output
+
+    def needs_only_temperature_scaling(self, idx_mapping_np: np.ndarray) -> bool:
+        """True when every request's required logits processing is, at most,
+        temperature scaling: no thinking-budget forcing, logits processors,
+        or (for non-greedy rows) min_p/top_k/top_p restriction. A caller can
+        then skip apply_sampling_params and pass raw logits straight into
+        rejection_sample() with target_logits_pre_scaled=False instead.
+        """
+        if np.any(self.needs_other_processing[idx_mapping_np]):
+            return False
+        temp_np = self.sampling_states.temperature.np[idx_mapping_np]
+        restriction_np = self.sampling_states.needs_restriction[idx_mapping_np]
+        return not np.any((temp_np != 0.0) & restriction_np)
 
     def apply_sampling_params(
         self,
