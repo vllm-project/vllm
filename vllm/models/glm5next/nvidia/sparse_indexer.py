@@ -22,6 +22,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
 )
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.model_executor.layers.sparse_attn_indexer import (
+    _dcp_topk_merge_specs,
     _merge_dcp_topk_global,
     as_fp32_logits,
 )
@@ -157,6 +158,8 @@ def sparse_attn_indexer_kpool(
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
+    # kpool: logits are pool-granular, so top-k selects pools.
+    select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
 
     fused_mqa_topk = use_fused_mqa_topk(
         query_shape=q_quant.shape[1:],
@@ -171,11 +174,16 @@ def sparse_attn_indexer_kpool(
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        current_workspace_manager().get_simultaneous(
+        profile_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
             values_spec,
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-        )
+        ]
+        if dcp_world_size > 1:
+            profile_specs.extend(
+                _dcp_topk_merge_specs(hidden_states.shape[0], select_k, dcp_world_size)
+            )
+        current_workspace_manager().get_simultaneous(*profile_specs)
         # Allocate the largest fused_mqa_topk workspaces so they are accounted
         # for (freed again, they overlap the dense logits below).
         if fused_mqa_topk:
@@ -369,10 +377,19 @@ def sparse_attn_indexer_kpool(
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        k_quant_full, k_scale_full = workspace_manager.get_simultaneous(
+        # The DCP merge scratch is taken in the same call: a separate request
+        # would alias k_quant_full, which a skip_kv_gather chunk reuses.
+        merge_specs = (
+            _dcp_topk_merge_specs(hidden_states.shape[0], select_k, dcp_world_size)
+            if dcp_world_size > 1
+            else []
+        )
+        k_quant_full, k_scale_full, *merge_bufs = workspace_manager.get_simultaneous(
             values_spec,
             scales_spec,
+            *merge_specs,
         )
+        merge_workspace = merge_bufs or None
         for chunk in prefill_metadata.chunks if not short_prefill else ():
             # Under DCP this rank only gathers the pools it owns.
             assert chunk.local_cu_seq_lens is not None
@@ -411,10 +428,8 @@ def sparse_attn_indexer_kpool(
                 ).squeeze(-1)
 
             num_rows = q_slice.shape[0]
-            # kpool: logits are pool-granular (compress_ratio == index_kpool),
-            # so topk selects pools. We pick topk_tokens // kpool pools then
-            # expand each pool back to its kpool constituent tokens.
-            select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
+            # kpool: we pick topk_tokens // kpool pools then expand each pool
+            # back to its kpool constituent tokens.
             if index_kpool > 1:
                 pool_topk = torch.empty(
                     (num_rows, select_k), dtype=torch.int32, device=q_slice.device
@@ -493,6 +508,7 @@ def sparse_attn_indexer_kpool(
                 row_starts=None,
                 logits_dtype=logits_dtype,
                 num_positions=max_pool_len,
+                workspace=merge_workspace,
             )
 
             if index_kpool > 1:
@@ -716,7 +732,6 @@ def sparse_attn_indexer_kpool(
         num_rows = logits.shape[0]
         # kpool: logits are pool-granular -> select topk_tokens//kpool pools,
         # then expand each pool back to its kpool tokens.
-        select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
         if defer_topk:
             assert num_rows == num_decode_tokens
             pool_topk = kpool_stage.pool_ids(num_rows, select_k)
