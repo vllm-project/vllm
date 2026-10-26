@@ -894,6 +894,11 @@ class ResponsesResponse(OpenAIBaseModel):
     safety_identifier: str | None = None
     service_tier: Literal["auto", "default", "flex", "scale", "priority"]
     status: ResponseStatus
+    completed_at: int | None = Field(
+        default=None,
+        description="Unix timestamp (seconds) of when this response completed. "
+        "Set when status is 'completed'.",
+    )
     text: ResponseTextConfig | None = None
     top_logprobs: int | None = None
     truncation: Literal["auto", "disabled"]
@@ -988,6 +993,7 @@ class ResponsesResponse(OpenAIBaseModel):
         return cls(
             id=request.request_id,
             created_at=created_time,
+            completed_at=int(time.time()) if status == "completed" else None,
             incomplete_details=incomplete_details,
             instructions=request.instructions,
             metadata=request.metadata,
