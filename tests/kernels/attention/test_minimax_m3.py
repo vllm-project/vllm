@@ -1008,12 +1008,7 @@ def _reference_aiter_sparse_table(
 def test_aiter_indexer_impl_matches_reference(
     num_idx_heads, init_blocks, local_blocks, monkeypatch
 ):
-    import vllm.models.minimax_m3.amd.indexer_aiter as indexer_aiter_mod
-    from vllm.models.minimax_m3.amd.indexer_aiter import (
-        MiniMaxM3IndexerAiterImpl,
-        MiniMaxM3IndexerAiterMetadataBuilder,
-    )
-
+    import vllm.models.minimax_m3.amd.indexer_msa as indexer_msa_mod
     import vllm.models.minimax_m3.common.indexer as indexer_mod
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -1022,15 +1017,19 @@ def test_aiter_indexer_impl_matches_reference(
     )
     from vllm.config import set_current_vllm_config
     from vllm.forward_context import set_forward_context
+    from vllm.models.minimax_m3.amd.indexer_msa import (
+        MiniMaxM3IndexerMSAImpl,
+        MiniMaxM3IndexerMSAMetadataBuilder,
+    )
     from vllm.models.minimax_m3.amd.ops.sparse_pa import (
         PAGES_PER_SPARSE_BLOCK,
         minimax_m3_rebase_block_table_to_page16,
     )
 
     monkeypatch.setattr(
-        indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
+        indexer_msa_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
     )
-    if reason := indexer_aiter_mod.aiter_indexer_unsupported_reason(
+    if reason := indexer_msa_mod.msa_indexer_unsupported_reason(
         topk_blocks=TOPK,
         sparse_block_size=BLOCK_SIZE,
         num_index_heads=num_idx_heads,
@@ -1108,7 +1107,7 @@ def test_aiter_indexer_impl_matches_reference(
     )
     sparse_ctx = torch.full((rows,), -27182, dtype=torch.int32, device=device)
     with set_current_vllm_config(vllm_config):
-        impl = MiniMaxM3IndexerAiterImpl(
+        impl = MiniMaxM3IndexerMSAImpl(
             num_kv_heads=num_idx_heads,
             scale=HEAD_DIM**-0.5,
             topk_blocks=TOPK,
@@ -1121,7 +1120,7 @@ def test_aiter_indexer_impl_matches_reference(
             indexer_kv_dtype="fp8",
             topk_indices_buffer=topk_buf,
         )
-        builder = MiniMaxM3IndexerAiterMetadataBuilder(
+        builder = MiniMaxM3IndexerMSAMetadataBuilder(
             spec, [impl.index_cache.prefix], vllm_config, device
         )
     impl.index_cache.kv_cache = index_cache
