@@ -305,9 +305,9 @@ def trainer_init(
             - master_address: str
             - master_port: int
             - world_size: int
-        rank: This trainer process's rank in the group. The broadcast backends
-            have a single trainer at rank 0; multi-rank trainers (m2n) occupy
-            ranks `[0, num_trainer_ranks)` and the workers start after them.
+        rank: This trainer process's rank in the group. Trainer ranks (dense
+            NCCL broadcasters, m2n senders) occupy ranks `[0, num_trainer_ranks)`
+            and the workers start after them.
 
     Returns:
         PyNcclCommunicator for weight transfer.
