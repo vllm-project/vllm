@@ -280,19 +280,24 @@ def _layer_mapping(
         return None
 
     if isinstance(spec, MLAAttentionSpec):
-        # TP-replicated latent; CP shards its tokens across the DCP groups
+        # TP-replicated latent; CP shards its tokens across the DCP groups.
+        # num_states = block_size/tokens_per_state for compressed MLA,
+        # num_states = block_size otherwise.
+        num_states = spec.num_states
         if (
-            spec.tokens_per_state != 1
-            or page % bs
+            type(spec.tokens_per_state) is not int
+            or spec.tokens_per_state <= 0
+            or spec.block_size % spec.tokens_per_state
+            or page % num_states
             or ctx.tp_size % ctx.dcp_size
             or spec.kv_quant_mode.is_per_token_head
         ):
             return None
-        row = page // bs
+        row = page // num_states
         return CanonicalPageMapping(
             canonical_page_size_bytes=ctx.cp_size * page,
             local_page_size_bytes=page,
-            runs=_interleave_cp_tokens([ByteRegion(0, 0, row, row)], bs, ctx),
+            runs=_interleave_cp_tokens([ByteRegion(0, 0, row, row)], num_states, ctx),
             num_writers=ctx.tp_size // ctx.dcp_size,
             writer_index=ctx.tp_rank // ctx.dcp_size,
             parallelism_agnostic=ctx.cp_size == 1,

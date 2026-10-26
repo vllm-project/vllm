@@ -81,6 +81,9 @@ def build_offloading_config(
                 group.kv_cache_spec,
                 parallel_config.decode_context_parallel_size,
             ),
+            tokens_per_state=tuple(
+                spec.tokens_per_state for spec in iter_layer_specs(group.kv_cache_spec)
+            ),
             layer_names=tuple(group.layer_names),
         )
         for group_id, group in selected_groups
@@ -202,8 +205,10 @@ def build_offloading_config(
                 return False
             if type(spec) is MLAAttentionSpec:
                 return (
-                    spec.tokens_per_state == 1
-                    and spec.real_page_size_bytes % spec.block_size == 0
+                    type(spec.tokens_per_state) is int
+                    and spec.tokens_per_state > 0
+                    and spec.block_size % spec.tokens_per_state == 0
+                    and spec.real_page_size_bytes % spec.num_states == 0
                 )
             if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
                 return False

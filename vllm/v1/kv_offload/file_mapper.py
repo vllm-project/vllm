@@ -86,6 +86,14 @@ class FileMapper:
         kv_cache_groups = [
             {
                 "tokens_per_block": group.tokens_per_block,
+                # Only written when any layer actually compresses, so existing
+                # (uncompressed) deployments' hashed fields — and thus base_path —
+                # are unchanged. json cannot serialize `Fraction`, so stringify.
+                **(
+                    {"tokens_per_state": [str(ts) for ts in group.tokens_per_state]}
+                    if any(ts != 1 for ts in group.tokens_per_state)
+                    else {}
+                ),
                 "layer_names": list(group.layer_names),
             }
             for group in config.groups
