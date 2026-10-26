@@ -5899,6 +5899,44 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     assert retained(0, None) == {14}
 
 
+def test_mamba_align_siblings_hit_committed_boundary_in_one_step():
+    """Requests that hit a Mamba state committed in an earlier step must not
+    defer each other. Re-caching that boundary through the prompt-tail path
+    used to mark its hash as cached in the current step, so every sibling
+    sharing the boundary was refused until the next step and siblings ran one
+    per engine step (e.g. many reads over one shared prompt)."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    shared = [7] * (2 * block_size)
+
+    # Step 1: the producer prefills up to the end of the shared prefix, which
+    # commits the Mamba state at that block boundary.
+    manager.new_step_starts()
+    producer = make_request("p", shared + [50] * 8, block_size, sha256)
+    blocks, num_computed, _ = manager.get_computed_blocks(producer)
+    assert num_computed == 0
+    assert manager.allocate_slots(producer, 2 * block_size, num_computed, blocks)
+    producer.num_computed_tokens = 2 * block_size
+
+    # Step 2: the producer finishes its prompt, and siblings that share the
+    # committed boundary are all admitted in the same step.
+    manager.new_step_starts()
+    assert manager.allocate_slots(producer, 8) is not None
+    for i, tail in enumerate((60, 70, 80)):
+        sibling = make_request(f"s{i}", shared + [tail] * 8, block_size, sha256)
+        blocks, num_computed, _ = manager.get_computed_blocks(sibling)
+        assert num_computed == 2 * block_size
+        new_blocks = manager.allocate_slots(
+            sibling, len(sibling.all_token_ids) - num_computed, num_computed, blocks
+        )
+        assert new_blocks is not None, f"sibling {i} was deferred"
+
+
 def test_mamba_shared_prefix_reuse_under_zero_retention():
     """Full cross-request Marconi flow: a partial shared prefix cached by the
     detecting request must stay reusable by a later request under
@@ -6184,25 +6222,34 @@ def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
     assert mask_no_dcp == mask_large_dcp, "DCP must not change Mamba retention"
 
 
-def test_swa_shared_prefix_reuse_under_zero_retention():
+@pytest.mark.parametrize("use_eagle", [False, True])
+def test_swa_shared_prefix_reuse_under_zero_retention(use_eagle):
     """SWA cross-request analog: a partial shared prefix's sliding-window tail
     must stay reusable under ``prefix_cache_retention_interval=0``. Without
     the pin the junction window is masked out and a later request misses; with
-    it (and under dense) reuse is preserved."""
+    it (and under dense) reuse is preserved. With only the SWA group drafting
+    under EAGLE, the full group reports the junction at the shared prefix, but
+    the SWA hit lands one block below it: the block past the junction is not
+    shared and cannot serve as the EAGLE peek."""
     block_size = 16
 
     def last_req_hit(retention, pin):
+        config = _make_hybrid_kv_cache_config(
+            block_size, 200, ["full", "sliding_window"]
+        )
+        config.kv_cache_groups[1].is_eagle_group = use_eagle
         manager = make_kv_cache_manager(
-            _make_hybrid_kv_cache_config(block_size, 200, ["full", "sliding_window"]),
+            config,
             max_model_len=8192,
             enable_caching=True,
+            use_eagle=use_eagle,
             hash_block_size=block_size,
             retention_interval=retention,
         )
         shared = [7 for _ in range(4 * block_size)]  # 4-block shared prefix
 
         def distinct(v):
-            return [v for _ in range(2 * block_size)]
+            return [v for _ in range(4 * block_size)]
 
         # req0 primes the (dense) full-attention cache; SWA under RET=0 keeps
         # only its own replay window, not the shared-prefix boundary.
@@ -6225,12 +6272,13 @@ def test_swa_shared_prefix_reuse_under_zero_retention():
         _, nc2, _ = manager.get_computed_blocks(req2)
         return nc2
 
+    expected = (3 if use_eagle else 4) * block_size
     # Dense keeps every SWA tail -> reuse works (ceiling).
-    assert last_req_hit(retention=None, pin=False) == 4 * block_size
+    assert last_req_hit(retention=None, pin=False) == expected
     # retention=0 without the pin drops the junction window -> reuse lost (bug).
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction window -> reuse restored.
-    assert last_req_hit(retention=0, pin=True) == 4 * block_size
+    assert last_req_hit(retention=0, pin=True) == expected
 
 
 def test_device_eviction_keeps_host_prefix():
