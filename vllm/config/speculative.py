@@ -587,10 +587,10 @@ class SpeculativeConfig:
     confidence. Currently only supported for method="dspark"."""
 
     adaptive_verification_floor: int = Field(default=0, ge=0)
-    """Verify all scheduled draft tokens when the number of scheduled decode
-    requests is at most this value, subject to the rejection sampler's logits
-    memory limit. Prefill requests do not count toward the floor. Only applies
-    when enable_adaptive_verification is enabled; 0 disables the floor."""
+    """Verify all scheduled draft tokens when at most this many requests have
+    scheduled drafts, subject to the rejection sampler's logits memory limit.
+    Only applies when enable_adaptive_verification is enabled; 0 disables the
+    floor."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:

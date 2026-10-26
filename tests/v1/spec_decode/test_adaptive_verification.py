@@ -319,14 +319,14 @@ def test_zero_budget_rebuilds_cpu_cu_num_logits():
         (1, False, 16, 0),
         (2, False, 16, 4),
         (3, False, 16, 4),
-        (2, True, 16, 0),
+        (2, True, 16, 4),
         (2, False, 4, 1),
     ],
 )
-def test_floor_counts_decodes_and_preserves_logits_limit(
+def test_floor_counts_drafting_reqs_and_preserves_logits_limit(
     dist_init, floor, draftless_decode, max_logits, expected_drafts
 ):
-    """Prefill completion must not disable the floor; draftless decodes must."""
+    """Only requests with scheduled drafts count toward the floor."""
     device = torch.device("cuda:0")
     states = RequestState(3, 32, 16, 2, 32, device)
     for req_id, computed in [("a", 4), ("b", 4), ("c", 4 if draftless_decode else 3)]:

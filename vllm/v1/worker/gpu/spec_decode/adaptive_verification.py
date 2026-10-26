@@ -425,49 +425,41 @@ class AdaptiveVerificationManager:
             dtype=np.int32,
             count=num_reqs,
         )
-        if self.adaptive_verification_floor > 0:
-            num_decode_requests = np.count_nonzero(
-                self.req_states.num_computed_prefill_tokens[slots]
-                >= self.req_states.prefill_len.np[slots]
-            )
-            if num_decode_requests <= self.adaptive_verification_floor:
-                draft_budget = min(
-                    int(scheduled_drafts.sum()),
-                    max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
-                )
-                self._batch_budget = (
-                    dict(zip(req_ids, map(int, scheduled_drafts), strict=True)),
-                    dict(zip(req_ids, map(int, num_non_draft_tokens), strict=True)),
-                    draft_budget,
-                )
-                return int(num_non_draft_tokens.sum()) + draft_budget
-        stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
-        survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
-        steps = np.arange(self.num_speculative_steps)
-        valid = steps[None, :] < scheduled_drafts[:, None]
-        scores = np.sort(survival_probability[valid])[::-1]
-        num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
         max_draft_budget = min(
             int(scheduled_drafts.sum()),
             max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
         )
-        scores = scores[:max_draft_budget]
-        draft_cost_ms, verify_cost_ms = self.cost_tables
-        num_sampling_requests = np.count_nonzero(
-            self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
-            >= self.req_states.prefill_len.np[slots]
-        )
-        num_tokens_to_estimated_accepted_tokens = np.concatenate(
-            ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
-        )
-        costs = (
-            draft_cost_ms[len(req_ids)]
-            + verify_cost_ms[
-                num_non_draft_tokens_total : num_non_draft_tokens_total
-                + max_draft_budget
-                + 1
-            ]
-        )
+        num_reqs_drafting = np.count_nonzero(scheduled_drafts)
+        if num_reqs_drafting > self.adaptive_verification_floor:
+            stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
+            survival_probability = np.cumprod(
+                stale_confidences.astype(np.float64), axis=1
+            )
+            steps = np.arange(self.num_speculative_steps)
+            valid = steps[None, :] < scheduled_drafts[:, None]
+            scores = np.sort(survival_probability[valid])[::-1][:max_draft_budget]
+            num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
+            draft_cost_ms, verify_cost_ms = self.cost_tables
+            num_sampling_requests = np.count_nonzero(
+                self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
+                >= self.req_states.prefill_len.np[slots]
+            )
+            num_tokens_to_estimated_accepted_tokens = np.concatenate(
+                ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
+            )
+            costs = (
+                draft_cost_ms[num_reqs]
+                + verify_cost_ms[
+                    num_non_draft_tokens_total : num_non_draft_tokens_total
+                    + max_draft_budget
+                    + 1
+                ]
+            )
+            draft_budget = int(
+                np.argmax(num_tokens_to_estimated_accepted_tokens / costs)
+            )
+        else:
+            draft_budget = max_draft_budget
         num_drafts_per_req = {
             req_id: int(num_drafts)
             for req_id, num_drafts in zip(req_ids, scheduled_drafts, strict=True)
@@ -476,7 +468,6 @@ class AdaptiveVerificationManager:
             req_id: int(num_tokens)
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
-        draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,

@@ -53,11 +53,11 @@ Set `enable_adaptive_verification: false` to verify the full block for every req
 To keep low-concurrency verification independent of confidence and cost-profile
 variance, set `adaptive_verification_floor` in the speculative config alongside
 `enable_adaptive_verification: true`. For example,
-`"adaptive_verification_floor": 8` verifies all scheduled draft tokens when there
-are **8 or fewer scheduled decode requests**. Above 8, the usual adaptive budget
-applies. Prefill requests, including the final prefill chunk, do not count toward
-the floor; decode requests without drafts do count. The default is `0`, which
-disables the floor, and negative values are rejected.
+`"adaptive_verification_floor": 8` verifies all scheduled draft tokens when **8 or
+fewer requests have scheduled drafts**. Above 8, the usual adaptive budget
+applies. Requests without scheduled drafts, such as prefills, do not count toward
+the floor. The default is `0`, which disables the floor, and negative values are
+rejected.
 
 The floor does not override the rejection sampler's logits-memory limit or
 increase the number of drafts scheduled. It can increase verification work when
