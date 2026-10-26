@@ -518,7 +518,16 @@ def stage_combine(c, unit):
     h = hg * COMB_HEADS + wave
     nchunk = c["nchunk"]
     ck = chunk_keys(d, s)
-    kv_len = ld_i32(a["klen"], t)
+    if const_expr("krdy" in c):
+        # An index source's key table and lengths are built in this launch
+        # (``krdy``), by other CTAs: wait for the token's and read its length
+        # past this CU's L2, as ``stage_split`` does. A combine CTA without
+        # split work gets here at the launch's start: a plain load returns the
+        # length the previous layer left, and the wrong chunk count drops keys.
+        await_flags(c, c["krdy"], 1, lambda u: t)
+        kv_len = ld_i32(a["klen"], t, CM_DEV)
+    else:
+        kv_len = ld_i32(a["klen"], t)
     nlive = (kv_len + ck - 1) // ck
     pos = ld_i32(a["pos"], 2 * t)
     sink = ld_f32(a["sink"], h) * fx.Float32(LOG2E)
