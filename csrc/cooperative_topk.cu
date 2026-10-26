@@ -80,7 +80,6 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
                                   torch::stable::Tensor& output,
                                   torch::stable::Tensor& workspace,
                                   int64_t max_seq_len) {
-  (void)max_seq_len;  // Kept for signature parity with persistent_topk.
   const int64_t num_rows = logits.size(0);
   const cudaStream_t stream = get_current_cuda_stream();
 
@@ -108,21 +107,34 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
   params.stride = stride;
 
   const cudaDeviceProp* prop = get_device_prop();
-  const bool supports_cluster16 = prop->major >= 10;
+  const bool supports_cluster16 = prop->major >= 9;
   const bool supports_cluster24 = prop->major == 10 && prop->minor == 7;
   const bool supports_oversized_smem =
       supports_cluster24 && kCudaSupportsOversizedSmem;
-  const bool long_stride = stride > ct::kFusedMaxStrideCS16;
-  if (num_rows <= 4 && long_stride && supports_cluster24) {
+  int64_t max_rows_cs16 = 4, max_rows_cs8 = 8, max_rows_cs4 = 33;
+  if (supports_cluster24) {
+    max_rows_cs16 = 8;
+    max_rows_cs8 = 22;
+    max_rows_cs4 = 46;
+  } else if (prop->major == 9 || prop->major == 10) {
+    max_rows_cs16 = 7;
+    max_rows_cs8 = 15;
+  }
+  const bool long_rows = max_seq_len > ct::kFusedMaxLenCS16;
+  const int64_t min_len_cs16 =
+      num_rows <= 4 && prop->major >= 10 ? 0 : ct::kMinLenCS16;
+  const bool use_cluster16 = supports_cluster16 && num_rows <= max_rows_cs16 &&
+                             max_seq_len > min_len_cs16;
+  if (num_rows <= 4 && long_rows && supports_cluster24) {
     launch_cooperative_cluster<TopK, 24>(params, ct::kSmemSize24, stream);
-  } else if (num_rows <= 4 && supports_cluster16) {
-    launch_cooperative_cluster<TopK, 16>(params, ct::kSmemSize8, stream);
-  } else if (num_rows <= 8 && long_stride && supports_oversized_smem) {
+  } else if (use_cluster16 && long_rows && supports_oversized_smem) {
     launch_cooperative_cluster<TopK, 16, true>(params, ct::kSmemSize16Oversized,
                                                stream);
-  } else if (num_rows <= 8) {
+  } else if (use_cluster16) {
+    launch_cooperative_cluster<TopK, 16>(params, ct::kSmemSize8, stream);
+  } else if (num_rows <= max_rows_cs8) {
     launch_cooperative_cluster<TopK, 8>(params, ct::kSmemSize8, stream);
-  } else if (num_rows <= 33) {
+  } else if (num_rows <= max_rows_cs4) {
     launch_cooperative_cluster<TopK, 4>(params, ct::kSmemSize4, stream);
   } else {
     launch_cooperative_cluster<TopK, 2>(params, ct::kSmemSize2, stream);

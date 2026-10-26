@@ -40,7 +40,8 @@ constexpr uint32_t kFusedStagesCS8 = 2;
 constexpr uint32_t kFusedStagesCS16 = 2;
 constexpr uint32_t kFusedStagesCS16Oversized = 4;
 constexpr uint32_t kFusedStagesCS24 = 3;
-constexpr uint32_t kFusedMaxStrideCS16 = 16 * kFusedStagesCS16 * kSizePerStage;
+constexpr uint32_t kFusedMaxLenCS16 = 16 * kFusedStagesCS16 * kSizePerStage;
+constexpr uint32_t kMinLenCS16 = 4 * kSizePerStage;
 
 // CS=4 single-pass path
 constexpr uint32_t kMaxSinglePassStages = 3;
