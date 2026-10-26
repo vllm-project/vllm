@@ -44,6 +44,8 @@ from vllm.model_executor.kernels.linear import (
     ROCmFP8ScaledMMLinearKernel,
     RowWiseTorchFP8ScaledMMLinearKernel,
     TritonFp8BlockScaledMMKernel,
+    XPUFp8BlockScaledMMKernel,
+    XPUW8A8FP8LinearKernel,
     _KernelT,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm, RMSNormGated
@@ -93,11 +95,27 @@ ROCM_KERNEL_GROUPSHAPE_COMBINATIONS = [
     (TritonFp8BlockScaledMMKernel, GroupShape(1, 64)),
 ]
 
-KERNEL_GROUPSHAPE_COMBINATIONS = (
-    CUDA_KERNEL_GROUPSHAPE_COMBINATIONS
-    if current_platform.is_cuda()
-    else ROCM_KERNEL_GROUPSHAPE_COMBINATIONS
-)
+# XPU kernels
+XPU_KERNEL_GROUPSHAPE_COMBINATIONS = [
+    # XPUW8A8FP8LinearKernel: per-token weights are not supported
+    (XPUW8A8FP8LinearKernel, GroupShape.PER_TENSOR),
+    # PerTensorTorchFP8ScaledMMLinearKernel only supports per-tensor
+    (PerTensorTorchFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
+    # ChannelWiseTorchFP8ScaledMMLinearKernel only supports per-token
+    (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    # Blockwise group shapes
+    (XPUFp8BlockScaledMMKernel, GroupShape(1, 128)),
+    (XPUFp8BlockScaledMMKernel, GroupShape(1, 64)),
+    (TritonFp8BlockScaledMMKernel, GroupShape(1, 128)),
+    (TritonFp8BlockScaledMMKernel, GroupShape(1, 64)),
+]
+
+if current_platform.is_cuda():
+    KERNEL_GROUPSHAPE_COMBINATIONS = CUDA_KERNEL_GROUPSHAPE_COMBINATIONS
+elif current_platform.is_xpu():
+    KERNEL_GROUPSHAPE_COMBINATIONS = XPU_KERNEL_GROUPSHAPE_COMBINATIONS
+else:
+    KERNEL_GROUPSHAPE_COMBINATIONS = ROCM_KERNEL_GROUPSHAPE_COMBINATIONS
 
 # For Aiter tests we toggle use_aiter_quant_op
 AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
@@ -336,7 +354,8 @@ def _run_fusion_test(
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
 @pytest.mark.parametrize("enable_quant_fp8_custom_op", [True, False])
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only test on CUDA and ROCm"
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Only test on CUDA, ROCm and XPU",
 )
 def test_fusion_rmsnorm_quant(
     dtype,
@@ -399,7 +418,7 @@ def test_fusion_rmsnorm_quant(
         vllm_config.kernel_config.ir_op_priority.set_priority(),
     ):
         # Setup device before model creation
-        torch.set_default_device("cuda")
+        torch.set_default_device(current_platform.device_type)
         torch.set_default_dtype(dtype)
         torch.manual_seed(1)
 
