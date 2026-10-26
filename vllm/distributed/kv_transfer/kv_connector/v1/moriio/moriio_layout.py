@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Mapping
-from math import prod
 from typing import NamedTuple, cast
 
 import torch
@@ -18,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
+    group_kernel_blocks,
 )
 
 
@@ -295,31 +295,28 @@ def get_layer_transfer_geometry(
         isinstance(spec, AttentionSpec)
         and len(shape) == 4
         and shape[1] == spec.num_heads
-        and spec.num_states % shape[2] == 0
+        and (
+            shape[2] == spec.num_states
+            or (shape[1] == 1 and spec.num_states % shape[2] == 0)
+        )
         and shape[3] * element_size == spec.state_content_size_bytes
     ):
         # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
-        # N < num_states: dense kernel blocks; block ids stay manager blocks.
-        num_kernel_blocks, num_heads, _, content_dim = shape
-        kernel_blocks_per_block = spec.num_states // shape[2]
-        if kernel_blocks_per_block > 1 and (
-            num_kernel_blocks % kernel_blocks_per_block != 0
-            or stride[0] != prod(shape[1:])
-        ):
-            raise ValueError(
-                f"Unsupported MoRIIO kernel-block cache shape for layer "
-                f"{layer_name}: {tuple(shape)} with stride {tuple(stride)} is "
-                f"not {kernel_blocks_per_block} dense kernel blocks per block"
-            )
+        # Single-head views may be split into kernel blocks (N < num_states):
+        # the allocator only splits dense pages, so a manager block is the same
+        # token rows whatever the kernel block size, and P and D may differ.
+        num_heads, content_dim = shape[1], shape[3]
+        blocks = group_kernel_blocks(
+            kv_cache, shape[0] // (spec.num_states // shape[2])
+        )
         slot_size_bytes = num_heads * content_dim * element_size
         block_len = spec.num_states * slot_size_bytes
-        # Assumes P and D share the block size and kernel layout.
         return LayerTransferGeometry(
-            num_blocks=num_kernel_blocks // kernel_blocks_per_block,
+            num_blocks=blocks.shape[0],
             block_size=spec.block_size,
             block_len=block_len,
             slot_size_bytes=slot_size_bytes,
-            block_stride=stride[0] * kernel_blocks_per_block,
+            block_stride=blocks.stride(0),
             local_kv_stride=None,
             remote_kv_stride=None,
             transfers_per_block=1,

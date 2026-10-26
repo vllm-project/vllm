@@ -320,14 +320,32 @@ def test_kernel_split_4d_view_addresses_manager_blocks():
     ) == ([24, 72], [96, 120], [24, 24])
 
 
-def test_kernel_split_4d_view_rejects_padded_kernel_blocks():
+def test_allocator_rejects_kernel_split_of_padded_blocks():
+    # A split view always comes from dense pages: the allocator refuses to split
+    # blocks that are padded or interleaved with other layers' pages.
+    from vllm.v1.kv_cache_interface import (
+        KVCacheLayout,
+        KVCacheTensor,
+        create_kv_cache_views,
+    )
+
+    num_blocks = 2
     spec = MLAAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=3, dtype=torch.bfloat16
     )
-    padded = torch.empty((16, 1, 5, 3), dtype=torch.bfloat16)[:, :, :4]
+    padded_stride = spec.page_size_bytes + 64
+    tensor = KVCacheTensor(
+        size=num_blocks * padded_stride,
+        layers=["layer"],
+        layer_stride=num_blocks * padded_stride,
+        block_stride=padded_stride,
+    )
+    raw = torch.zeros(num_blocks * padded_stride, dtype=torch.int8)
 
-    with pytest.raises(ValueError, match="not 4 dense kernel blocks per block"):
-        moriio_layout.get_layer_transfer_geometry("layer", padded, {"layer": spec})
+    with pytest.raises(ValueError, match="dense, unpadded pages"):
+        create_kv_cache_views(
+            raw, spec, num_blocks, KVCacheLayout.LBNHC, tensor, kernel_block_size=4
+        )
 
 
 def _kernel_split_views(num_heads, num_states, content, manager_blocks, ratio):
@@ -379,37 +397,68 @@ def test_kernel_split_ratios_match_manager_geometry(ratio):
 
 
 @pytest.mark.parametrize("num_heads", [2, 4])
-def test_kernel_split_multi_head_matches_manager_geometry(num_heads):
-    manager_blocks = 4
-    spec, manager_view, kernel_view = _kernel_split_views(
-        num_heads=num_heads,
-        num_states=16,
-        content=3,
-        manager_blocks=manager_blocks,
-        ratio=4,
+def test_kernel_split_multi_head_view_is_unsupported(num_heads):
+    # Whether a multi-head split keeps a block's byte order depends on the
+    # layout (LBHNC stores [r, H, N/r, C] instead of [H, N, C]), so a raw block
+    # copy is only correct if P and D split alike.
+    spec, _, kernel_view = _kernel_split_views(
+        num_heads=num_heads, num_states=16, content=3, manager_blocks=4, ratio=4
+    )
+
+    with pytest.raises(ValueError, match="Unsupported MoRIIO MLA cache shape"):
+        moriio_layout.get_layer_transfer_geometry("layer", kernel_view, {"layer": spec})
+
+
+@pytest.mark.parametrize(
+    ("head_size", "state_content_bytes"),
+    [(576, None), (128, 132)],
+    ids=["mla_latent", "indexer"],
+)
+def test_kernel_split_matches_real_allocator_block_size_8(
+    head_size, state_content_bytes
+):
+    # GLM-5.2 / DeepSeek-V3.2 on ROCm at --block-size 8: the sparse MLA and
+    # indexer backends only support kernel blocks of 1 or multiples of 16.
+    from vllm.v1.kv_cache_interface import (
+        KVCacheLayout,
+        KVCacheTensor,
+        create_kv_cache_views,
+    )
+
+    num_blocks = 3
+    spec = MLAAttentionSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=head_size,
+        head_size_v=0,
+        dtype=torch.uint8,
+        state_content_bytes=state_content_bytes,
+    )
+    page = spec.page_size_bytes
+    tensor = KVCacheTensor(
+        size=num_blocks * page,
+        layers=["layer"],
+        layer_stride=num_blocks * page,
+        block_stride=page,
+    )
+    raw = torch.zeros(num_blocks * page, dtype=torch.int8)
+    (view,) = create_kv_cache_views(
+        raw, spec, num_blocks, KVCacheLayout.LBNHC, tensor, kernel_block_size=1
     )
     layer_to_spec = {"layer": spec}
+    slot = state_content_bytes or head_size
 
-    manager = moriio_layout.get_layer_transfer_geometry(
-        "layer", manager_view, layer_to_spec
-    )
-    kernel = moriio_layout.get_layer_transfer_geometry(
-        "layer", kernel_view, layer_to_spec
-    )
-
-    assert kernel == manager
-    assert kernel.num_blocks == manager_blocks
-    assert kernel.slot_size_bytes == num_heads * 3 * manager_view.element_size()
-    ids = ([manager_blocks - 1, 0], [0, manager_blocks - 1])
+    assert tuple(view.shape) == (num_blocks * 8, 1, 1, slot)
+    geometry = moriio_layout.get_layer_transfer_geometry("layer", view, layer_to_spec)
+    assert geometry.num_blocks == num_blocks
+    assert geometry.block_len == geometry.block_stride == page == 8 * slot
     assert moriio_layout.compute_block_transfer_offsets(
-        "layer", kernel_view, layer_to_spec, *ids, manager_blocks
-    ) == moriio_layout.compute_block_transfer_offsets(
-        "layer", manager_view, layer_to_spec, *ids, manager_blocks
-    )
+        "layer", view, layer_to_spec, [2, 0], [0, 2], num_blocks
+    ) == ([0, 2 * page], [2 * page, 0], [page, page])
 
 
 def test_kernel_split_matches_real_allocator_indexer():
-    # GLM-5.3-Flash kpool indexer: block_size 640 in 128-token pages (ratio 5).
+    # Pooled indexer: block_size 640 in 128-token pages (ratio 5).
     from vllm.v1.kv_cache_interface import (
         KVCacheLayout,
         KVCacheTensor,
