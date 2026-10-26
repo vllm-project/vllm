@@ -360,12 +360,12 @@ impl VisionPreProcessor for Step3VLProcessor {
         )
     }
 
-    fn calculate_num_tokens(&self, width: u32, height: u32) -> usize {
+    fn calculate_num_tokens(&self, width: u32, height: u32) -> Result<usize, TransformError> {
         let (num_patches, num_newlines) = self.get_num_patches(width, height);
-        num_patches * (self.num_patch_feature_size + 2)
+        Ok(num_patches * (self.num_patch_feature_size + 2)
             + self.num_image_feature_size
             + 2
-            + num_newlines
+            + num_newlines)
     }
 
     fn model_name(&self) -> &'static str {
@@ -497,18 +497,18 @@ mod tests {
         let processor = Step3VLProcessor::new();
 
         // No patches: just the global span (169 + 2).
-        assert_eq!(processor.calculate_num_tokens(504, 504), 171);
-        assert_eq!(processor.calculate_num_tokens(400, 300), 171);
+        assert_eq!(processor.calculate_num_tokens(504, 504).unwrap(), 171);
+        assert_eq!(processor.calculate_num_tokens(400, 300).unwrap(), 171);
 
         // 2x2 grid: 4 * (81 + 2) + 1 newline + (169 + 2).
-        assert_eq!(processor.calculate_num_tokens(1008, 1008), 504);
+        assert_eq!(processor.calculate_num_tokens(1008, 1008).unwrap(), 504);
 
         // Single column, two rows: 2 * 83 + 1 newline + 171.
-        assert_eq!(processor.calculate_num_tokens(504, 1008), 338);
+        assert_eq!(processor.calculate_num_tokens(504, 1008).unwrap(), 338);
 
         // Wide strip: ratio > 4 -> window = short side (300), crop rounds
         // 2000/300 = 6.67 up to 7 windows; trailing newline popped -> 0 rows.
-        assert_eq!(processor.calculate_num_tokens(2000, 300), 752);
+        assert_eq!(processor.calculate_num_tokens(2000, 300).unwrap(), 752);
 
         // Consistent with the per-image patch counts.
         let (n, rows) = processor.get_num_patches(1008, 1008);
@@ -521,7 +521,7 @@ mod tests {
             enable_patch: false,
             ..Step3VLProcessor::new()
         };
-        assert_eq!(processor.calculate_num_tokens(1008, 1008), 171);
+        assert_eq!(processor.calculate_num_tokens(1008, 1008).unwrap(), 171);
         let patched = processor.patch_one(&solid(1008, 1008)).unwrap();
         assert!(patched.patches.is_empty());
     }
@@ -567,7 +567,7 @@ mod tests {
         // CLIP-normalized: a solid (120, 30, 200) view lands at the normalized
         // value everywhere (resize preserves the flat field).
         let expected_r = (120.0f32 / 255.0 - 0.481_454_66) / 0.268_629_55;
-        assert!((out.encoder_input[[0, 0, 0, 0]] - expected_r).abs() < 1e-3);
+        assert!((out.encoder_input.as_f32()[[0, 0, 0, 0]] - expected_r).abs() < 1e-3);
         assert!((patch_data[0] - expected_r).abs() < 1e-3);
     }
 
@@ -617,7 +617,7 @@ mod tests {
         .unwrap();
         let processor = Step3VLProcessor::from_preprocessor_config(&config);
 
-        assert_eq!(processor.calculate_num_tokens(1008, 1008), 146);
+        assert_eq!(processor.calculate_num_tokens(1008, 1008).unwrap(), 146);
         let out = processor.preprocess(std::slice::from_ref(&solid(1008, 1008))).unwrap();
         assert_eq!(out.encoder_input.shape(), &[1, 3, 336, 336]);
         assert_eq!(out.feature_token_counts, vec![144]);
