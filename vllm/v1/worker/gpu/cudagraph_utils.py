@@ -19,6 +19,7 @@ from vllm.compilation.breakable_cudagraph import (
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
+from vllm.compilation.cudagraph_launch import new_cuda_graph
 from vllm.compilation.cudagraph_pool import (
     capture_outside_cumem_pool,
     capture_pool,
@@ -486,7 +487,9 @@ class CudaGraphManager:
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
-                        graph = torch.cuda.CUDAGraph()
+                        graph = new_cuda_graph(
+                            self.compilation_config.cudagraph_launch_mode
+                        )
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()

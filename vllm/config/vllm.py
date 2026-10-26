@@ -2096,6 +2096,7 @@ class VllmConfig:
             self._validate_v1_model_runner()
 
         self._validate_profiler_config()
+        self._validate_cudagraph_launch_mode()
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
 
@@ -3260,6 +3261,29 @@ class VllmConfig:
             unsupported.append("dual batch overlap with encoder only models")
 
         return unsupported
+
+    def _validate_cudagraph_launch_mode(self) -> None:
+        if self.compilation_config.cudagraph_launch_mode != "device":
+            return
+        if self.mamba_config.enable_stochastic_rounding:
+            raise ValueError(
+                "cudagraph_launch_mode='device' skips PyTorch's per-replay RNG "
+                "setup, which --enable-mamba-cache-stochastic-rounding needs "
+                "inside the captured graphs. Use cudagraph_launch_mode='host' "
+                "or disable stochastic rounding."
+            )
+
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            raise ValueError("cudagraph_launch_mode='device' requires NVIDIA CUDA.")
+        try:
+            from cuda.bindings import driver  # noqa: F401
+        except ImportError as e:
+            raise ValueError(
+                "cudagraph_launch_mode='device' requires the cuda-bindings "
+                "package (pip install cuda-bindings)."
+            ) from e
 
     def _validate_profiler_config(self) -> None:
         if self.profiler_config.profiler != "proton":

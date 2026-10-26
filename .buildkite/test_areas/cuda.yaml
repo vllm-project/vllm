@@ -52,6 +52,7 @@ steps:
     - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
     - pytest -v -s v1/cudagraph/test_breakable_cudagraph.py
     - pytest -v -s v1/cudagraph/test_encoder_cudagraph.py
+    - pytest -v -s v1/cudagraph/test_cudagraph_launch.py
   mirror:
     amd:
       label: ":amd: (MI250) CUDAGraph"
