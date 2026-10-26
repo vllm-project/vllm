@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import functools
 import json
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -11,8 +11,14 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.triton_autotune import (
+    atomic_write_json,
+    get_autotune_cache_dir,
+)
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
@@ -158,61 +164,79 @@ def _get_lora_b_ptr(
     return _LORA_B_PTR_DICT.get(key)
 
 
-@functools.lru_cache
+def _lora_op_config_suffix(op_type: str, add_inputs: bool | None) -> str:
+    if op_type == "expand":
+        return f"{op_type.upper()}_{str(add_inputs).upper()}.json"
+    return f"{op_type.upper()}.json"
+
+
+def get_lora_op_config_file_name(op_type: str, add_inputs: bool | None) -> str:
+    """File name of a user-tuned config in VLLM_TUNED_CONFIG_FOLDER."""
+    gpu_name = torch.cuda.get_device_name().replace(" ", "_").replace("-", "_")
+    return f"{gpu_name}_{_lora_op_config_suffix(op_type, add_inputs)}"
+
+
+def get_lora_autotune_config_file_path(op_type: str, add_inputs: bool | None) -> str:
+    # The platform name remains available when torch reports an empty ROCm name.
+    device_name = get_device_name_as_file_name()
+    file_name = f"{device_name}_{_lora_op_config_suffix(op_type, add_inputs)}"
+    return str(Path(get_autotune_cache_dir("lora")) / file_name)
+
+
+def _read_lora_config(path: str | Path) -> dict:
+    with open(path) as f:
+        config = json.load(f)
+    config.pop("triton_version", None)
+    return config
+
+
+@lru_cache
 def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
-    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
-    # Avoid optimizing for the batch invariant case. Use default config
-    if user_defined_config_folder is not None and not is_batch_invariant:
-        gpu_name = torch.cuda.get_device_name()
-        gpu_name = gpu_name.replace(" ", "_")
-        gpu_name = gpu_name.replace("-", "_")
+    if is_batch_invariant:
+        return None
 
-        config_fname = None
-        # only expand op needs to consider add_inputs
-        if op_type == "expand":
-            config_fname = (
-                f"{gpu_name}_{op_type.upper()}_{str(add_inputs).upper()}.json"
-            )
-        else:
-            config_fname = f"{gpu_name}_{op_type.upper()}.json"
+    config_paths: list[Path] = []
+    user_folder = envs.VLLM_TUNED_CONFIG_FOLDER
+    if user_folder is not None:
+        file_name = get_lora_op_config_file_name(op_type, add_inputs)
+        config_paths.append(Path(user_folder) / file_name)
+    if current_platform.is_cuda_alike():
+        config_paths.append(
+            Path(get_lora_autotune_config_file_path(op_type, add_inputs))
+        )
 
-        config_path = Path(f"{user_defined_config_folder}/{config_fname}")
-        if not config_path.exists():
-            logger.warning_once(f"No LoRA kernel configs found in {config_path}")
-            return None
+    for config_path in config_paths:
+        if config_path.exists():
+            logger.info_once(f"Using tuned LoRA kernel configs from {config_path}.")
+            return _read_lora_config(config_path)
 
-        # Load json
-        logger.info_once(f"Using tuned LoRA kernel configs from {config_path}.")
-        with open(str(config_path)) as f:
-            config_data = json.load(f)
-    else:
-        config_data = None
-
-    return config_data
+    if user_folder is not None:
+        logger.warning_once(f"No LoRA kernel configs found in {config_paths[0]}")
+    return None
 
 
-@functools.lru_cache
-def get_lora_op_configs(
-    op_type: str,
-    max_loras: int,
-    batch: int,
-    hidden_size: int,
-    rank: int,
-    num_slices: int,
-    add_inputs: bool | None = None,
-    moe_intermediate_size: int | None = None,
+def load_lora_autotune_configs(op_type: str, add_inputs: bool | None) -> dict:
+    path = Path(get_lora_autotune_config_file_path(op_type, add_inputs))
+    if not path.exists():
+        return {}
+    return _read_lora_config(path)
+
+
+def save_lora_configs(op_type: str, add_inputs: bool | None, configs: dict) -> str:
+    """Save an autotune table and clear its lookup caches."""
+    path = get_lora_autotune_config_file_path(op_type, add_inputs)
+    atomic_write_json(
+        path,
+        {"triton_version": getattr(triton, "__version__", "unknown"), **configs},
+    )
+    load_lora_op_config.cache_clear()
+    _get_lora_op_configs_cached.cache_clear()
+    return path
+
+
+def _default_lora_op_config(
+    op_type: str, batch: int, num_slices: int, rank: int
 ) -> dict[str, int | None]:
-    # Add support for fused_moe_lora ops
-    assert op_type in [
-        "shrink",
-        "expand",
-        "fused_moe_lora_w13_shrink",
-        "fused_moe_lora_w13_expand",
-        "fused_moe_lora_w2_shrink",
-        "fused_moe_lora_w2_expand",
-    ]
-
-    # default config
     default = {}
     if op_type == "shrink":
         split_k = 64 if batch < 128 else 8
@@ -266,6 +290,73 @@ def get_lora_op_configs(
             "num_stages": 2,
             "max_nreg": None,
         }
+    return default
+
+
+# Override hook for the tuning benchmark, see `override_lora_op_config`.
+_lora_op_config_override: tuple[str, dict[str, int | None]] | None = None
+
+
+@contextmanager
+def override_lora_op_config(op_type: str, config: dict[str, int | None]):
+    """Temporarily override one LoRA operation's config."""
+    global _lora_op_config_override
+    prev = _lora_op_config_override
+    _lora_op_config_override = (op_type, config)
+    try:
+        yield
+    finally:
+        _lora_op_config_override = prev
+
+
+def get_lora_op_configs(
+    op_type: str,
+    max_loras: int,
+    batch: int,
+    hidden_size: int,
+    rank: int,
+    num_slices: int,
+    add_inputs: bool | None = None,
+    moe_intermediate_size: int | None = None,
+) -> dict[str, int | None]:
+    if _lora_op_config_override is not None:
+        override_op_type, config = _lora_op_config_override
+        if override_op_type == op_type:
+            return config
+    return _get_lora_op_configs_cached(
+        op_type,
+        max_loras,
+        batch,
+        hidden_size,
+        rank,
+        num_slices,
+        add_inputs,
+        moe_intermediate_size,
+    )
+
+
+@lru_cache
+def _get_lora_op_configs_cached(
+    op_type: str,
+    max_loras: int,
+    batch: int,
+    hidden_size: int,
+    rank: int,
+    num_slices: int,
+    add_inputs: bool | None,
+    moe_intermediate_size: int | None,
+) -> dict[str, int | None]:
+    # Add support for fused_moe_lora ops
+    assert op_type in [
+        "shrink",
+        "expand",
+        "fused_moe_lora_w13_shrink",
+        "fused_moe_lora_w13_expand",
+        "fused_moe_lora_w2_shrink",
+        "fused_moe_lora_w2_expand",
+    ]
+
+    default = _default_lora_op_config(op_type, batch, num_slices, rank)
     m = batch
 
     k, n = (hidden_size, rank) if op_type == "shrink" else (rank, hidden_size)
@@ -283,6 +374,13 @@ def get_lora_op_configs(
         or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - max_loras))]
     )
     # slice by num_slices
+    if str(num_slices) not in config_data:
+        logger.warning_once(
+            "No tuned LoRA %s config for num_slices=%d; using the default.",
+            op_type,
+            num_slices,
+        )
+        return default
     config_data = config_data[str(num_slices)]
     # slice by m
     config_data = (
