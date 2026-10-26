@@ -103,6 +103,12 @@ vllm bench serve \
   --num-prompts 10
 ```
 
+For a server that requires an API key, set `OPENAI_API_KEY` in the benchmark
+client's environment. This authenticates both generation requests and the
+automatic `/v1/models` lookup when `--model` is omitted. An explicit
+`--header "Authorization=Bearer <key>"` overrides the environment key; other
+headers supplied with `--header` are preserved.
+
 If successful, you will see the following output:
 
 ```text
