@@ -65,12 +65,13 @@ class CPUOffloadingManager(OffloadingManager):
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
+        info: CPUOffloadingInfo | None = None,
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
-        self._config_info: ConfigInfoMapping = CPUOffloadingInfo(
-            cpu_num_chunks=num_chunks
-        ).as_config_info()
+        self._config_info: ConfigInfoMapping = (
+            info.as_config_info() if info is not None else {}
+        )
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
