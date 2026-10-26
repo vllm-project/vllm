@@ -545,28 +545,46 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
     return TierFilter(matchers=tuple(matchers))
 
 
+class _RequestTokens(NamedTuple):
+    num_computed_tokens: int
+    num_in_flight_tokens: int
+    num_prompt_tokens: int
+    num_tokens: int
+
+
 @dataclass
 class _VllmReqContext(ReqContext):
-    _request: Request = field(kw_only=True, repr=False, compare=False)
+    _scheduler: "OffloadingConnectorScheduler" = field(
+        kw_only=True, repr=False, compare=False
+    )
+
+    @property
+    def _request_tokens(self) -> Request | _RequestTokens:
+        tokens = self.get_state(_RequestTokens)
+        if tokens is not None:
+            return tokens
+        return self._scheduler._req_status[self.req_id].req
 
     @property
     def num_computed_tokens(self) -> int:
-        return self._request.num_computed_tokens
+        return self._request_tokens.num_computed_tokens
 
     @property
     def num_in_flight_tokens(self) -> int:
-        return self._request.num_in_flight_tokens
+        return self._request_tokens.num_in_flight_tokens
 
     @property
     def num_prompt_tokens(self) -> int:
-        return self._request.num_prompt_tokens
+        return self._request_tokens.num_prompt_tokens
 
     @property
     def num_tokens(self) -> int:
-        return self._request.num_tokens
+        return self._request_tokens.num_tokens
 
 
-def _create_req_context(req: Request) -> ReqContext:
+def _create_req_context(
+    req: Request, scheduler: "OffloadingConnectorScheduler"
+) -> ReqContext:
     params = req.kv_transfer_params
     load_filter = TierFilter.ALL
     if params:
@@ -578,7 +596,7 @@ def _create_req_context(req: Request) -> ReqContext:
         kv_transfer_params=params,
         kv_hints=req.kv_hints,
         load_tier_filter=load_filter,
-        _request=req,
+        _scheduler=scheduler,
     )
 
 
@@ -1117,16 +1135,20 @@ class OffloadingConnectorScheduler:
 
     def on_new_request(self, request: Request) -> None:
         """Called when a new request is added to the scheduler."""
-        req_context = _create_req_context(request)
-        with self._manager_locked():
-            offloading_context = self.manager.on_new_request(req_context)
+        req_context = _create_req_context(request, self)
         req_status = RequestOffloadState(
             config=self.config,
             req=request,
             req_context=req_context,
-            offloading_context=offloading_context,
+            offloading_context=RequestOffloadingContext(),
         )
         self._req_status[request.request_id] = req_status
+        try:
+            with self._manager_locked():
+                req_status.offloading_context = self.manager.on_new_request(req_context)
+        except Exception:
+            del self._req_status[request.request_id]
+            raise
 
     def get_num_new_matched_tokens(
         self,
@@ -2160,11 +2182,24 @@ class OffloadingConnectorScheduler:
 
         """
         req_status = self._req_status.get(request.request_id)
+        req_context = (
+            req_status.req_context
+            if req_status is not None
+            else _create_req_context(request, self)
+        )
+        # Freeze at logical completion, independent of deferred tier callbacks.
+        req_context.set_state(
+            _RequestTokens(
+                request.num_computed_tokens,
+                request.num_in_flight_tokens,
+                request.num_prompt_tokens,
+                request.num_tokens,
+            )
+        )
 
         if req_status is None:
             # Untracked request (offloading never started): no in-flight jobs,
             # nothing was deferred, so finalize immediately.
-            req_context = _create_req_context(request)
             with self._manager_locked():
                 self.manager.on_new_request(req_context)
                 self.manager.on_request_finished(req_context)

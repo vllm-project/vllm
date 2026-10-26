@@ -90,7 +90,10 @@ TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 
 @dataclass
 class ReqContext:
-    """Per-request offloading state with optional live token counts."""
+    """Per-request offloading state with optional token counts.
+
+    Counts are live until the scheduler finishes the request, then frozen.
+    """
 
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
