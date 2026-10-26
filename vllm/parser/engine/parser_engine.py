@@ -163,18 +163,36 @@ class _ArgsRewriter:
     breaking that prefix.  A truncated tail is passed through unchanged.
     """
 
-    def __init__(self, text: str, properties: dict | None, *, final: bool) -> None:
+    def __init__(
+        self,
+        text: str,
+        properties: dict | None,
+        *,
+        final: bool,
+        force_parse: bool = False,
+    ) -> None:
         self._text = text
         self._props = properties
         # Whether no more text can arrive.  A trailing literal is otherwise
         # treated as still growing: it is only rewritten once delimited.
         self._final = final
+        # Parse even when the identity fast path would apply, so streaming
+        # callers can learn where structural parsing stops (see ``stop``).
+        self._force_parse = force_parse
         self._out: list[str] = []
         self._depth = 0
+        # Offset where the first unparsable token made the rewriter copy the
+        # rest verbatim, or ``None`` if it parsed to the end.
+        self.stop: int | None = None
 
     def rewrite(self) -> str:
         text = self._text
-        if not self._props and "NaN" not in text and "Infinity" not in text:
+        if (
+            not self._props
+            and not self._force_parse
+            and "NaN" not in text
+            and "Infinity" not in text
+        ):
             # Without a property schema only non-finite literals are rewritten.
             return text
         i = self._skip_ws(0)
@@ -218,7 +236,11 @@ class _ArgsRewriter:
                 return text[i + 1 : j], j + 1
         return None
 
-    def _truncated(self, i: int) -> int:
+    def _truncated(self, i: int, *, give_up: bool = True) -> int:
+        # A give-up is final; a wait for more text is not.  Both copy the
+        # remainder verbatim, but only the former bounds incremental resuming.
+        if give_up and self.stop is None:
+            self.stop = i
         self._out.append(self._text[i:])
         return len(self._text)
 
@@ -241,12 +263,13 @@ class _ArgsRewriter:
                 return i + 1
             scanned = self._scan_string(i) if text[i] == '"' else None
             if scanned is None:
-                return self._truncated(i)
+                # A non-string key is a give-up; an unterminated one may close.
+                return self._truncated(i, give_up=text[i] != '"')
             key, j = scanned
             out.append(text[i:j])
             i = self._skip_ws(j)
             if i >= len(text) or text[i] != ":":
-                return self._truncated(i)
+                return self._truncated(i, give_up=i < len(text))
             out.append(":")
             i = self._skip_ws(i + 1)
             i = self._value(i, props.get(key) if props and key is not None else None)
@@ -307,7 +330,7 @@ class _ArgsRewriter:
         if c == '"':
             scanned = self._scan_string(i)
             if scanned is None:
-                return self._truncated(i)
+                return self._truncated(i, give_up=False)
             value, j = scanned
             if value is not None and isinstance(schema, dict):
                 coerced, changed = coerce_typed_value(value, schema)
@@ -384,20 +407,37 @@ def _top_level_commas(text: str, depth: int) -> list[int]:
     return commas
 
 
+def _member_start(text: str, i: int) -> bool:
+    """Whether the member following offset *i* begins with a quoted key."""
+    n = len(text)
+    while i < n and text[i] in " \t\n\r":
+        i += 1
+    return i < n and text[i] == '"'
+
+
 def _resume_point(
     raw: str, corrected: str, emitted: int, depth: int
 ) -> tuple[int, int] | None:
-    """Resume offsets in *raw* and *corrected*, or ``None`` before any comma.
+    """Resume offsets in *raw* and *corrected*, or ``None``.
 
-    Every top-level comma is copied verbatim, so the k-th comma lies at the
-    same index in both texts: the last comma at or before the emitted prefix
-    is the last member that is final in both.
+    Every top-level comma is copied verbatim, so the k-th comma in *raw* pairs
+    with the k-th comma in *corrected* -- their indices differ because a
+    coerced value may change length.  Only a comma whose member begins with a
+    quoted key is safe to resume from: scanning from there reproduces the key
+    attribution of a full scan, which a malformed member (no quoted key) would
+    not.  The last such comma at or before the emitted prefix is the last
+    member that is final in both.
     """
     raw_commas = _top_level_commas(raw, depth)
     corrected_commas = _top_level_commas(corrected[:emitted], depth)
     if not corrected_commas or len(corrected_commas) > len(raw_commas):
         return None
-    return raw_commas[len(corrected_commas) - 1], corrected_commas[-1]
+    for k in range(len(corrected_commas) - 1, -1, -1):
+        if _member_start(raw, raw_commas[k]) and _member_start(
+            corrected, corrected_commas[k]
+        ):
+            return raw_commas[k], corrected_commas[k]
+    return None
 
 
 def _unescaped_quote(text: str, escape: bool) -> tuple[bool, bool]:
@@ -432,6 +472,12 @@ class _StreamingArgs:
     not extend the cached document falls back to a full pass.  A trailing
     open string under a streamable key streams its content verbatim, so a
     long value is not rescanned on every delta.
+
+    The tail is only resumed from a comma whose member starts with a quoted
+    key, and never past the offset where the rewriter first structurally
+    gave up (an unterminated trailing value is not a give-up): scanning
+    either region from a different start would infer different corrections
+    than the full pass.
     """
 
     __slots__ = (
@@ -442,6 +488,8 @@ class _StreamingArgs:
         "_streams",
         "_at_end",
         "_escape",
+        "_stop",
+        "_nonfinite",
     )
 
     def __init__(self) -> None:
@@ -452,12 +500,14 @@ class _StreamingArgs:
         self._streams = False
         self._at_end = False
         self._escape = False
+        self._stop: int | None = None
+        self._nonfinite = False
 
     @staticmethod
     def full_pass(
         args_json: str, properties: dict | None, string_keys: set[str] | None
-    ) -> tuple[str, str, bool]:
-        """Return (corrected text, safe prefix, value_streams) for *args_json*.
+    ) -> tuple[str, str, bool, int | None]:
+        """Return (corrected text, safe prefix, value_streams, stop offset).
 
         The correction rewrites value tokens in place (see
         :class:`_ArgsRewriter`), so the corrected text of one delta extends
@@ -465,11 +515,19 @@ class _StreamingArgs:
         holds however the model formats its JSON.  Trailing literals are
         treated as still growing: they are only corrected once delimited.
         """
-        corrected = _ArgsRewriter(args_json, properties, final=False).rewrite()
+        rewriter = _ArgsRewriter(args_json, properties, final=False)
+        corrected = rewriter.rewrite()
         safe, streams = ParserEngine._safe_arg_prefix(corrected, string_keys)
-        return corrected, safe, streams
+        return corrected, safe, streams, rewriter.stop
 
-    def reset(self, args_json: str, corrected: str, safe: str, streams: bool) -> None:
+    def reset(
+        self,
+        args_json: str,
+        corrected: str,
+        safe: str,
+        streams: bool,
+        stop: int | None = None,
+    ) -> None:
         self._raw = args_json
         self._raw_boundary = 0
         self._corrected_boundary = 0
@@ -477,8 +535,10 @@ class _StreamingArgs:
         self._streams = streams
         self._at_end = len(safe) == len(corrected)
         self._escape = _odd_trailing_backslashes(args_json) if streams else False
+        self._stop = stop
+        self._nonfinite = "NaN" in args_json or "Infinity" in args_json
         point = _resume_point(args_json, corrected, len(safe), 0)
-        if point is not None:
+        if point is not None and (stop is None or point[0] <= stop):
             self._raw_boundary, self._corrected_boundary = point
 
     def delta(
@@ -488,6 +548,12 @@ class _StreamingArgs:
         raw = self._raw
         if raw is None or not args_json.startswith(raw) or not raw.startswith("{"):
             return None
+        if not properties and not self._nonfinite:
+            # A non-finite literal introduced after the cache was built may
+            # rewrite text the full pass left verbatim after a give-up.
+            added = args_json[max(0, len(raw) - 7) :]
+            if "NaN" in added or "Infinity" in added:
+                return None
         if self._streams and self._at_end:
             delta = args_json[len(raw) :]
             closes, escape = _unescaped_quote(delta, self._escape)
@@ -497,11 +563,26 @@ class _StreamingArgs:
                 self._emitted += len(delta)
                 return delta, True
         skip = 1 if self._raw_boundary else 0
-        tail = "{" + args_json[self._raw_boundary :] if skip else args_json
-        tail_out = _ArgsRewriter(tail, properties, final=False).rewrite()
+        base = self._raw_boundary
+        tail = "{" + args_json[base:] if skip else args_json
+        rewriter = _ArgsRewriter(
+            tail, properties, final=False, force_parse=self._nonfinite
+        )
+        tail_out = rewriter.rewrite()
+        if rewriter.stop is not None:
+            stop = base + rewriter.stop - skip
+            # The first structural give-up is final: everything after it is
+            # copied verbatim, so a tail scan may not resume beyond it.
+            self._stop = stop if self._stop is None else min(self._stop, stop)
         safe_tail, streams = ParserEngine._safe_arg_prefix(tail_out, string_keys)
         emit_rel = max(len(safe_tail) - skip, 0)
         end = self._corrected_boundary + emit_rel
+        point = _resume_point(args_json[base:], tail_out[skip:], emit_rel, skip)
+        if point is not None and (self._stop is None or base + point[0] <= self._stop):
+            new_raw = base + point[0]
+            new_corrected = self._corrected_boundary + point[1]
+        else:
+            new_raw = None
         delta = ""
         if end > self._emitted:
             body = tail_out[skip:]
@@ -511,12 +592,9 @@ class _StreamingArgs:
         self._streams = streams
         self._at_end = end == self._corrected_boundary + len(tail_out) - skip
         self._escape = _odd_trailing_backslashes(args_json) if streams else False
-        point = _resume_point(
-            args_json[self._raw_boundary :], tail_out[skip:], emit_rel, skip
-        )
-        if point is not None:
-            self._raw_boundary += point[0]
-            self._corrected_boundary += point[1]
+        if new_raw is not None:
+            self._raw_boundary = new_raw
+            self._corrected_boundary = new_corrected
         return delta, streams
 
 
@@ -1453,7 +1531,7 @@ class ParserEngine(Parser):
         )
         if result is None:
             properties, string_keys = slot.properties, slot.string_keys
-            corrected, safe_json, value_streams = _StreamingArgs.full_pass(
+            corrected, safe_json, value_streams, stop = _StreamingArgs.full_pass(
                 current_json, properties, string_keys
             )
             prev = slot.streamed_json
@@ -1461,7 +1539,7 @@ class ParserEngine(Parser):
                 slot.arg_cache = None
                 return None
             cache = slot.arg_cache = _StreamingArgs()
-            cache.reset(current_json, corrected, safe_json, value_streams)
+            cache.reset(current_json, corrected, safe_json, value_streams, stop)
             if not safe_json:
                 return None
             slot.streamed_json = safe_json

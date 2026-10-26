@@ -2328,9 +2328,10 @@ class TestIncrementalArgRewrite:
         engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
         actual, flush = _stream_arg_deltas(engine, "f", chunks)
         expected = self._expected_deltas(tool, chunks)
-        assert [d for d in actual if d] == [d for d in expected if d]
-        fresh = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
-        assert "".join(actual) + flush == _stream_tool_args(fresh, "f", chunks)
+        # Unfiltered: a tick where the full pass emits but the cache defers
+        # is a latency regression even if the joined text is unchanged.
+        assert actual[1:] == expected
+        assert "".join(actual) + flush == engine._fix_arg_types("".join(chunks), "f")
 
     def test_long_string_deltas_match_full_pass(self):
         """Split escapes in an open string must not change the delta stream."""
@@ -2341,9 +2342,51 @@ class TestIncrementalArgRewrite:
         chunks.append('"}')
         actual, flush = _stream_arg_deltas(engine, "f", chunks)
         expected = self._expected_deltas(tool, chunks)
-        assert [d for d in actual if d] == [d for d in expected if d]
-        fresh = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
-        assert "".join(actual) + flush == _stream_tool_args(fresh, "f", chunks)
+        assert actual[1:] == expected
+        assert "".join(actual) + flush == engine._fix_arg_types("".join(chunks), "f")
+
+    def test_transient_truncation_does_not_pin_resume_boundary(self, monkeypatch):
+        """An unterminated trailing value is not a give-up.
+
+        Treating it as one pins the resume boundary at the first tick's tail,
+        so every later delta rescans the whole document.
+        """
+        rewritten = 0
+
+        class CountingRewriter(_ArgsRewriter):
+            def rewrite(self):
+                nonlocal rewritten
+                rewritten += len(self._text)
+                return super().rewrite()
+
+        monkeypatch.setattr(parser_engine, "_ArgsRewriter", CountingRewriter)
+        fields = {f"f{i}": {"type": "string"} for i in range(80)}
+        doc = "{" + ", ".join(f'"f{i}": "v{i}"' for i in range(80)) + "}"
+        tool = _make_tool("f", fields)
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        chunks = [doc[i : i + 4] for i in range(0, len(doc), 4)]
+        assert _stream_tool_args(engine, "f", chunks) == doc
+        assert rewritten < 20 * len(doc), f"rewrote {rewritten} chars for {len(doc)}"
+
+    def test_malformed_key_keeps_streaming(self):
+        """A malformed member's non-string key must not stop a streamable
+        string from streaming.
+
+        A full scan attributes the colon to the previous value, so the open
+        string streams; resuming after the comma loses that and buffers it.
+        """
+        schema = {
+            "a": {"type": "integer"},
+            "val": {"type": "string"},
+            "x": {"type": "string"},
+        }
+        tool = _make_tool("f", schema)
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        doc = '{"a": 1, "val": "x", 2: "streaming a long string value"}'
+        chunks = [doc[i : i + 3] for i in range(0, len(doc), 3)]
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+        assert actual[1:] == self._expected_deltas(tool, chunks)
+        assert "".join(actual) + flush == engine._fix_arg_types(doc, "f")
 
     def test_split_quote_and_comma_stream_in_order(self):
         """A closing quote and the following comma arriving in separate
@@ -2381,11 +2424,64 @@ class TestIncrementalArgRewrite:
         properties = find_tool_properties([tool], "f")
         string_keys = ParserEngine._streamable_string_keys(properties)
         cache = _StreamingArgs()
-        corrected, safe, streams = _StreamingArgs.full_pass(
+        corrected, safe, streams, stop = _StreamingArgs.full_pass(
             '{"a": 1}', properties, string_keys
         )
-        cache.reset('{"a": 1}', corrected, safe, streams)
+        cache.reset('{"a": 1}', corrected, safe, streams, stop)
         assert cache.delta('{"a": 2}', properties, string_keys) is None
+
+
+class TestIncrementalArgRewriteAfterGiveUp:
+    """Text after a structural give-up is corrected verbatim.
+
+    Resuming the rewriter past the give-up re-parses that region, coerces
+    values the full pass left alone, and makes the streamed text stop being
+    a prefix of the final arguments.
+    """
+
+    @staticmethod
+    def _assert_stream_matches_final(doc, schema, size):
+        tool = _make_tool("f", schema)
+        chunks = [doc[i : i + size] for i in range(0, len(doc), size)]
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+        assert actual[1:] == TestIncrementalArgRewrite._expected_deltas(tool, chunks)
+        assert "".join(actual) + flush == engine._fix_arg_types(doc, "f")
+
+    @pytest.mark.parametrize("size", [1, 3, 4])
+    def test_malformed_member_then_coercible(self, size):
+        self._assert_stream_matches_final(
+            '{"a": , "b": "5", "c": "z"}',
+            {
+                "a": {"type": "string"},
+                "b": {"type": "integer"},
+                "c": {"type": "string"},
+            },
+            size,
+        )
+
+    @pytest.mark.parametrize("size", [4, 8])
+    def test_pathological_nesting_then_coercible(self, size):
+        deep = "[" * 300 + "]" * 300
+        self._assert_stream_matches_final(
+            '{"a": ' + deep + ', "b": "5", "c": "z"}',
+            {
+                "a": {"type": "object"},
+                "b": {"type": "integer"},
+                "c": {"type": "string"},
+            },
+            size,
+        )
+
+    @pytest.mark.parametrize("size", [1, 3])
+    def test_no_schema_nonfinite_after_giveup(self, size):
+        """Without a schema only non-finite literals are rewritten, but the
+        identity fast path must not hide a give-up from the resume check."""
+        self._assert_stream_matches_final(
+            '{"n": NaN, "t": -Infin:ity, "x": 1e999, "t": NaN}',
+            {},
+            size,
+        )
 
 
 _STREAMABLE_SCHEMA_SHAPES: list[dict] = [
