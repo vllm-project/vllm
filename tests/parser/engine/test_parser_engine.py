@@ -37,6 +37,7 @@ from vllm.parser.engine.parser_engine import (
     ParserEngine,
     ReasoningEnd,
     _ArgsRewriter,
+    _has_non_finite_literal,
     _StreamingArgs,
 )
 from vllm.parser.engine.parser_engine_config import (
@@ -47,7 +48,11 @@ from vllm.parser.engine.parser_engine_config import (
 from vllm.parser.glm47_moe import glm47_moe_config
 from vllm.parser.parser_manager import ParserManager
 from vllm.parser.qwen3 import Qwen3Parser
-from vllm.tool_parsers.utils import coerce_typed_value, find_tool_properties
+from vllm.tool_parsers.utils import (
+    MAX_NESTING_DEPTH,
+    coerce_typed_value,
+    find_tool_properties,
+)
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -967,6 +972,16 @@ class TestFixArgTypes:
         args = '{"a": ' + "[" * 5000 + "]" * 5000 + "}"
         assert engine._fix_arg_types(args, "f") == args
 
+    def test_deeply_nested_schema_does_not_recurse(self):
+        """A client-supplied schema nested past the cap must not raise."""
+        schema: dict = {"type": "integer"}
+        for _ in range(MAX_NESTING_DEPTH * 10):
+            schema = {"anyOf": [schema]}
+        tool = _make_tool("f", {"count": schema})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"count": 5}', "f")
+        assert json.loads(result) == {"count": 5}
+
     @pytest.mark.parametrize(
         "type_name",
         ["str", "text", "varchar", "char", "STRING"],
@@ -1037,6 +1052,18 @@ class TestFixArgTypes:
         result = engine._fix_arg_types('{"x": NaN}', "f")
         parsed = json.loads(result, parse_constant=_reject_json_constant)
         assert parsed == {"x": "NaN"}
+
+    def test_nonfinite_literal_detection_ignores_string_contents(self):
+        """Only a bare ``NaN``/``Infinity`` token needs the slow path; the
+        same text inside a string (e.g. ``"banaNaNa"``) must not disable the
+        no-schema fast path.
+        """
+        assert _has_non_finite_literal('{"x": NaN}')
+        assert _has_non_finite_literal('{"x": -Infinity}')
+        assert _has_non_finite_literal('{"x": [Infinity]}')
+        assert not _has_non_finite_literal('{"x": "banaNaNa"}')
+        assert not _has_non_finite_literal('{"x": "Infinity"}')
+        assert not _has_non_finite_literal('{"x": "NaNValue"}')
 
     @pytest.mark.parametrize(
         "tools,func_name",

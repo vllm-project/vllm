@@ -30,8 +30,11 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
 )
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.parser.utils import _JSON_WS
 from vllm.renderers.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.tool_parsers.utils import (
+    MAX_NESTING_DEPTH,
+    _is_escaped,
     canonical_schema_types,
     coerce_to_schema_type,
     coerce_typed_value,
@@ -117,11 +120,17 @@ class ToolCallSlot:
 
 _NON_FINITE_LITERALS = ("NaN", "Infinity", "-Infinity")
 _NUMBER_CHARS = frozenset("0123456789+-.eE")
-# Real tool-call arguments nest a handful of levels deep; beyond this the
-# rewriter passes the tail through verbatim rather than recurse toward the
-# interpreter's limit, where a model stuck emitting brackets would otherwise
-# raise RecursionError and fail the request.
-_MAX_NESTING_DEPTH = 200
+# A bare non-finite literal token, not the same text inside a string (e.g.
+# "banaNaNa"): the no-schema fast path only needs to parse when one exists.
+_NON_FINITE_RE = re.compile(r'(?<![\w"])(?:NaN|Infinity)(?![\w"])')
+
+
+def _has_non_finite_literal(text: str) -> bool:
+    # Cheap C-level pre-filter; only a text containing a candidate substring
+    # pays for the regex scan that rejects non-token occurrences.
+    if "NaN" not in text and "Infinity" not in text:
+        return False
+    return _NON_FINITE_RE.search(text) is not None
 
 
 def _literal_type(literal: str) -> str | None:
@@ -190,8 +199,7 @@ class _ArgsRewriter:
         if (
             not self._props
             and not self._force_parse
-            and "NaN" not in text
-            and "Infinity" not in text
+            and not _has_non_finite_literal(text)
         ):
             # Without a property schema only non-finite literals are rewritten.
             return text
@@ -206,7 +214,7 @@ class _ArgsRewriter:
     def _skip_ws(self, i: int) -> int:
         text = self._text
         j = i
-        while j < len(text) and text[j] in " \t\n\r":
+        while j < len(text) and text[j] in _JSON_WS:
             j += 1
         if j > i:
             self._out.append(text[i:j])
@@ -247,7 +255,7 @@ class _ArgsRewriter:
     def _delimited(self, j: int) -> bool:
         text = self._text
         k = j
-        while k < len(text) and text[k] in " \t\n\r":
+        while k < len(text) and text[k] in _JSON_WS:
             k += 1
         return k < len(text) and text[k] in ",}]"
 
@@ -314,7 +322,7 @@ class _ArgsRewriter:
             return i
         c = text[i]
         if c == "{" or c == "[":
-            if self._depth >= _MAX_NESTING_DEPTH:
+            if self._depth >= MAX_NESTING_DEPTH:
                 return self._truncated(i)
             self._depth += 1
             try:
@@ -410,7 +418,7 @@ def _top_level_commas(text: str, depth: int) -> list[int]:
 def _member_start(text: str, i: int) -> bool:
     """Whether the member following offset *i* begins with a quoted key."""
     n = len(text)
-    while i < n and text[i] in " \t\n\r":
+    while i < n and text[i] in _JSON_WS:
         i += 1
     return i < n and text[i] == '"'
 
@@ -450,15 +458,6 @@ def _unescaped_quote(text: str, escape: bool) -> tuple[bool, bool]:
         elif c == '"':
             return True, escape
     return False, escape
-
-
-def _odd_trailing_backslashes(text: str) -> bool:
-    count = 0
-    for c in reversed(text):
-        if c != "\\":
-            break
-        count += 1
-    return count % 2 == 1
 
 
 class _StreamingArgs:
@@ -534,9 +533,9 @@ class _StreamingArgs:
         self._emitted = len(safe)
         self._streams = streams
         self._at_end = len(safe) == len(corrected)
-        self._escape = _odd_trailing_backslashes(args_json) if streams else False
+        self._escape = _is_escaped(args_json, len(args_json)) if streams else False
         self._stop = stop
-        self._nonfinite = "NaN" in args_json or "Infinity" in args_json
+        self._nonfinite = _has_non_finite_literal(args_json)
         point = _resume_point(args_json, corrected, len(safe), 0)
         if point is not None and (stop is None or point[0] <= stop):
             self._raw_boundary, self._corrected_boundary = point
@@ -552,7 +551,7 @@ class _StreamingArgs:
             # A non-finite literal introduced after the cache was built may
             # rewrite text the full pass left verbatim after a give-up.
             added = args_json[max(0, len(raw) - 7) :]
-            if "NaN" in added or "Infinity" in added:
+            if _has_non_finite_literal(added):
                 return None
         if self._streams and self._at_end:
             delta = args_json[len(raw) :]
@@ -591,7 +590,7 @@ class _StreamingArgs:
         self._raw = args_json
         self._streams = streams
         self._at_end = end == self._corrected_boundary + len(tail_out) - skip
-        self._escape = _odd_trailing_backslashes(args_json) if streams else False
+        self._escape = _is_escaped(args_json, len(args_json)) if streams else False
         if new_raw is not None:
             self._raw_boundary = new_raw
             self._corrected_boundary = new_corrected
