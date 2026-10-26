@@ -110,6 +110,7 @@ vllm serve <model> \
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
+| `sync_load_budget_bytes` | no | `0` | both | Per-step budget of KV bytes (per GPU) loaded within the same step, so those requests run immediately instead of waiting a step for an async load. Hits that don't fit the remaining budget, or would leave nothing to compute, stay async. `0` disables. |
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Partial recurrent tails emit the hash-aligned portion from the physical block start through the tail boundary. Other sliding-window/SSM chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
 | `canonical_layout` | no | `false` | both | Store each offloaded block in a common canonical representation instead of each worker's local GPU page (enables sharing across TP sizes and single-copy storage of replicated KV). See [Canonical Layout](#canonical-layout). |
@@ -477,6 +478,13 @@ requested count exceeds a worker's capacity. For the `disk` backend the count
 selects disk slots and is checked against `disk_capacity_bytes`. Omitting
 `num_cpu_blocks` preserves automatic per-worker sizing. This option applies
 to `SimpleCPUOffloadConnector`, separately from `OffloadingConnector` above.
+
+## Chunked-local attention with `SimpleCPUOffloadConnector`
+
+For chunked-local attention, CPU cache reuse requires the GPU-local prefix to
+end at an attention-chunk boundary for every chunked-local cache group. Otherwise,
+the connector keeps the GPU prefix and recomputes the remaining tokens. Requests
+with no GPU-local prefix, or with a chunk-aligned prefix, can still reuse CPU KV.
 
 ## Further Reading
 
