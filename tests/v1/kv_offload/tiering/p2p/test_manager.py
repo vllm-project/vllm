@@ -1441,9 +1441,11 @@ class TestBidirectionalManager:
         The producer drops parked blocks once unbound_store_timeout_s
         expires. A consumer whose fetch arrives after that must learn on the
         next tick via TransferDoneMsg(success=False) — not stall for
-        _LOAD_TIMEOUT_S and then take the abort path.
+        _PD_LOAD_TIMEOUT_S and then take the abort path.
         """
-        from vllm.v1.kv_offload.tiering.p2p.session.client import _LOAD_TIMEOUT_S
+        from vllm.v1.kv_offload.tiering.p2p.session.client import (
+            _PD_LOAD_TIMEOUT_S,
+        )
 
         mgr_a, mgr_b = _build_paired_managers()
         kv_id = "req-late"
@@ -1504,7 +1506,7 @@ class TestBidirectionalManager:
         assert JobResult(job_id=101, success=False) in all_a, all_a
         assert kv_id in mgr_a._failed_req_ids
         assert "abort_fetch" not in sent_from_a, sent_from_a
-        assert elapsed < _LOAD_TIMEOUT_S
+        assert elapsed < _PD_LOAD_TIMEOUT_S
 
 
 # ---------------------------------------------------------------------------
