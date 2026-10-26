@@ -45,6 +45,7 @@ from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_p
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.async_utils import make_async_with_semaphore, merge_async_iterators
+from vllm.utils.import_utils import has_silero_vad
 
 from ..transcription.protocol import (
     TranscriptionResponse,
@@ -574,6 +575,12 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             # shift the speaker timestamps the model emits.
             return self.create_error_response(
                 f"VAD is not supported for diarization model {request.model}"
+            )
+
+        if not has_silero_vad() and request.build_vad_config().enabled:
+            return self.create_error_response(
+                "VAD requires the silero-vad and onnxruntime packages. "
+                "Install them with `pip install vllm[audio]`."
             )
 
         if (

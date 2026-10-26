@@ -552,6 +552,13 @@ def check_moonep_system_support() -> None:
         )
 
 
+def has_silero_vad() -> bool:
+    """Whether the optional `silero_vad` and `onnxruntime` packages are
+    available."""
+    # Spec check only: importing silero_vad calls torch.set_num_threads(1).
+    return _has_module_spec("silero_vad") and _has_module_spec("onnxruntime")
+
+
 def is_numba_available() -> bool:
     """Whether the optional `numba` package is available."""
     return _has_module("numba")
