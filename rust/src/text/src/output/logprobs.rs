@@ -116,7 +116,7 @@ fn decode_position_logprobs<T: Tokenizer + ?Sized>(
             .entries
             .iter()
             .map(|entry| {
-                tokenizer.decode(&[entry.token_id], skip_special_tokens).map(|token| {
+                tokenizer.decode_token(entry.token_id, skip_special_tokens).map(|token| {
                     DecodedTokenLogprob {
                         token_id: entry.token_id,
                         token,
@@ -131,8 +131,10 @@ fn decode_position_logprobs<T: Tokenizer + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+    use tempfile::tempdir;
     use vllm_llm::{Logprobs, PositionLogprobs, TokenLogprob};
-    use vllm_tokenizer::test_utils::TestTokenizer;
+    use vllm_tokenizer::{HuggingFaceTokenizer, test_utils::TestTokenizer};
 
     use super::*;
 
@@ -177,6 +179,106 @@ mod tests {
                 }],
             }
         );
+    }
+
+    fn metaspace_tokenizer(sequenced: bool) -> HuggingFaceTokenizer {
+        let metaspace = json!({
+            "type": "Metaspace",
+            "replacement": "▁",
+            "prepend_scheme": "always",
+            "split": true
+        });
+        let pre_tokenizer = if sequenced {
+            json!({
+                "type": "Sequence",
+                "pretokenizers": [metaspace]
+            })
+        } else {
+            metaspace
+        };
+        let config = json!({
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": pre_tokenizer,
+            "post_processor": null,
+            "decoder": {
+                "type": "Metaspace",
+                "replacement": "▁",
+                "prepend_scheme": "always",
+                "split": true
+            },
+            "model": {
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": "<unk>",
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "ignore_merges": false,
+                "vocab": {"<unk>": 0, "▁the": 1, "the": 2, "▁": 3, "▁▁": 4},
+                "merges": []
+            }
+        });
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("tokenizer.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&config).expect("serialize tokenizer"),
+        )
+        .expect("write tokenizer");
+        HuggingFaceTokenizer::new_hf(&path).expect("load metaspace tokenizer")
+    }
+
+    #[test]
+    fn decode_logprobs_preserves_metaspace_leading_spaces() {
+        let logprobs = Logprobs {
+            positions: vec![PositionLogprobs {
+                entries: vec![
+                    TokenLogprob {
+                        token_id: 1,
+                        logprob: -0.1,
+                        rank: 1,
+                    },
+                    TokenLogprob {
+                        token_id: 2,
+                        logprob: -0.2,
+                        rank: 2,
+                    },
+                    TokenLogprob {
+                        token_id: 3,
+                        logprob: -0.3,
+                        rank: 3,
+                    },
+                    TokenLogprob {
+                        token_id: 4,
+                        logprob: -0.4,
+                        rank: 4,
+                    },
+                ],
+            }],
+        };
+
+        for sequenced in [false, true] {
+            let tokenizer = metaspace_tokenizer(sequenced);
+            assert_eq!(tokenizer.decode(&[1], false).unwrap(), "the");
+            assert_eq!(tokenizer.decode(&[2], false).unwrap(), "the");
+            assert_eq!(tokenizer.decode(&[3], false).unwrap(), "");
+
+            let decoded = decode_logprobs(&tokenizer, &logprobs, false).unwrap();
+            assert_eq!(
+                decoded.positions[0]
+                    .entries
+                    .iter()
+                    .map(|entry| entry.token.as_str())
+                    .collect::<Vec<_>>(),
+                [" the", "the", " ", "  "],
+                "sequenced={sequenced}",
+            );
+        }
     }
 
     #[test]
