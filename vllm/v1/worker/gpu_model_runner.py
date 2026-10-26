@@ -5680,11 +5680,15 @@ class GPUModelRunner(
                     dcp_dummy_context_len=dcp_dummy_context_len,
                 )
 
-                # Sync block table CPU->GPU so cleared rows from
-                # remove_request() are visible to the attention metadata
-                # builder. Without this, stale block IDs from finished
-                # requests can corrupt Mamba state.
-                self.input_batch.block_table.commit_block_table(num_reqs_padded)
+                # A dummy batch has no requests of its own, but the persistent
+                # batch can still hold live ones (e.g. while the scheduler is
+                # paused with mode="keep"), and their rows may name blocks that
+                # were freed and reused. Point every dummy row at the null block
+                # so the dummy forward never reads or writes another request's
+                # KV/Mamba blocks. The next real step re-commits the block
+                # table from its CPU copy.
+                for block_table in self.input_batch.block_table.block_tables:
+                    block_table.get_device_tensor(num_reqs_padded).fill_(NULL_BLOCK_ID)
 
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 attn_metadata, _ = self._build_attention_metadata(
