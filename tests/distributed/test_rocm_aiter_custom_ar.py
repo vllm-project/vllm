@@ -10,7 +10,10 @@ import torch.distributed as dist
 
 from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
 from vllm.device_allocator import alloc_conf
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
+from vllm.distributed.communication_op import (  # noqa
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.distributed.device_communicators.cuda_wrapper import find_loaded_library
 from vllm.distributed.parallel_state import (
     GraphCaptureContext,
@@ -141,6 +144,61 @@ def test_rocm_aiter_custom_allreduce(
     test_target,
 ):
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def tp_all_gather(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+) -> None:
+    with monkeypatch.context() as m:
+        _configure_aiter_custom_ar_env(m)
+
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        group = get_tp_group().device_group
+        aiter_comm = get_tp_group().device_communicator.aiter_ar_comm
+        unreg = aiter_comm.all_gather_unreg
+        aiter_dims = []
+
+        def spy_unreg(inp: torch.Tensor, dim: int) -> torch.Tensor:
+            aiter_dims.append(dim)
+            return unreg(inp, dim=dim)
+
+        m.setattr(aiter_comm, "all_gather_unreg", spy_unreg)
+
+        def expected(inp: torch.Tensor, dim: int) -> torch.Tensor:
+            chunks = [torch.empty_like(inp) for _ in range(tp_size)]
+            dist.all_gather(chunks, inp, group=group)
+            return torch.cat(chunks, dim=dim)
+
+        # The first, a middle and the last dim.
+        for dim in (0, 1, 2):
+            inp = torch.randn((3, 4, 64), device=device).to(torch.bfloat16) + rank
+            out = tensor_model_parallel_all_gather(inp, dim)
+            assert torch.equal(out, expected(inp, dim))
+
+            with graph_capture(device=device) as graph_capture_context:
+                torch.accelerator.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=graph_capture_context.stream):
+                    out = tensor_model_parallel_all_gather(inp, dim)
+            inp.add_(1)
+            graph.replay()
+            assert torch.equal(out, expected(inp, dim))
+        # Eager and captured gathers all ran on AITER's first- or last-dim kernel.
+        assert aiter_dims == [0, 0, -1, -1, -1, -1]
+
+
+@pytest.mark.skipif(not is_aiter_found(), reason="AITER is not installed")
+@multi_gpu_test(num_gpus=2)
+def test_rocm_aiter_tp_all_gather(monkeypatch: pytest.MonkeyPatch):
+    multi_process_parallel(monkeypatch, 2, 1, tp_all_gather)
 
 
 def _num_memcpy_nodes(graph: torch.cuda.CUDAGraph) -> int:
