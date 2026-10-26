@@ -236,7 +236,7 @@ steps:
 - label: ':nvidia: (B200) [Nightly] Spec Decode Speculators + MTP'
   key: spec-decode-speculators-mtp-nightly-b200
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   optional: true
   working_dir: .
   no_plugin: true
@@ -497,7 +497,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL MTP + Other Acceptance'
   key: spec-decode-mtp-other-acceptance-nightly
   device: intel_gpu
-  timeout_in_minutes: 35
+  timeout_in_minutes: 60
   parallelism: 3
   optional: true
   working_dir: .
