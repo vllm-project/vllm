@@ -494,6 +494,10 @@ class FusedMoEExperts(ABC):
     # (at weight 1.0) take only the routed top-k from the router.
     appends_fused_shared_experts: bool = False
 
+    # Called with the unweighted GEMM2 rows and the output to weight and reduce
+    # into, replacing the experts' own top-k reduction.
+    post_gemm2_hook: Callable[[UnfinalizedMoEOutput, torch.Tensor], None] | None = None
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -529,6 +533,24 @@ class FusedMoEExperts(ABC):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
+
+    def _uses_post_gemm2_hook(self, num_tokens: int) -> bool:
+        return self.post_gemm2_hook is not None and num_tokens > 0
+
+    def _run_post_gemm2_hook(
+        self,
+        unfinalized: torch.Tensor | UnfinalizedMoEOutput,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.post_gemm2_hook is not None
+        assert isinstance(unfinalized, UnfinalizedMoEOutput)
+        if output is None:
+            rows = unfinalized.gemm2_permuted
+            output = rows.new_empty(
+                (unfinalized.expanded_idx_to_permuted_idx.shape[0], rows.shape[1])
+            )
+        self.post_gemm2_hook(unfinalized, output)
+        return output
 
     @staticmethod
     def is_monolithic() -> bool:
