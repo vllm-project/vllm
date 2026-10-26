@@ -23,6 +23,7 @@ from vllm.v1.kv_offload.cpu.common import (
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
+from vllm.v1.kv_offload.cpu.policies.base import ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
@@ -1749,3 +1750,26 @@ def test_lru_incremental_stores_do_not_rescan_the_prefix():
         manager.complete_store([key], ctx)
 
     assert 0 < ctx.position_lookups <= 3 * len(keys)
+
+
+@pytest.mark.parametrize("ready_on_insert", [False, True])
+def test_lru_insert_orders_positioned_chunks_without_followup_access(ready_on_insert):
+    """Insertion alone orders new chunks, including out-of-order backfills."""
+    policy = LRUCachePolicy(cache_capacity=3)
+    ctx = make_req_context("insert")
+    head, middle, tail = to_keys([1, 2, 3])
+    for position, key in enumerate([head, middle, tail], 1):
+        ctx.set_offload_key_position(key, position * 16)
+    for chunk_id, key in enumerate([head, tail, middle]):
+        chunk = ChunkStatus(chunk_id)
+        if ready_on_insert:
+            chunk.ref_cnt = 0
+        policy.insert(key, chunk, ctx)
+        if not ready_on_insert:
+            chunk.ref_cnt = 0
+            policy.mark_evictable(key)
+
+    evicted = policy.evict(2, set())
+    assert evicted is not None
+    assert [key for key, _ in evicted] == [tail, middle]
+    assert policy.get(head) is not None

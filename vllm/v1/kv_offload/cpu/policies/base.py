@@ -60,8 +60,13 @@ class CachePolicy(ABC):
         """Find chunk in data structures. Returns None if not present."""
 
     @abstractmethod
-    def insert(self, key: OffloadKey, chunk: ChunkStatus) -> None:
-        """Add a newly allocated chunk. For ARC: also removes from ghost lists."""
+    def insert(
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+    ) -> None:
+        """Add a newly allocated chunk with the storing request's context.
+
+        For ARC: also removes from ghost lists.
+        """
 
     @abstractmethod
     def remove(self, key: OffloadKey) -> None:
@@ -92,13 +97,10 @@ class CachePolicy(ABC):
         self,
         keys: Iterable[OffloadKey],
         req_context: ReqContext,
-        *,
-        inserted: bool = False,
     ) -> None:
-        """Observe new request keys and successfully allocated store keys.
+        """Observe first accesses without allocating new chunks.
 
-        Keys first observed before allocation may not yet be resident. This
-        ``inserted`` is true only for newly allocated chunks. This hook can
+        Keys first observed here may not yet be resident. This hook can
         maintain prefix order during a request without committing the
         frequency access handled by ``on_request_finished``.
         """

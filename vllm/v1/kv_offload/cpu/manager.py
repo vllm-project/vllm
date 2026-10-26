@@ -357,8 +357,7 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
         for key, chunk in zip(keys_to_store, chunks):
-            self._policy.insert(key, chunk)
-        self._policy.on_request_access(keys_to_store, req_context, inserted=True)
+            self._policy.insert(key, chunk, req_context)
         self._num_write_pending_chunks += len(keys_to_store)
         state.inserted_keys.update(keys_to_store)
 

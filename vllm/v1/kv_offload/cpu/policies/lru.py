@@ -48,6 +48,18 @@ class LRUCachePolicy(CachePolicy):
         self._next_rank = 0
         self._cache_generation = 0
 
+    def _get_request_rank(self, req_context: ReqContext) -> int:
+        state = req_context.get_state(_RequestRank)
+        if (
+            state is None
+            or state.owner is not self
+            or state.cache_generation != self._cache_generation
+        ):
+            self._next_rank += 1
+            state = _RequestRank(self, self._cache_generation, self._next_rank)
+            req_context.set_state(state)
+        return state.rank
+
     def _assign_new_rank(self, key: OffloadKey) -> bool:
         if key not in self.chunks:
             return False
@@ -93,10 +105,16 @@ class LRUCachePolicy(CachePolicy):
         return self.chunks.get(key)
 
     @override
-    def insert(self, key: OffloadKey, chunk: ChunkStatus) -> None:
+    def insert(
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+    ) -> None:
         self.chunks[key] = chunk
-        self._next_rank += 1
-        self._ranks[key] = (self._next_rank, 0)
+        position = req_context.get_offload_key_position(key)
+        if position is None:
+            self._next_rank += 1
+            self._ranks[key] = (self._next_rank, 0)
+        else:
+            self._ranks[key] = (self._get_request_rank(req_context), -position)
         if chunk.ref_cnt == 0:
             self._evictable.add(key)
             self._push_evictable(key)
@@ -116,18 +134,8 @@ class LRUCachePolicy(CachePolicy):
         self,
         keys: Iterable[OffloadKey],
         req_context: ReqContext,
-        *,
-        inserted: bool = False,
     ) -> None:
-        state = req_context.get_state(_RequestRank)
-        if (
-            state is None
-            or state.owner is not self
-            or state.cache_generation != self._cache_generation
-        ):
-            self._next_rank += 1
-            state = _RequestRank(self, self._cache_generation, self._next_rank)
-            req_context.set_state(state)
+        request_rank = self._get_request_rank(req_context)
         updated_evictable = []
         for key in keys:
             position = req_context.get_offload_key_position(key)
@@ -135,8 +143,8 @@ class LRUCachePolicy(CachePolicy):
                 continue
             # All batches share one request rank; later positions precede
             # earlier ones without revisiting the already observed prefix.
-            rank = (state.rank, -position)
-            if not inserted and self._ranks[key] >= rank:
+            rank = (request_rank, -position)
+            if self._ranks[key] >= rank:
                 continue
             self._ranks[key] = rank
             if key in self._evictable:

@@ -184,6 +184,11 @@ Implement `CachePolicy` (`vllm/v1/kv_offload/cpu/policies/base.py`) in your own 
 }
 ```
 
+Custom policies must implement `insert(self, key, chunk, req_context)`. The request
+context provides each key's token position through `get_offload_key_position(key)`
+so a policy can establish prefix ordering during insertion. Policies that do not
+use request-specific insertion ordering can accept and ignore `req_context`.
+
 `eviction_policy` is checked against the built-in registry first; if it isn't a registered name, vLLM imports `cache_policy_module_path` and looks up `eviction_policy` as a class name in that module — the same fallback `spec_module_path` provides for a custom `OffloadingSpec`. No import or registration call needs to run before the server starts.
 
 ### Registering a friendly short name (in-process only)
