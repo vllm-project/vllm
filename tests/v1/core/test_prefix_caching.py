@@ -4520,18 +4520,12 @@ def test_eagle_grouped_swa_siblings_use_same_cache_mask():
     assert num_computed_tokens == 8 * block_size
 
 
-@pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("num_prompt_tokens", [165, 175])
-def test_eagle_swa_resend_hits_after_connector_import(packed, num_prompt_tokens):
-    """A prompt longer than the window, imported through a KV connector, must
-    serve a resend from the prefix cache: the EAGLE sliding-window lookup needs
-    one block below the window, which only the retained tail keeps allocated.
-    175 tokens end one short of a block boundary, where the window's own
-    retention lands exactly on a block edge. A block-outermost layout (e.g.
-    BLHNC) wraps groups whose page sizes differ in UniformTypeKVCacheSpecs,
-    which the scheduler unwraps.
+def _eagle_swa_scheduler_kv_cache_config(packed: bool, block_size: int):
+    """Full attention plus an EAGLE sliding-window draft group (window of four
+    blocks), planned on a KV transfer instance, as the scheduler sees it. A
+    block-outermost layout (e.g. BLHNC) wraps groups whose page sizes differ in
+    UniformTypeKVCacheSpecs, which the scheduler unwraps.
     """
-    block_size = 16
     specs = {
         "full": FullAttentionSpec(
             block_size=block_size,
@@ -4565,9 +4559,22 @@ def test_eagle_swa_resend_hits_after_connector_import(packed, num_prompt_tokens)
     wrapped = [isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in groups]
     assert wrapped == [packed, packed]
     kv_cache_planning._retain_eagle_hit_blocks_below_window(config, groups)
-    kv_cache_config = kv_cache_utils.generate_scheduler_kv_cache_config(
+    return kv_cache_utils.generate_scheduler_kv_cache_config(
         [KVCacheConfig(num_blocks=100, kv_cache_tensors=[], kv_cache_groups=groups)]
     )
+
+
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("num_prompt_tokens", [165, 175])
+def test_eagle_swa_resend_hits_after_connector_import(packed, num_prompt_tokens):
+    """A prompt longer than the window, imported through a KV connector, must
+    serve a resend from the prefix cache: the EAGLE sliding-window lookup needs
+    one block below the window, which only the retained tail keeps allocated.
+    175 tokens end one short of a block boundary, where the window's own
+    retention lands exactly on a block edge.
+    """
+    block_size = 16
+    kv_cache_config = _eagle_swa_scheduler_kv_cache_config(packed, block_size)
     manager = make_kv_cache_manager(
         kv_cache_config,
         max_model_len=8192,
@@ -4587,6 +4594,194 @@ def test_eagle_swa_resend_hits_after_connector_import(packed, num_prompt_tokens)
     req1 = make_request("1", token_ids, block_size, sha256)
     _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == (num_prompt_tokens // block_size - 1) * block_size
+
+
+def _nixl_transfer(kv_cache_config, block_size):
+    from tests.v1.kv_connector.unit.utils import create_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        NixlBaseConnectorWorker,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+
+    config = create_vllm_config(
+        block_size=block_size, disable_hybrid_kv_cache_manager=False
+    )
+    scheduler = NixlPullConnectorScheduler(config, "test", kv_cache_config)
+    worker = object.__new__(NixlBaseConnectorWorker)
+    worker._has_mamba = False
+
+    def transfer(decode_blocks, prefill_block_ids):
+        decode = scheduler.get_exchange_clipped_blocks(
+            decode_blocks.get_unhashed_block_ids_all_groups()
+        )
+        prefill = scheduler.get_exchange_clipped_blocks(prefill_block_ids)
+        return worker._apply_prefix_caching(decode, prefill, 1, 1)
+
+    return transfer
+
+
+def _mooncake_transfer(kv_cache_config, block_size):
+    from tests.v1.kv_connector.unit.utils import create_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (  # noqa: E501
+        MooncakeConnectorScheduler,
+    )
+
+    config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_both",
+        block_size=block_size,
+        disable_hybrid_kv_cache_manager=False,
+    )
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=config, engine_id="test", kv_cache_config=kv_cache_config
+    )
+
+    def transfer(decode_blocks, prefill_block_ids):
+        decode = scheduler.get_sw_clipped_blocks(
+            decode_blocks.get_unhashed_block_ids_all_groups()
+        )
+        prefill = scheduler.get_sw_clipped_blocks(prefill_block_ids)
+        # MooncakeConnectorWorker._build_transfer_params pairs each group: a
+        # prefill list shorter than the decoder's fails the request, a longer
+        # one sends its tail.
+        for decode_group, prefill_group in zip(decode, prefill, strict=True):
+            assert len(prefill_group) >= len(decode_group)
+        return decode, [
+            prefill_group[len(prefill_group) - len(decode_group) :]
+            for decode_group, prefill_group in zip(decode, prefill)
+        ]
+
+    return transfer
+
+
+def _moriio_transfer(kv_cache_config, block_size):
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+        get_role,
+        set_role,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (  # noqa: E501
+        MoRIIOConnectorScheduler,
+    )
+
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={
+                "read_mode": True,
+                "host_ip": "127.0.0.1",
+                "handshake_port": 6001,
+                "notify_port": 6002,
+            },
+            kv_role="kv_consumer",
+        ),
+        speculative_config=None,
+        cache_config=SimpleNamespace(block_size=block_size, mamba_cache_mode="align"),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        num_lookahead_tokens=0,
+        num_speculative_tokens=0,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            decode_context_parallel_size=1,
+            data_parallel_rank=0,
+            data_parallel_size_local=1,
+            data_parallel_size=1,
+        ),
+    )
+    # The scheduler sets a process-global role; leave it as it was.
+    role = get_role()
+    try:
+        scheduler = MoRIIOConnectorScheduler(config, "test", kv_cache_config)
+    finally:
+        set_role(role)
+
+    def transfer(decode_blocks, prefill_block_ids):
+        # READ mode, attention-only hybrid: the decoder clips its whole block
+        # table and pairs it with the prefill's clipped list.
+        decode = scheduler.get_exchange_clipped_blocks(decode_blocks.get_block_ids())
+        prefill = scheduler.get_exchange_clipped_blocks(prefill_block_ids)
+        pairs = [
+            scheduler._align_read_blocks(
+                decode_group, prefill_group, scheduler._max_decode_tail_blocks
+            )
+            for decode_group, prefill_group in zip(decode, prefill, strict=True)
+        ]
+        return [d for d, _ in pairs], [p for _, p in pairs]
+
+    return transfer
+
+
+@pytest.mark.parametrize(
+    "make_transfer", [_nixl_transfer, _mooncake_transfer, _moriio_transfer]
+)
+@pytest.mark.parametrize("packed", [False, True])
+def test_eagle_swa_connector_import_writes_every_allocated_block(make_transfer, packed):
+    """Every block a KV connector import allocates on the decoder must receive
+    the prefill's KV for the same token positions. The EAGLE sliding-window
+    group retains whole blocks below the window, and ``cache_blocks`` hashes
+    them after the load: a retained block the connector does not write would
+    serve a resend a prefix-cache hit on unwritten KV. Checked for every prompt
+    length up to eight blocks past the window, which covers each residue both
+    before and after out-of-window blocks become null placeholders.
+    """
+    block_size = 16
+    window = 4 * block_size
+    kv_cache_config = _eagle_swa_scheduler_kv_cache_config(packed, block_size)
+    transfer = make_transfer(kv_cache_config, block_size)
+
+    def new_manager():
+        return make_kv_cache_manager(
+            kv_cache_config,
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=block_size,
+            use_eagle=True,
+        )
+
+    for num_prompt_tokens in range(window + 1, window + 8 * block_size + 1):
+        token_ids = list(range(num_prompt_tokens))
+
+        # Prefill: computes the prompt, frees the out-of-window blocks and
+        # hands its block table to the connector (Scheduler._connector_finished).
+        prefill = new_manager()
+        prefill_req = make_request("prefill", token_ids, block_size, sha256)
+        assert prefill.allocate_slots(prefill_req, num_prompt_tokens) is not None
+        prefill.remove_skipped_blocks(
+            prefill_req.request_id,
+            processed_computed_tokens=num_prompt_tokens,
+            num_prompt_tokens=num_prompt_tokens,
+        )
+        prefill_block_ids = prefill.get_block_ids_for_computed_tokens(
+            prefill_req.request_id, num_prompt_tokens
+        )
+
+        decode = new_manager()
+        decode_req = make_request("decode", token_ids, block_size, sha256)
+        assert allocate_external_prefix(decode, decode_req, num_prompt_tokens)
+        decode_block_ids = decode.get_block_ids(decode_req.request_id)
+
+        null_id = decode.block_pool.null_block.block_id
+        decode_groups, prefill_groups = transfer(
+            decode.get_blocks(decode_req.request_id), prefill_block_ids
+        )
+        for group_id, (decode_group, prefill_group) in enumerate(
+            zip(decode_groups, prefill_groups, strict=True)
+        ):
+            decode_pos = {
+                b: i for i, b in enumerate(decode_block_ids[group_id]) if b != null_id
+            }
+            prefill_pos = {
+                b: i for i, b in enumerate(prefill_block_ids[group_id]) if b != null_id
+            }
+            written = {
+                decode_pos[d]: prefill_pos.get(p)
+                for d, p in zip(decode_group, prefill_group, strict=True)
+                if d != null_id
+            }
+            assert written == {pos: pos for pos in decode_pos.values()}, (
+                f"prompt {num_prompt_tokens}, group {group_id}: decode position "
+                f"-> prefill source {written}, allocated {sorted(decode_pos.values())}"
+            )
 
 
 def test_different_block_size():
