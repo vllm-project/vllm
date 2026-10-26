@@ -324,7 +324,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         self.ssm_state_size = ssm_state_size
         self.conv_kernel_size = conv_kernel_size
-        self.checkpoint_exporter = MambaPrefillCheckpointExporter(
+        self._checkpoint_exporter = MambaPrefillCheckpointExporter(
             state_len=conv_kernel_size - 1
         )
         self.activation = activation
@@ -897,7 +897,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 final_states = varlen_states[last_chunk_indices_p]
                 assert checkpoint_meta is not None
                 assert query_start_loc_p is not None
-                self.checkpoint_exporter.export(
+                self._checkpoint_exporter.export(
                     checkpoint_meta,
                     raw_qkv=x.transpose(0, 1),
                     conv_state=conv_state,
