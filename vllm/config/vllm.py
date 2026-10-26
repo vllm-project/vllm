@@ -2178,7 +2178,7 @@ class VllmConfig:
                 f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
             )
 
-        if self.parallel_config.use_ubatching and not self.parallel_config.dbo_tp_only:
+        if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
             if current_platform.is_rocm():
                 supported_backends = [
@@ -3237,10 +3237,9 @@ class VllmConfig:
         model_config = self.model_config
         parallel_config = self.parallel_config
 
-        tp_only_dbo = parallel_config.dbo_tp_only
         if self.lora_config is not None:
             unsupported.append("dual batch overlap with LoRA")
-        if self.speculative_config is not None and not tp_only_dbo:
+        if self.speculative_config is not None:
             unsupported.append("dual batch overlap with speculative decoding")
         if parallel_config.pipeline_parallel_size > 1:
             unsupported.append("dual batch overlap with pipeline parallelism")
@@ -3250,8 +3249,7 @@ class VllmConfig:
         ):
             unsupported.append("dual batch overlap with context parallelism")
         if model_config is not None and (
-            (model_config.is_multimodal_model and not tp_only_dbo)
-            or model_config.is_encoder_decoder
+            model_config.is_multimodal_model or model_config.is_encoder_decoder
         ):
             unsupported.append("dual batch overlap with multimodal models")
         if model_config is not None and model_config.is_hybrid:

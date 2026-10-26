@@ -24,7 +24,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.platforms import current_platform
-from vllm.v1.worker.ubatching import dbo_enabled
 
 MiB = 1024 * 1024
 
@@ -154,9 +153,8 @@ def fused_allreduce_gemma_rms_norm(
         # No all-reduce needed; identical to the unfused path.
         return norm(hidden_states, residual)
 
-    # Under DBO every all-reduce must reach the microbatch hand-off hook.
     ok, max_token_num = _can_use_flashinfer(hidden_states, tp_size)
-    if ok and not dbo_enabled():
+    if ok:
         norm_out = torch.empty_like(hidden_states)
         # With norm_out provided, the kernel writes the new residual
         # (all_reduce(hidden_states) + residual) into the hidden_states buffer
@@ -176,7 +174,7 @@ def fused_allreduce_gemma_rms_norm(
         )
         return norm_out, hidden_states
 
-    if not dbo_enabled() and _can_use_aiter_fused_ar_rms(hidden_states):
+    if _can_use_aiter_fused_ar_rms(hidden_states):
         from vllm._aiter_ops import rocm_aiter_ops
 
         return rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(

@@ -88,7 +88,6 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
-from vllm.models.minimax_m3.amd import sp_prefill
 from vllm.models.minimax_m3.amd.indexer_msa import (
     MiniMaxM3IndexerMSAImpl,
     MiniMaxM3MSAIndexer,
@@ -594,11 +593,6 @@ class MiniMaxM3Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        output, _ = self.o_proj(self.attend(positions, qkv))
-        return output
-
-    def attend(self, positions: torch.Tensor, qkv: torch.Tensor) -> torch.Tensor:
-        """The attention of this rank's heads, before o_proj."""
         if _USE_GFX942_NATIVE_QKNORM_ROPE:
             num_tokens = qkv.shape[0]
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -608,7 +602,9 @@ class MiniMaxM3Attention(nn.Module):
             assert k is not None
             q = q.reshape(num_tokens, self.q_size)
             k = k.reshape(num_tokens, self.kv_size)
-            return self.attn(q, k, v)
+            attn_output = self.attn(q, k, v)
+            output, _ = self.o_proj(attn_output)
+            return output
 
         # Fused per-head Gemma QK-norm + partial NeoX RoPE on q/k, in place (dense
         # mode: no index branch, no KV-cache insert). Matches nvidia/model.py and
@@ -627,7 +623,9 @@ class MiniMaxM3Attention(nn.Module):
             kv_cache_dtype="auto",
         )
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        return self.attn(q, k, v)
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 # Widest row pitch aiter's reshape_and_cache can carry in its `int` stride args.
@@ -1141,11 +1139,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     ) -> torch.Tensor:
         # Single fused projection emitting [q | k | v | index_q | index_k].
         qkv, _ = self.qkv_proj(hidden_states)
-        output, _ = self.o_proj(self.attend(positions, qkv))
-        return output
 
-    def attend(self, positions: torch.Tensor, qkv: torch.Tensor) -> torch.Tensor:
-        """The attention of this rank's heads, before o_proj."""
         # Horizontally-fused per-head Gemma QK-norm + partial NeoX RoPE on the
         # main (q/k) and index (index_q/index_k) branches, all read straight out
         # of the single fused ``qkv`` tensor. Once the paged caches are bound the
@@ -1165,14 +1159,16 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             or self.layer_name not in fwd_slot_mapping
         ):
             # Memory-profiling run: caches not yet bound, slot_mapping is empty.
-            return qkv.new_zeros((num_tokens, self.q_size))
+            return qkv.new_zeros((num_tokens, self.hidden_size))
 
         if _USE_GFX942_NATIVE_QKNORM_ROPE:
             q, index_q = self._native_gfx942_qknorm_rope_cache(
                 qkv, positions, fwd_slot_mapping
             )
             output = torch.empty_like(q)
-            return self._run_attention(q, index_q, output)
+            attn_output = self._run_attention(q, index_q, output)
+            output, _ = self.o_proj(attn_output)
+            return output
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         if self.use_nvfp4_kv:
@@ -1183,9 +1179,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 fwd_slot_mapping[self.indexer.index_cache.prefix],
             )
             output = torch.empty_like(q)
-            return self._run_attention(
+            attn_output = self._run_attention(
                 q, None if self.skip_index_topk else index_q, output
             )
+            output, _ = self.o_proj(attn_output)
+            return output
         q = qkv.new_empty((num_tokens, self.q_size))
         key_cache = value_cache = page16_slot_mapping = None
         k_scale = v_scale = None
@@ -1381,7 +1379,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 )
 
         output = torch.empty_like(q)
-        return self._run_attention(q, index_q, output)
+        attn_output = self._run_attention(q, index_q, output)
+        output, _ = self.o_proj(attn_output)
+        return output
 
     @eager_break_during_capture
     def _run_attention(
@@ -1532,9 +1532,6 @@ class MiniMaxM3DecoderLayer(nn.Module):
         )
         self.post_attention_layernorm = MiniMAXGemmaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.self_attn.o_proj_full = sp_prefill.make_o_proj_full(
-            self, quant_config, prefix
         )
 
     def forward(
@@ -1752,11 +1749,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self._maybe_add_hidden_state(
                 aux_hidden_states, self.start_layer, hidden_states, residual
             )
-            sp = sp_prefill.plan_model(self, hidden_states)
-            if sp is not None:
-                return sp_prefill.forward(
-                    self, positions, hidden_states, aux_hidden_states, sp
-                )
         layers = self.layers[self.start_layer : self.end_layer]
         if decode is None:
             for idx, layer in enumerate(layers, start=self.start_layer):
@@ -1916,12 +1908,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-                    # the sequence-parallel prefill's whole o_proj
-                    full = name.replace(".self_attn.o_proj.", ".self_attn.o_proj_full.")
-                    if full != name and full in params_dict:
-                        param = params_dict[full]
-                        param.weight_loader(param, loaded_weight)
-                        loaded_params.add(full)
             loaded_params.add(name)
         return loaded_params
 
