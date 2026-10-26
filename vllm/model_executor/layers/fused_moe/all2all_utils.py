@@ -359,7 +359,7 @@ def maybe_make_prepare_finalize(
             rank_expert_offset=all2all_manager.rank * num_local_experts,
         )
 
-    elif moe.use_mori_kernels:
+    elif moe.use_mori_epv1_kernels:
         assert quant_config is not None
 
         # MXFP4 activations are dispatched as packed FP4 with their e8m0

@@ -185,7 +185,7 @@ def _layer():
     w2.is_shuffled = True
     fused_experts = object.__new__(AiterMxfp4Experts)
     fused_experts.moe_config = SimpleNamespace(
-        use_mori_kernels=False,
+        use_mori_epv1_kernels=False,
         use_mxfp4_w4a4_dsv4=False,
     )
     experts = SimpleNamespace(
@@ -263,7 +263,7 @@ WEIGHT_REFUSALS = {
     ),
     "effective BF16": lambda x: setattr(
         _experts(x).quant_method.moe_kernel.fused_experts.moe_config,
-        "use_mori_kernels",
+        "use_mori_epv1_kernels",
         True,
     ),
     "router": lambda x: setattr(

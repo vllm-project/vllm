@@ -1085,7 +1085,7 @@ class FusedMoEParallelConfig:
         return self.all2all_backend == "passthrough"
 
     @property
-    def use_mori_kernels(self):
+    def use_mori_epv1_kernels(self):
         if self.all2all_backend == "mori":
             return self.use_all2all_kernels and not self.mori_ep_v2
         return self.use_all2all_kernels and self.all2all_backend in (
@@ -1411,11 +1411,11 @@ class FusedMoEConfig:
                 )
             self.use_mxfp4_w4a4_dsv4 = True
 
-        if self.use_mori_kernels:
+        if self.use_mori_epv1_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
-                "Mori needs to be used with aiter fused_moe for now."
+                "MoRI EPv1 needs to be used with aiter fused_moe for now."
             )
-        if self.use_mori_kernels or self.use_mori_epv2_kernels:
+        if self.use_mori_epv1_kernels or self.use_mori_epv2_kernels:
             assert not self.aiter_fmoe_shared_expert_enabled, (
                 "Mori does not support fusion shared expert now. "
                 "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
@@ -1567,8 +1567,8 @@ class FusedMoEConfig:
         return self.moe_parallel_config.use_passthrough_all2all
 
     @property
-    def use_mori_kernels(self):
-        return self.moe_parallel_config.use_mori_kernels
+    def use_mori_epv1_kernels(self):
+        return self.moe_parallel_config.use_mori_epv1_kernels
 
     @property
     def use_mori_epv2_kernels(self):
