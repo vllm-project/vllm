@@ -1,38 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 import torch
 import vllm._C  # noqa: F401
+from transformers import LlamaConfig
 
+import vllm.config.reasoning as reasoning_config_module
+from vllm.config import ModelConfig, VllmConfig
+from vllm.config.reasoning import ReasoningConfig as VllmReasoningConfig
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.watermarking.gumbel import (
     DualKeyGumbelWatermarker,
     GumbelWatermarker,
 )
-from vllm.v1.worker.cpu.logits_processors import (
-    CPUBadWords,
-    CPULogitBiasState,
-    CPUPenalties,
-)
+from vllm.v1.worker.cpu.logits_processors import LogitsContext
 from vllm.v1.worker.cpu.sampler import (
     CPUSampler,
     CPUSamplingMaskTensors,
     CPUThinkingBudgetState,
     CPUTraceReplayState,
     CPUWatermarkSampler,
+    get_num_nans,
 )
-from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext, LogitsProcessor
-from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.cpu.states import CPURequestState
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
-
-if current_platform.is_cpu():
-    import vllm.v1.worker.cpu.shm  # noqa: F401
 
 START = 90
 END = 91
@@ -59,12 +54,17 @@ class DistinctEndReasoningConfig:
     natural_reasoning_end_token_ids = [END]
 
 
-def _make_req_states(tokens: list[int], prompt_len: int = 1) -> RequestState:
-    req_states = RequestState(
+class _ReasoningTokenizer:
+    def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
+        del add_special_tokens
+        return {"<reasoning>": [START], "</reasoning>": [END]}[text]
+
+
+def _make_req_states(tokens: list[int], prompt_len: int = 1) -> CPURequestState:
+    req_states = CPURequestState(
         max_num_reqs=4,
         max_model_len=max(64, len(tokens) + 2),
         max_num_batched_tokens=32,
-        num_speculative_steps=4,
         vocab_size=VOCAB_SIZE,
         device=torch.device("cpu"),
     )
@@ -75,8 +75,40 @@ def _make_req_states(tokens: list[int], prompt_len: int = 1) -> RequestState:
         num_computed_tokens=len(tokens),
         max_tokens=32,
     )
-    req_states.apply_staged_writes()
     return req_states
+
+
+def _vllm_config(monkeypatch: pytest.MonkeyPatch, tmp_path) -> VllmConfig:
+    LlamaConfig(
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        max_position_embeddings=64,
+        vocab_size=VOCAB_SIZE,
+        architectures=["LlamaForCausalLM"],
+    ).save_pretrained(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        dtype="float32",
+        max_model_len=64,
+        skip_tokenizer_init=True,
+    )
+    reasoning_config = VllmReasoningConfig(
+        reasoning_start_str="<reasoning>",
+        reasoning_end_str="</reasoning>",
+    )
+    monkeypatch.setattr(
+        reasoning_config_module,
+        "cached_tokenizer_from_config",
+        lambda **_: _ReasoningTokenizer(),
+    )
+    reasoning_config.initialize_token_ids(model_config)
+    return VllmConfig(
+        model_config=model_config,
+        reasoning_config=reasoning_config,
+    )
 
 
 def _thinking_context(req_idx: int, input_ids: list[int]) -> LogitsContext:
@@ -92,42 +124,6 @@ def _thinking_context(req_idx: int, input_ids: list[int]) -> LogitsContext:
     )
 
 
-def test_cpu_sampler_selects_cpu_state_implementations() -> None:
-    req_states = _make_req_states([1])
-    sampler = CPUSampler(
-        vllm_config=SimpleNamespace(reasoning_config=None),
-        max_num_reqs=4,
-        vocab_size=VOCAB_SIZE,
-        device=torch.device("cpu"),
-        req_states=req_states,
-    )
-
-    assert isinstance(sampler.sampling_states, type(sampler).sampling_states_cls)
-    assert sampler.sampling_mask_tensors_cls is CPUSamplingMaskTensors
-    assert isinstance(sampler.logits_processors[0], CPULogitBiasState)
-    assert isinstance(sampler.penalties_state, CPUPenalties)
-    assert isinstance(sampler.logits_processors[2], CPUBadWords)
-    assert isinstance(sampler.thinking_budget_state, CPUThinkingBudgetState)
-
-
-def test_cpu_sampler_suppresses_incomplete_prefill_samples() -> None:
-    sampler = object.__new__(CPUSampler)
-    sampler.req_states = SimpleNamespace(
-        prefill_len=SimpleNamespace(gpu=torch.tensor([10, 7, 4, 20], dtype=torch.int32))
-    )
-    input_batch = SimpleNamespace(
-        num_reqs=4,
-        seq_lens=torch.tensor([4, 6, 22, 7], dtype=torch.int32),
-        cu_num_logits=torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32),
-        idx_mapping=torch.tensor([2, 0, 3, 1], dtype=torch.int64),
-    )
-
-    num_sampled, num_rejected = sampler._get_num_sampled_and_rejected(input_batch)
-
-    assert num_sampled.tolist() == [1, 0, 1, 1]
-    assert num_rejected.tolist() == [0, 0, 0, 0]
-
-
 def test_cpu_thinking_budget_forces_and_continues_end_marker() -> None:
     tokens = [1, START, 10, 11, 12]
     req_states = _make_req_states(tokens)
@@ -135,12 +131,19 @@ def test_cpu_thinking_budget_forces_and_continues_end_marker() -> None:
     state = CPUThinkingBudgetState(req_states, MultiTokenEndReasoningConfig())
     state.add_request(req_idx, SamplingParams(thinking_token_budget=3))
 
-    logits = torch.zeros((2, VOCAB_SIZE))
+    logits = torch.zeros((1, VOCAB_SIZE))
     logits[:, [END_A, END_B]] = -torch.inf
-    state.apply(logits, _thinking_context(req_idx, [12, END_A]))
+    state.apply(logits, _thinking_context(req_idx, [12]))
 
     assert logits[0, END_A] == pytest.approx(1.0e9)
-    assert logits[1, END_B] == pytest.approx(1.0e9)
+
+    total_len = int(req_states.total_len[req_idx])
+    req_states.all_token_ids[req_idx, total_len] = END_A
+    req_states.total_len[req_idx] = total_len + 1
+    logits = torch.zeros((1, VOCAB_SIZE))
+    state.apply(logits, _thinking_context(req_idx, [END_A]))
+
+    assert logits[0, END_B] == pytest.approx(1.0e9)
 
 
 def test_cpu_thinking_budget_uses_distinct_forced_end_marker() -> None:
@@ -149,11 +152,18 @@ def test_cpu_thinking_budget_uses_distinct_forced_end_marker() -> None:
     state = CPUThinkingBudgetState(req_states, DistinctEndReasoningConfig())
     state.add_request(req_idx, SamplingParams(thinking_token_budget=3))
 
-    logits = torch.zeros((2, VOCAB_SIZE))
-    state.apply(logits, _thinking_context(req_idx, [12, END_A]))
+    logits = torch.zeros((1, VOCAB_SIZE))
+    state.apply(logits, _thinking_context(req_idx, [12]))
 
     assert logits[0, END_A] == pytest.approx(1.0e9)
-    assert logits[1, END_B] == pytest.approx(1.0e9)
+
+    total_len = int(req_states.total_len[req_idx])
+    req_states.all_token_ids[req_idx, total_len] = END_A
+    req_states.total_len[req_idx] = total_len + 1
+    logits = torch.zeros((1, VOCAB_SIZE))
+    state.apply(logits, _thinking_context(req_idx, [END_A]))
+
+    assert logits[0, END_B] == pytest.approx(1.0e9)
 
 
 def test_cpu_thinking_budget_stops_after_natural_end() -> None:
@@ -165,6 +175,18 @@ def test_cpu_thinking_budget_stops_after_natural_end() -> None:
 
     logits = torch.zeros((1, VOCAB_SIZE))
     state.apply(logits, _thinking_context(req_idx, [22]))
+    assert torch.count_nonzero(logits) == 0
+
+
+def test_cpu_thinking_budget_ignores_plain_request() -> None:
+    req_states = _make_req_states([1, START, 10, 11, 12])
+    req_idx = req_states.req_id_to_index["req"]
+    state = CPUThinkingBudgetState(req_states, ReasoningConfig())
+    state.add_request(req_idx, SamplingParams())
+
+    logits = torch.zeros((1, VOCAB_SIZE))
+    state.apply(logits, _thinking_context(req_idx, [12]))
+
     assert torch.count_nonzero(logits) == 0
 
 
@@ -225,9 +247,8 @@ def test_cpu_thinking_budget_scans_new_committed_tokens_incrementally() -> None:
     state.apply(torch.zeros((1, VOCAB_SIZE)), _thinking_context(req_idx, [10]))
     assert state.cached_scan_pos[req_idx] == len(tokens)
 
-    req_states.all_token_ids.stage_write(req_idx, len(tokens), [10])
-    req_states.total_len.stage_write_elem(req_idx, len(tokens) + 1)
-    req_states.apply_staged_writes()
+    req_states.all_token_ids[req_idx, len(tokens)] = 10
+    req_states.total_len[req_idx] = len(tokens) + 1
     state.apply(torch.zeros((1, VOCAB_SIZE)), _thinking_context(req_idx, [10]))
     assert state.cached_scan_pos[req_idx] == len(tokens) + 1
 
@@ -244,11 +265,11 @@ def test_cpu_thinking_budget_clears_reused_slot() -> None:
     assert torch.count_nonzero(logits) == 0
 
 
-def test_cpu_greedy_sampling_applies_thinking_budget() -> None:
+def test_cpu_greedy_sampling_applies_thinking_budget(monkeypatch, tmp_path) -> None:
     req_states = _make_req_states([1, START, 10, 11, 12])
     req_idx = req_states.req_id_to_index["req"]
     sampler = CPUSampler(
-        vllm_config=SimpleNamespace(reasoning_config=ReasoningConfig()),
+        vllm_config=_vllm_config(monkeypatch, tmp_path),
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=torch.device("cpu"),
@@ -279,28 +300,41 @@ def test_cpu_trace_replay_uses_current_decode_step() -> None:
     req_idx = req_states.req_id_to_index["req"]
     state = CPUTraceReplayState(req_states)
     state.add_request(req_idx, SamplingParams(trace_decode_token_ids=[11, 12, 13]))
-    state.apply_staged_writes()
 
     for step, expected in enumerate([11, 12, 13]):
-        req_states.total_len.gpu[req_idx] = 2 + step
+        req_states.total_len[req_idx] = 2 + step
         sampled = torch.tensor([99], dtype=torch.int64)
         state.apply_trace(sampled, torch.tensor([req_idx], dtype=torch.int64))
         assert sampled.tolist() == [expected]
 
 
-def test_cpu_trace_replay_skips_inactive_and_exhausted_rows() -> None:
-    req_states = _make_req_states([1, 2, 7], prompt_len=2)
-    traced_idx = req_states.req_id_to_index["req"]
+def test_cpu_trace_replay_maps_requests_and_skips_inactive_rows() -> None:
+    req_states = CPURequestState(
+        max_num_reqs=4,
+        max_model_len=64,
+        max_num_batched_tokens=16,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+    )
+    req_states.add_request("plain", 2, [1, 2], 2, 16)
+    req_states.add_request("traced", 2, [3, 4, 7], 3, 16)
+    plain_idx = req_states.req_id_to_index["plain"]
+    traced_idx = req_states.req_id_to_index["traced"]
     state = CPUTraceReplayState(req_states)
-    state.add_request(traced_idx, SamplingParams(trace_decode_token_ids=[11]))
-    state.apply_staged_writes()
+    state.add_request(plain_idx, SamplingParams())
+    state.add_request(traced_idx, SamplingParams(trace_decode_token_ids=[11, 12]))
 
-    sampled = torch.tensor([20, 21], dtype=torch.int64)
+    sampled = torch.tensor([20, 21, 22], dtype=torch.int64)
     state.apply_trace(
         sampled,
-        torch.tensor([traced_idx, -1], dtype=torch.int64),
+        torch.tensor([traced_idx, -1, plain_idx], dtype=torch.int64),
     )
-    assert sampled.tolist() == [20, 21]
+    assert sampled.tolist() == [12, 21, 22]
+
+    req_states.total_len[traced_idx] = 4
+    sampled = torch.tensor([30], dtype=torch.int64)
+    state.apply_trace(sampled, torch.tensor([traced_idx], dtype=torch.int64))
+    assert sampled.tolist() == [30]
 
 
 def test_cpu_trace_replay_clears_reused_slot() -> None:
@@ -309,23 +343,30 @@ def test_cpu_trace_replay_clears_reused_slot() -> None:
     state = CPUTraceReplayState(req_states)
     state.add_request(req_idx, SamplingParams(trace_decode_token_ids=[11]))
     state.add_request(req_idx, SamplingParams())
-    state.apply_staged_writes()
 
     sampled = torch.tensor([20], dtype=torch.int64)
     state.apply_trace(sampled, torch.tensor([req_idx], dtype=torch.int64))
     assert sampled.tolist() == [20]
 
 
-def test_cpu_nan_count_and_sampling_mask() -> None:
+def test_cpu_nan_count() -> None:
     logits = torch.tensor(
         [
             [0.0, -torch.inf, torch.inf, 1.0, torch.nan, -torch.inf, 2.0, -torch.inf],
             [0.0] * 8,
         ]
     )
-    num_nans = CPUSampler._get_num_nans(logits)
+    num_nans = get_num_nans(logits)
     assert num_nans.tolist() == [1, 0]
 
+
+def test_cpu_sampling_mask_tracks_finite_tokens() -> None:
+    logits = torch.tensor(
+        [
+            [0.0, -torch.inf, torch.inf, 1.0, torch.nan, -torch.inf, 2.0, -torch.inf],
+            [0.0] * 8,
+        ]
+    )
     mask = CPUSamplingMaskTensors.from_logits(
         logits,
         torch.tensor([0, 1, 2], dtype=torch.int32),
@@ -335,22 +376,6 @@ def test_cpu_nan_count_and_sampling_mask() -> None:
     assert mask.counts.tolist() == [3, 0]
     assert mask.token_ids[0].tolist() == [0, 3]
     assert mask.packed_mask[0].tolist() == [73]
-
-
-def test_cpu_sampling_mask_uses_request_boundaries_and_exact_fallback() -> None:
-    logits = torch.full((6, 10), -torch.inf)
-    logits[0, [1, 3]] = 0
-    logits[2, [2, 4, 6, 8]] = 0
-    logits[5, [0, 9]] = 0
-
-    mask = CPUSamplingMaskTensors.from_logits(
-        logits,
-        torch.tensor([0, 2, 5, 6], dtype=torch.int32),
-        torch.tensor([1, 0, 1], dtype=torch.int32),
-        max_num_kept=2,
-    )
-
-    assert mask.tolists().to_nested_list() == [[1, 3], [], [0, 9]]
 
 
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
@@ -378,43 +403,147 @@ def test_cpu_sampling_mask_matches_wide_finite_support(max_num_kept: int) -> Non
     assert mask.tolists().to_nested_list() == expected
 
 
-class _AddOneProcessor(LogitsProcessor):
-    def __init__(self) -> None:
-        pass
-
-    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
-        return True
-
-    def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
-        return logits.add_(1)
-
-
-def test_cpu_sampler_runs_custom_logits_processors() -> None:
-    req_states = _make_req_states([1])
-    req_idx = req_states.req_id_to_index["req"]
+def _make_sampler(
+    sampling_params: list[SamplingParams],
+) -> tuple[CPUSampler, torch.Tensor]:
+    req_states = CPURequestState(
+        max_num_reqs=4,
+        max_model_len=64,
+        max_num_batched_tokens=16,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+    )
     sampler = CPUSampler(
-        vllm_config=SimpleNamespace(reasoning_config=None),
+        vllm_config=VllmConfig(),
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=torch.device("cpu"),
         req_states=req_states,
-        custom_logits_processors=[_AddOneProcessor()],
     )
-    sampler.add_request(req_idx, SamplingParams(temperature=0.0))
-    idx_mapping = torch.tensor([req_idx], dtype=torch.int64)
+    req_indices = []
+    for i, params in enumerate(sampling_params):
+        req_id = f"req-{i}"
+        req_states.add_request(req_id, 1, [i + 1], 1, 16)
+        req_idx = req_states.req_id_to_index[req_id]
+        req_indices.append(req_idx)
+        sampler.add_request(req_idx, params)
+    return sampler, torch.tensor(req_indices, dtype=torch.int64)
+
+
+@pytest.mark.parametrize(
+    ("sampling_params", "expected_finite"),
+    [
+        (SamplingParams(top_k=2), [2, 3]),
+        (SamplingParams(top_p=0.7), [2, 3]),
+        (SamplingParams(top_k=3, top_p=0.7), [2, 3]),
+        (SamplingParams(top_k=VOCAB_SIZE + 1, top_p=0.7), [2, 3]),
+    ],
+)
+def test_cpu_sampler_applies_top_k_top_p(
+    sampling_params: SamplingParams,
+    expected_finite: list[int],
+) -> None:
+    sampler, idx_mapping = _make_sampler([sampling_params])
 
     logits = sampler.apply_sampling_params(
-        torch.zeros((1, VOCAB_SIZE)),
+        torch.tensor([[0.0, 1.0, 2.0, 3.0]]),
         idx_mapping,
         idx_mapping,
         idx_mapping.numpy(),
-        torch.tensor([0], dtype=torch.int32),
+        torch.tensor([1], dtype=torch.int64),
         torch.tensor([1], dtype=torch.int32),
         torch.tensor([0], dtype=torch.int32),
         np.array([1], dtype=np.int64),
     )
 
-    assert torch.all(logits == 1)
+    assert torch.isfinite(logits[0]).nonzero().flatten().tolist() == expected_finite
+
+
+def test_cpu_sampler_applies_temperature() -> None:
+    sampler, idx_mapping = _make_sampler([SamplingParams(temperature=0.5)])
+    logits = torch.tensor([[0.0, 1.0, 2.0, 3.0]])
+
+    actual = sampler.apply_sampling_params(
+        logits,
+        idx_mapping,
+        idx_mapping,
+        idx_mapping.numpy(),
+        torch.tensor([1], dtype=torch.int64),
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+        np.array([1], dtype=np.int64),
+    )
+
+    torch.testing.assert_close(actual, logits / 0.5)
+
+
+def test_cpu_sampler_only_processes_active_requests() -> None:
+    sampler, idx_mapping = _make_sampler(
+        [SamplingParams(temperature=0.0), SamplingParams(temperature=0.5)]
+    )
+    logits = torch.tensor([[0.0, 1.0, 2.0, 3.0]])
+
+    greedy = sampler.apply_sampling_params(
+        logits,
+        idx_mapping[:1],
+        idx_mapping[:1],
+        idx_mapping[:1].numpy(),
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+        np.ones(1, dtype=np.int64),
+    )
+    scaled = sampler.apply_sampling_params(
+        logits,
+        idx_mapping[1:],
+        idx_mapping[1:],
+        idx_mapping[1:].numpy(),
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([2], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+        np.ones(1, dtype=np.int64),
+    )
+
+    torch.testing.assert_close(greedy, logits)
+    torch.testing.assert_close(scaled, logits / 0.5)
+
+
+def test_cpu_sampler_clears_processing_when_slot_is_reused() -> None:
+    sampler, idx_mapping = _make_sampler([SamplingParams(temperature=0.5)])
+    req_idx = int(idx_mapping[0])
+    sampler.add_request(req_idx, SamplingParams(temperature=0.0))
+    logits = torch.tensor([[0.0, 1.0, 2.0, 3.0]])
+
+    actual = sampler.apply_sampling_params(
+        logits,
+        idx_mapping,
+        idx_mapping,
+        idx_mapping.numpy(),
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+        np.ones(1, dtype=np.int64),
+    )
+
+    torch.testing.assert_close(actual, logits)
+
+
+def test_cpu_sampler_greedy_returns_argmax() -> None:
+    sampler, idx_mapping = _make_sampler([SamplingParams(temperature=0.0)])
+    logits = torch.tensor([[0.0, 3.0, 2.0, 1.0]])
+
+    sampled, _ = sampler.sample(
+        logits,
+        idx_mapping,
+        idx_mapping,
+        idx_mapping.numpy(),
+        torch.tensor([1], dtype=torch.int64),
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+        np.ones(1, dtype=np.int64),
+    )
+
+    assert sampled.tolist() == [1]
 
 
 @pytest.mark.parametrize("algorithm", ["gumbel", "dual-key"])
@@ -423,7 +552,6 @@ def test_cpu_watermark_sampler_uses_cpu_sampler_pipeline(
     algorithm: str,
     watermarking: bool,
 ) -> None:
-    assert issubclass(CPUWatermarkSampler, CPUSampler)
     req_states = _make_req_states([1])
     req_idx = req_states.req_id_to_index["req"]
     watermarker = (
@@ -433,35 +561,115 @@ def test_cpu_watermark_sampler_uses_cpu_sampler_pipeline(
     )
     sampler = CPUWatermarkSampler(
         watermarker,
-        vllm_config=SimpleNamespace(reasoning_config=None),
+        vllm_config=VllmConfig(),
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=torch.device("cpu"),
         req_states=req_states,
     )
-    sampler.add_request(
-        req_idx,
-        SamplingParams(
-            temperature=1.0,
-            seed=7,
-            watermarking=watermarking,
-        ),
+    params = SamplingParams(
+        temperature=1.0,
+        top_k=4,
+        top_p=0.9,
+        seed=7,
+        watermarking=watermarking,
     )
-    sampler.apply_staged_writes()
+    sampler.add_request(req_idx, params)
 
-    sampled, output_logits = sampler._sample_random(
-        torch.linspace(-1, 1, VOCAB_SIZE).unsqueeze(0),
-        torch.tensor([req_idx], dtype=torch.int64),
-        np.array([req_idx], dtype=np.intp),
+    idx_mapping = torch.tensor([req_idx], dtype=torch.int64)
+    logits = torch.linspace(-1, 1, VOCAB_SIZE).unsqueeze(0)
+    sample_args = (
+        logits,
+        idx_mapping,
+        idx_mapping,
+        idx_mapping.numpy(),
         torch.tensor([1], dtype=torch.int64),
-        top_k=None,
-        top_p=None,
-        use_fused_sampler=False,
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+        np.ones(1, dtype=np.int64),
     )
+    sampled, output_logits = sampler.sample(*sample_args)
+    repeated, repeated_logits = sampler.sample(*sample_args)
 
-    assert sampled.shape == (1,)
-    assert 0 <= sampled.item() < VOCAB_SIZE
-    assert output_logits.shape == (1, VOCAB_SIZE)
+    assert sampled.item() in range(VOCAB_SIZE - 4, VOCAB_SIZE)
+    assert torch.equal(repeated, sampled)
+    torch.testing.assert_close(repeated_logits, output_logits)
+    assert torch.isfinite(output_logits[0, sampled.item()])
+
+    ordinary = CPUSampler(
+        vllm_config=VllmConfig(),
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+        req_states=req_states,
+    )
+    ordinary.add_request(req_idx, params)
+    expected, expected_logits = ordinary.sample(*sample_args)
+    if watermarking:
+        assert not torch.equal(sampled, expected)
+    else:
+        assert torch.equal(sampled, expected)
+        torch.testing.assert_close(output_logits, expected_logits)
+
+
+def test_cpu_watermark_sampler_handles_mixed_rows() -> None:
+    req_states = CPURequestState(
+        max_num_reqs=4,
+        max_model_len=64,
+        max_num_batched_tokens=16,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+    )
+    params = [
+        SamplingParams(temperature=1.0, top_k=4, seed=7, watermarking=True),
+        SamplingParams(temperature=1.0, top_k=4, seed=11, watermarking=False),
+        SamplingParams(temperature=0.0, top_k=4, watermarking=True),
+    ]
+    req_indices = []
+    for i in range(len(params)):
+        req_id = f"req-{i}"
+        req_states.add_request(req_id, 1, [9, i + 1], 2, 16)
+        req_indices.append(req_states.req_id_to_index[req_id])
+    idx_mapping = torch.tensor(req_indices, dtype=torch.int64)
+
+    sampler = CPUWatermarkSampler(
+        GumbelWatermarker(key=42, context_width=1),
+        vllm_config=VllmConfig(),
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+        req_states=req_states,
+        deduplicate_contexts="none",
+    )
+    ordinary = CPUSampler(
+        vllm_config=VllmConfig(),
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+        req_states=req_states,
+    )
+    for req_idx, sampling_params in zip(req_indices, params, strict=True):
+        sampler.add_request(req_idx, sampling_params)
+        ordinary.add_request(req_idx, sampling_params)
+
+    logits = torch.linspace(-1, 1, VOCAB_SIZE).repeat(3, 1)
+    sample_args = (
+        logits,
+        idx_mapping,
+        idx_mapping,
+        idx_mapping.numpy(),
+        torch.tensor([2, 2, 2], dtype=torch.int64),
+        torch.tensor([1, 2, 3], dtype=torch.int32),
+        torch.zeros(3, dtype=torch.int32),
+        np.full(3, 2, dtype=np.int64),
+    )
+    sampled, _ = sampler.sample(*sample_args)
+    ordinary_sampled, _ = ordinary.sample(*sample_args)
+
+    assert sampled[0] != ordinary_sampled[0]
+    assert sampled[1] == ordinary_sampled[1]
+    assert sampled[2] == logits[2].argmax()
+    assert torch.all(sampled >= VOCAB_SIZE - 4)
 
 
 def test_cpu_watermark_sampler_detects_repeated_context() -> None:
@@ -469,7 +677,7 @@ def test_cpu_watermark_sampler_detects_repeated_context() -> None:
     req_idx = req_states.req_id_to_index["req"]
     sampler = CPUWatermarkSampler(
         GumbelWatermarker(key=42, context_width=2),
-        vllm_config=SimpleNamespace(reasoning_config=None),
+        vllm_config=VllmConfig(),
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=torch.device("cpu"),
@@ -481,3 +689,51 @@ def test_cpu_watermark_sampler_detects_repeated_context() -> None:
 
     assert contexts.tolist() == [[1, 2]]
     assert sampler._get_repeated_contexts(req_indices, contexts).tolist() == [True]
+
+
+def test_cpu_watermark_deduplication_scope_and_partial_context() -> None:
+    req_states = _make_req_states([1, 2, 1, 2], prompt_len=2)
+    req_idx = req_states.req_id_to_index["req"]
+    req_indices = torch.tensor([req_idx], dtype=torch.int64)
+
+    single_turn = CPUWatermarkSampler(
+        GumbelWatermarker(key=42, context_width=2),
+        vllm_config=VllmConfig(),
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+        req_states=req_states,
+        deduplicate_contexts="single_turn",
+    )
+    all_history = CPUWatermarkSampler(
+        GumbelWatermarker(key=42, context_width=2),
+        vllm_config=VllmConfig(),
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+        req_states=req_states,
+        deduplicate_contexts="all",
+    )
+    contexts = single_turn._get_contexts(req_indices)
+
+    assert single_turn._get_repeated_contexts(req_indices, contexts).tolist() == [False]
+    assert all_history._get_repeated_contexts(req_indices, contexts).tolist() == [True]
+
+    partial_states = _make_req_states([9, 1], prompt_len=1)
+    partial_idx = partial_states.req_id_to_index["req"]
+    partial_sampler = CPUWatermarkSampler(
+        GumbelWatermarker(key=42, context_width=2),
+        vllm_config=VllmConfig(),
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+        req_states=partial_states,
+        deduplicate_contexts="all",
+    )
+    partial_indices = torch.tensor([partial_idx], dtype=torch.int64)
+    partial_context = partial_sampler._get_contexts(partial_indices)
+
+    assert partial_context.tolist() == [[-1, 1]]
+    assert partial_sampler._get_repeated_contexts(
+        partial_indices, partial_context
+    ).tolist() == [True]

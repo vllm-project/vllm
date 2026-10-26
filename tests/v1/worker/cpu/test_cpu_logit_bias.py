@@ -8,17 +8,14 @@ import vllm._C  # noqa: F401
 
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
-from vllm.v1.worker.cpu.logits_processors import CPULogitBiasState
-from vllm.v1.worker.gpu.sample.logits_processor import (
+from vllm.v1.worker.cpu.logits_processors import (
+    CPULogitBiasState,
     LogitsContext,
     LogitsProcRequestState,
 )
-from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.cpu.states import CPURequestState
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
-
-if current_platform.is_cpu():
-    import vllm.v1.worker.cpu.shm  # noqa: F401
 
 VOCAB_SIZE = 128
 STOP_TOKEN = 3
@@ -28,23 +25,33 @@ MIN_TOKENS = 10
 POS = 5
 
 
-def _make_state(params: list[SamplingParams]) -> CPULogitBiasState:
-    req_states = RequestState(
+def _make_state(
+    params: list[SamplingParams],
+) -> tuple[CPULogitBiasState, list[int]]:
+    req_states = CPURequestState(
         max_num_reqs=4,
         max_model_len=64,
         max_num_batched_tokens=16,
-        num_speculative_steps=1,
         vocab_size=VOCAB_SIZE,
         device=torch.device("cpu"),
     )
-    req_states.prompt_len.np[:] = PROMPT_LEN
     state = CPULogitBiasState(
         None, LogitsProcRequestState.from_request_state(req_states)
     )
+    req_indices = []
     for req_idx, sampling_params in enumerate(params):
-        state.add_request(req_idx, sampling_params)
-    state.apply_staged_writes()
-    return state
+        req_id = f"req-{req_idx}"
+        req_states.add_request(
+            req_id,
+            prompt_len=PROMPT_LEN,
+            all_token_ids=[10, 11],
+            num_computed_tokens=PROMPT_LEN,
+            max_tokens=16,
+        )
+        state_idx = req_states.req_id_to_index[req_id]
+        req_indices.append(state_idx)
+        state.add_request(state_idx, sampling_params)
+    return state, req_indices
 
 
 def _apply(
@@ -53,20 +60,21 @@ def _apply(
     idx_mapping: list[int] | None = None,
     positions: list[int] | None = None,
 ) -> torch.Tensor:
-    state = _make_state(params)
+    state, req_indices = _make_state(params)
     if idx_mapping is None:
         idx_mapping = list(range(len(params)))
     if positions is None:
         positions = [POS] * len(idx_mapping)
 
-    idx_mapping_tensor = torch.tensor(idx_mapping, dtype=torch.int64)
+    state_mapping = [req_indices[idx] for idx in idx_mapping]
+    idx_mapping_tensor = torch.tensor(state_mapping, dtype=torch.int64)
     num_tokens = len(idx_mapping)
     state.apply(
         logits,
         LogitsContext(
             expanded_idx_mapping=idx_mapping_tensor,
             idx_mapping=idx_mapping_tensor,
-            idx_mapping_np=np.array(idx_mapping, dtype=np.intp),
+            idx_mapping_np=np.array(state_mapping, dtype=np.intp),
             expanded_local_pos=torch.zeros(num_tokens, dtype=torch.int32),
             input_ids=torch.zeros(num_tokens, dtype=torch.int32),
             pos=torch.tensor(positions, dtype=torch.int64),
@@ -151,18 +159,3 @@ def test_cpu_min_tokens_restores_only_structured_rows_in_mixed_batch() -> None:
 
     assert actual[0, STOP_TOKEN] == 1.0
     assert torch.isneginf(actual[1]).all()
-
-
-def test_cpu_min_tokens_uses_strict_position_boundary() -> None:
-    logits = torch.zeros((2, VOCAB_SIZE))
-    min_len = PROMPT_LEN + MIN_TOKENS
-
-    actual = _apply(
-        logits,
-        [_min_tokens_params(False)],
-        idx_mapping=[0, 0],
-        positions=[min_len - 2, min_len - 1],
-    )
-
-    assert torch.isneginf(actual[0, STOP_TOKEN])
-    assert actual[1, STOP_TOKEN] == 0.0

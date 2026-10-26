@@ -2,22 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 import vllm._C  # noqa: F401
 
 from vllm.platforms import current_platform
-from vllm.v1.worker.cpu.logprob import CPUPromptLogprobsWorker
-from vllm.v1.worker.cpu.sampler import CPUSampler
-from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
-from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
+from vllm.sampling_params import SamplingParams
+from vllm.triton_utils import HAS_TRITON
+from vllm.v1.worker.cpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.cpu.logprob import (
+    CPUPromptLogprobsWorker,
+    LogprobTokenIdsState,
+    compute_token_logprobs,
+    compute_topk_scores,
+)
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
-
-if current_platform.is_cpu():
-    import vllm.v1.worker.cpu.shm  # noqa: F401
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cpu() or HAS_TRITON,
+    reason="requires a CPU platform without Triton",
+)
 
 
 @pytest.mark.parametrize("logits_mode", [False, True])
@@ -27,15 +32,12 @@ def test_cpu_output_logprobs(logits_mode: bool) -> None:
         dtype=torch.bfloat16,
     )
     sampled_token_ids = torch.tensor([2, 1], dtype=torch.int64)
-    sampler = object.__new__(CPUSampler)
 
-    output = sampler._compute_topk_scores(
+    output = compute_topk_scores(
         logits,
         num_logprobs=2,
         sampled_token_ids=sampled_token_ids,
         cu_num_logits=[0, 1, 2],
-        logprob_token_ids_state=object.__new__(LogprobTokenIdsState),
-        expanded_idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
         max_per_req_token_ids=0,
         logits_mode=logits_mode,
     )
@@ -44,6 +46,7 @@ def test_cpu_output_logprobs(logits_mode: bool) -> None:
         [2, 0, 1],
         [1, 3, 1],
     ]
+    assert output.logprob_token_ids.dtype == torch.int64
     expected_scores = torch.tensor([[1.0, 4.0, 2.0], [2.0, 3.0, 2.0]])
     if not logits_mode:
         expected_scores -= torch.logsumexp(logits.float(), dim=-1, keepdim=True)
@@ -80,39 +83,146 @@ def test_cpu_prompt_logprobs_scores_prompt_targets() -> None:
     assert token_ranks.tolist() == [2, 3]
 
 
-def test_cpu_prompt_logprobs_scores_requested_token_ids() -> None:
+def _input_batch(
+    req_id: str,
+    num_computed_tokens: int,
+    num_scheduled_tokens: int,
+    prefill_len: int,
+) -> InputBatch:
+    buffers = InputBuffers(1, num_scheduled_tokens, torch.device("cpu"))
+    batch = InputBatch.make_dummy(1, num_scheduled_tokens, buffers)
+    batch.req_ids = [req_id]
+    batch.num_computed_prefill_tokens_np[:] = num_computed_tokens
+    batch.num_scheduled_tokens[:] = num_scheduled_tokens
+    batch.prefill_len_np[:] = prefill_len
+    return batch
+
+
+def test_cpu_prompt_logprobs_accumulate_chunked_prefill() -> None:
+    worker = CPUPromptLogprobsWorker(max_num_reqs=1, device=torch.device("cpu"))
+    worker.add_request("request", 0, SamplingParams(prompt_logprobs=1))
+
+    logits = torch.tensor(
+        [
+            [4.0, 2.0, 1.0, 0.0],
+            [0.0, 2.0, 1.0, 3.0],
+            [1.0, 4.0, 3.0, 2.0],
+            [3.0, 0.0, 2.0, 1.0],
+        ]
+    )
+    all_token_ids = torch.tensor([[0, 1, 2, 3, 0]], dtype=torch.int32)
+    prompt_lens = np.array([4], dtype=np.int32)
+
+    first = worker.compute_prompt_logprobs(
+        lambda hidden_states: hidden_states,
+        logits[:2],
+        _input_batch("request", 0, 2, 4),
+        all_token_ids,
+        torch.tensor([0], dtype=torch.int32),
+        prompt_lens,
+    )
+    assert first == {}
+
+    second = worker.compute_prompt_logprobs(
+        lambda hidden_states: hidden_states,
+        logits[2:],
+        _input_batch("request", 2, 2, 4),
+        all_token_ids,
+        torch.tensor([2], dtype=torch.int32),
+        prompt_lens,
+    )
+
+    result = second["request"]
+    assert result.logprob_token_ids[:, 0].tolist() == [1, 2, 3]
+    expected = torch.log_softmax(logits[:3], dim=-1)[
+        torch.arange(3), torch.tensor([1, 2, 3])
+    ]
+    torch.testing.assert_close(result.logprobs[:, 0], expected)
+
+
+def test_cpu_token_logprobs_accept_int32_token_ids() -> None:
     logits = torch.tensor(
         [[4.0, 2.0, 1.0, 0.0], [0.0, 2.0, 1.0, 3.0]],
         dtype=torch.bfloat16,
     )
-    token_ids = torch.tensor([[1, 3], [2, 0]])
+    token_ids = torch.tensor([[1, 3], [2, 0]], dtype=torch.int32)
 
-    worker = CPUPromptLogprobsWorker(max_num_reqs=1, device=torch.device("cpu"))
-    actual = worker._compute_token_logprobs(logits, token_ids)
+    actual = compute_token_logprobs(logits, token_ids)
     expected = logits.gather(-1, token_ids).float()
     expected -= torch.logsumexp(logits.float(), dim=-1, keepdim=True)
 
     torch.testing.assert_close(actual, expected)
 
 
-def test_cpu_runner_selects_prompt_logprobs_worker_without_triton() -> None:
-    from vllm.v1.worker.cpu import model_runner as cpu_model_runner
+def test_cpu_prompt_logprobs_honor_start_position() -> None:
+    worker = CPUPromptLogprobsWorker(max_num_reqs=1, device=torch.device("cpu"))
+    worker.add_request(
+        "request",
+        0,
+        SamplingParams(prompt_logprobs=1, prompt_logprob_start=2),
+    )
+    logits = torch.tensor(
+        [
+            [4.0, 2.0, 1.0, 0.0],
+            [0.0, 2.0, 1.0, 3.0],
+            [1.0, 4.0, 3.0, 2.0],
+            [3.0, 0.0, 2.0, 1.0],
+        ]
+    )
+    all_token_ids = torch.tensor([[0, 1, 2, 3, 0]], dtype=torch.int32)
 
-    triton_runner = object.__new__(cpu_model_runner.CPUModelRunner)
-    no_triton_runner = object.__new__(cpu_model_runner.NoTritonCPUModelRunner)
+    result = worker.compute_prompt_logprobs(
+        lambda hidden_states: hidden_states,
+        logits,
+        _input_batch("request", 0, 4, 4),
+        all_token_ids,
+        torch.tensor([0], dtype=torch.int32),
+        np.array([4], dtype=np.int32),
+    )["request"]
 
-    assert triton_runner.prompt_logprobs_worker_cls is PromptLogprobsWorker
-    assert no_triton_runner.prompt_logprobs_worker_cls is CPUPromptLogprobsWorker
+    assert result.logprob_token_ids[:, 0].tolist() == [3]
+
+
+def test_cpu_requested_prompt_token_scores_honor_start_position() -> None:
+    worker = CPUPromptLogprobsWorker(max_num_reqs=1, device=torch.device("cpu"))
+    token_ids = np.array([[0, 2], [1, 3]], dtype=np.int64)
+    worker.add_request(
+        "request",
+        0,
+        SamplingParams(
+            prompt_logprob_token_ids=token_ids,
+            prompt_logprob_start=1,
+        ),
+    )
+    logits = torch.tensor(
+        [
+            [4.0, 2.0, 1.0, 0.0],
+            [0.0, 2.0, 1.0, 3.0],
+            [1.0, 4.0, 3.0, 2.0],
+            [3.0, 0.0, 2.0, 1.0],
+        ]
+    )
+
+    result = worker.compute_prompt_token_id_logprobs(
+        lambda hidden_states: hidden_states,
+        logits,
+        _input_batch("request", 0, 4, 4),
+        np.array([4], dtype=np.int32),
+    )["request"]
+    expected = compute_token_logprobs(logits[1:3], torch.from_numpy(token_ids))
+
+    torch.testing.assert_close(result, expected)
 
 
 def _make_logprob_token_ids_state(
     num_token_ids: list[int], token_ids: list[list[int]]
 ) -> LogprobTokenIdsState:
-    state = object.__new__(LogprobTokenIdsState)
-    state.num_token_ids = SimpleNamespace(
-        gpu=torch.tensor(num_token_ids, dtype=torch.int32)
-    )
-    state.token_ids = SimpleNamespace(gpu=torch.tensor(token_ids, dtype=torch.int32))
+    state = LogprobTokenIdsState(len(num_token_ids), torch.device("cpu"))
+    for req_idx, num_ids in enumerate(num_token_ids):
+        state.add_request(
+            req_idx,
+            SamplingParams(logprob_token_ids=token_ids[req_idx][:num_ids]),
+        )
     return state
 
 
@@ -138,12 +248,13 @@ def test_cpu_requested_output_logprobs(logits_mode: bool) -> None:
         ],
     )
 
-    output = object.__new__(CPUSampler)._compute_topk_scores(
+    output = compute_topk_scores(
         logits,
         num_logprobs=4,
         sampled_token_ids=sampled_token_ids,
         cu_num_logits=[0, 1, 2, 3, 4],
-        logprob_token_ids_state=state,
+        num_per_req_token_ids=state.num_token_ids,
+        per_req_token_ids=state.token_ids,
         expanded_idx_mapping=torch.tensor([2, 0, 3, 1], dtype=torch.int64),
         max_per_req_token_ids=5,
         logits_mode=logits_mode,
@@ -177,12 +288,13 @@ def test_cpu_requested_output_logprobs_without_topk() -> None:
         token_ids=[[0, 0], [3, 1]],
     )
 
-    output = object.__new__(CPUSampler)._compute_topk_scores(
+    output = compute_topk_scores(
         logits,
         num_logprobs=0,
         sampled_token_ids=torch.tensor([2, 1]),
         cu_num_logits=None,
-        logprob_token_ids_state=state,
+        num_per_req_token_ids=state.num_token_ids,
+        per_req_token_ids=state.token_ids,
         expanded_idx_mapping=torch.tensor([1, 0], dtype=torch.int64),
         max_per_req_token_ids=2,
         logits_mode=True,
@@ -194,3 +306,12 @@ def test_cpu_requested_output_logprobs_without_topk() -> None:
         torch.tensor([[2.0, 1.0, 3.0], [2.0, -math.inf, -math.inf]]),
     )
     assert output.selected_token_ranks.tolist() == [3, 3]
+
+
+def test_cpu_output_logprobs_reject_negative_topk() -> None:
+    with pytest.raises(AssertionError):
+        compute_topk_scores(
+            torch.zeros((1, 4)),
+            num_logprobs=-1,
+            sampled_token_ids=torch.tensor([0]),
+        )

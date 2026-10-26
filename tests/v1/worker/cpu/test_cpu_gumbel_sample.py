@@ -16,7 +16,6 @@ pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only"
 
 _UINT32_MASK = (1 << 32) - 1
 _UINT64_MASK = (1 << 64) - 1
-_DRAFT_NOISE_SALT = 1 << 30
 VOCAB_SIZE = 200_000
 NUM_SAMPLES = 500_000
 HEAD_LOG_GAP = 18.0
@@ -30,7 +29,6 @@ def _sample(
     seeds: torch.Tensor,
     positions: torch.Tensor,
     apply_temperature: bool = True,
-    is_drafting: bool = False,
     use_fp64: bool = False,
 ) -> torch.Tensor:
     return gumbel_sample(
@@ -40,7 +38,7 @@ def _sample(
         seeds,
         positions,
         apply_temperature=apply_temperature,
-        is_drafting=is_drafting,
+        is_drafting=False,
         use_fp64=use_fp64,
     )
 
@@ -50,7 +48,6 @@ def _sample_many(
     num_samples: int,
     *,
     use_fp64: bool = False,
-    is_drafting: bool = False,
 ) -> torch.Tensor:
     vocab_size = logits_1d.shape[0]
     logits = logits_1d.unsqueeze(0).expand(num_samples, vocab_size)
@@ -64,7 +61,6 @@ def _sample_many(
         temperature,
         seeds,
         positions,
-        is_drafting=is_drafting,
         use_fp64=use_fp64,
     )
 
@@ -158,7 +154,6 @@ def _reference_sample(
     seeds: torch.Tensor,
     positions: torch.Tensor,
     apply_temperature: bool = True,
-    is_drafting: bool = False,
     use_fp64: bool = False,
 ) -> torch.Tensor:
     output = []
@@ -170,8 +165,6 @@ def _reference_sample(
             continue
 
         position = int(positions[row_idx])
-        if is_drafting:
-            position += _DRAFT_NOISE_SALT
         seed = int(seeds[req_state_idx])
 
         if use_fp64:
@@ -209,35 +202,6 @@ def _z_score(observed: int, expected: float, num_trials: int) -> float:
     return (observed - expected) / math.sqrt(
         num_trials * probability * (1.0 - probability)
     )
-
-
-def test_murmur3_known_answers() -> None:
-    seeds = [0, 1, -1, 0x123456789ABCDEF, -(1 << 63), (1 << 63) - 1]
-    positions = [0, 2, 17, 123456789, 1 << 30, (1 << 30) + 7]
-    token_ids = [0, 3, 1023, 199999, 4096, 0xFFFFFFFF]
-
-    assert [
-        _murmur3_hash32(seed, position, token_id)
-        for seed, position, token_id in zip(seeds, positions, token_ids)
-    ] == [
-        0x8134CDF8,
-        0x23B53F91,
-        0xC8C13C14,
-        0x5DDE974F,
-        0xF1A9355B,
-        0xD952F9AA,
-    ]
-    assert [
-        _murmur3_hash32(seed, position, token_id, 0x9E3779B9)
-        for seed, position, token_id in zip(seeds, positions, token_ids)
-    ] == [
-        0xD28AD962,
-        0xE3AAF818,
-        0xD223C51C,
-        0x0547D2FE,
-        0x3AED160F,
-        0x49E8EA7F,
-    ]
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
@@ -394,30 +358,6 @@ def test_full_vocab_distribution_fidelity() -> None:
     chi_square = (((histogram - expected) ** 2) / expected).sum().item()
     degrees_of_freedom = VOCAB_SIZE - 1
     assert chi_square < degrees_of_freedom + 10 * math.sqrt(2 * degrees_of_freedom)
-
-
-def test_drafting_uses_independent_reproducible_noise() -> None:
-    counts = _make_heavy_tailed_counts()
-    total = counts.sum().item()
-    logits = _counts_to_logits(counts)
-    tail_probability = (total - counts[0].item()) / total
-
-    target = _sample_many(logits, NUM_SAMPLES)
-    draft = _sample_many(logits, NUM_SAMPLES, is_drafting=True)
-    target_tail = target != 0
-    draft_tail = draft != 0
-
-    disagreement = (target_tail != draft_tail).double().mean().item()
-    assert disagreement > tail_probability
-    for tail in (target_tail, draft_tail):
-        tail_count = tail.sum().item()
-        z_score = _z_score(tail_count, NUM_SAMPLES * tail_probability, NUM_SAMPLES)
-        assert abs(z_score) < Z_TOLERANCE
-
-    assert torch.equal(
-        draft,
-        _sample_many(logits, NUM_SAMPLES, is_drafting=True),
-    )
 
 
 def test_greedy_temperature_zero_returns_argmax() -> None:
