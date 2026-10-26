@@ -29,6 +29,7 @@ vLLM currently supports the following reasoning models:
 | [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | `minimax_m2_append_think` | `json`, `regex` | ✅ |
 | [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `json`, `regex` | ✅ |
 | [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `json`, `regex` | ✅ |
+| [Step-3.5 / Step-3.7 Flash](https://huggingface.co/stepfun-ai/Step-3.5-Flash) | `step3p5` | `json`, `regex` | ✅ |
 
 !!! note
     IBM Granite 3.2 and DeepSeek-V3.1 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
@@ -234,6 +235,17 @@ vllm serve ibm-granite/granite-3.2-2b-instruct \
     --reasoning-parser granite \
     --default-chat-template-kwargs '{"thinking": true}'
 ```
+
+### Mapping Reasoning Efforts
+
+Chat templates differ in which `reasoning_effort` values they recognize, and some silently fall back to another effort (e.g. maximum reasoning) for values they do not know. Use `--reasoning-effort-map` to rewrite the efforts clients send into ones the template supports. For a template that only recognizes `low`, `high` and `max`:
+
+```bash
+vllm serve <model> \
+    --reasoning-effort-map '{"minimal": "low", "medium": "low", "xhigh": "max"}'
+```
+
+The map applies to the effort set through the Chat Completions (`reasoning_effort`), Responses (`reasoning.effort`) and Anthropic Messages (`output_config.effort`) APIs. Efforts that are not listed pass through unchanged, and a `reasoning_effort` set directly in `chat_template_kwargs` is not rewritten. Keys must be one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; values are passed to the chat template as-is. Mapping an effort to `none` disables thinking for templates that honor `enable_thinking`.
 
 ### Request-Level Override
 

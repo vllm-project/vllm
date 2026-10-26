@@ -68,9 +68,11 @@ class BlockStored(KVCacheEvent):
     lora_name: str | None
 
     """Extra keys used in block hash computation, one entry per block in
-    block_hashes. Each entry contains MM identifiers, LoRA name, cache_salt,
-    prompt embedding hashes, etc. for that specific block. Exposed for external
-    KV cache consumers to reconstruct block hashes.
+    block_hashes. Each entry contains, in order, the LoRA name (if
+    `lora_name` is set), `(mm_identifier, offset)` pairs, the cache_salt
+    string and prompt embedding digests for that specific block. These are
+    published untagged; the block hash itself uses each value tagged with
+    its source, e.g. `("lora", name)` or `("mm", mm_identifier, offset)`.
     """
     extra_keys: list[tuple[Any, ...] | None] | None = None
 
@@ -90,6 +92,10 @@ class BlockStored(KVCacheEvent):
     ownership of the underlying block, which may be shared across sessions.
     """
     session_id: str | None = None
+    """Tokens beyond each block used in its hash, one list per block_hashes entry.
+    None when lookahead hashing is disabled.
+    """
+    lookahead_token_ids: list[list[int]] | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -107,6 +113,9 @@ class BlockStored(KVCacheEvent):
                 self.locality,
                 self.ownership,
                 self.session_id,
+                tuple(map(tuple, self.lookahead_token_ids))
+                if self.lookahead_token_ids is not None
+                else None,
             )
         )
 

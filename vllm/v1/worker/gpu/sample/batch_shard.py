@@ -45,6 +45,7 @@ class BatchShardMetadata:
     # tensor. Derived from the global cu_num_logits, so each rank agrees
     # ont he gather shapes, including empty shards.
     max_num_logits_per_req: int
+    adaptive_verification_enabled: bool
 
 
 @triton.jit(
@@ -150,11 +151,13 @@ class BatchSharder:
         max_num_reqs: int,
         max_num_logits_per_req: int,
         device: torch.device,
+        adaptive_verification_enabled: bool,
     ):
         tp_group = get_tp_group()
         self.tp_rank = tp_group.rank_in_group
         self.tp_size = tp_group.world_size
         self.device = device
+        self.adaptive_verification_enabled = adaptive_verification_enabled
         self._padded_num_reqs = triton.next_power_of_2(max_num_reqs)
         self._padded_num_logits_per_req = triton.next_power_of_2(max_num_logits_per_req)
         self._num_warps = max(1, min(8, self._padded_num_reqs // 128))
@@ -175,7 +178,6 @@ class BatchSharder:
         tp_rank = self.tp_rank
         tp_size = self.tp_size
         num_reqs = input_batch.idx_mapping_np.shape[0]
-        num_logits = int(input_batch.cu_num_logits_np[-1])
 
         # Deterministically assign requests to ranks, round-robin over slot
         # indices so ownership stays balanced when the slot allocator fills
@@ -187,9 +189,23 @@ class BatchSharder:
         num_local_reqs = local_req_indices_np.shape[0]
         num_reqs_per_rank_np = np.bincount(req_owner_np, minlength=tp_size)
         max_num_reqs_per_rank = int(num_reqs_per_rank_np.max()) if num_reqs else 1
+        # Get the number of logits per request on the host.
+        num_logits_per_req_np = np.diff(input_batch.cu_num_logits_np)
+        num_admitted_draft_tokens_np = None
+        if input_batch.num_admitted_draft_tokens is not None:
+            # Under adaptive verification, cu_num_logits_np holds the scheduled counts.
+            # When the budget binds, the admitted counts are copied to the host so the
+            # plan matches the device layout.
+            assert input_batch.num_draft_tokens_per_req is not None
+            num_admitted_draft_tokens_np = input_batch.num_admitted_draft_tokens.wait()
+            num_logits_per_req_np = (
+                num_logits_per_req_np
+                - input_batch.num_draft_tokens_per_req
+                + num_admitted_draft_tokens_np
+            )
+        num_logits = int(num_logits_per_req_np.sum())
         # Derive the number of logits owned by each rank, as well as the
         # local rank.
-        num_logits_per_req_np = np.diff(input_batch.cu_num_logits_np)
         num_logits_per_rank_np = np.bincount(
             req_owner_np, weights=num_logits_per_req_np, minlength=tp_size
         ).astype(np.int64)
@@ -214,21 +230,15 @@ class BatchSharder:
         local_logits_indices = torch.empty(
             num_local_logits, dtype=torch.int64, device=self.device
         )
-        local_idx_mapping = torch.empty(
-            num_local_reqs, dtype=torch.int32, device=self.device
+        local_idx_mapping = input_batch.idx_mapping.new_empty(num_local_reqs)
+        local_cu_num_logits = input_batch.cu_num_logits.new_empty(num_local_reqs + 1)
+        local_expanded_idx_mapping = input_batch.expanded_idx_mapping.new_empty(
+            num_local_logits
         )
-        local_cu_num_logits = torch.empty(
-            num_local_reqs + 1, dtype=torch.int32, device=self.device
+        local_expanded_local_pos = input_batch.expanded_local_pos.new_empty(
+            num_local_logits
         )
-        local_expanded_idx_mapping = torch.empty(
-            num_local_logits, dtype=torch.int32, device=self.device
-        )
-        local_expanded_local_pos = torch.empty(
-            num_local_logits, dtype=torch.int32, device=self.device
-        )
-        local_seq_lens = torch.empty(
-            num_local_reqs, dtype=torch.int32, device=self.device
-        )
+        local_seq_lens = input_batch.seq_lens.new_empty(num_local_reqs)
         if num_reqs > 0:
             _build_shard_plan_kernel[(num_reqs,)](
                 input_batch.idx_mapping,
@@ -260,7 +270,15 @@ class BatchSharder:
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req[
                 local_req_indices_np
             ]
-            num_draft_tokens = int(num_draft_tokens_per_req.sum())
+            if num_admitted_draft_tokens_np is not None:
+                # Under adaptive verification num_draft_tokens_per_req holds the
+                # scheduled counts. Follow the admitted counts so every rank picks
+                # the same sampler as the replicated path, including a budget of 0.
+                num_draft_tokens = int(
+                    num_admitted_draft_tokens_np[local_req_indices_np].sum()
+                )
+            elif input_batch.num_draft_tokens > 0:
+                num_draft_tokens = int(num_draft_tokens_per_req.sum())
 
         local_req_ids = [input_batch.req_ids[i] for i in local_req_indices_np.tolist()]
         local_batch = replace(
@@ -281,9 +299,7 @@ class BatchSharder:
         )
         local_grammar_output = None
         if grammar_output is not None:
-            local_grammar_output = _shard_grammar_output(
-                grammar_output, input_batch, local_req_ids
-            )
+            local_grammar_output = _shard_grammar_output(grammar_output, local_req_ids)
         metadata = BatchShardMetadata(
             tp_size=tp_size,
             num_logits_per_rank=num_logits_per_rank_np.tolist(),
@@ -292,6 +308,7 @@ class BatchSharder:
             max_num_reqs_per_rank=max_num_reqs_per_rank,
             gathered_src_indices=gathered_src_indices,
             max_num_logits_per_req=max_num_logits_per_req,
+            adaptive_verification_enabled=self.adaptive_verification_enabled,
         )
         return local_batch, sorted_logits_indices, local_grammar_output, metadata
 
@@ -320,28 +337,26 @@ def all_to_all_logits(
 
 def _shard_grammar_output(
     grammar_output: GrammarOutput,
-    input_batch: InputBatch,
     local_req_ids: list[str],
 ) -> GrammarOutput | None:
     owned = set(local_req_ids)
-    req_id_to_idx = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
-    cu_num_logits_np = input_batch.cu_num_logits_np
-
-    local_ids: list[str] = []
-    keep_indices: list[int] = []
-    cursor = 0
-    for req_id in grammar_output.structured_output_request_ids:
-        req_idx = req_id_to_idx[req_id]
-        num_req_logits = int(cu_num_logits_np[req_idx + 1] - cu_num_logits_np[req_idx])
-        if req_id in owned:
-            local_ids.append(req_id)
-            keep_indices.extend(range(cursor, cursor + num_req_logits))
-        cursor += num_req_logits
-    if not local_ids:
+    grammar_req_ids = grammar_output.structured_output_request_ids
+    keep = [i for i, req_id in enumerate(grammar_req_ids) if req_id in owned]
+    if not keep:
         return None
+    local_ids = [grammar_req_ids[i] for i in keep]
+    # Each request owns a fixed-width block of rows.
+    bitmask = grammar_output.grammar_bitmask
+    blocks = bitmask.reshape(len(grammar_req_ids), -1, bitmask.shape[-1])
+    local_bitmask = blocks[keep].reshape(-1, bitmask.shape[-1])
+    # num_acceptable_drafts is ordered with structured_output_request_ids.
+    num_acceptable = grammar_output.num_acceptable_drafts
+    if num_acceptable is not None:
+        num_acceptable = [num_acceptable[i] for i in keep]
     return GrammarOutput(
         structured_output_request_ids=local_ids,
-        grammar_bitmask=grammar_output.grammar_bitmask[keep_indices],
+        grammar_bitmask=local_bitmask,
+        num_acceptable_drafts=num_acceptable,
     )
 
 
@@ -590,7 +605,14 @@ def _gather_logprobs_tensors(
         logprobs=logprobs,
         selected_token_ranks=selected_token_ranks,
         cu_num_generated_tokens=(
-            global_batch.cu_num_logits_np.tolist() if num_logits != num_reqs else None
+            None
+            if metadata.adaptive_verification_enabled or num_logits == num_reqs
+            else global_batch.cu_num_logits_np.tolist()
+        ),
+        cu_num_generated_tokens_tensor=(
+            global_batch.cu_num_logits.clone()
+            if metadata.adaptive_verification_enabled
+            else None
         ),
     )
 

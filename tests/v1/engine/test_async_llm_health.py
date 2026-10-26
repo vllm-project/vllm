@@ -13,6 +13,8 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCore
 from vllm.v1.engine.exceptions import EngineDeadError
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 @pytest.fixture
 def async_llm_for_health_check(monkeypatch: pytest.MonkeyPatch):

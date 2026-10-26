@@ -22,6 +22,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_globalize_align_block_size import (
+    fused_globalize_align_block_size,
+)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -63,6 +66,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
+from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -137,7 +141,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             "w13": humming_quant_config.w1_humming_config,
             "w2": humming_quant_config.w2_humming_config,
         }
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=moe_config.device)
+        self.locks = create_humming_locks(moe_config.device)
         self.num_experts = moe_config.num_local_experts
         self.global_num_experts = moe_config.num_experts
         self.quant_config = humming_quant_config
@@ -214,12 +218,20 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if scatter_idx is not None:
             layout = "scatter"
 
+        hadamard_block_size = getattr(quant_config, f"{prefix}_hadamard_block_size")
+        has_input_processing = (
+            mode.should_quantize
+            or (hadamard_block_size is not None and hadamard_block_size > 1)
+            or activation is not None
+            or scatter_idx is not None
+            or num_valid_tokens is not None
+        )
         inputs, group_scales, token_scales = may_process_input(
             config,
             inputs=inputs,
-            outputs=quanted_input,
+            outputs=quanted_input if has_input_processing else None,
             token_scales=scale2 if mode.has_secondary_scale else scale,
-            hadamard_block_size=getattr(quant_config, f"{prefix}_hadamard_block_size"),
+            hadamard_block_size=hadamard_block_size,
             layout=layout,
             expert_tokens=expert_tokens if layout == "grouped_mask" else None,
             scatter_idx=scatter_idx,
@@ -258,25 +270,14 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             **kwargs,
         )
 
-    def _get_permute_scratch(
-        self, topk: int, indices_only: bool = False
-    ) -> MoEPermuteScratch | None:
+    def _get_permute_scratch(self) -> MoEPermuteScratch | None:
         if not moe_permute_unpermute_supported():
             return None
 
-        max_expanded_rows = (
-            self.moe_config.max_num_tokens
-            * self.moe_config.dp_size
-            * self.moe_config.experts_per_token
-        )
         return get_moe_permute_scratch(
-            max_num_tokens=math.ceil(max_expanded_rows / topk),
-            topk=topk,
             num_experts=self.moe_config.num_experts,
             num_local_experts=self.moe_config.num_local_experts,
             device=torch.device(self.moe_config.device),
-            hidden_size=None if indices_only else self.moe_config.hidden_dim,
-            hidden_dtype=None if indices_only else self.moe_config.in_dtype,
         )
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
@@ -713,16 +714,45 @@ class HummingIndexedExperts(HummingExpertsBase):
             num_sms = num_compute_units(topk_ids.get_device())
             use_scatter = topk_ids.numel() > 2 * num_sms
 
-        alignment = moe_align_block_size(
-            topk_ids=topk_ids,
-            block_size=moe_block_size,
-            num_experts=self.global_num_experts,
-            expert_map=expert_map,
-            ignore_invalid_experts=True,
-            return_scatter_idx=use_scatter,
+        # When DeepEP-v2 deferred globalization, fuse globalize + align + sort
+        # into one launch (topk_ids globalized in place); else align only.
+        rank_expert_offset = (
+            expert_tokens_meta.rank_expert_offset
+            if expert_tokens_meta is not None
+            else None
         )
-        sorted_ids, expert_ids, num_tokens_padded = alignment[:3]
-        scatter_idx = alignment[3] if len(alignment) == 4 else None
+        psum = (
+            expert_tokens_meta.psum_recv_per_rank
+            if expert_tokens_meta is not None
+            else None
+        )
+        if (
+            current_platform.is_cuda()
+            and rank_expert_offset is not None
+            and psum is not None
+        ):
+            alignment = fused_globalize_align_block_size(
+                recv_topk_idx=topk_ids,
+                psum_recv_per_rank=psum,
+                rank_expert_offset=rank_expert_offset,
+                global_num_experts=self.global_num_experts,
+                local_num_experts=self.num_experts,
+                block_size=moe_block_size,
+                return_scatter_idx=use_scatter,
+            )
+            _, sorted_ids, expert_ids, num_tokens_padded = alignment[:4]
+            scatter_idx = alignment[4] if use_scatter else None
+        else:
+            alignment = moe_align_block_size(
+                topk_ids=topk_ids,
+                block_size=moe_block_size,
+                num_experts=self.global_num_experts,
+                expert_map=expert_map,
+                ignore_invalid_experts=True,
+                return_scatter_idx=use_scatter,
+            )
+            sorted_ids, expert_ids, num_tokens_padded = alignment[:3]
+            scatter_idx = alignment[3] if len(alignment) == 4 else None
 
         moe_common_kwargs = {
             "sorted_ids": sorted_ids,
@@ -911,14 +941,21 @@ class HummingGroupedExperts(HummingExpertsBase):
         )
         buffers["output"] = output
 
+        scratch = self._get_permute_scratch()
         if a1q_scale is None:
-            scratch = self._get_permute_scratch(topk_ids.size(1), indices_only=True)
             assert scratch is not None
             scatter_metadata = moe_prepare_scatter(topk_ids, expert_map, scratch)
             expert_offsets, scatter_idx = scatter_metadata
             inv_perm = scatter_idx.flatten()
-            num_valid_tokens = expert_offsets[-1:] if expert_map is not None else None
+            # Bound the dynamic input quantization to the valid routes. Rows
+            # past expert_offsets[-1] belong to non-local experts or to invalid
+            # routes (e.g. -1 for padding tokens), with or without expert_map.
+            num_valid_tokens = expert_offsets[-1:]
         else:
+            # Prequantized inputs skip w13 quantization, so its buffer is free
+            # to hold the permuted hidden states.
+            permuted_hidden_states = buffers["quanted_gate_up_input"]
+            assert permuted_hidden_states.dtype == hidden_states.dtype
             hidden_states, a1q_scale, expert_offsets, inv_perm, _ = moe_permute(
                 hidden_states=hidden_states,
                 a1q_scale=a1q_scale,
@@ -926,7 +963,8 @@ class HummingGroupedExperts(HummingExpertsBase):
                 n_expert=global_num_experts,
                 n_local_expert=self.num_experts,
                 expert_map=expert_map,
-                scratch=self._get_permute_scratch(topk_ids.size(1)),
+                permuted_hidden_states=permuted_hidden_states,
+                scratch=scratch,
             )
             scatter_idx = None
             num_valid_tokens = None
