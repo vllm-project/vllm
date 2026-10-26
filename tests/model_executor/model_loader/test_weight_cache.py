@@ -1286,3 +1286,31 @@ def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
     table = {"records": {"op": {"shape": 1}}}
     FlashInferWarmupCache().install(None, {"autotune_configs_dp0_rank0.json": table})
     assert json.loads(target.read_text()) == table
+
+
+def test_compile_cache_bundle_round_trip(tmp_path):
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+        CacheRoot,
+        _bundle,
+        _install,
+        _manifest,
+    )
+
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "kernel.cubin").write_bytes(b"compiled-kernel")
+    root = CacheRoot("flashinfer-cubins", source)
+    manifest = _manifest((root,))
+    bundle = _bundle((root,), manifest)
+
+    _install(bundle, manifest, (CacheRoot("flashinfer-cubins", target),))
+
+    assert (target / "nested" / "kernel.cubin").read_bytes() == b"compiled-kernel"
+
+
+def test_compile_cache_manifest_rejects_path_traversal():
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache import _safe_path
+
+    with pytest.raises(ValueError, match="unsafe cache path"):
+        _safe_path("../escape")

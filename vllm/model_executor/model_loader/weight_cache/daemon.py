@@ -84,6 +84,7 @@ import multiprocessing
 import os
 import select
 import socket
+import time
 from collections.abc import Callable
 
 import torch
@@ -130,7 +131,9 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
 )
 from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+    CompileArtifactWarmupCache,
     FlashInferWarmupCache,
+    _cache_roots,
 )
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib
@@ -218,11 +221,17 @@ class WeightCacheDaemon:
         dp_rank: int = 0,
         pp_rank: int = 0,
         seed_config: SeedConfig | None = None,
+        compile_cache_protocol: str = "rdma",
     ):
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
             raise ValueError("The weight cache daemon does not support EPLB.")
-        self.warmup_caches = [FlashInferWarmupCache()]
+        self.seed_config = seed_config or SeedConfig()
+        self.compile_cache = CompileArtifactWarmupCache(
+            _cache_roots(),
+            compile_cache_protocol,
+        )
+        self.warmup_caches = [FlashInferWarmupCache(), self.compile_cache]
         self.d2d = SeedTransport(self.warmup_caches, seed_config)
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
@@ -304,6 +313,7 @@ class WeightCacheDaemon:
             local_rank=self.local_rank,
             backend=current_platform.dist_backend,
         )
+        self._adopt_compile_cache()
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             self.model = self.get_model()
@@ -321,6 +331,43 @@ class WeightCacheDaemon:
             format_gib(torch.accelerator.memory_allocated()),
             format_gib(torch.accelerator.memory_reserved()),
         )
+
+    def _adopt_compile_cache(self) -> None:
+        if self.compile_cache is None:
+            return
+        if self.seed_config.source is None:
+            return
+        deadline = time.monotonic() + 300.0
+        while time.monotonic() < deadline:
+            response = self.d2d.request(
+                {
+                    "kind": self.compile_cache.kind,
+                    **self.compile_cache.request_params(self),
+                }
+            )
+            if response is not None and response.get("status") == "ok":
+                try:
+                    payload = self.compile_cache.validate_payload(
+                        response.get("payload")
+                    )
+                    self.compile_cache.install(self, payload)
+                except Exception as error:
+                    logger.warning(
+                        "Cannot install remote compile cache; using local loading: %s",
+                        error,
+                    )
+                    return
+                logger.info("Adopted remote compile cache before model loading")
+                return
+            if response is not None and response.get("status") == "miss":
+                return
+            if response is not None and response.get("status") == "error":
+                logger.warning(
+                    "Source does not provide a compile cache; using local loading"
+                )
+                return
+            time.sleep(1.0)
+        raise RuntimeError("timed out waiting for the source compile cache")
 
     def release_distributed(self) -> None:
         """Release process groups and BLAS workspaces after loading and warmup.
@@ -572,6 +619,7 @@ def _run_daemon(
     dp_rank: int = 0,
     pp_rank: int = 0,
     seed_config: SeedConfig | None = None,
+    compile_cache_protocol: str = "rdma",
 ) -> None:
     # Spawned daemons start with logging unconfigured, like engine workers.
     if logging_config := getattr(vllm_config, "logging_config", None):
@@ -586,9 +634,13 @@ def _run_daemon(
         dp_rank,
         pp_rank,
         seed_config=seed_config,
+        compile_cache_protocol=compile_cache_protocol,
     )
     daemon.load_model()
     daemon.warmup()
+    # FlashInfer warmup has populated the compiler caches before the source
+    # listener becomes available to target daemons.
+    daemon.d2d.start_listener()
     daemon.release_distributed()
     daemon.serve_forever(
         ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))

@@ -207,6 +207,12 @@ class PreloadSubcommand(CLISubcommand):
             help="Shared secret for daemon-to-daemon requests. The JSON "
             "connection is unencrypted; use a trusted network.",
         )
+        parser.add_argument(
+            "--seed-mooncake-protocol",
+            choices=("tcp", "rdma"),
+            default="rdma",
+            help="Mooncake protocol for D2D cache seeding (default: rdma).",
+        )
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -355,6 +361,7 @@ class PreloadSubcommand(CLISubcommand):
                             dp_rank,
                             pp_rank,
                             seed_config,
+                            args.seed_mooncake_protocol,
                         ),
                         name=(
                             f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
