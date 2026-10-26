@@ -364,18 +364,24 @@ class MambaHybridModelState(DefaultModelState):
             rswa_prefix_lens=input_batch.prompt_lens,
         )
         if self._use_flashinfer_replayssm:
-            self._replayssm_query_start_loc = input_batch.query_start_loc
+            self._replayssm_query_start_loc = None
             mamba_metadata = next(
-                metadata
-                for metadata in attn_metadata.values()
-                if isinstance(metadata, Mamba2AttentionMetadata)
+                (
+                    metadata
+                    for metadata in attn_metadata.values()
+                    if isinstance(metadata, Mamba2AttentionMetadata)
+                ),
+                None,
             )
-            replayssm_prefilling = (
-                torch.arange(num_reqs, device="cpu") >= mamba_metadata.num_decodes
-            )
-            async_tensor_h2d(
-                replayssm_prefilling, out=self._is_prefilling_gpu[:num_reqs]
-            )
+            # Autotune dummy runs and draft capture can omit Mamba metadata.
+            if mamba_metadata is not None:
+                self._replayssm_query_start_loc = input_batch.query_start_loc
+                replayssm_prefilling = (
+                    torch.arange(num_reqs, device="cpu") >= mamba_metadata.num_decodes
+                )
+                async_tensor_h2d(
+                    replayssm_prefilling, out=self._is_prefilling_gpu[:num_reqs]
+                )
         if self.recoverssm is not None:
             self.recoverssm.record_step(
                 attn_metadata, attn_groups, for_capture=for_capture

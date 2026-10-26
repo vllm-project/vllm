@@ -30,7 +30,7 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
     RecoverSSMPostprocessMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -244,8 +244,14 @@ def _input_batch(
             [False, False, True],
         ),
         ([4, 4], [68, 68], [False, False], None, True, [False, False, False]),
+        ([8, 8], [72, 72], [True, True], None, False, None),
     ],
-    ids=["resumed-chunk", "padded-prompt-tail", "full-graph-padding"],
+    ids=[
+        "resumed-chunk",
+        "padded-prompt-tail",
+        "full-graph-padding",
+        "autotune-no-mamba",
+    ],
 )
 def test_replayssm_uses_built_mamba_decode_split(
     query_lens, seq_lens, prefilling, prompt_tail, for_capture, expected
@@ -288,7 +294,7 @@ def test_replayssm_uses_built_mamba_decode_split(
         ],
     )
     num_reqs, num_tokens = len(query_lens), sum(query_lens)
-    padded_reqs = len(expected)
+    padded_reqs = len(expected) if expected is not None else num_reqs
     buffers = InputBuffers(padded_reqs, num_tokens, DEVICE)
     batch = InputBatch.make_dummy(num_reqs, num_tokens, buffers)
     batch.num_reqs_after_padding = padded_reqs
@@ -310,15 +316,31 @@ def test_replayssm_uses_built_mamba_decode_split(
     batch.prefill_runs_as_decode_np = (
         np.array(prompt_tail) if prompt_tail is not None else None
     )
+    attn_groups = [[group] for group in groups]
+    if expected is None:
+        # Profiling dummy runs omit Mamba groups before building metadata.
+        attn_groups = [
+            [
+                group
+                for group in group_list
+                if not isinstance(group.kv_cache_spec, MambaSpec)
+            ]
+            for group_list in attn_groups
+        ]
     metadata = state.prepare_attn(
         batch,
         CUDAGraphMode.FULL if for_capture else CUDAGraphMode.NONE,
         block_tables=(torch.ones(padded_reqs, 8, dtype=torch.int32),) * 2,
         slot_mappings=torch.zeros(2, num_tokens, dtype=torch.int64),
-        attn_groups=[[group] for group in groups],
+        attn_groups=attn_groups,
         kv_cache_config=kv_cache_config,
         for_capture=for_capture,
     )
+    if expected is None:
+        assert metadata == {}
+        assert state._replayssm_query_start_loc is None
+        assert not state._is_prefilling_gpu.any()
+        return
     assert list(metadata) == ["gdn", "mamba"]
     assert metadata["mamba"].num_decodes == expected.count(False)
     assert state._is_prefilling_gpu[:padded_reqs].tolist() == expected
