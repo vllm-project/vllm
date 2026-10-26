@@ -392,13 +392,13 @@ def _maybe_default_dsv4_mxfp4_indexer(vllm_config: "VllmConfig") -> None:
     "auto" and fall back to FP8 silently when the MXFP4 path can't run, so
     configs that worked before never start failing.
     """
-    model_config = vllm_config.model_config
+    hf_config = getattr(vllm_config.model_config, "hf_config", None)
+    if getattr(hf_config, "model_type", None) != "deepseek_v4":
+        return
     attention_config = vllm_config.attention_config
     parallel_config = vllm_config.parallel_config
     if (
-        model_config is None
-        or getattr(model_config.hf_config, "model_type", None) != "deepseek_v4"
-        or attention_config.indexer_kv_dtype != "auto"
+        attention_config.indexer_kv_dtype != "auto"
         or attention_config.indexer_sparse_logits
         or get_cdna_version() != 4
         # The MXFP4 indexer metadata builder rejects DCP/PCP.
