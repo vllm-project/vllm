@@ -338,6 +338,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
         num_tokens = hidden_states.shape[0]
         topk_ids = topk_ids.to(torch.int32)
+        assert self.max_num_tokens is not None
         padded_num_tokens = (
             w4a16_padded_num_tokens(num_tokens, self.max_num_tokens)
             if self.use_a16
@@ -376,6 +377,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         count plus the coarse buckets above the CUDA graph range."""
         w1 = layer.w13_weight
         w2 = layer.w2_weight
+        assert self.max_num_tokens is not None
         max_tokens = max(self.max_num_tokens, *token_counts, 1)
         counts = {w4a16_padded_num_tokens(t, max_tokens) for t in token_counts if t > 0}
         counts.update(
