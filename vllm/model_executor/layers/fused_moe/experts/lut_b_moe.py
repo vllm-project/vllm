@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExpert
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import route_major_moe_output
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.lut_b_utils import (
     LUT_B_SM107_TILE_K,
@@ -197,6 +198,12 @@ class LutBSm107Experts(_LutBExpertsBase):
         )
         if global_num_experts == -1:
             global_num_experts = num_experts
+        hooked = self._uses_post_gemm2_hook(num_tokens)
+        if hooked and apply_router_weight_on_input:
+            raise NotImplementedError(
+                "post_gemm2_hook needs unweighted GEMM2 rows; it does not support "
+                "router weights on the input."
+            )
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids,
@@ -233,13 +240,21 @@ class LutBSm107Experts(_LutBExpertsBase):
             a2_scales.view(cache2.size(0), -1),
             w2,
             cache3.view(-1, k),
-            None if apply_router_weight_on_input else topk_weights.float().contiguous(),
+            None
+            if hooked or apply_router_weight_on_input
+            else topk_weights.float().contiguous(),
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
             1,
         )
-        self.moe_sum(cache3, output, topk_ids, expert_map)
+        if hooked:
+            self._run_post_gemm2_hook(
+                route_major_moe_output(cache3, topk_weights, topk_ids, expert_map),
+                output,
+            )
+        else:
+            self.moe_sum(cache3, output, topk_ids, expert_map)
 
 
 def make_lut_b_moe_kernel(
