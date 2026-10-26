@@ -3,6 +3,7 @@
 """Unit tests for the sparse MLA backends and utilities."""
 
 import math
+import os
 import subprocess
 import sys
 from collections import deque
@@ -2573,6 +2574,7 @@ torch.accelerator.synchronize()
         capture_output=True,
         text=True,
         timeout=60,
+        env={**os.environ, "CUDA_ENABLE_COREDUMP_ON_EXCEPTION": "0"},
     )
     assert result.returncode != 0
     assert "unspecified launch failure" in result.stderr
