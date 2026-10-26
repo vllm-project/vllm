@@ -77,6 +77,7 @@ from vllm.config.cache import (
     KVOffloadingBackend,
     MambaCacheMode,
     MambaDType,
+    PrefixCacheEvictionPolicy,
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
@@ -601,6 +602,9 @@ class EngineArgs:
     )
     prefix_cache_retention_interval: int | None = get_field(
         CacheConfig, "prefix_cache_retention_interval"
+    )
+    prefix_cache_eviction_policy: PrefixCacheEvictionPolicy = (
+        CacheConfig.prefix_cache_eviction_policy
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool | None = None
@@ -1411,6 +1415,10 @@ class EngineArgs:
         cache_group.add_argument(
             "--prefix-cache-retention-interval",
             **cache_kwargs["prefix_cache_retention_interval"],
+        )
+        cache_group.add_argument(
+            "--prefix-cache-eviction-policy",
+            **cache_kwargs["prefix_cache_eviction_policy"],
         )
         cache_group.add_argument(
             "--kv-cache-dtype-skip-layers", **cache_kwargs["kv_cache_dtype_skip_layers"]
@@ -2315,6 +2323,7 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             prefix_cache_retention_interval=self.prefix_cache_retention_interval,
+            prefix_cache_eviction_policy=self.prefix_cache_eviction_policy,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             swa_bounded_replay=self.swa_bounded_replay,

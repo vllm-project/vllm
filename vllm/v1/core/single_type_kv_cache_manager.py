@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    make_block_hash_with_group_id,
     resolve_block_hashes,
     trim_null_head,
 )
@@ -1446,6 +1447,9 @@ class MambaManager(SingleTypeKVCacheManager):
         # Mamba checkpoints follow Eagle's global replay boundary.
         self.drop_eagle_checkpoint_block = False
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
+        # Used by prefix_cache_eviction_policy "mamba_aware_lru"; see
+        # ``demote_superseded_states``.
+        self._tip_hashes: set[BlockHashWithGroupId] = set()
         if self.mamba_cache_mode == "align":
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -1962,6 +1966,65 @@ class MambaManager(SingleTypeKVCacheManager):
                 if entry[0] != request_id
             ]
         return super().pop_blocks_for_free(request_id)
+
+    def demote_superseded_states(self, request: Request, hit_tokens: int) -> None:
+        """Move the states a finished request superseded to the eviction front.
+
+        A tip is the deepest state a finished request left cached on its
+        prompt. A later request that resumes from or passes a tip and caches
+        a deeper state supersedes it: a prompt that continues the conversation
+        now hits the deeper state, so the old tip is evicted before other
+        cached blocks. Cached states that were never a tip keep LRU order, and
+        so does the request's shared-prefix junction even when it is also the
+        request's deepest state: it serves every prompt sharing that prefix.
+        Only the request's own prefill range, down to its prefix-cache hit of
+        ``hit_tokens``, is scanned.
+        """
+        block_pool = self.block_pool
+        get_cached_block = block_pool.cached_block_hash_to_block.get_one_block
+        block_hashes = request.block_hashes
+        # Each hash chains over its whole prefix, so the state cached at a
+        # boundary is keyed by the hash ending there, whatever the block size.
+        hash_block_size = block_pool.hash_block_size
+        hit_idx = hit_tokens // hash_block_size - 1
+        alignment = self.cache_hit_alignment_tokens
+        junction_idx = (
+            request.shared_prefix_boundary // alignment * alignment // hash_block_size
+            - 1
+        )
+        tip: BlockHashWithGroupId | None = None
+        tip_idx = -1
+        superseded: list[BlockHashWithGroupId] = []
+        for idx in range(len(block_hashes) - 1, max(hit_idx, 0) - 1, -1):
+            key = make_block_hash_with_group_id(
+                block_hashes[idx], self.kv_cache_group_id
+            )
+            if get_cached_block(key) is None:
+                continue
+            if tip is None:
+                if idx == hit_idx:
+                    return  # Nothing cached past the hit.
+                tip, tip_idx = key, idx
+            elif idx != junction_idx and key in self._tip_hashes:
+                superseded.append(key)
+        if tip is None:
+            return
+        for key in superseded:
+            self._tip_hashes.discard(key)
+            block_pool.demote_cached_block(key)
+        if 0 <= junction_idx < len(block_hashes):
+            self._tip_hashes.discard(
+                make_block_hash_with_group_id(
+                    block_hashes[junction_idx], self.kv_cache_group_id
+                )
+            )
+        if tip_idx != junction_idx:
+            self._tip_hashes.add(tip)
+        if len(self._tip_hashes) > block_pool.num_gpu_blocks:
+            # Drop tips that LRU already evicted.
+            self._tip_hashes = {
+                key for key in self._tip_hashes if get_cached_block(key) is not None
+            }
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """Get the number of tokens whose mamba state are not needed anymore. Mamba only

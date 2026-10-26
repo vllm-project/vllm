@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
+from vllm.config.cache import PrefixCacheEvictionPolicy
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -146,6 +147,7 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
+        prefix_cache_eviction_policy: PrefixCacheEvictionPolicy = "lru",
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -193,6 +195,16 @@ class KVCacheManager:
             for manager in self.coordinator.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.shared_prefix_checkpoint = True
+        self.mamba_aware_eviction_managers: list[MambaManager] = []
+        if enable_caching and prefix_cache_eviction_policy == "mamba_aware_lru":
+            self.mamba_aware_eviction_managers = [
+                manager
+                for manager in self.coordinator.single_type_managers
+                if isinstance(manager, MambaManager)
+                and manager.mamba_cache_mode == "align"
+            ]
+        # Request ID -> local prefix-cache hit in tokens, kept until it finishes.
+        self._prefix_hit_tokens: dict[str, int] = {}
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.retained_hit_group_ids = tuple(
@@ -585,6 +597,12 @@ class KVCacheManager:
             # Cannot allocate new blocks
             return None
 
+        if self.mamba_aware_eviction_managers:
+            # Keep the first admission's hit; a resumed preemption hits deeper.
+            self._prefix_hit_tokens.setdefault(
+                request.request_id, num_local_computed_tokens
+            )
+
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
@@ -634,6 +652,8 @@ class KVCacheManager:
 
         """
         self.coordinator.free(request.request_id)
+        # After the free, so states only this request held can be demoted.
+        self._demote_superseded_states(request)
 
     def remove_skipped_blocks(
         self,
@@ -667,7 +687,17 @@ class KVCacheManager:
             The request's blocks in allocation order.
 
         """
-        return self.coordinator.pop_blocks_for_free(request.request_id)
+        blocks = self.coordinator.pop_blocks_for_free(request.request_id)
+        self._demote_superseded_states(request)
+        return blocks
+
+    def _demote_superseded_states(self, request: Request) -> None:
+        if not self.mamba_aware_eviction_managers or not request.is_finished():
+            return
+        hit_tokens = self._prefix_hit_tokens.pop(request.request_id, None)
+        if hit_tokens is not None:
+            for manager in self.mamba_aware_eviction_managers:
+                manager.demote_superseded_states(request, hit_tokens)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.

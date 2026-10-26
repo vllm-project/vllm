@@ -5987,6 +5987,72 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
     assert last_req_hit(retention=0, pin=True) == 2 * block_size
 
 
+def _mamba_aware_lru_manager(block_size: int, policy: str) -> KVCacheManager:
+    return make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 40, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+        prefix_cache_eviction_policy=policy,
+    )
+
+
+def _run_finished_request(
+    manager: KVCacheManager, request: Request, chunk_ends: list[int]
+) -> int:
+    """Prefill ``request`` in chunks ending at ``chunk_ends`` (as the align-mode
+    scheduler does), finish and free it; return its prefix-cache hit."""
+    blocks, hit, junction = manager.get_computed_blocks(request)
+    request.shared_prefix_boundary = junction
+    num_computed = hit
+    prefix_hit: tuple = (hit, blocks)
+    for end in chunk_ends:
+        manager.new_step_starts()
+        assert manager.allocate_slots(request, end - num_computed, *prefix_hit)
+        prefix_hit = ()
+        request.num_computed_tokens = num_computed = end
+    request.status = RequestStatus.FINISHED_STOPPED
+    manager.free(request)
+    return hit
+
+
+@pytest.mark.parametrize("policy", ["lru", "mamba_aware_lru"])
+def test_mamba_aware_lru_evicts_superseded_state_first(policy):
+    """A turn that resumes from the previous turn's Mamba state and caches a
+    deeper one supersedes it. mamba_aware_lru evicts it first, before even
+    never-used blocks; lru keeps it until they run out."""
+    block_size = 16
+    manager = _mamba_aware_lru_manager(block_size, policy)
+    turn1 = make_request("t1", [1] * 40, block_size, sha256)
+    assert _run_finished_request(manager, turn1, [32, 40]) == 0
+    turn2 = make_request("t2", [1] * 40 + [2] * 40, block_size, sha256)
+    assert _run_finished_request(manager, turn2, [64, 80]) == 32
+
+    manager.block_pool.get_new_blocks(1)
+    turn1_state = manager.block_pool.get_cached_block(turn1.block_hashes[1], [1])
+    assert (turn1_state is None) == (policy == "mamba_aware_lru")
+
+
+def test_mamba_aware_lru_keeps_shared_prefix_junction():
+    """The state cached at a shared-prefix junction serves every prompt with
+    that prefix, so it keeps LRU order even when it is also its writer's
+    deepest state and the writer's next turn passes it."""
+    block_size = 16
+    manager = _mamba_aware_lru_manager(block_size, "mamba_aware_lru")
+    shared = [7] * (2 * block_size)
+    primer = make_request("p", shared + [50] * 32, block_size, sha256)
+    assert _run_finished_request(manager, primer, [48, 64]) == 0
+    # The junction (32) is also the writer's replay boundary.
+    writer = make_request("w1", shared + [60] * 8, block_size, sha256)
+    assert _run_finished_request(manager, writer, [32, 40]) == 0
+    next_turn = make_request("w2", shared + [60] * 8 + [61] * 40, block_size, sha256)
+    assert _run_finished_request(manager, next_turn, [64, 80]) == 32
+
+    manager.block_pool.get_new_blocks(1)
+    assert manager.block_pool.get_cached_block(writer.block_hashes[1], [1])
+
+
 @pytest.mark.skip_global_cleanup
 def test_swa_reachable_block_mask_final_partial_segment():
     """Only a final SWA horizon makes its incomplete segment tail reachable."""

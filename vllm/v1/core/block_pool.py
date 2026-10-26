@@ -769,6 +769,21 @@ class BlockPool:
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
+    def demote_cached_block(self, block_hash: BlockHashWithGroupId) -> None:
+        """Move the free block cached under ``block_hash`` to the front of the
+        free queue, so that it is evicted before every other cached block.
+        Blocks in use are left alone.
+
+        Args:
+            block_hash: The hash (with group id) of the block to demote.
+
+        """
+        block = self.cached_block_hash_to_block.get_one_block(block_hash)
+        if block is None or block.ref_cnt > 0:
+            return
+        self.free_block_queue.remove(block)
+        self.free_block_queue.prepend_n([block])
+
     def is_block_writable(self, block: KVCacheBlock) -> bool:
         """Return whether a block can be mutated by its sole owner."""
         return not block.is_null and block.ref_cnt == 1 and block.block_hash is None

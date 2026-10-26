@@ -172,6 +172,7 @@ def is_known_kv_cache_dtype(name: str) -> bool:
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
+PrefixCacheEvictionPolicy = Literal["lru", "mamba_aware_lru"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
@@ -276,6 +277,14 @@ class CacheConfig:
     retain periodic checkpoints at the specified interval, which must be a
     multiple of the scheduler block size. ``None`` retains checkpoints densely.
     Applies only to sliding-window and Mamba cache groups."""
+    prefix_cache_eviction_policy: PrefixCacheEvictionPolicy = "lru"
+    """Eviction order of the prefix cache. ``"lru"`` evicts the least recently
+    used block first. ``"mamba_aware_lru"`` first evicts Mamba states that a
+    later request has superseded: when a request finishes, a cached state that
+    an earlier request left as its deepest one, and that this request resumed
+    from or passed, moves to the front of the eviction order. Shared-prefix
+    junction states keep LRU order. Only Mamba "align" prefix caching is
+    affected."""
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
     (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
@@ -408,6 +417,7 @@ class CacheConfig:
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
             "prefix_cache_retention_interval",
+            "prefix_cache_eviction_policy",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
             "enable_mamba_shared_prefix_checkpoint",
