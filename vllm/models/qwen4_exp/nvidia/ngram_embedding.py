@@ -17,12 +17,14 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
+from vllm.utils.math_utils import round_up
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
+    Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
@@ -35,6 +37,7 @@ __all__ = [
     "Qwen4ExpPLEEmbedding",
     "Qwen4ExpPLEEmbeddingMethod",
     "Qwen4ExpPLEFp8EmbeddingMethod",
+    "Qwen4ExpPLENvFp4EmbeddingMethod",
     "Qwen4ExpPLEPinnedHostEmbedding",
     "Qwen4ExpPLEUnquantizedEmbeddingMethod",
     "Qwen4ExpNGramEmbedding",
@@ -201,7 +204,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             persistent=True,
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
-        padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
+        padded_vocab_size = round_up(total_vocab_size, divisor)
         embedding_prefix = f"{prefix}.ngram_embedding"
         embedding_quant_method = Qwen4ExpPLEEmbeddingMethod.from_quant_config(
             quant_config,
@@ -241,9 +244,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
         weight = self.ngram_embedding.weight
         logger.info(
-            "Initialized PLE embedding %s: quantization_method=%s, "
+            "Initialized PLE embedding %s: "
+            "quantization_config=%s, quantization_method=%s, "
             "weight_dtype=%s, weight_device=%s, pinned=%s",
             embedding_prefix,
+            type(quant_config).__name__,
             type(embedding_quant_method).__name__,
             weight.dtype,
             weight.device,
@@ -420,6 +425,16 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         loaded: set[str] = set()
         regular_weights: list[tuple[str, torch.Tensor]] = []
         shard_prefix = "ngram_embedding.shard_"
+        embedding = self.ngram_embedding
+        method = getattr(embedding, "embedding_method", None)
+        nvfp4_method = (
+            method if isinstance(method, Qwen4ExpPLENvFp4EmbeddingMethod) else None
+        )
+        # NVFP4 tables split their block scales into shards like the rows.
+        shard_parameters = ("weight", "weight_scale") if nvfp4_method else ("weight",)
+        shard_size = (
+            embedding.org_vocab_size + self.split_ngram_parts - 1
+        ) // self.split_ngram_parts
 
         for name, loaded_weight in weights:
             leaf_name = name.rsplit(".", 1)[-1]
@@ -435,9 +450,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 buffer.copy_(loaded_weight.to(device=buffer.device, dtype=buffer.dtype))
                 loaded.add(name)
                 continue
-            if name.startswith(shard_prefix) and name.endswith(".weight"):
-                shard_text = name[len(shard_prefix) : -len(".weight")]
-                if not shard_text.isdigit():
+            if name.startswith(shard_prefix):
+                shard_text, _, suffix = name[len(shard_prefix) :].partition(".")
+                if not shard_text.isdigit() or suffix not in shard_parameters:
                     regular_weights.append((name, loaded_weight))
                     continue
                 shard_index = int(shard_text)
@@ -446,29 +461,40 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         f"PLE embedding shard index {shard_index} exceeds "
                         f"split_ngram_parts={self.split_ngram_parts}"
                     )
-                embedding = self.ngram_embedding
-                shard_size = (
-                    embedding.org_vocab_size + self.split_ngram_parts - 1
-                ) // self.split_ngram_parts
                 checkpoint_start = shard_index * shard_size
                 expected_rows = max(
                     0,
                     min(shard_size, embedding.org_vocab_size - checkpoint_start),
                 )
-                expected_shape = (expected_rows, embedding.embedding_dim)
+                parameter = getattr(embedding, suffix)
+                expected_shape = (expected_rows, parameter.shape[1])
                 if tuple(loaded_weight.shape) != expected_shape:
                     raise ValueError(
-                        f"Shape mismatch for PLE embedding shard {shard_index}: "
-                        f"expected {expected_shape}, got "
+                        f"Shape mismatch for PLE embedding shard {shard_index} "
+                        f"{suffix}: expected {expected_shape}, got "
                         f"{tuple(loaded_weight.shape)}"
                     )
-                embedding.weight.weight_loader(
-                    embedding.weight,
+                # A cast would silently reinterpret packed E2M1 bytes.
+                if nvfp4_method is not None and loaded_weight.dtype != parameter.dtype:
+                    raise ValueError(
+                        f"NVFP4 PLE shard {shard_index} {suffix} requires "
+                        f"{parameter.dtype}, got {loaded_weight.dtype}"
+                    )
+                parameter.weight_loader(
+                    parameter,
                     loaded_weight,
                     checkpoint_start=checkpoint_start,
                 )
-                loaded.add("ngram_embedding.weight")
+                loaded.add(f"ngram_embedding.{suffix}")
                 continue
+            if nvfp4_method is not None and name in (
+                "ngram_embedding.weight",
+                "ngram_embedding.weight_scale",
+            ):
+                raise ValueError(
+                    f"NVFP4 PLE tables must be stored as {shard_prefix}<i>.weight "
+                    f"and {shard_prefix}<i>.weight_scale shards, got unsharded {name}"
+                )
             regular_weights.append((name, loaded_weight))
 
         if regular_weights:

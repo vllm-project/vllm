@@ -4,6 +4,7 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from typing import Annotated, Literal
 
 import pytest
@@ -357,6 +358,22 @@ def test_jit_monitor_mode_arg(mode):
     assert engine_args.create_observability_config().jit_monitor_mode == mode
 
 
+def test_sleep_mode_backend_arg():
+    """A plugin-registered sleep-mode backend can be selected from the CLI."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    engine_args = EngineArgs.from_cli_args(
+        parser.parse_args(["--model", "facebook/opt-125m"])
+    )
+    assert engine_args.sleep_mode_backend == "cumem"
+
+    args = parser.parse_args(
+        ["--model", "facebook/opt-125m", "--sleep-mode-backend", "my_backend"]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.sleep_mode_backend == "my_backend"
+    assert engine_args.create_model_config().sleep_mode_backend == "my_backend"
+
+
 def test_hf_token_get_kwargs():
     kwargs = get_kwargs(ModelConfig)["hf_token"]
 
@@ -481,7 +498,7 @@ def test_compilation_config():
 
 
 def test_trust_request_mm_kwargs_cli():
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    from vllm.entrypoints.common.cli_args import FrontendArgs
 
     parser = FrontendArgs.add_cli_args(FlexibleArgumentParser())
 
@@ -805,6 +822,27 @@ def test_ir_op_priority():
         ).create_engine_config()
 
 
+def test_ir_op_priority_deprecation_warning(caplog_vllm, disable_log_dedup):
+    """Setting ir_op_priority warns users because vLLM IR is being removed."""
+    from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
+
+    msg = "ir_op_priority (--ir-op-priority) is deprecated"
+
+    # Platform defaults fill ir_op_priority; copying the config must not warn.
+    cfg = EngineArgs().create_engine_config()
+    replace(cfg.kernel_config, moe_backend="triton")
+    assert msg not in caplog_vllm.text
+
+    ir_op_priority = IrOpPriorityConfig(rms_norm=["vllm_c"])
+    EngineArgs(ir_op_priority=ir_op_priority).create_engine_config()
+    assert msg in caplog_vllm.text
+
+    caplog_vllm.clear()
+    kernel_config = KernelConfig(ir_op_priority=ir_op_priority)
+    EngineArgs(kernel_config=kernel_config).create_engine_config()
+    assert msg in caplog_vllm.text
+
+
 @pytest.mark.parametrize(
     ("input_json", "expected_json"),
     [
@@ -1054,3 +1092,34 @@ class TestDpDeviceIdSharding:
             get_physical_gpu_ids_for_local_dp_rank(
                 evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
             )
+
+
+@pytest.mark.parametrize(
+    ("name", "mem_gib", "capability", "expected_api_tokens", "expected_api_seqs"),
+    [
+        ("nvidia gb10", 121, (12, 1), 2048, 256),
+        ("nvidia h100", 80, (9, 0), 8192, 1024),
+        ("nvidia rtx pro 6000 blackwell", 96, (12, 0), 8192, 1024),
+    ],
+)
+def test_get_batch_defaults_gb10_stays_on_small_tier(
+    monkeypatch, name, mem_gib, capability, expected_api_tokens, expected_api_seqs
+):
+    """GB10 reports >= 70 GiB (unified memory) but not the compute of a
+    large discrete GPU, so it keeps the small-tier defaults."""
+    from types import SimpleNamespace
+
+    from vllm.usage.usage_lib import UsageContext
+    from vllm.utils.mem_constants import GiB_bytes
+
+    stub = SimpleNamespace(
+        get_device_total_memory=lambda: mem_gib * GiB_bytes,
+        get_device_name=lambda: name,
+        is_device_capability=lambda cap: cap == capability,
+        is_tpu=lambda: False,
+        is_cpu=lambda: False,
+    )
+    monkeypatch.setattr("vllm.engine.arg_utils.current_platform", stub)
+    tokens, seqs = EngineArgs.get_batch_defaults(1)
+    assert tokens[UsageContext.OPENAI_API_SERVER] == expected_api_tokens
+    assert seqs[UsageContext.OPENAI_API_SERVER] == expected_api_seqs

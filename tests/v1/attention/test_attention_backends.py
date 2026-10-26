@@ -29,20 +29,25 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
-    is_quantized_kv_cache,
     is_torch_equal_or_newer,
     nvfp4_kv_cache_full_dim,
     set_random_seed,
 )
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
+    AttentionImpl,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
     max_decode_query_len,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout, KVQuantMode
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    KVQuantMode,
+    is_quantized_kv_cache,
+)
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN,
@@ -310,6 +315,8 @@ def run_attention_backend(
     backend = _actual_backend(backend)
 
     builder_cls, impl_cls = try_get_attention_backend(backend)
+    # Every dense backend's impl derives from AttentionImpl.
+    assert issubclass(impl_cls, AttentionImpl)
 
     # Mock flashinfer's get_per_layer_parameters if needed
     if backend == AttentionBackendEnum.FLASHINFER:
@@ -343,6 +350,11 @@ def run_attention_backend(
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
         if backend == AttentionBackendEnum.FLEX_ATTENTION:
+            from vllm.v1.attention.backends.flex_attention import (
+                FlexAttentionMetadataBuilder,
+            )
+
+            assert isinstance(builder, FlexAttentionMetadataBuilder)
             builder.direct_build = use_direct_block_mask
         attn_metadata = builder.build(
             common_prefix_len=0,
@@ -383,7 +395,8 @@ def run_attention_backend(
     # NOTE: The query, key, and value are already shaped correctly
     # in the calling test function.
     if not try_backend_includes_kv_cache_update(backend):
-        impl.do_kv_cache_update(
+        # only impls whose backend sets forward_includes_kv_cache_update=False define it
+        impl.do_kv_cache_update(  # type: ignore[attr-defined]
             mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
         )
     if use_cuda_graph:
@@ -487,8 +500,8 @@ def _test_backend_correctness(
     if max_num_batched_tokens is not None:
         vllm_config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
     if num_speculative_tokens > 0:
-        vllm_config.speculative_config = SimpleNamespace(
-            num_speculative_tokens=num_speculative_tokens
+        vllm_config.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=num_speculative_tokens
         )
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
     device = torch.device(f"{DEVICE_TYPE}:0")
@@ -763,7 +776,7 @@ def test_flashinfer_cross_layer_layout(
 
     _test_backend_correctness(
         batch_spec=BATCH_SPECS[batch_spec_name],
-        model="meta-llama/Meta-Llama-3-8B",
+        model="Qwen/Qwen3-0.6B",
         backend_to_test=[AttentionBackendEnum.FLASHINFER],
         mask_mod=causal_mask_mod,
         kv_cache_dtype=kv_cache_dtype,
@@ -807,7 +820,7 @@ def test_flashinfer_declares_only_layouts_it_can_address(monkeypatch, capability
         "single_prefill",
     ],
 )
-@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 def test_causal_backend_correctness(
@@ -1213,6 +1226,7 @@ def test_flashinfer_varlen_cudagraph_capability(
         use_v2_model_runner=True,
     )
     monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda *_, **__: True)
+    monkeypatch.setattr(fi.current_platform, "has_device_capability", lambda _: True)
     monkeypatch.setattr(
         fi.FlashInferMetadataBuilder,
         "_get_flashinfer_trtllm_api_decode_kernel",
@@ -1441,6 +1455,7 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
         builder = fi.FlashInferMetadataBuilder(spec, ["layer"], config, device)
         metadata = builder.build(0, common)
         assert metadata.num_prefills == 0
+        assert isinstance(metadata.decode, fi.FlashInferTrtllmAPIDecode)
         assert metadata.decode.q_len_per_req == 8
         impl = fi.FlashInferImpl(
             num_heads=num_heads,
@@ -1527,6 +1542,7 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
         common.query_start_loc_cpu[6:] = 40
 
         def mixed_forward():
+            assert common.seq_lens_cpu_upper_bound is not None
             with set_current_vllm_config(config):
                 metadata = builder.build(
                     0,
@@ -1541,6 +1557,7 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
                 )
             assert metadata.num_decodes == 4
             assert metadata.num_prefills == 1
+            assert isinstance(metadata.decode, fi.FlashInferTrtllmAPIDecode)
             assert metadata.decode.q_len_per_req == 8
             forward(metadata)
 
@@ -1603,7 +1620,7 @@ def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
 
     _test_backend_correctness(
         BATCH_SPECS["small_prefill"],
-        "meta-llama/Meta-Llama-3-8B",
+        "Qwen/Qwen3-0.6B",
         [AttentionBackendEnum.FLASHINFER],
         causal_mask_mod,
         use_sinks=True,
@@ -1650,7 +1667,7 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
 
     batch_spec = BATCH_SPECS["small_decode"]
     vllm_config = create_vllm_config(
-        model_name="meta-llama/Meta-Llama-3-8B",
+        model_name="Qwen/Qwen3-0.6B",
         max_model_len=max(batch_spec.seq_lens),
         block_size=16,
     )
@@ -1712,7 +1729,7 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
 
     _test_backend_correctness(
         batch_spec,
-        "meta-llama/Meta-Llama-3-8B",
+        "Qwen/Qwen3-0.6B",
         [AttentionBackendEnum.FLASHINFER],
         causal_mask_mod,
     )
@@ -1720,22 +1737,27 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
 
 @pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
-    or not current_platform.is_device_capability_family(120),
-    reason="NVFP4 XQA decode requires SM12x.",
+    or not any(current_platform.is_device_capability_family(f) for f in (80, 120)),
+    reason="FlashInfer decodes an NVFP4 cache with XQA on SM12x and fa2 on SM8x.",
 )
 @pytest.mark.parametrize("use_cuda_graph", [False, True])
 @pytest.mark.parametrize("q_len", [1, 4])
-def test_flashinfer_xqa_nvfp4_decode_correctness(
+def test_flashinfer_nvfp4_decode_correctness(
     default_vllm_config, q_len, use_cuda_graph
 ):
     """Single-token and spec-decode queries over an NVFP4 cache decode with
-    XQA, eager and replayed, and match the fa2 prefill that wrote the cache."""
+    XQA on SM12x and fa2 on SM8x, eager and replayed, and match the fa2
+    prefill that wrote the cache."""
     import unittest.mock
 
     from vllm.v1.attention.backends import flashinfer as fi
 
     seq_lens, bs, d = [40, 300, 1027], 16, 256
-    config = create_vllm_config(max_model_len=max(seq_lens), block_size=bs)
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        max_model_len=max(seq_lens),
+        block_size=bs,
+    )
     # GQA 6 at head_dim 256, as Qwen3.8-27B at TP=2.
     config.model_config.model_arch_config = replace(
         config.model_config.model_arch_config,
@@ -1802,13 +1824,44 @@ def test_flashinfer_xqa_nvfp4_decode_correctness(
     # The full prefill writes every token through the NVFP4 writer; its fa2
     # output for the last q_len tokens of each request is the reference.
     _, reference = run(seq_lens)
-    xqa_fn = fi.flashinfer_xqa_batch_decode_with_kv_cache
-    with unittest.mock.patch.object(
-        fi, "flashinfer_xqa_batch_decode_with_kv_cache", wraps=xqa_fn
-    ) as xqa:
+    xqa = current_platform.is_device_capability_family(120)
+    name = "flashinfer_xqa_batch_decode_with_kv_cache" if xqa else "fast_plan_decode"
+    with unittest.mock.patch.object(fi, name, wraps=getattr(fi, name)) as decode:
         rows, output = run([q_len] * len(seq_lens), use_cuda_graph)
-    assert xqa.called
+    assert decode.called
+    assert xqa or decode.call_args.kwargs["q_len_per_req"] == q_len
     torch.testing.assert_close(output, reference[rows], atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
+    or current_platform.has_device_capability(90),
+    reason="FlashInfer fa2 spec decode runs before SM90.",
+)
+@pytest.mark.parametrize("use_cuda_graph", [False, True])
+def test_flashinfer_fa2_spec_decode_correctness(default_vllm_config, use_cuda_graph):
+    """Uniform spec-decode queries take fa2 decode and match SDPA."""
+    import unittest.mock
+
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    def causal_mask_mod(b, h, q_idx, kv_idx, *, context_len):
+        return (q_idx + context_len) >= kv_idx
+
+    with unittest.mock.patch.object(
+        flashinfer_backend,
+        "fast_plan_decode",
+        wraps=flashinfer_backend.fast_plan_decode,
+    ) as plan:
+        _test_backend_correctness(
+            BatchSpec(seq_lens=[32, 40, 1024], query_lens=[4, 4, 4]),
+            "meta-llama/Meta-Llama-3-8B",
+            [AttentionBackendEnum.FLASHINFER],
+            causal_mask_mod,
+            use_cuda_graph=use_cuda_graph,
+            num_speculative_tokens=3,
+        )
+    assert plan.call_args.kwargs["q_len_per_req"] == 4
 
 
 if current_platform.is_rocm():
@@ -2011,7 +2064,7 @@ if current_platform.is_rocm():
         "mixed_small",
     ],
 )
-@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B"])
 def test_non_causal_backend_correctness(
     default_vllm_config,
     batch_spec_name: str,

@@ -42,7 +42,6 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
 )
@@ -587,7 +586,6 @@ class GraniteMoeHybridForCausalLM(
     SupportsPP,
     IsHybrid,
     SupportsQuant,
-    SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
