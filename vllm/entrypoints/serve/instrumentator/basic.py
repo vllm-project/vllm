@@ -28,7 +28,9 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.get("/load")
-async def get_server_load_metrics(request: Request):
+async def get_server_load_metrics(
+    request: Request, include_inflight: bool = False, inflight_limit: int = 100
+):
     # This endpoint returns the current server load metrics.
     # It tracks requests utilizing the GPU from the following routes:
     # - /v1/responses
@@ -47,7 +49,12 @@ async def get_server_load_metrics(request: Request):
     # - /rerank
     # - /v1/rerank
     # - /v2/rerank
-    return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
+    content = {"server_load": request.app.state.server_load_metrics}
+    if include_inflight:
+        content["inflight"] = await engine_client(
+            request
+        ).get_inflight_queue_diagnostics(inflight_limit)
+    return JSONResponse(content=content)
 
 
 @router.get("/version")

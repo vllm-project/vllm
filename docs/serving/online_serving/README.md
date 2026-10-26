@@ -91,6 +91,32 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - `/v1/models` - List available models
 - `/health` - Health check
 
+#### In-flight queue diagnostics
+
+The Python server's `GET /load` returns only `server_load` by default. To inspect
+in-flight requests, opt in to a scheduler snapshot:
+
+```bash
+curl 'http://localhost:8000/load?include_inflight=true&inflight_limit=100'
+```
+
+The additional `inflight` list contains `data_parallel_rank`, `has_pending_work`,
+and `queues` for each queried engine. Queues are `running`, `waiting`,
+`kv_holding_waiting`, and `finished_pending_cleanup`. Each queue includes its
+total `num_requests` and a bounded `requests` list with `request_id`, `status`,
+`age_seconds`, `prompt_tokens`, and `output_tokens`; prompt/output contents are
+not returned. `has_pending_work` also accounts for native scheduler cleanup and
+connector work, so empty request lists do not necessarily mean the engine is idle.
+
+`inflight_limit` defaults to 100 and is clamped to 0–1000 entries **per engine**,
+shared across its queues in the order above. Asynchronous internal data-parallel
+load balancing queries all managed engines. Synchronous clients query each managed
+engine; ordinary offline clients manage one global DP rank. The entry cap does
+not bound the cleanup-count scan or RPC latency:
+a stalled engine can prevent this request from completing. Restrict access to
+these request identifiers and operational details using the
+[deployment security guidance](../../usage/security.md).
+
 ### Metrics APIs
 
 For further details on metrics, please refer to [this page](../../design/metrics.md).
