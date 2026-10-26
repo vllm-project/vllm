@@ -17,14 +17,10 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import (
-    CPULoadStoreSpec,
-    CPUOffloadingMetrics,
-)
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
 
 def make_req_context(
@@ -239,13 +235,16 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
 
 
-def test_cpu_manager_fills_the_config_info_keys_of_the_spec():
-    """A name the declaration misses becomes a dropped label at runtime."""
+def test_cpu_manager_reports_no_config_info_without_info():
+    """A caller that passes no info keeps the empty default.
+
+    The scheduler still sends an info payload, so the metric appears with the
+    engine labels alone. Tests in tests/v1/kv_offload/test_factory.py cover the
+    published labels, because a real spec supplies the info.
+    """
     manager = make_cpu_manager(num_chunks=4)
 
-    (info,) = manager.config_info()
-    assert tuple(info) == CPUOffloadingSpec.config_info_keys({})
-    assert info["cpu_num_chunks"] == 4
+    assert manager.config_info() == [{}]
 
 
 def test_cpu_manager_reports_cache_usage_gauge():
@@ -488,7 +487,7 @@ def test_cpu_manager():
     verify_events(
         cpu_manager.take_events(),
         expected_stores=({3, 4, 5}, {6, 7, 8}),
-        expected_evictions=({4, 5, 3}, {8}),
+        expected_evictions=({4, 5, 3}, {8}, {9}),
     )
 
 
@@ -1034,6 +1033,27 @@ class TestARCPolicy:
         # verify events
         events = list(cpu_manager.take_events())
         assert len(events) > 0  # should have store and eviction events
+
+
+def test_take_events_prunes_retried_cleanup_and_drains_once():
+    """Failed-write cleanup must not outlive a retry that re-owns the key, and a
+    partially consumed drain must not replay it."""
+    manager = make_cpu_manager(num_chunks=4, cache_policy="lru", enable_events=True)
+
+    assert manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
+    # A retry re-allocates key 1 before the cleanup is drained.
+    assert manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX) is not None
+    assert manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+
+    drain = iter(manager.take_events())
+    cleanup = next(drain)
+    assert cleanup.removed and cleanup.metadata_only
+    assert cleanup.keys == to_keys([2])
+    # Stopping early must not leave the batch queued for the next drain.
+    assert list(manager.take_events()) == []
+    assert [event.keys for event in drain] == [to_keys([3])]
 
 
 def test_filter_reused_manager():
