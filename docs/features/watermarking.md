@@ -35,9 +35,15 @@ same `watermarking: false` request field. The Rust token API accepts it in
 the optional `watermarking` field. Omitting the field keeps watermarking enabled
 when the engine has a watermark configuration.
 
-Deployments that require watermarking must restrict this field to trusted
-callers, or strip and validate it at the ingress boundary, so untrusted clients
-cannot opt out.
+Set `enforce` to ignore the per-request `watermarking` field:
+
+```bash
+vllm serve MODEL --watermark-config '{"key":42,"enforce":true}'
+```
+
+This prevents explicit opt-out and defaults to false for compatibility.
+It does not change decoding limitations: greedy decoding remains unwatermarked,
+and watermark detection is not guaranteed for every output.
 
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to
