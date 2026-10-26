@@ -331,6 +331,11 @@ class Scheduler(SchedulerInterface):
                     "acceptance rates."
                 )
 
+        self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
+        if self.num_hash_lookahead_tokens:
+            # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
+            self.use_eagle_block_drop = False
+
         # Create the KV cache manager.
         if hash_block_size is None:
             hash_block_size = block_size
@@ -341,6 +346,7 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle_block_drop,
+            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             num_prefill_lookahead=self.num_prefill_lookahead,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -461,7 +467,7 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector(self.hash_block_size)
+            AuxOutputSchedulerConnector(self.kv_cache_manager, self.connector)
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -561,6 +567,7 @@ class Scheduler(SchedulerInterface):
             request.num_tokens,
             block_size,
             self.use_eagle_block_drop,
+            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
         )
 
         end = start + num_new_tokens
@@ -568,6 +575,7 @@ class Scheduler(SchedulerInterface):
             prefill_end,
             ckpt_block_size,
             drop_eagle_block=self.use_eagle_block_drop,
+            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
         )
         use_internal_checkpoint = (
             self.mamba_has_prefill_checkpoint_blocks
@@ -603,6 +611,7 @@ class Scheduler(SchedulerInterface):
                 request.num_prompt_tokens,
                 self.hash_block_size,
                 self.use_eagle_block_drop,
+                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             )
             if self.mamba_partial_cache_hit and not use_internal_checkpoint
             else 0
@@ -640,14 +649,16 @@ class Scheduler(SchedulerInterface):
         return max(end - start, 0)
 
     def _get_local_prefix_cache_hit(
-        self, request: Request
+        self, request: Request, max_cache_hit_length: int | None = None
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         connector = self.connector
         if connector is not None and connector.supports_divergent_local_hybrid_hits:
-            return self.kv_cache_manager.get_computed_blocks_for_connector(request)
+            return self.kv_cache_manager.get_computed_blocks_for_connector(
+                request, max_cache_hit_length
+            )
 
         blocks, num_local, shared_prefix_boundary = (
-            self.kv_cache_manager.get_computed_blocks(request)
+            self.kv_cache_manager.get_computed_blocks(request, max_cache_hit_length)
         )
         return blocks, num_local, shared_prefix_boundary, False
 
@@ -956,6 +967,16 @@ class Scheduler(SchedulerInterface):
                         break
 
             if new_blocks is None:
+                if (
+                    self.policy == SchedulingPolicy.PRIORITY
+                    and request.status == RequestStatus.PREEMPTED
+                ):
+                    # The request was the lowest-priority running request and
+                    # preempted itself. The requests after it have higher
+                    # priority and may still fit (it just freed its blocks);
+                    # it was removed from `self.running`, so `req_index`
+                    # already points at the next one.
+                    continue
                 # Cannot schedule this request.
                 break
 
@@ -1074,13 +1095,23 @@ class Scheduler(SchedulerInterface):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    if request.resumable and self.num_hash_lookahead_tokens:
+                        # Resident KV can retain a discarded streaming token's
+                        # hash. Recomputing KV must use the current token sequence.
+                        request.block_hashes.clear()
+                        request.update_block_hashes()
                     did_prefix_cache_lookup = True
+                    max_cache_hit_length = (
+                        self.aux_output_connector.max_cache_hit(request)
+                        if self.aux_output_connector is not None
+                        else None
+                    )
                     (
                         new_computed_blocks,
                         num_new_local_computed_tokens,
                         request.shared_prefix_boundary,
                         hit_diverged,
-                    ) = self._get_local_prefix_cache_hit(request)
+                    ) = self._get_local_prefix_cache_hit(request, max_cache_hit_length)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -1142,6 +1173,16 @@ class Scheduler(SchedulerInterface):
                         else:
                             num_external_computed_tokens = ext_tokens
 
+                        if self.aux_output_connector is not None:
+                            num_external_computed_tokens = (
+                                self.aux_output_connector.cap_external_hit(
+                                    request,
+                                    num_new_local_computed_tokens,
+                                    num_external_computed_tokens,
+                                )
+                            )
+                            load_kv_async &= num_external_computed_tokens > 0
+
                         if hit_diverged and num_external_computed_tokens == 0:
                             # No external tokens back the deeper local hit, so its
                             # resume boundary would have no valid Mamba state.
@@ -1150,7 +1191,9 @@ class Scheduler(SchedulerInterface):
                                 new_computed_blocks,
                                 num_new_local_computed_tokens,
                                 request.shared_prefix_boundary,
-                            ) = self.kv_cache_manager.get_computed_blocks(request)
+                            ) = self.kv_cache_manager.get_computed_blocks(
+                                request, max_cache_hit_length
+                            )
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
@@ -1464,6 +1507,10 @@ class Scheduler(SchedulerInterface):
                     # _update_waiting_for_remote_kv will then cache
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
+                    if self.aux_output_connector is not None:
+                        self.aux_output_connector.request_loading(
+                            request, num_computed_tokens
+                        )
                     self._inflight_prefills.add(request)
                     self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)
                     skip_request(request_queue)
@@ -2320,9 +2367,19 @@ class Scheduler(SchedulerInterface):
 
             # Check for stop and update request status.
             if new_token_ids:
+                has_output_placeholders = request.num_output_placeholders > 0
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
                 )
+                if (
+                    not output_is_stale
+                    and status_before_stop == RequestStatus.RUNNING
+                    and (has_output_placeholders or self.num_spec_tokens > 0)
+                ):
+                    self.kv_cache_manager.cache_blocks(
+                        request,
+                        request.num_computed_tokens - request.num_in_flight_tokens,
+                    )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
@@ -2654,6 +2711,7 @@ class Scheduler(SchedulerInterface):
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
+        num_new_tokens = len(new_token_ids)
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
@@ -2671,6 +2729,11 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens -= len(new_token_ids) - num_new
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
+
+        if not is_stale and request.num_output_placeholders > 0:
+            # Resolve all returned tokens, including those trimmed at a stop.
+            request.num_output_placeholders -= num_new_tokens
+            assert request.num_output_placeholders >= 0
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:
