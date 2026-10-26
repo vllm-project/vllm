@@ -2217,66 +2217,108 @@ class MoRIIOConnectorWorker:
         path = make_zmq_path("tcp", host, port + port_offset)
         logger.debug("handshake Querying metadata on path: %s", path)
 
-        # Send query for the request.
-        with zmq_ctx(zmq.DEALER, path) as sock:
-            logger.debug("prepare send msg INSTAZNCE: %s", path)
-            sock.send(MoRIIOConstants.GET_META_MSG)
-            received_frame = sock.recv_multipart()
-            if len(received_frame) != 2 or received_frame[0] != b"":
-                raise HandshakeError(f"Unexpected frame! {received_frame = }")
+        # Send query with receive timeout and retry with backoff (Gap 3).
+        max_retries = MoRIIOConstants.HANDSHAKE_MAX_RETRIES
+        recv_timeout_ms = MoRIIOConstants.HANDSHAKE_RECV_TIMEOUT_MS
+        backoff = MoRIIOConstants.HANDSHAKE_BACKOFF_BASE
+        last_err: Exception | None = None
 
-            metadata_bytes = received_frame[1]
-            decoder = msgspec.msgpack.Decoder(MoRIIOAgentMetadata)
-            metadata = decoder.decode(metadata_bytes)
-            got_metadata_time = time.perf_counter()
-            logger.info(
-                "MoRIIO handshake: get metadata took: %s",
-                got_metadata_time - start_time,
-            )
-
-            self.moriio_wrapper.remote_engine_ip = host
-            remote_agent_name = self.moriio_wrapper.register_remote_engine(
-                metadata.agent_metadata
-            )
-
-            logger.debug(
-                "MoRIIO handshake: registered"
-                "remote agent %s for engine ID %s, path = %s",
-                remote_agent_name,
-                expected_engine_id,
-                path,
-            )
-
-            if len(self.local_kv_cache_metadata) > 0:
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                sleep_s = backoff * (2 ** (attempt - 1))
                 logger.warning(
-                    "len(self.local_kv_cache_metadata) = %s,"
-                    "maybe you didnt clear this buffer correctly",
-                    len(self.local_kv_cache_metadata),
+                    "Handshake attempt %d/%d to %s (backoff %.1fs)",
+                    attempt + 1,
+                    max_retries + 1,
+                    path,
+                    sleep_s,
                 )
-                self.local_kv_cache_metadata = []
-            if len(self.remote_kv_cache_metadata) > 0:
+                time.sleep(sleep_s)
+
+            try:
+                with zmq_ctx(zmq.DEALER, path) as sock:
+                    sock.setsockopt(zmq.RCVTIMEO, recv_timeout_ms)
+                    sock.setsockopt(zmq.SNDTIMEO, recv_timeout_ms)
+                    sock.send(MoRIIOConstants.GET_META_MSG)
+                    received_frame = sock.recv_multipart()
+                    if len(received_frame) != 2 or received_frame[0] != b"":
+                        raise HandshakeError(
+                            f"Unexpected frame! {received_frame = }"
+                        )
+
+                    metadata_bytes = received_frame[1]
+                    decoder = msgspec.msgpack.Decoder(MoRIIOAgentMetadata)
+                    metadata = decoder.decode(metadata_bytes)
+                    got_metadata_time = time.perf_counter()
+                    logger.info(
+                        "MoRIIO handshake: get metadata took: %s",
+                        got_metadata_time - start_time,
+                    )
+
+                    self.moriio_wrapper.remote_engine_ip = host
+                    remote_agent_name = (
+                        self.moriio_wrapper.register_remote_engine(
+                            metadata.agent_metadata
+                        )
+                    )
+
+                    logger.debug(
+                        "MoRIIO handshake: registered"
+                        "remote agent %s for engine ID %s, path = %s",
+                        remote_agent_name,
+                        expected_engine_id,
+                        path,
+                    )
+
+                    if len(self.local_kv_cache_metadata) > 0:
+                        logger.warning(
+                            "len(self.local_kv_cache_metadata) = %s,"
+                            "maybe you didnt clear this buffer correctly",
+                            len(self.local_kv_cache_metadata),
+                        )
+                        self.local_kv_cache_metadata = []
+                    if len(self.remote_kv_cache_metadata) > 0:
+                        logger.warning(
+                            "len(self.remote_kv_cache_metadata) = %s,"
+                            "maybe you didnt clear this buffer correctly",
+                            len(self.remote_kv_cache_metadata),
+                        )
+                        self.remote_kv_cache_metadata = []
+
+                    received_frame = sock.recv_multipart()
+                    if len(received_frame) != 2 or received_frame[0] != b"":
+                        raise HandshakeError(
+                            f"unexpected frame! {received_frame = }"
+                        )
+                    buf = received_frame[1]
+                    self.layer_name_to_remote_kv_cache_metadata[
+                        expected_engine_id
+                    ] = msgpack.loads(buf)
+                    self.remote_moriio_metadata[expected_engine_id] = metadata
+                    setup_agent_time = time.perf_counter()
+                    logger.debug(
+                        "MoRIIO handshake: add agent took: %s",
+                        setup_agent_time - got_metadata_time,
+                    )
+
+                return {remote_agent_name}
+
+            except zmq.Again as e:
+                last_err = e
                 logger.warning(
-                    "len(self.remote_kv_cache_metadata) = %s,"
-                    "maybe you didnt clear this buffer correctly",
-                    len(self.remote_kv_cache_metadata),
+                    "Handshake recv timed out after %dms on attempt %d/%d "
+                    "to %s",
+                    recv_timeout_ms,
+                    attempt + 1,
+                    max_retries + 1,
+                    path,
                 )
-                self.remote_kv_cache_metadata = []
+                continue
 
-            received_frame = sock.recv_multipart()
-            if len(received_frame) != 2 or received_frame[0] != b"":
-                raise HandshakeError(f"unexpected frame! {received_frame = }")
-            buf = received_frame[1]
-            self.layer_name_to_remote_kv_cache_metadata[expected_engine_id] = (
-                msgpack.loads(buf)
-            )
-            self.remote_moriio_metadata[expected_engine_id] = metadata
-            setup_agent_time = time.perf_counter()
-            logger.debug(
-                "MoRIIO handshake: add agent took: %s",
-                setup_agent_time - got_metadata_time,
-            )
-
-        return {remote_agent_name}
+        raise HandshakeError(
+            f"Handshake to {path} failed after {max_retries + 1} attempts "
+            f"(recv timeout {recv_timeout_ms}ms): {last_err}"
+        )
 
     def _remote_tp_rank(self, remote_tp_size: int) -> int:
         # 0/unknown remote TP == homogeneous (avoids collapsing all ranks to 0).
