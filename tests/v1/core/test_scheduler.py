@@ -16,6 +16,7 @@ from vllm.config import (
     KVTransferConfig,
     LoRAConfig,
     ModelConfig,
+    ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
@@ -598,6 +599,99 @@ def test_async_output_does_not_cache_inflight_tokens(num_spec_tokens):
         block_hasher=hasher,
     )
     assert scheduler.kv_cache_manager.get_computed_blocks(probe)[1] == 2
+
+
+@pytest.mark.parametrize("recovery", ["resident", "preempt", "reset"])
+def test_streaming_lookahead_hashes_follow_recomputed_kv(recovery):
+    """Recomputation uses the continuation's tokens without re-keying resident KV."""
+    block_size = 4
+    model_config = ModelConfig(
+        model="Qwen/Qwen3-Next-80B-A3B-Instruct",
+        max_model_len=128,
+        skip_tokenizer_init=True,
+    )
+    scheduler = create_scheduler(
+        model=model_config.model,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        enable_prefix_caching=True,
+        block_size=block_size,
+        speculative_config=SpeculativeConfig(
+            method="mtp",
+            num_speculative_tokens=1,
+            target_model_config=model_config,
+            target_parallel_config=ParallelConfig(),
+        ),
+    )
+    assert scheduler.num_hash_lookahead_tokens == 1
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(block_size, sha256, 1)
+
+    def request(request_id, tokens, max_tokens=16, resumable=False):
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=list(tokens),
+            sampling_params=SamplingParams(max_tokens=max_tokens, ignore_eos=True),
+            pooling_params=None,
+            block_hasher=hasher,
+            resumable=resumable,
+        )
+
+    session = request("session", [1, 2, 3], max_tokens=2, resumable=True)
+    scheduler.add_request(session)
+
+    def step(token):
+        output = scheduler.schedule()
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[session.request_id],
+                req_id_to_index={session.request_id: 0},
+                sampled_token_ids=[[token]],
+            ),
+        )
+
+    step(4)
+    step(5)
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    manager = scheduler.kv_cache_manager
+    old_block = manager.get_blocks(session.request_id).blocks[0][0]
+    old_key = old_block.block_hash
+    old_hash = session.block_hashes[0]
+    assert old_key is not None
+    old_probe = request("old", [1, 2, 3, 4, 5, 100])
+    assert manager.get_computed_blocks(old_probe)[1] == block_size
+
+    scheduler.add_request(request("session", [42, 43, 44], resumable=True))
+    assert list(session.all_token_ids) == [1, 2, 3, 4, 42, 43, 44]
+    step(99)
+    assert session.block_hashes[0] == old_hash
+    assert old_block.block_hash == old_key
+    current = request("current", session.all_token_ids)
+    assert current.block_hashes[0] != old_hash
+    assert manager.get_computed_blocks(current)[1] == 0
+    if recovery == "resident":
+        return
+
+    if recovery == "reset":
+        assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    else:
+        scheduler.running.remove(session)
+        scheduler._preempt_request(session, 0.0)
+    assert session.num_computed_tokens == 0
+    output = scheduler.schedule()
+    assert session.block_hashes == current.block_hashes
+    assert output.num_scheduled_tokens[session.request_id] == session.num_tokens
+    new_blocks, hit_tokens, _ = manager.get_computed_blocks(current)
+    assert hit_tokens == block_size
+    old_blocks, old_hit_tokens, _ = manager.get_computed_blocks(old_probe)
+    if recovery == "reset":
+        assert old_hit_tokens == 0
+    else:
+        assert old_hit_tokens == block_size
+        assert old_blocks.blocks[0][0] is old_block
+        assert new_blocks.blocks[0][0] is not old_block
+        assert old_block.block_hash == old_key
 
 
 def test_schedule_multimodal_requests():
