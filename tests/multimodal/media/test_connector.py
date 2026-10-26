@@ -35,6 +35,36 @@ TEST_VIDEO_URLS = [
 ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modality", ["video", "audio"])
+@pytest.mark.parametrize("source_type", ["data", "http", "file"])
+async def test_fetch_media_reference_script_rejected(
+    tmp_path, monkeypatch, modality, source_type
+):
+    """Every connector ingress must reject secondary-resource descriptions."""
+    data = b"ffconcat version 1.0\nfile 'private.avi'\n"
+    connector = MediaConnector(allowed_local_media_path=str(tmp_path))
+    if source_type == "data":
+        url = f"data:{modality}/mp4;base64," + base64.b64encode(data).decode()
+    elif source_type == "file":
+        path = tmp_path / "media.mp4"
+        path.write_bytes(data)
+        url = path.as_uri()
+    else:
+        url = "https://example.invalid/media.mp4"
+        monkeypatch.setattr(connector.connection, "get_bytes", lambda *a, **kw: data)
+
+        async def get_bytes(*args, **kwargs):
+            return data
+
+        monkeypatch.setattr(connector.connection, "async_get_bytes", get_bytes)
+
+    with pytest.raises(ValueError, match="playlists and stream descriptions"):
+        getattr(connector, f"fetch_{modality}")(url)
+    with pytest.raises(ValueError, match="playlists and stream descriptions"):
+        await getattr(connector, f"fetch_{modality}_async")(url)
+
+
 @pytest.fixture(scope="module")
 def url_images(local_asset_server) -> dict[str, Image.Image]:
     return {

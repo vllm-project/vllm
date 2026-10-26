@@ -87,6 +87,23 @@ def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
             _ = videoio.load_bytes(b"test")
 
 
+@pytest.mark.parametrize("entry_point", ["bytes", "base64", "file", "loader"])
+def test_video_reference_script_rejected(tmp_path, entry_point):
+    data = b"ffconcat version 1.0\nfile 'private.avi'\n"
+    video_io = VideoMediaIO(ImageMediaIO())
+    with pytest.raises(ValueError, match="playlists and stream descriptions"):
+        if entry_point == "bytes":
+            video_io.load_bytes(data)
+        elif entry_point == "base64":
+            video_io.load_base64("video/mp4", pybase64.b64encode(data).decode())
+        elif entry_point == "file":
+            path = tmp_path / "video.mp4"
+            path.write_bytes(data)
+            video_io.load_file(path)
+        else:
+            VIDEO_LOADER_REGISTRY.load("opencv").load_bytes(data)
+
+
 @pytest.mark.parametrize("is_color", [True, False])
 @pytest.mark.parametrize("fourcc, ext", [("mp4v", "mp4"), ("XVID", "avi")])
 def test_opencv_video_io_colorspace(tmp_path, is_color: bool, fourcc: str, ext: str):
