@@ -144,9 +144,9 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self.complete_read = self.complete_load
         self.prepare_write = self.prepare_store
         self.complete_write = self.complete_store
-        # Chunks of failed writes the writer may still be filling; kept out of
-        # the free pool until release_quarantined_write().
-        self._quarantined_chunk_ids: set[int] = set()
+        # Chunks of failed writes the writer may still be filling; their
+        # release to the free pool is deferred until release_deferred_write().
+        self._deferred_release_chunk_ids: set[int] = set()
 
         self._kv_memoryview = mmap_region.create_kv_memoryview()
 
@@ -160,15 +160,15 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         """
         return self._prepare_load(keys, req_context, record_access=False)
 
-    def quarantine_write(
+    def defer_write_release(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> list[int]:
-        """Fail pending writes like ``complete_write(False)`` but hold their chunks.
+        """Fail pending writes like ``complete_write(False)``, deferring the release.
 
         The keys leave the cache (lookups miss and a later store allocates a
         fresh chunk), while the chunks stay counted as write-pending and out
-        of the free pool. Returns the quarantined chunk ids, to be passed to
-        ``release_quarantined_write`` once the writer can no longer touch them.
+        of the free pool. Returns the deferred chunk ids, to be passed to
+        ``release_deferred_write`` once the writer can no longer touch them.
         """
         chunk_ids: list[int] = []
         removed_keys: list[OffloadKey] = []
@@ -176,7 +176,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             chunk = self._policy.get(key)
             if chunk is not None and not chunk.is_ready:
                 self._policy.remove(key)
-                self._quarantined_chunk_ids.add(chunk.chunk_id)
+                self._deferred_release_chunk_ids.add(chunk.chunk_id)
                 chunk_ids.append(chunk.chunk_id)
                 removed_keys.append(key)
         if removed_keys and self.events is not None:
@@ -190,21 +190,21 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             )
         return chunk_ids
 
-    def release_quarantined_write(self, chunk_ids: Iterable[int]) -> None:
-        """Return quarantined chunks to the free pool."""
+    def release_deferred_write(self, chunk_ids: Iterable[int]) -> None:
+        """Complete a deferred release: return the chunks to the free pool."""
         for chunk_id in chunk_ids:
-            self._quarantined_chunk_ids.remove(chunk_id)
+            self._deferred_release_chunk_ids.remove(chunk_id)
             self._num_write_pending_chunks -= 1
             self._free_list.append(chunk_id)
 
     @property
-    def num_quarantined_chunks(self) -> int:
-        return len(self._quarantined_chunk_ids)
+    def num_deferred_release_chunks(self) -> int:
+        return len(self._deferred_release_chunk_ids)
 
     @override
     def reset_cache(self) -> None:
-        assert not self._quarantined_chunk_ids, (
-            "reset_cache with quarantined chunks: a tier may still write to them"
+        assert not self._deferred_release_chunk_ids, (
+            "reset_cache with deferred-release chunks: a tier may still write to them"
         )
         super().reset_cache()
 
@@ -301,9 +301,9 @@ class TieringOffloadingManager(OffloadingManager):
         #   True:  secondary → primary (promotion)
         #   False: primary → secondary (cascade)
         self._jobs: dict[JobId, JobMetadata] = {}
-        # Finished promotions whose failed chunks are quarantined until the
-        # tier reports them in get_released_jobs(): job_id -> (tier, chunk ids).
-        self._retained_jobs: dict[JobId, tuple[int, list[int]]] = {}
+        # Finished promotions whose failed chunks await release until the tier
+        # lists them in get_deferred_releases(): job_id -> (tier, chunk ids).
+        self._deferred_releases: dict[JobId, tuple[int, list[int]]] = {}
         # Set by reset_cache() until on_reset_flushed(); see lookup().
         self._promotions_held = False
         primary_view = self.primary_tier.get_kv_memoryview()
@@ -546,17 +546,17 @@ class TieringOffloadingManager(OffloadingManager):
                 True,
             )
         if not failed_keys:
-            assert not completed_job.retains_memory
-        elif completed_job.retains_memory:
-            chunk_ids = self.primary_tier.quarantine_write(
+            assert not completed_job.defer_release
+        elif completed_job.defer_release:
+            chunk_ids = self.primary_tier.defer_write_release(
                 failed_keys, transfer_job.req_context
             )
-            # Record even an empty hold: the tier still reports the release.
-            self._retained_jobs[completed_job.job_id] = (
+            # Record even with no chunks: the tier still reports the release.
+            self._deferred_releases[completed_job.job_id] = (
                 job_metadata.tier_idx,
                 chunk_ids,
             )
-            self._metrics.on_write_quarantined(job_metadata.tier_idx, len(chunk_ids))
+            self._metrics.on_release_deferred(job_metadata.tier_idx, len(chunk_ids))
         else:
             self.primary_tier.complete_write(
                 failed_keys,
@@ -600,7 +600,7 @@ class TieringOffloadingManager(OffloadingManager):
                     f" but belongs to tier #{job_metadata.tier_idx}"
                 )
                 transfer_job = job_metadata.transfer_job
-                assert transfer_job.is_promotion or not completed_job.retains_memory
+                assert transfer_job.is_promotion or not completed_job.defer_release
                 self._metrics.on_job_finished(job_metadata, completed_job)
 
                 if transfer_job.is_promotion:
@@ -615,20 +615,20 @@ class TieringOffloadingManager(OffloadingManager):
                     )
                     self._update_backpressure(tier, job_metadata, completed_job)
             # After the results, so a release reported in the same round as
-            # its retains_memory result finds the job.
-            for job_id in tier.get_released_jobs():
-                retained = self._retained_jobs.pop(job_id, None)
-                assert retained is not None, (
-                    f"Released job_id {job_id} from tier #{i}"
-                    f" ({tier.tier_type}) was not retaining memory"
+            # its defer_release result finds the job.
+            for job_id in tier.get_deferred_releases():
+                deferred = self._deferred_releases.pop(job_id, None)
+                assert deferred is not None, (
+                    f"Deferred release of job_id {job_id} from tier #{i}"
+                    f" ({tier.tier_type}) was never deferred"
                 )
-                tier_idx, chunk_ids = retained
+                tier_idx, chunk_ids = deferred
                 assert tier_idx == i, (
-                    f"Released job_id {job_id} reported by tier #{i}"
-                    f" but was retained by tier #{tier_idx}"
+                    f"Deferred release of job_id {job_id} reported by tier #{i}"
+                    f" but was deferred by tier #{tier_idx}"
                 )
-                self.primary_tier.release_quarantined_write(chunk_ids)
-                self._metrics.on_write_released(i, len(chunk_ids))
+                self.primary_tier.release_deferred_write(chunk_ids)
+                self._metrics.on_deferred_release_done(i, len(chunk_ids))
 
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int
@@ -1201,10 +1201,10 @@ class TieringOffloadingManager(OffloadingManager):
         # In-flight primary<->secondary transfers (pending promotions are
         # translated to transfer jobs in on_schedule_end), plus any work the
         # secondary tiers themselves still have outstanding.
-        # Retained jobs keep the tiers polled until they release the memory.
+        # Deferred releases keep the tiers polled until they complete.
         return (
             bool(self._jobs)
-            or bool(self._retained_jobs)
+            or bool(self._deferred_releases)
             or any(state.pending_cascade_keys for state in self._req_state.values())
             or any(tier.has_pending_work() for tier in self.secondary_tiers)
         )
@@ -1251,8 +1251,8 @@ class TieringOffloadingManager(OffloadingManager):
         # so manager bookkeeping is consistent before the primary reset.
         self._process_finished_jobs()
         assert not self._jobs
-        assert not self._retained_jobs, (
-            "drain_jobs() returned with retained memory still unreleased"
+        assert not self._deferred_releases, (
+            "drain_jobs() returned with deferred releases still pending"
         )
 
         # Deferred promotion submissions reserve primary slots that the

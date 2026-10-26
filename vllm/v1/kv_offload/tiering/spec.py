@@ -247,20 +247,24 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             ),
             labelnames=(TIER_LABEL,),
         )
-        metrics[TieringOffloadingMetrics.QUARANTINED_CHUNKS] = OffloadingGaugeMetadata(
-            documentation=(
-                "Number of primary-tier chunks held out of the free pool after a "
-                "failed promotion, until the tier confirms its I/O can no longer "
-                "write to them, labeled by tier."
-            ),
-            labelnames=(TIER_LABEL,),
+        metrics[TieringOffloadingMetrics.DEFERRED_RELEASE_CHUNKS] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Number of primary-tier chunks of failed promotions whose release "
+                    "to the free pool is deferred until the tier confirms its I/O can "
+                    "no longer write to them, labeled by tier."
+                ),
+                labelnames=(TIER_LABEL,),
+            )
         )
-        metrics[TieringOffloadingMetrics.QUARANTINED_JOBS] = OffloadingCounterMetadata(
-            documentation=(
-                "Number of failed promotion jobs whose primary-tier chunks were "
-                "quarantined instead of freed, labeled by tier."
-            ),
-            labelnames=(TIER_LABEL,),
+        metrics[TieringOffloadingMetrics.DEFERRED_RELEASE_JOBS] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of failed promotion jobs whose primary-tier chunk release "
+                    "was deferred, labeled by tier."
+                ),
+                labelnames=(TIER_LABEL,),
+            )
         )
         metrics[TieringOffloadingMetrics.PROMOTION_LATENCY] = (
             OffloadingHistogramMetadata(

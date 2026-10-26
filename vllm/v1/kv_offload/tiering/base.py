@@ -66,8 +66,8 @@ class TieringOffloadingMetrics:
     BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
     BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
     PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
-    QUARANTINED_CHUNKS = "vllm:kv_offload_tiering_quarantined_chunks"
-    QUARANTINED_JOBS = "vllm:kv_offload_tiering_quarantined_jobs"
+    DEFERRED_RELEASE_CHUNKS = "vllm:kv_offload_tiering_deferred_release_chunks"
+    DEFERRED_RELEASE_JOBS = "vllm:kv_offload_tiering_deferred_release_jobs"
 
 
 @dataclass
@@ -97,9 +97,9 @@ class JobResult:
     transfer_bytes: int | None = None
     # Only applicable to failed promotion jobs. True means the tier's I/O may
     # still write into the primary chunks of the failed keys: the manager fails
-    # those keys now but keeps their chunks out of the free pool until the tier
-    # lists this job_id in get_released_jobs().
-    retains_memory: bool = False
+    # those keys now but defers releasing their chunks to the free pool until
+    # the tier lists this job_id in get_deferred_releases().
+    defer_release: bool = False
 
 
 class ParentManager(ABC):
@@ -297,13 +297,14 @@ class SecondaryTierManager(ABC):
         """
         pass
 
-    def get_released_jobs(self) -> Iterable[JobId]:
-        """Return jobs whose retained primary memory the tier no longer touches.
+    def get_deferred_releases(self) -> Iterable[JobId]:
+        """Return jobs whose deferred release can now complete.
 
-        Lists each job reported with ``JobResult.retains_memory=True`` exactly
-        once, in the same ``get_finished_jobs()`` round as its result or a later
-        one. The framework returns the job's quarantined primary chunks to the
-        free pool. Tiers that never retain memory need not override this.
+        Lists each job reported with ``JobResult.defer_release=True`` exactly
+        once, once the tier's I/O can no longer touch its primary chunks, in
+        the same ``get_finished_jobs()`` round as its result or a later one.
+        The framework then returns those chunks to the free pool. Tiers that
+        never defer a release need not override this.
         """
         return ()
 
@@ -402,9 +403,9 @@ class SecondaryTierManager(ABC):
         store. Queued (not-yet-started) transfers may be cancelled, but their
         failure result must still appear in `get_finished_jobs()`.
 
-        Likewise, every job reported with ``retains_memory=True`` must be
-        released through `get_released_jobs()` before this returns, so the
-        tier must bound how long it can hold retained memory.
+        Likewise, every job reported with ``defer_release=True`` must appear in
+        `get_deferred_releases()` before this returns, so the tier must bound
+        how long it can defer a release.
         """
         pass
 
