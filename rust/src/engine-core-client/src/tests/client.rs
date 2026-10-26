@@ -24,6 +24,7 @@ use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, Zmq
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::lora::LoraRequest;
 use crate::protocol::multimodal::{
     MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmModality, MmSlice,
     PlaceholderRange, SliceSpec,
@@ -267,6 +268,19 @@ async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, Option<u32>) {
     rmp_serde::from_slice(&frames[1]).expect("decode START_DP_WAVE payload")
 }
 
+async fn send_start_wave(push: &mut PushSocket, engine_index: u32, wave: u32) {
+    send_outputs(
+        push,
+        DpControlOutput {
+            engine_index,
+            timestamp: 0.0,
+            control: DpControlMessage::StartWave(wave),
+        }
+        .into(),
+    )
+    .await;
+}
+
 async fn connect_client_with_ipc(
     config: EngineCoreClientConfig,
     ipc: &IpcNamespace,
@@ -411,12 +425,6 @@ async fn recv_xpub_subscription(xpub: &mut XPubSocket) {
     let frames = recv_xpub_message(xpub).await;
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].as_ref(), b"\x01");
-}
-
-async fn recv_external_coordinator_wakeup(xpub: &mut XPubSocket) -> (u32, u32) {
-    let frames = recv_xpub_message(xpub).await;
-    assert_eq!(frames.len(), 1);
-    rmp_serde::from_slice(&frames[0]).expect("decode external coordinator wakeup")
 }
 
 async fn send_external_coordinator_publish<T: serde::Serialize>(
@@ -617,6 +625,14 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
                 engine.coordinator.take().expect("coordinator sockets should be present");
             let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
+            // An idle engine handed a request starts the wave itself.
+            let add = recv_engine_message(&mut data_socket.dealer).await;
+            assert_eq!(add[0].as_ref(), &[0x00]);
+            let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+            assert_eq!(request.request_id, "req-1");
+            assert_eq!(request.current_wave, 0);
+            send_start_wave(&mut coordinator.output_push, 0, 0).await;
+
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
             assert_eq!((wave, exclude_engine), (0, Some(0)));
 
@@ -628,12 +644,6 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             assert_eq!(replay, (0, None));
             let replay = recv_start_dp_wave(&mut coordinator.input_sub).await;
             assert_eq!(replay, (0, None));
-
-            let add = recv_engine_message(&mut data_socket.dealer).await;
-            assert_eq!(add[0].as_ref(), &[0x00]);
-            let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
-            assert_eq!(request.request_id, "req-1");
-            assert_eq!(request.current_wave, 0);
 
             assert!(
                 timeout(
@@ -670,14 +680,15 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             )
             .await;
 
-            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (1, Some(0)));
-
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-3");
             assert_eq!(request.current_wave, 1);
+            send_start_wave(&mut coordinator.output_push, 0, 1).await;
+
+            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!((wave, exclude_engine), (1, Some(0)));
 
             send_outputs(
                 &mut data_socket.push,
@@ -895,9 +906,6 @@ async fn coordinator_accepts_stats_only_outputs() {
         let mut coordinator =
             engine.coordinator.take().expect("coordinator sockets should be present");
         let data_socket = engine.data_sockets.first_mut().expect("data socket");
-
-        let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-        assert_eq!((wave, exclude_engine), (0, Some(0)));
 
         send_outputs(
             &mut coordinator.output_push,
@@ -2767,10 +2775,15 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         lines.next().expect("missing multipart prompt logprobs fixture line");
     let nixl_stats_hex = lines.next().expect("missing NIXL stats fixture line");
     let mooncake_stats_hex = lines.next().expect("missing Mooncake stats fixture line");
+    let mooncake_transfer_stats_hex =
+        lines.next().expect("missing Mooncake transfer stats fixture line");
     let multi_connector_stats_hex =
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
     let extended_outputs_hex = lines.next().expect("missing extended outputs fixture line");
+    let lora_request_hex = lines.next().expect("missing LoRA request fixture line");
+    let inplace_lora_request_hex =
+        lines.next().expect("missing in-place LoRA request fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2878,7 +2891,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         new_prompt_logprobs_tensors: None,
                         pooling_output: None,
                         finish_reason: Some(
-                            Length,
+                            Error,
                         ),
                         stop_reason: None,
                         events: None,
@@ -2886,12 +2899,34 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         ec_transfer_params: None,
                         trace_headers: None,
                         prefill_stats: None,
-                        routed_experts: None,
+                        routed_experts: Some(
+                            WireArray {
+                                dtype: NumpyDtype {
+                                    scalar: U8,
+                                    endianness: Native,
+                                },
+                                shape: [
+                                    2,
+                                    1,
+                                    2,
+                                ],
+                                data: RawView(
+                                    b"\0\x01\x02\x03",
+                                ),
+                            },
+                        ),
                         num_nans_in_logits: 0,
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
                         prompt_token_id_logprobs: None,
+                        error: Some(
+                            RequestError {
+                                code: "engine_paused",
+                                message: "Generation is paused.",
+                                retryable: true,
+                            },
+                        ),
                     },
                 ],
                 scheduler_stats: None,
@@ -2962,12 +2997,20 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             if stats.0.contains_key(&MooncakeOperation::LoadGet)
     ));
 
+    let mooncake_transfer_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(mooncake_transfer_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        mooncake_transfer_stats,
+        KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
+    ));
+
     let multi_connector_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
     assert!(matches!(
         multi_connector_stats,
         KvConnectorStats::Multi(stats)
             if stats.nixl.is_some()
+                && stats.mooncake_transfer.is_some()
                 && stats.mooncake.is_some()
                 && stats.other.contains_key("UnsupportedConnector")
     ));
@@ -3017,6 +3060,44 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     assert_eq!(kv_events_config.buffer_steps, 10_000);
     assert_eq!(kv_events_config.hwm, 100_000);
     assert_eq!(kv_events_config.max_queue_size, 100_000);
+
+    let lora_request_bytes = hex::decode(lora_request_hex).unwrap();
+    let expected_lora_request = LoraRequest {
+        lora_name: "adapter-a".to_string(),
+        lora_int_id: 3,
+        lora_path: "/adapters/a".to_string(),
+        base_model_name: Some("base-model".to_string()),
+        load_inplace: true,
+        is_3d_lora_weight: true,
+    };
+    let decoded_lora_request: EngineCoreRequest =
+        rmp_serde::from_slice(&lora_request_bytes).unwrap();
+    assert_eq!(
+        decoded_lora_request.lora_request,
+        Some(expected_lora_request.clone())
+    );
+    let python_lora_slot = match decode_value(&lora_request_bytes) {
+        Value::Array(items) => items.get(6).cloned().expect("request lora_request slot"),
+        other => panic!("request should encode as tuple array, got {other:?}"),
+    };
+    assert_eq!(
+        decode_value(&rmp_serde::to_vec_named(&expected_lora_request).unwrap()),
+        python_lora_slot,
+    );
+
+    let decoded_inplace_lora_request: LoraRequest =
+        rmp_serde::from_slice(&hex::decode(inplace_lora_request_hex).unwrap()).unwrap();
+    assert_eq!(
+        decoded_inplace_lora_request,
+        LoraRequest {
+            lora_name: "adapter-b".to_string(),
+            lora_int_id: 4,
+            lora_path: "/adapters/b".to_string(),
+            base_model_name: None,
+            load_inplace: true,
+            is_3d_lora_weight: false,
+        },
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3248,7 +3329,7 @@ async fn bootstrapped_external_coordinator_connects_and_subscribes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends_one_wakeup() {
+async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends_no_wakeup() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let input_address = ipc.input_endpoint();
@@ -3289,18 +3370,11 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
 
     let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
 
-    let wakeup = timeout(
-        Duration::from_secs(1),
-        recv_external_coordinator_wakeup(&mut stats_socket),
-    )
-    .await
-    .unwrap();
-    assert_eq!(wakeup, (0, 7));
-
+    // The engine that receives the request starts the wave, not the frontend.
     assert!(
         timeout(
             Duration::from_millis(200),
-            recv_external_coordinator_wakeup(&mut stats_socket)
+            recv_xpub_message(&mut stats_socket)
         )
         .await
         .is_err()
@@ -3312,81 +3386,6 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
     assert_eq!(request.request_id, "req-1");
     assert_eq!(request.current_wave, 7);
     assert!(client.is_healthy());
-
-    send_outputs(
-        &mut push,
-        RequestBatchOutputs {
-            outputs: vec![request_output(
-                "req-1",
-                vec![],
-                Some(EngineCoreFinishReason::Length),
-            )],
-            finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
-            ..Default::default()
-        }
-        .into(),
-    )
-    .await;
-
-    let final_output = timeout(Duration::from_secs(1), stream.next()).await.unwrap();
-    assert!(final_output.is_some());
-
-    client.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bootstrapped_external_coordinator_running_state_suppresses_wakeup() {
-    init_tracing();
-    let ipc = IpcNamespace::new().unwrap();
-    let input_address = ipc.input_endpoint();
-    let output_address = ipc.output_endpoint();
-    let coordinator_address = ipc.endpoint("stats.sock");
-
-    let mut stats_socket = XPubSocket::new();
-    stats_socket.bind(&coordinator_address).await.unwrap();
-
-    let client_task = tokio::spawn({
-        let input_address = input_address.clone();
-        let output_address = output_address.clone();
-        let coordinator_address = coordinator_address.clone();
-        async move {
-            EngineCoreClient::connect(bootstrapped_test_config(
-                input_address,
-                output_address,
-                1,
-                Duration::from_secs(2),
-                0,
-                Some(CoordinatorMode::External {
-                    address: coordinator_address,
-                }),
-            ))
-            .await
-            .unwrap()
-        }
-    });
-
-    let (mut dealer, mut push) =
-        setup_bootstrapped_mock_engine(input_address, output_address, &[0x00, 0x00]).await;
-    let client = client_task.await.unwrap();
-    recv_xpub_subscription(&mut stats_socket).await;
-
-    send_external_coordinator_publish(&mut stats_socket, &(Value::Nil, 5_u32, true)).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
-
-    assert!(
-        timeout(
-            Duration::from_millis(200),
-            recv_external_coordinator_wakeup(&mut stats_socket)
-        )
-        .await
-        .is_err()
-    );
-
-    let add = recv_engine_message(&mut dealer).await;
-    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
-    assert_eq!(request.current_wave, 5);
 
     send_outputs(
         &mut push,
