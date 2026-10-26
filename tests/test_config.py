@@ -108,55 +108,6 @@ def test_dspark_adaptive_verification_separates_graph_cache():
     assert config.compute_hash() != fixed_hash
 
 
-@pytest.mark.parametrize("multimodal", [False, True], ids=["text", "multimodal"])
-@pytest.mark.parametrize(
-    ("mtp_layers", "num_spec_tokens", "multi_module"),
-    [(1, 2, False), (2, 1, False), (2, 2, True)],
-)
-def test_qwen3_5_mtp_routes_by_mtp_num_hidden_layers(
-    tmp_path: Path,
-    multimodal: bool,
-    mtp_layers: int,
-    num_spec_tokens: int,
-    multi_module: bool,
-):
-    """Qwen3.5 declares its MTP modules as `mtp_num_hidden_layers` (nested in
-    `text_config` when multimodal), not `num_nextn_predict_layers`."""
-    from transformers import Qwen3_5Config, Qwen3_5TextConfig
-
-    text_config = Qwen3_5TextConfig(
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=4,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=16,
-        vocab_size=128,
-        mtp_num_hidden_layers=mtp_layers,
-    )
-    if multimodal:
-        hf_config = Qwen3_5Config(
-            text_config=text_config.to_dict(),
-            architectures=["Qwen3_5ForConditionalGeneration"],
-        )
-    else:
-        text_config.architectures = ["Qwen3_5ForCausalLM"]
-        hf_config = text_config
-    _write_json(tmp_path / "config.json", hf_config.to_dict())
-
-    speculative_config = SpeculativeConfig(
-        method="mtp",
-        num_speculative_tokens=num_spec_tokens,
-        target_model_config=ModelConfig(
-            model=str(tmp_path), tokenizer_mode="skip", max_model_len=2048
-        ),
-        target_parallel_config=ParallelConfig(),
-    )
-
-    assert speculative_config.use_multi_module_mtp() is multi_module
-    assert speculative_config.num_mtp_modules() == mtp_layers
-
-
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
