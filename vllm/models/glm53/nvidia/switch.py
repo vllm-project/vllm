@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, ClassVar, Final
 import torch
 
 from vllm.logger import init_logger
+from vllm.models.glm53.nvidia.ops.cute_dsl.registry import DRAFT_REQUESTS
 from vllm.models.glm53.nvidia.ops.cute_dsl.row_table import (
     PACKED_SLOTS,
     segments_per_request,
@@ -81,6 +82,32 @@ def from_config(vllm_config: "VllmConfig") -> LowLatencyDecode:
     )
 
 
+DRAFT_KS: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
+
+
+def drafter_serves(mtp: bool, drafts: int = GROUP_ROWS - 1) -> bool:
+    """Whether the CuTe drafter is installed: MTP with a K of :data:`DRAFT_KS`, at any
+    ``--max-num-seqs`` (K = 1, 2 pad the catch-up's four rows, K = 4..7 run two).
+    """
+    return mtp and drafts in DRAFT_KS
+
+
+def draft_tiers(seqs: int, drafts: int) -> tuple[int, ...]:
+    """Return the request tiers the CuTe drafter builds and serves at ``--max-num-seqs``
+    ``seqs`` and MTP ``drafts``: the one-request build and each
+    ``registry.DRAFT_REQUESTS`` tier up to ``seqs`` whose tokens are one of the
+    target's graphs (:func:`tier_claims`). At MTP 1 the tiers stop at two requests:
+    three and four ran 1.3 % slower a step than vLLM's drafter.
+    """
+    claims = tier_claims(seqs, 1 + drafts)
+    top = min(seqs, 2) if drafts == 1 else seqs
+    return tuple(
+        size
+        for size in (1, *DRAFT_REQUESTS)
+        if size <= top and size * (1 + drafts) in claims
+    )
+
+
 DRAFT_DECODE_SIZES: tuple[int, ...] = (1, 2, 4, 8)
 
 
@@ -94,7 +121,7 @@ def draft_capture_sizes(
         return ()
     found = graphs(seqs, per_request)
     claims = {graph.tokens for graph in found}
-    sizes: set[int] = set()
+    sizes = set(draft_tiers(seqs, drafts) if drafter_serves(mtp, drafts) else ())
     for size in (*DRAFT_DECODE_SIZES, seqs):
         rounded = -(-size // per_request) * per_request
         splits = any(g.requests[0] * per_request <= size < g.tokens for g in found)
@@ -432,6 +459,7 @@ def _unsupported(vllm_config: "VllmConfig", tiers: tuple[int, ...] = ()) -> list
         LowLatencyDecode.ATTENTION_BACKEND,
     )
     moe_backend = vllm_config.kernel_config.moe_backend
+    speculative = getattr(vllm_config, "speculative_config", None)
     requirements = {
         "an SM100 or SM103 GPU": current_platform.is_cuda()
         and current_platform.is_device_capability_family(100),
@@ -478,6 +506,12 @@ def _unsupported(vllm_config: "VllmConfig", tiers: tuple[int, ...] = ()) -> list
         "no batch-invariant mode (VLLM_BATCH_INVARIANT)": not envs.VLLM_BATCH_INVARIANT,
         f"--moe-backend {MOE_BACKEND} or auto (not {moe_backend})": (
             moe_backend in ("auto", MOE_BACKEND)
+        ),
+        "MTP with use_local_argmax_reduction "
+        "(the drafter hands over its greedy drafts)": (
+            speculative is None
+            or not drafter_serves(True, speculative.num_speculative_tokens)
+            or bool(speculative.use_local_argmax_reduction)
         ),
     }
     return [need for need, ok in requirements.items() if not ok]

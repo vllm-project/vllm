@@ -91,6 +91,7 @@ def _make_runner(
         speculative_config=SimpleNamespace() if num_spec_steps else None,
         adaptive_verification=None,
         rejection_sampler=None,
+        post_forward_graphs=None,
         decode_query_len=num_spec_steps + 1,
         is_pooling_model=False,
         is_encoder_decoder=False,

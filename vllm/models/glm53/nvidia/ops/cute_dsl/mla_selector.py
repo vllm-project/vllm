@@ -171,7 +171,7 @@ class SelectorParams(rt.Params):
     selection_base6: Int64
     selection_base7: Int64
 
-    BlockTable = None
+    BlockTable = OnlyRow = None
     UNSIGNED = dict.fromkeys(("QakiWeight", "WisWeight", "WqbWeight"), Uint8)
     UNSIGNED |= dict.fromkeys(("FullEpoch", "Flags", "SelectState"), Uint32)
 
@@ -195,6 +195,13 @@ class PagedParams(SelectorParams):
     RowTable: cute.Pointer = rt.ptr("int32", align=4)
     #: Int32 elements between block-table rows (see ``TailArgs``).
     BlockStride: Int32
+
+
+@rt.record
+class OnlyRowParams(PagedParams):
+    """``..._only_row_paged``: + the one served row."""
+
+    OnlyRow: cute.Pointer = rt.ptr("int32")
 
 
 class StateWords:
@@ -933,6 +940,7 @@ class MlaSelector(RowGroups, rt.RoleKernel):
     SEGMENT_SLOTS = 0
     #: CTAs below this run the X projections (vLLM's BF16 wk rows on 70-77).
     FRONT = 78
+    ONLY_ROW = ""
     REDUCE_CTAS = 0
     REDUCE_ROWS = 4
     GROUP_STRIDES = {
@@ -1087,10 +1095,15 @@ class MlaSelector(RowGroups, rt.RoleKernel):
         )
         return (Int32(group) < self.RANK) & self.group_live(p, self.RANK) & same
 
+    def position(self, p):
+        if cutlass.const_expr(self.ONLY_ROW == ""):
+            return super().position(p)
+        return p.CurPos[0]
+
     def rows(self, p, n, token):
         if self.SEGMENTS:
             return n * Int32(token < self.nlive)
-        return n
+        return n if self.ONLY_ROW == "" else n * Int32(p.OnlyRow[0] == token)
 
     def id_epoch(self, s, epoch):
         return Uint32(s.epoch_slot[1]) if self.SEGMENTS else epoch
@@ -1168,17 +1181,18 @@ class MlaSelector(RowGroups, rt.RoleKernel):
         warp = rt.Sync.warp_uniform(cdiv(tid, 32))
         cute.arch.griddepcontrol_wait()
         position = self.position(p)
-        row_id = bid * 256 + tid
-        if (
-            (row_id >= 0)
-            & (row_id < 1024)
-            & (row_id < cdiv((position + 4 + 64 - 1 >> 6) + 32 - 1, 32))
-        ):
-            address = ga(p.BlockTable, row_id * 32)
-            l2_line = cute.make_ptr(
-                Uint8, Int64(address), cute.AddressSpace.gmem
-            ).to_llvm_ptr()
-            cute.arch.prefetch(l2_line, cache_level="L2")
+        if cutlass.const_expr(self.ONLY_ROW == ""):
+            row_id = bid * 256 + tid
+            if (
+                (row_id >= 0)
+                & (row_id < 1024)
+                & (row_id < cdiv((position + 4 + 64 - 1 >> 6) + 32 - 1, 32))
+            ):
+                address = ga(p.BlockTable, row_id * 32)
+                l2_line = cute.make_ptr(
+                    Uint8, Int64(address), cute.AddressSpace.gmem
+                ).to_llvm_ptr()
+                cute.arch.prefetch(l2_line, cache_level="L2")
         long_context = Int32(position + 4 > 2048)
         direct_now = Int32(position + 4 > 65536) & Int32(
             position + 4 <= self.DIRECT_MAX
@@ -1332,16 +1346,17 @@ class MlaSelector(RowGroups, rt.RoleKernel):
             )
             rt.bar_sync(8, 256)
             q_accum = cute.make_rmem_tensor(8, Float32)
-            producer_dim = cmod(cmod(bid, 4) * 32 + cmod(tid, 32), 64)
-            producer_freq = [
-                bits_f32(x)
-                for x in ld_cg_v2(
-                    ga(
-                        p.Freq,
-                        cdiv(cmod(tid, 128), 32) * 64 + cdiv(producer_dim, 2) * 2,
+            if cutlass.const_expr(self.ONLY_ROW == ""):
+                producer_dim = cmod(cmod(bid, 4) * 32 + cmod(tid, 32), 64)
+                producer_freq = [
+                    bits_f32(x)
+                    for x in ld_cg_v2(
+                        ga(
+                            p.Freq,
+                            cdiv(cmod(tid, 128), 32) * 64 + cdiv(producer_dim, 2) * 2,
+                        )
                     )
-                )
-            ]
+                ]
             for qi in cutlass.range_constexpr(8):
                 q_accum[qi] = Float32(0.0)
             Projection.vin_proj_pages(
@@ -1358,45 +1373,56 @@ class MlaSelector(RowGroups, rt.RoleKernel):
             )
             Projection.mma_tiles_to_scratch(s.scratch, q_accum, warp, lane, 2, 129)
             rt.bar_sync(8, 256)
-            slot = cmod(tid, 128)
-            q_value = Projection.col_sum(s.scratch, slot, 129)
-            token = cdiv(slot, 32)
-            row = cmod(slot, 32)
-            own, _ = rt.Convert.bf16x2_to_f32x2(rt.f32x2_to_bf16x2(q_value, 0.0))
-            out = own
-            partner = cute.arch.shuffle_sync_bfly(own, 1)
-            if cmod(bid, 4) < 2:
-                pair_even = own
-                pair_odd = partner
-                if cmod(row, 2) != 0:
-                    pair_even = partner
-                    pair_odd = own
-                rot0 = ffma(
-                    pair_even, producer_freq[0], -(fmul(pair_odd, producer_freq[1]))
-                )
-                rot1 = ffma(
-                    pair_even, producer_freq[1], fmul(pair_odd, producer_freq[0])
-                )
-                rot_lo, rot_hi = rt.Convert.bf16x2_to_f32x2(
-                    rt.f32x2_to_bf16x2(rot0, rot1)
-                )
-                out = rot_lo
-                if cmod(row, 2) != 0:
-                    out = rot_hi
-            if tid < 128:
-                raw_query = p.RawQuery
-                raw_query[token * 4096 + bid * 32 + row] = rt.Convert.to_bf16(out)
-            quarter_bits = redux_max_u32(as_u32(rt.FastMath.abs_ftz(out)))
-            if tid < 128:  # noqa: SIM102
-                if row == 0:
-                    scores = p.Scores
-                    if cutlass.const_expr(self.SHARDS == 1):
-                        scores[self.amax_word(p, token, bid)] = bits_f32(quarter_bits)
-                    else:
-                        slots = self.SLOTS
-                        scores[
-                            (cmod(self.SHARD + 1, slots) + slots * token) * 128 + bid
-                        ] = bits_f32(quarter_bits)
+            if cutlass.const_expr(self.ONLY_ROW == ""):
+                slot = cmod(tid, 128)
+                q_value = Projection.col_sum(s.scratch, slot, 129)
+                token = cdiv(slot, 32)
+                row = cmod(slot, 32)
+                own, _ = rt.Convert.bf16x2_to_f32x2(rt.f32x2_to_bf16x2(q_value, 0.0))
+                out = own
+                partner = cute.arch.shuffle_sync_bfly(own, 1)
+                if cmod(bid, 4) < 2:
+                    pair_even = own
+                    pair_odd = partner
+                    if cmod(row, 2) != 0:
+                        pair_even = partner
+                        pair_odd = own
+                    rot0 = ffma(
+                        pair_even, producer_freq[0], -(fmul(pair_odd, producer_freq[1]))
+                    )
+                    rot1 = ffma(
+                        pair_even, producer_freq[1], fmul(pair_odd, producer_freq[0])
+                    )
+                    rot_lo, rot_hi = rt.Convert.bf16x2_to_f32x2(
+                        rt.f32x2_to_bf16x2(rot0, rot1)
+                    )
+                    out = rot_lo
+                    if cmod(row, 2) != 0:
+                        out = rot_hi
+                if tid < 128:
+                    raw_query = p.RawQuery
+                    raw_query[token * 4096 + bid * 32 + row] = rt.Convert.to_bf16(out)
+                quarter_bits = redux_max_u32(as_u32(rt.FastMath.abs_ftz(out)))
+                if tid < 128:  # noqa: SIM102
+                    if row == 0:
+                        scores = p.Scores
+                        if cutlass.const_expr(self.SHARDS == 1):
+                            scores[self.amax_word(p, token, bid)] = bits_f32(
+                                quarter_bits
+                            )
+                        else:
+                            slots = self.SLOTS
+                            scores[
+                                (cmod(self.SHARD + 1, slots) + slots * token) * 128
+                                + bid
+                            ] = bits_f32(quarter_bits)
+            else:
+                if tid < 128:
+                    q_sum = Projection.col_sum(s.scratch, tid, 129)
+                    raw_query = p.RawQuery
+                    raw_query[cdiv(tid, 32) * 4096 + bid * 32 + cmod(tid, 32)] = (
+                        rt.Convert.to_bf16(q_sum)
+                    )
             rt.bar_sync(8, 256)
         rt.bar_sync(8, 256)
         with rt.warp_leader(warp, 0):
@@ -1714,8 +1740,9 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                 self.direct_bounds(p, s, ids, warp, epoch)
             rt.bar_sync(11, 384)
         emit_gate = Int32(1)
-        rt.bar_sync(11, 384)
-        emit_gate = Int32(s.near_meta[61] == 0)
+        if cutlass.const_expr(self.ONLY_ROW == ""):
+            rt.bar_sync(11, 384)
+            emit_gate = Int32(s.near_meta[61] == 0)
         if emit_gate != 0:
             for item_index in range(tid - 256, 236, 128):
                 token = cdiv(item_index, 59)
@@ -1743,9 +1770,13 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                     1 - ws_streaming
                 )
                 x = bid * 128 + ws_round * 18432
-                rj = self.keys.ident(x)
-                tile_rows0 = p.BlockTable[rj >> 6] * 66 - (rj >> 6 << 6)
-                tile_rows1 = p.BlockTable[(rj >> 6) + 1] * 66 - ((rj >> 6) + 1 << 6)
+                if cutlass.const_expr(self.ONLY_ROW == ""):
+                    rj = self.keys.ident(x)
+                    tile_rows0 = p.BlockTable[rj >> 6] * 66 - (rj >> 6 << 6)
+                    tile_rows1 = p.BlockTable[(rj >> 6) + 1] * 66 - ((rj >> 6) + 1 << 6)
+                else:
+                    tile_rows0 = Int32(0)
+                    tile_rows1 = Int32(0)
                 if ws_round >= 2 + 2 * ws_streaming:
                     use = ws_round >> 1 + ws_streaming
                     mbar_wait(s.ws_free + produce_slot * 8, use - 1 & 1)
@@ -1797,33 +1828,57 @@ class MlaSelector(RowGroups, rt.RoleKernel):
         ws_base = s.umma_keys_addr + (slot - 2) * 16384
         first = self.keys.ident(produce_block)
         row4 = first + lane * 4
-        rows = rows0
-        if (row4 & 64) != 0:
-            rows = rows1
-        rt.AsyncCopy.cp_async_cg16_pred(
-            Int32(ws_live > produce_block + lane * 4),
-            s.key_scales_addr + (slot * 128 + lane * 4) * 4,
-            ga(
-                p.IndexKeyCache,
-                Int64(rows + row4 - (row4 & 63)) * 64 + (4096 + (row4 & 63) * 2),
-            ),
-        )
+        if cutlass.const_expr(self.ONLY_ROW == ""):
+            rows = rows0
+            if (row4 & 64) != 0:
+                rows = rows1
+            rt.AsyncCopy.cp_async_cg16_pred(
+                Int32(ws_live > produce_block + lane * 4),
+                s.key_scales_addr + (slot * 128 + lane * 4) * 4,
+                ga(
+                    p.IndexKeyCache,
+                    Int64(rows + row4 - (row4 & 63)) * 64 + (4096 + (row4 & 63) * 2),
+                ),
+            )
+        else:
+            rt.AsyncCopy.cp_async_cg16_pred(
+                Int32(ws_live > produce_block + lane * 4),
+                s.key_scales_addr + (slot * 128 + lane * 4) * 4,
+                ga(
+                    p.IndexKeyCache,
+                    Int64(p.BlockTable[row4 >> 6]) * 4224
+                    + Int64(cmod(row4, 64) * 2 + 4096),
+                ),
+            )
         for part in cutlass.range(0, 32):
             chunk = lane + part * 32
             row = cdiv(chunk, 8)
             q = first + row
-            rows_q = rows0
-            if (q & 64) != 0:
-                rows_q = rows1
-            rt.AsyncCopy.cp_async_cg16_pred_hint(
-                Int32(ws_live > produce_block + row),
-                ws_base + row * 128 + (cmod(chunk, 8) ^ cmod(row, 8)) * 16,
-                ga(
-                    p.IndexKeyCache,
-                    Int64(cmod(chunk, 8) * 8) + Int64(Uint32(rows_q + q)) * 64,
-                ),
-                Uint64(0x12F0000000000000),
-            )
+            if cutlass.const_expr(self.ONLY_ROW == ""):
+                rows_q = rows0
+                if (q & 64) != 0:
+                    rows_q = rows1
+                rt.AsyncCopy.cp_async_cg16_pred_hint(
+                    Int32(ws_live > produce_block + row),
+                    ws_base + row * 128 + (cmod(chunk, 8) ^ cmod(row, 8)) * 16,
+                    ga(
+                        p.IndexKeyCache,
+                        Int64(cmod(chunk, 8) * 8) + Int64(Uint32(rows_q + q)) * 64,
+                    ),
+                    Uint64(0x12F0000000000000),
+                )
+            else:
+                rt.AsyncCopy.cp_async_cg16_pred_hint(
+                    Int32(ws_live > produce_block + row),
+                    ws_base + row * 128 + (cmod(chunk, 8) ^ cmod(row, 8)) * 16,
+                    ga(
+                        p.IndexKeyCache,
+                        Int64(p.BlockTable[q >> 6]) * 4224
+                        + Int64(cmod(q, 64) * 64)
+                        + Int64(cmod(chunk, 8) * 8),
+                    ),
+                    Uint64(0x12F0000000000000),
+                )
         rt.AsyncCopy.cp_async_mbarrier_arrive_noinc(s.ws_full + slot * 8)
 
     @cute.jit
@@ -2261,7 +2316,8 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                         batch_bounds[tid * 8 + k] = bounds[k]
                 if tid == 0:
                     keep_meta[KeepMeta.USABLE] = Int32(position + 4 > DIRECT_KEYS)
-                    keep_meta[KeepMeta.EMITTED] = 0
+                    if cutlass.const_expr(self.ONLY_ROW == ""):
+                        keep_meta[KeepMeta.EMITTED] = 0
                 prelisted = direct_now
                 prelist_near = Int32(0)
                 prelist_far = Int32(0)
@@ -2281,7 +2337,10 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                 )
                 sb = p.shard_base(self.HOME)
                 shard_bases, near_bases = self.candidate_bases(p), self.replica_bases(p)
-                warm_first = 1 - prelisted
+                if cutlass.const_expr(self.ONLY_ROW == ""):
+                    warm_first = 1 - prelisted
+                else:
+                    warm_first = Int32(1)
                 launch = (
                     position,
                     epoch,
@@ -2301,7 +2360,8 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                         warm_round,
                     )
                 rt.bar_sync(8, 256)
-                cute.arch.griddepcontrol_launch_dependents()
+                if cutlass.const_expr(self.ONLY_ROW == ""):
+                    cute.arch.griddepcontrol_launch_dependents()
                 self.publish_listing(p, s, role_ids, position, parity)
                 if cutlass.const_expr(self.SHARDS > 1):
                     shard_full = Int32(0)
@@ -2354,26 +2414,32 @@ class MlaSelector(RowGroups, rt.RoleKernel):
         tid, bid, warp, lane = ids.tid, ids.bid, ids.warp, ids.lane
         sb, shard_bases, near_bases = mailboxes
         batch_bounds, near_meta, keep_meta = s.batch_bounds, s.near_meta, s.keep_meta
-        if tid == 0:
-            near_meta[NearMeta.WARM] = Int32(warm_round == 0)
+        if cutlass.const_expr(self.ONLY_ROW == ""):  # noqa: SIM102
+            if tid == 0:
+                near_meta[NearMeta.WARM] = Int32(warm_round == 0)
         self.shard_bucket(p, s, ids, prelisted, parity, sb)
         if prelisted != 0:
-            if warm_round != 0:
+            if cutlass.const_expr(self.ONLY_ROW == ""):
+                if warm_round != 0:
+                    rt.bar_sync(11, 384)
+                    if tid < 32:
+                        batch_bounds[tid] = s.loader_bounds[tid]
+                if warm_round == 0:  # noqa: SIM102
+                    if tid < 32:
+                        warm_token = cdiv(tid, 8)
+                        warm_word = cmod(tid, 8)
+                        warm_value = Int32(0)
+                        if warm_word == 0:
+                            warm_value = s.keep_meta[KeepMeta.FLOOR_PREFIX + warm_token]
+                        if warm_word == 3:
+                            warm_value = s.keep_meta[KeepMeta.FLOOR_SHIFT + warm_token]
+                        if warm_word == 4:
+                            warm_value = Int32(1)
+                        batch_bounds[tid] = warm_value
+            else:
                 rt.bar_sync(11, 384)
                 if tid < 32:
                     batch_bounds[tid] = s.loader_bounds[tid]
-            if warm_round == 0:  # noqa: SIM102
-                if tid < 32:
-                    warm_token = cdiv(tid, 8)
-                    warm_word = cmod(tid, 8)
-                    warm_value = Int32(0)
-                    if warm_word == 0:
-                        warm_value = s.keep_meta[KeepMeta.FLOOR_PREFIX + warm_token]
-                    if warm_word == 3:
-                        warm_value = s.keep_meta[KeepMeta.FLOOR_SHIFT + warm_token]
-                    if warm_word == 4:
-                        warm_value = Int32(1)
-                    batch_bounds[tid] = warm_value
         rt.bar_sync(8, 256)
         if tid < SEL_TOKENS:
             pushable_end = s.batch_bounds[tid * 8 + 2]
@@ -2384,7 +2450,10 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                 & Int32(near_rows > TOPK)
                 & Int32(pushable_end == 0 and pushable_size <= CAND_CAP)
             )
-        early_go = Int32(warm_round != 0)
+        if cutlass.const_expr(self.ONLY_ROW == ""):
+            early_go = Int32(warm_round != 0)
+        else:
+            early_go = Int32(1)
         if bid == 0 and tid < SEL_TOKENS and early_go != 0:
             self.publish_early(p, s, ids, parity, sb)
         token_half = cdiv(warp, 4)
@@ -2426,7 +2495,8 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                 kept[0] = prelist_near
                 kept[1] = prelist_far
                 slow_rounds = Int32(0)
-        slow_rounds = slow_rounds * Int32(warm_round != 0)
+        if cutlass.const_expr(self.ONLY_ROW == ""):
+            slow_rounds = slow_rounds * Int32(warm_round != 0)
         bounds = (bound_long, bound_digit, bound_shift)
         rd = Round(launch, (token_half, key_warp, key_lane, lanes_below), bounds, kept)
         attempt_live = Int32(1)
@@ -2526,7 +2596,7 @@ class MlaSelector(RowGroups, rt.RoleKernel):
             ),
             early_slots,
         )
-        if cutlass.const_expr(SHARD == 0):
+        if cutlass.const_expr(SHARD == 0 and self.ONLY_ROW == ""):
             refined_size = Int32(CAND_OVERFLOW)
             if s.near_meta[tid] != 0:
                 refined_size = early_size
@@ -2693,28 +2763,42 @@ class MlaSelector(RowGroups, rt.RoleKernel):
     def stage_key_tile(self, p, ids, kb, live, key_addr, scale_addr):
         tid, bid = ids.tid, ids.bid
         BlockTable, IndexKeyCache = p.BlockTable, p.IndexKeyCache
-        page_rows0 = BlockTable[kb >> 6] * 66 - (kb >> 6 << 6)
-        page_rows1 = BlockTable[(kb >> 6) + 1] * 66 - ((kb >> 6) + 1 << 6)
+        if cutlass.const_expr(self.ONLY_ROW == ""):
+            page_rows0 = BlockTable[kb >> 6] * 66 - (kb >> 6 << 6)
+            page_rows1 = BlockTable[(kb >> 6) + 1] * 66 - ((kb >> 6) + 1 << 6)
         for part in cutlass.range_constexpr(4):
             chunk = tid + part * 256
             row = cdiv(chunk, 8)
             col = cmod(chunk, 8)
-            rows = page_rows0 if (kb + row & 64) == 0 else page_rows1
-            src = ga(
-                IndexKeyCache,
-                Int64(col * 8) + Int64(Uint32(rows + (kb + row))) * 64,
-            )
+            if cutlass.const_expr(self.ONLY_ROW == ""):
+                rows = page_rows0 if (kb + row & 64) == 0 else page_rows1
+                src = ga(
+                    IndexKeyCache,
+                    Int64(col * 8) + Int64(Uint32(rows + (kb + row))) * 64,
+                )
+            else:
+                page = Int64(BlockTable[kb + row >> 6]) * 4224
+                src = ga(
+                    IndexKeyCache,
+                    page + Int64(cmod(kb + row, 64) * 64) + Int64(col * 8),
+                )
             dst = key_addr + row * 128 + (col ^ cmod(row, 8)) * 16
             rt.AsyncCopy.cp_async_cg16_pred_hint(
                 1 if live > bid * 128 + row else 0, dst, src, 0x12F0000000000000
             )
         if tid < 32:
             r = kb + tid * 4
-            rows = page_rows0 if (r & 64) == 0 else page_rows1
-            src = ga(
-                IndexKeyCache,
-                Int64(rows + r - (r & 63)) * 64 + Int64(4096 + (r & 63) * 2),
-            )
+            if cutlass.const_expr(self.ONLY_ROW == ""):
+                rows = page_rows0 if (r & 64) == 0 else page_rows1
+                src = ga(
+                    IndexKeyCache,
+                    Int64(rows + r - (r & 63)) * 64 + Int64(4096 + (r & 63) * 2),
+                )
+            else:
+                src = ga(
+                    IndexKeyCache,
+                    Int64(BlockTable[r >> 6]) * 4224 + Int64(cmod(r, 64) * 2 + 4096),
+                )
             rt.AsyncCopy.cp_async_cg16_pred(
                 1 if live > bid * 128 + tid * 4 else 0, scale_addr + tid * 16, src
             )
@@ -2731,6 +2815,12 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                 word = seed_words[key_row]
                 want = want | word & 1
                 values[key_row] = word & Uint32(4294967294)
+            if cutlass.const_expr(self.ONLY_ROW != ""):
+                only_word = ld_cg_b32(ga(p.SelectState, StateWords.SEEDS))
+                want = only_word & 1
+                values[0] = only_word & Uint32(4294967294)
+                for seed_row in cutlass.range_constexpr(1, 4):
+                    values[seed_row] = Uint32(0)
             for outer in cutlass.range_constexpr(4):
                 for inner in cutlass.range_constexpr(3 - outer):
                     high = cutlass.max(values[inner], values[inner + 1])
@@ -2839,9 +2929,16 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                 live = self.keys.live(self.rows(p, position_0 + tok + 1, tok))
                 if tok >= SEL_TOKENS:
                     live = Int32(0)
-                score = KeyScore.weighted(
-                    tmem_load, slot_0, s.head_weight, tok, key_scale
-                )
+                if cutlass.const_expr(self.ONLY_ROW == ""):
+                    score = KeyScore.weighted(
+                        tmem_load, slot_0, s.head_weight, tok, key_scale
+                    )
+                else:
+                    score = Float32(0.0)
+                    if live > 0:
+                        score = KeyScore.weighted(
+                            tmem_load, slot_0, s.head_weight, tok, key_scale
+                        )
                 key_0 = KeyScore.key(as_u32(score))
                 unit_hi = redux_max_u32(key_0 * Uint32(key < live))
                 if lane == 0 and tok < SEL_TOKENS:
@@ -3269,7 +3366,7 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                                 + (s.batch_bounds[token_3_0 * 8 + 5] + slot)
                             ) * 16
                             BucketMailbox.push_candidate(
-                                near_bases,
+                                near_bases if self.ONLY_ROW == "" else (),
                                 s.near_meta[token_3_0],
                                 shard_bases,
                                 offset,
@@ -3296,11 +3393,13 @@ class MlaSelector(RowGroups, rt.RoleKernel):
         tid, warp, lane = ids.tid, ids.warp, ids.lane
         keep_meta, near_meta = s.keep_meta, s.near_meta
         if usable != 0:
+            FULL = self.ONLY_ROW == ""
             key_warp_0 = cmod(warp, 4)
             half_1 = cdiv(warp, 4)
             lanes_below_0 = (Uint32(1) << Uint32(lane)) - 1
             round_live = Int32(1)
-            round_live = Int32(s.near_meta[NearMeta.WARM] == 0)
+            if cutlass.const_expr(FULL):
+                round_live = Int32(s.near_meta[NearMeta.WARM] == 0)
             prelist_counting = s.keep_meta[KeepMeta.COUNTING]
             regs_index = rmem_fill(2, Int32, 0)
             regs_key = rmem_fill(2, Uint32, 0)
@@ -3327,38 +3426,41 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                         regs_key[t] = key_word
                         regs_inside[t] = inside
                         regs_ballot[t] = _vote_0
-                        fast_above = present & Int32(
-                            prefix < Int32(key_word >> Uint32(shift))
-                        )
-                        above_total = above_total + popc(ballot(fast_above != 0))
+                        if cutlass.const_expr(FULL):
+                            fast_above = present & Int32(
+                                prefix < Int32(key_word >> Uint32(shift))
+                            )
+                            above_total = above_total + popc(ballot(fast_above != 0))
                     if lane == 0:
                         keep_meta[KeepMeta.INSIDE + token_3 * 4 + key_warp_0] = (
                             inside_total
                         )
-                        near_meta[NearMeta.ABOVE + token_3 * 4 + key_warp_0] = (
-                            above_total
-                        )
-                        near_meta[NearMeta.INSIDE + token_3 * 4 + key_warp_0] = (
-                            inside_total
-                        )
+                        if cutlass.const_expr(FULL):
+                            near_meta[NearMeta.ABOVE + token_3 * 4 + key_warp_0] = (
+                                above_total
+                            )
+                            near_meta[NearMeta.INSIDE + token_3 * 4 + key_warp_0] = (
+                                inside_total
+                            )
             rt.bar_sync(8, 256)
             fast_first = Uint32(0)
-            if tid < SEL_TOKENS:  # noqa: SIM102
-                if s.near_meta[tid] != 0:
-                    fast_reserve = Int32(0)
-                    for warp_0 in cutlass.range_constexpr(4):
-                        fast_reserve = (
-                            fast_reserve
-                            + s.near_meta[NearMeta.ABOVE + tid * 4 + warp_0]
-                        )
-                    if fast_reserve != 0 and round_live != 0:
-                        fast_first = rt.Memory.atomic_add_u32(
-                            p.SelectState,
-                            StateWords.refine_word(tid, StateWords.HEADER)
-                            + parity * 8
-                            + 5,
-                            fast_reserve,
-                        )
+            if cutlass.const_expr(FULL):  # noqa: SIM102
+                if tid < SEL_TOKENS:  # noqa: SIM102
+                    if s.near_meta[tid] != 0:
+                        fast_reserve = Int32(0)
+                        for warp_0 in cutlass.range_constexpr(4):
+                            fast_reserve = (
+                                fast_reserve
+                                + s.near_meta[NearMeta.ABOVE + tid * 4 + warp_0]
+                            )
+                        if fast_reserve != 0 and round_live != 0:
+                            fast_first = rt.Memory.atomic_add_u32(
+                                p.SelectState,
+                                StateWords.refine_word(tid, StateWords.HEADER)
+                                + parity * 8
+                                + 5,
+                                fast_reserve,
+                            )
             if tid < SEL_TOKENS:  # noqa: SIM102
                 if self.rows(p, position + tid + 1, tid) > TOPK:
                     total = Int32(0)
@@ -3375,8 +3477,9 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                         running = (
                             running + s.keep_meta[KeepMeta.INSIDE + tid * 4 + warp_0]
                         )
-            if tid < SEL_TOKENS:
-                near_meta[NearMeta.RESERVED + tid] = Int32(fast_first)
+            if cutlass.const_expr(FULL):  # noqa: SIM102
+                if tid < SEL_TOKENS:
+                    near_meta[NearMeta.RESERVED + tid] = Int32(fast_first)
             rt.bar_sync(8, 256)
             if round_live != 0:
                 for t in cutlass.range_constexpr(2):
@@ -3414,7 +3517,7 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                                         + (s.batch_bounds[token_0 * 8 + 5] + regs_slot)
                                     ) * 16
                                     BucketMailbox.push_candidate(
-                                        near_bases,
+                                        near_bases if FULL else (),
                                         s.near_meta[token_0],
                                         shard_bases,
                                         offset,
@@ -3424,21 +3527,27 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                                     )
                             stored = stored + popc(regs_entry_ballot)
             if round_live != 0:
-                if direct_now != 0:
-                    self.first_above_slots(s, ids)
-                    rt.bar_sync(8, 256)
-                    others = tuple(
-                        b for i, b in enumerate(self.rank_bases(p)) if i != self.HOME
-                    )
-                    self.emit_above(p, s, ids, epoch, ((sb,) + near_bases, others))
-                    if tid == 0:
-                        keep_meta[KeepMeta.EMITTED] = 1
+                if cutlass.const_expr(FULL):  # noqa: SIM102
+                    if direct_now != 0:
+                        self.first_above_slots(s, ids)
+                        rt.bar_sync(8, 256)
+                        others = tuple(
+                            b
+                            for i, b in enumerate(self.rank_bases(p))
+                            if i != self.HOME
+                        )
+                        self.emit_above(p, s, ids, epoch, ((sb,) + near_bases, others))
+                        if tid == 0:
+                            keep_meta[KeepMeta.EMITTED] = 1
                 if prelist_counting != 0:
                     self.count_prelist(s, ids)
             attempt_live = Int32(0)
         else:
             use_lists = Int32(0)
-            slow_rounds = rounds_0 * Int32(warm_round != 0)
+            if cutlass.const_expr(self.ONLY_ROW == ""):
+                slow_rounds = rounds_0 * Int32(warm_round != 0)
+            else:
+                slow_rounds = rounds_0
         return attempt_live, use_lists, slow_rounds
 
     @cute.jit
@@ -3637,21 +3746,25 @@ class MlaSelector(RowGroups, rt.RoleKernel):
         if (long_context != 0) & (direct_now != 0):
             lists_used = s.keep_meta[KeepMeta.USABLE]
             direct_gate = Int32(1)
-            direct_gate = Int32(s.keep_meta[KeepMeta.EMITTED] == 0)
+            if cutlass.const_expr(self.ONLY_ROW == ""):
+                direct_gate = Int32(s.keep_meta[KeepMeta.EMITTED] == 0)
             if direct_gate != 0:
                 bases = (own_bases, other_bases, all_bases)
                 self.emit_direct(p, s, ids, position, epoch, parity, lists_used, bases)
         if long_context != 0:
             slow_gate = Int32(1)
-            near_meta = s.near_meta
-            if tid == 0:
-                all_direct = Int32(1)
-                for exit_token in cutlass.range_constexpr(SEL_TOKENS):
-                    if self.rows(p, position + exit_token + 1, exit_token) > TOPK:
-                        all_direct = all_direct & s.near_meta[exit_token]
-                near_meta[NearMeta.ALL_DIRECT] = all_direct
-            rt.bar_sync(11, 384)
-            slow_gate = Int32(s.near_meta[NearMeta.ALL_DIRECT] == 0)
+            if cutlass.const_expr(self.ONLY_ROW == ""):
+                near_meta = s.near_meta
+                if tid == 0:
+                    all_direct = Int32(1)
+                    for exit_token in cutlass.range_constexpr(SEL_TOKENS):
+                        if self.rows(p, position + exit_token + 1, exit_token) > TOPK:
+                            all_direct = all_direct & s.near_meta[exit_token]
+                    near_meta[NearMeta.ALL_DIRECT] = all_direct
+                rt.bar_sync(11, 384)
+                slow_gate = Int32(s.near_meta[NearMeta.ALL_DIRECT] == 0)
+            else:
+                rt.bar_sync(11, 384)
             if slow_gate != 0:
                 self.emit_slow(p, s, ids, position, epoch, all_bases)
 
@@ -3705,23 +3818,29 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                 near_meta[NearMeta.ABOVE + tid] = table_above
                 near_meta[NearMeta.INSIDE + tid] = table_inside
             rt.bar_sync(8, 256)
-        if tid < SEL_TOKENS:
-            reserved_first = Uint32(0)
-            if s.near_meta[tid] != 0:
-                reserve_above = Int32(0)
-                for warp_0 in cutlass.range_constexpr(4):
-                    reserve_above = (
-                        reserve_above + s.near_meta[NearMeta.ABOVE + tid * 4 + warp_0]
-                    )
-                if reserve_above != 0:
-                    reserve_word = (
-                        StateWords.refine_word(tid, StateWords.HEADER) + parity * 8 + 5
-                    )
-                    reserved_first = cute.arch.atomic_add(
-                        p.SelectState.iterator + reserve_word, Uint32(reserve_above)
-                    )
-            near_meta[NearMeta.RESERVED + tid] = Int32(reserved_first)
-        rt.bar_sync(8, 256)
+        if cutlass.const_expr(self.ONLY_ROW == ""):
+            if tid < SEL_TOKENS:
+                reserved_first = Uint32(0)
+                if s.near_meta[tid] != 0:
+                    reserve_above = Int32(0)
+                    for warp_0 in cutlass.range_constexpr(4):
+                        reserve_above = (
+                            reserve_above
+                            + s.near_meta[NearMeta.ABOVE + tid * 4 + warp_0]
+                        )
+                    if reserve_above != 0:
+                        reserve_word = (
+                            StateWords.refine_word(tid, StateWords.HEADER)
+                            + parity * 8
+                            + 5
+                        )
+                        reserved_first = cute.arch.atomic_add(
+                            p.SelectState.iterator + reserve_word, Uint32(reserve_above)
+                        )
+                near_meta[NearMeta.RESERVED + tid] = Int32(reserved_first)
+            rt.bar_sync(8, 256)
+        else:
+            self.lower_ctas_above(p, s, ids, epoch)
         self.first_above_slots(s, ids)
         rt.bar_sync(8, 256)
         if lists_used != 0:
@@ -3730,10 +3849,63 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                 s,
                 ids,
                 epoch,
-                (bases[0], bases[1]),
+                (bases[0], bases[1]) if self.ONLY_ROW == "" else (bases[2],),
             )
         if lists_used == 0:
             self.emit_stash_above(p, s, ids, position, epoch, bases[2])
+
+    @cute.jit
+    def lower_ctas_above(self, p, s, ids, epoch):
+        tid, bid, lane = ids.tid, ids.bid, ids.lane
+        near_meta = s.near_meta
+        if tid < SEL_TOKENS:
+            if s.near_meta[tid] != 0:
+                total_above = Int32(0)
+                total_inside = Int32(0)
+                for w4 in cutlass.range_constexpr(4):
+                    total_above = (
+                        total_above + s.near_meta[NearMeta.ABOVE + tid * 4 + w4]
+                    )
+                    total_inside = (
+                        total_inside + s.near_meta[NearMeta.INSIDE + tid * 4 + w4]
+                    )
+                totals_record = (Uint64(epoch + 1) << 32) | Uint64(
+                    Uint32(total_above) | Uint32(total_inside) << 16
+                )
+                st_volatile_u64(
+                    ga(p.SelectState, StateWords.cta_record(tid, bid, 3)), totals_record
+                )
+            near_meta[NearMeta.RESERVED + tid] = 0
+            near_meta[NearMeta.LOWER + tid] = 0
+        rt.bar_sync(8, 256)
+        lower_words = cute.make_rmem_tensor(4, Uint64)
+        lower_waiting = Int32(1)
+        while lower_waiting != 0:
+            lower_ready = Int32(1)
+            for lower_token in cutlass.range_constexpr(SEL_TOKENS):
+                lower_words[lower_token] = Uint64(0)
+                if (tid < bid) & (s.near_meta[lower_token] != 0):
+                    lower_words[lower_token] = ld_volatile_u64(
+                        ga(p.SelectState, StateWords.cta_record(lower_token, tid, 3))
+                    )
+                    lower_ready = lower_ready & Int32(
+                        Uint32(lower_words[lower_token] >> 32) == epoch + 1
+                    )
+            if cute.arch.vote_all_sync(lower_ready != 0):
+                lower_waiting = Int32(0)
+        for lower_token in cutlass.range_constexpr(SEL_TOKENS):
+            lower_above = redux_add_u32(Uint32(lower_words[lower_token]) & 65535)
+            lower_inside = redux_add_u32(Uint32(lower_words[lower_token]) >> 16)
+            if (lane == 0) & ((lower_above | lower_inside) != 0):
+                cute.arch.atomic_add(
+                    s.near_meta.iterator + (NearMeta.RESERVED + lower_token),
+                    Int32(lower_above),
+                )
+                cute.arch.atomic_add(
+                    s.near_meta.iterator + (NearMeta.LOWER + lower_token),
+                    Int32(lower_inside),
+                )
+        rt.bar_sync(8, 256)
 
     @cute.jit
     def emit_stash_above(self, p, s, ids, position, epoch, all_bases):
@@ -3782,7 +3954,8 @@ class MlaSelector(RowGroups, rt.RoleKernel):
     def emit_slow(self, p, s, ids, position, epoch, all_bases):
         tid, bid, warp, lane = ids.tid, ids.bid, ids.warp, ids.lane
         near_counts, near_offsets = s.near_counts, s.near_offsets
-        rt.bar_sync(11, 384)
+        if cutlass.const_expr(self.ONLY_ROW == ""):
+            rt.bar_sync(11, 384)
         lanes_below = (Uint32(1) << Uint32(lane)) - 1
         rounds_0 = self.keys.rounds(position + 4, bid)
         if tid < SEL_TOKENS:
@@ -4039,7 +4212,8 @@ class MlaSelector(RowGroups, rt.RoleKernel):
         role_ids = rt.ThreadIds(ids.tid, ids.bid, warp, ids.lane)
         tid, bid = role_ids.tid, role_ids.bid
         if (bid >= SCORE_CTAS) & (bid < CTAS):
-            cute.arch.griddepcontrol_launch_dependents()
+            if cutlass.const_expr(self.ONLY_ROW == ""):
+                cute.arch.griddepcontrol_launch_dependents()
             row_token = bid - SCORE_CTAS
             sb = p.shard_base(self.HOME)
             if self.rows(p, position + row_token + 1, row_token) > TOPK:
@@ -4068,12 +4242,14 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                     )
                 else:
                     self.radix_select(p, s, role_ids, row_token, sb, epoch)
-            self.sel_copy_ids(p, s, sb, epoch, row_token, tid)
+            if cutlass.const_expr(self.ONLY_ROW == ""):
+                self.sel_copy_ids(p, s, sb, epoch, row_token, tid)
         if bid < self.REDUCE_CTAS:
             self.sel_reduce(p, s, role_ids, warp, epoch)
-        Final = p.Final
-        if bid * 256 < 24576:
-            Final[bid * 256 + tid] = p.X[bid * 256 + tid]
+        if cutlass.const_expr(self.ONLY_ROW == ""):
+            Final = p.Final
+            if bid * 256 < 24576:
+                Final[bid * 256 + tid] = p.X[bid * 256 + tid]
         if warp == 0:
             rt.TensorCore.fence_after_thread_sync()
             rt.TensorCore.tmem_dealloc(
@@ -4323,6 +4499,9 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                 record_off = Int64(emit_mailbox + (staged_first + staged_index)) * 8
                 for dst in cutlass.range_constexpr(self.RANKS):
                     st_volatile_u64(p.shard_base(dst) + record_off, id_record)
+                if cutlass.const_expr(self.ONLY_ROW != ""):
+                    for base in self.replica_bases(p):
+                        st_volatile_u64(base + record_off, id_record)
 
     @cute.jit
     def radix_select(self, p, s, ids, row_token, sb, epoch):
@@ -4500,7 +4679,10 @@ class MlaSelector(RowGroups, rt.RoleKernel):
                     below = self.shard_sum(p, s, at, group_below, False)
             if below > 8192:
                 next_seed = next_seed | Uint32(1)
-        SelectState[StateWords.SEEDS + token] = next_seed
+        if cutlass.const_expr(self.ONLY_ROW != ""):
+            SelectState[StateWords.SEEDS] = next_seed
+        else:
+            SelectState[StateWords.SEEDS + token] = next_seed
 
     @cute.jit
     def sel_recycle(self, p, other, bid, tid, warp):
@@ -4516,8 +4698,9 @@ class MlaSelector(RowGroups, rt.RoleKernel):
         group_words = 4
         if (group_words > tid) & (bid * group_words + tid < 512):
             state[StateWords.GROUPS + other * 4 * 128 + bid * group_words + tid] = 0
-        if (bid == 0) & (tid < 4):
-            state[StateWords.refine(tid) + 160 + other * 8 + 5] = 0
+        if cutlass.const_expr(self.ONLY_ROW == ""):  # noqa: SIM102
+            if (bid == 0) & (tid < 4):
+                state[StateWords.refine(tid) + 160 + other * 8 + 5] = 0
         rt.bar_sync(8, 256)
         with rt.warp_leader(warp, 0):
             rt.Memory.fence_release_gpu()
@@ -4747,3 +4930,72 @@ class SelectorFull(MlaSelector):
             (p.WisWeight, WIS_PAGES),
         )
         return tuple(MlaWorker.page_map(weight, *pages) for weight, pages in weights)
+
+
+class SelectorOnlyRow(SelectorFull):
+    """``mla_selector_q4_shard3r{SHARD}_only_row_paged``: the drafter catch-up's
+    selector of key shard ``SHARD``.
+    """
+
+    Params = OnlyRowParams  # type: ignore[assignment]
+    ONLY_ROW = "row"
+    GROUP_STRIDES = MlaSelector.GROUP_STRIDES | {"CurPos": 8, "OnlyRow": 1}
+
+    @cute.jit
+    def stage_query(self, p, s, ids, hoist_quad, hoist_freq):
+        q_scales = s.q_scales
+        tid, bid = ids.tid, ids.bid
+        freq_q = [
+            p.Freq[(64 + 64 * j) + cmod(tid, 8) * 8 + i]
+            for j in range(3)
+            for i in range(8)
+        ]
+        rt.bar_sync(11, 384)
+        q_raw = [
+            ld_cg_v4(
+                ga(
+                    p.RawQuery,
+                    cdiv(tid + 256 * c, 16) * 128 + cmod(tid + 256 * c, 16) * 8,
+                )
+            )
+            for c in range(8)
+        ]
+        QueryTile.store_head_weight(s.head_weight, hoist_quad, tid)
+        q_words = cute.make_rmem_tensor(4, Uint32)
+        for c in cutlass.range_constexpr(8):
+            q_row = cdiv(tid + 256 * c, 16)
+            q_chunk = cmod(tid + 256 * c, 16)
+            q_vals = rt.bf16x8_to_f32(list(q_raw[c]))
+            freq = hoist_freq if c < 2 else freq_q[(c // 2 - 1) * 8 : (c // 2) * 8]
+            roped = []
+            for pr in cutlass.range_constexpr(4):
+                even, odd = q_vals[2 * pr], q_vals[2 * pr + 1]
+                cos, sin = freq[2 * pr], freq[2 * pr + 1]
+                roped += [
+                    ffma(even, cos, -(fmul(odd, sin))),
+                    ffma(even, sin, fmul(odd, cos)),
+                ]
+            for i in cutlass.range_constexpr(4):
+                q_words[i] = q_raw[c][i]
+            if cmod(tid, 16) < 8:
+                roped_words = QueryTile.pack_bf16x8(roped)
+                for i in cutlass.range_constexpr(4):
+                    q_words[i] = roped_words[i]
+            q_vals = rt.bf16x8_to_f32([q_words[i] for i in range(4)])
+            if cdiv(tid, 16) + 16 * c == bid:
+                rt.Memory.stg_u32x4(
+                    p.IndexQuery,
+                    q_row * 128 + q_chunk * 8,
+                    QueryTile.pack_bf16x8(q_vals),
+                )
+            q_amax = Float32(0.0)
+            for i in cutlass.range_constexpr(8):
+                q_amax = rt.max_noftz(q_amax, rt.FastMath.abs_ftz(q_vals[i]))
+            for step in cutlass.range_constexpr(4):
+                q_amax = rt.max_noftz(
+                    q_amax, cute.arch.shuffle_sync_bfly(q_amax, 1 << step)
+                )
+            q_exponent = QueryTile.fp8_exponent(q_amax)
+            QueryTile.store_fp8(s.query_words_addr, q_row, q_chunk, q_vals, q_exponent)
+            if q_chunk == 0:
+                q_scales[q_row] = bits_f32(q_exponent << 23)

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm.models.glm53.nvidia import providers, switch
+from vllm.models.glm53.nvidia import draft_providers, providers, switch
 from vllm.models.glm53.nvidia.ops import launch as glm53_launch
 from vllm.models.glm53.nvidia.ops.cute_dsl.mla_selector import IndexScale, StateWords
 from vllm.models.glm53.nvidia.ops.cute_dsl.mla_worker import Handoff, MlaWorker
@@ -41,7 +41,12 @@ class _ReplicatedEmbedding(_AnyTensors):
 
 
 class _Placement:
-    """CPU stand-in for ``Glm53Placement``: plain handoff and flags."""
+    """CPU stand-in for ``Glm53Placement``: plain handoff and flags (``issued``: the
+    ``moe_flags`` pairs handed out, in order).
+    """
+
+    def __init__(self) -> None:
+        self.issued: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     def worker_handoff(self, by_sm: bool, groups: int = 1) -> SimpleNamespace:
         return SimpleNamespace(
@@ -51,10 +56,12 @@ class _Placement:
 
     def moe_flags(self, rows: int = 4) -> tuple[torch.Tensor, torch.Tensor]:
         words = glm53_launch.sizes_of(f"fused_moe_q{rows}_ckpt_shared")["kFlagWords"]
-        return (
+        pair = (
             torch.zeros(words, dtype=torch.int32),
             torch.zeros(words, dtype=torch.int32),
         )
+        self.issued.append(pair)
+        return pair
 
 
 def _bound(program: Sequence[providers.Provider]) -> list[glm53_launch.Launch]:
@@ -97,6 +104,13 @@ def test_shipped_kernels_are_the_served_kernels(geometry) -> None:
                 launched += _bound(
                     providers.program(tier_geometry, rank, inputs, _Placement())
                 )
+    # The drafter runs beside the one-request build, and has its own request tiers.
+    for requests in (1, *registry.DRAFT_REQUESTS):
+        for rank in range(geometry.world):
+            for part in draft_providers.program(
+                geometry, rank, _AnyTensors(), _Placement(), requests
+            ):
+                launched += _bound(part)
     # The shapes of every MTP K and selection split.
     for tier_geometry in _deployment_geometries(geometry):
         for rank in range(geometry.world):
@@ -145,6 +159,69 @@ def test_b2_q8_launches_use_eight_row_buffers_and_mirrored_flags(geometry) -> No
             launch.arguments[names.index("Activation")]
             == part.results["activation"].data_ptr()
         )
+
+
+def test_draft_tier_blocks_are_the_workers_group_strides() -> None:
+    from vllm.models.glm53.nvidia.ops.cute_dsl import registry
+    from vllm.models.glm53.nvidia.ops.cute_dsl.lm_head import DoneWords, Mailbox
+    from vllm.models.glm53.nvidia.ops.cute_dsl.mla_worker import PUSH_MAILBOX_BYTES
+
+    for requests in (1, *registry.DRAFT_REQUESTS):
+        tier = requests > 1
+        for name, group_rows in (
+            (
+                f"mla_worker_draft_r{4 * requests}_paged"
+                if tier
+                else "mla_worker_draft_q4_paged",
+                4,
+            ),
+            (
+                f"mla_worker_draft_p{requests}_paged"
+                if tier
+                else "mla_worker_draft_q1_paged",
+                1,
+            ),
+        ):
+            worker = registry.kernel(name)
+            sizes = registry.ENTRIES[name].host
+            assert group_rows == worker.GROUP_ROWS and requests == worker.GROUPS
+            strides = worker.GROUP_STRIDES
+            assert strides["Handoff"] * requests == sizes["kHandoffWords"]
+            assert strides["PartialO"] * 4 * requests == sizes["kPartialOBytes"]
+            assert strides["PartialLSE"] * 4 * requests == sizes["kPartialLseBytes"]
+            assert strides["Flags"] * requests == sizes["kFlagWords"]
+            if tier:
+                assert sizes["kMailboxBytes"] == PUSH_MAILBOX_BYTES * requests
+    # The four-row head: one ticket, the CTAs' records and the two tail counters.
+    head = registry.ENTRIES[draft_providers.HEAD_KERNEL_Q4].host
+    assert head["kDoneWords"] == DoneWords.counter(4) + 2
+    assert head["kMailboxBytes"] == Mailbox.packet(1, 7, 3) + 16
+
+
+def test_draft_step_words_hold_every_request() -> None:
+    from vllm.models.glm53.nvidia.ops.cute_dsl import registry
+
+    for requests in (1, *registry.DRAFT_REQUESTS):
+        words = draft_providers.step_words(requests)
+        assert set(words) <= set(draft_providers.WORDS)
+        # Two words a row, four rows a request: the layout of vLLM's positions.
+        assert words["position"] == 8 * requests
+        assert words["draft.propose.position"] == 2 * requests
+        assert words["draft.tokens"] == draft_providers.buffer_rows(requests)
+        assert words["draft.tokens"] >= requests
+
+
+def test_drafter_moe_flags_are_placed_like_the_targets(geometry) -> None:
+    placement = _Placement()
+    parts = draft_providers.program(geometry, 0, _AnyTensors(), placement)
+    assert len(placement.issued) == len(parts)
+    for part, (flags, mirror) in zip(parts, placement.issued):
+        moe = next(p for p in part if isinstance(p, draft_providers.DraftMoe))
+        assert moe.state[moe.prefix + "flags"] is flags
+        assert moe.state[moe.prefix + "flags_mirror"] is mirror
+    target = providers.program(geometry, 0, _AnyTensors(), _Placement())
+    ffn = next(p for p in target if isinstance(p, providers.Ffn) and p.layer > 3)
+    assert {n.rsplit(".", 1)[-1] for n in ffn.state} >= {"flags", "flags_mirror"}
 
 
 def test_layer_layout(geometry) -> None:

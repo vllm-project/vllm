@@ -1664,6 +1664,21 @@ class Reduce:
             last = FastMath.add(last, cute.arch.shuffle_sync_bfly(last, tail[b]))
         return last
 
+    @staticmethod
+    def argmax_better(ov, oi, v, i):
+        return FastMath.fcmp(">", ov, v) | (FastMath.fcmp("==", ov, v) & (oi < i))
+
+    @staticmethod
+    @cute.jit
+    def argmax_bfly(v: Float32, i: Int32, offsets: cutlass.Constexpr):
+        for off in cutlass.range_constexpr(len(offsets)):
+            ov = cute.arch.shuffle_sync_bfly(v, offsets[off])
+            oi = cute.arch.shuffle_sync_bfly(i, offsets[off])
+            if Reduce.argmax_better(ov, oi, v, i):
+                v = ov
+                i = oi
+        return v, i
+
 
 class Mma:
     """FP8 (E4M3) weight-page MMA steps of the GEMV families."""

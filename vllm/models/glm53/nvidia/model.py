@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -28,12 +29,15 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.utils import AttentionGroup
 
 from . import switch
 from .ops.launch import Glm53Geometry
 
 if TYPE_CHECKING:
+    from . import draft as glm53_draft
     from . import weights as glm53_weights
 
 
@@ -146,6 +150,10 @@ class GlmMoeDsaForCausalLM(DeepseekV32ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # The low-latency decode switch, read once; refuses an unsupported deployment.
         low_latency = switch.resolve(vllm_config)
+        if low_latency.enabled:
+            from vllm.models.glm53.nvidia import mtp as glm53_mtp
+
+            glm53_mtp.register()
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.low_latency: switch.LowLatencyDecode = low_latency
         speculative = vllm_config.speculative_config
@@ -258,11 +266,31 @@ def warm_up_rejection_kernels(
     torch.accelerator.synchronize(device)
 
 
+def _draft() -> "glm53_draft.Glm53Draft | None":
+    """Return the installed drafter hook; under ``auto`` none, with nothing imported."""
+    if not switch.current().enabled:
+        return None
+    from . import draft as glm53_draft
+
+    return glm53_draft.current()
+
+
 class Glm53ModelState(DefaultModelState):
     """``DefaultModelState`` plus the decode segment's runner-side hooks."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._metadata: dict[tuple[int, int, int, int], dict[str, Any]] = {}
+        # Model Runner V2's low-latency decode paths, with the segment installed.
+        self.low_latency_decode = self._segment() is not None
+
     def _segment(self) -> Any:
         return self.model.model.glm53_segment
+
+    def claims_draft_decode_capture(self) -> bool:
+        """Whether the drafter segment runs the draft decode being captured."""
+        draft = _draft()
+        return draft is not None and draft.claims_capture()
 
     def custom_sampler(self, sampler: Sampler) -> None:
         """Keep vLLM's samplers; compile the request-time Triton kernels now."""
@@ -324,3 +352,77 @@ class Glm53ModelState(DefaultModelState):
             input_batch.num_scheduled_tokens[:num_reqs].tolist(),
             input_batch.num_tokens_after_padding,
         )
+        draft = _draft()
+        if draft is not None:
+            # The drafter's row tables of the step, and the rows its catch-up gathers.
+            draft.step(list(input_batch.req_ids), input_batch.query_start_loc)
+
+    def postprocess_state(
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor | int,
+        num_computed_tokens: torch.Tensor | None = None,
+    ) -> None:
+        """Hand the drafter the step's sampled-token counts (its sampled rows at
+        MTP K = 1).
+        """
+        super().postprocess_state(idx_mapping, num_sampled, num_computed_tokens)
+        draft = _draft()
+        if draft is not None:
+            draft.observe_sampled(num_sampled)
+
+    def prepare_attn(
+        self,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
+        ubatch_idx: int = 0,
+        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+    ) -> dict[str, Any]:
+        """Return the cached metadata of a segment-owned FULL step, or build it."""
+        key = None
+        segment = self._segment()
+        if (
+            segment is not None
+            and cudagraph_mode == CUDAGraphMode.FULL
+            and not for_capture
+            and ubatch_idx == 0
+            and not input_batch.has_prefill
+            and input_batch.max_query_len is None
+        ):
+            key = (
+                input_batch.num_reqs,
+                input_batch.num_reqs_after_padding,
+                input_batch.num_tokens,
+                input_batch.num_tokens_after_padding,
+            )
+            cached = self._metadata.get(key)
+            if cached is not None and segment.owns_attn_metadata(
+                input_batch.num_tokens_after_padding
+            ):
+                return cached
+        metadata = super().prepare_attn(
+            input_batch,
+            cudagraph_mode,
+            block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture=for_capture,
+            ubatch_idx=ubatch_idx,
+            model_specific_attn_metadata=model_specific_attn_metadata,
+        )
+        if key is not None:
+            self._metadata.setdefault(key, metadata)
+        return metadata
+
+    def capture_inner_cudagraphs(self, *args: Any, **kwargs: Any) -> None:
+        """Drop the cached metadata: a capture follows every reallocation of its
+        buffers.
+        """
+        self._metadata.clear()
+        return super().capture_inner_cudagraphs(*args, **kwargs)

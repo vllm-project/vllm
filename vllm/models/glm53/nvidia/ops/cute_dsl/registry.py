@@ -87,10 +87,12 @@ _PUSH_MAILBOX = 1009792
 _HANDOFF_BLOCK = 59680
 
 
-def _sel(shard: int, knobs: tuple[tuple[str, int | bool], ...] = ()) -> CuteEntry:
-    return CuteEntry(
-        "mla_selector", "SelectorFull", (("SHARD", shard),) + knobs, _SELECTOR
-    )
+def _sel(
+    shard: int,
+    cls: str = "SelectorFull",
+    knobs: tuple[tuple[str, int | bool], ...] = (),
+) -> CuteEntry:
+    return CuteEntry("mla_selector", cls, (("SHARD", shard),) + knobs, _SELECTOR)
 
 
 def _worker(cls: str, **host: int) -> CuteEntry:
@@ -288,6 +290,111 @@ def _moe_tier(rmax: int, seam: bool = False) -> CuteEntry:
 
 ENTRIES.update({f"fused_moe_r{r}_ckpt_shared": _moe_tier(r) for r in TIERS})
 ENTRIES.update({f"fused_moe_r{r}_seam_ckpt_shared": _moe_tier(r, True) for r in TIERS})
+
+
+_HEAD = {
+    "kMailboxBytes": 1024,
+    "kVocabShard": 19360,
+    "kHidden": 6144,
+    "kPaddedRows": 19362,
+}
+_DRAFT_WORKER = {"kMailboxBytes": 917504, "kFlagWords": 15804}
+_DRAFT_PRE = {"kMailboxBytes": 917504}
+DRAFT_ENTRIES: dict[str, CuteEntry] = {
+    "lm_head_top1_q1": CuteEntry(
+        "lm_head",
+        "LmHead",
+        (("ROWS", 1),),
+        {"kQTokens": 1, **_HEAD, "kDoneWords": 299, "kRecordWords": 4},
+    ),
+    "lm_head_top1_q4": CuteEntry(
+        "lm_head",
+        "LmHead",
+        (("ROWS", 4),),
+        {"kQTokens": 4, **_HEAD, "kDoneWords": 1187, "kRecordWords": 4},
+    ),
+    "mla_worker_draft_q1_paged": CuteEntry(
+        "mla_draft",
+        "DraftWorker",
+        (("ROWS", 1), ("GROUP_ROWS", 1)),
+        {
+            **_DRAFT_WORKER,
+            "kHandoffWords": 14848,
+            "kPartialOBytes": 524288,
+            "kPartialLseBytes": 1024,
+        },
+    ),
+    "mla_worker_draft_q4_paged": CuteEntry(
+        "mla_draft",
+        "DraftWorker",
+        (("ROWS", 4),),
+        {
+            **_DRAFT_WORKER,
+            "kHandoffWords": 59392,
+            "kPartialOBytes": 2097152,
+            "kPartialLseBytes": 4096,
+        },
+    ),
+    "mtp_preprocess_q1": CuteEntry(
+        "mtp_preprocess", "MtpPreprocess", (("ROWS", 1),), _DRAFT_PRE
+    ),
+    "mtp_preprocess_q4": CuteEntry(
+        "mtp_preprocess", "MtpPreprocess", (("ROWS", 4),), _DRAFT_PRE
+    ),
+    "prologue_vllm": CuteEntry("prologue", "PrologueVllm", (("ROWS", 1),)),
+    **{
+        f"mla_selector_q4_shard3r{shard}_only_row_paged": _sel(shard, "SelectorOnlyRow")
+        for shard in range(3)
+    },
+}
+ENTRIES.update(DRAFT_ENTRIES)
+
+DRAFT_REQUESTS = (2, 4)
+_DRAFT_ROW = {
+    "kHandoffWords": 14848,
+    "kPartialOBytes": 524288,
+    "kPartialLseBytes": 1024,
+}
+
+
+def _draft_tier_entries() -> dict[str, CuteEntry]:
+    entries: dict[str, CuteEntry] = {}
+    for requests in DRAFT_REQUESTS:
+        rows = 4 * requests
+        catch_up = (("ROWS", rows), ("REQUESTS", requests))
+        sizes = _SELECTOR | {
+            name: -(-_SELECTOR[name] // 4) * 4 * requests for name in _SELECTOR_BLOCKS
+        }
+        for shard in range(SELECTOR_RANKS):
+            selector = _sel(shard, "SelectorOnlyRow", knobs=catch_up)
+            entries[
+                f"mla_selector_r{rows}_shard{SELECTOR_RANKS}r{shard}_only_row_paged"
+            ] = CuteEntry(selector.module, selector.cls, selector.constants, sizes)
+        for name, group_rows, part_rows in (
+            (f"mla_worker_draft_r{rows}_paged", 4, rows),
+            (f"mla_worker_draft_p{requests}_paged", 1, requests),
+        ):
+            entries[name] = CuteEntry(
+                "mla_draft",
+                "DraftWorker",
+                (
+                    ("ROWS", part_rows),
+                    ("GROUP_ROWS", group_rows),
+                    ("REQUESTS", requests),
+                ),
+                {
+                    "kMailboxBytes": _PUSH_MAILBOX * requests,
+                    "kFlagWords": _WORKER["kFlagWords"] * (part_rows // group_rows),
+                    **{key: value * part_rows for key, value in _DRAFT_ROW.items()},
+                },
+            )
+        entries[f"prologue_vllm_p{requests}"] = CuteEntry(
+            "prologue", "PrologueVllm", (("ROWS", requests), ("REQUESTS", requests))
+        )
+    return entries
+
+
+ENTRIES.update(_draft_tier_entries())
 
 
 def kernel_class(name: str) -> type:

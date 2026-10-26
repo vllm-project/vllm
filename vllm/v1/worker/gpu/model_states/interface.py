@@ -43,6 +43,13 @@ class ModelState(ABC):
     supports_prompt_embeds: ClassVar[bool] = False
     """Whether this state implements user-provided prompt embeddings."""
 
+    low_latency_decode: bool = False
+    """Opt in to the low-latency decode paths for speculative decoding (CUDA,
+    MTP/EAGLE): the post-forward CUDA graph of sampling, state update and draft
+    prefill inputs, fused draft-prefill stores, drafts stored by the draft decode
+    graph, and kernel copies in captures. A state that sets it must keep
+    ``postprocess_state`` safe to capture in a CUDA graph."""
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -132,6 +139,11 @@ class ModelState(ABC):
     ) -> None:
         """Hook run after the KV cache tensors are allocated and bound."""
         return None
+
+    def claims_draft_decode_capture(self) -> bool:
+        """With ``low_latency_decode``: whether the model runs the draft decode
+        being captured itself, reading no slot mappings or decode metadata."""
+        return False
 
     def capture_inner_cudagraphs(
         self,

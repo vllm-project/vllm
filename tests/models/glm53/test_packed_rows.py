@@ -223,5 +223,5 @@ def test_the_host_writes_the_true_rows_and_leaves_the_replay_counter(geometry):
 def test_the_ledger_covers_what_a_step_writes(per_request, packed):
     # A packed step writes its tokens; a lone aligned request also its dead rows.
     lone = switch.lone_rows(per_request)
-    stop = ledger_stop(100, per_request, 0 if packed else lone - per_request)
+    stop = ledger_stop(100, per_request, 0, 0 if packed else lone - per_request)
     assert stop == 100 + (per_request if packed else lone)

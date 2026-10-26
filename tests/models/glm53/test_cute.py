@@ -42,6 +42,10 @@ def _inputs() -> dict[str, torch.Tensor]:
         "row_table": torch.tensor(
             [4, 1, 0, 0, 0, 0, 0, 0, 0], dtype=torch.int32, device=device
         ),
+        # The one-row build's table (the drafter's proposals): R = 1 live row.
+        "row_table_q1": torch.tensor(
+            [1, 1, 0, 0, 0, 0], dtype=torch.int32, device=device
+        ),
     }
 
 
@@ -50,6 +54,8 @@ def _outputs() -> dict[str, torch.Tensor]:
     out = {
         "hidden_q4": torch.empty(4, HIDDEN, dtype=torch.bfloat16, device=device),
         "freq_q4": torch.empty(4, 64, device=device),
+        "hidden_v1": torch.empty(4, HIDDEN, dtype=torch.bfloat16, device=device),
+        "freq_v1": torch.empty(4, 64, device=device),
         "hidden_v4": torch.empty(4, HIDDEN, dtype=torch.bfloat16, device=device),
         "freq_v4": torch.empty(4, 64, device=device),
     }
@@ -81,18 +87,22 @@ def _launches(x, out) -> None:
             x["row_table"].data_ptr(),
         ],
     )
-    launch(
-        "prologue_vllm_q4",
-        [
-            *common,
-            x["rope"].data_ptr(),
-            out["hidden_v4"].data_ptr(),
-            out["freq_v4"].data_ptr(),
-            ROPE_CAPACITY,
-            x["row_table"].data_ptr(),
-            *shards,
-        ],
-    )
+    for name, tag, table in (
+        ("prologue_vllm", "v1", "row_table_q1"),
+        ("prologue_vllm_q4", "v4", "row_table"),
+    ):
+        launch(
+            name,
+            [
+                *common,
+                x["rope"].data_ptr(),
+                out[f"hidden_{tag}"].data_ptr(),
+                out[f"freq_{tag}"].data_ptr(),
+                ROPE_CAPACITY,
+                x[table].data_ptr(),
+                *shards,
+            ],
+        )
 
 
 def _programmatic_edges(graph: torch.cuda.CUDAGraph) -> int:
@@ -114,7 +124,7 @@ def test_cute_entries_build_and_bind():
         assert registry.executor(name, device) is registry.executor(name, device), name
 
 
-CHAINED = ("prologue_q4", "prologue_vllm_q4")
+CHAINED = ("prologue_q4", "prologue_vllm", "prologue_vllm_q4")
 
 
 @sm100

@@ -19,6 +19,7 @@ from vllm.models.glm53.nvidia import providers, switch
 from vllm.models.glm53.nvidia import rows as glm53_rows
 from vllm.models.glm53.nvidia import weights as glm53_weights
 from vllm.models.glm53.nvidia.ops import launch as glm53_launch
+from vllm.models.glm53.nvidia.ops.cute_dsl import registry as glm53_registry
 from vllm.models.glm53.nvidia.ops.cute_dsl.row_table import RowTableLayout
 from vllm.models.glm53.nvidia.ops.launch import Glm53Geometry, Region
 
@@ -139,13 +140,13 @@ def null_padding_block(
         table[last : last + 1].zero_()
 
 
-def ledger_stop(computed: int, scheduled: int, dead: int) -> int:
+def ledger_stop(computed: int, scheduled: int, reach: int, dead: int) -> int:
     """Return where the positions a step may have written end (the KV ledger's stop):
-    the request's tokens and, for a lone request on an aligned build, its ``dead``
-    rows past the tokens (0 on a packed tier: its rows are the request's tokens, and
-    tail rows store nothing).
+    the request's tokens, the drafter's ``reach`` and, for a lone request on an
+    aligned build, its ``dead`` rows past the tokens (0 on a packed tier: its rows
+    are the request's tokens, and tail rows store nothing).
     """
-    return computed + scheduled + dead
+    return computed + scheduled + dead + reach
 
 
 def router_pages(
@@ -252,9 +253,11 @@ class SpecializedDecode:
         self._block_tables: BlockTables | None = None
         self._mla_group: int = 0
         self._batch: tuple[str, ...] = ()
+        self._drafter_partial: bool = False
         self._max_model_len: int = max_model_len
         self._block_size: int = 0
         self._row_tiers: bool = row_tiers
+        self._reach: int = 0
 
     @property
     def built(self) -> bool:
@@ -267,6 +270,91 @@ class SpecializedDecode:
     @property
     def kv(self) -> glm53_kv.Glm53KvHygiene | None:
         return self._kv
+
+    def _tier_of(self, capacity: int | switch.Build | None) -> TierState:
+        if capacity is None:
+            (tier,) = self._tiers.values()
+            return tier
+        return self._tiers[min(self._builds_of(capacity), key=lambda b: b.w8a16_rows)]
+
+    def _builds_of(self, capacity: int | switch.Build) -> list[switch.Build]:
+        if isinstance(capacity, switch.Build):
+            # One build of a tier with several (K = 1: q4 and q8 MoE builds of tier 8).
+            return [capacity] if capacity in self._tiers else []
+        return [build for build in self._tiers if build.tier == capacity]
+
+    def has_tier(self, capacity: int | switch.Build) -> bool:
+        """Whether a build of row capacity ``capacity`` (or that build) is built."""
+        return bool(self._builds_of(capacity))
+
+    def sync_block_table(self, capacity: int | switch.Build | None = None) -> None:
+        """Copy vLLM's block-table rows into the padded copy of tier ``capacity``'s
+        kernels (default: the only tier), if any (stream-ordered).
+        """
+        self._tier_of(capacity).sync_block_table()
+
+    def shared_tensors(
+        self, capacity: int | switch.Build | None = None
+    ) -> dict[str, torch.Tensor]:
+        """Return the tensors the drafter segment of a tier shares: the RoPE table and
+        the block table.
+        """
+        if capacity is not None and not self.has_tier(capacity):
+            return {}
+        names = ("rope_table", glm53_launch.BLOCK_TABLE)
+        tensors = self._tier_of(capacity).tensors
+        return {name: tensors[name] for name in names}
+
+    @property
+    def embedding_arena(self) -> glm53_arena.PeerArena:
+        assert self._embedding is not None
+        return self._embedding
+
+    def add_layer(
+        self, layer: int, caches: dict[str, torch.Tensor], reach: int
+    ) -> None:
+        """Extend the KV hygiene to the drafter's layer, whose steps write ``reach``
+        more rows.
+        """
+        from vllm.distributed import get_tp_group
+
+        assert self._kv is not None
+        if any(key[0] == layer for key in self._kv.planes):
+            return  # another request tier of the drafter added it
+        geometry = self.geometry
+        planes = {
+            **self._kv.planes,
+            **glm53_kv.pool_planes(caches, geometry, self._kv.block_size),
+        }
+        if any(key[0] != layer for key in planes if key not in self._kv.planes):
+            raise ValueError(f"caches of layers other than {layer}")
+        pending = self._kv.pending
+        selectors = frozenset(range(glm53_registry.SELECTOR_RANKS))
+        self._kv = glm53_kv.Glm53KvHygiene(
+            planes,
+            geometry,
+            rank=get_tp_group().rank_in_group,
+            block_size=self._kv.block_size,
+            partial_writers={
+                key: selectors
+                for key in planes
+                if key[1] in ("index_key", "index_scale")
+            },
+        )
+        self._kv.pending = pending
+        self._reach = reach
+
+    def owns_attn_metadata(self, num_tokens: int) -> bool:
+        """Return whether a FULL step of ``num_tokens`` tokens replays only claimed
+        graphs.
+        """
+        from vllm.models.glm53.nvidia import draft as glm53_draft
+
+        if self.captures == 0 or num_tokens not in self.claims:
+            return False
+        return num_tokens == 1 or glm53_draft.claims_draft_prefill(
+            num_tokens // self.rows_per_request
+        )
 
     def forward(
         self, input_ids: torch.Tensor | None, positions: torch.Tensor
@@ -432,6 +520,7 @@ class SpecializedDecode:
             return
         if not uniform:
             return  # not a uniform decode step: vLLM runs it outside the graph
+        self._complete_for_stock_drafter(len(request_ids))
         geometry = tier.segment.geometry
         if geometry.max_requests == 1 and geometry.rows > self.rows_per_request:
             assert tier.table.dim() == 1
@@ -460,6 +549,7 @@ class SpecializedDecode:
             stop = ledger_stop(
                 self._computed[request_id],
                 scheduled,
+                self._reach,
                 0 if tier.packed else self.lone_rows - self.rows_per_request,
             )
             self._kv.pending.decoded(request_id, start, stop)
@@ -468,10 +558,26 @@ class SpecializedDecode:
 
     def _before_stock_step(self) -> None:
         self._batch = ()
+        self._drafter_partial = False
         if self._kv is not None and self._kv.pending:
             from vllm.distributed import get_tp_group
 
             self._kv.complete_pending(self._request_blocks, get_tp_group())
+
+    def _complete_for_stock_drafter(self, requests: int) -> None:
+        from vllm.models.glm53.nvidia import draft as glm53_draft
+
+        draft = glm53_draft.current()
+        if draft is None or not draft.built:
+            return
+        if draft.tier_of(requests) is not None:
+            self._drafter_partial = True
+            return
+        if self._drafter_partial and self._kv is not None and self._kv.pending:
+            from vllm.distributed import get_tp_group
+
+            self._kv.complete_pending(self._request_blocks, get_tp_group())
+        self._drafter_partial = False
 
     def _try_build(
         self, build: switch.Build, input_ids: torch.Tensor, positions: torch.Tensor
@@ -609,6 +715,11 @@ class SpecializedDecode:
         """Drop the segments and their KV-bound state; the next eager forward of a
         served size rebuilds them.
         """
+        from vllm.models.glm53.nvidia import draft as glm53_draft
+
+        draft = glm53_draft.current()
+        if draft is not None:
+            draft.close()
         if self._tiers:
             torch.accelerator.synchronize()
             for tier in self._tiers.values():

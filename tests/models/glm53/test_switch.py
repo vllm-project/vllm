@@ -42,6 +42,7 @@ def _config(
     method="mtp",
     per_batch_size=None,
     adaptive=False,
+    local_argmax=True,
 ):
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
@@ -63,6 +64,7 @@ def _config(
         use_v2_model_runner=v2,
         speculative_config=SimpleNamespace(
             num_speculative_tokens=drafts,
+            use_local_argmax_reduction=local_argmax,
             moe_backend=None,
             method=method,
             enable_adaptive_verification=adaptive,
@@ -126,6 +128,18 @@ def test_refuses_unservable_deployments(clean_env, override, need):
 def test_full_and_piecewise_graphs_are_supported(clean_env):
     config = _config(graphs=CUDAGraphMode.FULL_AND_PIECEWISE)
     assert not any("CUDA graphs" in m for m in switch._unsupported(config))
+
+
+def test_cute_drafter_needs_local_argmax_reduction(clean_env):
+    need = (
+        "MTP with use_local_argmax_reduction (the drafter hands over its greedy drafts)"
+    )
+    assert need not in switch._unsupported(_config())
+    assert need in switch._unsupported(_config(local_argmax=False))
+    assert need in switch._unsupported(_config(local_argmax=False, seqs=3), (4, 8, 16))
+    for drafts in (1, 2):  # the CuTe drafter's greedy drafts at every K
+        config = _config(local_argmax=False, seqs=2, drafts=drafts)
+        assert need in switch._unsupported(config, (4, 8))
 
 
 def test_refuses_batch_invariant(clean_env):
@@ -255,8 +269,14 @@ def test_other_backends_leave_the_capture_sizes_alone(clean_env):
         (4, False, ()),  # no MTP
     ],
 )
-def test_the_draft_decode_sizes_join_the_capture_sizes(seqs, mtp, sizes):
+def test_the_drafters_tiers_add_their_decode_sizes_to_the_capture_sizes(
+    seqs, mtp, sizes
+):
     assert switch.draft_capture_sizes(seqs, mtp) == sizes
+    tiers = switch.draft_tiers(seqs, 3)
+    assert switch.drafter_serves(mtp) == mtp
+    assert seqs == 1 or not mtp or set(tiers) <= set(sizes)
+    assert set(tiers) <= {1, *switch.DRAFT_REQUESTS}
 
 
 GRAPHS = {
@@ -379,15 +399,26 @@ def test_a_tier_runs_packed_builds_for_partial_row_groups(tier, per_request, pac
         (8, 1, ()),  # one draft: no draft decode
     ],
 )
-def test_vllms_drafter_gets_decode_sizes_on_the_deployments_graphs(
+def test_short_k_decode_sizes_are_on_the_deployments_graphs(
     clean_env, seqs, drafts, sizes
 ):
+    assert switch.drafter_serves(True, drafts)
     assert switch.draft_capture_sizes(seqs, True, drafts) == sizes
+    if drafts > 1:  # K = 1 has no draft decode
+        assert set(switch.draft_tiers(seqs, drafts)) <= set(sizes)
     per_request = 1 + drafts
     claims = switch.tier_claims(seqs, per_request)
     for size in sizes:
         rounded = -(-size // per_request) * per_request
         assert size <= seqs and (rounded in claims or rounded > max(claims))
+
+
+def test_the_drafter_serves_k_1_to_7(clean_env):
+    assert all(switch.drafter_serves(True, k) for k in range(1, 8))
+    assert not switch.drafter_serves(True, 0) and not switch.drafter_serves(True, 8)
+    assert not switch.drafter_serves(False, 3)
+    assert switch.draft_capture_sizes(4, True, 3) == (1, 2, 4)
+    assert switch.draft_capture_sizes(4, True, 2) == (1, 2, 4)
 
 
 @pytest.mark.parametrize(
@@ -404,7 +435,43 @@ def test_vllms_drafter_gets_decode_sizes_on_the_deployments_graphs(
     ],
 )
 def test_the_drafters_decode_sizes_at_every_k(clean_env, seqs, drafts, sizes):
+    assert switch.drafter_serves(True, drafts)
     assert switch.draft_capture_sizes(seqs, True, drafts) == sizes
+    assert set(switch.draft_tiers(seqs, drafts)) <= set(sizes) or seqs == 1
+
+
+def test_a_drafter_tier_is_the_top_of_its_target_graph():
+    assert switch.draft_tiers(16, 3) == (1, 2, 4)  # B = 5-16: vLLM's drafter
+    assert switch.draft_tiers(6, 3) == (1, 2, 4)
+    assert switch.draft_tiers(2, 4) == (1, 2)  # two requests own the 10-token graph
+    assert switch.draft_tiers(3, 4) == (1,)  # two pad to the 15-token graph of three
+    assert switch.draft_tiers(16, 7) == (1, 2)
+    assert switch.draft_tiers(8, 1) == (1, 2)  # B = 3-8: vLLM's drafter
+    assert switch.draft_tiers(1, 1) == (1,) and switch.draft_tiers(1, 2) == (1,)
+    assert switch.draft_tiers(4, 2) == (1, 2, 4)
+    assert switch.draft_tiers(5, 2) == (1, 2)  # B = 3-5 share the 15-token graph
+
+
+def test_one_drafter_tier_binds_another_target_tier_than_its_step():
+    foreign = set()
+    for seqs in (1, 2, 3, 4, 8, 16):
+        for drafts in switch.DRAFT_KS:
+            rows = drafts + 1
+            # A tier's catch-up replays at its target graph's rows.
+            tiers = [
+                tier
+                for tier in switch.draft_tiers(seqs, drafts)
+                if switch.serves_shape(tier, rows)
+            ]
+            claims = switch.tier_claims(seqs, rows)
+            assert all(tier * rows in claims for tier in tiers)
+            for b in range(1, seqs + 1):
+                tier = next((size for size in tiers if size >= b), None)
+                if tier is None:
+                    continue
+                if switch.shape_build(b, rows) != switch.shape_build(tier, rows):
+                    foreign.add((seqs, drafts, tier))
+    assert foreign == set()
 
 
 def test_derived_tiers_become_the_capture_sizes(clean_env):
@@ -507,3 +574,14 @@ loaded = {{m[len(prefix):] for m in sys.modules if m.startswith(prefix)}}
 assert loaded <= {AUTO_MODULES!r}, sorted(loaded - {AUTO_MODULES!r})
 """
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.parametrize("drafts", switch.DRAFT_KS)
+def test_every_drafter_tier_is_a_built_request_tier(drafts):
+    from vllm.models.glm53.nvidia.ops.cute_dsl import registry
+
+    for seqs in range(1, 17):
+        tiers = switch.draft_tiers(seqs, drafts)
+        assert tiers[0] == 1 and list(tiers) == sorted(set(tiers))
+        assert set(tiers[1:]) <= set(registry.DRAFT_REQUESTS)
+    assert switch.draft_tiers(4, 4) == (1,)  # 10 tokens are no graph; 20 rows: stock

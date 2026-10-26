@@ -483,7 +483,10 @@ def combine_sampled_and_draft_tokens(
     cu_num_logits: torch.Tensor,
     num_logits: int,
     num_new_sampled_tokens: int = 1,  # excl accepted draft tokens, a.k.a bonus tokens
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Write the sampled and draft tokens into input_ids and return the logits
+    indices (into ``out[:num_logits]`` when given, a persistent buffer)."""
     assert num_new_sampled_tokens in (0, 1), (
         f"num_new_sampled_tokens must be 0 or 1, got {num_new_sampled_tokens}"
     )
@@ -491,7 +494,12 @@ def combine_sampled_and_draft_tokens(
     num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
 
-    logits_indices = torch.empty(num_logits, dtype=torch.int64, device=input_ids.device)
+    if out is not None:
+        logits_indices = out[:num_logits]
+    else:
+        logits_indices = torch.empty(
+            num_logits, dtype=torch.int64, device=input_ids.device
+        )
     _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,
@@ -721,12 +729,19 @@ def expand_idx_mapping(
     total_num_logits: int,
     cu_num_logits: torch.Tensor,
     max_expand_len: int,
+    out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Expand idx_mapping to one entry per logits row, with each row's position
+    within its request (into slices of the persistent ``out`` when given)."""
     num_reqs = idx_mapping.shape[0]
-    expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
-    expanded_local_pos = torch.empty(
-        total_num_logits, dtype=torch.int32, device=idx_mapping.device
-    )
+    if out is not None:
+        expanded_idx_mapping = out[0][:total_num_logits]
+        expanded_local_pos = out[1][:total_num_logits]
+    else:
+        expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
+        expanded_local_pos = torch.empty(
+            total_num_logits, dtype=torch.int32, device=idx_mapping.device
+        )
     _expand_idx_mapping_kernel[(num_reqs,)](
         idx_mapping,
         expanded_idx_mapping,

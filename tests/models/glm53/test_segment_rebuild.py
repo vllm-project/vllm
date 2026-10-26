@@ -9,6 +9,7 @@ import torch
 
 import vllm.forward_context
 from vllm.models.glm53.nvidia import decode as glm53_decode
+from vllm.models.glm53.nvidia import draft as glm53_draft
 from vllm.models.glm53.nvidia import kv as glm53_kv
 from vllm.models.glm53.nvidia import model as glm53_model
 from vllm.models.glm53.nvidia import switch
@@ -146,6 +147,182 @@ def test_row_tier_requests_read_their_own_slot(geometry):
     assert "a" not in decode._slots
 
 
+def test_target_close_closes_the_installed_drafter(monkeypatch, geometry):
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda *args, **kwargs: None)
+    drafter = _Segment()
+    monkeypatch.setattr(glm53_draft, "_CURRENT", drafter)
+    _decode(geometry).close()
+    assert drafter.closed == 1
+
+
+def _draft_tier(requests, segment):
+    return glm53_draft.DraftTier(
+        requests,
+        segment,
+        {"token_ids": torch.zeros(4 * requests)},
+        torch.zeros(2),
+        1,
+        torch.zeros(1),
+        torch.zeros(1),
+        None,
+        {"prefill": 1, "decode": 2},
+    )
+
+
+def test_drafter_close_forgets_its_captures_and_bound_tensors(monkeypatch, geometry):
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda *args, **kwargs: None)
+    draft = glm53_draft.Glm53Draft(
+        SimpleNamespace(), geometry, {}, drafts=3, tiers=(1, 2, 4)
+    )
+    assert draft.sizes == (1, 2, 4)
+    segments = [_Segment(), _Segment()]
+    draft._tiers = {1: _draft_tier(1, segments[0]), 4: _draft_tier(4, segments[1])}
+    draft._positions = torch.zeros(4)
+    draft._sequence_captures, draft._decoding, draft._warmed = 2, True, True
+    draft._batch, draft._tokens = ("a",), torch.zeros(1)
+    assert draft.claims_draft_prefill(3) and draft.claims_draft_prefill(1)
+    draft.close()
+    assert [segment.closed for segment in segments] == [1, 1] and not draft.built
+    assert not draft.claims_draft_prefill(1) and draft._sequence_captures == 0
+    assert not draft._decoding and not draft._warmed and draft._tokens is None
+    assert draft._batch == () and draft._positions is None
+    draft.decode_phase(True)  # a new capture sequence starts at proposal 0
+    draft.decode_phase(False)
+    assert not draft.claims_proposals()
+
+
+def test_the_draft_decode_phase_ends_after_whole_graphs_of_proposals(geometry):
+    draft = glm53_draft.Glm53Draft(
+        SimpleNamespace(), geometry, {}, drafts=3, tiers=(1, 2, 4)
+    )
+    draft.decode_phase(True)
+    # Three sizes captured one after the other: two proposals each.
+    draft._sequence_captures = 6
+    draft.decode_phase(False)
+    assert draft._sequence_captures == 0
+    draft.decode_phase(True)
+    draft._sequence_captures = 3  # a graph that holds one proposal of two
+    with pytest.raises(RuntimeError, match="holds one proposal"):
+        draft.decode_phase(False)
+
+
+def test_a_batch_runs_the_smallest_drafter_tier_that_holds_it(geometry):
+    draft = glm53_draft.Glm53Draft(
+        SimpleNamespace(), geometry, {}, drafts=3, tiers=(1, 2, 4)
+    )
+    assert draft.sizes == (1, 2, 4)
+    assert [draft.tier_of(b) for b in (1, 2, 3, 4, 5)] == [1, 2, 4, 4, None]
+    # No drafter tier above the deployment's batch.
+    small = glm53_draft.Glm53Draft(
+        SimpleNamespace(), geometry, {}, drafts=3, tiers=(1, 2)
+    )
+    assert small.sizes == (1, 2) and small.tier_of(3) is None
+
+
+def test_the_drafter_steps_the_tier_of_the_batch(monkeypatch, geometry):
+    steps: list[tuple[int, int]] = []
+    resets: list[int] = []
+
+    class _Tiered(_Segment):
+        def __init__(self, requests):
+            super().__init__()
+            self.requests = requests
+
+        def step(self, live):
+            steps.append((self.requests, live))
+
+        def reset_seeds(self):
+            resets.append(self.requests)
+
+    draft = glm53_draft.Glm53Draft(
+        SimpleNamespace(), geometry, {}, drafts=3, tiers=(1, 2, 4)
+    )
+    draft._tiers = {b: _draft_tier(b, _Tiered(b)) for b in (1, 2, 4)}
+    start = torch.zeros(4, dtype=torch.int32)
+    draft.step(["a", "b", "c"], start)
+    draft.step(["a", "b", "c"], start)
+    draft.step(["a", "b"], start)
+    assert steps == [(4, 3), (4, 3), (2, 2)]
+    assert resets == [4, 2]  # seeds follow the batch: reset when it changes
+
+
+def test_a_step_past_the_largest_tier_runs_vllms_drafter(monkeypatch, geometry):
+    resets: list[int] = []
+
+    class _Tiered(_Segment):
+        def __init__(self, requests):
+            super().__init__()
+            self.requests = requests
+
+        def step(self, live):
+            pass
+
+        def reset_seeds(self):
+            resets.append(self.requests)
+
+    draft = glm53_draft.Glm53Draft(
+        SimpleNamespace(), geometry, {}, drafts=3, tiers=(1, 2, 4)
+    )
+    draft._tiers = {b: _draft_tier(b, _Tiered(b)) for b in (1, 2, 4)}
+    start = torch.zeros(9, dtype=torch.int32)
+    draft.step(["a", "b", "c", "d"], start)
+    draft.step(list("abcdef"), start)  # vLLM's drafter
+    assert not draft.claims_proposals() and not draft.claims_draft_prefill(6)
+    draft.step(["a", "b", "c", "d"], start)  # same four requests: fresh seeds
+    assert resets == [4, 4]
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    for rows, lean in ((1, True), (2, True), (4, True), (8, False), (3, False)):
+        draft._eager_rows = rows
+        assert draft.claims_capture() == lean
+    draft.decode_phase(True)
+    draft._eager_rows = 4
+    assert draft.claims_capture()
+    with pytest.raises(RuntimeError, match="claimed lean"):
+        draft.forward(SimpleNamespace(is_cuda=True, shape=(8,)), None, None)
+
+
+def test_a_replayed_step_past_the_drafter_tiers_completes_its_index_keys(
+    monkeypatch, geometry
+):
+    completed: list[int] = []
+
+    class _Kv:
+        pending = True
+
+        def complete_pending(self, blocks_of, group):
+            completed.append(len(completed))
+
+    import vllm.distributed as distributed
+
+    monkeypatch.setattr(distributed, "get_tp_group", lambda: None, raising=False)
+    draft = glm53_draft.Glm53Draft(
+        SimpleNamespace(), geometry, {}, drafts=3, tiers=(1, 2, 4)
+    )
+    draft._tiers = {b: _draft_tier(b, _Segment()) for b in (1, 2, 4)}
+    monkeypatch.setattr(glm53_draft, "_CURRENT", draft)
+    decode = _decode(geometry)
+    decode._kv = _Kv()
+    decode._complete_for_stock_drafter(5)  # no CuTe step yet: nothing pending of ours
+    decode._complete_for_stock_drafter(4)
+    decode._complete_for_stock_drafter(3)
+    assert completed == []
+    decode._complete_for_stock_drafter(5)  # first vLLM-drafter step after CuTe steps
+    decode._complete_for_stock_drafter(6)
+    assert completed == [0]
+    decode._complete_for_stock_drafter(2)
+    decode._complete_for_stock_drafter(8)
+    assert completed == [0, 1]
+
+
+def test_drafter_segment_close_gives_its_placement_back():
+    events: list[str] = []
+    segment = object.__new__(glm53_draft.Glm53DraftSegment)
+    segment.arena = SimpleNamespace(close=lambda: events.append("arena"))
+    segment.placement = SimpleNamespace(release=lambda: events.append("placement"))
+    segment.close()
+    assert events == ["arena", "placement"]
+
+
 def test_a_capture_size_between_two_tiers_is_served_by_the_next_tier_up(geometry):
     def build(claims):
         return glm53_decode.SpecializedDecode(
@@ -163,6 +340,70 @@ def test_a_capture_size_between_two_tiers_is_served_by_the_next_tier_up(geometry
     for claims in ({16: 16, 10: 16}, {16: 16, 20: 16}, {16: 12}):
         with pytest.raises(ValueError, match="cannot serve"):
             build(claims)
+
+
+def test_the_drafter_shares_the_tensors_of_the_target_tier_of_its_rows(geometry):
+    decode = _decode(geometry)
+    names = ("rope_table", glm53_decode.glm53_launch.BLOCK_TABLE)
+    tensors = {name: torch.zeros(i + 1) for i, name in enumerate(names)}
+    decode._tiers = {switch.Build(8): _tier(tensors=tensors)}
+    assert decode.has_tier(8) and not decode.has_tier(16)
+    assert decode.shared_tensors(8) == tensors and decode.shared_tensors(16) == {}
+    assert decode.shared_tensors() == tensors  # the only tier
+
+
+def test_a_drafter_tier_shares_the_tensors_of_its_own_build(geometry):
+    decode = _decode(geometry)
+    names = ("rope_table", glm53_decode.glm53_launch.BLOCK_TABLE)
+    q4, q8 = switch.Build(8, 4), switch.Build(8, 8)
+    two, four = ({name: torch.zeros(n) for name in names} for n in (1, 3))
+    decode._tiers = {q4: _tier(tensors=two), q8: _tier(tensors=four)}
+    assert decode.shared_tensors(q8) == four and decode.shared_tensors(q4) == two
+    assert decode.shared_tensors(8) == two  # by row tier: the q4 build
+    assert not decode.has_tier(switch.Build(8)) and decode.has_tier(q8)
+    # MTP 1: two requests run the q4 MoE build of tier 8, three and four the q8 one.
+    draft = glm53_draft.Glm53Draft(
+        SimpleNamespace(), geometry, {}, drafts=1, tiers=(1, 2, 4)
+    )
+    assert [draft.target_rows(b) for b in (1, 2, 4)] == [switch.Build(4), q4, q8]
+    assert not any(draft._foreign_target(b) for b in (1, 2, 4))
+
+
+@pytest.mark.parametrize(
+    ("drafts", "windows"), [(1, (1,)), (2, (1,)), (3, ()), (4, (0, 1)), (7, (0, 1))]
+)
+def test_the_catchup_stages_one_padded_window_below_mtp_3(geometry, drafts, windows):
+    draft = glm53_draft.Glm53Draft(
+        SimpleNamespace(), geometry, {}, drafts=drafts, tiers=(1,)
+    )
+    assert draft.windows == windows
+    assert draft._vllm_name("token_ids") == ("vllm." * bool(windows)) + "token_ids"
+    draft.decode_phase(True)
+    draft.decode_phase(False)  # K = 1 captures no proposal
+
+
+def test_a_step_owns_its_attention_metadata_when_its_drafter_tier_replays(
+    monkeypatch, geometry
+):
+    asked: list[int] = []
+
+    class _Drafter:
+        def claims_draft_prefill(self, requests):
+            asked.append(requests)
+            return requests in (3, 4)
+
+    monkeypatch.setattr(glm53_draft, "_CURRENT", _Drafter())
+    decode = glm53_decode.SpecializedDecode(
+        SimpleNamespace(),
+        SimpleNamespace(geometry=geometry),
+        {16: 16, 12: 16},
+        rows_per_request=4,
+        row_tiers=True,
+    )
+    decode._tiers = {switch.Build(16): _tier()}
+    assert decode.owns_attn_metadata(16) and decode.owns_attn_metadata(12)
+    assert not decode.owns_attn_metadata(8)  # not a claimed size
+    assert asked == [4, 3]
 
 
 def test_a_wide_tier_completes_the_rows_of_narrow_steps_first(monkeypatch, geometry):
@@ -221,3 +462,16 @@ def test_an_eager_forward_of_a_claimed_uniform_step_counts_as_stock(
     assert (decode.uniform_steps, decode.unclaimed_steps) == (1, 1)
     assert decode.forward(input_ids, None) is None  # a dummy run: no step
     assert decode.unclaimed_steps == 1
+
+
+def test_at_mtp_1_the_sampled_rows_come_from_the_sampled_token_counts(geometry):
+    draft = glm53_draft.Glm53Draft(
+        SimpleNamespace(), geometry, {}, drafts=1, tiers=(1, 2, 4)
+    )
+    assert draft._sampled is None  # no CUDA forms: nothing to write
+    draft._first_rows = torch.arange(4) * 2 - 1
+    draft._sampled = torch.zeros(4, dtype=torch.int64)
+    draft.observe_sampled(torch.tensor([1, 2, 2], dtype=torch.int32))
+    assert draft._sampled.tolist() == [0, 3, 5, 0]  # rows 2b + accepted
+    draft.observe_sampled(0)  # a pipeline-parallel step without counts
+    assert draft._sampled.tolist() == [0, 3, 5, 0]

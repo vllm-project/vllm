@@ -4,8 +4,9 @@ GLM-5.3 (`GlmMoeDsaForCausalLM`) serves low-batch decode at low latency on 8xB20
 (SM100) and 8xB300 (SM103): steps of B requests of 1 + K tokens, B (1 + K) <= 16 rows
 (up to 16 requests with MTP off, 4 at MTP K = 3). CuTe DSL kernels (`ops/cute_dsl`)
 replace vLLM's FULL uniform decode graph of the 78 target layers. The MTP drafter
-(layer 78) is vLLM's DeepSeek-V3.2 MTP model on vLLM's speculator. Every other
-forward (prefill, mixed steps, eager steps) stays on vLLM's stock layers.
+(layer 78) runs on vLLM's speculator, its decode steps as CuTe DSL kernels too
+(Specialized drafter below). Every other forward (prefill, mixed steps, eager
+steps) stays on vLLM's stock layers.
 
 ## Terms
 
@@ -41,13 +42,13 @@ Runner-side hooks that are not model-specific stay in `vllm/v1/worker/gpu/`.
 
 `--additional-config '{"decode_backend": "latency_specialized"}'` turns on the
 whole path, as Kimi K3's specialized decode does: the kernels, the weight forms,
-and segment 1 (`auto`, the default, keeps vLLM's decode). With
+segment 1 and the drafter segment (`auto`, the default, keeps vLLM's decode). With
 the path on, startup refuses, on every TP rank (a MIN all-reduce over the TP group),
 unless: the GPU is SM100 or SM103; tensor parallel size is 8 without pipeline
 parallelism; the KV cache is FlashInfer MLA's 576-byte fp8 rows
 (`--attention-backend FLASHINFER_MLA_SPARSE --kv-cache-dtype fp8`, vLLM's SM10x
 default); the segment runs under Model Runner V2; decode steps run in FULL CUDA graphs
-(not `--enforce-eager`).
+(not `--enforce-eager`); MTP, if configured, sets `use_local_argmax_reduction`.
 
 ## Deployment
 
@@ -55,6 +56,9 @@ Set a persistent `VLLM_CACHE_ROOT` (node-local, reused across restarts). It hold
 the compiled CuTe host wrappers (`glm53_kernels/<entry>.<arch>.<key>.o`; a cold build is about 40 s per rank) and
 DeepGEMM's JIT cache (`deep_gemm`, for the dense FP8 linears). A cold
 node also needs `VLLM_ENGINE_READY_TIMEOUT_S=3600`, past vLLM's default 600 s.
+The model state opts in to Model Runner V2's low-latency decode paths
+(`ModelState.low_latency_decode`); with MTP, the sampling, state update and
+draft-prefill inputs after each uniform decode step then run as one CUDA graph.
 
 ```bash
 export VLLM_CACHE_ROOT=/local/ssd/vllm-cache VLLM_ENGINE_READY_TIMEOUT_S=3600
@@ -68,8 +72,8 @@ vllm serve zai-org/GLM-5.3 --tensor-parallel-size 8 --block-size 64 \
 - With MTP, add `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3,
   "use_local_argmax_reduction": true}'` and `--max-num-seqs 4` (K = 3: four rows per
   request). The drafter is vLLM's MTP; `use_local_argmax_reduction` takes its greedy drafts
-  from a per-rank argmax. Benchmarks at a fixed acceptance length add vLLM's
-  synthetic acceptance:
+  from a per-rank argmax (the switch requires it with MTP). Benchmarks at a fixed
+  acceptance length add vLLM's synthetic acceptance:
   `"rejection_sample_method": "synthetic", "synthetic_acceptance_length": 2.99`.
 - The path serves the MoE from vLLM's `flashinfer_trtllm` experts (FlashInfer trtllm-gen's
   DeepSeekFp8 BlockMajorK form, stock's default on SM100), which the decode MoE kernels
@@ -173,3 +177,78 @@ The segment allocates this at startup, so at a fixed memory budget every MiB is 
 less KV pool. The packed tier-16 build is shared by every K and its selector has 16
 slots (K = 0 at B = 16 needs them), 2662 MiB of the totals; K >= 1 fills at most eight. K = 0 and 1 keep two builds on tier 8 (the q4 MoE and the q8 MoE), each
 with its own arena.
+
+## Specialized drafter
+
+With `latency_specialized` the MTP drafter (layer 78) also runs as CuTe DSL kernels.
+The target model registers `GlmMoeDsaMTP` (`mtp.py`, vLLM's DeepSeek-V3.2 MTP model with
+the drafter hooks) under the `DeepseekV32MTPModel` architecture before vLLM builds the
+drafter; without the switch vLLM's stock drafter runs. Per decode step the drafter runs a
+catch-up over the step's rows (vLLM's draft prefill) and one proposal per later draft. It
+serves MTP K = 1..7 (`switch.DRAFT_KS`): the catch-up kernels hold four rows a request, so
+at K = 4..7 (T = 5..8 rows) the catch-up runs twice in the same graph, over rows 0..3 and
+the last four. The other window runs first, up to its worker, and only writes its rows'
+latents and index keys; the window with the accepted row (the low one when both hold it)
+runs the whole catch-up. At K = 1, 2 (T = 2, 3) one window is padded to four rows, as the
+target pads a lone request: the dead rows repeat row T - 1 and write latents and index keys
+only past the step's tokens, beyond what the accepted row reads (the next step's rows
+overwrite them before any row reads them). vLLM reserves slots through p + 2K, so at K = 1
+the last dead row may fall in an unreserved block, whose block-table entry the staging
+kernel points at the null block for that step (vLLM gathers every reserved entry of the
+row again before the next step, so a nulled entry never outlives it). K = 1 has no
+proposal. The modules:
+
+| Module | Role |
+| --- | --- |
+| `mtp.py` | `GlmMoeDsaMTP`, the drafter model with the hooks, and its registration. |
+| `draft.py` | The drafter segment: hook, graphs, rebuild after a KV-cache rebind, warm-up, and weight forms (layer 78 bound in place to vLLM's tensors). |
+| `draft_providers.py` | The drafter's launch providers (`providers.Provider`): results, protocol state and peer-arena slices, bound and run like segment 1's. |
+| `ops/cute_dsl/mla_draft.py` | `DraftWorker`: the layer-78 worker over vLLM's eight heads of each rank (four rows for the catch-up, one for a proposal). |
+| `ops/cute_dsl/mtp_preprocess.py` | The MTP preprocess (`enorm`, `hnorm`, `eh_proj`). |
+| `ops/cute_dsl/lm_head.py` | The BF16 draft head `lm_head_top1_q1`: final RMSNorm, the rank's vocabulary-shard logits and their top-1. |
+
+The catch-up's selection runs the only-row selector shards (`SelectorOnlyRow`, ranks 0-2)
+before the worker; every rank runs the worker in both parts. The worker writes its attended
+row four times, and the MoE is the target's `fused_moe_q4_ckpt_shared`; the BF16 draft head
+(`lm_head_top1_q1`) reads row 0.
+
+Request tiers. At MTP 3 the drafter serves steps of up to four requests: it builds the
+tiers of 1, 2 and 4 requests that `--max-num-seqs` allows
+(`switch.draft_tiers`) and a step runs the smallest tier that holds its requests; the groups
+past the step's requests are
+skipped. A tier is the one-request kernels run over request groups: the catch-up has four rows a
+request, a proposal one, and the selector and the worker loop over the request groups inside one
+launch each (`RowGroups`, the target's row tiers' mechanism) while the preprocess, the MoE and the
+head run once per four requests. Each tier is one catch-up graph and one draft-decode graph that
+vLLM captures at the tier's size, so the capture sizes are the row tiers plus 1 and 2
+(`switch.draft_capture_sizes`). The row tables and the per-request step words (position, accepted
+row, context length, selection generation) are written each step by the model state's
+preprocess hook and by two small kernels in the captured graphs. A request's results are bitwise
+those of the one-request build except the MoE, which sums its experts over the rows of its launch,
+and the head, whose four-row build reduces in another order (relative RMS below 5e-3).
+A drafter tier is the top request count of one of the target's graphs, whose rows its
+catch-up replays at (`switch.draft_tiers`): four requests at MTP 3, two at MTP 1 (three and
+four ran 1.3 % slower a step than vLLM's drafter), at MTP 2 four
+while `--max-num-seqs` is at most 4 (from five on, three to five requests share the
+15-token graph: two), two at MTP 5 to 7, and at MTP 4 two only while `--max-num-seqs` is
+2 (from three on, two requests pad to the three-request graph). A
+drafter tier binds the block table of the target build its catch-up replays at (at MTP 1
+tier 8 has two: two requests on the q4 MoE build, three or four on the q8 one). Any other step runs vLLM's drafter, at any `--max-num-seqs`.
+vLLM's draft decode graphs are captured only at sizes up to `--max-num-seqs` (one token a
+request), which the row tiers' token counts are not, so the capture sizes also hold the
+request counts 1, 2, 4, 8 and `--max-num-seqs` itself unless one would split a run of the
+target's graphs (same function; at K = 3 and `--max-num-seqs` 13 to 15, draft decodes of
+9 or more requests then run eagerly); without them a draft decode of fewer requests than
+the smallest row graph ran eagerly (all of them at K = 4 to 7). The catch-up writes the drafter
+layer's index keys on the selector ranks only; before the first step vLLM's drafter serves after
+CuTe steps, the pending rows are completed on every rank (by the admitting prefill step's eager
+forward, or by the target's step hook when the admission replays as a decode).
+
+The drafter reads layer 78 as stock vLLM loads it for the shipped checkpoint: the worker's
+`fused_qkv_a`, `q_b`, `kv_b` and `o_proj` and the selector's `indexer.wq_b` are E4M3 with
+DeepGEMM UE8M0 scales, moved once into `VllmLinear` buffers like the target's; the routed
+experts and the shared expert are read in place, as in the target layers; `eh_proj` (read through a TMA map), `wk_weights_proj`, the router, the norms, the
+embedding and the head are BF16 as loaded; the KV cache is vLLM's FP8 cache. Activations are
+BF16 with FP32 accumulation.
+The startup log shows `GLM-5.3 drafter segment installed (T = 4, 2 proposals)`, and after
+the first eager draft prefill `GLM-5.3 drafter segment built`.

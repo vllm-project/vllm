@@ -23,4 +23,5 @@ format, `mqa_logits_use_mx_scales()`); the selector reads and writes that form (
 
 A cold compile takes 0.06-0.08 s per small entry, 0.73 s for
 dense_ffn, 1.8-1.9 s for fused_moe, 1.0-3.3 s for mla_worker, and 5.4-6.2 s for mla_selector,
-on every rank in parallel (measured with the drafter's entries also compiled).
+on every rank in parallel. The drafter's entries (`mla_worker_draft_q{1,4}_paged`,
+`mtp_preprocess_q{1,4}`, `lm_head_top1_q1`, `prologue_vllm`) compile in the same build.
