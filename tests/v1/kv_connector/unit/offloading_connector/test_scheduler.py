@@ -6392,3 +6392,143 @@ class TestMambaHybridOffloadServing:
             False,
         ]
         assert self._roundtrip_served_tokens(scheduler) == 16
+
+
+class _BoundedTierManager:
+    """A bounded primary tier in front of an async secondary tier.
+
+    A secondary-tier chunk answers RETRY until the step ends, then is promoted
+    into a free or idle primary-tier chunk on lookup; the promotion lands at
+    the next step end. Primary-tier hits stay pinned until the step ends.
+    """
+
+    def __init__(self, num_chunks: int, secondary: set[OffloadKey]):
+        self.num_chunks = num_chunks
+        self.secondary = secondary
+        self.primary: dict[OffloadKey, bool] = {}  # key -> ready
+        self.pinned: set[OffloadKey] = set()
+        self.resolved: set[OffloadKey] = set()
+        self.requested: set[OffloadKey] = set()
+
+    def _idle(self) -> list[OffloadKey]:
+        return [
+            key
+            for key, ready in self.primary.items()
+            if ready and key not in self.pinned
+        ]
+
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        if key in self.primary:
+            if not self.primary[key]:
+                return LookupResult.HIT_PENDING
+            self.pinned.add(key)
+            return LookupResult.HIT
+        if key not in self.secondary:
+            return LookupResult.MISS
+        if key not in self.resolved:
+            self.requested.add(key)
+            return LookupResult.RETRY
+        if len(self.primary) == self.num_chunks:
+            idle = self._idle()
+            if not idle:
+                return LookupResult.MISS
+            del self.primary[idle[0]]
+        self.primary[key] = False
+        return LookupResult.HIT_PENDING
+
+    def get_load_capacity(self) -> int:
+        return self.num_chunks - len(self.primary) + len(self._idle())
+
+    def end_step(self) -> None:
+        self.primary = dict.fromkeys(self.primary, True)
+        self.resolved |= self.requested
+        self.requested.clear()
+        self.pinned.clear()
+
+
+def test_hit_larger_than_bounded_tier_loads_every_group_at_one_boundary():
+    """A full-attention group must not take all of a bounded tier.
+
+    The secondary tier holds the whole prompt for the full-attention group and
+    the windows of two sliding-window groups every retention_interval tokens.
+    The primary tier does not fit all of it. Looked up one group after another,
+    the full-attention group's promotions fill the primary tier, the windows
+    miss and nothing loads.
+    """
+    block_size, num_tokens, retention_interval, window = 16, 4096, 256, 64
+    kwargs = dict(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    swa_spec = SlidingWindowSpec(**kwargs, sliding_window=window)
+    groups = [KVCacheGroupSpec(["full"], FullAttentionSpec(**kwargs))] + [
+        KVCacheGroupSpec([f"swa{i}"], swa_spec) for i in range(2)
+    ]
+    manager = MagicMock(spec=OffloadingManager)
+    spec = SimpleNamespace(
+        config=SimpleNamespace(
+            groups=tuple(
+                SimpleNamespace(
+                    group_id=i,
+                    tokens_per_block=block_size,
+                    sliding_window_size_in_chunks=get_sliding_window_size_in_chunks(
+                        group.kv_cache_spec, block_size
+                    ),
+                )
+                for i, group in enumerate(groups)
+            )
+        ),
+        tokens_per_block=(block_size,) * len(groups),
+        tokens_per_hash=block_size,
+        blocks_per_chunk=1,
+        offload_prompt_only=True,
+        extra_config={},
+        kv_events_config=OffloadingKVEventsConfig(
+            enable_kv_cache_events=False, self_describing_kv_events=False
+        ),
+        get_manager=lambda: manager,
+    )
+    config = SimpleNamespace(
+        speculative_config=None,
+        cache_config=SimpleNamespace(
+            enable_prefix_caching=True,
+            prefix_cache_retention_interval=retention_interval,
+        ),
+        parallel_config=SimpleNamespace(world_size=1, decode_context_parallel_size=1),
+    )
+    sched = OffloadingConnectorScheduler(
+        spec,
+        config,
+        KVCacheConfig(num_blocks=1024, kv_cache_tensors=[], kv_cache_groups=groups),
+    )
+    request = MagicMock()
+    request.request_id = "req"
+    request.kv_transfer_params = None
+    request.num_tokens = request.num_prompt_tokens = num_tokens
+    request.block_hashes = [
+        BlockHash(f"h{i}".encode()) for i in range(num_tokens // block_size)
+    ]
+    request.skip_reading_external_kv = False
+    sched.on_new_request(request)
+    state = sched._req_status["req"]
+    state.update_offload_keys()
+    full_keys, *swa_keys = (group.offload_keys for group in state.group_states)
+    secondary = set(full_keys)
+    window_chunks = window // block_size
+    for keys in swa_keys:
+        for end in range(retention_interval, num_tokens + 1, retention_interval):
+            end_chunk = end // block_size
+            secondary.update(keys[end_chunk - window_chunks - 1 : end_chunk])
+    tier = _BoundedTierManager(num_chunks=200, secondary=secondary)
+    manager.lookup.side_effect = tier.lookup
+    manager.get_load_capacity.side_effect = tier.get_load_capacity
+
+    for _ in range(5):
+        hit, load_async = sched.get_num_new_matched_tokens(request, 0)
+        if hit is not None:
+            break
+        tier.end_step()
+
+    assert hit is not None and hit > 0 and load_async
+    assert hit % retention_interval == 0
+    # The load and both windows at its boundary fit in the primary tier.
+    assert hit // block_size + 2 * (window_chunks + 1) <= tier.num_chunks
