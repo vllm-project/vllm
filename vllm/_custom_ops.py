@@ -2011,10 +2011,6 @@ def compute_slot_mapping_cpu(
     positions: torch.Tensor,
     block_size: int,
     mapping_enabled: bool,
-    dcp_sharded: bool,
-    cp_size: int,
-    cp_rank: int,
-    cp_interleave: int,
     pad_slot_id: int,
 ) -> None:
     torch.ops._C.compute_slot_mapping_cpu(
@@ -2025,10 +2021,6 @@ def compute_slot_mapping_cpu(
         positions,
         block_size,
         mapping_enabled,
-        dcp_sharded,
-        cp_size,
-        cp_rank,
-        cp_interleave,
         pad_slot_id,
     )
 

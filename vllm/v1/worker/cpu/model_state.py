@@ -13,7 +13,6 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.worker.gpu.block_table import BlockTables
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -50,7 +49,7 @@ class CPUMambaHybridModelState(MambaHybridModelState):
     def initialize_kv_cache(
         self,
         kv_cache_config: "KVCacheConfig",
-        block_tables: "BlockTables",
+        block_tables: object,
     ) -> None:
         """Resolve align metadata without building the GPU pointer-copy context."""
         if self._align_mode:

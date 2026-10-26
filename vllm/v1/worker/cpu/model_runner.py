@@ -25,7 +25,6 @@ from vllm.v1.worker.cpu.model_state import (
 from vllm.v1.worker.cpu.sampler import CPUSampler, CPUWatermarkSampler
 from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
 from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer
-from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
@@ -212,7 +211,7 @@ class NoTritonCPUModelRunner(CPUModelRunner):
         )
 
     @property
-    def block_tables_cls(self) -> type[BlockTables]:
+    def block_tables_cls(self) -> type[CPUBlockTables]:  # type: ignore[override]
         return CPUBlockTables
 
     @property
