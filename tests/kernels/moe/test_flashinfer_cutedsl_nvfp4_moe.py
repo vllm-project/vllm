@@ -227,7 +227,8 @@ def test_flashinfer_cutedsl_fp4_moe(
     monkeypatch.setattr(loc, "get_localized_resources", lambda: resources)
     monkeypatch.setattr(mod, "get_localized_resources", lambda: resources)
     monkeypatch.setenv(
-        "VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS", str(int(localization == "free"))
+        "VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS",
+        str(int(localization == "free")),
     )
     set_random_seed(7)
     with set_current_vllm_config(
@@ -507,8 +508,10 @@ def test_localization_arguments_initialized_after_loading(
     )
     lookup = Mock(return_value=resources)
     monkeypatch.setattr(mod, "get_localized_resources", lookup)
-    monkeypatch.setenv("VLLM_MOE_LOCALIZE_MEMSET_OVERLAP", str(int(overlap)))
-    monkeypatch.setenv("VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS", "1")
+    monkeypatch.setenv(
+        "VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP", str(int(overlap))
+    )
+    monkeypatch.setenv("VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS", "1")
     experts.process_weights_after_loading(layer)
     lookup.assert_called_once_with()
     lookup.side_effect = AssertionError(

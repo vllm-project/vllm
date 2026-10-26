@@ -129,12 +129,12 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             "localized_sm_count": _one_sm_count(res),
             # Retained full weights let autotuning compare both paths.
             "localized_allow_nonlocalized": (
-                not envs.VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS
+                not envs.VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS
             ),
             # Optionally overlap output zeroing on the auxiliary stream.
             **(
                 {"localized_memset_stream": res.aux_stream}
-                if envs.VLLM_MOE_LOCALIZE_MEMSET_OVERLAP
+                if envs.VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP
                 else {}
             ),
         }

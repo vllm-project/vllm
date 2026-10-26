@@ -220,8 +220,8 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_USE_LOCALITY_DOMAINS: bool = False
     VLLM_MOE_LOCALIZE_BACKFILL: bool = False
-    VLLM_MOE_LOCALIZE_MEMSET_OVERLAP: bool = True
-    VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS: bool = False
+    VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP: bool = True
+    VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
@@ -1692,14 +1692,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOE_LOCALIZE_BACKFILL": lambda: bool(
         int(os.getenv("VLLM_MOE_LOCALIZE_BACKFILL", "0"))
     ),
-    # Overlap output memset with FC1 on an auxiliary stream.
-    "VLLM_MOE_LOCALIZE_MEMSET_OVERLAP": lambda: bool(
-        int(os.getenv("VLLM_MOE_LOCALIZE_MEMSET_OVERLAP", "1"))
+    # FlashInfer CuteDSL NVFP4 MoE only: with locality domains, overlap the
+    # output memset with FC1 on an auxiliary stream.
+    "VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP", "1"))
     ),
-    # Release full-width weight storage after sharding, disabling full-width
+    # FlashInfer CuteDSL NVFP4 MoE only: with locality domains, release the
+    # full-width weight storage after sharding, disabling the full-width
     # fallback. EPLB uses the registered shards instead of the originals.
-    "VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS": lambda: bool(
-        int(os.getenv("VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS", "0"))
+    "VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS", "0"))
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.

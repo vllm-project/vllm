@@ -261,7 +261,7 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
 
         # Free originals before memory profiling so reclaimed storage is available
         # for KV cache. Retain shape metadata; EPLB uses the registered shards.
-        if envs.VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS:
+        if envs.VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS:
             # Surface asynchronous sharding errors before releasing source storage.
             torch.accelerator.synchronize()
             freed = 0
