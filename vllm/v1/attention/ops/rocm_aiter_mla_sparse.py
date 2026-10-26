@@ -15,6 +15,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.indexer_topk import RADIX_TOPK_WORKSPACE_SIZE
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
@@ -31,6 +32,16 @@ else:
 logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
+
+
+def _decode_logits_workspace(num_rows: int, max_model_len: int) -> torch.Tensor:
+    # SparseIndexerTopk takes its top-k workspace from the start of the same
+    # buffer while it reads these logits.
+    _, logits = current_workspace_manager().get_simultaneous(
+        ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+        ((num_rows, max_model_len), torch.float32),
+    )
+    return logits
 
 
 @functools.cache
@@ -648,9 +659,7 @@ def rocm_fp8_paged_mqa_logits_triton(
     ctx_per_row = not (next_n > 1 and cl.numel() == batch_size)
 
     max_blocks = block_tables.shape[1]
-    (out_logits,) = current_workspace_manager().get_simultaneous(
-        ((batch_size * next_n, max_model_len), torch.float32),
-    )
+    out_logits = _decode_logits_workspace(batch_size * next_n, max_model_len)
 
     # Memory-bound over the KV range: split each row's keys across programs so
     # few-row / long-context launches still fill the GPU. Cap splits at the
@@ -821,9 +830,7 @@ def rocm_fp8_paged_mqa_logits(
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
             batch_size, next_n, heads, _ = q_fp8.shape
-            (out_logits,) = current_workspace_manager().get_simultaneous(
-                ((batch_size * next_n, max_model_len), torch.float32),
-            )
+            out_logits = _decode_logits_workspace(batch_size * next_n, max_model_len)
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
@@ -1201,9 +1208,7 @@ def rocm_aiter_sparse_attn_indexer(
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
         if _ON_GFX942 or _ON_GFX950:
-            workspace_manager.get_simultaneous(
-                ((decode_rows, max_model_len), torch.float32),
-            )
+            _decode_logits_workspace(decode_rows, max_model_len)
         else:
             workspace_manager.get_simultaneous(
                 (

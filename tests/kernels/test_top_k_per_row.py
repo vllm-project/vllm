@@ -2582,6 +2582,45 @@ def test_sparse_indexer_decode_topk_short_seq_lens(
             assert torch.equal(got, ref), f"{backend}: row {row}"
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
+@torch.inference_mode()
+def test_persistent_topk_on_rocm_paged_mqa_logits(workspace_init) -> None:
+    """rocm_fp8_paged_mqa_logits returns its logits in the shared workspace,
+    where persistent_topk's multi-CTA launch also clears its row states."""
+    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_fp8_paged_mqa_logits,
+    )
+
+    set_random_seed(0)
+    torch.set_default_device("cuda:0")
+    fp8 = current_platform.fp8_dtype()
+    batch_size, num_heads, head_dim, block_size, top_k = 4, 32, 128, 64, 2048
+    seq_len = 81920
+    num_pages = seq_len // block_size
+    values = torch.randn(batch_size * num_pages, block_size * head_dim).to(fp8)
+    scales = torch.rand(batch_size * num_pages, block_size) + 0.5
+    kv_cache = torch.cat([values.view(torch.uint8), scales.view(torch.uint8)], 1)
+    kv_cache = kv_cache.view(-1, block_size, 1, head_dim + 4)
+    q = torch.randn(batch_size, 1, num_heads, head_dim).to(fp8)
+    weights = torch.randn(batch_size, num_heads)
+    seq_lens = torch.full((batch_size, 1), seq_len, dtype=torch.int32)
+    block_tables = torch.arange(batch_size * num_pages, dtype=torch.int32).view(
+        batch_size, num_pages
+    )
+
+    logits = rocm_fp8_paged_mqa_logits(
+        q, kv_cache, weights, seq_lens, block_tables, None, seq_len, compress_ratio=4
+    )
+    expected = logits.clone()
+    indices = torch.empty((batch_size, top_k), dtype=torch.int32)
+    SparseIndexerTopk("persistent")(logits, seq_lens, 1, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(logits, expected, rtol=0, atol=0)
+    _assert_topk_values_match_reference(expected, indices, seq_len, top_k)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @torch.inference_mode()
 def test_sparse_indexer_topk_backend_resolution() -> None:
