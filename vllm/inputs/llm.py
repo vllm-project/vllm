@@ -117,6 +117,9 @@ class TokensPrompt(_PromptOptions):
     prompt: NotRequired[str]
     """The prompt text corresponding to the token IDs, if available."""
 
+    prompt_special_tokens_mask: NotRequired[list[int]]
+    """Internal mask of tokenizer-added tokens, consumed when rebuilding text."""
+
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 

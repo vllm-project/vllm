@@ -674,22 +674,50 @@ class BaseRenderer(ABC, Generic[_T]):
         kwargs = params.get_encode_kwargs()
         if want_offsets:
             kwargs = {**kwargs, "return_offsets_mapping": True}
+        want_special_tokens_mask = (
+            params.needs_detokenization
+            and params.add_special_tokens
+            and params.truncate_prompt_tokens is not None
+            and params.truncation_side is not None
+            and tokenizer.num_special_tokens_to_add() > 0
+        )
+        if want_special_tokens_mask:
+            kwargs = {**kwargs, "return_special_tokens_mask": True}
         encoding = tokenizer(prompt["prompt"], **kwargs)
-        return self._build_tokens_prompt(
+        tokenized = self._build_tokens_prompt(
             encoding["input_ids"],
             prompt,
             offset_mapping=encoding["offset_mapping"] if want_offsets else None,
         )
+        if (
+            want_special_tokens_mask
+            and params._truncation_slice(tokenizer, len(tokenized["prompt_token_ids"]))
+            is not None
+        ):
+            tokenized["prompt_special_tokens_mask"] = encoding["special_tokens_mask"]
+        return tokenized
+
+    @staticmethod
+    def _get_detokenization_tokens(prompt: TokensPrompt) -> list[int]:
+        token_ids = prompt["prompt_token_ids"]
+        special_tokens_mask = prompt.pop("prompt_special_tokens_mask", None)
+        if special_tokens_mask is None:
+            return token_ids
+        return [
+            token_id
+            for index, token_id in enumerate(token_ids)
+            if index >= len(special_tokens_mask) or not special_tokens_mask[index]
+        ]
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
-        prompt["prompt"] = tokenizer.decode(prompt["prompt_token_ids"])
+        prompt["prompt"] = tokenizer.decode(self._get_detokenization_tokens(prompt))
 
         return prompt
 
     async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
         prompt["prompt"] = await self._async_tokenizer_decode(
-            prompt["prompt_token_ids"]
+            self._get_detokenization_tokens(prompt)
         )
 
         return prompt
@@ -1014,7 +1042,7 @@ class BaseRenderer(ABC, Generic[_T]):
         else:
             engine_input = tokens_input(prompt_token_ids)
 
-        if prompt_text := prompt.get("prompt"):
+        if (prompt_text := prompt.get("prompt")) is not None:
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
@@ -1081,7 +1109,7 @@ class BaseRenderer(ABC, Generic[_T]):
         else:
             engine_input = tokens_input(prompt_token_ids)
 
-        if prompt_text := prompt.get("prompt"):
+        if (prompt_text := prompt.get("prompt")) is not None:
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt

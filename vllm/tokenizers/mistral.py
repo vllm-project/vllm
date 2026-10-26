@@ -340,6 +340,7 @@ class MistralTokenizer(TokenizerLike):
         add_special_tokens: bool = True,
         truncation: bool = False,
         max_length: int | None = None,
+        return_special_tokens_mask: bool = False,
     ) -> "BatchEncoding":
         if text_pair is not None:
             raise ValueError(
@@ -352,6 +353,7 @@ class MistralTokenizer(TokenizerLike):
             add_special_tokens=add_special_tokens,
             truncation=truncation,
             max_length=max_length,
+            return_special_tokens_mask=return_special_tokens_mask,
         )
 
     @property

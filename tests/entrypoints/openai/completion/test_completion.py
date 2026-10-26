@@ -116,6 +116,43 @@ async def test_completion_truncation_side_controls_prompt_truncation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "prompt,keep,expected",
+    [
+        ("Hello, my name is", 4, "Hello, my"),
+        ("</s>Hello, my name is", 4, "</s>Hello,"),
+        ("Hello, my name is", 1, ""),
+    ],
+)
+async def test_truncated_echo_excludes_only_added_special_tokens(
+    client: openai.AsyncOpenAI, prompt: str, keep: int, expected: str, stream: bool
+) -> None:
+    extra_body = {"truncate_prompt_tokens": keep, "truncation_side": "right"}
+    generated = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt,
+        max_tokens=1,
+        temperature=0.0,
+        extra_body=extra_body,
+    )
+    response = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt,
+        echo=True,
+        max_tokens=1,
+        temperature=0.0,
+        stream=stream,
+        extra_body=extra_body,
+    )
+    if stream:
+        text = "".join([chunk.choices[0].text async for chunk in response])
+    else:
+        text = response.choices[0].text
+    assert text == expected + generated.choices[0].text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],

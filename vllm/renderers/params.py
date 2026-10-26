@@ -30,6 +30,7 @@ _S = TypeVar("_S", list[int], "torch.Tensor")
 _PARALLEL_TO_PROMPT_TOKENS = (
     "prompt_token_offsets",
     "prompt_is_token_ids",
+    "prompt_special_tokens_mask",
 )
 
 

@@ -72,6 +72,9 @@ class DummyTokenizer:
     # tell a pad token apart from a real one.
     pad_token_id: int = 99999
 
+    def num_special_tokens_to_add(self) -> int:
+        return 0
+
     def __post_init__(self) -> None:
         self._captured_encode_kwargs: dict = {}
         self._captured_text_len: int = 0
