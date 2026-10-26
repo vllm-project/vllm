@@ -3949,13 +3949,28 @@ async fn happy_path_returns_sse_stream() {
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let after = METRICS.render().unwrap();
 
+    let payloads = sse_json_payloads(&text);
     assert_shared_openai_stream_envelope(
-        &sse_json_payloads(&text),
+        &payloads,
         "chat.completion.chunk",
         "Qwen/Qwen1.5-0.5B-Chat",
     );
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
     assert!(text.starts_with("data: "), "{text}");
+    // Like Python, the first chunk carries the prompt fields as explicit
+    // `null` when unset, and later chunks omit them.
+    let (first, rest) = payloads.split_first().expect("first chunk");
+    for key in ["prompt_token_ids", "prompt_text"] {
+        assert!(
+            first.as_object().expect("first chunk object").contains_key(key)
+                && first[key].is_null(),
+            "expected explicit null `{key}` on the first chunk: {text}"
+        );
+        assert!(
+            rest.iter().all(|chunk| chunk.get(key).is_none()),
+            "expected no `{key}` after the first chunk: {text}"
+        );
+    }
     assert_eq!(
         metric_delta(
             &before,
