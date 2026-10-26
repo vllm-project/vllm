@@ -7,6 +7,7 @@ import torch
 from transformers import LlamaConfig
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFeatureSpec,
@@ -15,10 +16,15 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.platforms import current_platform
+from vllm.pooling_params import PoolingParams
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.worker.cpu.encoder_cache import EncoderCache
 from vllm.v1.worker.cpu.encoder_runner import EncoderRunner
+from vllm.v1.worker.cpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.cpu.model_states.default import DefaultModelState
+from vllm.v1.worker.cpu.model_states.encoder_only import EncoderOnlyModelState
+from vllm.v1.worker.cpu.states import CPURequestState
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cpu() or HAS_TRITON,
@@ -254,6 +260,64 @@ def test_model_state_empty_encoder_schedule_is_a_noop(
     assert model.batches == []
     assert set(cache.encoder_outputs) == {"existing"}
     assert cache.encoder_outputs["existing"] is cached
+
+
+def test_encoder_only_state_slices_compressed_token_types_for_chunk(
+    vllm_config: VllmConfig,
+) -> None:
+    tokens = [10, 11, 12, 13, 14, 15]
+    request = NewRequestData(
+        req_id="req0",
+        prompt_token_ids=tokens,
+        mm_features=[],
+        sampling_params=None,
+        pooling_params=PoolingParams(
+            extra_kwargs={
+                "compressed_token_type_ids": compress_token_type_ids([0, 0, 1, 1, 1, 0])
+            }
+        ),
+        block_ids=(),
+        num_computed_tokens=1,
+        lora_request=None,
+        prefill_token_ids=tokens,
+    )
+    req_states = CPURequestState(
+        max_num_reqs=2,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        vocab_size=32,
+        device=torch.device("cpu"),
+    )
+    req_states.add_request(
+        req_id=request.req_id,
+        prompt_len=len(tokens),
+        all_token_ids=tokens,
+        num_computed_tokens=1,
+        max_tokens=1,
+    )
+    req_index = req_states.req_id_to_index[request.req_id]
+    state = EncoderOnlyModelState(
+        vllm_config, torch.nn.Module(), None, torch.device("cpu")
+    )
+    state.add_request(req_index, request)
+
+    input_batch = InputBatch.make_dummy(
+        num_reqs=1,
+        num_tokens=5,
+        input_buffers=InputBuffers(2, 64, torch.device("cpu")),
+        is_padding=False,
+    )
+    input_batch.req_ids[0] = request.req_id
+    input_batch.idx_mapping.fill_(req_index)
+    input_batch.idx_mapping_np.fill(req_index)
+    input_batch.expanded_idx_mapping.fill_(req_index)
+    input_batch.num_computed_tokens_np[0] = 1
+
+    model_inputs = state.prepare_inputs(input_batch, req_states)
+
+    token_type_ids = model_inputs["token_type_ids"]
+    assert token_type_ids is not None
+    assert token_type_ids.tolist() == [0, 1, 1, 1, 0]
 
 
 def test_encoder_timing_stats_registry() -> None:
