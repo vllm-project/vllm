@@ -134,57 +134,18 @@ def test_constant_substitution_loads_novices():
 
 @pytest.mark.parametrize("num_tokens", [0, 1, 3, 7])
 @pytest.mark.parametrize("hidden_size", [2, 4])
-def test_constant_substitution_transforms_routes_and_computes_side_output(
-    num_tokens, hidden_size
-):
-    substitution = _substitution(2)
-    substitution.novices.data.copy_(torch.tensor([[10.0, 20.0], [30.0, 40.0]]))
+def test_constant_substitution_transforms_routes(num_tokens, hidden_size):
+    substitution = _substitution(hidden_size)
 
     rows = torch.arange(num_tokens) % 3
     topk_ids = torch.tensor([[1, 2], [4, 3], [99, -1]])[rows]
     topk_weights = torch.tensor([[0.25, 0.75], [0.6, 0.4], [0.5, 0.5]])[rows]
-    constant_output = substitution.transform_routes(
-        torch.zeros(num_tokens, hidden_size), topk_weights, topk_ids
-    )
+    assert substitution.transform_routes(topk_weights, topk_ids) is None
 
     torch.testing.assert_close(
         topk_weights, torch.tensor([[0.0, 0.75], [0.6, 0.0], [0.0, 0.0]])[rows]
     )
     torch.testing.assert_close(topk_ids, torch.tensor([[0, 1], [2, 0], [0, 0]])[rows])
-    expected = torch.zeros(num_tokens, hidden_size)
-    expected[:, :2] = torch.tensor([[2.5, 5.0], [12.0, 16.0], [0.0, 0.0]])[rows]
-    torch.testing.assert_close(constant_output, expected)
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize(
-    "device",
-    [
-        "cpu",
-        pytest.param(
-            "cuda",
-            marks=pytest.mark.skipif(
-                not current_platform.is_cuda_alike(),
-                reason="requires a CUDA-like platform",
-            ),
-        ),
-    ],
-)
-def test_constant_substitution_preserves_router_weight_precision(dtype, device):
-    substitution = _substitution(1, dtype).to(device)
-    substitution.novices.data.copy_(
-        torch.tensor([[60000.0], [-60000.0]], dtype=dtype, device=device)
-    )
-    topk_weights = torch.tensor([[0.5001, 0.4999]], dtype=torch.float32, device=device)
-    topk_ids = torch.tensor([[1, 3]], device=device)
-    # Nearly cancelling constants must retain the difference between FP32 weights.
-    expected = (topk_weights.double() @ substitution.novices.double()).to(dtype)
-
-    actual = substitution.transform_routes(
-        torch.zeros(1, 1, dtype=dtype, device=device), topk_weights, topk_ids
-    )
-
-    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 def _bare_substituted_routed_experts(**attrs) -> SubstitutedRoutedExperts:
@@ -197,8 +158,7 @@ def _bare_substituted_routed_experts(**attrs) -> SubstitutedRoutedExperts:
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
-@pytest.mark.parametrize("padded_input", [False, True])
-def test_substituted_routed_experts_adds_constant_on_one_tp_rank(tp_rank, padded_input):
+def test_substituted_routed_experts_remaps_routes(tp_rank):
     def apply(*, layer, x, topk_weights, topk_ids, **kwargs):
         torch.testing.assert_close(topk_weights, torch.tensor([[0.0, 0.75]]))
         torch.testing.assert_close(topk_ids, torch.tensor([[0, 1]]))
@@ -208,18 +168,12 @@ def test_substituted_routed_experts_adds_constant_on_one_tp_rank(tp_rank, padded
         moe_config=SimpleNamespace(tp_rank=tp_rank),
         quant_method=SimpleNamespace(is_monolithic=False, apply=apply),
     )
-    layer.expert_substitution.novices.data.copy_(
-        torch.tensor([[10.0, 20.0], [30.0, 40.0]])
-    )
     actual = layer.forward_modular(
-        torch.zeros(1, 4 if padded_input else 2),
+        torch.zeros(1, 2),
         torch.tensor([[0.25, 0.75]]),
         torch.tensor([[1, 2]]),
     )
-    expected = torch.ones(1, 2)
-    if tp_rank == 0:
-        expected += torch.tensor([[2.5, 5.0]])
-    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual, torch.ones(1, 2))
 
 
 @pytest.mark.skipif(
@@ -295,8 +249,8 @@ def test_fused_moe_combines_compact_experts_and_substitution(dist_init, moe_back
         topk_weights, topk_ids = layer.router.select_experts(
             hidden_states.clone(), router_logits
         )
-        expected = substitution.transform_routes(hidden_states, topk_weights, topk_ids)
-        expected += layer._quant_method.apply(
+        substitution.transform_routes(topk_weights, topk_ids)
+        expected = layer._quant_method.apply(
             layer=layer.routed_experts,
             x=hidden_states.clone(),
             topk_weights=topk_weights,
@@ -329,7 +283,6 @@ def _tp_substitution_worker(
         with torch.no_grad():
             layer.routed_experts.w13_weight.zero_()
             layer.routed_experts.w2_weight.zero_()
-            layer.routed_experts.expert_substitution.novices.fill_(0.25)
         layer._quant_method.process_weights_after_loading(layer.routed_experts)
 
         hidden_states = torch.zeros(2, 256, dtype=torch.bfloat16)
@@ -340,16 +293,14 @@ def _tp_substitution_worker(
         )
         get_forward_context().all_moe_layers = None
         actual = layer(hidden_states, router_logits)
-        torch.testing.assert_close(
-            actual, torch.full_like(actual, 0.25), atol=0, rtol=0
-        )
+        torch.testing.assert_close(actual, torch.zeros_like(actual), atol=0, rtol=0)
 
 
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike() or current_platform.device_count() < 2,
     reason="requires two CUDA-like devices",
 )
-def test_constant_substitution_is_added_once_with_tp2():
+def test_routes_to_novices_are_dropped_with_tp2():
     vllm_config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=2))
     vllm_config.model_config = _model_config(
         [3],

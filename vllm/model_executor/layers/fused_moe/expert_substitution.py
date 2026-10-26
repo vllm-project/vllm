@@ -100,13 +100,14 @@ def get_expert_substitution_spec(model_config: Any) -> ExpertSubstitutionSpec | 
 
 
 class ConstantExpertSubstitution(nn.Module):
-    """Constant novice outputs for the collapsed experts of one MoE layer.
+    """Constant novice experts for the collapsed experts of one MoE layer.
 
     Router outputs keep the full logical expert set. The trailing logical IDs
     are the collapsed experts; ``transform_routes`` maps the leading (retained)
-    IDs to their compact physical rows and turns collapsed routes into zero-weight
-    routes to physical expert 0, so any decomposed MoE backend can run them
-    unchanged.
+    IDs to their compact physical rows and turns collapsed routes into
+    zero-weight routes to physical expert 0, so any decomposed MoE backend can
+    run them unchanged. The novice constants are loaded for checkpoint
+    compatibility but never evaluated, so their contribution is dropped.
     """
 
     def __init__(
@@ -174,34 +175,17 @@ class ConstantExpertSubstitution(nn.Module):
 
     def transform_routes(
         self,
-        hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        """Remap routes in place and return the novice experts' output."""
+    ) -> None:
+        """Remap routes in place, zeroing the weights routed to novices."""
         valid = (topk_ids >= 0) & (topk_ids < self.num_logical_experts)
         routes = self.expert_substitution_routes[
             torch.where(valid, topk_ids, torch.zeros_like(topk_ids)).long()
-        ].long()
+        ]
         substituted = valid & (routes < 0)
-
-        # Sum each token's router weights per collapsed expert in FP32; other
-        # routes land in a trailing column that is dropped.
-        num_values, value_size = self.novices.shape
-        scales = topk_weights.new_zeros(
-            (topk_ids.shape[0], num_values + 1), dtype=torch.float32
-        )
-        scales.scatter_add_(
-            1,
-            torch.where(substituted, -1 - routes, num_values),
-            topk_weights.float(),
-        )
-        output = torch.zeros_like(hidden_states)
-        output[..., :value_size] = scales[:, :num_values] @ self.novices.float()
-
         topk_weights.masked_fill_(~valid | substituted, 0.0)
-        topk_ids.copy_(routes.clamp_min(0).to(topk_ids.dtype))
-        return output
+        topk_ids.copy_(routes.clamp_min(0))
 
 
 def make_expert_substitution(
@@ -318,9 +302,7 @@ class SubstitutedRoutedExperts(RoutedExperts):
         shared_experts: "SharedExperts | None" = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        constant_output = self.expert_substitution.transform_routes(
-            x, topk_weights, topk_ids
-        )
+        self.expert_substitution.transform_routes(topk_weights, topk_ids)
         output = super().forward_modular(
             x, topk_weights, topk_ids, shared_experts, shared_experts_input
         )
@@ -328,8 +310,4 @@ class SubstitutedRoutedExperts(RoutedExperts):
             raise NotImplementedError(
                 "expert substitution does not support deferred MoE finalize"
             )
-        # The constant output is replicated across TP ranks, whose partial
-        # outputs are all-reduced later, so add it on one rank only.
-        if self.moe_config.tp_rank == 0:
-            output.add_(constant_output[..., : output.shape[-1]])
         return output
