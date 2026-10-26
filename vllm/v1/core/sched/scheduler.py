@@ -2296,6 +2296,15 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        if kv_connector_output and (
+            kv_connector_output.lost_kv_req_ids or kv_connector_output.lost_all_kv
+        ):
+            failed_kv_load_req_ids.update(
+                self._handle_lost_kv(
+                    kv_connector_output.lost_kv_req_ids,
+                    kv_connector_output.lost_all_kv,
+                )
+            )
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -3689,6 +3698,47 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens = 0
                     self.failed_recving_kv_req_ids.add(req_id)
         return set() if self.recompute_kv_load_failures else affected_req_ids
+
+    def _handle_lost_kv(self, lost_req_ids: set[str], lost_all: bool) -> set[str]:
+        """Handle running requests whose KV cache was lost on some worker.
+
+        Their blocks (with lost_all: all blocks) are evicted from the prefix
+        cache, since what they hold is no longer valid everywhere. With the
+        recompute policy the requests are preempted, so they resume with a
+        prefill of all their tokens and their in-flight outputs are dropped.
+        Returns the IDs of the requests to fail (fail policy).
+        """
+        lost_reqs = [
+            req for req in self.running if lost_all or req.request_id in lost_req_ids
+        ]
+        if lost_all:
+            blocks_to_evict = set(
+                range(self.kv_cache_manager.block_pool.num_gpu_blocks)
+            )
+        else:
+            blocks_to_evict = {
+                block_id
+                for req in lost_reqs
+                for group in self.kv_cache_manager.get_block_ids(req.request_id)
+                for block_id in group
+            }
+        self.kv_cache_manager.evict_blocks(blocks_to_evict)
+        if not lost_reqs:
+            return set()
+        if not self.recompute_kv_load_failures:
+            return {req.request_id for req in lost_reqs}
+
+        timestamp = time.monotonic()
+        self.running = remove_all(self.running, set(lost_reqs))
+        # Preempt in reverse order so the requests are resumed in FIFO order.
+        for request in reversed(lost_reqs):
+            self._preempt_request(request, timestamp, drop_stale_output=True)
+            self.prev_step_scheduled_req_ids.discard(request.request_id)
+        logger.warning(
+            "KV cache lost for %d running request(s); recomputing them.",
+            len(lost_reqs),
+        )
+        return set()
 
     def _handle_invalid_blocks(
         self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]

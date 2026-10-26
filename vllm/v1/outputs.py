@@ -225,6 +225,15 @@ class KVConnectorOutput:
     # Receive failures keyed by request identity. This remains unambiguous for
     # hybrid/multi-pool cache layouts where numeric block IDs overlap.
     failed_recving: set[str] = field(default_factory=set)
+    # Running requests whose KV cache was lost on some worker after it was
+    # computed (e.g. a remote pipeline stage was replaced by one that does not
+    # hold it). The scheduler drops their in-flight outputs, evicts their
+    # blocks from the prefix cache and recomputes them from the start, or
+    # fails them under kv_load_failure_policy=fail.
+    lost_kv_req_ids: set[str] = field(default_factory=set)
+    # Some worker lost its whole KV cache: the same for every running request,
+    # and the prefix cache is dropped.
+    lost_all_kv: bool = False
     # Configuration describing how many finished sending/receiving
     # notifications should be expected for each request. This allows
     # handshake-based connectors like Nixl to update the KVOutputAggregator.
@@ -240,6 +249,8 @@ class KVConnectorOutput:
             and not self.kv_cache_events
             and not self.invalid_block_ids
             and not self.failed_recving
+            and not self.lost_kv_req_ids
+            and not self.lost_all_kv
             and not self.kv_connector_worker_meta
         )
 
