@@ -385,11 +385,19 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # direct allocation when the workspace manager is not initialized (e.g.
         # unit tests without a GPUModelRunner).
         logits_shape = (B, q_num_heads, num_kv_splits, self.kv_lora_rank + 1)
+        attn_logits: torch.Tensor | None = None
         if is_workspace_manager_initialized():
-            (attn_logits,) = current_workspace_manager().get_simultaneous(
-                (logits_shape, torch.float32),
-            )
-        else:
+            try:
+                (attn_logits,) = current_workspace_manager().get_simultaneous(
+                    (logits_shape, torch.float32),
+                )
+            except AssertionError:
+                # The locked workspace of this lane is too small. The DSPark
+                # draft's lane is sized by its cudagraph captures (short dummy
+                # sequences, so few splits), while the builder's reservation
+                # lands in the target's lane. Allocate, as for o and lse.
+                pass
+        if attn_logits is None:
             attn_logits = torch.empty(
                 logits_shape, dtype=torch.float32, device=q.device
             )
