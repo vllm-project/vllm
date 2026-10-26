@@ -2677,3 +2677,63 @@ nominal (heartbeats only). GPU 2 = CoursIA training (24,091 MiB, expected).
 Coordination: CoursIA-2's [LIFT DEMANDE] on #21704 re-routed to
 myia-ai-01:CoursIA (the reserve is that persona's, review 5593125735) — vllm
 does not lift another lane's reserve; DM answered and marked read.
+
+### 26/10 09:45Z — cold morning working set fails the write target; disk serving passes
+
+Window 07:41 -> 09:45Z (2 h 04). Read-only cycle. User approved additional patch
+deployment **this evening after their EPF classes**; no engine/config change was
+made during this cycle.
+
+| metric | cumulative at 09:45Z | delta 2 h 04 |
+|---|---|---|
+| fs writes | **131.945 GB** | **+42.235 GB = 20.44 GB/h** |
+| prompt tokens | 223.514 M | +37.444 M = 18.12 M tok/h |
+| fs reads | 72.862 GB | +24.722 GB = 11.96 GB/h |
+| cached by source | device 129.122 M / host 66.995 M / disk 5.610 M | window: device 0.03 % / host 78.66 % / disk **4.86 %** |
+| computed prefill | — | 6.157 M = **16.44 %** of window prompt |
+| preemptions | **25** | **+11**, after +0 for 6 h |
+| fs chunk hits | 2,767 | +942 |
+| fs tier size | 273.60 GB = 254.83 GiB | nominal at the 250 GiB LRU cap |
+
+**The cold-window write gate FAILS:** `42.235 GB / 37.444 M prompt tokens =
+1.128 KB/token = div 1.51` against the 1.7 KB/token baseline, far short of the
+required div 5. The 30-min birth-time scan at ~09:51Z explains both components:
+524 touched files = **292 NEW / 7.66 GB + 232 REWRITES / 6.09 GB**, zero unknown
+birth times (13.75 GB/30 min = 27.5 GB/h). New blocks are again the majority,
+so skip-rewrite alone cannot meet div 5 in this regime.
+
+**The disk-serving gate PASSES:** window disk share **4.86 %** vs the 1.76 %
+floor; cumulative 2.51 %. Cumulative cached share 90.25 %. This is the inverse
+of the 07:41Z cruise profile: hot RAM serves 78.7 %, fs reads and disk-served
+tokens rise, and GPU-resident serving nearly disappears from this window.
+Issue #198 stays OPEN. Do not extrapolate the overnight div 9.3 to a cold set.
+
+The **+11 preemptions** coincide with real diurnal KV pressure: recent engine
+samples show GPU KV 74-95 %, 3-7 running, 3-7 waiting, and KV-fetch backlog.
+Decode probes continue; all observed WEDGE events remain **fail 1/2**, never
+2/2, no watchdog restart. Health 200 in 4.5 ms, StartedAt still 21:48:52Z,
+RC=0, OOM=false, 0 OOM log lines, three containers up. GPU0 **22,658 MiB** /
+GPU1 21,508; GPU2 24,092 = expected CoursIA training. `/dev/shm` 25G/63G (39 %).
+No automatic configuration escalation: Q35's long-prefill threshold stays
+rejected, and any tuning belongs to tonight's measured window.
+
+**Deployment preparation:** user said additional patches can be deployed this
+evening. PR #211 was read in full (body, all comments/reviews — zero — and both
+file diffs): one commit `75403198d9`, no CHANGES_REQUESTED, 6/6 tests already
+recorded. It remains unmerged and inactive. Tonight's baseline is fixed above;
+anti-rewrite saves at most the measured rewrite share, not the new-block
+majority. Admission/serving gates must be re-measured after restart. Kill
+switch `MYIA_FS_SKIP_REWRITE=0`; no merge-only pull into the live bind-mounted
+source outside the deployment window.
+
+Security: only known hairpin `90.65.170.144` and internal no-XFF had 200s in
+the 3 h census (525 x 200, 29 x 401, 4 x 400). No new external IP or unknown
+key fingerprint. The same four known window+1 400s (07:07-07:42Z) remain;
+zero new large-body 400 in the following ~2 h. nbaudit healthy at 09:06Z
+(`runner_rc=0`, `deliver_rc=0`, `ok=true`, `consecutive_failures=0`, Image/).
+G: write probe OK. Condensation nominal. The RSM log burst at 09:42Z is its own
+stdin-end graceful-shutdown handling (`[object Object]` errors), not a vLLM
+condensation failure; coordination tooling to be checked before closure.
+
+**Host commit 93.4 %** (369.1/395.3 GB, margin 26.1 GB), fifth consecutive
+rise. No heavy host work. No WSL/Docker remediation without user GO.
