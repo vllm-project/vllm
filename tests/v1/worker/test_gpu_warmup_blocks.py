@@ -88,6 +88,7 @@ def _make_runner(
     """Stub model runner exposing only what the warmup entry points read."""
     return SimpleNamespace(
         num_speculative_steps=num_spec_steps,
+        speculative_config=SimpleNamespace() if num_spec_steps else None,
         adaptive_verification=None,
         rejection_sampler=None,
         decode_query_len=num_spec_steps + 1,
@@ -116,9 +117,14 @@ class _StepRecorder:
     def __init__(self) -> None:
         # (blocks held per group, num_computed_tokens, num_scheduled_tokens)
         self.steps: list[tuple[list[int], int, int]] = []
+        self.num_spec_tokens_to_schedule: list[int] = []
         self._held: dict[str, list[int]] = {}
 
     def execute_model(self, scheduler_output) -> None:
+        if scheduler_output.total_num_scheduled_tokens:
+            self.num_spec_tokens_to_schedule.append(
+                scheduler_output.num_spec_tokens_to_schedule
+            )
         for new_req in scheduler_output.scheduled_new_reqs:
             self._held[new_req.req_id] = [len(ids) for ids in new_req.block_ids]
             self._record(new_req.req_id, new_req.num_computed_tokens, scheduler_output)
@@ -161,7 +167,7 @@ def _assert_covers_lookahead(
 
 # 0 covers eagle / MTP / draft models, 1 covers DFlash's extra in-fill query.
 @pytest.mark.parametrize("extra_lookahead", [0, 1])
-@pytest.mark.parametrize("num_spec_steps", [2, 3, 5, 7])
+@pytest.mark.parametrize("num_spec_steps", [1, 2, 3, 5, 7])
 def test_warmup_kernels_reserves_lookahead_blocks(num_spec_steps, extra_lookahead):
     num_lookahead_tokens = num_spec_steps + extra_lookahead
     recorder = _StepRecorder()
@@ -173,6 +179,7 @@ def test_warmup_kernels_reserves_lookahead_blocks(num_spec_steps, extra_lookahea
     )
 
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
+    assert set(recorder.num_spec_tokens_to_schedule) == {num_spec_steps}
 
 
 def test_mixed_warmup_reserves_lookahead_blocks():
@@ -187,6 +194,7 @@ def test_mixed_warmup_reserves_lookahead_blocks():
     )
 
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
+    assert set(recorder.num_spec_tokens_to_schedule) == {NUM_SPEC_STEPS}
 
 
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
@@ -313,6 +321,18 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
     manager.free(request)
 
 
+def _config_without_post_init(
+    speculative_config: SpeculativeConfig | None,
+) -> VllmConfig:
+    """A real `VllmConfig` built without `__post_init__`, which would otherwise
+    require a resolvable draft model. The lookahead properties only read
+    `speculative_config` and `diffusion_config`."""
+    config = object.__new__(VllmConfig)
+    object.__setattr__(config, "speculative_config", speculative_config)
+    object.__setattr__(config, "diffusion_config", None)
+    return config
+
+
 @pytest.mark.parametrize(
     ("method", "draft_hf_config", "expected"),
     [
@@ -327,8 +347,6 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
         ("dflash", None, NUM_SPEC_STEPS + 1),
         ("ngram", None, 0),
         ("ngram_gpu", None, 0),
-        ("medusa", None, 0),
-        ("mlp_speculator", None, 0),
         ("suffix", None, 0),
         ("extract_hidden_states", None, 0),
     ],
@@ -344,13 +362,6 @@ def test_num_lookahead_tokens_per_method(
     `__post_init__` because the speculative methods otherwise require a draft
     model to be resolvable.
     """
-
-    class _Config:
-        speculative_config: SpeculativeConfig | None = None
-        diffusion_config = None
-        num_speculative_tokens = VllmConfig.num_speculative_tokens
-        num_lookahead_tokens = VllmConfig.num_lookahead_tokens
-
     speculative_config = object.__new__(SpeculativeConfig)
     object.__setattr__(speculative_config, "method", method)
     object.__setattr__(speculative_config, "num_speculative_tokens", NUM_SPEC_STEPS)
@@ -361,19 +372,12 @@ def test_num_lookahead_tokens_per_method(
         SimpleNamespace(hf_config=hf_config),
     )
 
-    config = _Config()
-    config.speculative_config = speculative_config
+    config = _config_without_post_init(speculative_config)
 
     assert config.num_lookahead_tokens == expected
 
 
 def test_num_lookahead_tokens_without_speculation():
-    class _Config:
-        speculative_config: SpeculativeConfig | None = None
-        diffusion_config = None
-        num_speculative_tokens = VllmConfig.num_speculative_tokens
-        num_lookahead_tokens = VllmConfig.num_lookahead_tokens
-
-    config = _Config()
+    config = _config_without_post_init(None)
 
     assert config.num_lookahead_tokens == 0

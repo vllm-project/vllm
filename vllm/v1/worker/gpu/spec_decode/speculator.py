@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -92,11 +93,12 @@ class BaseSpeculator(ABC):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
 
@@ -115,7 +117,6 @@ class DraftModelSpeculator(BaseSpeculator):
         self.scheduler_config = vllm_config.scheduler_config
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = vllm_config.model_config.max_model_len
         self.draft_max_seq_len = self.max_model_len
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -151,7 +152,7 @@ class DraftModelSpeculator(BaseSpeculator):
             device=device,
         )
         self.idx_mapping = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
+            self.max_num_reqs, dtype=torch.int64, device=device
         )
         self.temperature = torch.zeros(
             self.max_num_reqs, dtype=torch.float32, device=device
@@ -206,6 +207,14 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.supports_mm_inputs = False
         self.pcp_manager: PCPManager | None = None
+        # Whether every draft attention builder can refresh its decode metadata
+        # in place, so the refresh can be recorded in the draft CUDA graph.
+        self.supports_decode_metadata_update = False
+
+    @property
+    def max_model_len(self) -> int:
+        # Auto-fit can reduce the limit after the speculator is built.
+        return self.vllm_config.model_config.max_model_len
 
     @abstractmethod
     def load_draft_model(
@@ -298,6 +307,24 @@ class DraftModelSpeculator(BaseSpeculator):
         # builders and buffers.
         self.target_input_buffers = target_input_buffers
         self.target_attn_groups = target_attn_groups
+        self._configure_decode_metadata_update()
+
+    def _configure_decode_metadata_update(self) -> None:
+        unsupported_backends = sorted(
+            {
+                attn_group.backend.get_name()
+                for attn_groups in self.attn_groups
+                for attn_group in attn_groups
+                if not attn_group.supports_draft_decode_metadata_update
+            }
+        )
+        self.supports_decode_metadata_update = not unsupported_backends
+        if unsupported_backends:
+            logger.info_once(
+                "Attention backend(s) %s cannot update draft decode metadata in "
+                "place; falling back to rebuilding attention metadata eagerly.",
+                ", ".join(unsupported_backends),
+            )
 
     def _build_attn_metadata(
         self,
@@ -367,7 +394,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 if dcp_local_seq_lens is None
                 else dcp_local_seq_lens[:num_reqs_padded]
             ),
-            max_seq_len=self.draft_max_seq_len,
+            max_seq_len=min(self.draft_max_seq_len, self.max_model_len),
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
@@ -424,6 +451,7 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
         spec_step_idx: int = 0,
+        num_steps: int = 1,
     ) -> torch.Tensor:
         if draft_logits is None and self.use_local_argmax_reduction:
             return self.get_draft_top_tokens(hidden_states, spec_step_idx)
@@ -433,7 +461,7 @@ class DraftModelSpeculator(BaseSpeculator):
             sampler = (
                 gumbel_sample
                 if self.draft_watermarker is None
-                else self.draft_watermarker.sample
+                else partial(self.draft_watermarker.sample, num_steps=num_steps)
             )
             sampled = sampler(
                 logits,
@@ -524,18 +552,18 @@ class DraftModelSpeculator(BaseSpeculator):
 
     def _build_uniform_batch_dp_sync(
         self,
-        target_dp_sync: DPSyncState,
+        target_dp_sync_state: DPSyncState,
         num_reqs: int,
         num_query_per_req: int = 1,
     ) -> tuple[DPSyncState, int]:
-        num_batch_tokens = target_dp_sync.num_reqs * num_query_per_req
+        num_batch_tokens = target_dp_sync_state.num_reqs * num_query_per_req
         assert num_reqs * num_query_per_req <= num_batch_tokens, (
             "reusing a DP sync that does not cover this batch's requests"
         )
         return replace(
-            target_dp_sync,
+            target_dp_sync_state,
             num_tokens_across_dp=torch.full_like(
-                target_dp_sync.num_tokens_across_dp, num_batch_tokens
+                target_dp_sync_state.num_tokens_across_dp, num_batch_tokens
             ),
             uniform_token_count=num_query_per_req,
             eager=False,
@@ -561,3 +589,19 @@ class DraftModelSpeculator(BaseSpeculator):
             causal=causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
         )
+
+    def _update_draft_decode_metadata(
+        self, attn_metadata: dict[str, Any], num_reqs: int
+    ) -> None:
+        if self.block_tables.cp_size > 1:
+            prepare_dcp_local_seq_lens(
+                self.input_buffers.dcp_local_seq_lens,
+                self.input_buffers.seq_lens,
+                num_reqs,
+                self.block_tables.cp_size,
+                self.block_tables.cp_rank,
+                self.block_tables.cp_interleave,
+            )
+        for groups in self.attn_groups:
+            for group in groups:
+                group.update_draft_decode_metadata(attn_metadata)

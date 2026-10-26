@@ -49,6 +49,7 @@ from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferInitInfo,
     IPCWeightTransferUpdateInfo,
 )
+from vllm.distributed.weight_transfer.nccl_common import run_trainer_rendezvous
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerInitInfo,
     NCCLTrainerWeightTransferEngine,
@@ -216,6 +217,27 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
 
 
 # --- Unit Tests: Engine Parsing ---
+
+
+@pytest.mark.parametrize(
+    "engine_type",
+    [
+        NCCLWeightTransferEngine,
+        NCCLTrainerWeightTransferEngine,
+        SparseNCCLWeightTransferEngine,
+        SparseNCCLTrainerWeightTransferEngine,
+    ],
+)
+def test_nccl_shutdown_destroys_communicator_once(engine_type):
+    engine = object.__new__(engine_type)
+    group = MagicMock()
+    engine.model_update_group = group
+
+    engine.shutdown()
+    engine.shutdown()
+
+    group.destroy.assert_called_once_with()
+    assert engine.model_update_group is None
 
 
 class TestNCCLEngineParsing:
@@ -1292,6 +1314,9 @@ class TestTrainerClients:
         handle.finish_weight_update.remote.assert_called_once_with()
         handle.update_weight_version.remote.assert_called_once_with("step-42")
 
+        client.shutdown_weight_transfer_engine()
+        handle.shutdown_weight_transfer_engine.remote.assert_called_once_with()
+
     def test_http_client_pickles_ipc_handles_for_json(self, monkeypatch):
         """HTTP update_weights must encode raw ipc_handles as a base64 pickle."""
         captured = {}
@@ -1322,6 +1347,7 @@ class TestTrainerClients:
         captured = {}
 
         def fake_post(self, path, json=None):
+            captured["path"] = path
             captured["json"] = json
 
         monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
@@ -1332,6 +1358,9 @@ class TestTrainerClients:
 
         client.finish_weight_update("step-42")
         assert captured["json"] == {"weight_version": "step-42"}
+
+        client.shutdown_weight_transfer_engine()
+        assert captured == {"path": "shutdown_weight_transfer_engine", "json": None}
 
 
 class TestModuleSource:
@@ -1641,16 +1670,63 @@ def test_ipc_trainer_init_ships_packed_to_worker():
     assert client.last_init_info == {"packed": True}
 
 
-def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
+def test_nccl_trainer_rendezvous_runs_concurrently_and_waits_for_worker():
+    worker_started = threading.Event()
+    trainer_started = threading.Event()
+    worker_finished = threading.Event()
+    trainer_thread = threading.get_ident()
+
+    def init_worker():
+        assert threading.get_ident() != trainer_thread
+        worker_started.set()
+        assert trainer_started.wait(timeout=5)
+        worker_finished.set()
+
+    def init_trainer():
+        try:
+            assert threading.get_ident() == trainer_thread
+            assert worker_started.wait(timeout=5)
+            assert not worker_finished.is_set()
+        finally:
+            trainer_started.set()
+
+    run_trainer_rendezvous(init_worker=init_worker, init_trainer=init_trainer)
+    assert worker_finished.is_set()
+
+
+@pytest.mark.parametrize("failure_side", ["worker", "trainer"])
+def test_nccl_trainer_rendezvous_propagates_errors_after_worker_exits(failure_side):
+    trainer_started = threading.Event()
+    worker_finished = threading.Event()
+    error = RuntimeError(f"{failure_side} initialization failed")
+
+    def init_worker():
+        assert trainer_started.wait(timeout=5)
+        worker_finished.set()
+        if failure_side == "worker":
+            raise error
+
+    def init_trainer():
+        trainer_started.set()
+        if failure_side == "trainer":
+            raise error
+
+    with pytest.raises(RuntimeError) as exc_info:
+        run_trainer_rendezvous(init_worker=init_worker, init_trainer=init_trainer)
+    assert exc_info.value is error
+    assert worker_finished.is_set()
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed):
     """The sender's trainer_init drives the inference-side init handshake with
     the worker-shaped init info (rank_offset=1) while opening its own endpoint,
     and propagates the must-agree wire params to the worker."""
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
 
     # Bypass the real NCCL rendezvous.
-    monkeypatch.setattr(
-        nccl_engine_mod, "open_trainer_endpoint", lambda info: MagicMock()
-    )
+    group = object()
+    monkeypatch.setattr(nccl_engine_mod, "open_trainer_endpoint", lambda info: group)
 
     client = RecordingClient()
     engine = WeightTransferTrainerFactory.trainer_init(
@@ -1659,7 +1735,7 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
             master_port=29500,
             world_size=3,
             rank=0,
-            packed=True,
+            packed=packed,
             packed_buffer_size_bytes=1024,
             packed_num_buffers=3,
         ),
@@ -1669,17 +1745,58 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
 
     assert isinstance(engine, NCCLTrainerWeightTransferEngine)
     assert engine.is_sender is True
-    assert engine.packed is True
+    assert engine.packed is packed
+    assert engine.model_update_group is group
     assert client.order == ["init"]
     assert client.last_init_info == {
         "master_address": "127.0.0.1",
         "master_port": 29500,
         "rank_offset": 1,
         "world_size": 3,
-        "packed": True,
+        "packed": packed,
         "packed_buffer_size_bytes": 1024,
         "packed_num_buffers": 3,
     }
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_nccl_trainer_init_dispatches_subclass_hooks_only_on_sender(rank):
+    group = object()
+    calls = []
+
+    class Trainer(NCCLTrainerWeightTransferEngine):
+        @classmethod
+        def _build_worker_init_payload(cls, init_info):
+            calls.append(("payload", cls, init_info))
+            payload = super()._build_worker_init_payload(init_info)
+            payload["master_port"] += 1
+            return payload
+
+        def _open_trainer_endpoint(self, init_info):
+            calls.append(("endpoint", self, init_info))
+            self.model_update_group = group
+
+    init_info = NCCLTrainerInitInfo(
+        master_address="127.0.0.1", master_port=29500, world_size=3, rank=rank
+    )
+    client = RecordingClient()
+    engine = Trainer.trainer_init(
+        init_info, client=client, source=ModuleSource(_module_with())
+    )
+
+    assert type(engine) is Trainer
+    if rank == 0:
+        assert calls == [
+            ("payload", Trainer, init_info),
+            ("endpoint", engine, init_info),
+        ]
+        assert client.last_init_info is not None
+        assert client.last_init_info["master_port"] == 29501
+        assert engine.model_update_group is group
+    else:
+        assert calls == []
+        assert client.order == []
+        assert engine.model_update_group is None
 
 
 def test_nccl_worker_learns_wire_params_from_init_handshake(monkeypatch):
@@ -1765,6 +1882,75 @@ def test_nccl_trainer_send_weights_drives_client_in_order():
     assert client.last_update_info["names"] == ["w"]
     assert client.last_update_info["shapes"] == [[4]]
     assert "packed" not in client.last_update_info
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU (NCCL broadcast / CUDA stream).",
+)
+def test_nccl_trainer_sends_metadata_only_when_changed():
+    """An unchanged parameter set ships empty update info; a changed one ships
+    the full metadata again."""
+    client = RecordingClient()
+    engine = NCCLTrainerWeightTransferEngine(
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.zeros(4, device="cuda")))),
+        packed=False,
+    )
+    engine.model_update_group = MagicMock()
+
+    engine.send_weights()
+    assert client.last_update_info is not None
+    assert client.last_update_info["shapes"] == [[4]]
+    engine.send_weights()
+    assert client.last_update_info == {"names": [], "dtype_names": [], "shapes": []}
+    engine.source = ModuleSource(_module_with(("w", torch.zeros(8, device="cuda"))))
+    engine.send_weights()
+    assert client.last_update_info["shapes"] == [[8]]
+
+
+def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
+    """Empty update info reuses the previous call's metadata for the same model;
+    target and draft keep separate copies, and re-init clears them."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    monkeypatch.setattr(
+        nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
+    )
+    target, draft = MagicMock(spec=torch.nn.Module), MagicMock(spec=torch.nn.Module)
+    received: list = []
+    for model in (target, draft):
+        model.load_weights = lambda w, m=model: received.append((m, w[0][0]))
+    engine = NCCLWeightTransferEngine(
+        WeightTransferConfig(backend="nccl"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        target,
+    )
+    init_info = NCCLWeightTransferInitInfo(
+        master_address="127.0.0.1", master_port=29500, rank_offset=1, world_size=2
+    )
+    engine.init_transfer_engine(init_info)
+    monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
+
+    def update(model, *names):
+        engine.set_weight_update_target(model, None)
+        engine.receive_weights(
+            NCCLWeightTransferUpdateInfo(
+                names=list(names),
+                dtype_names=["float32"] * len(names),
+                shapes=[[2]] * len(names),
+            )
+        )
+
+    update(target, "t")
+    update(draft, "d")
+    update(target)
+    update(draft)
+    engine.init_transfer_engine(init_info)
+    update(target)
+
+    assert received == [(target, "t"), (draft, "d"), (target, "t"), (draft, "d")]
 
 
 class _ScriptedSource(WeightSource):
@@ -1914,12 +2100,12 @@ def _sparse_patch(device: str = "cpu") -> SparseWeightPatch:
 
 
 def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
-    """The sender's trainer_init drives the init handshake with the
-    worker-shaped init info; sparse ships no packed wire params, so the worker
-    keeps its unpacked defaults. Sparse takes no `source`."""
+    """The sender's trainer_init sends worker-shaped init info with
+    `packed=False` and default buffer settings. Sparse takes no `source`."""
     import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
 
-    monkeypatch.setattr(sparse_mod, "open_trainer_endpoint", lambda info: MagicMock())
+    group = object()
+    monkeypatch.setattr(sparse_mod, "open_trainer_endpoint", lambda info: group)
 
     client = RecordingClient()
     engine = WeightTransferTrainerFactory.trainer_init(
@@ -1933,6 +2119,7 @@ def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
     )
 
     assert isinstance(engine, SparseNCCLTrainerWeightTransferEngine)
+    assert engine.model_update_group is group
     assert client.order == ["init"]
     assert client.last_init_info == {
         "master_address": "127.0.0.1",
