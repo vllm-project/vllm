@@ -58,7 +58,7 @@ Every plugin has three parts:
 Some components are not registered through entry points but selected by class name, so a plugin package only has to be importable:
 
 - `--worker-cls` and `--worker-extension-cls` replace or extend the worker.
-- `--pp-group-cls` replaces the pipeline parallel `GroupCoordinator` with a subclass, e.g. one whose `isend_tensor_dict` / `irecv_tensor_dict` move the intermediate tensors between stages over a different transport. The subclass is constructed with the same arguments as `GroupCoordinator`, in every worker.
+- `--pp-group-cls` replaces the pipeline parallel `GroupCoordinator` with a subclass, e.g. one whose `isend_tensor_dict` / `irecv_tensor_dict` move the intermediate tensors between stages over a different transport. The subclass is constructed with the same arguments as `GroupCoordinator`, in every worker. With the V2 model runner the last stage also sends the sampled tokens to the other stages, through `make_sibling_device_group` / `sibling_broadcast`, which the subclass can override as well.
 
 ## Guidelines for Writing Plugins
 
