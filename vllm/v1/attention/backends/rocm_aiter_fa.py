@@ -917,10 +917,11 @@ class AiterFlashAttentionBackend(AttentionBackend):
         return [64, 128, 256]
 
     forward_includes_kv_cache_update: bool = False
-    # External KV writers produce the packed layout, not the shuffle layout.
-    supports_kv_cache_update_bypass: bool = (
-        not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-    )
+
+    @classmethod
+    def supports_kv_update_bypass(cls) -> bool:
+        # External KV writers produce the packed layout, not the shuffle layout.
+        return not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
 
     @staticmethod
     def get_name() -> str:

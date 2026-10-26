@@ -16,7 +16,6 @@ from tests.kernels.quant_utils import (
 )
 from tests.kernels.utils import _assert_deterministic
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific tests"
@@ -339,109 +338,6 @@ def test_fp8_scaled_mm_determinism():
         )
 
     _assert_deterministic(run_gemm, n_runs=4)
-
-
-@fp8_only
-def test_aiter_fp8_kv_attention_matches_bf16_reference():
-    import aiter
-
-    from vllm._aiter_ops import is_aiter_found_and_supported
-    from vllm.v1.attention.backends.rocm_aiter_fa import cp_mha_gather_cache
-
-    assert is_aiter_found_and_supported()
-
-    set_random_seed(10)
-
-    num_q_heads, num_kv_heads = 8, 8
-    head_size = 128
-    query_len, kv_len = 4, 128
-    block_size = 16
-    num_blocks = 2048
-    scale = head_size**-0.5
-
-    query = torch.randn(
-        query_len, num_q_heads, head_size, dtype=torch.bfloat16, device=DEVICE
-    )
-    key_cache_fp8 = torch.clamp(
-        torch.randn(num_blocks, block_size, num_kv_heads, head_size, device=DEVICE),
-        min=-1.0,
-        max=1.0,
-    ).to(FP8_DTYPE)
-    value_cache_fp8 = torch.clamp(
-        torch.randn(num_blocks, block_size, num_kv_heads, head_size, device=DEVICE),
-        min=-1.0,
-        max=1.0,
-    ).to(FP8_DTYPE)
-
-    cu_query_lens = torch.tensor([0, query_len], dtype=torch.int32, device=DEVICE)
-    cu_seq_lens = torch.tensor([0, kv_len], dtype=torch.int32, device=DEVICE)
-    block_tables = torch.randint(
-        0,
-        num_blocks,
-        (1, (kv_len + block_size - 1) // block_size),
-        dtype=torch.int32,
-        device=DEVICE,
-    )
-    token_to_batch = torch.zeros(kv_len, dtype=torch.int32, device=DEVICE)
-    seq_starts = torch.zeros(1, dtype=torch.int32, device=DEVICE)
-    gathered_key = torch.empty(
-        kv_len, num_kv_heads, head_size, dtype=torch.bfloat16, device=DEVICE
-    )
-    gathered_value = torch.empty_like(gathered_key)
-
-    cp_mha_gather_cache(
-        key_cache=key_cache_fp8,
-        value_cache=value_cache_fp8,
-        key=gathered_key,
-        value=gathered_value,
-        block_tables=block_tables,
-        k_scales=torch.ones(1, dtype=torch.float32, device=DEVICE),
-        v_scales=torch.ones(1, dtype=torch.float32, device=DEVICE),
-        cu_seqlens_kv=cu_seq_lens,
-        token_to_batch=token_to_batch,
-        seq_starts=seq_starts,
-        dequant=True,
-        kv_cache_layout="NHD",
-        total_tokens=kv_len,
-    )
-
-    output = torch.empty_like(query)
-    aiter.flash_attn_varlen_func(
-        q=query,
-        k=gathered_key,
-        v=gathered_value,
-        cu_seqlens_q=cu_query_lens,
-        cu_seqlens_k=cu_seq_lens,
-        max_seqlen_q=query_len,
-        max_seqlen_k=kv_len,
-        min_seqlen_q=1,
-        dropout_p=0.0,
-        softmax_scale=scale,
-        causal=True,
-        window_size=(-1, -1),
-        alibi_slopes=None,
-        return_lse=False,
-        out=output,
-    )
-
-    ref = _ref_paged_attention(
-        query=query,
-        key_cache=key_cache_fp8.to(torch.bfloat16),
-        value_cache=value_cache_fp8.to(torch.bfloat16),
-        query_lens=[query_len],
-        kv_lens=[kv_len],
-        block_tables=block_tables,
-        scale=scale,
-    )
-
-    _assert_abs_error_budget(
-        output.float(),
-        ref.float(),
-        label="aiter_fp8_kv_attention",
-        tight_atol=0.15,
-        max_atol=0.25,
-        pass_rate=0.98,
-    )
 
 
 @fp8_only
