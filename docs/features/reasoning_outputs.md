@@ -238,6 +238,17 @@ vllm serve ibm-granite/granite-3.2-2b-instruct \
     --default-chat-template-kwargs '{"thinking": true}'
 ```
 
+### Mapping Reasoning Efforts
+
+Chat templates differ in which `reasoning_effort` values they recognize, and some silently fall back to another effort (e.g. maximum reasoning) for values they do not know. Use `--reasoning-effort-map` to rewrite the efforts clients send into ones the template supports. For a template that only recognizes `low`, `high` and `max`:
+
+```bash
+vllm serve <model> \
+    --reasoning-effort-map '{"minimal": "low", "medium": "low", "xhigh": "max"}'
+```
+
+The map applies to the effort set through the Chat Completions (`reasoning_effort`), Responses (`reasoning.effort`) and Anthropic Messages (`output_config.effort`) APIs. Efforts that are not listed pass through unchanged, and a `reasoning_effort` set directly in `chat_template_kwargs` is not rewritten. Keys must be one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; values are passed to the chat template as-is. Mapping an effort to `none` disables thinking for templates that honor `enable_thinking`.
+
 ### Request-Level Override
 
 Request-level `chat_template_kwargs` always take priority over server defaults. For example, if the server is started with `enable_thinking=false`, a client can still enable it for a specific request:

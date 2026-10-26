@@ -38,7 +38,7 @@ use crate::{Error, Result as ChatResult};
 /// assembling final structured chat events.
 pub struct DefaultChatOutputProcessor {
     parser: Box<dyn UnifiedParser>,
-    parallel_tool_calls: bool,
+    max_tool_calls: Option<usize>,
     /// Request facts the initialized parser needs to build its output grammar.
     /// Absent for the plain-text-only processor, which never builds one.
     grammar_inputs: Option<GrammarInputs>,
@@ -51,6 +51,7 @@ struct GrammarInputs {
     tools: Vec<ChatTool>,
     tool_choice: ToolChoice,
     tool_strict_level: ToolStrictLevel,
+    parallel_tool_calls: bool,
     /// The request's structured-output constraint, normalized for composition
     /// into the output grammar. The original stays on the request until an
     /// output grammar replaces it.
@@ -122,6 +123,7 @@ impl DefaultChatOutputProcessor {
             let tool_parser = if tool_parsing_enabled {
                 Some(Self::resolve_tool_parser(
                     request.tools(),
+                    tokenizer.clone(),
                     model_id,
                     tool_call_parser,
                 )?)
@@ -141,11 +143,12 @@ impl DefaultChatOutputProcessor {
 
         Ok(Self {
             parser,
-            parallel_tool_calls: request.parallel_tool_calls(),
+            max_tool_calls: request.max_tool_calls(),
             grammar_inputs: Some(GrammarInputs {
                 tools: request.tools().to_vec(),
                 tool_choice: request.tool_choice().into(),
                 tool_strict_level,
+                parallel_tool_calls: request.parallel_tool_calls(),
                 answer: request.sampling_params.structured_outputs.as_ref().and_then(answer_format),
             }),
         })
@@ -159,13 +162,14 @@ impl DefaultChatOutputProcessor {
     pub fn plain_text_only() -> Self {
         Self {
             parser: Box::new(CombinedParser::plain_text_only()),
-            parallel_tool_calls: true,
+            max_tool_calls: None,
             grammar_inputs: None,
         }
     }
 
     fn resolve_tool_parser(
         tools: &[ChatTool],
+        tokenizer: DynTokenizer,
         model_id: &str,
         selection: &ParserSelection,
     ) -> ChatResult<Box<dyn ToolParser>> {
@@ -181,7 +185,7 @@ impl DefaultChatOutputProcessor {
             ParserSelection::Explicit(name) => name.as_str(),
         };
 
-        let parser = factory.create(parser_name, tools)?;
+        let parser = factory.create(parser_name, tools, tokenizer)?;
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
         Ok(parser)
@@ -269,7 +273,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
                 tools: &inputs.tools,
                 tool_choice: &inputs.tool_choice,
                 tool_strict_level: inputs.tool_strict_level,
-                parallel_tool_calls: self.parallel_tool_calls,
+                parallel_tool_calls: inputs.parallel_tool_calls,
                 answer: inputs.answer.as_ref(),
             })
             .map_err(|error| Error::OutputGrammar {
@@ -285,7 +289,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
     /// 2. [`structured_chat_event_stream`] — final block assembly
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
         let parsed = unified_event_stream(decoded, self.parser);
-        let structured = structured_chat_event_stream(parsed, self.parallel_tool_calls);
+        let structured = structured_chat_event_stream(parsed, self.max_tool_calls);
 
         Ok(structured.boxed())
     }
@@ -295,13 +299,17 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
 mod tests {
     use std::sync::Arc;
 
+    use futures::{StreamExt as _, stream};
     use thiserror_ext::AsReport as _;
     use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
     use vllm_parser::output_grammar::BuiltOutputGrammar;
+    use vllm_text::output::{DecodedTextEvent, Finished};
+    use vllm_text::{DecodedText, SampledDelta};
     use vllm_tokenizer::test_utils::TestTokenizer;
     use xgrammar_structural_tag::format::Format;
 
     use super::DefaultChatOutputProcessor;
+    use crate::event::{AssistantMessageExt as _, ChatEvent};
     use crate::output::ChatOutputProcessor;
     use crate::parser::unified::{HfTemplateError, ResponseTemplate};
     use crate::parser::{ParserSelection, ToolStrictLevel};
@@ -362,6 +370,67 @@ mod tests {
         assert_eq!(parameters, strict);
         assert_ne!(envelope, parameters);
         assert!(build(ToolStrictLevel::Parameter, None, ChatToolChoice::None).is_none());
+    }
+
+    #[tokio::test]
+    async fn tool_choice_none_drops_tool_calls_parsed_by_unified_parsers() {
+        let tools = vec![ChatTool {
+            name: "search".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: None,
+        }];
+        let run = async |tool_choice| {
+            let mut request = ChatRequest {
+                tool_context: ResolvedToolContext::new(&[], tools.clone(), Some(tool_choice), true)
+                    .unwrap(),
+                ..ChatRequest::for_test()
+            };
+            let gemma4 = ParserSelection::Explicit("gemma4".to_string());
+            let mut processor = DefaultChatOutputProcessor::new(
+                &mut request,
+                "other-model",
+                tokenizer(),
+                &gemma4,
+                &gemma4,
+                None,
+            )
+            .unwrap();
+            processor.initialize(&[]).unwrap();
+            let decoded = stream::iter([Ok(DecodedTextEvent::TextDelta {
+                decoded: DecodedText::unattributed(
+                    "Sure.<|tool_call>call:search{query:<|\"|>vllm<|\"|>}<tool_call|>",
+                ),
+                sampled: SampledDelta::default(),
+                finished: Some(Box::new(Finished {
+                    usage: vllm_llm::TokenUsage::default(),
+                    finish_reason: crate::FinishReason::Stop(None),
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                    sampling_mask: None,
+                    timestamps: Default::default(),
+                })),
+            })]);
+            let events =
+                Box::new(processor).process(decoded.boxed()).unwrap().collect::<Vec<_>>().await;
+            let Some(Ok(ChatEvent::Done { message, .. })) = events.last() else {
+                panic!("expected done");
+            };
+            let names = message.tool_calls().map(|call| call.name.clone()).collect::<Vec<_>>();
+            (message.text(), names)
+        };
+
+        assert_eq!(
+            run(ChatToolChoice::Auto).await,
+            ("Sure.".to_string(), vec!["search".to_string()])
+        );
+        // Python's parser engine parses the call and drops it: neither a tool
+        // call nor its markup reaches the response.
+        assert_eq!(
+            run(ChatToolChoice::None).await,
+            ("Sure.".to_string(), vec![])
+        );
     }
 
     #[test]
