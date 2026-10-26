@@ -4683,6 +4683,7 @@ async fn non_stream_completions_return_json_response() {
     let response_object = json.as_object().expect("response object");
     let choice = json["choices"][0].as_object().expect("choice object");
     for (object, key) in [
+        (response_object, "service_tier"),
         (response_object, "system_fingerprint"),
         (response_object, "kv_transfer_params"),
         (choice, "logprobs"),
@@ -4690,6 +4691,8 @@ async fn non_stream_completions_return_json_response() {
         (choice, "prompt_logprobs"),
         (choice, "token_ids"),
         (choice, "prompt_token_ids"),
+        (choice, "routed_experts"),
+        (choice, "weight_versions"),
     ] {
         assert!(
             object.contains_key(key) && object[key].is_null(),
