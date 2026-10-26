@@ -48,7 +48,7 @@ steps:
       dind: false
       automatic_shard: true
       device: mi300_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 90
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd
