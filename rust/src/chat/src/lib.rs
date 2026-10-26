@@ -10,6 +10,8 @@
 //! blocks. It is closer to vLLM's internal chat-rendering flow than to a full
 //! OpenAI-compatible surface.
 
+use std::sync::Once;
+
 pub use backend::hf::HfChatBackend;
 pub use backend::{
     ChatBackend, ChatTextBackend, DynChatBackend, DynChatTextBackend, LoadModelBackendsOptions,
@@ -60,9 +62,11 @@ mod renderer;
 mod request;
 mod stream;
 
+use tracing::warn;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
@@ -82,7 +86,12 @@ pub struct ChatRequestProcessor {
     /// Server-side floor for tool-call structural tags, or `None` for the
     /// tool parser's default level.
     tool_strict_level: Option<ToolStrictLevel>,
+    /// Whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    exclude_tools_when_tool_choice_none: bool,
 }
+
+static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
 
 impl ChatRequestProcessor {
     /// Create a processor with multimodal support using the effective model
@@ -95,6 +104,7 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
+            exclude_tools_when_tool_choice_none: false,
         }
     }
 
@@ -107,6 +117,7 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
+            exclude_tools_when_tool_choice_none: false,
         }
     }
 
@@ -125,6 +136,13 @@ impl ChatRequestProcessor {
     /// `None` for the tool parser's default level.
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Configure whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub fn with_exclude_tools_when_tool_choice_none(mut self, exclude: bool) -> Self {
+        self.exclude_tools_when_tool_choice_none = exclude;
         self
     }
 
@@ -179,9 +197,12 @@ impl ChatRequestProcessor {
         Ok(Some(features))
     }
 
-    async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
+    async fn prepare_text_request(&self, mut request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
+        if self.exclude_tools_when_tool_choice_none {
+            request.tool_context.exclude_initial_tools_if_none();
+        }
         let renderer = self.backend.chat_renderer();
         let (mut rendered, request) = tokio::task::spawn_blocking(move || {
             renderer.render(&request).map(|rendered| (rendered, request))
@@ -245,11 +266,24 @@ impl ChatRequestProcessor {
         // Initialize the output processor from the final prompt token IDs and apply
         // the output grammar to the request, if any.
         let prompt_token_ids = text_processor.tokenize_in_place(&mut text_request)?;
-        let grammar = {
-            output_processor.initialize(prompt_token_ids)?;
-            output_processor.build_output_grammar()?
-        };
-        apply_output_grammar(&mut text_request, grammar)?;
+        output_processor.initialize(prompt_token_ids)?;
+        let grammar = output_processor.build_output_grammar()?;
+        // Output grammars are xgrammar structural tags. With another backend the
+        // request keeps its own constraint and parsing runs unconstrained.
+        match text_processor.structured_outputs_backend() {
+            StructuredOutputBackend::Xgrammar => apply_output_grammar(&mut text_request, grammar)?,
+            backend => {
+                if grammar.is_some() {
+                    OUTPUT_GRAMMAR_SKIPPED_ONCE.call_once(|| {
+                        warn!(
+                            ?backend,
+                            "output grammars need the xgrammar structured outputs backend; \
+                             tool calls and composed response formats are not constrained"
+                        );
+                    });
+                }
+            }
+        }
 
         Ok((text_request, output_processor))
     }
@@ -301,6 +335,13 @@ impl ChatLlm {
     /// the tool parser's default level.
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.processor.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Set whether request-level tools are left out of the prompt when
+    /// `tool_choice` is `none`.
+    pub fn with_exclude_tools_when_tool_choice_none(mut self, exclude: bool) -> Self {
+        self.processor.exclude_tools_when_tool_choice_none = exclude;
         self
     }
 
