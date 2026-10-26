@@ -27,6 +27,7 @@ from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
+    HiSparseHostPool,
     drop_hisparse_host_pool,
     release_pinned_state,
     update_hisparse_residency,
@@ -212,26 +213,20 @@ class HiSparseConnectorWorker:
         if not cache_handles:
             raise RuntimeError("HiSparse connector found no hot-cache handles.")
         hot_backings: dict[int, torch.Tensor] = {}
-        registered_host_pools: dict[int, torch.Tensor] = {}
-        shared_host_regions: dict[int, SharedOffloadRegion] = {}
+        host_pools: dict[int, HiSparseHostPool] = {}
         for cache in cache_handles:
             hot_backing = cache.runtime.hot_backing
             hot_backings[hot_backing.untyped_storage().data_ptr()] = hot_backing
-            registered_pool = cache.runtime.registered_host_pool
-            registered_host_pools[registered_pool.data_ptr()] = registered_pool
-            if (region := cache.runtime.shared_host_region) is not None:
-                shared_host_regions[id(region)] = region
+            assert cache.runtime.host_pool is not None
+            host_pools[id(cache.runtime.host_pool)] = cache.runtime.host_pool
         if len(hot_backings) != 1:
             raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
         hot_backing = next(iter(hot_backings.values()))
-        if len(shared_host_regions) > 1:
-            raise RuntimeError("HiSparse caches must share one host region.")
-        shared_host_region = next(iter(shared_host_regions.values()), None)
-        pinned_host_pools = (
-            []
-            if shared_host_region is not None
-            else list(registered_host_pools.values())
-        )
+        if len(host_pools) != 1:
+            raise RuntimeError("HiSparse caches must share one host pool.")
+        host_pool = next(iter(host_pools.values()))
+        shared_host_region = host_pool.shared_region
+        pinned_host_pools = host_pool.pinned
         is_host_writer = _is_hisparse_host_writer(shared_host_region)
 
         resident = cache_handles[0].view
