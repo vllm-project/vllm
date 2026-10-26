@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import array
 import contextlib
 import os
 import random
@@ -57,6 +58,9 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "turboquant_4bit_nc": torch.uint8,
     "turboquant_k3v4_nc": torch.uint8,
     "turboquant_3bit_nc": torch.uint8,
+    "octave_k3v4": torch.uint8,
+    "octave_k3v3": torch.uint8,
+    "octave_k3v3_compact": torch.uint8,
     "ultraquant_4bit": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
@@ -70,6 +74,11 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.int32: np.int32,
     torch.int64: np.int64,
 }
+
+# array.array typecodes with the same item layout as the torch dtype.
+TORCH_DTYPE_TO_ARRAY_TYPECODE = {torch.int32: "i", torch.int64: "q", torch.float32: "f"}
+for _dtype, _typecode in TORCH_DTYPE_TO_ARRAY_TYPECODE.items():
+    assert array.array(_typecode).itemsize == _dtype.itemsize
 
 
 MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
