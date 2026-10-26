@@ -106,16 +106,7 @@ def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
             init_test_distributed_environment(world_size, 1, rank, port)
         worker_fn(rank, world_size)
         torch.distributed.barrier()
-        # Older FlashInfer releases retain process-wide workspaces. Newer
-        # backends release them in destroy() and remove these legacy classes.
-        legacy_one_sided = getattr(
-            sys.modules.get("flashinfer.comm.trtllm_moe_alltoall"), "MoeAlltoAll", None
-        )
-        if legacy_one_sided is not None and hasattr(
-            legacy_one_sided, "_WORKSPACE_CACHE"
-        ):
-            torch.accelerator.synchronize()
-            legacy_one_sided._WORKSPACE_CACHE.clear()
+        # The legacy two-sided API retains process-wide workspaces.
         legacy_two_sided = getattr(
             sys.modules.get("flashinfer.comm.trtllm_alltoall"), "MnnvlMoe", None
         )
@@ -330,6 +321,12 @@ def _one_sided_lifecycle_worker(rank, world_size):
     )
     from vllm.distributed.parallel_state import get_dp_group
 
+    expected = {
+        "fence": (False, False),
+        "cft": (None, False),
+        "lamport": (False, True),
+        "auto": (None, None),
+    }[os.environ.get("VLLM_FLASHINFER_MOE_A2A_TRANSPORT", "fence")]
     cpu_group = get_dp_group().cpu_group
     manager = FlashInferNVLinkOneSidedManager(cpu_group)
 
@@ -351,6 +348,8 @@ def _one_sided_lifecycle_worker(rank, world_size):
         assert torch.get_default_device() == torch.device(f"{DEVICE}:{rank}")
     assert manager.initialized
     assert manager.get_communication().params.hidden_size == 4096
+    config = manager.get_communication().config
+    assert (config.cft, config.lamport) == expected
 
     torch.distributed.barrier()
 
@@ -364,6 +363,8 @@ def _one_sided_lifecycle_worker(rank, world_size):
     # Reinitialize with different token count
     manager.initialize(**{**init_kwargs, "max_num_tokens": 2048})
     assert manager.initialized
+    config = manager.get_communication().config
+    assert (config.cft, config.lamport) == expected
 
     torch.distributed.barrier()
     manager.cleanup()
@@ -373,8 +374,16 @@ def _one_sided_lifecycle_worker(rank, world_size):
 @requires_one_sided
 @requires_ptrace
 @pytest.mark.parametrize("world_size", [2])
-def test_one_sided_manager_lifecycle(world_size):
-    """Test init, cleanup, and reinit with different params."""
+@pytest.mark.parametrize("transport", [None, "cft", "lamport", "auto"])
+def test_one_sided_manager_lifecycle(world_size, transport, monkeypatch):
+    """Test init, cleanup, and reinit with different params.
+
+    CFT and Lamport stay off unless VLLM_FLASHINFER_MOE_A2A_TRANSPORT opts in.
+    """
+    if transport is None:
+        monkeypatch.delenv("VLLM_FLASHINFER_MOE_A2A_TRANSPORT", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_FLASHINFER_MOE_A2A_TRANSPORT", transport)
     _spawn_workers(
         _one_sided_lifecycle_worker,
         world_size,
@@ -482,7 +491,9 @@ def _one_sided_workspace_grow_worker(rank, world_size):
         top_k = base_kwargs["top_k"]
         ids = torch.arange(top_k, dtype=torch.int32, device=device).repeat(tokens, 1)
         weights = torch.ones(tokens, top_k, device=device)
-        received = shared.dispatch(x, ids, weights, max_tokens_per_rank=world_size + 2)
+        received = shared.dispatch(
+            x, ids, weights, runtime_max_tokens_per_rank=world_size + 2
+        )
         local = (received.topk_ids >= rank * 8) & (received.topk_ids < (rank + 1) * 8)
         values = received.hidden_states.to(torch.bfloat16)
         expected = x.to(torch.bfloat16)
@@ -551,7 +562,9 @@ def _one_sided_expert_output_in_workspace_worker(rank, world_size):
         device=device,
     )
     weights = torch.ones(tokens, top_k, device=device)
-    received = comm.dispatch(x, ids, weights, max_tokens_per_rank=tokens_per_rank)
+    received = comm.dispatch(
+        x, ids, weights, runtime_max_tokens_per_rank=tokens_per_rank
+    )
 
     fused_out = prepare_finalize.allocate_fused_expert_output(
         (world_size * tokens_per_rank, hidden),
@@ -560,6 +573,9 @@ def _one_sided_expert_output_in_workspace_worker(rank, world_size):
         TopKWeightAndReduceNoOP(),
     )
     assert fused_out is not None
+    # FlashInfer skips the staging copy when the payload is its combine input.
+    combine_input = comm.get_combine_input_buffer(torch.bfloat16)
+    assert fused_out.data_ptr() == combine_input.data_ptr()
     lo, hi = rank * experts_per_rank, (rank + 1) * experts_per_rank
     local = (received.topk_ids >= lo) & (received.topk_ids < hi)
     fused_out.copy_(
@@ -570,19 +586,20 @@ def _one_sided_expert_output_in_workspace_worker(rank, world_size):
         )
     )
 
-    payload_in_workspace = []
-    combine = comm.alltoall.combine
+    combined_payloads = []
+    combine = comm.combine
 
-    def spy_combine(*args, **kwargs):
-        payload_in_workspace.append(kwargs["payload_in_workspace"])
-        return combine(*args, **kwargs)
+    def spy_combine(expert_output, *args, **kwargs):
+        combined_payloads.append(expert_output.data_ptr())
+        return combine(expert_output, *args, **kwargs)
 
-    comm.alltoall.combine = spy_combine
+    comm.combine = spy_combine
     output = torch.empty_like(x)
     prepare_finalize.finalize(
         output, fused_out, weights, ids, False, TopKWeightAndReduceNoOP()
     )
-    assert payload_in_workspace == [True]
+    del comm.combine
+    assert combined_payloads == [combine_input.data_ptr()]
     torch.testing.assert_close(output, x * top_k, rtol=0, atol=0)
     manager.cleanup()
 
@@ -591,8 +608,10 @@ def _one_sided_expert_output_in_workspace_worker(rank, world_size):
 @requires_one_sided
 @requires_ptrace
 @pytest.mark.parametrize("world_size", [2])
-def test_one_sided_expert_output_in_workspace(world_size):
+@pytest.mark.parametrize("transport", ["fence", "cft", "lamport"])
+def test_one_sided_expert_output_in_workspace(world_size, transport, monkeypatch):
     """Experts write into the combine workspace, so combine skips the copy."""
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_A2A_TRANSPORT", transport)
     _spawn_workers(
         _one_sided_expert_output_in_workspace_worker,
         world_size,
@@ -1089,7 +1108,7 @@ def test_two_sided_dispatch_combine(world_size):
 # ---------------------------------------------------------------------------
 
 
-def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
+def _one_sided_data_worker(rank, world_size, *, padded_mxfp8, experts_per_token):
     from flashinfer.fused_moe import QuantFormat
 
     from vllm.distributed.device_communicators.all2all import (
@@ -1115,7 +1134,6 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
         QuantFormat.MXFP8 if padded_mxfp8 else QuantFormat.NVFP4
     )
     tokens_per_rank = 32
-    experts_per_token = 2
     num_experts = world_size * 8
 
     # Initialize the one-sided manager
@@ -1147,6 +1165,11 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
                 device=device,
                 dtype=torch.uint8,
             )
+            if not padded_mxfp8:
+                # Lamport delivers NVFP4 -0 (0b1000) as +0, the same value, so
+                # draw packed E2M1 pairs without -0 to compare raw bytes.
+                x = torch.where((x & 0x0F) == 0x08, x & 0xF0, x)
+                x = torch.where((x & 0xF0) == 0x80, x & 0x0F, x)
             x_sf = torch.randint(
                 0,
                 256,
@@ -1181,7 +1204,7 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
                     topk_ids,
                     topk_weights,
                     hidden_states_scale=x_sf,
-                    max_tokens_per_rank=runtime_max_tokens,
+                    runtime_max_tokens_per_rank=runtime_max_tokens,
                 )
                 recv_ids = received.topk_ids
                 local = (recv_ids >= rank * experts_per_rank) & (
@@ -1218,16 +1241,30 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
 @requires_ptrace
 @pytest.mark.parametrize("world_size", [2])
 @pytest.mark.parametrize("padded_mxfp8", [False, True])
-def test_one_sided_dispatch_combine(world_size, padded_mxfp8):
+# CFT needs 16-byte payload rows, so top_k=2 would dispatch expert IDs over
+# fences; top_k=4 lets CFT carry both directions.
+@pytest.mark.parametrize(
+    "experts_per_token,transport", [(2, "fence"), (4, "cft"), (4, "lamport")]
+)
+def test_one_sided_dispatch_combine(
+    world_size, padded_mxfp8, experts_per_token, transport, monkeypatch
+):
     """Test FlashInfer one-sided dispatch/combine with actual data flow."""
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_A2A_TRANSPORT", transport)
     _spawn_workers(
-        partial(_one_sided_data_worker, padded_mxfp8=padded_mxfp8),
+        partial(
+            _one_sided_data_worker,
+            padded_mxfp8=padded_mxfp8,
+            experts_per_token=experts_per_token,
+        ),
         world_size,
         dp_size=world_size,
     )
 
 
-def _one_sided_prepare_finalize_worker(rank, world_size, *, empty_rank, cuda_graph):
+def _one_sided_prepare_finalize_worker(
+    rank, world_size, *, empty_rank, cuda_graph, top_k
+):
     from vllm.distributed.device_communicators.all2all import (
         FlashInferNVLinkOneSidedManager,
     )
@@ -1253,7 +1290,7 @@ def _one_sided_prepare_finalize_worker(rank, world_size, *, empty_rank, cuda_gra
         num_tokens = token_counts[rank]
         adapter = FlashInferNVLinkOneSidedPrepareAndFinalize(
             max_num_tokens=16,
-            top_k=2,
+            top_k=top_k,
             num_experts=local_experts * world_size,
             hidden_size=hidden,
         )
@@ -1263,11 +1300,14 @@ def _one_sided_prepare_finalize_worker(rank, world_size, *, empty_rank, cuda_gra
         x = torch.randn(num_tokens, hidden, device=DEVICE, dtype=torch.bfloat16)
         token = torch.arange(num_tokens, device=DEVICE, dtype=torch.int32)
         # Alternate between two experts on one rank and experts on different ranks.
-        ids = torch.stack((token % local_experts, (token + 1) % local_experts), dim=1)
-        ids[:, 1] += (token % 2) * local_experts
-        weights = torch.empty(num_tokens, 2, device=DEVICE, dtype=torch.float32)
-        weights[:, 0] = 0.25
-        weights[:, 1] = 0.75
+        ids = torch.stack([(token + k) % local_experts for k in range(top_k)], dim=1)
+        offsets = token[:, None] + torch.arange(top_k - 1, device=DEVICE)
+        ids[:, 1:] += (offsets % 2) * local_experts
+        # Allocate rows explicitly: an expanded empty tensor keeps a zero stride.
+        weights = torch.empty(num_tokens, top_k, device=DEVICE, dtype=torch.float32)
+        weights[:] = torch.tensor(
+            [0.25, 0.75] if top_k == 2 else [0.1, 0.2, 0.3, 0.4], device=DEVICE
+        )
         output = torch.empty_like(x)
 
         def round_trip():
@@ -1315,8 +1355,11 @@ def _one_sided_prepare_finalize_worker(rank, world_size, *, empty_rank, cuda_gra
                     else:
                         graph.replay()
                     check_output()
-                manager.checkpoint_prepare()
-                manager.checkpoint_restore()
+                # Checkpoint metadata must stay on the CPU under the model's
+                # default device, and graphs must replay after restoring.
+                with torch.device(x.device):
+                    manager.checkpoint_prepare()
+                    manager.checkpoint_restore()
                 if graph is None:
                     round_trip()
                 else:
@@ -1333,13 +1376,18 @@ def _one_sided_prepare_finalize_worker(rank, world_size, *, empty_rank, cuda_gra
 @requires_ptrace
 @pytest.mark.parametrize("empty_rank", [False, True])
 @pytest.mark.parametrize("cuda_graph", [False, True])
-def test_one_sided_prepare_finalize(empty_rank, cuda_graph):
+@pytest.mark.parametrize("top_k,transport", [(2, "fence"), (4, "cft"), (4, "lamport")])
+def test_one_sided_prepare_finalize(
+    empty_rank, cuda_graph, top_k, transport, monkeypatch
+):
     """Check the vLLM adapter's weighted routing, padding and output on two GPUs."""
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_A2A_TRANSPORT", transport)
     _spawn_workers(
         partial(
             _one_sided_prepare_finalize_worker,
             empty_rank=empty_rank,
             cuda_graph=cuda_graph,
+            top_k=top_k,
         ),
         2,
         dp_size=2,
@@ -1394,7 +1442,7 @@ def _one_sided_low_precision_worker(rank, world_size):
         topk_ids,
         topk_weights,
         hidden_states_scale=x_sf,
-        max_tokens_per_rank=tokens_per_rank,
+        runtime_max_tokens_per_rank=tokens_per_rank,
     )
 
     expert_output = torch.ones(

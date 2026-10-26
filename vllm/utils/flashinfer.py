@@ -443,6 +443,8 @@ def has_flashinfer_nvlink_one_sided() -> bool:
             )
         )
         and hasattr(mod.MoEEpCommParams, "dispatch_format")
+        # Transport selection (cft/lamport) arrived in FlashInfer 0.7.3.
+        and "lamport" in getattr(mod.NVLinkOneSidedConfig, "__dataclass_fields__", {})
     )
 
 
