@@ -19,6 +19,58 @@ from vllm.v1.worker.startup_plan import (
 )
 
 
+def test_v2_worker_requires_triton(monkeypatch):
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    config = SimpleNamespace(use_v2_model_runner=True)
+    with pytest.raises(ValueError, match="Model Runner V2 requires Triton"):
+        gpu_worker.Worker(
+            config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method="env://",
+        )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cpu(), reason="CPU worker test; needs the CPU platform"
+)
+def test_cpu_worker_without_triton(monkeypatch):
+    import vllm.config.vllm as config_module
+    from vllm.config import VllmConfig
+    from vllm.utils.cpu_resource_utils import MemoryNodeInfo
+    from vllm.v1.worker import cpu_worker
+
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(config_module, "HAS_TRITON", False)
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    monkeypatch.setattr(
+        cpu_worker, "get_visible_memory_node", lambda _assigned_node_ids: [0]
+    )
+    monkeypatch.setattr(
+        cpu_worker, "get_allowed_cpu_list", lambda: [SimpleNamespace(numa_node=0)]
+    )
+    monkeypatch.setattr(
+        cpu_worker,
+        "get_memory_node_info",
+        lambda node: MemoryNodeInfo(
+            total_memory=8 * GiB_bytes, available_memory=8 * GiB_bytes
+        ),
+    )
+    monkeypatch.setattr(
+        cpu_worker.torch.ops._C,
+        "init_cpu_memory_env",
+        lambda nodes: None,
+        raising=False,
+    )
+
+    config = VllmConfig()
+    worker = cpu_worker.CPUWorker(
+        config, local_rank=0, rank=0, distributed_init_method="env://"
+    )
+    assert not config.use_v2_model_runner
+    assert not worker.use_v2_model_runner
+
+
 def test_sleep_preservation_restores_private_draft_not_shared_target():
     target = torch.nn.Linear(2, 2, bias=False)
     draft = torch.nn.Module()
