@@ -190,6 +190,7 @@ class EngineCoreClient(ABC):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -297,6 +298,7 @@ class EngineCoreClient(ABC):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -419,12 +421,14 @@ class InprocClient(EngineCoreClient):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         self.engine_core.profile(
             is_start,
             profile_prefix,
             delay_iterations=delay_iterations,
             max_iterations=max_iterations,
+            profiler_kwargs=profiler_kwargs,
         )
 
     def reset_mm_cache(self) -> None:
@@ -506,8 +510,8 @@ class BackgroundResources:
     coordinator: DPCoordinator | None = None
     output_socket: zmq.Socket | zmq.asyncio.Socket | None = None
     input_socket: zmq.Socket | zmq.asyncio.Socket | None = None
-    first_req_send_socket: zmq.asyncio.Socket | None = None
-    first_req_rcv_socket: zmq.asyncio.Socket | None = None
+    scale_send_socket: zmq.asyncio.Socket | None = None
+    scale_rcv_socket: zmq.asyncio.Socket | None = None
     stats_update_socket: zmq.asyncio.Socket | None = None
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
@@ -535,8 +539,8 @@ class BackgroundResources:
             sockets = (
                 self.output_socket,
                 self.input_socket,
-                self.first_req_send_socket,
-                self.first_req_rcv_socket,
+                self.scale_send_socket,
+                self.scale_rcv_socket,
                 self.stats_update_socket,
             )
 
@@ -1070,6 +1074,7 @@ class SyncMPClient(MPClient):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         self.call_utility(
             "profile",
@@ -1077,6 +1082,7 @@ class SyncMPClient(MPClient):
             profile_prefix,
             delay_iterations,
             max_iterations,
+            profiler_kwargs,
         )
 
     def reset_mm_cache(self) -> None:
@@ -1344,6 +1350,11 @@ class AsyncMPClient(MPClient):
     ) -> None:
         await self.call_utility_async("pause_scheduler", mode, clear_cache)
 
+    async def pause_generation_async(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> None:
+        await self.call_utility_async("pause_generation", mode, clear_cache)
+
     async def resume_scheduler_async(self) -> None:
         await self.call_utility_async("resume_scheduler")
 
@@ -1356,6 +1367,7 @@ class AsyncMPClient(MPClient):
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         await self.call_utility_async(
             "profile",
@@ -1363,6 +1375,7 @@ class AsyncMPClient(MPClient):
             profile_prefix,
             delay_iterations,
             max_iterations,
+            profiler_kwargs,
         )
 
     async def reset_mm_cache_async(self) -> None:
@@ -1493,9 +1506,9 @@ class DPAsyncMPClient(AsyncMPClient):
 
         self.eep_scaling_cache: ElasticScalingCache | None = None
 
-        self.first_req_sock_addr = get_open_zmq_inproc_path()
-        self.first_req_send_socket = self.resources.first_req_send_socket = (
-            make_zmq_socket(self.ctx, self.first_req_sock_addr, zmq.PAIR, bind=True)
+        self.scale_sock_addr = get_open_zmq_inproc_path()
+        self.scale_send_socket = self.resources.scale_send_socket = make_zmq_socket(
+            self.ctx, self.scale_sock_addr, zmq.PAIR, bind=True
         )
         try:
             # If we are running in an asyncio event loop, start the stats task.
@@ -1518,75 +1531,48 @@ class DPAsyncMPClient(AsyncMPClient):
             with (
                 make_zmq_socket(self.ctx, stats_addr, zmq.XSUB, linger=0) as socket,
                 make_zmq_socket(
-                    self.ctx, self.first_req_sock_addr, zmq.PAIR, bind=False, linger=0
-                ) as first_req_rcv_socket,
+                    self.ctx, self.scale_sock_addr, zmq.PAIR, bind=False, linger=0
+                ) as scale_rcv_socket,
             ):
                 assert isinstance(socket, zmq.asyncio.Socket)
-                assert isinstance(first_req_rcv_socket, zmq.asyncio.Socket)
+                assert isinstance(scale_rcv_socket, zmq.asyncio.Socket)
                 self.resources.stats_update_socket = socket
-                self.resources.first_req_rcv_socket = first_req_rcv_socket
+                self.resources.scale_rcv_socket = scale_rcv_socket
                 # Send subscription message.
                 await socket.send(b"\x01")
 
                 poller = zmq.asyncio.Poller()
                 poller.register(socket, zmq.POLLIN)
-                poller.register(first_req_rcv_socket, zmq.POLLIN)
+                poller.register(scale_rcv_socket, zmq.POLLIN)
 
                 while True:
-                    events = await poller.poll()
-                    if (
-                        not self.engines_running
-                        and len(events) == 2
-                        or (events[0][0] == first_req_rcv_socket)
-                    ):
-                        # Check if this is a regular request notification or
-                        # scale up notification
-                        buf = first_req_rcv_socket.recv(flags=zmq.NOBLOCK).result()
-
-                        decoded = msgspec.msgpack.decode(buf)
-                        if (
-                            isinstance(decoded, (list, tuple))
-                            and len(decoded) == 2
-                            and decoded[0] == "SCALE_ELASTIC_EP"
-                        ):
-                            # Extract new engine count from the decoded message
-                            new_engine_count = decoded[1]
-                            # Update engine_ranks_managed and count_slice
-                            parallel_config = self.vllm_config.parallel_config
-                            dp_size = parallel_config.data_parallel_size
-                            dp_rank = parallel_config.data_parallel_rank
-                            assert dp_rank == 0
-                            assert dp_size == new_engine_count
-                            assert not parallel_config.data_parallel_hybrid_lb
-                            # External LB clients continue to manage only local ranks.
-                            if not parallel_config.data_parallel_external_lb:
-                                self.engine_ranks_managed = list(range(dp_size))
-                                if len(self.lb_engines) < new_engine_count:
-                                    self.lb_engines += [
-                                        [0, 0, 0.0]
-                                        for _ in range(
-                                            new_engine_count - len(self.lb_engines)
-                                        )
-                                    ]
-                                else:
-                                    self.lb_engines = self.lb_engines[:new_engine_count]
-                            # Send scale up notification to coordinator
-                            scale_msg = msgspec.msgpack.encode(
-                                ("SCALE_ELASTIC_EP", new_engine_count)
-                            )
-                            await socket.send(scale_msg)
-                            continue
-
-                        # we're sending a request while the engines are
-                        # paused, so that it can wake the others up
-                        # (to run dummy EP loop).
-                        assert decoded[0] == "FIRST_REQ"
-                        target_eng_index = decoded[1]
-                        self.engines_running = True
-                        msg = msgspec.msgpack.encode(
-                            (target_eng_index, self.current_wave)
-                        )
-                        await socket.send(msg)
+                    events = dict(await poller.poll())
+                    if scale_rcv_socket in events:
+                        buf = scale_rcv_socket.recv(flags=zmq.NOBLOCK).result()
+                        msg_type, new_engine_count = msgspec.msgpack.decode(buf)
+                        assert msg_type == "SCALE_ELASTIC_EP"
+                        # Update engine_ranks_managed and count_slice
+                        parallel_config = self.vllm_config.parallel_config
+                        dp_size = parallel_config.data_parallel_size
+                        dp_rank = parallel_config.data_parallel_rank
+                        assert dp_rank == 0
+                        assert dp_size == new_engine_count
+                        assert not parallel_config.data_parallel_hybrid_lb
+                        # External LB clients continue to manage only local ranks.
+                        if not parallel_config.data_parallel_external_lb:
+                            self.engine_ranks_managed = list(range(dp_size))
+                            if len(self.lb_engines) < new_engine_count:
+                                self.lb_engines += [
+                                    [0, 0, 0.0]
+                                    for _ in range(
+                                        new_engine_count - len(self.lb_engines)
+                                    )
+                                ]
+                            else:
+                                self.lb_engines = self.lb_engines[:new_engine_count]
+                        # Forward the scale notification to the coordinator.
+                        await socket.send(buf)
+                        continue
 
                     buf = None
                     while True:
@@ -1624,14 +1610,9 @@ class DPAsyncMPClient(AsyncMPClient):
         request.current_wave = self.current_wave
         request.client_index = self.client_index
 
+        # The engine that receives it wakes the other ranks if they are idle.
         chosen_engine = self.get_core_engine_for_request(request)
-        to_await = self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
-        if not self.engines_running:
-            # Notify coordinator that we're sending a request
-            req_msg = msgspec.msgpack.encode(("FIRST_REQ", chosen_engine))
-            await self.first_req_send_socket.send(req_msg)
-
-        await to_await
+        await self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
 
         self._ensure_output_queue_task()
 
@@ -2100,7 +2081,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         scale_up_marker = msgspec.msgpack.encode(
             ("SCALE_ELASTIC_EP", new_data_parallel_size)
         )
-        await self.first_req_send_socket.send(scale_up_marker)
+        await self.scale_send_socket.send(scale_up_marker)
 
         logger.info(
             "[Elastic EP] Scale up completed, new data parallel size: %s",
@@ -2176,7 +2157,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             scale_down_marker = msgspec.msgpack.encode(
                 ("SCALE_ELASTIC_EP", new_data_parallel_size)
             )
-            await self.first_req_send_socket.send(scale_down_marker)
+            await self.scale_send_socket.send(scale_down_marker)
             await wait_future
             await self.resume_scheduler_async()
         except Exception:

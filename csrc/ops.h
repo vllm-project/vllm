@@ -363,6 +363,35 @@ minimax_allreduce_rms_qk(torch::stable::Tensor qkv,
                          int64_t const nranks, double const eps);
 #endif
 
+#ifndef USE_ROCM
+namespace vllm {
+void fused_qknorm_rope_cache(
+    torch::stable::Tensor& q_out, torch::stable::Tensor& k_out,
+    torch::stable::Tensor& v_out, torch::stable::Tensor& qkv,
+    torch::stable::Tensor& q_weight, torch::stable::Tensor& k_weight,
+    torch::stable::Tensor& cos, torch::stable::Tensor& sin,
+    torch::stable::Tensor& positions, torch::stable::Tensor& slot_mapping,
+    torch::stable::Tensor& k_cache, torch::stable::Tensor& v_cache,
+    int64_t head_dim, int64_t num_q_heads, int64_t num_kv_heads,
+    int64_t rotary_pairs, double epsilon, double norm_weight_bias,
+    const std::string& kv_cache_dtype,
+    std::optional<torch::stable::Tensor> k_scale,
+    std::optional<torch::stable::Tensor> v_scale);
+}  // namespace vllm
+#endif
+
+void fused_muse_spark_qknorm_rope_kv_insert(
+    torch::stable::Tensor& qkv, torch::stable::Tensor const& positions,
+    int64_t num_heads, int64_t num_kv_heads, int64_t head_dim, double eps,
+    std::optional<torch::stable::Tensor> cos_sin_cache, int64_t rotary_dim,
+    std::optional<torch::stable::Tensor> slot_mapping,
+    std::optional<torch::stable::Tensor> kv_cache, int64_t block_size,
+    const std::string& kv_cache_dtype,
+    std::optional<torch::stable::Tensor> k_scale,
+    std::optional<torch::stable::Tensor> v_scale,
+    std::optional<torch::stable::Tensor> q_fp8_out,
+    std::optional<torch::stable::Tensor> q_scale);
+
 // Horizontally-fused MiniMax-M3 QK-norm + partial NeoX RoPE (+ optional KV /
 // index-cache insert). Dense layer: norm+RoPE only; sparse layer: also packs
 // the index branch and scatters k/v/index_k into their paged caches.
@@ -444,6 +473,26 @@ void fused_kda_chunk(
     std::optional<torch::stable::Tensor> state_cache,
     std::optional<torch::stable::Tensor> state_indices,
     std::optional<torch::stable::Tensor> has_initial_state);
+#endif
+
+#ifdef VLLM_ENABLE_BEAM_KERNELS
+void beam_allreduce_norm(
+    torch::stable::Tensor const& input, torch::stable::Tensor const& residual,
+    std::optional<torch::stable::Tensor> post_weight,
+    std::optional<torch::stable::Tensor> next_weight,
+    torch::stable::Tensor& hidden,
+    std::optional<torch::stable::Tensor> normalized, int64_t buffer_ptrs,
+    torch::stable::Tensor& flags, int64_t multicast_ptr, int64_t local_ptr,
+    int64_t world, int64_t rank, double post_eps, double next_eps,
+    double x_scale, double r_scale, bool post_norm, bool next_norm, bool scaled,
+    bool one_shot, bool small_batch,
+    std::optional<torch::stable::Tensor> experts,
+    std::optional<torch::stable::Tensor> expert_weights,
+    std::optional<torch::stable::Tensor> permutation, double routed_scale);
+void beam_allreduce(torch::stable::Tensor const& input,
+                    torch::stable::Tensor& output, int64_t buffer_ptrs,
+                    torch::stable::Tensor& flags, int64_t multicast_ptr,
+                    int64_t world, int64_t rank);
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
@@ -546,6 +595,10 @@ std::tuple<int64_t, torch::stable::Tensor> allocate_shared_buffer_and_handle(
 int64_t open_mem_handle(torch::stable::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
 
+void muse_spark_mul_tanh_soft_cap(torch::stable::Tensor& out,
+                                  torch::stable::Tensor& input,
+                                  double multiplier, double soft_cap_temp);
+
 // Activation kernels (shared CUDA/ROCm)
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void silu_and_mul_clamp(torch::stable::Tensor& out,
@@ -579,10 +632,6 @@ void situ_and_mul_quant(
     int64_t group_size = 0,
     std::optional<torch::stable::Tensor> num_valid_tokens = std::nullopt,
     int64_t topk = 1);
-void masked_situ_and_mul(torch::stable::Tensor& out,
-                         torch::stable::Tensor& input,
-                         const torch::stable::Tensor& expert_num_tokens,
-                         double beta = 1.0, double linear_beta = -1.0);
 void masked_moe_activation(torch::stable::Tensor& out,
                            torch::stable::Tensor& input,
                            const torch::stable::Tensor& valid_token_counts,
@@ -663,7 +712,7 @@ void concat_and_cache_mla(torch::stable::Tensor& kv_c,
                           torch::stable::Tensor& kv_cache,
                           torch::stable::Tensor& slot_mapping,
                           const std::string& kv_cache_dtype,
-                          torch::stable::Tensor& scale);
+                          torch::stable::Tensor& scale, bool skip_scale);
 
 void concat_and_cache_mla_grouped(
     torch::stable::Tensor& kv_c, torch::stable::Tensor& k_pe,

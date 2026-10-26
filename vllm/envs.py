@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: float = 30.0
+    VLLM_CHAT_TEMPLATE_FUEL: int = 500000
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     S3_ACCESS_KEY_ID: str | None = None
@@ -107,6 +108,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
+    VLLM_HTTP_MAX_REQUEST_BODY_SIZE: int = 32 * 1024 * 1024  # bytes
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_MAX_STOP_STRINGS: int = 4
@@ -135,6 +137,8 @@ if TYPE_CHECKING:
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
+    VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
+    VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -144,16 +148,13 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
-    VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
-    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
-    VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -170,7 +171,6 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
-    VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = True
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: str | None = None
@@ -212,6 +212,7 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
+    VLLM_STEP5_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
@@ -246,6 +247,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
+    VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
@@ -305,6 +307,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
+    VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -374,7 +377,7 @@ def disable_compile_cache() -> bool:
 
 
 def use_aot_compile() -> bool:
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
+    from vllm.utils.torch_version import is_torch_equal_or_newer
 
     default_value = (
         "1"
@@ -386,7 +389,7 @@ def use_aot_compile() -> bool:
 
 
 def use_mega_aot_artifact():
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
+    from vllm.utils.torch_version import is_torch_equal_or_newer
 
     default_value = (
         "1" if is_torch_equal_or_newer("2.12.0.dev") and use_aot_compile() else "0"
@@ -815,6 +818,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": lambda: float(
         os.environ.get("VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT", "30")
     ),
+    # Maximum template instructions (MiniJinja fuel) for rendering a
+    # request-supplied chat template (--trust-request-chat-template) in the
+    # Rust frontend; the server's own template has no limit. Set to 0 to
+    # disable the limit.
+    "VLLM_CHAT_TEMPLATE_FUEL": lambda: int(
+        os.environ.get("VLLM_CHAT_TEMPLATE_FUEL", "500000")
+    ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
     # Whether to log responses from API Server for debugging
@@ -1125,6 +1135,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
     ),
+    # Maximum request body size in bytes accepted by the HTTP API server; 0
+    # removes the limit. Only enforced by the Rust frontend; the Python
+    # frontend has no limit.
+    "VLLM_HTTP_MAX_REQUEST_BODY_SIZE": lambda: int(
+        os.environ.get("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", str(32 * 1024 * 1024))
+    ),
     # Maximum allowed value for the `n` sampling parameter (number of output
     # sequences per request). Limits resource consumption to prevent
     # denial-of-service via excessively large fan-out. Default: 16384.
@@ -1256,6 +1272,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
     ),
+    # Muse Spark on ROCm: dtype of the TP reduction before the post-expert norm.
+    "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE": lambda: os.getenv(
+        "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", "fp32"
+    ).lower(),
+    # Muse Spark on ROCm: online-quantize routed experts ("" or "mxfp4"; first
+    # and last layer stay BF16).
+    "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
+        "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
+    ).lower(),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -1306,16 +1331,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
     ),
-    # Kernel for causal multi-token (spec-decode) verify steps under decode
-    # context parallelism: "asm" uses AITER's round-robin ASM decode (gfx950),
-    # "segmented" the Triton segmented MLA path. "auto" (default) takes "asm"
-    # wherever it can serve the shape and "segmented" otherwise.
-    "VLLM_ROCM_AITER_MLA_DCP_VERIFY": env_with_choices(
-        "VLLM_ROCM_AITER_MLA_DCP_VERIFY",
-        "auto",
-        ["auto", "asm", "segmented"],
-        case_sensitive=False,
-    ),
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts
     # (e.g. Kimi-K3: 12 heads/rank at TP8, 6 at TP16) can decode either through
     # the Gluon small-head kernel or through the padded persistent-scheduling
@@ -1334,11 +1349,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
-    ),
-    # Whether to use aiter fp4 gemm asm.
-    # By default is disabled.
-    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
     ),
     # Whether sparse MLA prefill and decode run on aiter's Triton kernel, which
     # reads the KV cache as stored (bf16 or fp8, paged or flat). Used by the
@@ -1373,12 +1383,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
-        in ("true", "1")
-    ),
-    # Fuse DeepSeek-V4's shared expert into AITER MegaMoE (requantized to
-    # MXFP4). By default is disabled.
-    "VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS": lambda: (
-        os.getenv("VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
@@ -1485,12 +1489,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # which indices are used for the Ray bundle, for every worker.
     # Format: comma-separated list of integers, e.g. "0,1,2,3"
     "VLLM_RAY_BUNDLE_INDICES": lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
-    # Deprecated and ignored: RayExecutorV2 is the only Ray executor. Kept so
-    # out-of-tree platforms that still read it keep working; will be removed
-    # in v0.34.
-    "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
-    ),
     # In some system, find_loaded_library() may not work. So we allow users to
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH": lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
@@ -1642,6 +1640,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
+    # Step5 SP dense/shared MLPs: opt into TP-sharded weights with AG/RS
+    # instead of replicated weights and local-token computation.
+    "VLLM_STEP5_SHARD_SP_SHARED_EXPERT": lambda: bool(
+        int(os.getenv("VLLM_STEP5_SHARD_SP_SHARED_EXPERT", "0"))
+    ),
     # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
     # are replicated on every rank, so each rank streams the whole weight to
     # serve its own token shard. Shard them across TP instead: the MLP then
@@ -1843,6 +1846,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enforce function parameter schemas in structural-tag based tool calling.
     "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: (
         os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "True").lower() in ("true", "1")
+    ),
+    # Constrain every `beam` output to its response template's format, also
+    # without tool or structured output constraints.
+    "VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT": lambda: (
+        os.getenv("VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT", "True").lower() in ("true", "1")
     ),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
@@ -2121,6 +2129,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
     ),
+    # Cohere2 MoE runs the MLP/MoE of its parallel blocks on a side CUDA stream,
+    # overlapping it with attention, for batches of at most this many tokens.
+    # Larger batches and piecewise CUDA graphs (prefill / mixed batches) run
+    # the MLP inline. Set to 0 to disable the dual stream.
+    "VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD": lambda: int(
+        os.getenv("VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD", "256")
+    ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
     #     Safe for multiple vllm serve processes accessing the same torch compile cache.
@@ -2366,6 +2381,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
+        "VLLM_RAY_BUNDLE_INDICES",
+        "VLLM_CHAT_TEMPLATE_FUEL",
         "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
@@ -2388,6 +2405,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
+        "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
