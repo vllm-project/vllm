@@ -482,6 +482,16 @@ class AiterFlashAttentionMetadataBuilder(
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        if (
+            rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+            and self.reorder_batch_threshold is not None
+            and self.reorder_batch_threshold > 1
+        ):
+            raise ValueError(
+                "ROCM_AITER_FA's shuffle KV cache layout does not support "
+                "multi-token decode (speculative decoding); unset "
+                "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT."
+            )
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
         kv_sharing_shape = None
@@ -969,6 +979,59 @@ class AiterFlashAttentionBackend(AttentionBackend):
         )
 
     @classmethod
+    def validate_configuration(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        use_per_head_quant_scales: bool,
+        device_capability: DeviceCapability,
+        attn_type: str,
+        has_sliding_window: bool = False,
+        use_non_causal: bool = False,
+        use_batch_invariant: bool = False,
+        use_kv_connector: bool = False,
+        use_pcp: bool = False,
+        use_adaptive_verification: bool = False,
+        use_dcp: bool = False,
+        use_rswa: bool = False,
+    ) -> list[str]:
+        invalid_reasons = super().validate_configuration(
+            head_size=head_size,
+            dtype=dtype,
+            kv_cache_dtype=kv_cache_dtype,
+            block_size=block_size,
+            use_mla=use_mla,
+            has_sink=has_sink,
+            use_sparse=use_sparse,
+            use_mm_prefix=use_mm_prefix,
+            use_per_head_quant_scales=use_per_head_quant_scales,
+            device_capability=device_capability,
+            attn_type=attn_type,
+            has_sliding_window=has_sliding_window,
+            use_non_causal=use_non_causal,
+            use_batch_invariant=use_batch_invariant,
+            use_kv_connector=use_kv_connector,
+            use_pcp=use_pcp,
+            use_adaptive_verification=use_adaptive_verification,
+            use_dcp=use_dcp,
+            use_rswa=use_rswa,
+        )
+        # Shuffle decode (paged_attention_common) has no window or sink input.
+        if rocm_aiter_ops.is_shuffle_kv_cache_enabled() and (
+            has_sliding_window or has_sink
+        ):
+            invalid_reasons.append(
+                "shuffle KV cache layout does not support sliding window or sinks"
+            )
+        return invalid_reasons
+
+    @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
         if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
             # pa_fwd_asm strides between pages by a whole dense page, so the two
@@ -1041,6 +1104,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 "because the prefill path uses cu_seqlens_k set to decoder "
                 "query_start_loc with causal=True, which is incorrect for "
                 "cross-attention."
+            )
+
+        if rocm_aiter_ops.is_shuffle_kv_cache_enabled() and (
+            self.logits_soft_cap > 0
+            or self.sinks is not None
+            or self.alibi_slopes is not None
+        ):
+            raise NotImplementedError(
+                "ROCM_AITER_FA's shuffle KV cache layout does not support "
+                "soft cap, ALiBi or sinks; unset VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT."
             )
 
     def _get_kv_cache_descales(
