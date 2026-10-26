@@ -329,7 +329,11 @@ class CudaGraphManager:
             decode_shapes = decode_cudagraph_capture_shapes(
                 decode_sizes,
                 self.decode_max_reqs,
-                compilation_config.max_cudagraph_capture_size,
+                min(
+                    compilation_config.max_cudagraph_capture_size,
+                    compilation_config.max_decode_cudagraph_capture_tokens
+                    or compilation_config.max_cudagraph_capture_size,
+                ),
             )
             for (n, q), num_active_loras in product(
                 decode_shapes, self.lora_capture_cases

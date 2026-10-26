@@ -604,6 +604,7 @@ _CAPTURE_SIZE_FIELDS = (
     "max_prefill_cudagraph_capture_tokens",
     "decode_cudagraph_capture_request_sizes",
     "max_decode_cudagraph_capture_requests",
+    "max_decode_cudagraph_capture_tokens",
     "cudagraph_capture_sizes",
     "max_cudagraph_capture_size",
 )
@@ -642,15 +643,31 @@ def off_sm100(monkeypatch):
     )
 
 
-def test_sm100_defaults_cover_max_num_seqs_at_any_query_length(monkeypatch):
-    """On SM100, decode graphs reach max_num_seqs requests whatever the number of
-    speculative tokens, and prefill graphs reach 8192 tokens."""
+def test_sm100_defaults_cover_max_num_seqs_within_the_decode_budget(monkeypatch):
+    """On SM100, decode graphs reach max_num_seqs requests up to the 4096-token
+    decode budget, and prefill graphs reach 8192 tokens."""
     compilation_config = _resolve_capture_sizes(monkeypatch, sm100=True)
 
     assert compilation_config.max_prefill_cudagraph_capture_tokens == 8192
     assert compilation_config.max_decode_cudagraph_capture_requests == 1024
-    assert _widest_covered_request_count(compilation_config, 8, 1024) == 1024
+    assert _widest_covered_request_count(compilation_config, 4, 1024) == 1024
+    # The 4096-token decode budget stops K=7 (q=8) at 512 requests.
+    assert _widest_covered_request_count(compilation_config, 8, 1024) == 512
     assert compilation_config.max_cudagraph_capture_size == 8192
+
+
+@pytest.mark.parametrize(("sm100", "budget"), [(True, 4096), (False, None)])
+def test_decode_graphs_have_a_default_token_budget_on_sm100(monkeypatch, sm100, budget):
+    """On SM100, uniform decode graphs stop at 4096 tokens (512 requests at
+    K=7); the recorded token sizes hold no wider decode shape."""
+    compilation_config = _resolve_capture_sizes(monkeypatch, sm100=sm100)
+    assert compilation_config.max_decode_cudagraph_capture_tokens == budget
+    if budget:
+        prefill = set(compilation_config.prefill_cudagraph_capture_token_sizes)
+        assert all(
+            t <= budget or t in prefill
+            for t in compilation_config.cudagraph_capture_sizes
+        )
 
 
 @pytest.mark.parametrize("sm100", [True, False])
@@ -1077,7 +1094,11 @@ def _widest_covered_request_count(compilation_config, query_len, max_num_seqs):
     shapes = decode_cudagraph_capture_shapes(
         compilation_config.decode_cudagraph_capture_request_sizes,
         {query_len: max_num_seqs},
-        compilation_config.max_cudagraph_capture_size,
+        min(
+            compilation_config.max_cudagraph_capture_size,
+            compilation_config.max_decode_cudagraph_capture_tokens
+            or compilation_config.max_cudagraph_capture_size,
+        ),
     )
     return max((n for n, _ in shapes), default=0)
 

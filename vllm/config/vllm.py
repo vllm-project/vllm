@@ -2747,6 +2747,11 @@ class VllmConfig:
         wide_defaults = (
             not legacy_sizes and current_platform.is_device_capability_family(100)
         )
+        if (
+            wide_defaults
+            and compilation_config.max_decode_cudagraph_capture_tokens is None
+        ):
+            compilation_config.max_decode_cudagraph_capture_tokens = 4096
 
         def explicit(
             sizes: list[int], limit: int, cap: int | None, name: str, cap_name: str
@@ -2816,11 +2821,15 @@ class VllmConfig:
             decode_sizes, default=0
         )
 
+        decode_max_tokens = min(
+            max_num_tokens,
+            compilation_config.max_decode_cudagraph_capture_tokens or max_num_tokens,
+        )
         token_sizes = set(prefill_sizes)
         token_sizes.update(
             n * q
             for n, q in decode_cudagraph_capture_shapes(
-                decode_sizes, target_query_lens, max_num_tokens
+                decode_sizes, target_query_lens, decode_max_tokens
             )
         )
         token_sizes.update(
@@ -2828,7 +2837,7 @@ class VllmConfig:
             for n, _ in decode_cudagraph_capture_shapes(
                 self.get_draft_decode_cudagraph_request_sizes(),
                 {1: max_num_seqs},
-                max_num_tokens,
+                decode_max_tokens,
             )
         )
         speculative_config = self.speculative_config

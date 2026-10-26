@@ -774,6 +774,13 @@ class CompilationConfig:
     shared graph pool. Wider graphs, and FULL graphs of
     models with large per-token buffers (e.g. DeepSeek's indexer at a long
     `max_model_len`), take memory from the KV cache."""
+    max_decode_cudagraph_capture_tokens: int | None = Field(default=None, ge=1)
+    """Token budget of a uniform decode CUDA graph: each runner captures `n`
+    requests at query length `q` only while `n * q` fits, and wider decode
+    batches take the prefill graphs. Adaptive verification's graphs are not
+    bounded by it. None (default): 4096 on SM100 GPUs, otherwise no budget. At
+    high concurrency a large `num_speculative_tokens` is slower than a small one,
+    and its widest decode graphs would take memory from the KV cache."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
     cudagraph. If the caller can guarantee that the same input buffers
