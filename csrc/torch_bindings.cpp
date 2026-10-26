@@ -151,7 +151,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                        Tensor! input_permutation, "
       "                        Tensor! output_permutation, int num_experts, "
       "                        int n, int k, Tensor? blockscale_offsets, "
-      "                        bool is_gated) -> ()");
+      "                        bool is_gated, "
+      "                        Tensor!? sorted_expert_ids=None) -> ()");
 
   // compute per-expert problem sizes from expert_first_token_offset
   // produced by vLLM's moe_permute kernel
@@ -235,14 +236,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "mxfp4_experts_quant(Tensor! output, Tensor! output_scale,"
       "Tensor input, Tensor input_offset_by_experts,"
-      "Tensor output_scale_offset_by_experts, int n_experts) -> ()");
+      "Tensor output_scale_offset_by_experts, int n_experts, "
+      "Tensor? sorted_expert_ids=None) -> ()");
 
   // Fused SiLU+Mul+MXFP4 experts quantization.
   ops.def(
       "silu_and_mul_mxfp4_experts_quant(Tensor! output, Tensor! "
       "output_scale,"
       "Tensor input, Tensor input_offset_by_experts,"
-      "Tensor output_scale_offset_by_experts, int n_experts) -> ()");
+      "Tensor output_scale_offset_by_experts, int n_experts, "
+      "Tensor? sorted_expert_ids=None) -> ()");
 
   // Fused SiLU+Mul+NVFP4 quantization.
   ops.def(
