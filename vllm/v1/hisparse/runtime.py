@@ -430,7 +430,7 @@ def release_pinned_state(
     if pinned_host_pools or shared_host_region is not None:
         backend = get_hisparse_backend()
         try:
-            backend.synchronize()
+            torch.accelerator.synchronize()
         except RuntimeError as e:
             logger.warning(
                 "HiSparse: device context unusable at teardown (%s); leaving "
@@ -665,7 +665,7 @@ def _create_shared_topk_state(
 
 
 def _create_copy_stream(device: torch.device) -> torch.Stream:
-    return get_hisparse_backend().create_stream(device)
+    return torch.Stream(device=device)
 
 
 class HiSparseIndexGroup:
@@ -689,7 +689,9 @@ class HiSparseIndexGroup:
             dtype=torch.int32,
             device=device,
         )
-        self.lru_init = get_hisparse_backend().create_lru_init(region_stride, device)
+        self.lru_init = torch.arange(
+            region_stride, dtype=torch.int32, device=device
+        ).to(torch.int16)
         self.lru_slots = self.lru_init.repeat(max_num_reqs, 1).contiguous()
         self.shared_topk = _create_shared_topk_state(device, max_swap_rows, top_k)
         # Request ids the resolver reads, built on the copy stream: a
@@ -731,8 +733,7 @@ class HiSparseRuntime:
         logical_topk_ready: torch.Event | None = None,
     ) -> None:
         self.backend = get_hisparse_backend()
-        if not _has_hisparse_ops():
-            self.backend.check_available()
+        self.backend.check_available()
         self.cache_ops: Any = None
         self.max_num_reqs = max_num_reqs
         self.row_width = row_width
@@ -877,7 +878,7 @@ class HiSparseRuntime:
     def reset_hot_state(self) -> None:
         """Drop all hot-buffer bookkeeping (hits become misses)."""
         group = self.index_group
-        compute_stream = self.backend.current_stream()
+        compute_stream = torch.accelerator.current_stream()
         compute_stream.wait_stream(group.copy_stream)
         group.device_global_indices.fill_(-1)
         group.lru_slots.copy_(group.lru_init.expand_as(group.lru_slots))
@@ -1032,12 +1033,12 @@ class HiSparseRuntime:
         num_valid_rows: torch.Tensor,
     ) -> None:
         group = self.index_group
-        compute_stream = self.backend.current_stream()
+        compute_stream = torch.accelerator.current_stream()
         if group.logical_topk_ready is not None and not in_piecewise_cudagraph():
             group.copy_stream.wait_event(group.logical_topk_ready)
         else:
             group.copy_stream.wait_stream(compute_stream)
-        with self.backend.stream_context(group.copy_stream):
+        with group.copy_stream:
             # CUDA-graph padding rows past the batch's tokens map to request 0;
             # mark them -1 so residency resolution skips them.
             num_tokens = logical_topk_indices.shape[0]
@@ -1063,25 +1064,25 @@ class HiSparseRuntime:
             for runtime in runtimes:
                 runtime._swap_rows(shared_rows)
                 if runtime._layer_ready_event is None:
-                    runtime._layer_ready_event = self.backend.create_event()
+                    runtime._layer_ready_event = torch.Event()
                 runtime._layer_ready_event.record(group.copy_stream)
                 runtime._swap_staged = True
 
     def _stage_this_layer(self, shared_rows: slice) -> None:
         group = self.index_group
-        compute_stream = self.backend.current_stream()
+        compute_stream = torch.accelerator.current_stream()
         group.copy_stream.wait_stream(compute_stream)
-        with self.backend.stream_context(group.copy_stream):
+        with group.copy_stream:
             self._swap_rows(shared_rows)
             if self._layer_ready_event is None:
-                self._layer_ready_event = self.backend.create_event()
+                self._layer_ready_event = torch.Event()
             self._layer_ready_event.record(group.copy_stream)
             self._swap_staged = True
 
     def wait_for_staged_swap(self) -> None:
         if not self._swap_staged or self._layer_ready_event is None:
             raise RuntimeError("HiSparse layer swap was not prefetched.")
-        self.backend.current_stream().wait_event(self._layer_ready_event)
+        torch.accelerator.current_stream().wait_event(self._layer_ready_event)
         self._swap_staged = False
 
     def swap_in(

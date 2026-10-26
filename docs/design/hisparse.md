@@ -224,10 +224,11 @@ choose GPU LRU victim ──► copy pinned host row ──► hot physical row
 Device operations are selected by `Platform.get_hisparse_backend_cls()`. The base
 platform returns `None`; CUDA selects `CUDAHiSparseBackend` in `platforms/cuda.py`.
 Hardware plugins can provide a `HiSparseBackend` for host registration, cache
-operations, streams, events, and transfers while reusing the common runtime and
-connector. HiSparse validates availability and cache formats before allocation.
-CUDA creates all HiSparse streams with `torch.Stream`; the backend provides the
-stream context without a separate generic/CUDA stream mode.
+operations, IPC events, capture queries, and transfers while reusing the common
+runtime and connector. HiSparse validates availability and cache formats before
+allocation. Streams, ordinary events, current-stream queries, and synchronization
+use `torch.Stream`, `torch.Event`, and `torch.accelerator` directly. The backend
+provides IPC event creation/import/export only for shared host pools.
 Without HiSparse, sparse attention keeps its normal stream and event path.
 ROCm does not currently provide a HiSparse backend.
 

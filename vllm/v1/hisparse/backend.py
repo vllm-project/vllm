@@ -48,13 +48,8 @@ class HiSparseBackend:
         Backends must not put per-step metadata or transfers in this hook.
         """
 
-    def create_stream(self, device: torch.device) -> Any:
-        raise NotImplementedError
-
-    def create_lru_init(self, size: int, device: torch.device) -> torch.Tensor:
-        return torch.arange(size, dtype=torch.int16, device=device)
-
-    def create_event(self, *, interprocess: bool = False) -> Any:
+    def create_ipc_event(self) -> Any:
+        """Create an event that can be exported to another process."""
         raise NotImplementedError
 
     def export_event(self, event: Any) -> Any:
@@ -67,33 +62,14 @@ class HiSparseBackend:
         self, source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor
     ) -> None:
         """Copy resident rows into staging without changing their payload format."""
-        raise NotImplementedError
-
-    def gather_fp8_prefill(
-        self,
-        source: torch.Tensor,
-        destination: torch.Tensor,
-        block_table: torch.Tensor,
-        workspace_starts: torch.Tensor,
-        batch_size: int,
-        *,
-        host_cache: torch.Tensor,
-        host_row_ids: torch.Tensor,
-        device_row_ids: torch.Tensor,
-    ) -> None:
-        """Gather packed device/host FP8 rows into the backend's prefill format."""
-        raise NotImplementedError
-
-    def current_stream(self) -> Any:
-        raise NotImplementedError
-
-    def stream_context(self, stream: Any) -> Any:
-        raise NotImplementedError
+        rows = row_ids.to(torch.long).clamp_min(0)
+        block_size = source.shape[1]
+        payload = source[rows // block_size, rows % block_size]
+        if payload.dtype != destination.dtype:
+            payload = payload.contiguous().view(destination.dtype)
+        destination.copy_(payload)
 
     def is_current_stream_capturing(self) -> bool:
-        raise NotImplementedError
-
-    def synchronize(self) -> None:
         raise NotImplementedError
 
     def swap_blocks_batch(
@@ -134,13 +110,8 @@ class CUDAHiSparseBackend(HiSparseBackend):
     def create_cache_ops(self, runtime: HiSparseRuntime) -> Any:
         return torch.ops._C_cache_ops
 
-    def create_stream(self, device: torch.device) -> Any:
-        return torch.Stream(device=device)
-
-    def create_event(self, *, interprocess: bool = False) -> Any:
-        if interprocess:
-            return torch.cuda.Event(interprocess=True)
-        return torch.Event()
+    def create_ipc_event(self) -> Any:
+        return torch.cuda.Event(interprocess=True)
 
     def export_event(self, event: Any) -> Any:
         return event.ipc_handle()
@@ -148,54 +119,8 @@ class CUDAHiSparseBackend(HiSparseBackend):
     def import_event(self, device: torch.device, handle: Any) -> Any:
         return torch.cuda.Event.from_ipc_handle(device, handle)
 
-    def gather_resident_rows(
-        self, source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor
-    ) -> None:
-        rows = row_ids.to(torch.long).clamp_min(0)
-        block_size = source.shape[1]
-        payload = source[rows // block_size, rows % block_size]
-        if payload.dtype != destination.dtype:
-            payload = payload.contiguous().view(destination.dtype)
-        destination.copy_(payload)
-
-    def gather_fp8_prefill(
-        self,
-        source: torch.Tensor,
-        destination: torch.Tensor,
-        block_table: torch.Tensor,
-        workspace_starts: torch.Tensor,
-        batch_size: int,
-        *,
-        host_cache: torch.Tensor,
-        host_row_ids: torch.Tensor,
-        device_row_ids: torch.Tensor,
-    ) -> None:
-        from vllm import _custom_ops as ops
-
-        ops.cp_gather_and_upconvert_fp8_kv_cache(
-            source,
-            destination,
-            block_table,
-            workspace_starts,
-            batch_size,
-            host_cache=host_cache,
-            host_row_ids=host_row_ids,
-            device_row_ids=device_row_ids,
-        )
-
-    def current_stream(self) -> Any:
-        from vllm.utils.torch_utils import current_stream
-
-        return current_stream()
-
-    def stream_context(self, stream: Any) -> Any:
-        return stream
-
     def is_current_stream_capturing(self) -> bool:
         return torch.cuda.is_current_stream_capturing()
-
-    def synchronize(self) -> None:
-        torch.accelerator.synchronize()
 
     def swap_blocks_batch(
         self, src: torch.Tensor, dst: torch.Tensor, sizes: torch.Tensor

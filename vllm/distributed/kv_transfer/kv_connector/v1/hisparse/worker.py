@@ -165,16 +165,16 @@ def _create_hisparse_host_events(
 ) -> tuple[torch.Event, torch.Event]:
     backend = get_hisparse_backend()
     if shared_host_region is None:
-        return backend.create_event(), backend.create_event()
+        return torch.Event(), torch.Event()
 
     events: tuple[torch.Event, torch.Event] | None = None
     ipc_handles = None
     if is_host_writer:
         events = (
-            backend.create_event(interprocess=True),
-            backend.create_event(interprocess=True),
+            backend.create_ipc_event(),
+            backend.create_ipc_event(),
         )
-        stream = backend.current_stream()
+        stream = torch.accelerator.current_stream()
         for event in events:
             event.record(stream)
         ipc_handles = tuple(backend.export_event(event) for event in events)
@@ -281,9 +281,7 @@ class HiSparseConnectorWorker:
         self.pinned_host_pools = pinned_host_pools
         self.shared_host_region = shared_host_region
         self.is_host_writer = is_host_writer
-        self.dma_stream = (
-            self.backend.create_stream(device) if self.is_host_writer else None
-        )
+        self.dma_stream = torch.Stream(device=device) if self.is_host_writer else None
         self._slot_mapping_staging = None
         if self.is_host_writer:
             max_mirror_rows = (
@@ -291,8 +289,8 @@ class HiSparseConnectorWorker:
                 + max_num_reqs * (self.vllm_config.num_lookahead_tokens + 1)
             )
             self._slot_mapping_staging = _SlotMappingStaging(
-                stream=self.backend.create_stream(device),
-                event=self.backend.create_event(),
+                stream=torch.Stream(device=device),
+                event=torch.Event(),
                 slots=torch.empty(
                     max_mirror_rows,
                     dtype=torch.int64,
@@ -306,10 +304,8 @@ class HiSparseConnectorWorker:
         self._dma_submitted = False
         self._per_layer_mirrored: set[int] = set()
         self._submitted_mirror_layers: set[int] = set()
-        self._layer_ready_events = tuple(
-            self.backend.create_event() for _ in cache_handles
-        )
-        self._forward_ready_event = self.backend.create_event()
+        self._layer_ready_events = tuple(torch.Event() for _ in cache_handles)
+        self._forward_ready_event = torch.Event()
         self._draft_layers = tuple(
             index for index, cache in enumerate(cache_handles) if cache.draft_layer
         )
@@ -356,7 +352,7 @@ class HiSparseConnectorWorker:
             deque()
         )
         self._metrics_calls = 0
-        self._metrics_event = self.backend.create_event()
+        self._metrics_event = torch.Event()
         self._metrics_pending = False
         self._init_dma()
         if self.is_host_writer:
@@ -420,7 +416,7 @@ class HiSparseConnectorWorker:
         previous_host_write_event = self.host_write_event
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
-        self.backend.current_stream().wait_event(previous_host_write_event)
+        torch.accelerator.current_stream().wait_event(previous_host_write_event)
         if self.shared_host_region is not None and not num_tokens:
             # Without a forward, no TP collective keeps rank 0 from recording
             # a shared event again before every rank has issued its wait.
@@ -502,9 +498,9 @@ class HiSparseConnectorWorker:
                 "HiSparse row mapping exceeds staging capacity: "
                 f"{end} > {state.slots.shape[0]}."
             )
-        main_stream = self.backend.current_stream()
+        main_stream = torch.accelerator.current_stream()
         state.stream.wait_stream(main_stream)
-        with self.backend.stream_context(state.stream):
+        with state.stream:
             state.slots[start:end].copy_(
                 slots[:num_tokens],
                 non_blocking=True,
@@ -584,7 +580,7 @@ class HiSparseConnectorWorker:
             and not self._metrics_pending
             and not self.backend.is_current_stream_capturing()
         ):
-            compute_stream = self.backend.current_stream()
+            compute_stream = torch.accelerator.current_stream()
             for runtime in self.leader_runtimes:
                 group = runtime.index_group
                 compute_stream.wait_stream(group.copy_stream)
@@ -617,11 +613,11 @@ class HiSparseConnectorWorker:
         stream = self.dma_stream
         assert stream is not None
         if ready_event is None:
-            stream.wait_stream(self.backend.current_stream())
+            stream.wait_stream(torch.accelerator.current_stream())
         else:
             stream.wait_event(ready_event)
-        completion_event = self.backend.create_event()
-        with self.backend.stream_context(stream):
+        completion_event = torch.Event()
+        with stream:
             self.backend.swap_blocks_batch(
                 descriptors.src[:descriptor_count],
                 descriptors.dst[:descriptor_count],
@@ -760,7 +756,7 @@ class HiSparseConnectorWorker:
                 return
             stream = self.dma_stream
         assert stream is not None
-        completion_event = self.backend.create_event()
+        completion_event = torch.Event()
         completion_event.record(stream)
         transfer_ids = tuple(transfer.transfer_id for transfer in transfers)
         self._pending_transfer_events.append((completion_event, transfer_ids))
@@ -789,7 +785,7 @@ class HiSparseConnectorWorker:
                         non_blocking=True,
                     )
         self._record_transfer_completion(
-            transfers, stream=self.backend.current_stream()
+            transfers, stream=torch.accelerator.current_stream()
         )
 
     def _submit_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
@@ -920,7 +916,7 @@ class HiSparseConnectorWorker:
         self._clear_forward_mirror_state()
 
     def finish_forward(self) -> None:
-        compute_stream = self.backend.current_stream()
+        compute_stream = torch.accelerator.current_stream()
         self._forward_ready_event.record()
         self._finish_mirror_phase(self._forward_ready_event)
         if self.is_host_writer:

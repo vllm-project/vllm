@@ -2011,19 +2011,19 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int, reuse_buffers
         assert torch.all(result[row, num_valid:] == -1)
 
 
-def test_hisparse_backend_stream_orders_ipc_event():
+def test_hisparse_generic_stream_orders_ipc_event():
     """Generic copy streams must record IPC events and restore the compute stream."""
     from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 
     backend = CUDAHiSparseBackend()
-    compute_stream = backend.current_stream()
-    copy_stream = backend.create_stream(torch.device(DEVICE_TYPE))
+    compute_stream = torch.accelerator.current_stream()
+    copy_stream = torch.Stream(device=torch.device(DEVICE_TYPE))
     values = torch.arange(8, dtype=torch.float32, device=DEVICE_TYPE)
-    input_ready = backend.create_event()
+    input_ready = torch.Event()
     input_ready.record(compute_stream)
     copy_stream.wait_event(input_ready)
-    output_ready = backend.create_event(interprocess=True)
-    with backend.stream_context(copy_stream):
+    output_ready = backend.create_ipc_event()
+    with copy_stream:
         values.add_(1)
         output_ready.record(copy_stream)
     assert torch.cuda.current_stream().stream_id == compute_stream.stream_id
@@ -2033,12 +2033,6 @@ def test_hisparse_backend_stream_orders_ipc_event():
 
 
 def test_sparse_mla_index_group_converts_decode_indices_once(monkeypatch):
-    def unexpected_hisparse_backend():
-        pytest.fail("Sparse attention without HiSparse must not resolve its backend")
-
-    monkeypatch.setattr(
-        index_group_module, "get_hisparse_backend", unexpected_hisparse_backend
-    )
     device = torch.device(DEVICE_TYPE)
     logical = torch.full((2, 128), -1, dtype=torch.int32, device=device)
     logical[:, :4] = torch.tensor(
@@ -4755,13 +4749,10 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
 
 
 def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
-    from vllm.v1.hisparse.backend import CUDAHiSparseBackend
-
-    monkeypatch.setattr(index_group_module, "get_hisparse_backend", CUDAHiSparseBackend)
     compute_stream = object()
     prefill_stream = MagicMock()
     gather = MagicMock()
-    monkeypatch.setattr("vllm.utils.torch_utils.current_stream", lambda: compute_stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: compute_stream)
     monkeypatch.setattr(
         index_group_module.ops, "cp_gather_and_upconvert_fp8_kv_cache", gather
     )

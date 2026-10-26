@@ -28,7 +28,7 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.hisparse.backend import CUDAHiSparseBackend
+from vllm.v1.hisparse.backend import CUDAHiSparseBackend, HiSparseBackend
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.worker.utils import (
@@ -49,7 +49,7 @@ def test_hisparse_resident_gather_preserves_stride_and_payload(packed_bytes):
         source = source.view(torch.uint8)
     destination = torch.empty((4, 4), dtype=torch.float32)
 
-    CUDAHiSparseBackend().gather_resident_rows(
+    HiSparseBackend().gather_resident_rows(
         source, destination, torch.tensor([3, 0, 2, -1])
     )
 
@@ -104,7 +104,7 @@ def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeyp
     )
     worker.leader_runtimes = [SimpleNamespace(index_group=group)]  # type: ignore[list-item]  # runtime stand-in
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
-    monkeypatch.setattr(worker.backend, "current_stream", lambda: compute_stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: compute_stream)
 
     assert worker.get_kv_connector_stats() is None
     compute_stream.wait_stream.assert_called_once_with(group.copy_stream)
@@ -185,7 +185,7 @@ def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
     worker._row_mirror_num_rows = 1
     worker._submitted_mirror_layers = set()
     main_stream = MagicMock()
-    monkeypatch.setattr(worker.backend, "current_stream", lambda: main_stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: main_stream)
     monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
 
     handle.slot_mapping = torch.tensor([7, 8], dtype=torch.int64)
@@ -656,7 +656,7 @@ def test_hisparse_tail_restore_preserves_imported_rows(
         worker, "_record_transfer_completion", record_transfer_completion
     )
     stream = torch.cuda.current_stream() if device == "cuda" else MagicMock()
-    monkeypatch.setattr(worker.backend, "current_stream", lambda: stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: stream)
     transfer = SparseKVPageTransfer(7, 2, (1, 3), False, restore=True)
 
     restore_pages = worker._restore_pages
@@ -723,7 +723,7 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     current_stream = MagicMock()
     event = MagicMock()
     swap_blocks_batch = MagicMock()
-    monkeypatch.setattr(worker.backend, "current_stream", lambda: current_stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: current_stream)
     monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
     monkeypatch.setattr(torch, "Event", lambda: event)
     monkeypatch.setattr(worker.backend, "swap_blocks_batch", swap_blocks_batch)
@@ -818,7 +818,7 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     worker.host_write_event = MagicMock()
     worker._forward_ready_event = MagicMock()
     current_stream = MagicMock()
-    monkeypatch.setattr(worker.backend, "current_stream", lambda: current_stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: current_stream)
 
     worker.finish_forward()
 
@@ -959,7 +959,7 @@ def test_hisparse_finish_forward_orders_next_forward_after_dma(monkeypatch):
     worker._dma_free_descriptors = []
     worker._forward_ready_event = MagicMock()
     monkeypatch.setattr(worker, "_finish_mirror_phase", MagicMock())
-    monkeypatch.setattr(worker.backend, "current_stream", lambda: current_stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: current_stream)
 
     worker.finish_forward()
 
@@ -1098,7 +1098,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
     stream = MagicMock()
-    monkeypatch.setattr(worker.backend, "current_stream", lambda: stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: stream)
 
     worker.start_step(
         SimpleNamespace(
@@ -1184,7 +1184,7 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
     enqueue_host_mirror = MagicMock(wraps=worker._enqueue_host_mirror)
     monkeypatch.setattr(worker, "_enqueue_host_mirror", enqueue_host_mirror)
     stream = MagicMock()
-    monkeypatch.setattr(worker.backend, "current_stream", lambda: stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: stream)
 
     worker.start_step(
         SimpleNamespace(
@@ -1224,7 +1224,7 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
         device_buffer_size=8,
         max_union_rows=8,
     )
-    monkeypatch.setattr(hisparse_runtime_module, "_has_hisparse_ops", lambda: True)
+    monkeypatch.setattr(CUDAHiSparseBackend, "check_available", lambda self: None)
     monkeypatch.setattr(
         hisparse_runtime_module.ResolvedHiSparseConfig,
         "from_vllm_config",
@@ -1246,14 +1246,14 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     )
     monkeypatch.setattr(hisparse_runtime_module, "_create_copy_stream", create_stream)
     monkeypatch.setattr(
-        index_group_module.SparseMLAIndexGroup,
-        "create_side_stream",
-        staticmethod(lambda _: object()),
+        torch,
+        "Stream",
+        lambda device: object(),
     )
     monkeypatch.setattr(
-        index_group_module.SparseMLAIndexGroup,
-        "create_event",
-        staticmethod(lambda: object()),
+        torch,
+        "Event",
+        lambda: object(),
     )
     index_group_builder = index_group_module.SparseMLAIndexGroupBuilder(
         torch.empty((2, 4), dtype=torch.int32)
