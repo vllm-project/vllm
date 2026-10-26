@@ -705,9 +705,15 @@ class Worker(WorkerBase):
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
         cudagraph_memory_estimate = 0
-        if (
-            current_platform.is_cuda_alike() or current_platform.is_xpu()
-        ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+        compilation_config = self.vllm_config.compilation_config
+        if (current_platform.is_cuda_alike() or current_platform.is_xpu()) and (
+            compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            or (
+                self.use_v2_model_runner
+                and compilation_config.cudagraph_mm_encoder
+                and not self.model_config.enforce_eager
+            )
+        ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
@@ -1395,6 +1401,7 @@ class Worker(WorkerBase):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
@@ -1425,9 +1432,11 @@ class Worker(WorkerBase):
                     self.profiler_config,
                     worker_name=trace_name,
                     local_rank=self.local_rank,
+                    profiler_kwargs=profiler_kwargs,
                 )
 
             self.profiler.set_output_name(trace_name)
+            self.profiler.set_profiler_kwargs(profiler_kwargs)
             self.profiler.start(
                 delay_iterations=delay_iterations,
                 max_iterations=max_iterations,
