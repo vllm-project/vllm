@@ -24,7 +24,7 @@
 
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import torch
@@ -902,7 +902,9 @@ class Qwen3Omni_VisionTransformer(nn.Module):
 
         return cos_combined, sin_combined
 
-    def fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
+    def fast_pos_embed_interpolate(
+        self, grid_thw: Sequence[Sequence[int]]
+    ) -> torch.Tensor:
         num_grid_per_side = self.num_grid_per_side
         m_size = self.spatial_merge_size
         hidden_dim = self.pos_embed.embedding_dim
@@ -1665,6 +1667,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 ):
     is_3d_moe_weight: ClassVar[bool] = True
     supports_tower_connector_lora: ClassVar[bool] = True
+    # Narrows the mixin's nn.Module annotation for the encoder CUDA graph code.
+    visual: Qwen3Omni_VisionTransformer
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
@@ -1900,7 +1904,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         assert isinstance(info, Qwen3OmniMoeThinkerProcessingInfo)
         return info.get_num_frames_with_most_features(
             seq_len=self.model_config.max_model_len,
-            mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
+            mm_counts={
+                "video": self.model_config.get_multimodal_config().get_limit_per_prompt(
+                    "video"
+                )
+            },
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -2043,7 +2051,10 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         # Image and video pixel values have the same layout, so one capture
         # input serves both modalities.
         return EncoderCudaGraphCaptureInputs(
-            values=metadata | {"pixel_values": dummy_pixel_values},
+            # None entries (pos_embeds without the absolute position embedding,
+            # backend-specific metadata) get no buffer update at replay.
+            values=cast(dict[str, torch.Tensor], metadata)
+            | {"pixel_values": dummy_pixel_values},
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
