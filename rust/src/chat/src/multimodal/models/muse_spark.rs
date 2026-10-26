@@ -430,7 +430,7 @@ mod tests {
     use super::*;
     use llm_multimodal::{ImageSize, ModelSpecificValue};
 
-    // Token IDs from the Muse-Spark-1.2 checkpoint's `tokenizer_config.json`.
+    // Token IDs from the Muse Spark Open checkpoint's `tokenizer_config.json`.
     fn muse_spark_tokenizer() -> TestTokenizer {
         TestTokenizer::new(&[
             (AUDIO_TOKEN, 200038),
