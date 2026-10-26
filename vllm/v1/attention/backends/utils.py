@@ -766,8 +766,13 @@ def split_decodes_prefills_and_extends(
     common_attn_metadata: CommonAttentionMetadata,
     decode_threshold: int = 1,
 ) -> tuple[int, int, int, int, int, int]:
-    """Assuming a reordered batch, finds the boundary between prefill and decode
-    requests.
+    """Splits a batch whose decode requests lead into decodes, extends and
+    prefills.
+
+    Prefills are the trailing requests without context. A prefill placed
+    before an extend (model runner v2 orders non-decodes by token count) is
+    counted as an extend with zero context, so the returned ranges stay
+    contiguous and every extend keeps its context.
 
     Args:
         common_attn_metadata: CommonAttentionMetadata object containing the
@@ -801,6 +806,10 @@ def split_decodes_prefills_and_extends(
     is_prefill_or_extend = query_lens > decode_threshold
     is_prefill = (seq_lens == query_lens) & is_prefill_or_extend
     first_extend = is_prefill_or_extend.int().argmax(dim=-1).item()
+    is_extend = is_prefill_or_extend & ~is_prefill
+    if torch.any(is_extend):
+        last_extend = num_reqs - 1 - is_extend.flip(0).int().argmax(dim=-1).item()
+        is_prefill[: last_extend + 1] = False
     first_prefill = is_prefill.int().argmax(dim=-1).item()
     num_decodes = first_extend
     num_decode_tokens = query_start_loc[first_extend].item()
