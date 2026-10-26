@@ -19,6 +19,7 @@ meta:
     gb200: verified
     gb300: verified
     mi355x: verified
+    rtx_pro_6000: verified
     rtx_pro_6000_4x: verified
     dgx_station_gb300: verified
 
@@ -66,6 +67,14 @@ features:
     args:
       - "--speculative-config"
       - '{"method":"mtp","num_speculative_tokens":3}'
+    hardware_overrides:
+      # K=2 with a separate NVFP4 MTP drafter directory (see the guide section
+      # "NVFP4 on a single RTX PRO 6000 (TP1)"). The checkpoint's bundled BF16
+      # MTP head costs a much smaller KV pool on a 96 GB card.
+      rtx_pro_6000:
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":2,"model":"/root/.cache/huggingface/Qwen3.8-Flash-Next-MTP-NVFP4"}'
   text_only:
     description: "Skip the vision encoder for text-only workloads and leave more memory for KV cache"
     args:
@@ -85,6 +94,8 @@ opt_in_features:
   - long_context
 
 hardware_opt_in_features:
+  rtx_pro_6000:
+    - spec_decoding
   rtx_pro_6000_4x:
     - spec_decoding
   mi355x:
@@ -176,6 +187,32 @@ variants:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
           AITER_USE_FLYDSL_MOE_SORTING: "1"
+  nvfp4_radixark:
+    model_id: "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RadixArk)"
+    # 135.2 GB checkpoint (NVFP4 routed experts; attention, embeddings and MTP
+    # unquantized) -> ceil(135.2 x 1.2)
+    vram_minimum_gb: 163
+    description: "RadixArk NVFP4 routed experts with an FP8 N-gram embedding table, which vLLM offloads to host RAM"
+    # Tested only on a single RTX PRO 6000.
+    supported_hardware:
+      - rtx_pro_6000
+    hardware_overrides:
+      rtx_pro_6000:
+        # GPU-resident weights with the ~51 GB N-gram table in host RAM.
+        vram_minimum_gb: 80
+        extra_args:
+          - "--max-model-len"
+          - "262144"
+          - "--max-num-seqs"
+          - "6"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--mamba-cache-mode"
+          - "align"
 
 # TP+EP is the default deployment; it benchmarks consistently faster than
 # plain TP for this model, which stays offered as an alternative.
@@ -392,6 +429,147 @@ guide: |
   | TP2 | 0.967 | 801 / 1384 |
   | TP1 | 0.967 | 751 / 1282 |
 
+  ### NVFP4 on a single RTX PRO 6000 (TP1)
+
+  Tested on one RTX PRO 6000 Blackwell Workstation (sm_120, 96 GB) in a PCIe 4.0
+  host with 125 GiB DDR4, using the
+  [`RadixArk/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)
+  checkpoint (NVFP4 routed experts, FP8 N-gram embedding table). The ~51 GB table
+  is offloaded to pinned host RAM by default (the startup log shows
+  `EngramConfig cpu_offload=True`); only weights and KV cache live on the GPU.
+  No env var is needed. Select the **NVFP4 (RadixArk)** variant in the builder;
+  it is offered only for this hardware.
+
+  Tested image: `vllm/vllm-openai:nightly` at digest
+  `sha256:6b90105076216e861cd30fae8828efef9263a0399137b894289f3b6a685bf4ff`
+  (vLLM `0.32.1rc1.dev466+ge4a5b5537`, commit `e4a5b553`, image built 2026-10-25).
+
+  The measurements below were taken with the command the builder renders for
+  this hardware (default strategy `single_node_tep` at TP1, inside its
+  `docker run` wrapper, only the port changed). The last line is present only
+  when the **Spec Decoding** toggle is on:
+
+  ```bash
+  VLLM_USE_RUST_FRONTEND=1 \
+  vllm serve RadixArk/Qwen3.8-Flash-Next-NVFP4 \
+    --enable-prefix-caching \
+    --max-model-len 262144 \
+    --max-num-seqs 6 \
+    --max-num-batched-tokens 8192 \
+    --gpu-memory-utilization 0.95 \
+    --mamba-cache-mode align \
+    --enable-expert-parallel \
+    --tensor-parallel-size 1 \
+    --kv-cache-dtype fp8 \
+    --attention-config.indexer_kv_dtype fp8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3 \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":2,"model":"/root/.cache/huggingface/Qwen3.8-Flash-Next-MTP-NVFP4"}'
+  ```
+
+  `--mamba-cache-mode align` is required for `--enable-prefix-caching` to take
+  effect on this hybrid GDN/QSA model. `--max-num-seqs 6` is the concurrency
+  tested on this card (the `--max-num-seqs 256` advice under Troubleshooting
+  does not apply to this profile). `--moe-backend` was left at its default.
+
+  **Anthropic Messages API:** with the Rust frontend (`VLLM_USE_RUST_FRONTEND=1`,
+  the builder default for this recipe) `/v1/messages` returns `501 Not
+  Implemented`; it was the only ERROR line in any test log. Clients that speak
+  the Anthropic Messages API (for example Claude Code) need the Python frontend:
+  set `VLLM_USE_RUST_FRONTEND=0`. Tool calls (`qwen3_coder`), reasoning
+  extraction and `/v1/completions` with `prompt_logprobs` worked on both
+  frontends.
+
+  **Optional NVFP4 MTP drafter.** The RadixArk checkpoint ships its MTP head in
+  BF16 (4.86 GiB, as
+  [Peuqui reported](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4/discussions/6)).
+  [`Inferact/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/Inferact/Qwen3.8-Flash-Next-NVFP4)
+  ships an NVFP4-quantized MTP head (~1.49 GiB) as a single file,
+  `nvfp4_experts_mtp.safetensors`;
+  [`provsalt/Qwen3.8-Flash-Next-NVFP4-PLE-NVFP4`](https://huggingface.co/provsalt/Qwen3.8-Flash-Next-NVFP4-PLE-NVFP4)
+  redistributes the same file byte for byte and is the download source tested here.
+  Peuqui's [mtp-quant-transplant](https://github.com/Peuqui/mtp-quant-transplant)
+  splices that file into the RadixArk checkpoint. The steps below instead load it
+  as a separate drafter directory through the `model` field of
+  `--speculative-config`, which leaves the main checkpoint untouched. The directory
+  holds the MTP file, provsalt's config and tokenizer files, and an index trimmed
+  to the MTP tensors; the inline script keeps only the index entries that point at
+  the MTP file and sets `total_size` to that file's tensor bytes.
+
+  ```bash
+  D=~/.cache/huggingface/Qwen3.8-Flash-Next-MTP-NVFP4
+  hf download provsalt/Qwen3.8-Flash-Next-NVFP4-PLE-NVFP4 \
+    --revision 48d98195ac8da8ff10d9ee497b5d52e7817f058d --local-dir "$D" \
+    nvfp4_experts_mtp.safetensors model.safetensors.index.json config.json \
+    generation_config.json tokenizer.json tokenizer_config.json vocab.json merges.txt
+  python3 - "$D" <<'PY'
+  import json, os, struct, sys
+  d, f = sys.argv[1], "nvfp4_experts_mtp.safetensors"
+  p = os.path.join(d, "model.safetensors.index.json")
+  idx = json.load(open(p))
+  idx["weight_map"] = {k: v for k, v in idx["weight_map"].items() if v == f}
+  with open(os.path.join(d, f), "rb") as fh:
+      header_len = struct.unpack("<Q", fh.read(8))[0]
+  idx["metadata"]["total_size"] = os.path.getsize(os.path.join(d, f)) - 8 - header_len
+  json.dump(idx, open(p, "w"))
+  PY
+  ```
+
+  The builder's **Spec Decoding** toggle on this hardware points at
+  `/root/.cache/huggingface/Qwen3.8-Flash-Next-MTP-NVFP4`, which is where `$D`
+  lands inside the generated `docker run` (it mounts `~/.cache/huggingface`).
+
+  **Measurements.** Boot to ready 251-291 s (weights load ~106-110 s; model
+  74.4 GiB without MTP, 76.2 GiB with the NVFP4 drafter). KV pool from the
+  `GPU KV cache size` log line:
+
+  - no MTP, prefix caching on: 975,608 tokens (3.72x the 262,144 context)
+  - MTP K=2 with the NVFP4 drafter, prefix caching on: 702,444 tokens (2.68x)
+  - MTP K=2, prefix caching off: 764,586 tokens (2.92x)
+
+  Single-stream decode speed is modest; the reason to run this model on vLLM on
+  one 96 GB card is concurrency. Parallel decode, MTP K=2, one distinct
+  conversation per stream, prefix warmed, 512 output tokens per stream, median
+  of 3 bursts, as total tok/s / per-stream tok/s:
+
+  | Streams | 256 ctx | 16K ctx | 100K ctx |
+  |---|---|---|---|
+  | 1 | 145 / 145 | 133 / 133 | 132 / 132 |
+  | 2 | 248 / 127 | 218 / 112 | 222 / 115 |
+  | 4 | 428 / 112 | 327 / 85 | 299 / 91 |
+  | 6 | 565 / 99 | 405 / 70 | 55 / 11 (see below) |
+
+  6 x 100K does not fit the 702K pool: each 100K conversation occupies about
+  150K tokens of pool, so 4 run and 2 wait (log: `Running 4, Waiting 2`, KV
+  ~87%, prefix cache hit 0%) and every burst re-prefills at ~15K tok/s. There
+  were no preemptions or errors; the server degrades by queueing. For agentic
+  workloads with deep contexts (~100K, for example coding agents that run
+  subagents), cap concurrent agents at 4 on this card: 4 x 100K fits the pool
+  at ~90 tok/s per stream, 6 x 100K queues. Occasional
+  slow bursts (93 / 106 / 139 tok/s in rows that otherwise read ~130 / 220)
+  coincide with a stream's cached prefix being evicted and re-prefilled; in
+  day-to-day use on the same hardware, per-stream decode drops to roughly 30-50
+  tok/s when prefix-cache hits are low.
+
+  Single stream (512 output tokens, `ignore_eos`, prefix warmed), decode tok/s:
+
+  | Context | 256 | 16K | 128K |
+  |---|---|---|---|
+  | no MTP | 101.0 | 98.4 | 97.3 |
+  | MTP K=2 | 136.1 | 129.5 | 127.4 |
+
+  MTP acceptance was 53.6% of drafted tokens over the parallel sweep
+  (30,969 / 57,794) and 50.7% in the single-stream run, both on synthetic filler
+  prompts; real traffic on the same model measured ~62.5%, so acceptance and
+  MTP decode speed are workload-dependent.
+
+  Correctness (MTP K=2, prefix caching off, Python frontend, idle server): the
+  teacher-forced mean logprob on a fixed passage, n=8, was -0.42597
+  (sd 0.00675) against -0.42783 (sd 0.00677) from a reference server on the
+  same checkpoint, the same within noise, and the preceding request did not
+  change the score (delta -0.0062, SE 0.0054, t=-1.15).
+
   ### FP8 configuration on a 4x MI355X GPU
   ```bash
   export VLLM_ROCM_USE_AITER=1
@@ -473,7 +651,8 @@ guide: |
 
   - **FP8 on eight GPUs:** use TEP8; plain TP8 is incompatible with this
     checkpoint. TP4 is also supported if GPU memory capacity allows.
-  - **Mamba-cache capacity error at startup:** keep `--max-num-seqs 256`.
+  - **Mamba-cache capacity error at startup:** keep `--max-num-seqs 256`
+    (except the single RTX PRO 6000 profile, which was tested at 6).
   - **Runtime OOM on large multimodal batches:** keep `--gpu-memory-utilization 0.90`.
   - **Out of memory while loading:** enable N-gram Embedding CPU offload, increase
     TP size, or reduce `--max-model-len` to reserve less KV cache. On 4x H100
