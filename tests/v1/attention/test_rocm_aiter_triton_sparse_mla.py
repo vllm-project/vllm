@@ -400,6 +400,7 @@ def test_deepseek_v4_forward_mqa_matches_reference(
         max_num_batched_tokens=256,
         hf_config_override={"compress_ratios": [1], "sliding_window": window},
     )
+    vllm_config.model_config.model_arch_config.total_num_attention_heads = num_heads
     swa_spec = SlidingWindowMLASpec(
         block_size=block_size,
         num_kv_heads=1,
@@ -426,9 +427,10 @@ def test_deepseek_v4_forward_mqa_matches_reference(
         causal=True,
     )
     monkeypatch.setattr(rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True)
-    swa_metadata = rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder(
+    swa_builder = rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder(
         swa_spec, ["swa"], vllm_config, device
-    ).build(0, common)
+    )
+    swa_metadata = swa_builder.build(0, common)
     monkeypatch.setattr(
         rocm,
         "get_forward_context",
@@ -464,9 +466,7 @@ def test_deepseek_v4_forward_mqa_matches_reference(
     attn.rotary_emb = SimpleNamespace(cos_sin_cache=cos_sin_cache)
     attn._wo_a_fp8_weight = torch.empty(0) if wo_a_fp8 else None
     attn._use_aiter_sparse_mla_decode = rocm._aiter_sparse_mla_enabled(False)
-    attn._use_aiter_sparse_mla_prefill = rocm._aiter_sparse_mla_prefill_enabled(
-        num_heads, False
-    )
+    attn._use_aiter_sparse_mla_prefill = swa_builder._use_aiter_sparse_mla_prefill
 
     q = (torch.randn(num_tokens, num_heads, head_dim, device=device) * 0.5).bfloat16()
     output = torch.empty_like(q)
