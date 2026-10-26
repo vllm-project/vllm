@@ -936,6 +936,7 @@ class TestAudioChunking:
         assert len(chunks_48k) >= 2
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("max_audio_clip_s", [30, None])
 def test_split_audio_with_vad_returns_no_chunks_without_speech(max_audio_clip_s):
     pytest.importorskip("silero_vad")
@@ -955,6 +956,7 @@ def test_split_audio_with_vad_returns_no_chunks_without_speech(max_audio_clip_s)
     assert chunks == []
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("max_audio_clip_s", [30, None])
 def test_split_audio_without_vad_keeps_silent_audio(max_audio_clip_s):
     sample_rate = 16000
@@ -1003,6 +1005,7 @@ def _assert_chunks_aligned(chunks, audio: np.ndarray, sample_rate: int) -> None:
             )
 
 
+@pytest.mark.cpu_test
 def test_split_audio_with_vad_splits_packs_and_maps_times():
     """VAD spans longer than max_audio_clip_s are RMS split, the resulting
     pieces are packed into chunks of up to max_audio_clip_s with the
@@ -1059,6 +1062,7 @@ def test_split_audio_with_vad_splits_packs_and_maps_times():
     assert timing.to_original_time(20.5, is_end=True) == 80.0
 
 
+@pytest.mark.cpu_test
 def test_split_audio_with_vad_chunk_count_is_bounded_by_speech():
     """Many short speech segments, e.g. from extreme VAD parameters, must not
     fan out into one engine request each."""
@@ -1081,6 +1085,7 @@ def test_split_audio_with_vad_chunk_count_is_bounded_by_speech():
     assert all(chunk.audio.shape[-1] <= 30 * sample_rate for chunk in chunks)
 
 
+@pytest.mark.cpu_test
 def test_split_audio_without_vad_start_times_are_cumulative():
     sample_rate = 16000
     audio = np.random.default_rng(0).standard_normal(65 * sample_rate)
@@ -1104,6 +1109,7 @@ def test_split_audio_without_vad_start_times_are_cumulative():
     _assert_chunks_aligned(chunks, audio, sample_rate)
 
 
+@pytest.mark.cpu_test
 def test_split_audio_with_vad_only_starts_at_first_speech():
     sample_rate = 16000
     audio = np.random.default_rng(0).standard_normal(30 * sample_rate)
