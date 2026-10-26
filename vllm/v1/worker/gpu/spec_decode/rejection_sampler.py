@@ -54,6 +54,30 @@ def _iter_request_chunks(
         start = end
 
 
+def _consumed_invalid_rows(
+    invalid_rows: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_sampled: torch.Tensor,
+    max_rows: int,
+) -> torch.Tensor:
+    """Map all-(-inf) target logit rows to the requests that consumed one.
+
+    ``invalid_rows`` is ``[num_logits]``. Request ``r`` owns target rows
+    ``[cu_num_logits[r], cu_num_logits[r + 1])`` and consumes the first
+    ``num_sampled[r]`` of them (accepted drafts plus the recovered/bonus row).
+    Accepted rows cannot be all--inf, so a request is flagged iff its
+    recovered or bonus row was all--inf. Fully vectorized: no host reads.
+    """
+    num_reqs = num_sampled.shape[0]
+    if num_reqs == 0 or invalid_rows.numel() == 0:
+        return torch.zeros(num_reqs, dtype=torch.bool, device=invalid_rows.device)
+    starts = cu_num_logits[:num_reqs].to(torch.long).unsqueeze(1)
+    positions = torch.arange(max_rows, device=invalid_rows.device)
+    in_range = positions.unsqueeze(0) < num_sampled.to(torch.long).unsqueeze(1)
+    row_indices = (starts + positions.unsqueeze(0)).clamp_(max=invalid_rows.numel() - 1)
+    return (invalid_rows[row_indices] & in_range).any(dim=1)
+
+
 @triton.jit
 def _flatten_sampled_kernel(
     # [num_logits]
@@ -260,7 +284,7 @@ class RejectionSampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
         verify_draft_sampled: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
@@ -271,6 +295,14 @@ class RejectionSampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
         )
+        # Neutralize target rows where every logit is -inf so the rejection
+        # kernels stay well-defined. Gated on CPU-side state and device-side
+        # only: no host sync. An invalid row is given a single finite token;
+        # its recovered token is discarded.
+        invalid_rows: torch.Tensor | None = None
+        if np.any(self.sampler.needs_logits_processing[idx_mapping_np]):
+            invalid_rows = torch.isneginf(processed_logits.amax(dim=-1))
+            processed_logits[invalid_rows, 0] = 0.0
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
@@ -293,7 +325,20 @@ class RejectionSampler:
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),
         )
-        return processed_logits, sampled, num_sampled
+        if invalid_rows is not None:
+            no_valid_token_mask = _consumed_invalid_rows(
+                invalid_rows,
+                cu_num_logits,
+                num_sampled,
+                self.num_speculative_steps + 1,
+            )
+        else:
+            # Detection was skipped for these requests; contribute an all-False
+            # mask so chunked verification keeps a request-length layout.
+            no_valid_token_mask = torch.zeros(
+                num_sampled.shape[0], dtype=torch.bool, device=num_sampled.device
+            )
+        return processed_logits, sampled, num_sampled, no_valid_token_mask
 
     def _verify_in_chunks(
         self,
@@ -310,6 +355,7 @@ class RejectionSampler:
         torch.Tensor,
         LogprobsTensors | None,
         SamplingMaskTensors | None,
+        torch.Tensor,
     ]:
         if verify_draft_sampled is None:
             verify_draft_sampled = draft_sampled
@@ -331,6 +377,7 @@ class RejectionSampler:
         num_sampled_chunks: list[torch.Tensor] = []
         logprobs_chunks: list[LogprobsTensors] = []
         sampling_mask_chunks: list[SamplingMaskTensors] = []
+        no_valid_chunks: list[torch.Tensor] = []
         max_num_kept = None
         if self.sampler.return_sampling_mask:
             max_num_kept = int(
@@ -345,7 +392,7 @@ class RejectionSampler:
             chunk_cu_num_logits_np = cu_num_logits_np[start : end + 1] - lo
             chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1] - lo
             # draft_logits uses persistent request-state indices and stays global.
-            processed_logits, sampled, num_sampled = self._verify(
+            processed_logits, sampled, num_sampled, chunk_no_valid = self._verify(
                 logits[lo:hi],
                 draft_logits,
                 draft_sampled[lo:hi],
@@ -358,6 +405,7 @@ class RejectionSampler:
                 input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
                 verify_draft_sampled[lo:hi],
             )
+            no_valid_chunks.append(chunk_no_valid)
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
                 num_sampled,
@@ -392,6 +440,7 @@ class RejectionSampler:
                 num_sampled_chunks[0],
                 logprobs_tensors,
                 sampling_mask_tensors,
+                no_valid_chunks[0],
             )
 
         logprobs_tensors = None
@@ -411,7 +460,14 @@ class RejectionSampler:
             if sampling_mask_chunks
             else None
         )
-        return sampled, num_sampled, logprobs_tensors, sampling_mask_tensors
+        no_valid_token_mask = torch.cat(no_valid_chunks)
+        return (
+            sampled,
+            num_sampled,
+            logprobs_tensors,
+            sampling_mask_tensors,
+            no_valid_token_mask,
+        )
 
     def __call__(
         self,
@@ -450,6 +506,7 @@ class RejectionSampler:
             num_sampled,
             logprobs_tensors,
             sampling_mask_tensors,
+            no_valid_token_mask,
         ) = self._verify_in_chunks(
             logits,
             input_batch,
@@ -476,4 +533,5 @@ class RejectionSampler:
             num_sampled=num_sampled,
             num_rejected=num_rejected,
             sampling_mask_tensors=sampling_mask_tensors,
+            no_valid_token_mask=no_valid_token_mask,
         )
