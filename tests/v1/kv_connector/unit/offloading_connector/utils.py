@@ -100,7 +100,11 @@ class MockOffloadingWorker(OffloadingWorker):
         return True
 
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: LoadStoreSpec,
+        expedited: bool = False,
     ) -> bool:
         self.transfer_specs[job_id] = (src_spec, dst_spec)
         self.waiting_jobs.add(job_id)
