@@ -135,8 +135,22 @@ def _rebind_kernels(
             # kernel as an instance attribute; read the instance dict directly
             # so module-level __getattr__ hooks are never triggered, and so
             # this scan needs no dependency on the warmup machinery.
-            if hasattr(value, "__dict__"):
-                wrapper = lookup(vars(value).get("kernel"))
+            #
+            # `hasattr(value, "__dict__")` is not a sufficient guard: proxy
+            # objects such as llvmlite's `binding.ffi.lib` synthesise every
+            # attribute through `__getattr__`, so `__dict__` resolves to a
+            # `_lib_fn_wrapper` and `.get()` would raise AttributeError. Only
+            # treat a real dict as an instance namespace.
+            try:
+                instance_dict = vars(value)
+            except TypeError:
+                # Slots-only objects have no instance dict.
+                instance_dict = None
+            wrapper = (
+                lookup(instance_dict.get("kernel"))
+                if isinstance(instance_dict, dict)
+                else None
+            )
             if wrapper is None:
                 continue
             value.kernel = wrapper
