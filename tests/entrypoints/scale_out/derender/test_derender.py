@@ -204,6 +204,11 @@ async def test_derender_chat_usage(client):
     assert usage["prompt_tokens"] == 10
     assert usage["completion_tokens"] == len(synthetic_ids)
     assert usage["total_tokens"] == 10 + len(synthetic_ids)
+    # No generate usage and no reasoning parser: no details, as on the
+    # coupled chat endpoint. A null `prompt_tokens_details` is omitted from
+    # the JSON entirely (#64177).
+    assert "prompt_tokens_details" not in usage
+    assert usage["completion_tokens_details"] is None
 
 
 @pytest.mark.asyncio
@@ -1244,6 +1249,45 @@ async def test_e2e_parsed_reasoning(parser_client, parser_tokenizer):
 
 
 @pytest.mark.asyncio
+async def test_e2e_parsed_usage_details(parser_client, parser_tokenizer):
+    """Batch usage reports `reasoning_tokens` counted by the reasoning parser and
+    passes `prompt_tokens_details` through from the generate usage, as the
+    coupled chat endpoint does."""
+    messages = [{"role": "user", "content": "What is 2+3?"}]
+    gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
+    output_ids = _require_markers_survive(
+        parser_tokenizer, "<think>Two plus three.</think>Five.", "<think>", "</think>"
+    )
+    think_start = parser_tokenizer.convert_tokens_to_ids("<think>")
+    think_end = parser_tokenizer.convert_tokens_to_ids("</think>")
+    reasoning_tokens = output_ids.index(think_end) - output_ids.index(think_start) - 1
+    assert reasoning_tokens > 0
+    prompt_tokens = len(gen_req["token_ids"])
+
+    generate_response = _e2e_generate_response(output_ids)
+    generate_response["usage"] = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": len(output_ids),
+        "total_tokens": prompt_tokens + len(output_ids),
+        "prompt_tokens_details": {"cached_tokens": 4},
+    }
+    resp = await parser_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": PARSER_MODEL,
+            "generate_response": generate_response,
+            "prompt_tokens": prompt_tokens,
+            "chat_request": {"model": PARSER_MODEL, "messages": messages},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    usage = resp.json()["usage"]
+    assert usage["completion_tokens"] == len(output_ids)
+    assert usage["completion_tokens_details"]["reasoning_tokens"] == reasoning_tokens
+    assert usage["prompt_tokens_details"]["cached_tokens"] == 4
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("include_reasoning", [True, False])
 async def test_e2e_parsed_logprobs_follow_include_reasoning(
     parser_client, parser_tokenizer, include_reasoning
@@ -1695,7 +1739,7 @@ def _derender_hermes_chat(
         )
     )
 
-    (choice,), _ = derenderer._derender_chat(response, request)
+    (choice,), _, _ = derenderer._derender_chat(response, request)
     return choice
 
 
@@ -1854,7 +1898,7 @@ def test_derender_batch_trims_stop_like_engine(
             messages=[{"role": "user", "content": "Count"}],
             **request_kwargs,
         )
-        (choice,), _ = derenderer._derender_chat(response, request)
+        (choice,), _, _ = derenderer._derender_chat(response, request)
         output_text = choice.message.content
     else:
         request = CompletionRequest(model=MODEL_NAME, prompt="Count", **request_kwargs)
