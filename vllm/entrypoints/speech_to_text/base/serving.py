@@ -156,8 +156,11 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             max_workers=num_audio_preprocess_workers,
             thread_name_prefix="stt-preprocess",
         )
+        preprocess_semaphore = asyncio.Semaphore(num_audio_preprocess_workers)
         self._decode_and_chunk_speech_async = make_async_with_semaphore(
-            self._decode_and_chunk_speech, executor=self._preprocess_executor
+            self._decode_and_chunk_speech,
+            executor=self._preprocess_executor,
+            semaphore=preprocess_semaphore,
         )
         # VAD-enabled requests decode on the preprocess pool and then run
         # VAD + audio splitting on a dedicated pool, so VAD scales
@@ -171,7 +174,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 thread_name_prefix="stt-vad",
             )
             self._decode_audio_async = make_async_with_semaphore(
-                self._decode_audio, executor=self._preprocess_executor
+                self._decode_audio,
+                executor=self._preprocess_executor,
+                semaphore=preprocess_semaphore,
             )
             self._chunk_speech_async = make_async_with_semaphore(
                 self._chunk_speech, executor=self._vad_executor
