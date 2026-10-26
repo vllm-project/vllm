@@ -32,6 +32,98 @@ def _make_hf_config(**kwargs) -> PreTrainedConfig:
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "architecture,expected",
+    [
+        ("MiMoV2ForCausalLM", 3),
+        ("MiMoV2FlashForCausalLM", 3),
+        ("MiMoV2OmniForCausalLM", 1),
+    ],
+)
+def test_mimo_checkpoint_depth_survives_draft_mapping(architecture, expected):
+    config = PreTrainedConfig(
+        model_type="mimo_v2",
+        architectures=[architecture],
+        num_nextn_predict_layers=3,
+    )
+    result = SpeculativeConfig.hf_config_override(config)
+    assert result.num_nextn_predict_layers == expected
+    assert result.n_predict == expected
+    assert result.model_type == "mimo_v2_mtp"
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "method,sampling,rejection,model_type,architecture,valid",
+    [
+        ("mtp", "probabilistic", "standard", "mimo_v2_mtp", "MiMoV2MTPModel", True),
+        ("mtp", "greedy", "standard", "mimo_v2_mtp", "MiMoV2MTPModel", False),
+        ("mtp", "probabilistic", "synthetic", "mimo_v2_mtp", "MiMoV2MTPModel", False),
+        (
+            "draft_model",
+            "probabilistic",
+            "standard",
+            "mimo_v2_mtp",
+            "MiMoV2MTPModel",
+            False,
+        ),
+        ("mtp", "probabilistic", "standard", "deepseek_mtp", "DeepSeekMTPModel", False),
+        (
+            "mtp",
+            "probabilistic",
+            "standard",
+            "mimo_v2_mtp",
+            "MiMoV2OmniMTPModel",
+            False,
+        ),
+    ],
+)
+def test_mimo_draft_scale_is_scoped(
+    method, sampling, rejection, model_type, architecture, valid
+):
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        mimo_draft_logit_scale=1.25,
+        method=method,
+        draft_sample_method=sampling,
+        rejection_sample_method=rejection,
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type=model_type, architectures=[architecture]
+            )
+        ),
+    )
+    if valid:
+        SpeculativeConfig._validate_mimo_draft_logit_scale(config)
+    else:
+        with pytest.raises(ValueError, match="probabilistic"):
+            SpeculativeConfig._validate_mimo_draft_logit_scale(config)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "use_v2,multi,allowed",
+    [(True, True, True), (False, True, False), (False, False, True)],
+)
+def test_mimo_runner_requirement(use_v2, multi, allowed):
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="mimo_v2_mtp")
+        ),
+        use_multi_module_mtp=lambda: multi,
+        mimo_draft_logit_scale=1.0,
+    )
+    if allowed:
+        SpeculativeConfig.validate_mimo_runner(config, use_v2)
+    else:
+        with pytest.raises(ValueError, match="Model Runner V2"):
+            SpeculativeConfig.validate_mimo_runner(config, use_v2)
+
+
+@pytest.mark.cpu_test
 def test_dict_overrides_are_not_forwarded_to_draft():
     """Dict overrides are target-specific key patches; the draft must get
     only the architecture-mapping override."""

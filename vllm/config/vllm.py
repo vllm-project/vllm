@@ -2095,6 +2095,9 @@ class VllmConfig:
         else:
             self._validate_v1_model_runner()
 
+        if self.speculative_config is not None:
+            self.speculative_config.validate_mimo_runner(self.use_v2_model_runner)
+
         self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
