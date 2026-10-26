@@ -459,6 +459,7 @@ def test_should_split():
     assert should_split(node, splitting_ops)
 
 
+@pytest.mark.usefixtures("off_sm100")
 @pytest.mark.skipif(
     not current_platform.support_static_graph_mode(),
     reason="Skip if not cudagraph mode supported",
@@ -545,6 +546,7 @@ def _mock_config_for_cudagraph_sizes(
     max_num_batched_tokens: int,
     compilation_config: CompilationConfig,
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
+    method: str = "eagle3",
 ) -> MagicMock:
     """Mock VllmConfig wired up enough to run `_set_cudagraph_sizes`.
 
@@ -567,9 +569,12 @@ def _mock_config_for_cudagraph_sizes(
     schedule = num_speculative_tokens_per_batch_size
     config.speculative_config = (
         SimpleNamespace(
+            method=method,
             num_speculative_tokens=num_speculative_tokens,
             num_speculative_tokens_per_batch_size=schedule,
             uses_dynamic_speculative_decoding=lambda: schedule is not None,
+            use_multi_module_mtp=lambda: False,
+            use_gemma4_mtp=lambda: False,
             enable_adaptive_verification=False,
         )
         if num_speculative_tokens
@@ -581,6 +586,9 @@ def _mock_config_for_cudagraph_sizes(
         lambda decode_query_len: VllmConfig.get_decode_cudagraph_query_lens(
             config, decode_query_len
         )
+    )
+    config.get_draft_decode_cudagraph_request_sizes = (
+        lambda: VllmConfig.get_draft_decode_cudagraph_request_sizes(config)
     )
     config.use_v2_model_runner = True
     config._split_cudagraph_capture_sizes = (
@@ -621,6 +629,26 @@ def _resolve_capture_sizes(monkeypatch, sm100: bool, **kwargs) -> CompilationCon
     VllmConfig._set_cudagraph_sizes(config)
     assert resolved == {f: getattr(compilation_config, f) for f in _CAPTURE_SIZE_FIELDS}
     return compilation_config
+
+
+@pytest.fixture
+def off_sm100(monkeypatch):
+    """The default sizes these tests pin are the ones kept off SM100; model
+    runner V2 defaults to wider graphs on SM100."""
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda *args, **kw: False
+    )
+
+
+def test_sm100_defaults_cover_max_num_seqs_at_any_query_length(monkeypatch):
+    """On SM100, decode graphs reach max_num_seqs requests whatever the number of
+    speculative tokens, and prefill graphs reach 8192 tokens."""
+    compilation_config = _resolve_capture_sizes(monkeypatch, sm100=True)
+
+    assert compilation_config.max_prefill_cudagraph_capture_tokens == 8192
+    assert compilation_config.max_decode_cudagraph_capture_requests == 1024
+    assert _widest_covered_request_count(compilation_config, 8, 1024) == 1024
+    assert compilation_config.max_cudagraph_capture_size == 8192
 
 
 @pytest.mark.parametrize("sm100", [True, False])
@@ -691,6 +719,42 @@ def test_capture_sizes_above_their_cap_raise(monkeypatch, kwargs):
         _resolve_capture_sizes(monkeypatch, sm100=True, **kwargs)
 
 
+@pytest.mark.usefixtures("off_sm100")
+@pytest.mark.parametrize(
+    ("method", "kwargs", "widest_draft_decode", "max_capture_size"),
+    [
+        # The target's default decode graphs stop at 512 // 8 = 64 requests.
+        ("eagle3", {}, 1024, 1024),
+        ("mtp", {"max_decode_cudagraph_capture_requests": 16}, 1024, 1024),
+        ("eagle3", {"decode_cudagraph_capture_request_sizes": []}, None, 512),
+        # Draft blocks of K tokens take the target's request counts.
+        ("dspark", {}, None, 512),
+    ],
+)
+def test_one_token_draft_decodes_cover_max_num_seqs(
+    method, kwargs, widest_draft_decode, max_capture_size
+):
+    """One-token draft decode graphs reach max_num_seqs past the target's
+    decode cap, and the recorded capture sizes hold them."""
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE, **kwargs
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=1024,
+        num_speculative_tokens=7,
+        max_num_batched_tokens=16384,
+        compilation_config=compilation_config,
+        method=method,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    draft_sizes = config.get_draft_decode_cudagraph_request_sizes()
+    assert max(draft_sizes, default=None) == widest_draft_decode
+    assert compilation_config.max_cudagraph_capture_size == max_capture_size
+
+
+@pytest.mark.usefixtures("off_sm100")
 @pytest.mark.parametrize("max_num_seqs", [100, 101])
 def test_default_cudagraph_capture_sizes_cover_off_stride_max_num_seqs(
     max_num_seqs: int,
@@ -710,6 +774,7 @@ def test_default_cudagraph_capture_sizes_cover_off_stride_max_num_seqs(
     assert max_num_seqs in compilation_config.cudagraph_capture_sizes
 
 
+@pytest.mark.usefixtures("off_sm100")
 @pytest.mark.parametrize(
     ("max_num_seqs", "num_speculative_tokens", "widest_is_captured"),
     [
@@ -773,6 +838,7 @@ def test_default_cudagraph_capture_size_respects_platform_ceiling(
     ) is widest_is_captured
 
 
+@pytest.mark.usefixtures("off_sm100")
 def test_default_cudagraph_capture_sizes_keep_all_sizes_bounded():
     """Keep both token and uniform-decode grids under the platform default.
 
@@ -867,6 +933,7 @@ def test_real_vllm_config_caps_widest_ngram_decode_batch():
     )
 
 
+@pytest.mark.usefixtures("off_sm100")
 @pytest.mark.parametrize("max_num_seqs", [8, 32, 256, 300, 512, 600, 1024, 2048])
 def test_default_cudagraph_capture_size_unchanged_without_speculation(max_num_seqs):
     """Without speculation the default must reproduce the historical formula.
@@ -901,6 +968,7 @@ def test_default_cudagraph_capture_size_unchanged_without_speculation(max_num_se
     )
 
 
+@pytest.mark.usefixtures("off_sm100")
 def test_single_speculative_token_does_not_raise_default_capture_size():
     """One speculative token must not raise the default capture ceiling.
 
@@ -932,6 +1000,7 @@ def test_single_speculative_token_does_not_raise_default_capture_size():
     assert 600 not in compilation_config.cudagraph_capture_sizes
 
 
+@pytest.mark.usefixtures("off_sm100")
 def test_default_cudagraph_capture_size_caps_tokens():
     """The ceiling remains a platform-bounded token count.
 
@@ -946,6 +1015,9 @@ def test_default_cudagraph_capture_size_caps_tokens():
         num_speculative_tokens=16,
         max_num_batched_tokens=1_000_000,
         compilation_config=compilation_config,
+        # One-token draft decodes reach max_num_seqs past the ceiling; see
+        # test_one_token_draft_decodes_cover_max_num_seqs.
+        method="ngram",
     )
 
     VllmConfig._set_cudagraph_sizes(config)
@@ -974,6 +1046,7 @@ def _widest_covered_request_count(compilation_config, query_len, max_num_seqs):
     return max((n for n, _ in shapes), default=0)
 
 
+@pytest.mark.usefixtures("off_sm100")
 def test_default_cudagraph_capture_sizes_cover_every_dynamic_decode_width():
     """Each scheduled draft width needs sizes over the range it applies to.
 
@@ -1002,6 +1075,7 @@ def test_default_cudagraph_capture_sizes_cover_every_dynamic_decode_width():
     assert _widest_covered_request_count(compilation_config, 3, 128) == 128
 
 
+@pytest.mark.usefixtures("off_sm100")
 def test_dynamic_decode_capture_clamps_configured_width():
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
@@ -1020,6 +1094,7 @@ def test_dynamic_decode_capture_clamps_configured_width():
     assert config.get_decode_cudagraph_query_lens(4) == {4: 16}
 
 
+@pytest.mark.usefixtures("off_sm100")
 def test_dynamic_decode_capture_covers_schedule_gap_and_tail():
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
@@ -1039,6 +1114,7 @@ def test_dynamic_decode_capture_covers_schedule_gap_and_tail():
     assert 34 in sizes
 
 
+@pytest.mark.usefixtures("off_sm100")
 def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
     """Decode coverage does not override the `max_num_batched_tokens` clamp.
 
@@ -1084,9 +1160,10 @@ def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
     reason="Skip if static graph mode is not supported",
 )
 @pytest.mark.parametrize(
-    ("is_blackwell", "expected_max_size"), [(False, 512), (True, 1024)]
+    ("is_blackwell", "expected_max_size"), [(False, 512), (True, 2048)]
 )
 def test_blackwell_cudagraph_default(is_blackwell, expected_max_size):
+    # On SM100, prefill graphs reach min(8192, max_num_batched_tokens) tokens.
     vllm_config = VllmConfig()
     vllm_config.model_config = MagicMock(enforce_eager=False)
     vllm_config.scheduler_config = SchedulerConfig(
