@@ -1299,6 +1299,15 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         assert output is not None
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
+            query_start = (
+                query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
+            )
+            query_end = (
+                query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
+            )
+            if query_end <= query_start:
+                # Padded request slots count as prefills and can fill a chunk.
+                continue
             kv = kv_rows[: chunk_size * chunk_M].view(chunk_size, chunk_M, -1)
             if not swa_only:
                 assert attn_metadata is not None
@@ -1328,13 +1337,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 block_size=swa_metadata.block_size,
                 offset=chunk_N,
                 use_fnuz=current_platform.is_fp8_fnuz(),
-            )
-
-            query_start = (
-                query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
-            )
-            query_end = (
-                query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
 
             combined_indices, combined_lens = combine_topk_swa_indices(
