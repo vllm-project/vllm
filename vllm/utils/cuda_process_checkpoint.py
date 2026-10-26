@@ -4,8 +4,8 @@
 
 import ctypes as C
 import time
-from collections.abc import Callable, Sequence
-from typing import Any, Literal, TextIO, cast
+from collections.abc import Sequence
+from typing import Literal, TextIO, cast
 
 CheckpointOperation = Literal["Lock", "Checkpoint", "Restore", "Unlock"]
 _OPERATIONS: tuple[CheckpointOperation, ...] = (
@@ -14,19 +14,6 @@ _OPERATIONS: tuple[CheckpointOperation, ...] = (
     "Restore",
     "Unlock",
 )
-
-
-def cycle(
-    pids,
-    invoke: Callable[[int, CheckpointOperation], Any],
-    boundary: Callable[[CheckpointOperation], None] = lambda op: None,
-):
-    if not pids or len(set(pids)) != len(pids):
-        raise ValueError("Expected distinct target PIDs")
-    for op in _OPERATIONS:
-        for pid in pids:
-            invoke(pid, op)
-        boundary(op)
 
 
 class LockArgs(C.Structure):

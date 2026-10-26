@@ -360,9 +360,9 @@ the selected allocator tags. It cannot selectively restore graph or driver
 state. Ordinary worker RPCs are rejected while checkpointed. A checkpointed
 worker cannot execute another model until restored.
 
-Wait for a sleep request to finish before issuing another pause, sleep, wake,
-or resume request. While level-1 sleep is draining requests, these overlapping
-operations are rejected. A partial wake keeps scheduling paused until all
+Follow the caller-serialization requirement in
+[Control request ordering](#control-request-ordering), including while level-1
+sleep is draining requests. A partial wake keeps scheduling paused until all
 allocator tags are awake.
 
 As with the ordinary executor, `sleep()` is a no-op while weights remain asleep.
