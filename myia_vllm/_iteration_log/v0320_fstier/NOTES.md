@@ -2901,3 +2901,56 @@ needed in this cycle. Upstream PR vllm-project/vllm#63551 remains OPEN; latest
 orozery comment (07:14Z) discusses `prepare_load` taking refs and a separate
 `complete_read`; no rework here. PR #211 remains OPEN, unmerged and inactive
 for the evening window. #198 remains OPEN.
+
+### 26/10 17:41Z — cruise holds at div 19; third mobile IP joins Q40; RSM env restored
+
+Window 15:41:27 -> ~17:43Z (~2 h 02). Read-only cycle; no engine/config change.
+Evening patch window (user GO) remains after the EPF classes.
+
+| metric | cumulative at 17:43Z | delta ~2 h 02 |
+|---|---|---|
+| fs writes | **164.648 GB** | **+3.858 GB = ~1.9 GB/h** |
+| prompt tokens | 405.060 M | **+44.085 M = ~21.7 M tok/h** |
+| fs reads | 93.492 GB | +1.260 GB = 0.62 GB/h |
+| cached by source | device 290.670 M / host 77.541 M / disk 7.102 M | window: device **93.80 %** / host 1.23 % / disk 0.23 % |
+| computed prefill | — | 2.087 M = **4.74 %** of window prompt |
+| prefix cache | queries 405.137 M / hits 290.670 M | window hit rate **94.61 %** |
+| preemptions | **27** | **+0 for ~7 h 45** |
+| fs chunk hits | 3,443 | +48 |
+| fs tier size | **251G** (`du`) | at the 250 GiB LRU cap |
+
+**Write ratio: 3.858 GB / 44.085 M prompt tokens = 0.0875 KB/token = div 19.4**
+— between the very quiet 15:41Z window (div 132) and the 13:41Z cruise (div
+8.7): cruise regime, no extrapolation. The 30-min birth-time scan stays small:
+12 touched files = **6 NEW / 0.16 GB + 6 REWRITES / 0.16 GB** (50/50).
+
+**Disk-serving floor: cumulative 7.102/405.060 = 1.753 %, now marginally BELOW
+the 1.76 % floor** (window 0.23 %). Reading: not a utility loss — device serves
+93.8 %, fs reads still ran 0.62 GB/h with +48 chunk hits, and the cumulative
+share decays mechanically as the filter reduces new writes. The floor criterion
+(#198) needs a cold-window form; revisit at tonight's patch gate.
+
+Engine health: StartedAt still 21:48:52Z, RC=0, OOM=false, 0 OOM lines, 0
+tracebacks/asserts, three containers up, health 200 in 43 ms. **No new WEDGE
+after 11:44:39Z** (fail 1/2 only, ever), 3,753 OK probes. VRAM GPU0 22,388 /
+GPU1 21,508 MiB; GPU2 161 = idle. `/dev/shm` 25G/63G (39 %).
+
+Traffic census (~2 h, 539 req): 516 x 200, 23 x 401, **0 x 400**. Security:
+**third unclaimed mobile IP `92.184.146.164`, 3 x 200** (15:54:08Z 23,056 B,
+15:57:58Z 54,414 B, 16:21:26Z 21,198 B, OpenAI/JS, key `be312daf7c1c` =
+MEDIUM, attribution fields empty) — Q40 extended to three IPs (7 x 200 total).
+No recurrence of `.46`/`.254` after 13:05Z. 401s all the known dead key
+`1f7f6080cb65` loop. nbaudit healthy 17:06Z (Image/). G: write OK.
+
+**RSM per-call env FIXED by roo-extensions (~16:20Z)** — the `.env` of the
+server checkout had been deleted by their morning `file:`-junction cleanup;
+restored from the canonical copy. Verified this side: last `key=MISSING` banner
+16:21:09Z; banners 17:31->17:41Z show primary `localhost:5002/v1` key OK. ACK
+replied. Side note: my own 17:15Z dashboard append hit the pass-deadline and
+used the cloud reserve with deterministic truncation (RSM-side mechanics).
+
+Host commit **85.6 %** (348.2/406.6 GB, margin 58.3 GB) — at the 85 % heavy-work
+threshold; no heavy job from this lane. Deployment plan confirmed: engine-first
+patch window tonight after EPF (PR #211 merge + deploy, gates, then GO/NO-GO to
+claudish for the hub recreate), targeting the ~21:41Z cycle unless the user
+signals earlier.
