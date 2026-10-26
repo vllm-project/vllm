@@ -24,8 +24,7 @@ model:
   parameter_count: "120B"
   active_parameters: "12B"
   context_length: 262144
-  base_args:
-    - "--trust-remote-code"
+  base_args: []
   base_env: {}
 
 features:

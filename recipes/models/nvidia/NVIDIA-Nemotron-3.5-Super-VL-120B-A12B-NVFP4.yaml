@@ -26,8 +26,7 @@ model:
   parameter_count: "120B"
   active_parameters: "12B"
   context_length: 1048576
-  base_args:
-    - "--trust-remote-code"
+  base_args: []
   base_env: {}
 
 features:
@@ -296,7 +295,6 @@ guide: |
   ```bash
   vllm serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 \
     --served-model-name nemotron-3.5-super \
-    --trust-remote-code \
     --tensor-parallel-size 2 \
     --pipeline-parallel-size 1 \
     --data-parallel-size 1 \
