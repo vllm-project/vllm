@@ -116,19 +116,6 @@ KNOWN_DEFECTS["kv-update-bypass-frozen"] = Defect(
     (_CAP + "test_kv_update_bypass_follows_the_shuffle_toggle",),
 )
 
-KNOWN_DEFECTS["zero-query-rows"] = Defect(
-    "Rows with no query tokens (FULL CUDA graph padding, or requests an async "
-    "KV connector is loading) are run as real rows: decode kernels compute "
-    "them at the query/output row their query_start_loc points at, and the "
-    "extend chunk planner and sliding-window gather give them context, "
-    "adding chunks no real row needs.",
-    (
-        _DISPATCH + "test_zero_query_rows_after_real_rows[*-decode-*]",
-        _BUILDER + "test_chunk_planner_skips_rows_without_queries[*-kv-load]",
-        _BUILDER + "test_sliding_window_extend_skips_rows_without_queries[kv-load]",
-    ),
-)
-
 _MARKED = pytest.StashKey[bool]()
 
 

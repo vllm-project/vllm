@@ -641,6 +641,16 @@ class AiterFlashAttentionMetadataBuilder(
         ) = split_ret
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        if num_decodes > 0 and num_extends == 0 and num_prefills == 0:
+            # Trailing rows with no query tokens (CUDA graph padding, or
+            # requests whose KV an async connector is loading) are not
+            # decodes: the decode kernels would compute them at the Q/output
+            # row their query_start_loc points at, past the real tokens.
+            decode_q_lens = query_start_loc_cpu[1 : num_decodes + 1].diff(
+                prepend=query_start_loc_cpu[:1]
+            )
+            with_queries = decode_q_lens.nonzero()
+            num_decodes = int(with_queries[-1]) + 1 if len(with_queries) else 0
 
         with gpu_sync_allowed():
             # Only copy seq_lens to CPU when prefill or extend is present to avoid a
@@ -709,12 +719,22 @@ class AiterFlashAttentionMetadataBuilder(
             num_extends_slice = slice(num_decodes, num_decodes + num_extends)
             query_lens_for_extend = query_lens_cpu[num_extends_slice]
             seq_lens_for_extend = seq_lens[num_extends_slice]
-            computed_kv_lens = seq_lens_for_extend - query_lens_for_extend
+            # A row with no query tokens (CUDA graph padding, or a request
+            # whose KV an async connector is loading) reads no context, so
+            # it must not get context chunks or a sliding-window gather.
+            has_query = query_lens_for_extend > 0
+            computed_kv_lens = torch.where(
+                has_query, seq_lens_for_extend - query_lens_for_extend, 0
+            )
             swa_metadata = None
             if self.aot_sliding_window is not None:
-                swa_seqlen_for_extend = torch.minimum(
-                    seq_lens_for_extend,
-                    query_lens_for_extend + self.aot_sliding_window[0] + 1,
+                swa_seqlen_for_extend = torch.where(
+                    has_query,
+                    torch.minimum(
+                        seq_lens_for_extend,
+                        query_lens_for_extend + self.aot_sliding_window[0] + 1,
+                    ),
+                    0,
                 )
                 cu_seq_lens = torch.zeros(
                     num_extends + 1,
