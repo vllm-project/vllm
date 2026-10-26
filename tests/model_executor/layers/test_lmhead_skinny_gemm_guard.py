@@ -10,9 +10,8 @@ collapse. The guard keeps every weight above
 VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES (default 256 MiB) on the generic GEMM
 fall-through at 0 < n <= 5. The swap is NOT bit-exact (different GEMM
 kernel, different accumulation order) -- these tests check the decision
-table, dispatch selection, env behavior, and numerical agreement within
-bf16 GEMM tolerance. VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD=1 restores
-the stock dispatch exactly.
+table, dispatch selection, cap tuning, and numerical agreement within
+bf16 GEMM tolerance.
 """
 
 import os
@@ -22,6 +21,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.utils import (
+    _skinny_gemm_max_weight_bytes,
     _skinny_guard_warned,
     lmhead_skinny_guard_permits,
     rocm_unquantized_gemm_impl,
@@ -42,7 +42,6 @@ pytestmark = [
     ),
 ]
 
-_DISABLE_VAR = "VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD"
 _MAX_BYTES_VAR = "VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES"
 
 # The serving-site shape: the DSpark draft vocab-parallel lm_head shard at
@@ -57,15 +56,16 @@ def _clean_env(monkeypatch):
     # These tests assert exact dispatch selection, so pin every env var
     # that feeds it: state leaked by unrelated tests earlier in a long
     # suite run must not change the outcome here.
-    monkeypatch.delenv(_DISABLE_VAR, raising=False)
     monkeypatch.delenv(_MAX_BYTES_VAR, raising=False)
     monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "1")
     monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
     _skinny_guard_warned.clear()
     envs.disable_envs_cache()
+    _skinny_gemm_max_weight_bytes.cache_clear()
     yield
     _skinny_guard_warned.clear()
     envs.disable_envs_cache()
+    _skinny_gemm_max_weight_bytes.cache_clear()
 
 
 def _weight(shape, seed=0):
@@ -78,12 +78,15 @@ def _x(n, k, seed=1):
     return torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
 
 
-def _set_guard(state):
-    if state:
-        os.environ[_DISABLE_VAR] = "1"
+def _set_cap(max_bytes):
+    # None -> the 256 MiB default; an int -> that exact cap. The accessor
+    # caches the env read, so clear it after every change.
+    if max_bytes is None:
+        os.environ.pop(_MAX_BYTES_VAR, None)
     else:
-        os.environ.pop(_DISABLE_VAR, None)
+        os.environ[_MAX_BYTES_VAR] = str(max_bytes)
     envs.disable_envs_cache()
+    _skinny_gemm_max_weight_bytes.cache_clear()
 
 
 # Event names that are not compute-kernel records: transfers, runtime API
@@ -128,8 +131,8 @@ def _has_cijk(names):
 
 
 def test_guard_decision():
-    """Decision table: bytes-gated at 0 < n <= 5; n=1 (no pathology) and
-    the kill switch always permit; the cap is tunable."""
+    """Decision table: bytes-gated at 0 < n <= 5; n=1 (no pathology)
+    always permits; the cap is tunable."""
     small = torch.zeros(SMALL_SHAPE, dtype=torch.bfloat16)
     big = torch.zeros(BIG_SHAPE, dtype=torch.bfloat16)
     assert lmhead_skinny_guard_permits(small, 5)
@@ -137,18 +140,14 @@ def test_guard_decision():
         assert not lmhead_skinny_guard_permits(big, n)
     assert lmhead_skinny_guard_permits(big, 1), "n=1 carve-out missing"
 
-    os.environ[_DISABLE_VAR] = "1"
-    envs.disable_envs_cache()
-    assert lmhead_skinny_guard_permits(big, 5), "kill switch must permit"
-
-    os.environ[_DISABLE_VAR] = "0"
-    os.environ[_MAX_BYTES_VAR] = str(1024 * 1024 * 1024)
-    envs.disable_envs_cache()
+    _set_cap(1024 * 1024 * 1024)
     assert lmhead_skinny_guard_permits(big, 5), "raised cap must permit"
 
-    os.environ.pop(_DISABLE_VAR, None)
-    os.environ.pop(_MAX_BYTES_VAR, None)
-    envs.disable_envs_cache()
+    _set_cap(128 * 1024 * 1024)
+    assert not lmhead_skinny_guard_permits(big, 5), "lowered cap must gate"
+
+    _set_cap(None)
+    assert not lmhead_skinny_guard_permits(big, 5), "default cap must gate"
 
 
 def test_census_warning_fires_once_per_site(caplog):
@@ -162,12 +161,13 @@ def test_census_warning_fires_once_per_site(caplog):
     assert "32320" in warns[0].message and "n=5" in warns[0].message
 
 
-@pytest.mark.parametrize("disabled,expect_skinny", [(False, False), (True, True)])
-def test_n5_big_weight_dispatch(disabled, expect_skinny):
-    """The draft-lm_head shape (n=5, >256 MiB): the guard redirects to the
-    generic hipBLASLt GEMM (the same kernel class its n=6 verify twin
-    dispatches to); the kill switch restores the stock wvSplitK path."""
-    _set_guard("1" if disabled else None)
+@pytest.mark.parametrize("cap_gib,expect_skinny", [(None, False), (1, True)])
+def test_n5_big_weight_dispatch(cap_gib, expect_skinny):
+    """The draft-lm_head shape (n=5, >256 MiB): under the default cap the
+    guard redirects to the generic hipBLASLt GEMM (the same kernel class
+    its n=6 verify twin dispatches to); a raised cap keeps the stock
+    wvSplitK path."""
+    _set_cap(cap_gib * 1024 * 1024 * 1024 if cap_gib else None)
     w = _weight(BIG_SHAPE)
     x = _x(5, BIG_SHAPE[1])
     ref = torch.nn.functional.linear(x, w)
@@ -189,18 +189,18 @@ def test_n5_big_weight_dispatch(disabled, expect_skinny):
     ],
 )
 def test_guard_no_op_where_it_must_be(shape, n, expect_skinny):
-    """The guard must not touch dispatch outside its window, in BOTH guard
-    states: n=6 (above the skinny branch) and small weights (below the
-    byte cap)."""
+    """The guard must not touch dispatch outside its window, under the
+    default cap AND a raised one: n=6 (above the skinny branch) and small
+    weights (below the byte cap)."""
     w = _weight(shape)
     x = _x(n, shape[1])
     ref = torch.nn.functional.linear(x, w)
-    for guard_state in (None, "1"):
-        _set_guard(guard_state)
+    for cap_gib in (None, 1):
+        _set_cap(cap_gib * 1024 * 1024 * 1024 if cap_gib else None)
         _skinny_guard_warned.clear()
         kernels = _launched_kernels(lambda: rocm_unquantized_gemm_impl(x, w, None))
         assert _has_wvsplitk_hf_sml(kernels) == expect_skinny, (
-            f"guard_state={guard_state}: skinny dispatch changed for "
+            f"cap={cap_gib} GiB: skinny dispatch changed for "
             f"shape={shape} n={n}; kernels={kernels}"
         )
     out = rocm_unquantized_gemm_impl(x, w, None)

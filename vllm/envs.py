@@ -309,8 +309,6 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
-    VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM: bool = False
-    VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD: bool = False
     VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES: int = 256 * 1024 * 1024
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
@@ -2139,16 +2137,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
         int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
     ),
-    # AMD MI355X (gfx950) DeepSeek-V4.x decode fastpaths: each lever defaults
-    # to ON; the VLLM_DEBUG_DISABLE_* kill switches restore the stock path.
-    "VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM": lambda: bool(
-        int(os.getenv("VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM", "0"))
-    ),
-    "VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD": lambda: bool(
-        int(os.getenv("VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD", "0"))
-    ),
-    # wvSplitK skinny-GEMM weight cap: the K-shard re-read makes the
-    # path a loss above L2-sized weights (measured at TP4 on MI355X).
+    # Size cap for the lm_head skinny-GEMM (wvSplitK) weight guard: weights
+    # larger than this skip the skinny path at 1 < n <= 5 (see
+    # vllm.model_executor.layers.utils.lmhead_skinny_guard_permits).
+    # wvSplitK re-reads the weight once per K-shard, so past the
+    # cache-resident regime the re-read costs more than the split-K launch
+    # saves. The 256 MiB default is the measured crossover for the
+    # DeepSeek-V4.1-Flash TP=4 decode shapes on MI355X (gfx950): the
+    # [32320, 5120] draft lm_head shard (~315 MiB) is the site that
+    # motivated the guard, and weights below the cap keep winning on
+    # wvSplitK. Raise it only if profiling shows wvSplitK still winning on
+    # a larger weight at your serving point; set it very large (e.g.
+    # 2**60) to disable the guard. It is deliberately not derived from the
+    # device properties: gfx950 exposes a 4 MiB per-XCD L2, far below the
+    # measured crossover, so a hardware-derived cap would disable the
+    # fastpath on the shapes where it wins.
     "VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES": lambda: int(
         os.getenv("VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES", str(256 * 1024 * 1024))
     ),

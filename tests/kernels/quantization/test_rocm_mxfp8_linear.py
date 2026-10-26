@@ -14,8 +14,7 @@ They also cover the tiny-M fused quant+GEMM fastpath of
 the packed GEMM's K loop): bit-exactness with the stock two-launch
 ``mxfp8_e4m3_quantize`` + ``rocm_mxfp8_block32_gemm`` path at the serving
 shapes and under CUDA-graph capture/replay, agreement with a high-precision
-QDQ fp32 reference, and bit-identical fallbacks for ineligible inputs and the
-``VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM=1`` kill switch.
+QDQ fp32 reference, and bit-identical fallbacks for ineligible inputs.
 """
 
 import pytest
@@ -439,28 +438,6 @@ def test_rocm_mxfp8_fused_quant_fallbacks_match_stock():
     x0 = torch.randn(0, k, device="cuda", dtype=torch.bfloat16)
     out = rocm_mxfp8_block32_gemm_quant(x0, weight, weight_scale, torch.bfloat16)
     assert out.shape == (0, n)
-
-
-def test_rocm_mxfp8_fused_quant_kill_switch(monkeypatch):
-    """VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM=1 restores the two-launch
-    path."""
-    from vllm.model_executor.kernels.linear.mxfp8 import rocm_block32_gemm as g
-
-    n, k, m = 256, 512, 3  # unique shape for an unambiguous ledger check
-    weight, weight_scale = _make_block32_weight(n, k, "cuda", seed=13)
-    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * 0.5
-    expected = _stock(x, weight, weight_scale)
-
-    monkeypatch.setenv("VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM", "1")
-    g._FUSED_QUANT_ENV_OK = None  # reset the cached decision
-    try:
-        with torch.inference_mode():
-            out = rocm_mxfp8_block32_gemm_quant(x, weight, weight_scale, torch.bfloat16)
-        assert not _fused_quant_hit(m, n, k), "kill switch did not disable the fastpath"
-        assert torch.equal(out, expected), "disabled path differs from stock"
-    finally:
-        monkeypatch.delenv("VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM")
-        g._FUSED_QUANT_ENV_OK = None
 
 
 @torch.inference_mode()

@@ -331,30 +331,39 @@ def maybe_pad_weight_avoid_cache_aliasing(weight: torch.Tensor) -> torch.Tensor:
 _skinny_guard_warned: set[tuple[tuple[int, ...], int]] = set()
 
 
+@functools.lru_cache(maxsize=1)
+def _skinny_gemm_max_weight_bytes() -> int:
+    """VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES, evaluated once.
+
+    lmhead_skinny_guard_permits runs per decode step, so the env var is
+    read on the first call only (env access in hot paths: #17067). Tests
+    that change the env var must call cache_clear().
+    """
+    return envs.VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES
+
+
 def lmhead_skinny_guard_permits(weight: torch.Tensor, n: int) -> bool:
     """Should this weight still take the wvSplitK skinny path at n?
 
-    wvSplitK_hf_sml re-reads the weight matrix once per K-shard, so its
-    effective bandwidth collapses on weights far larger than L2 (MI355X
+    wvSplitK_hf_sml re-reads the weight matrix once per K-shard, so past
+    the cache-resident regime its effective bandwidth collapses (MI355X
     measurements in the PR description). Weights above
-    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES (default 256 MiB) therefore skip the
-    skinny path at 1 < n <= 5 and fall through to the generic GEMM.
+    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES (default 256 MiB, the measured
+    DeepSeek-V4.1-Flash TP=4 crossover; see envs.py for what the cap
+    controls and how to tune it) therefore skip the skinny path at
+    1 < n <= 5 and fall through to the generic GEMM.
 
     n == 1 always keeps wvSplitK: the n=1 kernel variant shows no
     pathology on large weights, and its fall-through would be a numerics
     change with no speed win, so single-row calls stay on the stock path.
 
-    Returns True (keep wvSplitK) when the guard is disabled via
-    VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD, when n <= 1, or when the
-    weight is under the cap; otherwise returns False after emitting a
-    census WARNING (once per (shape, n) per process) naming the redirected
-    site.
+    Returns True (keep wvSplitK) when n <= 1 or the weight is under the
+    cap; otherwise returns False after emitting a census WARNING (once per
+    (shape, n) per process) naming the redirected site.
     """
     if n <= 1:
         return True
-    if envs.VLLM_DEBUG_DISABLE_LMHEAD_SKINNY_GEMM_GUARD:
-        return True
-    max_bytes = envs.VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES
+    max_bytes = _skinny_gemm_max_weight_bytes()
     if weight.nbytes <= max_bytes:
         return True
     key = (tuple(weight.shape), n)

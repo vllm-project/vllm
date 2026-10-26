@@ -46,7 +46,6 @@ The packed kernel and the in-launch split-K reduction on one XCD
 adapted from the group32 GEMM in ROCm/aiter#5750.
 """
 
-import os
 from typing import NamedTuple
 
 import torch
@@ -937,25 +936,14 @@ def rocm_mxfp8_block32_gemm(
 # --- tiny-M fused quant+GEMM ------------------------------------------------
 # At M <= 8 (decode-sized batches) the fused kernel below computes the
 # activation quant inside the GEMM's K loop, saving one launch and its
-# global round-trip per call. VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM=1
-# restores the two-launch path (identical results).
+# global round-trip per call.
 
 _TINY_M_FUSED_QUANT_MAX_M = 8
 # Shared with _mxfp8_quant_triton_kernel (the bit-exactness contract).
 _FP8_MAX = float(torch.finfo(torch.float8_e4m3fn).max)
 _FP32_TINY = float(torch.finfo(torch.float32).tiny)
 
-_FUSED_QUANT_ENV_OK: bool | None = None
 _FUSED_QUANT_HIT_SHAPES: set = set()
-
-
-def _fused_quant_env_ok() -> bool:
-    global _FUSED_QUANT_ENV_OK
-    if _FUSED_QUANT_ENV_OK is None:
-        _FUSED_QUANT_ENV_OK = (
-            os.environ.get("VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM", "0") != "1"
-        )
-    return _FUSED_QUANT_ENV_OK
 
 
 def _rocm_mxfp8_block32_gemm_quant_impl(
@@ -973,10 +961,9 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
     ``tl.dot_scaled`` from registers -- bit-identical output to
     ``mxfp8_e4m3_quantize`` + ``rocm_mxfp8_block32_gemm`` with one launch
     fewer on the decode critical path. Everything else (larger M,
-    non-packed tiles, non-contiguous or non-bf16/fp16 x, or
-    ``VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM=1``) runs the stock two-launch
-    path with identical results. The branch is inside this opaque op so a
-    compiled caller cannot freeze the token-count decision.
+    non-packed tiles, or non-contiguous or non-bf16/fp16 x) runs the stock
+    two-launch path with identical results. The branch is inside this
+    opaque op so a compiled caller cannot freeze the token-count decision.
     """
     M, K = x.shape
     out = torch.empty((M, weight.shape[0]), dtype=out_dtype, device=x.device)
@@ -989,10 +976,10 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
         and x.dtype in (torch.bfloat16, torch.float16)
         and x.is_contiguous()
     )
-    if eligible and _fused_quant_env_ok():
+    if eligible:
         # Retuned tiling for the in-kernel quant prologue (same K-structure
-        # as the stock tier at M, so bit-exactness holds); the DISABLED and
-        # stock paths below keep the stock config untouched.
+        # as the stock tier at M, so bit-exactness holds); the stock path
+        # below keeps the stock config untouched.
         fused_cfg = _fused_quant_config(M, weight.shape[0], K)
         shape = (M, weight.shape[0], K)
         if shape not in _FUSED_QUANT_HIT_SHAPES:
@@ -1017,12 +1004,6 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
             )
         _launch(x, None, weight, weight_scale, out, fused_cfg, quant_in_kernel=True)
     else:
-        if eligible:
-            logger.warning_once(
-                "tiny-M fused MXFP8 quant+GEMM fastpath is DISABLED (env "
-                "override VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM=1); using "
-                "separate mxfp8_e4m3_quantize + block32 GEMM launches"
-            )
         x_q, x_scale = mxfp8_e4m3_quantize(x)
         _launch(x_q, x_scale, weight, weight_scale, out, cfg)
     return out
@@ -1055,8 +1036,7 @@ def rocm_mxfp8_block32_gemm_quant(
     """``x @ weight.T`` for a raw bf16/fp16 ``x`` [M, K] and a 32x32
     block-scaled MXFP8 ``weight`` [N, K] with ``weight_scale``
     [N / 32, K / 32]. Tiny-M batches quantize inside the packed GEMM (see
-    ``_rocm_mxfp8_block32_gemm_quant_impl``); the kill switch is
-    ``VLLM_DEBUG_DISABLE_FUSED_MXFP8_QUANT_GEMM=1``.
+    ``_rocm_mxfp8_block32_gemm_quant_impl``).
     """
     return torch.ops.vllm.rocm_mxfp8_block32_gemm_quant(
         x, weight, weight_scale, out_dtype
