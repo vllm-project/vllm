@@ -3091,6 +3091,41 @@ def test_basic_prefix_caching_disabled():
     assert not blocks
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_pending_prefix_load_pins_blocks_without_a_readable_cache_hit(failed):
+    """The transfer owns its destinations even after all request refs disappear."""
+    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
+    request = make_request("owner", list(range(32)), 16, sha256)
+    block_hash = request.block_hashes[-1]
+    key = make_block_hash_with_group_id(block_hash, 0)
+    blocks = pool.get_new_blocks(2)
+    load = pool.register_pending_prefix_load(key, "owner", blocks)
+    assert load is not None
+    assert pool.get_pending_prefix_load(key) is load
+    assert pool.find_pending_prefix_load(request.block_hashes, 0) is load
+    assert pool.find_pending_prefix_load(request.block_hashes[-1:], 0) is None
+    assert pool.get_cached_block(block_hash, [0]) is None
+    assert (
+        pool.get_pending_prefix_load(make_block_hash_with_group_id(block_hash, 1))
+        is None
+    )
+    assert pool.register_pending_prefix_load(key, "duplicate", blocks) is None
+    assert all(block.ref_cnt == 2 for block in blocks)
+
+    pool.free_blocks(blocks)
+    assert all(block.ref_cnt == 1 for block in blocks)
+    assert not pool.reset_prefix_cache()
+    other_blocks = pool.get_new_blocks(1)
+    assert set(b.block_id for b in other_blocks).isdisjoint(b.block_id for b in blocks)
+    pool.free_blocks(other_blocks)
+    load.failed = failed
+    assert (pool.get_pending_prefix_load(key) is None) == failed
+    pool.release_pending_prefix_load(load)
+    assert pool.get_pending_prefix_load(key) is None
+    assert all(block.ref_cnt == 0 and block.block_hash is None for block in blocks)
+    assert pool.reset_prefix_cache()
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_cache_blocks(hash_fn):
     """This is a unit test that tests the correctness of the _cache_full_blocks

@@ -95,6 +95,24 @@ vllm serve <model> \
   }'
 ```
 
+## Concurrent requests sharing a prefix
+
+With prefix caching enabled, the built-in `CPUOffloadingSpec` and built-in
+`lru` or `arc` policy automatically share an in-progress CPU-to-GPU load across
+eligible concurrent requests. They use the same GPU prefix blocks and wait for
+one logical load. No additional configuration is required. Cancelling the
+request that initiated the load does not cancel it for the remaining readers.
+Transfer failures follow the configured KV-load failure policy; failed blocks
+are not published as reusable prefix-cache entries.
+
+Sharing requires an exact, contiguous, block-aligned prefix shorter than the
+request, one full-attention KV cache group, and matching hash/allocation block
+sizes. Cache salts and other prefix-cache isolation rules still apply. This
+initial support excludes full-prompt loads, speculative decoding, context
+parallelism, encoder inputs, auxiliary outputs such as routed experts,
+custom specs or cache policies, and other connectors including NIXL and
+`TieringOffloadingSpec`. Those configurations retain their existing behavior.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
