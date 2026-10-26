@@ -221,6 +221,30 @@ def test_loaded_groups_follow_the_connector_serving_the_request(mc, chosen):
     mc._connectors[1 - chosen].get_loaded_kv_cache_group_ids.assert_not_called()
 
 
+def test_child_handle_stored_without_a_prior_handle_stays_with_that_child(mc):
+    """Siblings never see another child's handle, even one created late."""
+    request = create_request()
+    seen: list[object] = []
+
+    def store_handle(req, num_computed_tokens):
+        seen.append(req.kv_preschedule_handle)
+        req.kv_preschedule_handle = "lookup"
+        return 0, False
+
+    def record_handle(req, num_computed_tokens):
+        seen.append(req.kv_preschedule_handle)
+        return 0, False
+
+    mc._connectors[0].get_num_new_matched_tokens.side_effect = store_handle
+    mc._connectors[1].get_num_new_matched_tokens.side_effect = record_handle
+
+    mc.get_num_new_matched_tokens(request, 0)
+    mc.get_num_new_matched_tokens(request, 0)
+
+    assert seen == [None, None, "lookup", None]
+    assert request.kv_preschedule_handle.handles == ["lookup", None]
+
+
 def test_multi_connector_mem_pool_context_none(mc: MultiConnector):
     assert mc.get_mem_pool_context() is None
 

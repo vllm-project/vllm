@@ -462,20 +462,24 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def _child_preschedule_handle(
         self, request: "Request", index: int
     ) -> Iterator[None]:
-        """Expose this child's handle and preserve its consumption on return."""
+        """Expose this child's handle and keep the one it leaves on return."""
         state = request.kv_preschedule_handle
-        if state is None:
-            yield
-            return
-        assert isinstance(state, MultiKVConnectorPrescheduleHandle)
-        request.kv_preschedule_handle = state.handles[index]
+        if state is not None:
+            assert isinstance(state, MultiKVConnectorPrescheduleHandle)
+            request.kv_preschedule_handle = state.handles[index]
         try:
             yield
         finally:
-            state.handles[index] = request.kv_preschedule_handle
-            request.kv_preschedule_handle = (
-                state if any(h is not None for h in state.handles) else None
-            )
+            handle = request.kv_preschedule_handle
+            if state is None and handle is not None:
+                state = MultiKVConnectorPrescheduleHandle(
+                    [None] * len(self._connectors)
+                )
+            if state is not None:
+                state.handles[index] = handle
+                if not any(h is not None for h in state.handles):
+                    state = None
+            request.kv_preschedule_handle = state
 
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
         index = self._requests_to_connector[request.request_id]
