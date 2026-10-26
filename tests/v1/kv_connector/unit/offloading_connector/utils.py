@@ -100,7 +100,11 @@ class MockOffloadingWorker(OffloadingWorker):
         return True
 
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: LoadStoreSpec,
+        expedited: bool = False,
     ) -> bool:
         self.transfer_specs[job_id] = (src_spec, dst_spec)
         self.waiting_jobs.add(job_id)
@@ -187,10 +191,10 @@ class RequestRunner:
         retention_interval: int | None = None,
         speculative_config: Any | None = None,
     ):
-        assert blocks_per_chunk == 1 or kv_cache_groups is None, (
-            "blocks_per_chunk > 1 requires all groups to have the same "
-            "block size, so kv_cache_groups must be None (use default group)"
-        )
+        assert blocks_per_chunk == 1 or all(
+            group.kv_cache_spec.block_size == block_size
+            for group in kv_cache_groups or ()
+        ), "blocks_per_chunk > 1 requires every group to use block_size"
 
         self.blocks_per_chunk: int = blocks_per_chunk
         self.block_size: int = block_size
@@ -373,8 +377,12 @@ class RequestRunner:
         token_ids: list[int],
         kv_transfer_params: dict | None = None,
         skip_reading_prefix_cache: bool = False,
+        req_id: str | None = None,
+        resumable: bool = False,
     ):
-        self.req_id += 1
+        if req_id is None:
+            self.req_id += 1
+            req_id = str(self.req_id)
 
         sampling_params = SamplingParams(
             max_tokens=1000,
@@ -383,11 +391,12 @@ class RequestRunner:
         sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
         req = Request(
-            request_id=str(self.req_id),
+            request_id=req_id,
             prompt_token_ids=token_ids,
             sampling_params=sampling_params,
             pooling_params=None,
             block_hasher=self._block_hasher,
+            resumable=resumable,
         )
         if kv_transfer_params is not None:
             req.kv_transfer_params = kv_transfer_params

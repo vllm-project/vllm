@@ -936,7 +936,10 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     partition reclaims the storages of earlier cudagraph recordings once the
     real capture records new ones, leading to use-after-free crashes).
     """
-    if runner.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+    if (
+        runner.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        and not runner.needs_cudagraph_capture()
+    ):
         return 0
 
     gc.collect()
@@ -974,7 +977,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         uncaptured_graph_memory = 0
         graph_memory = 0
         try:
-            if not manager.needs_capture():
+            if not runner.needs_cudagraph_capture():
                 return 0
             manager.pool = throwaway_pool
             if manager.use_breakable_cg:
