@@ -4,12 +4,44 @@ import pytest
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
+from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize(
+    "manager_cls", [EncoderCacheManager, EncoderDecoderCacheManager]
+)
+@pytest.mark.parametrize("num_encoder_tokens", [None, 12])
+def test_pruned_encoder_compute_and_cache_budgets(manager_cls, num_encoder_tokens):
+    """Pruning reduces cache occupancy but not the encoder's compute cost."""
+    manager = manager_cls(cache_size=4)
+    request = Request(
+        request_id="pruned",
+        prompt_token_ids=[0] * 4,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=None,
+                modality="video",
+                identifier="video",
+                mm_position=PlaceholderRange(
+                    offset=0, length=4, num_encoder_tokens=num_encoder_tokens
+                ),
+            )
+        ],
+    )
+    compute_tokens = num_encoder_tokens or 4
+    assert not manager.can_allocate(request, 0, compute_tokens - 1, 0)
+    assert manager.can_allocate(request, 0, compute_tokens, 0)
+    manager.allocate(request, 0)
+    assert manager.num_free_slots == 0
 
 
 # ------------------ Mock Classes ------------------ #

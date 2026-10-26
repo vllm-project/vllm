@@ -83,6 +83,84 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+def test_pruned_encoder_budget_with_duplicate_inputs():
+    """Charge the unpruned cost once per unique encoder input in a step."""
+    scheduler = create_scheduler(model="Qwen/Qwen3-VL-2B-Instruct")
+    compute_tokens = scheduler.max_num_encoder_input_tokens // 2 + 1
+    positions = [
+        [PlaceholderRange(offset=0, length=4, num_encoder_tokens=compute_tokens)]
+        for _ in range(3)
+    ]
+    requests = create_requests(
+        num_requests=3,
+        num_tokens=4,
+        mm_positions=positions,
+        mm_hashes_list=[["shared"], ["shared"], ["other"]],
+    )
+    for request in requests:
+        scheduler.add_request(request)
+    free_slots = scheduler.encoder_cache_manager.num_free_slots
+    output = scheduler.schedule()
+    assert output.scheduled_encoder_inputs == {requests[0].request_id: [0]}
+    assert set(output.num_scheduled_tokens) == {
+        requests[0].request_id,
+        requests[1].request_id,
+    }
+    assert scheduler.encoder_cache_manager.num_free_slots == free_slots - 4
+
+
+def test_preemption_restores_unpruned_encoder_budget():
+    scheduler = create_scheduler_with_priority(
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        max_num_batched_tokens=200,
+        max_model_len=1024,
+        num_blocks=7,
+        block_size=16,
+    )
+    compute_tokens = scheduler.max_num_encoder_input_tokens
+    low = create_requests_with_priority(
+        1,
+        priorities=[5],
+        req_ids=["low"],
+        num_tokens=48,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=i, length=1, num_encoder_tokens=compute_tokens)
+                for i in (0, 32, 34)
+            ]
+        ],
+    )[0]
+    scheduler.add_request(low)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"low": 32}
+    _model_output(scheduler, output, [[]])
+
+    high = create_requests_with_priority(
+        1, priorities=[0], req_ids=["high"], num_tokens=32
+    )[0]
+    scheduler.add_request(high)
+    later = create_requests_with_priority(
+        1,
+        priorities=[1],
+        req_ids=["later"],
+        num_tokens=5,
+        mm_hashes_list=[["new"]],
+        mm_positions=[
+            [PlaceholderRange(offset=1, length=1, num_encoder_tokens=compute_tokens)]
+        ],
+    )[0]
+    scheduler.add_request(later)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"low": 2, "high": 32, "later": 1}
+    _model_output(scheduler, output, [[], [100], []])
+
+    output = scheduler.schedule()
+    # High needs another KV block after low's encoder input was scheduled.
+    assert low.status == RequestStatus.PREEMPTED
+    assert output.scheduled_encoder_inputs == {"later": [0]}
+    assert set(output.num_scheduled_tokens) == {"high", "later"}
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [

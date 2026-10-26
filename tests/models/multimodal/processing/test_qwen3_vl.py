@@ -24,6 +24,39 @@ from ...utils import build_model_context
 MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
 
 
+@pytest.mark.parametrize("pruning_method", ["evs", "vidcom2"])
+@pytest.mark.parametrize("pruning_rate", [0.0, 0.75])
+def test_video_pruning_preserves_encoder_compute_cost(pruning_method, pruning_rate):
+    ctx = build_model_context(
+        MODEL_ID,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+        mm_processor_cache_gb=1,
+        model_config_kwargs={
+            "video_pruning_rate": pruning_rate,
+            "video_pruning_method": pruning_method,
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    mm_items = processor.info.parse_mm_data(_build_video_mm_data(num_frames=16))
+    for _ in range(2):
+        result = processor(
+            "<|vision_start|><|video_pad|><|vision_end|>",
+            mm_items=mm_items,
+            hf_processor_mm_kwargs={"num_frames": 16},
+            cache=cache,
+        )
+        position = result["mm_placeholders"]["video"][0]
+        grid = result["mm_kwargs"].get_data()["video_grid_thw"][0]
+        merge_size = processor.info.get_hf_config().vision_config.spatial_merge_size
+        compute_tokens = int(grid.prod()) // merge_size**2
+        assert position.get_num_encoder_tokens() == compute_tokens
+        if pruning_rate:
+            assert position.get_num_embeds() < compute_tokens
+        else:
+            assert position.get_num_embeds() == compute_tokens
+
+
 def test_qwen3_video_routing_schema_adds_vllm_compatibility_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

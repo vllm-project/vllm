@@ -190,6 +190,9 @@ class PromptUpdateDetails:
     [`SupportsMultiModal.embed_multimodal`][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal].
     """
 
+    num_encoder_tokens: int | None = None
+    """Encoder compute cost before pruning, in output-token units."""
+
     @staticmethod
     def from_seq(seq: list[int]) -> "PromptUpdateDetails":
         return PromptUpdateDetails(full=seq)
@@ -582,6 +585,7 @@ class PlaceholderFeaturesInfo:
     start_idx: int
     tokens: list[int]
     is_embed: torch.Tensor | None
+    num_encoder_tokens: int | None = None
 
     @property
     def length(self) -> int:
@@ -594,6 +598,7 @@ class PlaceholderFeaturesInfo:
             offset=self.start_idx,
             length=self.length,
             is_embed=self.is_embed,
+            num_encoder_tokens=self.num_encoder_tokens,
         )
 
 
@@ -890,6 +895,7 @@ def _apply_token_matches_with_placeholders(
                     start_idx=start_idx,
                     tokens=tokens,
                     is_embed=content_is_embed,
+                    num_encoder_tokens=update.content.num_encoder_tokens,
                 )
             )
             new_token_ids.extend(tokens)
@@ -963,6 +969,7 @@ def _iter_placeholders(
                     start_idx=start_idx,
                     tokens=content_tokens_full,
                     is_embed=content_is_embed,
+                    num_encoder_tokens=content.num_encoder_tokens,
                 )
 
                 # Exclude overlapping matches

@@ -364,6 +364,10 @@ video, and `--video-pruning-method` to choose the training-free algorithm:
   video-level and frame-level feature centers and gives distinctive frames a
   larger share of the budget. At least one token per frame is retained.
 
+Pruning does not reduce the input processed by the vision encoder. The scheduler
+budgets encoder computation using the encoder output token count before pruning,
+while the encoder cache stores only the retained embeddings.
+
 ```bash
 vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --video-pruning-rate 0.75 --video-pruning-method vidcom2
