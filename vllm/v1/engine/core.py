@@ -1001,7 +1001,7 @@ class EngineCore:
                 f"{self._checkpoint_state}"
             )
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
-        if self._checkpoint_state == CheckpointState.RESUMING:
+        if self._checkpoint_state == CheckpointState.RESTORING:
             self._checkpoint_state = CheckpointState.RUNNING
 
     def is_scheduler_paused(self) -> bool:
@@ -2311,9 +2311,9 @@ class EngineCoreProc(EngineCore):
         if state.is_restored:
             return
         if state != CheckpointState.PREPARED:
-            raise RuntimeError(f"Cannot resume while the checkpoint state is {state}")
-        logger.info("Resuming from a process checkpoint")
-        self._checkpoint_state = CheckpointState.RESUMING
+            raise RuntimeError(f"Cannot restore while the checkpoint state is {state}")
+        logger.info("Restoring from a process checkpoint")
+        self._checkpoint_state = CheckpointState.RESTORING
         try:
             self.collective_rpc("checkpoint_restore")
             self.wake_up(["kv_cache"])

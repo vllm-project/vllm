@@ -390,7 +390,7 @@ class ModelConfig:
     (the default) sleep still releases weights/KV-cache memory as before."""
     checkpoint_prepare_on_startup: bool = False
     """Prepare each engine for a process checkpoint once it starts, as
-    `/checkpoint/prepare` does. It serves only after `/checkpoint/resume`.
+    `/checkpoint/prepare` does. It serves only after `/checkpoint/restore`.
     Requires sleep mode."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory

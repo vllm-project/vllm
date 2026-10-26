@@ -1848,7 +1848,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             return next(iter(states)), None
         if CheckpointState.PREPARING in states:
             return CheckpointState.PREPARING, None
-        return CheckpointState.RESUMING, None
+        return CheckpointState.RESTORING, None
 
     @staticmethod
     async def process_engine_outputs(

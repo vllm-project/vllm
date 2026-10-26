@@ -65,11 +65,12 @@ def register_api_routers(
 
         elastic_ep_attach_router(app)
 
-        from vllm.entrypoints.serve.checkpoint.api_router import (
-            attach_router as checkpoint_attach_router,
-        )
+        if model_config is not None and model_config.enable_sleep_mode:
+            from vllm.entrypoints.serve.checkpoint.api_router import (
+                attach_router as checkpoint_attach_router,
+            )
 
-        checkpoint_attach_router(app)
+            checkpoint_attach_router(app)
 
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers

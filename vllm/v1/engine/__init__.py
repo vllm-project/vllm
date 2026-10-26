@@ -51,13 +51,14 @@ class CheckpointState(enum.StrEnum):
     # Safe to capture.
     PREPARED = "prepared"
     # Bringing back what preparing released.
-    RESUMING = "resuming"
+    RESTORING = "restoring"
     FAILED = "failed"
 
     @property
     def is_restored(self) -> bool:
-        """Whether released state is back, so memory may wake and scheduling resume."""
-        return self in (CheckpointState.RUNNING, CheckpointState.RESUMING)
+        """Whether released state is back or coming back, so memory may wake and
+        scheduling resume."""
+        return self in (CheckpointState.RUNNING, CheckpointState.RESTORING)
 
 
 class EEPNotificationType(enum.Enum):
