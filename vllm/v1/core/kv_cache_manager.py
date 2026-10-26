@@ -883,9 +883,9 @@ class KVCacheManager:
         """Drain this step's boundary-state hand-offs for a KV connector.
 
         Returns ``{request_id: [(group_id, block_id, boundary_tokens), ...]}``
-        for mamba "align" boundary states: the
+        for mamba boundary states: the
         request's committed boundary-state snapshots and, on a sub-block partial
-        hit, the CoW copy of its last-prompt-boundary state. Only mamba "align"
+        hit, the CoW copy of its last-prompt-boundary state. Only mamba
         groups contribute; empty otherwise. A connector reads the referenced
         blocks — never resolving them positionally — and offloads them so a
         later request can hit that prefix.

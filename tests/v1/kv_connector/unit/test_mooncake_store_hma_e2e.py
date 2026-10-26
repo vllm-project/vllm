@@ -401,7 +401,6 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     groups = [
         KVCacheGroupSpec(["L0"], full),
@@ -487,7 +486,6 @@ def test_offload_syncs_event_before_put():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     groups = [
         KVCacheGroupSpec(["L0"], full),
@@ -565,7 +563,6 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     groups = [
         KVCacheGroupSpec(["L0"], full),
@@ -653,7 +650,6 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     cfg = KVCacheConfig(
         num_blocks=4,
@@ -741,7 +737,6 @@ def test_worker_setup_tolerates_finer_scratch_group():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     # Scratch block 4 is not divisible by the hash unit 8 below.
     scratch = CircularBufferSpec(

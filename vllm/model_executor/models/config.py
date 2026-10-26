@@ -761,14 +761,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
 
         if cache_config.enable_prefix_caching:
-            if cache_config.mamba_cache_mode == "none":
-                cache_config.mamba_cache_mode = "align"
-                logger.info(
-                    "Mamba cache mode is set to '%s' for %s by default "
-                    "when prefix caching is enabled",
-                    cache_config.mamba_cache_mode,
-                    model_config.architecture,
-                )
             assert vllm_config.scheduler_config.enable_chunked_prefill, (
                 "Chunked prefill is required for Mamba prefix caching."
             )
@@ -777,14 +769,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             # to the block size as the basic granularity for prefix caching.
             if cache_config.mamba_block_size is None:
                 cache_config.mamba_block_size = cache_config.block_size
-        else:
-            if cache_config.mamba_cache_mode != "none":
-                cache_config.mamba_cache_mode = "none"
-                logger.warning(
-                    "Mamba cache mode is set to 'none' when prefix caching is disabled"
-                )
-            if cache_config.mamba_block_size is None:
-                cache_config.mamba_block_size = model_config.max_model_len
+        elif cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
 
 class MiniMaxM3SparseForConditionalGenerationConfig(VerifyAndUpdateConfig):

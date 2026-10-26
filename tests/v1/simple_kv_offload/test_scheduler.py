@@ -21,7 +21,6 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
-from vllm.config.cache import MambaCacheMode
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
@@ -2497,7 +2496,6 @@ def _make_hybrid_attention_mamba_scheduler(
     hash_block_size: int | None = None,
     dcp_world_size: int = 4,
     lazy: bool = False,
-    mamba_cache_mode: MambaCacheMode = "align",
     enable_kv_cache_events: bool = False,
 ) -> SchedulerFixture:
     """Build a scheduler for one attention group plus one Mamba group."""
@@ -2511,7 +2509,6 @@ def _make_hybrid_attention_mamba_scheduler(
         block_size=block_size,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode=mamba_cache_mode,
     )
     return _make_two_group_scheduler(
         attention_spec,
@@ -2522,7 +2519,6 @@ def _make_hybrid_attention_mamba_scheduler(
         hash_block_size=hash_block_size or block_size,
         dcp_world_size=dcp_world_size,
         lazy=lazy,
-        mamba_cache_mode=mamba_cache_mode,
         enable_kv_cache_events=enable_kv_cache_events,
     )
 
@@ -2537,7 +2533,6 @@ def _make_two_group_scheduler(
     hash_block_size: int,
     dcp_world_size: int,
     lazy: bool = False,
-    mamba_cache_mode: MambaCacheMode = "align",
     enable_kv_cache_events: bool = False,
 ) -> SchedulerFixture:
     """Build a scheduler for one attention group plus one named second group."""
@@ -2562,7 +2557,6 @@ def _make_two_group_scheduler(
     )
     vllm_config = _make_cp_vllm_config(dcp_world_size=dcp_world_size)
     vllm_config.cache_config.prefix_cache_retention_interval = 0
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     if enable_kv_cache_events:
         vllm_config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
     # _derive_cpu_config() scales the requested capacity against

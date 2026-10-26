@@ -38,6 +38,7 @@ def _reserved_block_count(
     num_lookahead_tokens: int,
     max_model_len: int,
     max_encoder_len: int,
+    enable_prefix_caching: bool,
 ) -> int:
     """Number of blocks the scheduler would hold for a request of `num_tokens`.
 
@@ -55,10 +56,11 @@ def _reserved_block_count(
         return cdiv(max_encoder_len, kvcache_spec.block_size)
     num_speculative_blocks = 0
     if isinstance(kvcache_spec, MambaSpec):
-        # MambaManager appends speculative running-state blocks in every cache
-        # mode; align mode sizes from the uncapped, lookahead-free token range.
+        # MambaManager appends speculative running-state blocks either way;
+        # with prefix caching it sizes from the uncapped, lookahead-free token
+        # range.
         num_speculative_blocks = kvcache_spec.num_speculative_blocks
-        if kvcache_spec.mamba_cache_mode == "align":
+        if enable_prefix_caching:
             return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
     return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
@@ -71,6 +73,7 @@ def _warmup_block_counter(
     num_lookahead_tokens = model_runner.vllm_config.num_lookahead_tokens
     max_model_len = model_runner.max_model_len
     max_encoder_len = getattr(model_runner.model_state, "max_encoder_len", 0)
+    enable_prefix_caching = model_runner.vllm_config.cache_config.enable_prefix_caching
 
     def block_count(num_tokens: int, kvcache_spec: KVCacheSpec) -> int:
         return _reserved_block_count(
@@ -79,6 +82,7 @@ def _warmup_block_counter(
             num_lookahead_tokens=num_lookahead_tokens,
             max_model_len=max_model_len,
             max_encoder_len=max_encoder_len,
+            enable_prefix_caching=enable_prefix_caching,
         )
 
     return block_count

@@ -773,7 +773,7 @@ class ReqMeta:
     # would release the wrong job's blocks.
     store_job_id: int | None = None
     # Blocks stored under an explicit prefix hash rather than by position:
-    # core-provided mamba "align" states (a block-aligned entry is a committed
+    # core-provided mamba states (a block-aligned entry is a committed
     # snapshot, a non-aligned one the sub-block CoW prompt tail) and the
     # scheduler-resolved non-Mamba blocks of the prompt's partial tail. The
     # store-job reference keeps each block alive until every worker rank

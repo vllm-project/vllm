@@ -1284,19 +1284,19 @@ def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
     kv_cache_spec: KVCacheSpec,
-    mamba_cache_mode: str,
+    enable_prefix_caching: bool,
 ) -> torch.Tensor:
     """Get the block table tensor for mamba kernels from the input
-    common_attn_metadata.block_table_tensor given different mamba cache modes.
+    common_attn_metadata.block_table_tensor.
 
-    - "none":  input  (#requests, 1 + num_speculative_blocks);
-               output (#requests, 1 + num_speculative_blocks).
+    - Without prefix caching: input and output (#requests,
+      1 + num_speculative_blocks).
 
-    - "align": input  (#requests, cdiv(max_model_len, block_size));
-               output (#requests, 1 + num_speculative_blocks), which are the last
-               1 + num_speculative_blocks of each request.
+    - With prefix caching: input (#requests, cdiv(max_model_len, block_size));
+      output (#requests, 1 + num_speculative_blocks), which are the last
+      1 + num_speculative_blocks of each request.
     """
-    if mamba_cache_mode == "none":
+    if not enable_prefix_caching:
         return block_table
     else:
         assert isinstance(kv_cache_spec, MambaSpec)

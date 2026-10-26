@@ -1876,7 +1876,7 @@ class MooncakeConnectorWorker:
                 )
                 if is_mamba_group:
                     # Mamba/GDN prefix caching can use null blocks only as
-                    # align-mode placeholders. They do not carry transferable
+                    # placeholders. They do not carry transferable
                     # state, so skip them on both producer and consumer sides.
                     local_group = [
                         block_id

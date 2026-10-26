@@ -423,7 +423,7 @@ class Scheduler(SchedulerInterface):
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         self.need_mamba_block_aligned_split = (
-            self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+            self.has_mamba_layers and self.cache_config.enable_prefix_caching
         )
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
@@ -541,7 +541,7 @@ class Scheduler(SchedulerInterface):
     ) -> int:
         """Clip a prefill chunk so it ends where Mamba state must be cached.
 
-        In "align" cache mode reusable SSM states are materialized at block
+        With prefix caching, reusable SSM states are materialized at block
         boundaries, plus mandatory early stops (the prompt's partial-tail hash
         boundary, a detected shared-prefix junction). If a block is larger
         than the configured prefill chunk limit, intermediate chunks keep
@@ -888,7 +888,7 @@ class Scheduler(SchedulerInterface):
                 # 2. The encoder budget is exhausted.
                 # 3. The encoder cache is exhausted.
                 # 4. Insufficient budget for a block-aligned chunk in hybrid
-                #    models with mamba cache mode \"align\".
+                #    models with Mamba prefix caching.
                 # 5. Insufficient budget to keep a multi-module MTP prefill
                 #    chunk out of the prefill-lookahead window.
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
@@ -1649,7 +1649,7 @@ class Scheduler(SchedulerInterface):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        # Mamba "align" boundary states must be handed off with exact block ids;
+        # Mamba boundary states must be handed off with exact block ids;
         # they cannot be reconstructed from a connector's append-only block
         # table. Drained every step so stale offers cannot accumulate.
         boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()

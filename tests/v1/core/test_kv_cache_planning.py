@@ -1368,7 +1368,6 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
         block_size=block_size,
         shapes=((557056,),),
         dtypes=(torch.bfloat16,),
-        mamba_cache_mode="align",
     )
     hidden_spec = HiddenStateCacheSpec(
         block_size=block_size,
@@ -1580,6 +1579,8 @@ def test_auto_fit_max_model_len_with_hybrid():
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    # Without prefix caching a Mamba layer holds 1 + gamma blocks.
+    vllm_config.cache_config.enable_prefix_caching = False
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
     gamma = 2
@@ -1966,11 +1967,7 @@ def _hybrid_specs(draft=True):
     """Qwen3.5-shaped [GDN x3, full-attn] x2, plus an MTP full-attn layer."""
     specs = {}
     for i in range(8):
-        specs[f"layers.{i}"] = (
-            new_kv_cache_spec()
-            if i % 4 == 3
-            else new_mamba_spec(mamba_cache_mode="align")
-        )
+        specs[f"layers.{i}"] = new_kv_cache_spec() if i % 4 == 3 else new_mamba_spec()
     if draft:
         specs["mtp.0"] = _as_draft(new_kv_cache_spec())
     return specs

@@ -63,7 +63,7 @@ class _StubSpeculativeConfig:
 
 def _builder(
     num_prefill_checkpoint_blocks: int = 1,
-    mamba_cache_mode: str = "align",
+    enable_prefix_caching: bool = True,
     block_size: int = BLOCK_SIZE,
     prefix_match_unit: int | None = None,
     num_spec: int = 0,
@@ -71,7 +71,7 @@ def _builder(
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=block_size
     )
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     if num_spec:
         vllm_config.speculative_config = _StubSpeculativeConfig(num_spec)
@@ -80,7 +80,6 @@ def _builder(
             block_size=block_size,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
-            mamba_cache_mode=mamba_cache_mode,
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
             prefill_checkpoint_alignment=(
                 KDA_CHECKPOINT_ALIGNMENT if num_prefill_checkpoint_blocks else None
@@ -213,10 +212,10 @@ def test_spec_checkpoint_metadata_gathers_non_spec_rows_by_index() -> None:
     )
 
 
-def test_checkpoint_metadata_absent_outside_align_mode() -> None:
+def test_checkpoint_metadata_absent_without_prefix_caching() -> None:
     md = _build(
         BatchSpec(seq_lens=[200], query_lens=[200]),
-        mamba_cache_mode="none",
+        enable_prefix_caching=False,
     )
     assert getattr(md, "checkpoint", None) is None
 
@@ -488,7 +487,7 @@ def _spec_for(monkeypatch, **attrs) -> MambaSpec:
     ).items():
         setattr(layer, name, attrs.get(name, value))
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
-    vllm_config.cache_config.mamba_cache_mode = "align"
+    vllm_config.cache_config.enable_prefix_caching = True
     return layer.get_kv_cache_spec(vllm_config)
 
 

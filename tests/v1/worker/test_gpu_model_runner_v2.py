@@ -86,7 +86,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.parallel_config = parallel_config
     runner.vllm_config = SimpleNamespace(
         parallel_config=parallel_config,
-        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
     )
     runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.model_state = SimpleNamespace(
@@ -164,15 +164,15 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("mamba_cache_mode", "num_speculative_blocks", "expected"),
+    ("enable_prefix_caching", "num_speculative_blocks", "expected"),
     [
-        pytest.param("align", 0, 65_536, id="align-prefix-cache"),
-        pytest.param("none", 7, 8, id="no-prefix-cache-with-speculation"),
+        pytest.param(True, 0, 65_536, id="prefix-cache"),
+        pytest.param(False, 7, 8, id="no-prefix-cache-with-speculation"),
     ],
 )
 def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     monkeypatch,
-    mamba_cache_mode: str,
+    enable_prefix_caching: bool,
     num_speculative_blocks: int,
     expected: int,
 ):
@@ -191,7 +191,6 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
         shapes=((1,),),
         dtypes=(torch.bfloat16,),
         block_size=mamba_block_size,
-        mamba_cache_mode=mamba_cache_mode,
         num_speculative_blocks=num_speculative_blocks,
     )
     kv_cache_config = KVCacheConfig(
@@ -208,7 +207,7 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     )
     vllm_config = SimpleNamespace(
         parallel_config=parallel_config,
-        cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode),
+        cache_config=SimpleNamespace(enable_prefix_caching=enable_prefix_caching),
     )
     runner = SimpleNamespace(
         max_model_len=max_model_len,

@@ -119,7 +119,6 @@ def _mamba_spec(num_states: int = 2, *, num_speculative_blocks: int = 0):
         block_size=16,
         shapes=shapes,
         dtypes=(torch.float32,) * num_states,
-        mamba_cache_mode="align",
         num_speculative_blocks=num_speculative_blocks,
     )
 
@@ -135,7 +134,6 @@ def _gate_vllm_config(
     block_size: int = 16,
     num_lookahead_tokens: int = 0,
     num_speculative_tokens: int = 0,
-    mamba_cache_mode: str = "align",
     dcp_size: int = 1,
 ):
     return SimpleNamespace(
@@ -149,10 +147,7 @@ def _gate_vllm_config(
             kv_role="kv_consumer",
         ),
         speculative_config=speculative_config,
-        cache_config=SimpleNamespace(
-            block_size=block_size,
-            mamba_cache_mode=mamba_cache_mode,
-        ),
+        cache_config=SimpleNamespace(block_size=block_size),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         num_lookahead_tokens=num_lookahead_tokens,
         num_speculative_tokens=num_speculative_tokens,
@@ -182,7 +177,6 @@ def test_split_block_groups_ignores_transfer_disabled_group():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     config = SimpleNamespace(
         kv_cache_groups=[

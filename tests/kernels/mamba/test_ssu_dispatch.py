@@ -540,7 +540,9 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer._commits_replayssm_trackers = True
     mixer._updates_replayssm_trackers = False
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
-    mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
+    mixer.cache_config = SimpleNamespace(
+        mamba_block_size=16, enable_prefix_caching=False
+    )
     mixer.conv_weights = torch.empty(0)
     mixer.conv1d = SimpleNamespace(bias=None)
     mixer.activation = "silu"

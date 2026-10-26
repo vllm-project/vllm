@@ -272,7 +272,6 @@ def _hybrid_kv_cache_config() -> KVCacheConfig:
         block_size=16,
         shapes=((4,),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     return KVCacheConfig(
         num_blocks=8,

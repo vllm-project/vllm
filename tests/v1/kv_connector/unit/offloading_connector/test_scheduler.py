@@ -438,7 +438,7 @@ def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
     assert meta.jobs_to_flush == {job_id}
 
 
-def test_normal_store_excludes_align_mode_mamba_sources():
+def test_normal_store_excludes_mamba_sources():
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(scheduler)
     request.num_computed_tokens = 0
@@ -5830,7 +5830,6 @@ class TestMambaHybridOffloadServing:
                         block_size=self.MAMBA_BLOCK,
                         shapes=((1, 1),),
                         dtypes=(torch.float32,),
-                        mamba_cache_mode="align",
                     ),
                 ),
             ],

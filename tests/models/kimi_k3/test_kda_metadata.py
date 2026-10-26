@@ -96,7 +96,7 @@ def _make_builder(
     num_speculative_tokens: int,
     full_cuda_graph: bool,
     device: torch.device = DEVICE,
-    mamba_cache_mode: str = "none",
+    enable_prefix_caching: bool = False,
     use_recoverssm: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
     mamba_block_size: int = BLOCK_SIZE,
@@ -123,7 +123,7 @@ def _make_builder(
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     vllm_config.cache_config.use_replayssm = use_recoverssm
     vllm_config.cache_config.use_kda_recoverssm = use_recoverssm
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
@@ -137,7 +137,6 @@ def _make_builder(
             block_size=mamba_block_size,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
-            mamba_cache_mode=mamba_cache_mode,
             num_speculative_blocks=(0 if use_recoverssm else num_speculative_tokens),
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
             prefill_checkpoint_alignment=(
@@ -182,7 +181,6 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         shapes=KimiLinearForCausalLM.get_mamba_state_shape_from_config(layout_config),
         dtypes=KimiLinearForCausalLM.get_mamba_state_dtype_from_config(layout_config),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode="align",
         num_prefill_checkpoint_blocks=1,
         prefill_checkpoint_alignment=16,
     )
@@ -205,7 +203,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
             hf_text_config=SimpleNamespace(linear_key_head_dim=32),
         ),
         cache_config=SimpleNamespace(
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
             use_kda_recoverssm=True,
             prefix_match_unit=None,
         ),
@@ -247,7 +245,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         prefill_common.block_table_tensor,
         prefill_common.seq_lens,
         kv_cache_spec,
-        "align",
+        True,
     )
     prefill_metadata = builder.build(
         0,
@@ -276,7 +274,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         spec_common.block_table_tensor,
         spec_common.seq_lens,
         kv_cache_spec,
-        "align",
+        True,
     )
     recoverssm_context = Mock()
     with patch(
@@ -336,7 +334,7 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=0,
         full_cuda_graph=False,
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_prefill_checkpoint_blocks=1,
         prefix_match_unit=prefix_match_unit,
         cache_hit_alignment_tokens=hit_alignment,
@@ -348,7 +346,7 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
         common_attn_metadata.block_table_tensor,
         common_attn_metadata.seq_lens,
         builder.kv_cache_spec,
-        "align",
+        True,
     )
     actual = builder.build(0, common_attn_metadata)
 
@@ -408,7 +406,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=3,
         full_cuda_graph=False,
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_prefill_checkpoint_blocks=1,
         mamba_block_size=64,
         prefix_match_unit=prefix_match_unit,
@@ -421,7 +419,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         common_attn_metadata.block_table_tensor,
         common_attn_metadata.seq_lens,
         builder.kv_cache_spec,
-        "align",
+        True,
     )
     actual = builder.build(0, common_attn_metadata)
 
@@ -452,7 +450,7 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=0,
         full_cuda_graph=False,
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_prefill_checkpoint_blocks=1,
         prefix_match_unit=16,
         device=device,
@@ -462,7 +460,7 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
         common_attn_metadata.block_table_tensor,
         common_attn_metadata.seq_lens,
         builder.kv_cache_spec,
-        "align",
+        True,
     )
     actual = builder.build(0, common_attn_metadata)
 
@@ -630,13 +628,15 @@ def test_mixed_regular_and_spec_decode_excludes_request_padding():
     assert actual.spec_token_start == 1
 
 
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize(
+    "enable_prefix_caching", [False, True], ids=["no_prefix_caching", "prefix_caching"]
+)
 def test_recoverssm_spec_uses_one_state_slot_and_current_window(
-    mamba_cache_mode: str,
+    enable_prefix_caching: bool,
 ):
-    if mamba_cache_mode == "align" and not torch.cuda.is_available():
-        pytest.skip("align metadata construction requires CUDA")
-    device = torch.device("cuda") if mamba_cache_mode == "align" else DEVICE
+    if enable_prefix_caching and not torch.cuda.is_available():
+        pytest.skip("prefix-caching metadata construction requires CUDA")
+    device = torch.device("cuda") if enable_prefix_caching else DEVICE
     batch = BatchSpec(seq_lens=[100, 65, 20], query_lens=[1, 1, 3])
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device
@@ -646,16 +646,16 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
         num_speculative_tokens=2,
         full_cuda_graph=False,
         device=device,
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
         use_recoverssm=True,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)
-    if mamba_cache_mode == "align":
+    if enable_prefix_caching:
         builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
             common_attn_metadata.block_table_tensor,
             common_attn_metadata.seq_lens,
             builder.kv_cache_spec,
-            mamba_cache_mode,
+            enable_prefix_caching,
         )
     context = builder.recoverssm_context
     assert context is not None
@@ -683,7 +683,7 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
 
     postprocess = actual.commit_recoverssm_state(num_accepted_tokens)
 
-    if mamba_cache_mode == "none":
+    if not enable_prefix_caching:
         assert commit_metadata.align is None
         assert postprocess is None
     else:
@@ -904,7 +904,7 @@ def test_kimi_k3_metadata_uses_precomputed_aligned_state_indices():
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=2,
         full_cuda_graph=False,
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)
     precomputed_indices = torch.tensor(
@@ -1009,13 +1009,13 @@ def test_aligned_block_table_matches_shared_gdn():
         block_table,
         seq_lens,
         kv_cache_spec,
-        "align",
+        True,
     )
     actual = _mamba_get_block_table_tensor(
         block_table,
         seq_lens,
         kv_cache_spec,
-        "align",
+        True,
     )
 
     torch.testing.assert_close(actual, expected)

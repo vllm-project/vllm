@@ -391,7 +391,6 @@ def new_mamba_spec(
     shapes=((2, 512), (3, 32, 32)),
     dtypes=(torch.float32, torch.float32),
     num_speculative_blocks=2,
-    mamba_cache_mode="none",
     page_size_padded=None,
 ):
     return MambaSpec(
@@ -399,7 +398,6 @@ def new_mamba_spec(
         shapes=shapes,
         dtypes=dtypes,
         page_size_padded=page_size_padded,
-        mamba_cache_mode=mamba_cache_mode,
         num_speculative_blocks=num_speculative_blocks,
     )
 

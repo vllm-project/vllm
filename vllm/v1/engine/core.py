@@ -99,6 +99,7 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    MambaSpec,
     get_kv_cache_spec_kind,
     is_full_attention_spec,
 )
@@ -274,6 +275,16 @@ class EngineCore:
                 )
                 vllm_config.scheduler_config.enable_chunked_prefill = False
             if vllm_config.cache_config.enable_prefix_caching:
+                if any(
+                    isinstance(spec, MambaSpec)
+                    for worker_specs in kv_cache_specs
+                    for spec in worker_specs.values()
+                ):
+                    raise ValueError(
+                        "Prefix caching is not supported for models with both "
+                        "non-causal attention and Mamba layers; pass "
+                        "--no-enable-prefix-caching."
+                    )
                 logger.info(
                     "Disabling prefix caching: model has non-causal attention layers."
                 )

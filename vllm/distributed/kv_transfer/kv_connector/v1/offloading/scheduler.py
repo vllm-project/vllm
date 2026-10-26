@@ -138,17 +138,17 @@ def resolve_mamba_align_size(
     spec: "OffloadingSpec", kv_cache_config: KVCacheConfig
 ) -> int | None:
     """Scan all KV cache groups in *spec* and return the single mamba alignment
-    size, or None if no group requires mamba alignment.
+    size, or None if there is no MambaSpec group.
 
-    For MambaSpec groups in "align" cache mode the hit window must be
-    rounded down to a multiple of the offloaded chunk size. Asserts that all
-    such groups agree on the same value.
+    With prefix caching, the hit window of MambaSpec groups must be rounded
+    down to a multiple of the offloaded chunk size. Asserts that all such
+    groups agree on the same value.
     """
     mamba_align_size: int | None = None
     for group in spec.config.groups:
         tokens_per_block = group.tokens_per_block
         kv_spec = kv_cache_config.kv_cache_groups[group.group_id].kv_cache_spec
-        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
+        if isinstance(kv_spec, MambaSpec):
             tokens_per_chunk = tokens_per_block * spec.blocks_per_chunk
             assert mamba_align_size is None or mamba_align_size == tokens_per_chunk
             mamba_align_size = tokens_per_chunk
@@ -265,7 +265,7 @@ class SchedulerOffloadConfig(NamedTuple):
                     is_eagle_group=group_id in eagle_groups,
                     requires_cow_source=(
                         isinstance(kv_spec, MambaSpec)
-                        and kv_spec.mamba_cache_mode == "align"
+                        and vllm_config.cache_config.enable_prefix_caching
                     ),
                 )
             )
@@ -591,8 +591,10 @@ class OffloadingConnectorScheduler:
         self._full_attention_groups: tuple[int, ...] = tuple(full_attention_groups)
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
         self._lookup_groups = self._full_attention_groups + self._sliding_window_groups
-        self._mamba_align_size: int | None = resolve_mamba_align_size(
-            spec, kv_cache_config
+        self._mamba_align_size: int | None = (
+            resolve_mamba_align_size(spec, kv_cache_config)
+            if vllm_config.cache_config.enable_prefix_caching
+            else None
         )
         self._partial_tail_block_size = (
             self.config.kv_group_configs[0].tokens_per_block

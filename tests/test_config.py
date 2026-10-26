@@ -248,7 +248,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
         cache_config=SimpleNamespace(
             use_replayssm=True,
             use_kda_recoverssm=False,
-            mamba_cache_mode="none",
+            enable_prefix_caching=False,
             replayssm_buffer_len=16,
         ),
         num_speculative_tokens=3,
@@ -269,13 +269,13 @@ def test_kda_recoverssm_derivation_is_revalidated():
     assert config.cache_config.use_replayssm
     assert config.cache_config.use_kda_recoverssm
 
-    config.cache_config.mamba_cache_mode = "align"
+    config.cache_config.enable_prefix_caching = True
     VllmConfig.validate_mamba_cached_kernel(config)
     config.use_v2_model_runner = False
     with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
     config.use_v2_model_runner = True
-    config.cache_config.mamba_cache_mode = "none"
+    config.cache_config.enable_prefix_caching = False
 
     config.model_config.architecture = "NemotronHForCausalLM"
     config.mamba_config.backend = MambaBackendEnum.FLASHINFER
@@ -324,12 +324,6 @@ def test_lora_allowed_for_drafter_without_lora_support():
     lora_config = LoRAConfig()
     lora_config.verify_with_model_config(draft_config)
     assert lora_config.lora_dtype == torch.bfloat16
-
-
-def test_mamba_cache_mode_all_is_rejected():
-    """The removed 'all' mode must fail validation instead of being ignored."""
-    with pytest.raises(ValidationError, match="mamba_cache_mode"):
-        CacheConfig(mamba_cache_mode="all")
 
 
 @pytest.mark.parametrize(
@@ -459,7 +453,7 @@ def test_kv_offloading_does_not_skip_dcp_interleave_validation():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=16,
-            mamba_cache_mode="none",
+            enable_prefix_caching=False,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=2,
@@ -3257,12 +3251,13 @@ def test_vllm_config_defaults_are_none():
 
 
 def test_validate_mamba_align_subblock_prefill():
-    """Align mode permits configured prefill chunks smaller than a block."""
+    """Mamba prefix caching permits prefill chunks smaller than a block."""
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=11392,
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
         ),
+        model_config=SimpleNamespace(is_hybrid=True),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
         ),

@@ -219,7 +219,7 @@ class KVConnectorBlockState:
     req_ids: set[str]
     # Resolve on access to avoid copying tables the connector never reads.
     resolve_block_ids: Callable[[str], tuple[list[int], ...]]
-    # Exact Mamba "align" boundary-state hand-offs.
+    # Exact Mamba boundary-state hand-offs.
     boundary_state_offloads: dict[str, list[tuple[int, int, int]]]
 
     def get_block_ids(self, req_id: str) -> tuple[list[int], ...] | None:

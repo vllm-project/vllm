@@ -781,7 +781,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     self.local_num_heads,
                     self.spec_query_len,
                     self.conv1d.weight.device,
-                    align=self.cache_config.mamba_cache_mode == "align",
+                    align=self.cache_config.enable_prefix_caching,
                 )
         decode_conv1d_weight = None
         if (

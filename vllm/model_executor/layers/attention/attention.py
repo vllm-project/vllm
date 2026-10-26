@@ -381,6 +381,15 @@ class Attention(nn.Module, AttentionLayerBase):
                 or self.attn_backend.get_name() == "TRITON_MLA"
             )
         ):
+            if (
+                vllm_config.model_config is not None
+                and vllm_config.model_config.is_hybrid
+            ):
+                raise ValueError(
+                    "Prefix caching with batch invariance is not supported for "
+                    "FLASHINFER/TRITON_MLA in hybrid Mamba models; pass "
+                    "--no-enable-prefix-caching."
+                )
             logger.warning_once(
                 "Disabling prefix caching for FLASHINFER/TRITON_MLA "
                 "with batch invariance, as it is not yet supported.",

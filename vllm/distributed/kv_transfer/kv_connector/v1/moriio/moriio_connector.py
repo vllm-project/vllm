@@ -1343,7 +1343,7 @@ class MoRIIOConnectorScheduler:
         self, req: "Request", block_ids: BlockIds, scheduler_output: SchedulerOutput
     ) -> BlockIds:
         if self._has_mamba:
-            # Align-mode state slots can move without appending a new block.
+            # Mamba state slots can move without appending a new block.
             # Resolve the authoritative table at the final prefill step.
             block_state = scheduler_output.kv_connector_block_state
             assert block_state is not None

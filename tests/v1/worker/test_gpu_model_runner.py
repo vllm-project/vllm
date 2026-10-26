@@ -540,7 +540,7 @@ def _align_qwen3_5_blocks(*prefill_checkpoint_alignments: int | None):
 
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     cache_config = vllm_config.cache_config
-    cache_config.mamba_cache_mode = "align"
+    cache_config.enable_prefix_caching = True
     forward_context = vllm_config.compilation_config.static_forward_context
     for i, alignment in enumerate(prefill_checkpoint_alignments):
         forward_context[f"mamba.{i}"] = _CheckpointingMambaLayer(alignment)
@@ -589,7 +589,7 @@ def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
     )
     cache_config = SimpleNamespace(
         block_size=16,
-        mamba_cache_mode="none",
+        enable_prefix_caching=False,
         mamba_page_size_padded=None,
         user_specified_block_size=True,
         kv_cache_dtype_skip_layers=None,

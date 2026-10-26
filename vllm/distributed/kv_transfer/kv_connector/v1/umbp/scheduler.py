@@ -194,8 +194,8 @@ class UMBPStoreConnectorScheduler:
             group_id: resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size)
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         }
-        # Mamba "align" block tables are not append-only: a position may hold
-        # the live state the next step writes, or a speculative block core will
+        # Mamba block tables are not append-only: a position may hold the live
+        # state the next step writes, or a speculative block core will
         # relocate, so positional stores would read or pin the wrong block.
         # Core hands off each committed boundary state instead
         # (_add_boundary_state_plans).
@@ -203,8 +203,12 @@ class UMBPStoreConnectorScheduler:
             group_id
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
             if isinstance(group.kv_cache_spec, MambaSpec)
-            and getattr(group.kv_cache_spec, "mamba_cache_mode", None) == "align"
         )
+        if (
+            self._boundary_handoff_groups
+            and not vllm_config.cache_config.enable_prefix_caching
+        ):
+            raise ValueError("UMBP requires prefix caching for Mamba layers")
         self.runtime = runtime
         self.enable_kv_cache_events = bool(
             vllm_config.kv_events_config

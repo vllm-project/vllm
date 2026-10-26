@@ -215,13 +215,13 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
         assert len(meta.spec_state_indices_tensor) == meta.num_spec_decodes
 
 
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
 @pytest.mark.parametrize("full_cuda_graph", [False, True])
 @pytest.mark.parametrize(
     "test_case", GDN_BUILD_TEST_CASES.values(), ids=GDN_BUILD_TEST_CASES.keys()
 )
 def test_update_block_table_matches_build(
-    test_case: GDNBuildTestCase, full_cuda_graph: bool, mamba_cache_mode: str
+    test_case: GDNBuildTestCase, full_cuda_graph: bool, enable_prefix_caching: bool
 ):
     """update_block_table() on another group's metadata matches build()."""
     batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
@@ -230,13 +230,13 @@ def test_update_block_table_matches_build(
         for _ in range(3)
     )
     for builder in (src, dst, ref):
-        builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+        builder.vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
-    if mamba_cache_mode == "align":
+    if enable_prefix_caching:
         # MRV2 precomputes these for every Mamba group each step.
         dst.mamba_aligned_state_indices = ref.mamba_aligned_state_indices = (
             mamba_get_block_table_tensor(
-                common.block_table_tensor, common.seq_lens, ref.kv_cache_spec, "align"
+                common.block_table_tensor, common.seq_lens, ref.kv_cache_spec, True
             )
         )
     draft_tokens = test_case.num_decode_draft_tokens
@@ -397,13 +397,12 @@ def _create_checkpoint_builder_and_batch(
             method="ngram",
             num_speculative_tokens=num_spec,
         )
-    vllm_config.cache_config.mamba_cache_mode = "align"
+    vllm_config.cache_config.enable_prefix_caching = True
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     mamba_spec = MambaSpec(
         block_size=64,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        mamba_cache_mode="align",
         num_speculative_blocks=num_spec,
         num_prefill_checkpoint_blocks=1,
         prefill_checkpoint_alignment=16,
@@ -471,7 +470,7 @@ def test_update_block_table_regathers_checkpoint(num_spec):
     other_table = common.block_table_tensor + 100
     other = common.replace(block_table_tensor=other_table)
     dst.mamba_aligned_state_indices = mamba_get_block_table_tensor(
-        other_table, other.seq_lens, dst.kv_cache_spec, "align"
+        other_table, other.seq_lens, dst.kv_cache_spec, True
     )
 
     source = src.build(0, common, **kwargs)

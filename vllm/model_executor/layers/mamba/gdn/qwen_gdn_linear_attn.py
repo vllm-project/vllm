@@ -686,11 +686,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
         self.vllm_config = vllm_config
-        # FlashInfer's prefill emits mid-prefill states, so an align-mode
+        # FlashInfer's prefill emits mid-prefill states, so a prefix-cache
         # checkpoint needs no split prefill.
         self._checkpoint_alignment: int | None = None
         if (
-            vllm_config.cache_config.mamba_cache_mode == "align"
+            vllm_config.cache_config.enable_prefix_caching
             and self.gdn_prefill_backend == "flashinfer"
         ):
             self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT

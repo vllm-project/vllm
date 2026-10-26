@@ -101,7 +101,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             and self.kda_prefill_backend == "fused"
             and self.use_safe_gate
         )
-        if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
+        if can_checkpoint and vllm_config.cache_config.enable_prefix_caching:
             logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
         return replace(
             spec,

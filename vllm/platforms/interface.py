@@ -1086,7 +1086,7 @@ class Platform:
                 # For hybrid MLA/Mamba models, make the manager block size a
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             # Internal prefill checkpoints land on block boundaries.
             kernel_block_alignment_size = lcm(
                 kernel_block_alignment_size,
@@ -1111,7 +1111,7 @@ class Platform:
                 attn_block_size,
             )
 
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             cache_config.mamba_block_size = cache_config.block_size
 
         # Pad mamba page size to exactly match attention page size

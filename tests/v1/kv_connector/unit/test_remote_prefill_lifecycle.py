@@ -634,7 +634,7 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
         block_size=BLOCK_SIZE,
     )
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
-    # mamba_cache_mode "none" only runs without prefix caching.
+    # Mamba keeps a single running state per request without prefix caching.
     vllm_config.cache_config.enable_prefix_caching = False
 
     kv_cache_config = make_kv_cache_config(
@@ -846,11 +846,12 @@ def test_async_load_reserves_blocks_for_promotion_margin(
 
 
 @pytest.mark.parametrize(
-    ("mamba_cache_mode", "mamba_block_size", "num_blocks"),
-    [("none", 128, 18), ("align", 16, 18)],
+    ("enable_prefix_caching", "mamba_block_size", "num_blocks"),
+    [(False, 128, 18), (True, 16, 18)],
+    ids=["no_prefix_caching", "prefix_caching"],
 )
 def test_async_load_does_not_double_reserve_mamba_spec_blocks(
-    mamba_cache_mode, mamba_block_size, num_blocks
+    enable_prefix_caching, mamba_block_size, num_blocks
 ):
     """Two hybrid loads fit when Mamba's speculative states are counted once."""
     block_size = 16
@@ -861,12 +862,10 @@ def test_async_load_does_not_double_reserve_mamba_spec_blocks(
         num_speculative_tokens=num_spec_tokens,
         disable_hybrid_kv_cache_manager=False,
     )
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
-    vllm_config.cache_config.enable_prefix_caching = mamba_cache_mode == "align"
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     kv_cache_config = make_kv_cache_config(
         block_size,
         mamba_enabled=True,
-        mamba_cache_mode=mamba_cache_mode,
         num_blocks=num_blocks,
     )
     mamba_group = kv_cache_config.kv_cache_groups[-1]

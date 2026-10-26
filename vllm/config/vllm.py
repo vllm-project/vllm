@@ -3410,8 +3410,12 @@ class VllmConfig:
                 "than or equal to and divisible by cp_kv_cache_interleave_size "
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
-        # Mamba cache align-mode constraints
-        if self.cache_config.mamba_cache_mode == "align":
+        # Mamba prefix caching constraints
+        if (
+            self.cache_config.enable_prefix_caching
+            and self.model_config is not None
+            and self.model_config.is_hybrid
+        ):
             assert not self.scheduler_config.disable_chunked_mm_input, (
                 "Chunked MM input is required because we need the flexibility "
                 "to schedule a multiple of block_size tokens even if they are "
@@ -3491,10 +3495,7 @@ class VllmConfig:
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
                 )
-            if (
-                self.cache_config.mamba_cache_mode == "align"
-                and not self.use_v2_model_runner
-            ):
+            if self.cache_config.enable_prefix_caching and not self.use_v2_model_runner:
                 raise ValueError(
                     "RecoverSSM with prefix caching requires VLLM_USE_V2_MODEL_RUNNER=1"
                 )
@@ -3505,7 +3506,7 @@ class VllmConfig:
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
         elif use_mamba_replayssm_spec:
-            if self.cache_config.mamba_cache_mode != "none":
+            if self.cache_config.enable_prefix_caching:
                 raise ValueError(
                     "FlashInfer ReplaySSM speculative decoding does not support "
                     "prefix caching; use --disable-prefix-caching"
@@ -3524,7 +3525,7 @@ class VllmConfig:
                     "--mamba-backend flashinfer"
                 )
         elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
-            if self.cache_config.mamba_cache_mode == "align":
+            if self.cache_config.enable_prefix_caching:
                 raise ValueError(
                     "FlashInfer ReplaySSM does not support prefix caching yet; "
                     "use --disable-prefix-caching"

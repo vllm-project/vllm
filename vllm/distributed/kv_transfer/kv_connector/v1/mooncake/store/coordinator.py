@@ -292,7 +292,7 @@ class MooncakeStoreCoordinator:
 
         Mamba groups are always all-False: the normal save resolves blocks
         positionally from the connector's append-only block-ID snapshot, but
-        an align-mode mamba block table is not append-only (interior state
+        a mamba block table is not append-only (interior state
         blocks are nulled/freed, and speculative decoding relocates the spec
         blocks in place), so a positional read may hit a null, freed, or live
         speculative-state block and persist wrong bytes under a valid prefix

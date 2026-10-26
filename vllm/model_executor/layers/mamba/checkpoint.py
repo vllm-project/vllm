@@ -115,7 +115,7 @@ class MambaPrefillCheckpointBuilder:
         m: CommonAttentionMetadata,
         request_rows: list[int],
     ) -> MambaPrefillCheckpointMetadata | None:
-        if self.vllm_config.cache_config.mamba_cache_mode != "align":
+        if not self.vllm_config.cache_config.enable_prefix_caching:
             return None
         if self.kv_cache_spec.num_prefill_checkpoint_blocks == 0:
             return None

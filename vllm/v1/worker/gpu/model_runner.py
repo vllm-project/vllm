@@ -1865,7 +1865,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output, batch_req_state, batch_desc, num_active_loras
             )
             block_tables, slot_mappings = self.prepare_attn(input_batch)
-            # Mamba "align" pre-copy: migrate recurrent state across block
+            # Mamba pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
             # boundary reset is visible to the attention metadata.
