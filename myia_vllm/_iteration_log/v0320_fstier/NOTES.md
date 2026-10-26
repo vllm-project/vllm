@@ -2864,8 +2864,8 @@ change. Evening patch window (user GO) remains after EPF classes.
 | prompt tokens | 360.976 M | **+42.829 M = 21.51 M tok/h** |
 | fs reads | 92.233 GB | +0.866 GB = 0.434 GB/h |
 | cached by source | device 249.319 M / host 76.998 M / disk 7.000 M | window: device **96.0 %** / host 1.3 % / disk 0.35 % |
-| computed prefill | — | 0.590 M = **1.38 %** of window prompt |
-| prefix cache | queries 361.426 M / hits 249.319 M | window hit rate **95.4 %** |
+| computed prefill | — | 0.980 M = **2.29 %** of window prompt |
+| prefix cache | queries 361.426 M / hits 249.319 M | window hit rate **95.26 %** |
 | preemptions | **27** | **+0 for ~5 h 45** |
 | fs chunk hits | 3,395 | +33 |
 | fs tier size | **251G** (`du`) | at the 250 GiB LRU cap |
@@ -2874,7 +2874,7 @@ change. Evening patch window (user GO) remains after EPF classes.
 — a very quiet fs-write window, not an extrapolation: only **7 files touched in
 30 min (4 NEW / 0.10 GB + 3 REWRITES / 0.08 GB)**. Disk-served window share
 0.35 % is below the 1.76 % floor because device serves 96.0 % and computed
-prefill is 1.38 %; cumulative disk share is 1.94 %, still above the floor. No
+prefill is 2.29 %; cumulative disk share is 1.94 %, still above the floor. No
 new regression and no claim of utility loss: the engine is serving from fast
 tiers, with almost no prefill work in this window.
 
