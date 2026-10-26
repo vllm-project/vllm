@@ -63,6 +63,31 @@ TP_SIZE = int(os.getenv("TP_SIZE", "1"))
         {"data_parallel_backend": "ray"},
         {"data_parallel_rpc_port": 0},
         {"data_parallel_rpc_port": 65536},
+        {"elastic_ep_allocation_index": 0},
+        {"elastic_ep_allocation_index": -1, "data_parallel_rank": None},
+        {"elastic_ep_allocation_index": 4, "data_parallel_rank": None},
+        {
+            "elastic_ep_allocation_index": 0,
+            "data_parallel_rank": None,
+            "data_parallel_external_lb": True,
+        },
+        {
+            "elastic_ep_allocation_index": 0,
+            "data_parallel_rank": None,
+            "elastic_ep_auto_bootstrap": False,
+        },
+        {
+            "elastic_ep_allocation_index": 0,
+            "data_parallel_rank": None,
+            "data_parallel_size_local": 2,
+            "elastic_ep_initial_dp_size": 3,
+        },
+        {
+            "elastic_ep_allocation_index": 0,
+            "data_parallel_rank": None,
+            "data_parallel_size_local": 2,
+            "elastic_ep_max_dp_size": 3,
+        },
     ],
 )
 def test_external_elastic_ep_auto_bootstrap_rejects_unsupported_launch(options):
@@ -102,12 +127,19 @@ def test_external_elastic_ep_bootstrap_binds_one_launch_to_one_handshake(scale_u
 
 
 @pytest.mark.parametrize("enable_fault_tolerance", [False, True])
+@pytest.mark.parametrize("indexed", [False, True])
 @pytest.mark.parametrize(
     "rank,target_size,initial_size,local_size",
     [(2, 3, 2, 1), (2, 4, 2, 1), (3, 4, 2, 1), (2, 3, 4, 1), (8, 12, 8, 4)],
 )
 def test_external_elastic_ep_auto_bootstrap_uses_native_scale_handshake(
-    monkeypatch, rank, target_size, initial_size, local_size, enable_fault_tolerance
+    monkeypatch,
+    rank,
+    target_size,
+    initial_size,
+    local_size,
+    enable_fault_tolerance,
+    indexed,
 ):
     """The active handshake resolves append startup, including retired initial ranks."""
     port = get_open_port()
@@ -134,7 +166,11 @@ def test_external_elastic_ep_auto_bootstrap_uses_native_scale_handshake(
         args = EngineArgs(
             elastic_ep_auto_bootstrap=True,
             elastic_ep_initial_dp_size=initial_size,
-            data_parallel_rank=rank,
+            **(
+                {"elastic_ep_allocation_index": rank // local_size}
+                if indexed
+                else {"data_parallel_rank": rank}
+            ),
             data_parallel_size_local=local_size,
             data_parallel_address="127.0.0.1",
             data_parallel_rpc_port=port,
@@ -150,6 +186,7 @@ def test_external_elastic_ep_auto_bootstrap_uses_native_scale_handshake(
         launch = prepare_external_elastic_ep_launch(args)
         assert args.elastic_ep_initial_dp_size == initial_size
         assert launch.data_parallel_size == target_size
+        assert launch.first_rank == rank
         assert launch.scale_up
         assert args.enable_fault_tolerance is enable_fault_tolerance
         for engine_rank in range(rank, rank + local_size):
@@ -239,12 +276,36 @@ def test_external_elastic_ep_bootstrap_requires_the_whole_range_to_await_startup
     server.validate(5, list(launch.identity))
 
 
+@pytest.mark.parametrize("local_size", [None, 1, 4])
+def test_external_elastic_ep_allocation_index_zero_initial_world(
+    local_size, monkeypatch
+):
+    monkeypatch.delenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", raising=False)
+    args = EngineArgs(
+        elastic_ep_auto_bootstrap=True,
+        elastic_ep_initial_dp_size=8,
+        elastic_ep_max_dp_size=12,
+        elastic_ep_allocation_index=0,
+        data_parallel_size_local=local_size,
+        enable_elastic_ep=True,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+    )
+    launch = prepare_external_elastic_ep_launch(args)
+    assert launch.first_rank == 0
+    assert launch.data_parallel_size == 8
+    assert not launch.scale_up
+
+
 @pytest.mark.parametrize("local_size", [1, 4, 8])
+@pytest.mark.parametrize("indexed", [False, True])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Real EngineArgs with EPLB requires a CUDA-like platform",
 )
-def test_external_lb_elastic_ep_local_range_config(local_size, tmp_path, monkeypatch):
+def test_external_lb_elastic_ep_local_range_config(
+    local_size, indexed, tmp_path, monkeypatch
+):
     Qwen3MoeConfig(
         architectures=["Qwen3MoeForCausalLM"],
         hidden_size=64,
@@ -263,8 +324,12 @@ def test_external_lb_elastic_ep_local_range_config(local_size, tmp_path, monkeyp
             model=str(tmp_path),
             elastic_ep_auto_bootstrap=True,
             elastic_ep_initial_dp_size=8,
-            elastic_ep_max_dp_size=12,
-            data_parallel_rank=0,
+            elastic_ep_max_dp_size=8 + local_size,
+            **(
+                {"elastic_ep_allocation_index": 0}
+                if indexed
+                else {"data_parallel_rank": 0}
+            ),
             data_parallel_size_local=local_size,
             enable_elastic_ep=True,
             enable_expert_parallel=True,
@@ -275,6 +340,7 @@ def test_external_lb_elastic_ep_local_range_config(local_size, tmp_path, monkeyp
         .parallel_config
     )
     assert config.data_parallel_size == 8
+    assert config.data_parallel_rank == 0
     assert config.data_parallel_size_local == local_size
     assert config.data_parallel_external_lb is (local_size == 1)
     assert config.data_parallel_hybrid_lb is (1 < local_size < 8)
@@ -781,6 +847,7 @@ def test_external_lb_elastic_ep_scale_up(
     [((0, 2), 2), ((0,), 4)],
     ids=["hybrid-local-ranges", "internal-local-range"],
 )
+@pytest.mark.parametrize("indexed", [False, True], ids=["explicit", "indexed"])
 @pytest.mark.distributed(num_gpus=4)
 @pytest.mark.skipif(
     TP_SIZE != 1 or current_platform.device_count() < 4,
@@ -791,7 +858,7 @@ def test_external_lb_elastic_ep_scale_up(
     reason="Automatic Elastic EP bootstrap requires the Python frontend",
 )
 def test_external_lb_elastic_ep_bootstrap_local_range(
-    default_server_args, first_ranks, local_size
+    default_server_args, first_ranks, local_size, indexed
 ):
     """A client independently routes inference to every engine it bootstraps."""
     server_args = [
@@ -822,9 +889,14 @@ def test_external_lb_elastic_ep_bootstrap_local_range(
     servers: list[RemoteOpenAIServer] = []
 
     def start_client(first_rank: int):
+        identity_args = (
+            ["--elastic-ep-allocation-index", str(first_rank // local_size)]
+            if indexed
+            else ["--data-parallel-rank", str(first_rank)]
+        )
         server = RemoteOpenAIServer(
             ELASTIC_EP_MODEL_NAME,
-            [*server_args, "--data-parallel-rank", str(first_rank)],
+            [*server_args, *identity_args],
             env_dict={
                 "VLLM_SERVER_DEV_MODE": "1",
                 current_platform.device_control_env_var: ",".join(

@@ -578,6 +578,7 @@ class EngineArgs:
     elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
     elastic_ep_auto_bootstrap: bool = False
     elastic_ep_initial_dp_size: int | None = None
+    elastic_ep_allocation_index: int | None = None
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -880,6 +881,26 @@ class EngineArgs:
     kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
+        if self.elastic_ep_allocation_index is not None:
+            if (
+                type(self.elastic_ep_allocation_index) is not int
+                or self.elastic_ep_allocation_index < 0
+            ):
+                raise ValueError(
+                    "--elastic-ep-allocation-index must be a nonnegative integer."
+                )
+            if (
+                not self.elastic_ep_auto_bootstrap
+                or self.data_parallel_rank is not None
+                or self.data_parallel_start_rank is not None
+                or self.data_parallel_external_lb
+                or self.data_parallel_hybrid_lb
+                or self.data_parallel_multi_port_external_lb
+            ):
+                raise ValueError(
+                    "--elastic-ep-allocation-index requires automatic bootstrap "
+                    "and cannot be combined with rank or load-balancer flags."
+                )
         if self.elastic_ep_auto_bootstrap:
             if self.elastic_ep_initial_dp_size is None:
                 raise ValueError(
@@ -1366,6 +1387,16 @@ class EngineArgs:
         parallel_group.add_argument(
             "--elastic-ep-max-dp-size",
             **parallel_kwargs["elastic_ep_max_dp_size"],
+        )
+        parallel_group.add_argument(
+            "--elastic-ep-allocation-index",
+            type=int,
+            default=None,
+            help="Zero-based allocation index for automatic Elastic EP bootstrap. "
+            "The first DP rank is this index times --data-parallel-size-local "
+            "(default local size: 1). Initial and maximum DP sizes must be "
+            "multiples of the local size. Cannot be combined with explicit "
+            "rank or load-balancer flags. Unset by default.",
         )
         parallel_group.add_argument(
             "--elastic-ep-auto-bootstrap",
@@ -2314,6 +2345,8 @@ class EngineArgs:
 
             launch = prepare_external_elastic_ep_launch(self)
             self.data_parallel_size = launch.data_parallel_size
+            if launch.first_rank is not None:
+                self.data_parallel_rank = launch.first_rank
             bootstrap_identity = launch.identity
             os.environ["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = str(int(launch.scale_up))
 

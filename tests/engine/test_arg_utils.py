@@ -127,6 +127,86 @@ def test_data_parallel_size_cli_defaults_are_unchanged(options, expected):
     assert args.data_parallel_size == expected
 
 
+@pytest.mark.parametrize("allocation_index", [0, 2])
+def test_external_elastic_ep_allocation_index_cli(allocation_index):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(
+        parser.parse_args(
+            [
+                "--elastic-ep-auto-bootstrap",
+                "--elastic-ep-initial-dp-size",
+                "8",
+                "--elastic-ep-max-dp-size",
+                "12",
+                "--data-parallel-size-local",
+                "4",
+                "--elastic-ep-allocation-index",
+                str(allocation_index),
+            ]
+        )
+    )
+    assert args.elastic_ep_allocation_index == allocation_index
+    assert args.data_parallel_rank is None
+    assert args.data_parallel_size_local == 4
+    assert args.elastic_ep_initial_dp_size == 8
+    assert args.data_parallel_size == 1
+
+
+def test_external_elastic_ep_allocation_index_config(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "elastic-ep-auto-bootstrap: true\nelastic-ep-initial-dp-size: 8\n"
+        "elastic-ep-max-dp-size: 12\ndata-parallel-size-local: 4\n"
+        "elastic-ep-allocation-index: 2\n"
+    )
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    parser.add_argument("--config")
+    args = EngineArgs.from_cli_args(parser.parse_args(["--config", str(config_file)]))
+    assert args.elastic_ep_allocation_index == 2
+    assert args.data_parallel_rank is None
+    assert args.data_parallel_size_local == 4
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--data-parallel-rank", "0"],
+        ["--data-parallel-start-rank", "0"],
+        ["--data-parallel-external-lb"],
+        ["--data-parallel-hybrid-lb"],
+        ["--data-parallel-multi-port-external-lb"],
+        ["--no-elastic-ep-auto-bootstrap"],
+    ],
+)
+def test_external_elastic_ep_allocation_index_rejects_conflicting_cli(options):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    with pytest.raises(ValueError, match="--elastic-ep-allocation-index"):
+        EngineArgs.from_cli_args(
+            parser.parse_args(
+                [
+                    "--elastic-ep-auto-bootstrap",
+                    "--elastic-ep-initial-dp-size",
+                    "8",
+                    "--elastic-ep-allocation-index",
+                    "0",
+                    *options,
+                ]
+            )
+        )
+
+
+@pytest.mark.parametrize("allocation_index", [-1, True, 1.0, "1"])
+def test_external_elastic_ep_allocation_index_requires_nonnegative_integer(
+    allocation_index,
+):
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        EngineArgs(
+            elastic_ep_auto_bootstrap=True,
+            elastic_ep_initial_dp_size=8,
+            elastic_ep_allocation_index=allocation_index,
+        )
+
+
 def test_watermark_config_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(

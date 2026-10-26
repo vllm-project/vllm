@@ -19,6 +19,7 @@ class ExternalElasticEPLaunch(msgspec.Struct):
     data_parallel_size: int
     scale_up: bool
     identity: tuple[str, str] | None = None
+    first_rank: int | None = None
 
 
 class ExternalElasticEPBootstrapServer:
@@ -111,7 +112,9 @@ def prepare_external_elastic_ep_launch(args: "EngineArgs") -> ExternalElasticEPL
         not args.enable_elastic_ep
         or not args.enable_expert_parallel
         or not args.enable_eplb
-        or args.data_parallel_rank is None
+        or (
+            args.data_parallel_rank is None and args.elastic_ep_allocation_index is None
+        )
         or args.data_parallel_hybrid_lb
         or args.data_parallel_start_rank is not None
         or args.data_parallel_multi_port_external_lb
@@ -120,7 +123,8 @@ def prepare_external_elastic_ep_launch(args: "EngineArgs") -> ExternalElasticEPL
     ):
         raise ValueError(
             "Automatic Elastic EP bootstrap requires external MP DP with an "
-            "explicit first rank, one API server, EP and EPLB enabled"
+            "explicit first rank or allocation index, one API server, "
+            "EP and EPLB enabled"
         )
     initial_size = args.elastic_ep_initial_dp_size
     maximum_size = args.elastic_ep_max_dp_size
@@ -130,6 +134,8 @@ def prepare_external_elastic_ep_launch(args: "EngineArgs") -> ExternalElasticEPL
         if args.data_parallel_size_local is not None
         else 1
     )
+    if args.elastic_ep_allocation_index is not None:
+        rank = args.elastic_ep_allocation_index * local_size
     if (
         initial_size is None
         or initial_size <= 1
@@ -145,6 +151,13 @@ def prepare_external_elastic_ep_launch(args: "EngineArgs") -> ExternalElasticEPL
         or rank + local_size > min(maximum_size, 2**16)
     ):
         raise ValueError("Automatic bootstrap rank range must fit below max DP size")
+    if args.elastic_ep_allocation_index is not None and (
+        initial_size % local_size or maximum_size % local_size
+    ):
+        raise ValueError(
+            "Allocation-index bootstrap requires initial and maximum DP sizes "
+            "to be multiples of the local DP size"
+        )
     if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
         raise ValueError("Automatic bootstrap owns VLLM_ELASTIC_EP_SCALE_UP_LAUNCH")
     address = args.data_parallel_address or args.master_addr or "127.0.0.1"
@@ -158,7 +171,7 @@ def prepare_external_elastic_ep_launch(args: "EngineArgs") -> ExternalElasticEPL
     if rank == 0:
         if local_size > initial_size:
             raise ValueError("Local DP ranks must fit within the initial DP world")
-        return ExternalElasticEPLaunch(initial_size, False)
+        return ExternalElasticEPLaunch(initial_size, False, first_rank=rank)
     timeout = envs.VLLM_ENGINE_READY_TIMEOUT_S
     if timeout <= 0:
         raise ValueError("Automatic bootstrap requires a positive engine-ready timeout")
@@ -207,4 +220,5 @@ def prepare_external_elastic_ep_launch(args: "EngineArgs") -> ExternalElasticEPL
         raise ValueError(
             "Bootstrap handshake does not match the declared initial world"
         )
+    launch.first_rank = rank
     return launch

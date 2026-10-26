@@ -205,13 +205,26 @@ Manual external Elastic EP launch arguments remain supported without this flag.
 ### Local Rank Ranges
 
 One client can bootstrap several local engines together. Set
-`--data-parallel-rank` to its first global rank and
-`--data-parallel-size-local` to its local count. Do not enable
+`--data-parallel-size-local` to its local count. For uniform fixed-width
+allocations, use `--elastic-ep-allocation-index` instead of an explicit first
+rank: `first_rank = allocation_index × local_count`. The index is zero-based;
+with four local engines, indices 0, 1 and 2 start at ranks 0, 4 and 8.
+
+This option is unset by default and requires automatic bootstrap. Use a
+nonnegative index and `1 < initial DP size <= maximum DP size`. Local count
+defaults to one; keep it fixed across allocations. The initial and maximum DP
+sizes still count native ranks and must be multiples of the local count. Do not
+combine the index with explicit rank, start-rank or load-balancer flags. It does
+not create capacity or specify the live target; native discovery resolves that
+target before engine configuration.
+
+Explicit `--data-parallel-rank` remains supported as the alternative first-rank
+input, with its existing behavior. Do not enable
 `--data-parallel-multi-port-external-lb`: that option starts separate clients.
 
 For an initial DP8 world with four local ranks per client and a maximum of DP12,
-use the same template for each client, varying only `FIRST_DP_RANK` (0 or 4
-initially, then 8 for an append joiner):
+use the same template for each client, varying only `ALLOCATION_INDEX` (0 or 1
+initially, then 2 for an append joiner):
 
 This illustrates the startup contract, not a complete resize workflow: the
 packed clients starting at 0 and 4 cannot initiate DP8→DP12 with the current
@@ -223,7 +236,7 @@ vllm serve Qwen/Qwen3-30B-A3B \
     --eplb-config '{"communicator":"pynccl","use_async":false}' \
     --enable-elastic-ep --elastic-ep-auto-bootstrap \
     --elastic-ep-initial-dp-size 8 --elastic-ep-max-dp-size 12 \
-    --data-parallel-rank "${FIRST_DP_RANK}" \
+    --elastic-ep-allocation-index "${ALLOCATION_INDEX}" \
     --data-parallel-size-local 4 \
     --data-parallel-address "${DP_MASTER_ADDRESS}" \
     --data-parallel-rpc-port 29550 --tensor-parallel-size 1
