@@ -1686,6 +1686,43 @@ def test_eager_store_resets_block_cursor_after_preemption(
     assert resumed_meta.store_gpu_blocks == [resumed_blocks.blocks[0][2].block_id]
 
 
+def test_eager_store_streaming_session_stores_new_chunks() -> None:
+    """A resumed streaming session is rescheduled as a new request carrying
+    its full block table without being preempted. The accumulated block IDs
+    must be replaced, not extended, so the new chunk's blocks get stored."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=8, lazy=False)
+    sched = fix.scheduler
+    req = make_request(num_blocks=4)
+
+    gpu_blocks = fix.gpu_block_pool.get_new_blocks(2)
+    fix.gpu_block_pool.cache_full_blocks(req, gpu_blocks, 0, 2, BLOCK_SIZE, 0)
+    req.num_computed_tokens = 2 * BLOCK_SIZE
+    first_turn = KVCacheBlocks(blocks=(gpu_blocks,))
+    sched.update_state_after_alloc(req, first_turn, num_external_tokens=0)
+    first_meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: 2 * BLOCK_SIZE},
+            new_reqs={req.request_id: first_turn.get_block_ids()},
+        )
+    )
+    assert len(first_meta.store_gpu_blocks) == 2
+    simulate_store_completion(sched, first_meta.store_event)
+
+    # The paused session keeps its blocks and grows by a new chunk.
+    gpu_blocks = gpu_blocks + fix.gpu_block_pool.get_new_blocks(2)
+    fix.gpu_block_pool.cache_full_blocks(req, gpu_blocks, 2, 4, BLOCK_SIZE, 0)
+    req.num_computed_tokens = 4 * BLOCK_SIZE
+    second_turn = KVCacheBlocks(blocks=(gpu_blocks,))
+    sched.update_state_after_alloc(req, second_turn, num_external_tokens=0)
+    second_meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: 2 * BLOCK_SIZE},
+            new_reqs={req.request_id: second_turn.get_block_ids()},
+        )
+    )
+    assert second_meta.store_gpu_blocks == [b.block_id for b in gpu_blocks[2:]]
+
+
 # ---------------------------------------------------------------------------
 # Test 10: Partial GPU prefix hit + CPU load + new compute blocks
 # ---------------------------------------------------------------------------
