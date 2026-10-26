@@ -6,7 +6,7 @@ import copy
 import gc
 import os
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
@@ -49,7 +49,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
 from vllm.distributed.parallel_state import (
-    Handle,
     checkpoint_prepare_distributed_state,
     checkpoint_restore_distributed_state,
     get_pcp_group,
@@ -176,40 +175,9 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
+    from vllm.distributed.pp_transport import PPTransport
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-
-
-class AsyncIntermediateTensors(IntermediateTensors):
-    """IntermediateTensors with lazy comm synchronization"""
-
-    def __init__(
-        self,
-        tensors: dict[str, torch.Tensor],
-        comm_handles: list[Handle] | None = None,
-        comm_postprocess: list[Callable[[], None]] | None = None,
-    ) -> None:
-        super().__init__(tensors)
-        self._comm_handles = comm_handles
-        self._comm_postprocess = comm_postprocess
-        self._comm_waited = False
-
-    def wait_for_comm(self) -> None:
-        if self._comm_waited:
-            return
-        if self._comm_handles:
-            for handle in self._comm_handles:
-                handle.wait()
-        if self._comm_postprocess:
-            for fn in self._comm_postprocess:
-                fn()
-        self._comm_waited = True
-
-    def __getattribute__(self, name: str):
-        # ensure `.tensors` is ready before use
-        if name == "tensors" and not object.__getattribute__(self, "_comm_waited"):
-            object.__getattribute__(self, "wait_for_comm")()
-        return object.__getattribute__(self, name)
 
 
 class Worker(WorkerBase):
@@ -264,7 +232,8 @@ class Worker(WorkerBase):
         validate_worker_profiler_config(self.profiler_config)
 
         # Device handles of the previous step's PP intermediate-tensor send.
-        self._pp_send_work: list[Handle] = []
+        # Created after the profile run, see _init_pp_transport.
+        self._pp_transport: PPTransport | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -671,6 +640,20 @@ class Worker(WorkerBase):
         may borrow its memory; see `EngineCore._set_kv_cache_reclaimable`."""
         self._kv_cache_reclaimable = reclaimable
 
+    def _init_pp_transport(self) -> None:
+        """Right after the profile run."""
+        if get_pp_group().world_size == 1 or self._pp_transport is not None:
+            return
+        from vllm.distributed.pp_transport import create_pp_transport
+
+        profile_send = getattr(self.model_runner, "profile_pp_send", None)
+        self._pp_transport = create_pp_transport(
+            None if profile_send is None else profile_send.tensors
+        )
+        if profile_send is not None:
+            # Free the profile run's outputs before memory profiling measures.
+            profile_send.tensors.clear()
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -694,6 +677,7 @@ class Worker(WorkerBase):
                 self.model_runner.profile_run(
                     randomize_inputs=self.randomize_dummy_inputs
                 )
+                self._init_pp_transport()
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -732,6 +716,7 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+            self._init_pp_transport()
 
         # Profile CUDA graph memory if graphs will be captured. The runner
         # decides itself, since encoder graphs don't depend on cudagraph_mode.
@@ -768,6 +753,9 @@ class Worker(WorkerBase):
             profile_result.non_kv_cache_memory = (
                 profile_result.total_consumed + profile_result.transient_peak_headroom
             )
+
+        if self._pp_transport is not None:
+            profile_result.non_kv_cache_memory += self._pp_transport.unprofiled_bytes
 
         self.total_consumed = profile_result.total_consumed
         self.peak_activation_memory = (
@@ -1441,27 +1429,20 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        # Wait for the previous step's sends so this forward pass cannot
-        # overwrite buffers they are still reading.
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
+        pp_group = get_pp_group()
+        if pp_group.world_size > 1 and self._pp_transport is None:
+            # No memory profiling ran: NCCL without send buffers.
+            from vllm.distributed.pp_transport.nccl import NcclTransport
+
+            self._pp_transport = NcclTransport(get_tp_group(), None)
+        if self._pp_transport is not None:
+            self._pp_transport.before_forward()
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and not get_pp_group().is_first_rank:
-            tensor_dict, comm_handles, comm_postprocess = (
-                get_pp_group().irecv_tensor_dict(
-                    all_gather_group=get_tp_group(),
-                )
-            )
-            assert tensor_dict is not None
-            intermediate_tensors = AsyncIntermediateTensors(
-                tensor_dict,
-                comm_handles=comm_handles,
-                comm_postprocess=comm_postprocess,
-            )
+        if forward_pass and not pp_group.is_first_rank:
+            assert self._pp_transport is not None
+            intermediate_tensors = self._pp_transport.recv(pp_group)
 
         with self.annotate_profile(scheduler_output):
             output = self.model_runner.execute_model(
@@ -1481,14 +1462,8 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        # Non-blocking send of the intermediate tensors. The metadata handle
-        # is reaped lazily by the GroupCoordinator; the device handles are
-        # waited at the top of the next step.
-        handles = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-        )
-        self._pp_send_work = handles[1:]
+        assert self._pp_transport is not None
+        self._pp_transport.send(output.tensors, pp_group)
 
         if self.model_runner.is_pooling_model:
             return self.model_runner.pool()

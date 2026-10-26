@@ -24,7 +24,7 @@ from vllm.distributed import (
 from vllm.distributed.device_communicators import flashinfer_all_reduce
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
-from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
+from vllm.distributed.pp_transport.nccl import AsyncIntermediateTensors
 
 from ..utils import (
     init_test_distributed_environment,
