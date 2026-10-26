@@ -418,6 +418,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         if guard_only_sources and guard_config is None:
             raise ValueError("guard_only_sources requires a KVCR Guard service")
         self.guard_only_sources = guard_only_sources
+        self.suppresses_primary_events = guard_only_sources
         g3_config = None
         if g3 is not None:
             g3_values = dict(g3)
@@ -611,6 +612,8 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     def take_events(self) -> Iterable[OffloadingEvent]:
         events = self._inventory_events
         self._inventory_events = []
+        if self.guard_only_sources:
+            return [event for event in events if event.ownership == "kvcr"]
         return events
 
     @override

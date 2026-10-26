@@ -427,14 +427,14 @@ class TestTieringOffloadingManager:
         )
         other_event = OffloadingEvent(to_keys([3]), Medium.STORAGE, removed=False)
 
-        self.secondary_tier1.guard_only_sources = True
+        self.secondary_tier1.suppresses_primary_events = True
         monkeypatch.setattr(
             self.primary_tier, "take_events", lambda: iter([primary_event])
         )
         monkeypatch.setattr(
             self.secondary_tier1,
             "take_events",
-            lambda: iter([guard_event, other_event]),
+            lambda: iter([guard_event]),
         )
         monkeypatch.setattr(
             self.secondary_tier2, "take_events", lambda: iter([other_event])
