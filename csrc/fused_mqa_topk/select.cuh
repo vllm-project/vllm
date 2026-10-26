@@ -1,4 +1,6 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
 // Per-row top-K selection of the persistent kernel's candidates, one warp per
 // row (K, the row's top-k: 512, 1024 or 2048, is a runtime value).
 //

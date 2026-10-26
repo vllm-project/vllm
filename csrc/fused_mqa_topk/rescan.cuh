@@ -1,4 +1,6 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
 // Exact recovery for the blocks the persistent kernel cannot select from its
 // gated candidates (see persistent_kernel.cuh): the block is rescanned densely,
 // and every 1024-key segment of fp32 scores is merged into a running per-row

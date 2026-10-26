@@ -1,4 +1,6 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
 // Persistent fused FP8 MQA logits + per-row top-K (K = 512, 1024, 2048; SM100),
 // DeepGEMM/FA4-style: one CTA per SM, barriers and TMEM initialised once, every
 // warp role runs its own loop over blocks claimed (heaviest first) from a

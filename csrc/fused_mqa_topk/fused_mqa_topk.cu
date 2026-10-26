@@ -64,6 +64,8 @@ int sm_count(int device) {
   return it->second;
 }
 
+// Adapted from DeepGEMM's make_tma_2d_desc
+// (csrc/jit_kernels/impls/runtime_utils.hpp at 88965b078186)
 CUtensorMap make_2d(void* ptr, CUtensorMapDataType dt, int elem_size,
                     int gmem_inner, int gmem_outer, int smem_inner,
                     int smem_outer, long gmem_outer_stride, int swizzle_mode) {

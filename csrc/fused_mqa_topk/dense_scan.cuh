@@ -1,5 +1,10 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2025 DeepSeek
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
+// Adapted from DeepGEMM (https://github.com/deepseek-ai/DeepGEMM) at
+// 88965b078186ee7510ab9fc4f1d5ebc19adfa8d1:
+// deep_gemm/include/deep_gemm/impls/sm100_fp8_mqa_logits.cuh.
+//
 // Dense FP8 MQA scoring of one 8-row block over its whole KV range: DeepGEMM's
 // SM100 MQA logits pipeline (contiguous KV, 32 heads, D = 128) with the logits
 // store replaced by a per-score policy. Used by the persistent kernel's exact

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
 // Body of one persistent epoch (included twice by persistent_kernel.cuh: the
 // first epoch is straight-line code so the hot loops are not nested in an outer
 // loop).

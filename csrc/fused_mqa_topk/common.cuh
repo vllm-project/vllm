@@ -91,6 +91,7 @@ __device__ __forceinline__ float half_bin_floor(uint32_t b) {
 }
 
 // Weighted head reduction of one row's 32 head scores s_h in two FFMA2 chains
+// (adapted from DeepGEMM's sm100_fp8_mqa_logits.cuh at 88965b078186)
 // seeded with sum_0 / sum_1: sum_h w_h * |s_h| (kWithLinear = false: the
 // persistent kernel adds the linear part on the tensor core) or
 // sum_h w_h * (s_h + |s_h|) (kWithLinear = true); relu(s) = (s + |s|) / 2.

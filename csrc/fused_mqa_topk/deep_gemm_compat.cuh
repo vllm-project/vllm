@@ -1,11 +1,13 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2025 DeepSeek
-// FP8 MQA-logits building blocks from DeepGEMM
-// (github.com/deepseek-ai/DeepGEMM) as of the release before its SM100 kernels
-// went MX-only: the shared-storage layout with fp32 per-key scales and fp32
-// weights, the grid-stride contiguous-KV scheduler and the 2D/3D TMA load.
-// Trimmed to what the fused kernel instantiates (FP8 only, no metadata
-// schedule, no multicast, no paging).
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
+// Adapted from DeepGEMM (https://github.com/deepseek-ai/DeepGEMM) at
+// 88965b078186ee7510ab9fc4f1d5ebc19adfa8d1, the last release before its SM100
+// MQA-logits kernels went MX-only. FP8 MQA-logits building blocks: the
+// shared-storage layout with fp32 per-key scales and fp32 weights, the
+// grid-stride contiguous-KV scheduler and the 2D/3D TMA load. Trimmed to what
+// the fused kernel instantiates (FP8 only, no metadata schedule, no multicast,
+// no paging).
 #pragma once
 
 #include <cute/arch/copy_sm90_tma.hpp>
