@@ -221,7 +221,9 @@ class EngineCore:
             init_none_hash(caching_hash_fn)
 
             self.request_block_hasher = get_request_block_hasher(
-                hash_block_size, caching_hash_fn
+                hash_block_size,
+                caching_hash_fn,
+                vllm_config.num_hash_lookahead_tokens,
             )
 
         self.step_fn = (

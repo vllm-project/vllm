@@ -91,6 +91,7 @@ def create_scheduler(
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
+    speculative_config: SpeculativeConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -174,8 +175,8 @@ def create_scheduler(
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
 
-    speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
+        assert speculative_config is None
         spec_kwargs: dict = dict(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )

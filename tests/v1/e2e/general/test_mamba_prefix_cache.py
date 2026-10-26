@@ -786,17 +786,20 @@ def get_mamba_prefix_cache_step_configs(
                 ),
             ],
         ),
+        # Lookahead hashes reuse the last aligned boundary below the logits
+        # token, so prompts with a partial tail no longer stop one Mamba
+        # page early.
         "prompt_2_block_size_10": TestConfig(
             num_prompt_tokens=B * 2 + 10,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, B, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(B, B + 10, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
+                StepAction(0, B * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B * 2, 10, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
                 StepAction(
                     B * 2 + 10,
                     4,
-                    [1, 0, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1],
+                    [0, 1, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -823,12 +826,18 @@ def get_mamba_prefix_cache_step_configs(
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, B * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(B * 2, B + 10, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
+                StepAction(0, B * 3, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    B * 3,
+                    10,
+                    [0, 0, 1, 1, 1, 1, 1],
+                    (2, 3),
+                    (-1, -1),
+                ),
                 StepAction(
                     B * 3 + 10,
                     4,
-                    [0, 1, 0, 1, 1, 1, 1] if a else [0, 0, 0, 1, 1, 1, 1],
+                    [0, 0, 1, 1, 1, 1, 1] if a else [0, 0, 0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -875,18 +884,18 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
                     B * 5,
-                    B * 4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
-                    (4, 8),
+                    B * 5,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1],
+                    (4, 9),
                     (-1, -1),
                 ),
                 StepAction(
-                    B * 9,
-                    B + 10,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 1]
+                    B * 10,
+                    10,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1]
                     if a
-                    else [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1],
-                    (8, 10),
+                    else [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+                    (9, 10),
                     (-1, -1),
                 ),
             ],
@@ -900,7 +909,7 @@ def get_internal_checkpoint_step_configs() -> dict[str, TestConfig]:
     the prompt's last block boundary itself, so the final chunk runs whole.
 
     The checkpoint goes in the second-to-last block the chunk reaches, keyed to
-    the boundary: column 1 holds the state at B for a 2B + 10 prompt.
+    the boundary: column 1 holds the state at 2B for a 2B + 10 prompt.
     """
     B = BLOCK_SIZE
     return {
@@ -1328,13 +1337,13 @@ def _run_mamba_prefix_cache_mrv2(
         assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
 
         if internal_checkpoints:
-            # The checkpoint a 2B + 10 prefill exports at B (column 1) is the
-            # final state of a prefill that stops at B (column 0). Distinct
+            # The checkpoint a 2B + 10 prefill exports at 2B (column 1) is the
+            # final state of a prefill that stops at 2B (column 1). Distinct
             # tokens make a shifted conv window visible.
             tokens = [(i * 7919) % 30000 + 1 for i in range(BLOCK_SIZE * 2 + 10)]
             scheduler = engine.llm_engine.engine_core.engine_core.scheduler
             states = []
-            for num_tokens, col in ((BLOCK_SIZE, 0), (len(tokens), 1)):
+            for num_tokens, col in ((BLOCK_SIZE * 2, 1), (len(tokens), 1)):
                 captured["snapshot_col"] = col
                 _ = engine.generate(
                     [TokensPrompt(prompt_token_ids=tokens[:num_tokens])],

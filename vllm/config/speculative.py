@@ -475,6 +475,12 @@ class SpeculativeConfig:
     speculative methods. This is an experimental option for measuring the
     acceptance-rate impact of reusing that block. It does not disable the
     speculative drafter itself."""
+    disable_lookahead_block_hashes: bool = False
+    """Disable lookahead block hashes for EAGLE-like speculative methods and
+    fall back to dropping the trailing prefix-cache block. Lookahead hashes
+    also cover the tokens the drafter reads after each block, so engines
+    sharing a KV store and external consumers of KV cache events must use the
+    same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
     MTP). "fp8" uses per-row weight and per-token activation scales on the
