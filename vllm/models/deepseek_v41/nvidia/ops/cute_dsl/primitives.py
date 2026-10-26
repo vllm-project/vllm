@@ -318,6 +318,55 @@ def shuffle_sync_idx_u32(
     )
 
 
+def _stuc(peer_table, offset, words, peers, loc, ip) -> None:
+    """Store 1, 2 or 4 32-bit words at ``offset`` into each of ``peers``
+    buffers whose base addresses are the u64 entries of ``peer_table``: the
+    unicast twin of ``stmc_bf16x*`` for deployments without NVLink multicast."""
+    vec = {1: "b32", 2: "v2.b32", 4: "v4.b32"}[len(words)]
+    regs = ", ".join(f"${i + 2}" for i in range(len(words)))
+    regs = regs if len(words) == 1 else "{" + regs + "}"
+    body = ["{", ".reg .u64 base, addr;"]
+    for peer in range(peers):
+        body += [
+            f"ld.global.nc.u64 base, [$0+{8 * peer}];",
+            "add.u64 addr, base, $1;",
+            f"st.relaxed.sys.global.{vec} [addr], {regs};",
+        ]
+    body.append("}")
+    _asm(
+        None,
+        [peer_table.ir_value(loc=loc, ip=ip), offset.ir_value(loc=loc, ip=ip), *words],
+        "\n\t".join(body),
+        "l,l" + ",r" * len(words),
+        side_effects=True,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def stuc_bf16x2(
+    peer_table: Int64, offset: Int64, packed: Uint32, peers: int, *, loc=None, ip=None
+) -> None:
+    _stuc(peer_table, offset, [packed.ir_value(loc=loc, ip=ip)], peers, loc, ip)
+
+
+@dsl_user_op
+def stuc_bf16x4(
+    peer_table: Int64, offset: Int64, values, peers: int, *, loc=None, ip=None
+) -> None:
+    words = [values[i].ir_value(loc=loc, ip=ip) for i in range(2)]
+    _stuc(peer_table, offset, words, peers, loc, ip)
+
+
+@dsl_user_op
+def stuc_bf16x8(
+    peer_table: Int64, offset: Int64, values, peers: int, *, loc=None, ip=None
+) -> None:
+    words = [values[i].ir_value(loc=loc, ip=ip) for i in range(4)]
+    _stuc(peer_table, offset, words, peers, loc, ip)
+
+
 @dsl_user_op
 def stmc_bf16x2(address: Int64, packed: Uint32, *, loc=None, ip=None) -> None:
     _asm(
