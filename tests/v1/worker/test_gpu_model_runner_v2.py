@@ -433,7 +433,10 @@ def test_async_copy_to_np_does_not_alias_reused_buffer():
     ("draft_dtype", "expected_dtype"),
     [("auto", "auto"), ("bfloat16", "bfloat16"), (None, "fp8_e4m3")],
 )
-def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_dtype):
+@pytest.mark.parametrize("data_parallel_index", [0, 3])
+def test_standalone_draft_kv_dtype_override(
+    monkeypatch, draft_dtype, expected_dtype, data_parallel_index
+):
     @dataclass
     class Config:
         cache_config: CacheConfig
@@ -442,6 +445,7 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
         quant_config: object | None = None
 
     target = Config(CacheConfig(cache_dtype="fp8_e4m3"), ParallelConfig(), object())
+    target.parallel_config.data_parallel_index = data_parallel_index
     speculator = object.__new__(ar_module.StandaloneARSpeculator)
     speculator.vllm_config = target
     speculator.draft_model_config = object()
@@ -458,3 +462,5 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
     assert draft_config.cache_config.cache_dtype == expected_dtype
     assert speculator.attn_vllm_config.cache_config.cache_dtype == expected_dtype
     assert target.cache_config.cache_dtype == "fp8_e4m3"
+    assert draft_config.parallel_config.data_parallel_index == data_parallel_index
+    assert target.parallel_config.data_parallel_index == data_parallel_index

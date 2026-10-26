@@ -119,6 +119,9 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 rank=self.vllm_config.parallel_config.rank,
             ),
         )
+        draft_vllm_config.parallel_config.data_parallel_index = (
+            self.vllm_config.parallel_config.data_parallel_index
+        )
         self._draft_vllm_config = draft_vllm_config
         with set_model_tag("draft_model"):
             return get_model(
