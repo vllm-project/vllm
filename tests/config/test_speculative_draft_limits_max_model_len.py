@@ -11,10 +11,17 @@ max_model_len.
 
 import pytest
 
-from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
 
 # All repos are public; only config/tokenizer-config files are fetched.
 AR_MODEL = "JackFram/llama-68m"  # max_position_embeddings=2048
+HYBRID_MODEL = "ai21labs/Jamba-tiny-random"
 EAGLE3_DRAFT = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"  # max_position_embeddings=2048
 LLAMA3_TARGET = "unsloth/Meta-Llama-3.1-8B-Instruct"  # max_position_embeddings=131072
 
@@ -71,3 +78,30 @@ def test_eagle_draft_limits_max_model_len_unless_resized(
     draft_hf_config = speculative_config.draft_model_config.hf_config
     assert draft_hf_config.max_position_embeddings == (8192 if resizable else 2048)
     assert vllm_config.model_config.max_model_len == (8192 if resizable else 2048)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("use_v2_model_runner", [True, False])
+def test_draft_limit_reaches_mamba_block_size(
+    use_v2_model_runner: bool, monkeypatch: pytest.MonkeyPatch
+):
+    """Without prefix caching, the hybrid mamba hook sets mamba_block_size to
+    max_model_len; it must see the value the draft lowered it to (#63844)."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
+    model_config = ModelConfig(HYBRID_MODEL, max_model_len=4096)
+    speculative_config = SpeculativeConfig(
+        target_model_config=model_config,
+        target_parallel_config=ParallelConfig(),
+        model=HYBRID_MODEL,
+        method="draft_model",
+        num_speculative_tokens=3,
+        max_model_len=1024,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        speculative_config=speculative_config,
+        cache_config=CacheConfig(enable_prefix_caching=False),
+    )
+    expected = 1024 if use_v2_model_runner else 4096
+    assert vllm_config.model_config.max_model_len == expected
+    assert vllm_config.cache_config.mamba_block_size == expected
