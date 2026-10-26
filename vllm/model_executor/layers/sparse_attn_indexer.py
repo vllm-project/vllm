@@ -1201,6 +1201,11 @@ class SparseAttnIndexer(CustomOp):
                 candidate_blocks=self.candidate_blocks,
                 candidate_block_size=self.candidate_block_size,
                 candidate_write=self.candidate_write,
+                dcp_rank=self.dcp_rank,
+                dcp_world_size=self.dcp_world_size,
+                cp_kv_cache_interleave_size=(
+                    self._parallel_config.cp_kv_cache_interleave_size
+                ),
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path requires AITER or a supported "

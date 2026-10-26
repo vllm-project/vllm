@@ -1149,6 +1149,9 @@ def rocm_aiter_sparse_attn_indexer_fake(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1173,6 +1176,9 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -1240,9 +1246,17 @@ def rocm_aiter_sparse_attn_indexer(
             candidate_blocks,
             candidate_block_size,
             candidate_write,
+            dcp_rank,
+            dcp_world_size,
+            cp_kv_cache_interleave_size,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
+    if dcp_world_size > 1 and (compress_ratio > 1 or candidate_blocks is not None):
+        raise NotImplementedError(
+            "The ROCm sparse indexer supports DCP only without indexer KV "
+            "compression and without candidate blocks."
+        )
     assert topk_indices_buffer is not None
     assert scale_fmt is not None
     slot_mapping = layer_attn_metadata.slot_mapping
@@ -1278,15 +1292,42 @@ def rocm_aiter_sparse_attn_indexer(
             ((total_seq_lens, 4), torch.uint8),
         )
         for chunk in prefill_metadata.chunks:
-            k_fp8 = k_fp8_full[: chunk.total_seq_lens]
-            k_scale = k_scale_full[: chunk.total_seq_lens]
+            # Under DCP gather only this rank's keys. cu_seqlen_ks/ke are
+            # already local.
+            gather_cu_seq_lens = chunk.cu_seq_lens
+            gather_total = chunk.total_seq_lens
+            token_to_seq = chunk.token_to_seq
+            if dcp_world_size > 1:
+                assert chunk.local_cu_seq_lens is not None
+                gather_cu_seq_lens = chunk.local_cu_seq_lens
+                gather_total = chunk.local_total_seq_lens
+                token_to_seq = _token_to_seq_from_cu(gather_cu_seq_lens, gather_total)
+            k_fp8 = k_fp8_full[:gather_total]
+            k_scale = k_scale_full[:gather_total]
+            if gather_total == 0:
+                # No local keys, but every rank must join the exchange.
+                topk_indices = topk_indices_buffer[
+                    chunk.token_start : chunk.token_end, :topk_tokens
+                ]
+                topk_indices.fill_(-1)
+                if dcp_world_size > 1:
+                    _merge_rocm_dcp_topk(
+                        topk_indices.new_empty((topk_indices.shape[0], 0)).float(),
+                        topk_indices,
+                        topk_tokens,
+                        dcp_rank,
+                        dcp_world_size,
+                        cp_kv_cache_interleave_size,
+                        row_starts=None,
+                    )
+                continue
             cp_gather_indexer_k_quant_cache_triton(
                 kv_cache,
                 k_fp8,
                 k_scale,
                 chunk.block_table,
-                chunk.cu_seq_lens,
-                token_to_seq=chunk.token_to_seq,
+                gather_cu_seq_lens,
+                token_to_seq=token_to_seq,
                 cache_layout=(
                     "NORMAL" if _indexer_k_is_c4a_block_flat(compress_ratio) else None
                 ),
@@ -1352,6 +1393,17 @@ def rocm_aiter_sparse_attn_indexer(
                     logits.stride(0),
                     logits.stride(1),
                     topk_tokens,
+                )
+
+            if dcp_world_size > 1:
+                _merge_rocm_dcp_topk(
+                    logits,
+                    topk_indices,
+                    topk_tokens,
+                    dcp_rank,
+                    dcp_world_size,
+                    cp_kv_cache_interleave_size,
+                    row_starts=chunk.cu_seqlen_ks,
                 )
 
     if has_decode:
@@ -1459,6 +1511,18 @@ def rocm_aiter_sparse_attn_indexer(
                 topk_tokens,
             )
 
+        if dcp_world_size > 1:
+            # decode_metadata.seq_lens is local under DCP.
+            _merge_rocm_dcp_topk(
+                logits,
+                topk_indices,
+                topk_tokens,
+                dcp_rank,
+                dcp_world_size,
+                cp_kv_cache_interleave_size,
+                row_starts=None,
+            )
+
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
@@ -1471,6 +1535,42 @@ def rocm_aiter_sparse_attn_indexer(
             )
 
     return topk_indices_buffer
+
+
+def _token_to_seq_from_cu(cu_seq_lens: torch.Tensor, total: int) -> torch.Tensor:
+    """Map each gathered key row to its request, from cumulative lengths."""
+    lens = cu_seq_lens[1:] - cu_seq_lens[:-1]
+    return torch.repeat_interleave(
+        torch.arange(lens.shape[0], dtype=torch.int32, device=lens.device),
+        lens,
+        output_size=total,
+    )
+
+
+def _merge_rocm_dcp_topk(
+    logits: torch.Tensor,
+    topk_indices: torch.Tensor,
+    topk_tokens: int,
+    dcp_rank: int,
+    dcp_world_size: int,
+    cp_interleave: int,
+    row_starts: torch.Tensor | None,
+) -> None:
+    from vllm.distributed import get_dcp_group
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_torch import (
+        merge_dcp_topk_global,
+    )
+
+    merge_dcp_topk_global(
+        logits,
+        topk_indices,
+        topk_tokens,
+        dcp_rank,
+        dcp_world_size,
+        cp_interleave,
+        get_dcp_group(),
+        row_starts=row_starts,
+    )
 
 
 def _decode_e8m0_scales(scale: torch.Tensor) -> torch.Tensor:

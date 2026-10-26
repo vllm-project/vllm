@@ -816,6 +816,7 @@ def _rocm_aiter_mla_decode_fwd_lse_impl(
         kwargs["q_scale"] = q_scale
         kwargs["kv_scale"] = kv_scale
 
+    forced_single_split = False
     if (
         q.dtype == torch.bfloat16
         and kv_buffer.dtype == torch.bfloat16
@@ -830,10 +831,11 @@ def _rocm_aiter_mla_decode_fwd_lse_impl(
             kwargs["num_kv_splits_indptr"] = torch.arange(
                 qo_indptr.shape[0], dtype=torch.int32, device=q.device
             )
+            forced_single_split = True
 
-    if q.dtype == FP8_DTYPE:
+    if not forced_single_split:
         assert kv_indices is not None
-        num_kv_splits, num_kv_splits_indptr = get_meta_param(
+        num_kv_splits, _ = get_meta_param(
             None,
             qo_indptr.shape[0] - 1,
             kv_indices.numel(),
@@ -841,20 +843,19 @@ def _rocm_aiter_mla_decode_fwd_lse_impl(
             max_seqlen_qo,
             q.dtype,
         )
-        if num_kv_splits == 1:
-            # gfx942's one-split FP8 asm writes the final output directly but
-            # does not write either LSE buffer. Force the normal split reducer,
-            # which produces both the same output and an accurate natural LSE.
-            num_kv_splits = 2
-            num_kv_splits_indptr = torch.arange(
-                0,
-                (qo_indptr.shape[0]) * num_kv_splits,
-                num_kv_splits,
-                dtype=torch.int32,
-                device=q.device,
-            )
+        # With one KV split, some AITER kernels write `o` but not the LSE.
+        # Two splits run the reducer, which writes both.
+        num_kv_splits = max(num_kv_splits, 2)
         kwargs["num_kv_splits"] = num_kv_splits
-        kwargs["num_kv_splits_indptr"] = num_kv_splits_indptr
+        # Not get_meta_param's tensor: it lives only in an lru_cache, so a
+        # captured CUDA graph can replay it after it is freed (ROCm/aiter#5193).
+        kwargs["num_kv_splits_indptr"] = torch.arange(
+            0,
+            qo_indptr.shape[0] * num_kv_splits,
+            num_kv_splits,
+            dtype=torch.int32,
+            device=q.device,
+        )
 
     _, final_lse = mla_decode_fwd(
         q,
