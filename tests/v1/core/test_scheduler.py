@@ -5096,6 +5096,7 @@ def test_mamba_align_eagle_schedules_encoder_at_boundary():
     )
     scheduler.need_mamba_block_aligned_split = True
     scheduler.use_eagle = True
+    scheduler.use_eagle_block_drop = True
     scheduler.num_prefill_lookahead = 1
     scheduler.max_num_encoder_input_tokens = 2048
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
@@ -8212,3 +8213,72 @@ def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     # Deferring this step alone would ask for 6. The PP wait to 7 stands.
     assert "read" not in scheduler.schedule().num_scheduled_tokens
     assert read.next_decode_eligible_step == 7
+
+
+def _skip_drafts_per_step(
+    num_requests: int, num_tokens: int, max_tokens: int, num_steps: int = 2
+) -> list[bool]:
+    """SchedulerOutput.skip_drafts for each step, with 64-token chunks."""
+    scheduler = create_scheduler(num_speculative_tokens=2, max_num_batched_tokens=64)
+    # As for a drafter on the V2 model runner (the ngram config reserves no
+    # lookahead slots, which disables the check).
+    scheduler.can_skip_drafts = True
+    for request in create_requests(num_requests, num_tokens, max_tokens=max_tokens):
+        scheduler.add_request(request)
+    skip_drafts = []
+    for _ in range(num_steps):
+        output = scheduler.schedule()
+        skip_drafts.append(output.skip_drafts)
+        req_ids = list(output.num_scheduled_tokens)
+        requests = [scheduler.requests[req_id] for req_id in req_ids]
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+            sampled_token_ids=[
+                [] if r.num_computed_tokens < r.num_tokens else [100] for r in requests
+            ],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        scheduler.update_from_output(output, model_runner_output)
+    return skip_drafts
+
+
+def test_skip_drafts_only_when_no_request_can_use_them():
+    # A non-final chunk drafts nothing; a final chunk that samples the last of
+    # max_tokens finishes the request.
+    assert _skip_drafts_per_step(1, num_tokens=100, max_tokens=1) == [True, True]
+    # The final chunk's drafts are verified by the next decode step.
+    assert _skip_drafts_per_step(1, num_tokens=100, max_tokens=2) == [True, False]
+    # One request finishes its prompt next to the other's non-final chunk.
+    assert _skip_drafts_per_step(2, num_tokens=40, max_tokens=2, num_steps=1) == [False]
+
+
+def test_drafts_unused_with_async_placeholders():
+    """The predicate must assume that all in-flight drafts are rejected."""
+    scheduler = create_scheduler(num_speculative_tokens=2)
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+
+    # Non-final prefill chunk: no sample, drafts unusable.
+    assert scheduler._drafts_unused(request, 0, 8)
+    # Final prefill chunk with max_tokens=3: drafts usable.
+    assert not scheduler._drafts_unused(request, 0, 16)
+
+    # Sync decode: 2 of 3 output tokens verified; this step must finish.
+    request.append_output_token_ids(100)
+    request.append_output_token_ids(101)
+    assert scheduler._drafts_unused(request, 17, 1)
+    # Only 1 verified output: this step may or may not finish.
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+    request.append_output_token_ids(100)
+    assert not scheduler._drafts_unused(request, 16, 1)
+
+    # Async decode, 1 verified output and one in-flight step (1 sample +
+    # 1 draft placeholder): worst case still reaches 3 = max_tokens.
+    request.num_output_placeholders = 2
+    assert scheduler._drafts_unused(request, 18, 3)
+    # 0 verified outputs: worst case gives only 2 tokens, not guaranteed.
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
+    request.num_output_placeholders = 2
+    assert not scheduler._drafts_unused(request, 17, 3)
