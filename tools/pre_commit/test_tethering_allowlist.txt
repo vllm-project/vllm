@@ -125,6 +125,7 @@ tests/parser/engine/test_gemma4_streaming_reasoning.py  # CI jobs disabled pendi
 tests/parser/engine/test_glm47_moe.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_granite.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_inkling.py  # CI jobs disabled pending locked cmake installation
+tests/parser/engine/test_llama_json.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_ling3.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_minicpmv_reasoning.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_minimax_m2.py  # CI jobs disabled pending locked cmake installation
