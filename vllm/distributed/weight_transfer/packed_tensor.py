@@ -256,8 +256,9 @@ def packed_nccl_broadcast_consumer(
                 packed, list(names), list(shapes), list(dtypes), list(tensor_sizes)
             )
         )
-        slot_done[buffer_idx] = torch.Event()
-        slot_done[buffer_idx].record(streams[buffer_idx])
+        event = torch.Event()
+        event.record(streams[buffer_idx])
+        slot_done[buffer_idx] = event
 
     while True:
         # Wait for this slot's previous pack. Not streams[buffer_idx].synchronize():
