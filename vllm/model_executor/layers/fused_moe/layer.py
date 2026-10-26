@@ -342,6 +342,7 @@ def FusedMoEFactory(
                 )
                 else 1.0
             ),
+            has_shared_expert_gate=shared_expert_gate is not None,
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
