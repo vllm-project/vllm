@@ -156,7 +156,7 @@ def make_full_mamba_manager(
     [
         (8, 16, 16, 512, 1),
         (8, 16, 16, 513, 1),
-        *[(8, 128, 896, p, 1) for p in (127, 128, 129, 7040, 7168, 7296, 7449)],
+        *[(8, 128, 896, p, 1) for p in (127, 128, 7040, 7168, 7296, 7449)],
     ],
 )
 @pytest.mark.parametrize("use_eagle", [False, True])

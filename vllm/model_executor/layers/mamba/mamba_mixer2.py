@@ -1110,9 +1110,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if not isinstance(spec, MambaSpec):
             return spec
         # The block-boundary state can be exported from inside one forward
-        # pass, so the scheduler need not split the prefill; every reader
-        # acts on this only in align mode. The metadata builder puts a chunk
-        # end exactly on the checkpoint, so any token position works.
+        # pass; every reader acts on this only in align mode. The metadata
+        # builder puts a chunk end exactly on the checkpoint, so any token
+        # position works.
         return replace(
             spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=1
         )

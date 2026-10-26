@@ -199,10 +199,9 @@ class SingleTypeKVCacheManager(ABC):
             apply_admission_cap: If True, clamp by `num_required_blocks` by
                 `max_admission_blocks_per_request`for recycling-aware specs
                 (SWA, chunked-local).
-            prefill_end: The token index the request's prefill ends at, the
-                same value the scheduler splits chunks against. Mamba reserves
-                a prefill checkpoint only on the chunk reaching it; 0 (dense
-                retention) reserves one on every chunk.
+            prefill_end: The token index the request's prefill ends at. Mamba
+                reserves a prefill checkpoint only on the chunk reaching it; 0
+                (dense retention) reserves one on every chunk.
 
         Returns:
             The number of blocks to allocate.

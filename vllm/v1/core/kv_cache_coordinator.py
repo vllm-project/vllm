@@ -219,8 +219,7 @@ class KVCacheCoordinator(ABC):
                 per-request admission cap (SWA / chunked-local). Set only by
                 the full-sequence admission gate; per-step allocation must
                 leave it False so the predictor matches `allocate_new_blocks`.
-            prefill_end: The token index the request's prefill ends at, the
-                same value the scheduler splits chunks against. Under sparse
+            prefill_end: The token index the request's prefill ends at. Under sparse
                 retention Mamba reserves a prefill checkpoint only on the chunk
                 reaching it; under dense retention every chunk publishes a
                 state, so it is ignored (0).
