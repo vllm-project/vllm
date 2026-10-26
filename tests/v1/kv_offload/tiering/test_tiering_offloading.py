@@ -715,12 +715,16 @@ class TestTieringOffloadingManager:
         assert self.manager.has_pending_work()
         reduced = self.manager.get_stats().reduce()
         label = self.manager._metrics.tier_label(0)
-        assert reduced[f"{TieringOffloadingMetrics.DEFERRED_RELEASE_JOBS}:{label}"] == 1
         assert (
             reduced[f"{TieringOffloadingMetrics.DEFERRED_RELEASE_CHUNKS}:{label}"] == 2
         )
+        hold = TieringOffloadingMetrics.DEFERRED_RELEASE_HOLD
+        assert not has_histogram_count(reduced, hold)
 
         self._release(monkeypatch, job_ids)
+
+        reduced = self.manager.get_stats().reduce()
+        assert reduced[histogram_count_key(hold, label)] == 1
 
         assert self.primary_tier.num_deferred_release_chunks == 0
         assert self.primary_tier._get_num_free_chunks() == free_before
@@ -782,6 +786,18 @@ class TestTieringOffloadingManager:
         self._promote_with_deferred_release(monkeypatch, chunks)
         assert self.primary_tier.num_deferred_release_chunks == 0
         assert not self.manager._deferred_releases
+
+    def test_defer_write_release_asserts_on_non_pending_key(self, manager_setup):
+        """Every failed key must still be pending: a ready or missing key
+        means a chunk the tier may still write to would go unheld."""
+        self._start_request()
+        chunk = to_keys([5])
+        assert self.primary_tier.prepare_write(chunk, _CTX) is not None
+        self.primary_tier.complete_write(chunk, _CTX, True)
+        with pytest.raises(AssertionError, match="is not a pending write"):
+            self.primary_tier.defer_write_release(chunk)
+        with pytest.raises(AssertionError, match="is not a pending write"):
+            self.primary_tier.defer_write_release(to_keys([6]))
 
     def test_deferred_release_of_unknown_job_asserts(self, manager_setup, monkeypatch):
         monkeypatch.setattr(

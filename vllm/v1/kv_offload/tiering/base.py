@@ -67,7 +67,7 @@ class TieringOffloadingMetrics:
     BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
     PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
     DEFERRED_RELEASE_CHUNKS = "vllm:kv_offload_tiering_deferred_release_chunks"
-    DEFERRED_RELEASE_JOBS = "vllm:kv_offload_tiering_deferred_release_jobs"
+    DEFERRED_RELEASE_HOLD = "vllm:kv_offload_tiering_deferred_release_hold_seconds"
 
 
 @dataclass
@@ -301,10 +301,21 @@ class SecondaryTierManager(ABC):
         """Return jobs whose deferred release can now complete.
 
         Lists each job reported with ``JobResult.defer_release=True`` exactly
-        once, once the tier's I/O can no longer touch its primary chunks, in
-        the same ``get_finished_jobs()`` round as its result or a later one.
-        The framework then returns those chunks to the free pool. Tiers that
-        never defer a release need not override this.
+        once, once the tier's I/O can no longer touch its primary chunks. The
+        framework then returns those chunks to the free pool. Tiers that never
+        defer a release need not override this.
+
+        Ordering: a job may be listed only after its ``defer_release`` result
+        has been returned by ``get_finished_jobs()`` (an earlier call, or the
+        same polling round, which the framework processes first). Listing it
+        before its result trips the framework's unknown-job assert. A tier
+        whose confirmation can outrun its timeout (e.g. an early abort ack
+        racing the failure it acknowledges) must buffer the release until the
+        result has been reported.
+
+        Polled rather than delivered by callback so that releases are applied
+        on the framework's own polling path, under the manager lock, and never
+        on a tier's I/O or network thread.
         """
         return ()
 

@@ -111,6 +111,12 @@ class JobMetadata(NamedTuple):
     tier_idx: int
 
 
+class _DeferredRelease(NamedTuple):
+    tier_idx: int
+    chunk_ids: list[int]
+    deferred_at: float
+
+
 class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
     """CPUOffloadingManager with a primary/secondary transfer interface.
 
@@ -160,9 +166,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         """
         return self._prepare_load(keys, req_context, record_access=False)
 
-    def defer_write_release(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
-    ) -> list[int]:
+    def defer_write_release(self, keys: Collection[OffloadKey]) -> list[int]:
         """Fail pending writes like ``complete_write(False)``, deferring the release.
 
         The keys leave the cache (lookups miss and a later store allocates a
@@ -171,18 +175,20 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         ``release_deferred_write`` once the writer can no longer touch them.
         """
         chunk_ids: list[int] = []
-        removed_keys: list[OffloadKey] = []
         for key in keys:
             chunk = self._policy.get(key)
-            if chunk is not None and not chunk.is_ready:
-                self._policy.remove(key)
-                self._deferred_release_chunk_ids.add(chunk.chunk_id)
-                chunk_ids.append(chunk.chunk_id)
-                removed_keys.append(key)
-        if removed_keys and self.events is not None:
+            # Every key must still be pending, or a chunk the tier may still
+            # write to would go unheld.
+            assert chunk is not None and not chunk.is_ready, (
+                f"defer_write_release: key {key!r} is not a pending write"
+            )
+            self._policy.remove(key)
+            self._deferred_release_chunk_ids.add(chunk.chunk_id)
+            chunk_ids.append(chunk.chunk_id)
+        if chunk_ids and self.events is not None:
             self.events.append(
                 OffloadingEvent(
-                    keys=removed_keys,
+                    keys=list(keys),
                     medium=self.medium,
                     removed=True,
                     metadata_only=True,
@@ -302,8 +308,8 @@ class TieringOffloadingManager(OffloadingManager):
         #   False: primary → secondary (cascade)
         self._jobs: dict[JobId, JobMetadata] = {}
         # Finished promotions whose failed chunks await release until the tier
-        # lists them in get_deferred_releases(): job_id -> (tier, chunk ids).
-        self._deferred_releases: dict[JobId, tuple[int, list[int]]] = {}
+        # lists them in get_deferred_releases().
+        self._deferred_releases: dict[JobId, _DeferredRelease] = {}
         # Set by reset_cache() until on_reset_flushed(); see lookup().
         self._promotions_held = False
         primary_view = self.primary_tier.get_kv_memoryview()
@@ -548,13 +554,11 @@ class TieringOffloadingManager(OffloadingManager):
         if not failed_keys:
             assert not completed_job.defer_release
         elif completed_job.defer_release:
-            chunk_ids = self.primary_tier.defer_write_release(
-                failed_keys, transfer_job.req_context
-            )
-            # Record even with no chunks: the tier still reports the release.
-            self._deferred_releases[completed_job.job_id] = (
-                job_metadata.tier_idx,
-                chunk_ids,
+            chunk_ids = self.primary_tier.defer_write_release(failed_keys)
+            self._deferred_releases[completed_job.job_id] = _DeferredRelease(
+                tier_idx=job_metadata.tier_idx,
+                chunk_ids=chunk_ids,
+                deferred_at=time.monotonic(),
             )
             self._metrics.on_release_deferred(job_metadata.tier_idx, len(chunk_ids))
         else:
@@ -622,13 +626,16 @@ class TieringOffloadingManager(OffloadingManager):
                     f"Deferred release of job_id {job_id} from tier #{i}"
                     f" ({tier.tier_type}) was never deferred"
                 )
-                tier_idx, chunk_ids = deferred
-                assert tier_idx == i, (
+                assert deferred.tier_idx == i, (
                     f"Deferred release of job_id {job_id} reported by tier #{i}"
-                    f" but was deferred by tier #{tier_idx}"
+                    f" but was deferred by tier #{deferred.tier_idx}"
                 )
-                self.primary_tier.release_deferred_write(chunk_ids)
-                self._metrics.on_deferred_release_done(i, len(chunk_ids))
+                self.primary_tier.release_deferred_write(deferred.chunk_ids)
+                self._metrics.on_deferred_release_done(
+                    i,
+                    len(deferred.chunk_ids),
+                    time.monotonic() - deferred.deferred_at,
+                )
 
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int

@@ -131,15 +131,18 @@ class TieringMetricsTracker:
 
     def on_release_deferred(self, tier_idx: int, chunk_count: int) -> None:
         self._tier_states[tier_idx].deferred_release_chunk_count += chunk_count
-        self._stats.increase_counter(
-            TieringOffloadingMetrics.DEFERRED_RELEASE_JOBS,
-            labelvalues=self.tier_label(tier_idx),
-        )
 
-    def on_deferred_release_done(self, tier_idx: int, chunk_count: int) -> None:
+    def on_deferred_release_done(
+        self, tier_idx: int, chunk_count: int, hold_duration: float
+    ) -> None:
         state = self._tier_states[tier_idx]
         state.deferred_release_chunk_count -= chunk_count
         assert state.deferred_release_chunk_count >= 0
+        self._stats.observe_histogram(
+            TieringOffloadingMetrics.DEFERRED_RELEASE_HOLD,
+            hold_duration,
+            self.tier_label(tier_idx),
+        )
 
     def on_promotion_allocation_failure(self) -> None:
         self._stats.increase_counter(
