@@ -276,6 +276,10 @@ class RemoteVLLMServer:
             self._pre_download_model(model, args)
         self._shutdown_complete = False
 
+        # A just-exited process's VRAM may not be reclaimed yet on a
+        # shared host; wait for it to clear before a doomed engine start.
+        self._wait_for_gpu_memory_available(args.gpu_memory_utilization)
+
         # Record GPU memory before server start so we know what
         # "released" looks like.
         self._pre_server_gpu_memory = self._get_gpu_memory_used()
@@ -285,13 +289,6 @@ class RemoteVLLMServer:
                 f"[{type(self).__name__}] GPU memory before server start: "
                 f"{pre_gb:.2f} GB"
             )
-
-        # A single instantaneous reading can catch a transient
-        # noisy-neighbor VRAM spike on a shared physical GPU. Wait for
-        # the reading to stabilize before handing it to vLLM's startup
-        # free-memory check, and use the stabilized value as the
-        # baseline for the post-shutdown release check too.
-        self._pre_server_gpu_memory = self._wait_for_gpu_memory_stable()
 
         self._start_server(model, vllm_serve_args, env_dict)
         self._register_active_server()
@@ -559,8 +556,8 @@ class RemoteVLLMServer:
                 continue
         return members
 
-    def _get_gpu_memory_used(self) -> float | None:
-        """Get device-wide usage across visible devices in bytes.
+    def _get_gpu_memory_per_device(self) -> list[tuple[float, float]] | None:
+        """Get (free_bytes, total_bytes) for each visible device.
 
         On ROCm this initializes HIP in the caller; subsequent multiprocessing
         GPU workers must use spawn, as the ROCm server helpers already do.
@@ -569,82 +566,89 @@ class RemoteVLLMServer:
             if current_platform.is_rocm():
                 # Use HIP logical devices. On MI355 DPX/NPS2, the primary
                 # AMD SMI device can expose whole-card memory counters.
-                total_used = 0
+                readings = []
                 for i in range(current_platform.device_count()):
                     free, total = torch.accelerator.get_memory_info(i)
-                    total_used += total - free
-                return float(total_used)
+                    readings.append((float(free), float(total)))
+                return readings
             elif current_platform.is_cuda():
                 with _nvml():
-                    total_used = 0
-                    device_count = current_platform.device_count()
-                    for i in range(device_count):
+                    readings = []
+                    for i in range(current_platform.device_count()):
                         handle = nvmlDeviceGetHandleByIndex(i)
                         mem_info = nvmlDeviceGetMemoryInfo(handle)
-                        total_used += mem_info.used
-                    return total_used
+                        readings.append((float(mem_info.free), float(mem_info.total)))
+                    return readings
             elif current_platform.is_xpu():
-                total_used = 0
-                device_count = current_platform.device_count()
-                for i in range(device_count):
+                readings = []
+                for i in range(current_platform.device_count()):
                     free, total = torch.xpu.mem_get_info(i)
-                    total_used += total - free
-                return total_used
+                    readings.append((float(free), float(total)))
+                return readings
         except Exception as e:
             print(f"[RemoteOpenAIServer] Could not query GPU memory: {e}")
             return None
         return None
 
-    def _wait_for_gpu_memory_stable(
-        self, timeout: float = 30.0, poll_interval: float = 2.0
-    ) -> float | None:
-        """Poll GPU memory until two consecutive readings agree.
+    def _get_gpu_memory_used(self) -> float | None:
+        """Get device-wide usage across visible devices in bytes."""
+        per_device = self._get_gpu_memory_per_device()
+        if per_device is None:
+            return None
+        return sum(total - free for free, total in per_device)
 
-        Used right before server start to smooth over a transient
-        noisy-neighbor VRAM spike on a shared physical GPU: a reading
-        taken at a single instant can be an outlier, and feeding that
-        straight into vLLM's hard startup free-memory check causes a
-        spurious failure. This is a best-effort pre-flight smoothing
-        step, not a hard gate -- if the reading never stabilizes within
-        ``timeout``, we just return the last value seen instead of
-        raising (raising here would only convert a flaky failure into a
-        different flaky failure).
+    def _wait_for_gpu_memory_available(
+        self,
+        gpu_memory_utilization: float,
+        timeout: float = 60.0,
+        poll_interval: float = 5.0,
+    ) -> None:
+        """Wait for each visible device to pass vLLM's own startup check:
+        ``free >= total * gpu_memory_utilization``
+        (``vllm.v1.worker.utils.request_memory``).
+
+        A shared host can leave a just-exited process's VRAM unreclaimed
+        for a few seconds, transiently failing that check. This doesn't
+        replace vLLM's check -- it just avoids paying for a doomed engine
+        start. If memory is still short at ``timeout``, log the shortfall
+        and let vLLM raise its own error.
         """
-        used = self._get_gpu_memory_used()
-        if used is None:
-            return None  # Can't query, nothing to do
-
-        # Small absolute tolerance for two readings to be considered
-        # the same; analogous in spirit to the aggregate driver/context
-        # headroom used in `_wait_for_gpu_memory_release`.
-        tolerance_bytes = 0.5 * 1024 * 1024 * 1024
-
         start = time.time()
-        iterations = 0
-        while time.time() - start < timeout:
+        while True:
+            per_device = self._get_gpu_memory_per_device()
+            if per_device is None:
+                return  # Can't query, nothing to do
+
+            shortfalls = []
+            for i, (free, total) in enumerate(per_device):
+                required = total * gpu_memory_utilization
+                if free < required:
+                    shortfalls.append((i, free, total, required))
+
+            if not shortfalls:
+                return
+
+            elapsed = time.time() - start
+            if elapsed >= timeout:
+                details = ", ".join(
+                    f"device {i}: {free / 1e9:.2f}/{total / 1e9:.2f} GiB free, "
+                    f"need {required / 1e9:.2f} GiB"
+                    for i, free, total, required in shortfalls
+                )
+                print(
+                    f"[{type(self).__name__}] GPU memory still insufficient "
+                    f"after {elapsed:.0f}s ({details}). This usually means "
+                    "a previous process on this host has not released its "
+                    "VRAM yet; proceeding and letting vLLM's own startup "
+                    "check raise."
+                )
+                return
+
+            print(
+                f"[{type(self).__name__}] Waiting for GPU memory to free up "
+                f"before server start [{elapsed:.0f}s/{timeout:.0f}s]"
+            )
             time.sleep(poll_interval)
-            iterations += 1
-            next_used = self._get_gpu_memory_used()
-            if next_used is None:
-                return used  # Can't query anymore, use last good reading
-
-            if abs(next_used - used) <= tolerance_bytes:
-                if iterations > 1:
-                    print(
-                        f"[{type(self).__name__}] GPU memory stabilized at "
-                        f"{next_used / 1e9:.2f} GB after "
-                        f"{time.time() - start:.1f}s"
-                    )
-                return next_used
-
-            used = next_used
-
-        print(
-            f"[{type(self).__name__}] GPU memory did not stabilize within "
-            f"{timeout:.0f}s, proceeding with last reading: "
-            f"{used / 1e9:.2f} GB"
-        )
-        return used
 
     def _wait_for_gpu_memory_release(
         self, timeout: float = 120.0, log_interval: float = 10.0
