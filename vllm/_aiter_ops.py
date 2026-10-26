@@ -4413,7 +4413,7 @@ class rocm_aiter_ops:
             YQ=YQ,
             transpose_bm=transpose_bm,
             config=config,
-            y_scale=y_scale,
+            y_scale_out=y_scale,
         )
 
     @staticmethod
