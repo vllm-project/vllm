@@ -37,7 +37,7 @@ from vllm.parser.engine.parser_engine import (
     ParserEngine,
     ReasoningEnd,
     _ArgsRewriter,
-    _has_non_finite_literal,
+    _document_has_non_finite_literal,
     _StreamingArgs,
 )
 from vllm.parser.engine.parser_engine_config import (
@@ -1055,15 +1055,18 @@ class TestFixArgTypes:
 
     def test_nonfinite_literal_detection_ignores_string_contents(self):
         """Only a bare ``NaN``/``Infinity`` token needs the slow path; the
-        same text inside a string (e.g. ``"banaNaNa"``) must not disable the
-        no-schema fast path.
+        same text inside a string must not disable the no-schema fast path,
+        including a token surrounded by whitespace, which the token regex
+        alone cannot reject.
         """
-        assert _has_non_finite_literal('{"x": NaN}')
-        assert _has_non_finite_literal('{"x": -Infinity}')
-        assert _has_non_finite_literal('{"x": [Infinity]}')
-        assert not _has_non_finite_literal('{"x": "banaNaNa"}')
-        assert not _has_non_finite_literal('{"x": "Infinity"}')
-        assert not _has_non_finite_literal('{"x": "NaNValue"}')
+        assert _document_has_non_finite_literal('{"x": NaN}')
+        assert _document_has_non_finite_literal('{"x": -Infinity}')
+        assert _document_has_non_finite_literal('{"x": [Infinity]}')
+        assert not _document_has_non_finite_literal('{"x": "banaNaNa"}')
+        assert not _document_has_non_finite_literal('{"x": "Infinity"}')
+        assert not _document_has_non_finite_literal('{"x": "NaNValue"}')
+        assert not _document_has_non_finite_literal('{"x": "temp -Infinity seen"}')
+        assert not _document_has_non_finite_literal('{"x": "say \\" -Infinity"}')
 
     @pytest.mark.parametrize(
         "tools,func_name",
@@ -2410,6 +2413,15 @@ class TestIncrementalArgRewrite:
         cache = _StreamingArgs('{"a": 1}', properties, string_keys)
         assert cache.delta('{"a": 2}') is None
 
+    def test_rewritten_tail_falls_back_to_full_pass(self):
+        """A longer text that does not extend the cache is a rewrite, not an
+        append."""
+        tool = _make_tool("f", {"a": {"type": "integer"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs('{"a": 1, "b": "x"}', properties, string_keys)
+        assert cache.delta('{"a": 1, "b": "y", "c": 2}') is None
+
     @pytest.mark.parametrize("size", [1, 2, 3, 5])
     def test_non_delimited_nonfinite_literal_streams_as_final(self, size):
         """A non-finite token followed by malformed text is quoted by the
@@ -2424,6 +2436,63 @@ class TestIncrementalArgRewrite:
         actual, flush = _stream_arg_deltas(engine, "f", chunks)
         assert actual[1:] == self._expected_deltas(tool, chunks)
         assert "".join(actual) + flush == engine._fix_arg_types(doc, "f")
+
+    @pytest.mark.parametrize(
+        "schema, doc",
+        [
+            (
+                {f"f{i}": {"type": "string"} for i in range(80)},
+                "{" + " , ".join(f'"f{i}": "v{i}"' for i in range(80)) + "}",
+            ),
+            (
+                {
+                    "items": {"type": "array"},
+                    **{f"f{i}": {"type": "string"} for i in range(60)},
+                },
+                '{"items": [1 , 2] , '
+                + " , ".join(f'"f{i}": "v{i}"' for i in range(60))
+                + "}",
+            ),
+        ],
+        ids=["object", "array"],
+    )
+    def test_transient_whitespace_does_not_pin_resume_boundary(
+        self, monkeypatch, schema, doc
+    ):
+        """Whitespace between a complete value and the next comma is a wait,
+        not a give-up: pinning the boundary there rescans the whole document
+        for every later delta.
+        """
+        rewritten = 0
+
+        class CountingRewriter(_ArgsRewriter):
+            def rewrite(self):
+                nonlocal rewritten
+                rewritten += len(self._text)
+                return super().rewrite()
+
+        monkeypatch.setattr(parser_engine, "_ArgsRewriter", CountingRewriter)
+        tool = _make_tool("f", schema)
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        chunks = [doc[i : i + 4] for i in range(0, len(doc), 4)]
+        assert _stream_tool_args(engine, "f", chunks) == doc
+        assert rewritten < 20 * len(doc), f"rewrote {rewritten} chars for {len(doc)}"
+
+    def test_nonfinite_inside_string_does_not_parse_document(self, monkeypatch):
+        """Text naming a non-finite literal inside a string must keep the
+        no-schema identity fast path, not force a structural walk."""
+        calls = 0
+        original = _ArgsRewriter._object
+
+        def counting(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(_ArgsRewriter, "_object", counting)
+        document = '{"msg": "temp -Infinity seen"}'
+        assert _ArgsRewriter(document, None, final=False).rewrite() == document
+        assert calls == 0
 
 
 class TestIncrementalArgRewriteAfterGiveUp:

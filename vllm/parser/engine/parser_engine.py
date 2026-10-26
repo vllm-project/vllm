@@ -120,8 +120,10 @@ class ToolCallSlot:
 
 _NON_FINITE_LITERALS = ("NaN", "Infinity", "-Infinity")
 _NUMBER_CHARS = frozenset("0123456789+-.eE")
-# A bare non-finite literal token, not the same text inside a string (e.g.
-# "banaNaNa"): the no-schema fast path only needs to parse when one exists.
+# Approximates a bare non-finite literal token: the lookarounds reject
+# identifiers ("banaNaNa") and quoted occurrences, but not a token inside a
+# longer string.  Fragments cannot be string-scanned, so callers that hold a
+# document use ``_document_has_non_finite_literal`` instead.
 _NON_FINITE_RE = re.compile(
     r'(?<![\w"])(?:' + "|".join(_NON_FINITE_LITERALS) + r')(?![\w"])'
 )
@@ -131,11 +133,34 @@ _JSON_STRING_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
 
 
 def _has_non_finite_literal(text: str) -> bool:
+    """Whether *text* may contain a bare non-finite literal.
+
+    Over-approximates inside strings, which is all a fragment permits: a
+    false positive only costs a structural pass, a false negative would miss
+    a rewrite.
+    """
     # Cheap C-level pre-filter; only a text containing a candidate substring
     # pays for the regex scan that rejects non-token occurrences.
     if "NaN" not in text and "Infinity" not in text:
         return False
     return _NON_FINITE_RE.search(text) is not None
+
+
+def _document_has_non_finite_literal(text: str) -> bool:
+    """Whether the document *text* contains a bare non-finite literal.
+
+    Unlike :func:`_has_non_finite_literal`, text inside strings is ignored,
+    so an argument naming ``-Infinity`` does not disable the no-schema fast
+    path.  An unmatched quote opens the unterminated trailing string, whose
+    content cannot contain a bare token yet.
+    """
+    if not _has_non_finite_literal(text):
+        return False
+    outside = _JSON_STRING_RE.sub("", text)
+    quote = outside.find('"')
+    if quote != -1:
+        outside = outside[:quote]
+    return _NON_FINITE_RE.search(outside) is not None
 
 
 def _is_literal(literal: str) -> bool:
@@ -211,7 +236,7 @@ class _ArgsRewriter:
         if (
             not self._props
             and not self._force_parse
-            and not _has_non_finite_literal(text)
+            and not _document_has_non_finite_literal(text)
         ):
             # Without a property schema only non-finite literals are rewritten.
             return text
@@ -307,7 +332,9 @@ class _ArgsRewriter:
             if i < len(text) and text[i] == "}":
                 out.append("}")
                 return i + 1
-            return self._truncated(i)
+            # Only a pending input is a wait; trailing whitespace after a
+            # complete member is not a structural give-up.
+            return self._truncated(i, give_up=i < len(text))
 
     def _array(self, i: int, items: dict | None, depth: int) -> int:
         text, out = self._text, self._out
@@ -330,7 +357,7 @@ class _ArgsRewriter:
             if i < len(text) and text[i] == "]":
                 out.append("]")
                 return i + 1
-            return self._truncated(i)
+            return self._truncated(i, give_up=i < len(text))
 
     def _value(self, i: int, schema: object, depth: int) -> int:
         text, out = self._text, self._out
@@ -514,7 +541,7 @@ class _StreamingArgs:
         self._properties = properties
         self._string_keys = string_keys
         self._stop: int | None = None
-        self._nonfinite = _has_non_finite_literal(args_json)
+        self._nonfinite = _document_has_non_finite_literal(args_json)
         corrected, self.safe, self.streams = self._rewrite(args_json)
         self._raw = args_json
         self._raw_boundary = 0
@@ -541,10 +568,25 @@ class _StreamingArgs:
             self._stop = stop if self._stop is None else min(self._stop, stop)
         return out, safe, streams
 
+    # A converter only appends to its previous output between ticks, so
+    # checking this much of the cached tail detects a rewritten boundary
+    # without rescanning the whole document on every delta.
+    _OVERLAP = 256
+
+    def _extends(self, args_json: str) -> bool:
+        """Whether *args_json* still has the cached document as its prefix."""
+        raw = self._raw
+        if not raw.startswith("{") or len(args_json) < len(raw):
+            return False
+        if len(args_json) == len(raw):
+            return args_json == raw
+        start = max(len(raw) - self._OVERLAP, 0)
+        return args_json[start : len(raw)] == raw[start:]
+
     def delta(self, args_json: str) -> tuple[str, bool] | None:
         """Return (newly safe text, value_streams), or ``None`` for a full pass."""
         raw = self._raw
-        if not args_json.startswith(raw) or not raw.startswith("{"):
+        if not self._extends(args_json):
             return None
         if not self._properties and not self._nonfinite:
             # A non-finite literal introduced after the cache was built may
