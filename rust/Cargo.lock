@@ -5726,6 +5726,7 @@ dependencies = [
  "serde_repr",
  "serde_tuple",
  "serde_with",
+ "sha2",
  "socket2",
  "task-local",
  "tempfile",
