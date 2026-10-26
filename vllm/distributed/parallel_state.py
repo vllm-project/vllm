@@ -614,6 +614,19 @@ class GroupCoordinator:
         assert sibling is not None
         return sibling
 
+    def sibling_broadcast(
+        self, tensor: torch.Tensor, src: int, group: ProcessGroup
+    ) -> None:
+        """Broadcast `tensor` from global rank `src` over `group`, a group
+        returned by `make_sibling_device_group`, on the current stream.
+
+        The V2 model runner sends the sampled tokens from the last PP rank to
+        the other PP ranks through this method, so a `pp_group_cls` that moves
+        the inter-stage tensors over its own transport can carry these too
+        (overriding both methods).
+        """
+        torch.distributed.broadcast(tensor, src=src, group=group)
+
     def create_mq_broadcaster(
         self, writer_rank=0, external_writer_handle=None, blocking=True
     ):
