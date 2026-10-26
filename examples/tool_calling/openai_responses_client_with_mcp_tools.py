@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Example demonstrating MCP (Model Context Protocol) tools with the Responses API.
+"""Example demonstrating MCP (Model Context Protocol) tools with the Responses API.
 
 This example shows how to use MCP tools with different allowed_tools configurations:
 1. No filter (allows all tools from the MCP server)

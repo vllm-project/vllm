@@ -11,13 +11,19 @@ See https://github.com/vllm-project/vllm/issues/49224.
 """
 
 import contextlib
+import gc
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+import torch
+
+from tests.utils import create_new_process_for_each_test
 from vllm.compilation.counter import compilation_counter
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu import cudagraph_utils as cgu
 from vllm.v1.worker.gpu import model_runner as mrv2
+from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
 GLOBAL_POOL = "global-pool"
 THROWAWAY_POOL = "throwaway-pool"
@@ -47,6 +53,7 @@ def _make_profiling_runner(
     cudagraph_mode: CUDAGraphMode,
     *,
     needs_capture: bool = True,
+    encoder_only: bool = False,
     num_full_descs: int = 3,
     piecewise_only: bool = False,
     captured_bytes: int = 7 << 30,
@@ -58,11 +65,16 @@ def _make_profiling_runner(
         needs_capture, num_full_descs, piecewise_only
     )
     runner.vllm_config = SimpleNamespace()
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=encoder_only,
+        encoder_runner=SimpleNamespace(has_cudagraph=lambda: encoder_only),
+    )
 
     events: list[str] = []
     runner.events = events
 
-    def _capture_model() -> int:
+    def _capture_model(*, profile_only: bool = False) -> int:
+        assert profile_only
         events.append("capture")
         # Simulate the manager's per-FULL-graph memory sampling.
         samples = runner.cudagraph_manager._capture_mem_samples
@@ -112,7 +124,8 @@ def _patch_module(monkeypatch) -> None:
 
 def test_profile_cudagraph_memory_disabled_returns_zero(monkeypatch):
     _patch_module(monkeypatch)
-    runner = _make_profiling_runner(CUDAGraphMode.NONE)
+    runner = _make_profiling_runner(CUDAGraphMode.NONE, needs_capture=False)
+    runner.cudagraph_manager = None
 
     result = cgu.profile_cudagraph_memory(runner)
 
@@ -159,26 +172,50 @@ def test_profile_cudagraph_memory_samples_and_extrapolates(monkeypatch):
     )
 
 
-def test_profile_cudagraph_memory_piecewise_only_returns_measured(monkeypatch):
+@pytest.mark.parametrize(
+    "mode", [CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.NONE, CUDAGraphMode.FULL]
+)
+def test_profile_cudagraph_memory_piecewise_or_encoder_returns_measured(
+    monkeypatch, mode
+):
     _patch_module(monkeypatch)
     captured_bytes = 5 << 30
     runner = _make_profiling_runner(
-        CUDAGraphMode.FULL_AND_PIECEWISE,
-        piecewise_only=True,
+        mode,
+        needs_capture=mode == CUDAGraphMode.FULL_AND_PIECEWISE,
+        encoder_only=mode != CUDAGraphMode.FULL_AND_PIECEWISE,
+        piecewise_only=mode == CUDAGraphMode.FULL_AND_PIECEWISE,
         captured_bytes=captured_bytes,
     )
+    manager = runner.cudagraph_manager
+    runner.cudagraph_manager = None
+
+    def init(r):
+        r.events.append("init")
+        r.cudagraph_manager = manager
+
+    monkeypatch.setattr(cgu, "_init_minimal_kv_cache_for_profiling", init)
 
     result = cgu.profile_cudagraph_memory(runner)
 
     # No FULL graphs to sample or extrapolate: the measured delta is exact.
     assert result == captured_bytes
+    assert runner.events == ["init", "capture", "teardown"]
+    assert _FakePlatform._global_graph_pool == GLOBAL_POOL
 
 
-def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
+@pytest.mark.parametrize("encoder_only", [False, True])
+def test_profile_cudagraph_memory_tears_down_on_capture_error(
+    monkeypatch, encoder_only
+):
     _patch_module(monkeypatch)
-    runner = _make_profiling_runner(CUDAGraphMode.FULL)
+    runner = _make_profiling_runner(
+        CUDAGraphMode.NONE if encoder_only else CUDAGraphMode.FULL,
+        needs_capture=not encoder_only,
+        encoder_only=encoder_only,
+    )
 
-    def _boom() -> int:
+    def _boom(*, profile_only: bool = False) -> int:
         runner.events.append("capture")
         raise RuntimeError("capture failed")
 
@@ -193,13 +230,14 @@ def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
 
     # Teardown still runs even if capture raises.
     assert runner.events == ["init", "capture", "teardown"]
+    assert _FakePlatform._global_graph_pool == GLOBAL_POOL
 
 
 def test_profile_cudagraph_memory_restores_compilation_counters(monkeypatch):
     _patch_module(monkeypatch)
     runner = _make_profiling_runner(CUDAGraphMode.FULL)
 
-    def _capture_model() -> int:
+    def _capture_model(*, profile_only: bool = False) -> int:
         compilation_counter.num_cudagraph_captured += 5
         compilation_counter.num_gpu_runner_capture_triggers += 1
         return 1 << 30
@@ -218,6 +256,9 @@ def test_profile_cudagraph_memory_restores_compilation_counters(monkeypatch):
 
 def test_model_runner_delegates_to_cudagraph_utils(monkeypatch):
     runner = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.eplb = EPLBController(
+        SimpleNamespace(enable_eplb=False), torch.device("cpu")
+    )
     monkeypatch.setattr(mrv2, "_profile_cudagraph_memory", lambda r: 42)
     assert runner.profile_cudagraph_memory() == 42
 
@@ -283,9 +324,9 @@ def test_profile_cudagraph_memory_redirects_wrapper_pools(monkeypatch):
     try:
         capture_model = runner.capture_model
 
-        def _capture_model() -> int:
+        def _capture_model(*, profile_only: bool = False) -> int:
             wrapper.pool_during_capture = wrapper.graph_pool
-            return capture_model()
+            return capture_model(profile_only=profile_only)
 
         runner.capture_model = _capture_model
 
@@ -323,9 +364,9 @@ def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatc
     pools_seen: list[Any] = []
     capture_model = runner.capture_model
 
-    def _capture_model() -> int:
+    def _capture_model(*, profile_only: bool = False) -> int:
         pools_seen.append(runner.speculator.cudagraph_manager.pool)
-        return capture_model()
+        return capture_model(profile_only=profile_only)
 
     runner.capture_model = _capture_model
 
@@ -335,3 +376,101 @@ def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatc
     assert runner.speculator.cudagraph_manager is None
     # The real global pool is restored afterwards.
     assert _FakePlatform._global_graph_pool == GLOBAL_POOL
+
+
+@create_new_process_for_each_test("spawn")
+@pytest.mark.skipif(not cgu.current_platform.is_cuda(), reason="requires CUDA")
+def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
+    """Profiling graph memory must be freed before teardown completes."""
+
+    @contextlib.contextmanager
+    def _fake_set_current_vllm_config(_cfg):
+        yield
+
+    runner = _make_profiling_runner(CUDAGraphMode.FULL_AND_PIECEWISE)
+    runner.compilation_config.static_forward_context = {}
+    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
+    runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
+    runner.kv_caches = []
+    runner.attn_groups = []
+    runner.kv_cache_config = SimpleNamespace()
+    runner.lora_config = None
+    runner.maybe_remove_all_loras = lambda _: None
+    allocation_bytes = 64 << 20
+    memory: dict[str, int] = {}
+
+    torch.accelerator.synchronize()
+    gc.collect()
+    torch.accelerator.empty_cache()
+    memory["before"] = torch.accelerator.memory_reserved()
+
+    def _init(r):
+        r.events.append("init")
+        kv_cache = torch.empty(allocation_bytes, dtype=torch.uint8, device="cuda")
+        r.kv_caches = [kv_cache]
+        r.compilation_config.static_forward_context = {
+            "layer": SimpleNamespace(kv_cache=kv_cache)
+        }
+        manager = cgu.CudaGraphManager.__new__(cgu.CudaGraphManager)
+        manager.pool = cgu.current_platform.get_global_graph_pool()
+        r.speculator = SimpleNamespace(cudagraph_manager=manager)
+
+    def _capture_model(*, profile_only: bool = False) -> int:
+        for owner in (
+            runner.cudagraph_manager,
+            runner.speculator.cudagraph_manager,
+        ):
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, pool=owner.pool):
+                output = torch.empty(allocation_bytes, dtype=torch.uint8, device="cuda")
+                output.fill_(1)
+            owner.profiling_resources = (graph, output)
+        torch.accelerator.synchronize()
+        memory["captured"] = torch.accelerator.memory_reserved()
+        return memory["captured"] - memory["before"]
+
+    monkeypatch.setattr(cgu, "set_current_vllm_config", _fake_set_current_vllm_config)
+    monkeypatch.setattr(cgu, "_init_minimal_kv_cache_for_profiling", _init)
+    runner.capture_model = _capture_model
+
+    cgu.profile_cudagraph_memory(runner)
+    memory["after"] = torch.accelerator.memory_reserved()
+
+    assert memory["captured"] - memory["before"] >= 3 * allocation_bytes
+    assert memory["after"] == memory["before"]
+
+
+def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
+    """Profiling-cached Mamba align metadata must be invalidated at teardown.
+
+    ``MambaHybridModelState`` lazily caches ``_mamba_group_ids`` and
+    ``_mamba_spec`` from whichever KVCacheConfig it first sees. When the
+    profiling config's group layout differs from the real (e.g. PP-projected)
+    config, reusing the stale metadata mismatches the real block tables
+    ("expected 3 block tables, got 4" at
+    ``MambaSpecDecodeGPUContext.initialize_from_forward_context``).
+    """
+    runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=False,
+        _mamba_ctx=object(),
+        _mamba_group_ids=[0, 1],
+        _mamba_spec=object(),
+    )
+    runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
+    runner.kv_caches = []
+    runner.attn_groups = []
+    runner.kv_cache_config = SimpleNamespace()
+    runner.cudagraph_manager = object()
+    runner.lora_config = None
+    runner.maybe_remove_all_loras = lambda _: None
+
+    monkeypatch.setattr(cgu.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(cgu.torch.accelerator, "empty_cache", lambda: None)
+
+    cgu._teardown_profiling_state(runner)
+
+    assert runner.model_state._mamba_ctx is None
+    assert runner.model_state._mamba_group_ids == []
+    assert runner.model_state._mamba_spec is None

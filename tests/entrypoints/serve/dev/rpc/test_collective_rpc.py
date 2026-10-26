@@ -25,7 +25,7 @@ class TestWorkerExtension:
         )
 
     def return_none(self, *args, **kwargs) -> None:
-        """Test method that does not return anything"""
+        """Test method that does not return anything."""
         return
 
 
@@ -48,7 +48,7 @@ def server():
 
 
 def test_get_model_name(server):
-    """Test basic response"""
+    """Test basic response."""
     response = requests.post(
         server.url_for("collective_rpc"), json={"method": "get_model_name"}
     )
@@ -59,7 +59,7 @@ def test_get_model_name(server):
 
 
 def test_return_none(server):
-    """Test return none"""
+    """Test return none."""
     response = requests.post(
         server.url_for("collective_rpc"), json={"method": "return_none"}
     )
@@ -69,7 +69,7 @@ def test_return_none(server):
 
 
 def test_echo_args_kwargs(server):
-    """Test args, kwargs, and dict response"""
+    """Test args, kwargs, and dict response."""
     args = ["arg1", "arg2"]
     kwargs = {"key1": "value1", "key2": "value2"}
     response = requests.post(

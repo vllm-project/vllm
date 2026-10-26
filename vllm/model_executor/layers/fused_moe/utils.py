@@ -56,6 +56,7 @@ def resolve_layer_fused_shared_expert(
     quant_config: "QuantizationConfig | None",
     prefix: str,
     shared_expert_name: str = "shared_experts",
+    moe_backend: str | None = None,
 ) -> bool:
     """Resolve whether AITER fused shared-expert execution is enabled.
 
@@ -63,12 +64,14 @@ def resolve_layer_fused_shared_expert(
         quant_config: Model quantization configuration.
         prefix: MoE module prefix.
         shared_expert_name: Shared-expert module name under ``prefix``.
+        moe_backend: MoE backend that runs the fused shared expert.
 
     Returns:
         Whether AITER fused shared experts are enabled.
 
     Raises:
         ValueError: If requested shared-expert fusion is quantization-incompatible.
+
     """
     # NOTE: is_fusion_moe_shared_experts_enabled is decorated with @if_aiter_supported
     # that returns None if AITER is not available.
@@ -78,15 +81,50 @@ def resolve_layer_fused_shared_expert(
             quant_config,
             f"{prefix}.experts",
             f"{prefix}.{shared_expert_name}",
+            moe_backend=moe_backend,
         )
         if fse_requested
         else (True, None)
     )
     is_fused_shared_expert_enabled = fse_requested and fse_compatible
+
+    # In online shared_expert quantization is used, register it to
+    # `online_quantization_config.quantized_layers` ahead of weight loading.
+    if is_fused_shared_expert_enabled and quant_config is not None:
+        online_quantization_config = quant_config.online_quantization_config
+        if online_quantization_config is not None:
+            from vllm.model_executor.layers.linear import (
+                LinearBase,
+                UnquantizedLinearMethod,
+            )
+
+            for projection_name in ("gate_up_proj", "down_proj"):
+                projection_prefix = f"{prefix}.{shared_expert_name}.{projection_name}"
+                quant_method_metadata = (
+                    online_quantization_config.resolve_quant_method_cls(
+                        LinearBase, projection_prefix
+                    )
+                )
+
+                if quant_method_metadata is None:
+                    continue
+
+                source, quant_key_str, target_pattern, _, quant_method_cls = (
+                    quant_method_metadata
+                )
+
+                if quant_method_cls in (None, UnquantizedLinearMethod):
+                    continue
+
+                online_quantization_config.quantized_layers[projection_prefix] = (
+                    source.value,
+                    quant_key_str,
+                    target_pattern,
+                )
     if fse_requested and not is_fused_shared_expert_enabled:
         logger.warning(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-            "cannot be enabled: %s.",
+            "cannot be enabled - skipping for this layer: %s.",
             fse_reason,
         )
     return is_fused_shared_expert_enabled
@@ -164,20 +202,19 @@ def _count_expert_num_tokens(
 def count_expert_num_tokens(
     topk_ids: torch.Tensor, num_local_experts: int, expert_map: torch.Tensor | None
 ) -> torch.Tensor:
-    """
-    Count the number to tokens assigned to each expert.
+    """Count the number to tokens assigned to each expert.
 
-    Parameters:
-    - topk_ids (torch.Tensor): Tensor mapping each token to its
-    list of experts.
-    - num_local_experts (int): Number of experts in this rank.
-    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-    from the global expert space to the local expert space of the expert
-    parallel shard.
+    Args:
+        topk_ids (torch.Tensor): Tensor mapping each token to its list of experts.
+        num_local_experts (int): Number of experts in this rank.
+        expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+            from the global expert space to the local expert space of the expert
+            parallel shard.
 
     Returns:
     A tensor of size num_local_experts, where tensor[i] holds the number
     of tokens assigned to the ith expert.
+
     """
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
     expert_num_tokens = torch.empty(
@@ -201,9 +238,75 @@ def count_expert_num_tokens(
     return expert_num_tokens
 
 
-def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
+@triton.jit
+def _remap_topk_to_local_kernel(
+    topk_ids_ptr,  # [n] global expert IDs (-1 = invalid)
+    expert_map_ptr,  # [num_experts] global->local (-1 for non-local)
+    out_ptr,  # [n] local expert IDs (-1 for invalid/non-local)
+    n_elements,
+    BLOCK: tl.constexpr,
+    OUT_INT32: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    tid = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
+    # Gather expert_map[tid] for valid (tid >= 0); clamp the index so invalid
+    # rows don't read OOB, then select -1 for them. Matches
+    # torch.where(tid >= 0, expert_map[clamp(tid, 0)], -1) -- preserving -1 (a
+    # plain expert_map[-1] would wrap to a valid local id and misroute).
+    valid = tid >= 0
+    idx = tl.where(valid, tid, 0)
+    local = tl.load(expert_map_ptr + idx, mask=mask, other=-1)
+    if OUT_INT32:
+        out = tl.where(valid, local, -1)
+    else:
+        out = tl.where(valid, local.to(tl.int64), -1)
+    tl.store(out_ptr + offs, out, mask=mask)
+
+
+def remap_topk_to_local(
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
+    *,
+    out_dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    """Map global expert ids to local ids; non-local or invalid routes become -1.
+
+    Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
+    with one kernel. Returns a NEW tensor -- the caller keeps the original
+    ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
+
+    Args:
+        topk_ids: Global expert ids; -1 marks invalid slots. Must be contiguous;
+            the Triton kernel indexes by flat ``numel()`` offsets.
+        expert_map: Global-to-local mapping; -1 marks non-local experts.
+        out_dtype: Output dtype, ``torch.int32`` or ``torch.int64``.
+
+    Returns:
+        Remapped local expert ids with the same shape as ``topk_ids``.
+
     """
-    Shrink the given tensor and apply the given view to it.  This is
+    if out_dtype not in (torch.int32, torch.int64):
+        raise ValueError(f"out_dtype must be int32 or int64, got {out_dtype}")
+    assert topk_ids.is_contiguous()
+    out = torch.empty(topk_ids.shape, dtype=out_dtype, device=topk_ids.device)
+    n = topk_ids.numel()
+    BLOCK = 1024
+    grid = (triton.cdiv(n, BLOCK),)
+    _remap_topk_to_local_kernel[grid](
+        topk_ids,
+        expert_map,
+        out,
+        n,
+        BLOCK=BLOCK,
+        OUT_INT32=out_dtype == torch.int32,
+    )
+    return out
+
+
+def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
+    """Shrink the given tensor and apply the given view to it.  This is
     used to resize the intermediate fused_moe caches.
     """
     assert prod(v) <= x.numel(), (
@@ -225,9 +328,9 @@ def _fp8_quantize(
     A_scale: torch.Tensor | None,
     per_act_token: bool,
     block_shape: list[int] | None = None,
+    is_scale_transposed: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform fp8 quantization on the inputs.  If a block_shape
+    """Perform fp8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
     if block_shape is None:
@@ -240,7 +343,9 @@ def _fp8_quantize(
         assert not per_act_token
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
-        A, A_scale = per_token_group_quant_fp8(A, block_k)
+        A, A_scale = per_token_group_quant_fp8(
+            A, block_k, column_major_scales=is_scale_transposed
+        )
         assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
 
     return A, A_scale
@@ -252,11 +357,9 @@ def _int8_quantize(
     per_act_token: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform int8 quantization on the inputs.  If a block_shape
+    """Perform int8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
     """
-
     # If weights are per-channel (per_channel_quant=True), then
     # activations apply per-token quantization. Otherwise, assume
     # activation tensor-wise fp8/int8 quantization, dynamic or static
@@ -365,6 +468,7 @@ def moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
     is_scale_swizzled: bool = True,
+    is_scale_transposed: bool = False,
     quantization_emulation: bool = False,
     mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -372,7 +476,9 @@ def moe_kernel_quantize_input(
         if quantization_emulation:
             return _fp8_quantize_dequantize(A, A_scale)
         else:
-            return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
+            return _fp8_quantize(
+                A, A_scale, per_act_token_quant, block_shape, is_scale_transposed
+            )
     elif quant_dtype == torch.int8:
         if quantization_emulation:
             raise NotImplementedError(
@@ -457,35 +563,6 @@ def normalize_batched_scales_shape(
     return scales
 
 
-@triton.jit
-def _pack_topk_ids_weights_kernel(
-    topk_ids_ptr,
-    topk_weights_ptr,
-    output_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-    USE_GDC: tl.constexpr,
-    launch_pdl: tl.constexpr,  # triton metadata
-):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
-        tl.extra.cuda.gdc_wait()
-    expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
-    expert_id_shifted = expert_id << 16
-
-    weight = tl.load(topk_weights_ptr + offsets, mask=mask, other=0.0)
-    weight_bf16 = weight.to(tl.bfloat16)
-    weight_int16 = weight_bf16.to(tl.int16, bitcast=True)
-
-    weight_int32 = weight_int16.to(tl.int32) & 0xFFFF
-
-    packed = expert_id_shifted | weight_int32
-    tl.store(output_ptr + offsets, packed, mask=mask)
-
-
 def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
     """Estimate FlashInfer's MoE autotuning maximum token count.
 
@@ -500,36 +577,8 @@ def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
 
     For a detailed explanation, see: `docs/serving/data_parallel_deployment.md`
     """
-    return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
-
-
-def trtllm_moe_pack_topk_ids_weights(
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    block_size: int = 1024,
-) -> torch.Tensor:
-    assert topk_ids.shape == topk_weights.shape
-    assert topk_ids.is_contiguous() and topk_weights.is_contiguous()
-
-    original_shape = topk_ids.shape
-    ids_flat = topk_ids.reshape(-1)
-    weights_flat = topk_weights.reshape(-1)
-
-    n_elements = ids_flat.numel()
-    output = torch.empty(n_elements, dtype=torch.int32, device=topk_ids.device)
-
-    use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(90)
-    grid = (triton.cdiv(n_elements, block_size),)
-    _pack_topk_ids_weights_kernel[grid](
-        ids_flat,
-        weights_flat,
-        output,
-        n_elements,
-        BLOCK_SIZE=block_size,
-        USE_GDC=use_gdc,
-        launch_pdl=use_gdc,
-    )
-    return output.reshape(original_shape)
+    dp_size = moe_config.elastic_ep_max_dp_size or moe_config.dp_size
+    return max(moe_config.max_num_tokens * dp_size, 8192)
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
@@ -647,6 +696,8 @@ def swiglu_limit_func(
     # requires topk_ids. Fall back to the torch implementation otherwise.
     if topk_ids is not None:
         _swiglu_limit_pad_aware(output, input, topk_ids, swiglu_limit, expert_map)
+    elif current_platform.is_cuda():
+        torch.ops._C.silu_and_mul_with_clamp(output, input, swiglu_limit, 1.0, 0.0)
     else:
         _swiglu_limit_torch(output, input, swiglu_limit)
 

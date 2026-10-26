@@ -12,17 +12,17 @@
 
 ## Deploy from a vLLM Recipe
 
-The **Recipe** column below links to validated Xeon 6 configurations when
-available. Use the Recipe conversion tool to generate `config.yaml` and
-`env.sh`; see the
-[Recipes conversion tool README](../../../tools/recipes/README.md) for usage.
+The **Recipe** column below links to published Xeon 6 configurations when
+available. Open a recipe to review the latest deployment configuration for the
+model and hardware.
 
-Load the generated environment before starting vLLM:
+For one-step deployment with the pre-built CPU image, see
+[Serve with vLLM Recipes](../../getting_started/installation/cpu.md#serve-with-vllm-recipes).
+The image includes the Recipes tool, which can retrieve the latest published
+recipe, apply Xeon hardware detection, and start `vllm serve`.
 
-```bash
-source env.sh
-vllm serve --config config.yaml
-```
+For converter usage and interactive model/hardware discovery, see the
+[Recipes tool documentation](../../../tools/recipes/README.md).
 
 ## Recommended Models
 
@@ -30,7 +30,7 @@ vllm serve --config config.yaml
 
 | Model | Architecture | Supported | Recipe |
 | ------------------------------------ | ---------------------------------------- | --------- | ------ |
-| openai/gpt-oss-20b | GptOssForCausalLM | ✅ | — |
+| openai/gpt-oss-20b | GptOssForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/openai/gpt-oss-20b?hardware=xeon6) |
 | meta-llama/Llama-3.1-8B | LlamaForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/meta-llama/Llama-3.1-8B?hardware=xeon6) |
 | meta-llama/Llama-3.1-8B-Instruct | LlamaForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/meta-llama/Llama-3.1-8B-Instruct?hardware=xeon6) |
 | meta-llama/Llama-3.2-1B | LlamaForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/meta-llama/Llama-3.2-1B?hardware=xeon6) |
@@ -48,13 +48,13 @@ vllm serve --config config.yaml
 | TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ | LlamaForCausalLM | ✅ | — |
 | TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ | LlamaForCausalLM | ✅ | — |
 | ibm-granite/granite-3.2-2b-instruct | GraniteForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/ibm-granite/granite-3.2-2b-instruct?hardware=xeon6) |
-| Qwen/Qwen3-1.7B | Qwen3ForCausalLM | ✅ | — |
+| Qwen/Qwen3-1.7B | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-1.7B?hardware=xeon6) |
 | Qwen/Qwen3-4B | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-4B?hardware=xeon6) |
-| Qwen/Qwen3-8B | Qwen3ForCausalLM | ✅ | — |
+| Qwen/Qwen3-8B | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-8B?hardware=xeon6) |
 | Qwen/Qwen3-14B | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-14B?hardware=xeon6) |
 | Qwen/Qwen3-14B-FP8 | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-14B?hardware=xeon6&variant=fp8) |
 | Qwen/Qwen3-14B-AWQ | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-14B?hardware=xeon6&variant=awq) |
-| Qwen/Qwen3-30B-A3B | Qwen3MoeForCausalLM | ✅ | — |
+| Qwen/Qwen3-30B-A3B | Qwen3MoeForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-30B-A3B?hardware=xeon6) |
 | Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 | Qwen3MoeForCausalLM | ✅ | — |
 | Qwen/QwQ-32B | Qwen2ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/QwQ-32B?hardware=xeon6) |
 | Qwen/QwQ-32B-AWQ | Qwen2ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/QwQ-32B?hardware=xeon6&variant=awq) |

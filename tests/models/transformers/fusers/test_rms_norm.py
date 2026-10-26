@@ -50,6 +50,55 @@ class WeightlessRMSNorm(RMSNorm):
         return self._rms(x.to(torch.float32)).to(x.dtype)
 
 
+class Gemma4RMSNorm(RMSNorm):
+    """`pow(v, -0.5)` where the others write `rsqrt(v)` (HF `Gemma4RMSNorm._norm`).
+
+    Gemma 4 spells the reciprocal square root as `torch.pow(..., -0.5)` to keep
+    Torch and JAX in agreement, and -- unlike Gemma 1-3 -- its weight is *not*
+    zero-centered, so this fuses to a plain `RMSNorm`.
+    """
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(mean_squared, -0.5)
+
+    def forward(self, x):
+        return (self._rms(x.float()) * self.weight.float()).type_as(x)
+
+
+class PowOperatorRMSNorm(Gemma4RMSNorm):
+    """The `v ** -0.5` operator spelling of the same reciprocal square root."""
+
+    def _rms(self, x):
+        return x * (x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon) ** -0.5
+
+
+class KwargPowRMSNorm(Gemma4RMSNorm):
+    """The keyword spelling `torch.pow(v, exponent=-0.5)` of the same rsqrt."""
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(mean_squared, exponent=-0.5)
+
+
+class KwargBasePowRMSNorm(Gemma4RMSNorm):
+    """The fully functional spelling `torch.pow(input=v, exponent=-0.5)`."""
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(input=mean_squared, exponent=-0.5)
+
+
+class WeightlessGemma4RMSNorm(Gemma4RMSNorm):
+    """Gemma 4 with `with_scale=False`: the `pow` spelling and no scale parameter."""
+
+    def __init__(self, hidden: int = 16, eps: float = 1e-6):
+        super().__init__(hidden, eps, weight=False)
+
+    def forward(self, x):
+        return self._rms(x.float()).type_as(x)
+
+
 class LayerNorm(RMSNorm):
     """An RMSNorm not named `*RMSNorm`, keeping the input dtype (no upcast)."""
 
@@ -156,13 +205,18 @@ class UntraceableGatedRMSNorm(RMSNorm):
         (RMSNorm, 1e-5, False),
         (GemmaRMSNorm, 1e-6, True),
         (WeightlessRMSNorm, 1e-6, False),
+        (Gemma4RMSNorm, 1e-6, False),
+        (PowOperatorRMSNorm, 1e-6, False),
+        (KwargPowRMSNorm, 1e-6, False),
+        (KwargBasePowRMSNorm, 1e-6, False),
+        (WeightlessGemma4RMSNorm, 1e-6, False),
         (LayerNorm, 1e-6, False),
         (torch.nn.RMSNorm, 1e-5, False),  # fused `F.rms_norm` op
     ],
 )
 def test_detects_rms_norm_variants(cls, eps, zero_centered):
     with torch.device("meta"):
-        fuser = get_fuser(cls(16, eps=eps))
+        fuser = get_fuser(cls(16, eps=eps), RMSNormFuser)
     assert isinstance(fuser, RMSNormFuser)
     assert fuser.zero_centered == zero_centered
 
@@ -171,7 +225,7 @@ def test_detects_rms_norm_variants(cls, eps, zero_centered):
 def test_non_rms_norms_are_not_matched(cls):
     with torch.device("meta"):
         module = cls(16) if cls is nn.LayerNorm else cls()
-    assert not isinstance(get_fuser(module), RMSNormFuser)
+    assert get_fuser(module, RMSNormFuser) is None
 
 
 @pytest.mark.parametrize(
@@ -179,7 +233,7 @@ def test_non_rms_norms_are_not_matched(cls):
 )
 def test_gated_rms_norm_is_not_fused(cls):
     with torch.device("meta"):
-        assert not isinstance(get_fuser(cls()), RMSNormFuser)
+        assert get_fuser(cls(), RMSNormFuser) is None
 
 
 @pytest.mark.parametrize(
@@ -188,6 +242,10 @@ def test_gated_rms_norm_is_not_fused(cls):
         (RMSNorm, "RMSNorm", False),
         (GemmaRMSNorm, "GemmaRMSNorm", True),
         (WeightlessRMSNorm, "RMSNorm", False),
+        (Gemma4RMSNorm, "RMSNorm", False),
+        (KwargPowRMSNorm, "RMSNorm", False),
+        (KwargBasePowRMSNorm, "RMSNorm", False),
+        (WeightlessGemma4RMSNorm, "RMSNorm", False),
     ],
 )
 def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_config):
@@ -196,7 +254,7 @@ def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_c
 
     with torch.device("meta"):
         module = cls()
-        fuser = get_fuser(module)
+        fuser = get_fuser(module, RMSNormFuser)
         built = fuser.fuse(module, "norm", default_vllm_config)
     from vllm.model_executor.models.transformers.fusers.rms_norm import (
         TPAwareNormMixin,
@@ -213,6 +271,25 @@ def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_c
     assert built.weight.shape[0] == (weight.size(0) if weight is not None else 0)
 
 
+@pytest.mark.parametrize(
+    "cls", [Gemma4RMSNorm, PowOperatorRMSNorm, KwargPowRMSNorm, KwargBasePowRMSNorm]
+)
+def test_pow_spelled_norm_fuses_to_equivalent_math(cls, default_vllm_config):
+    """Matching `pow(v, -0.5)` is only sound if it really is the reciprocal square
+    root: the fused norm must reproduce the unfused forward, not just replace it.
+    `pow` and `rsqrt` take different paths to the same value, so compare at float32
+    tolerance rather than bit-for-bit."""
+    torch.manual_seed(0)
+    module = cls(16)
+    with torch.no_grad():
+        module.weight.copy_(torch.randn(16))
+    built = get_fuser(module, RMSNormFuser).fuse(module, "norm", default_vllm_config)
+    with torch.no_grad():
+        built.weight.copy_(module.weight)
+    x = torch.randn(4, 16)
+    torch.testing.assert_close(built(x), module(x), rtol=1e-5, atol=1e-6)
+
+
 def test_weightless_norm_has_no_hidden_size(default_vllm_config):
     """A weightless norm states no hidden size, and the model's (LM) hidden size
     would be wrong for one on a sub-dimension: Llama 4's `qk_norm` normalizes
@@ -221,7 +298,7 @@ def test_weightless_norm_has_no_hidden_size(default_vllm_config):
     matching the unfused norm and vLLM's native `RMSNorm(hidden_size=head_dim)`.
     """
     module = WeightlessRMSNorm(72)
-    built = get_fuser(module).fuse(module, "norm", default_vllm_config)
+    built = get_fuser(module, RMSNormFuser).fuse(module, "norm", default_vllm_config)
     assert built.hidden_size == 0
 
     built.tp_size = 2  # emulate TP=2 without a real process group
@@ -236,7 +313,7 @@ def test_fused_rms_norm_op_default_eps(default_vllm_config):
 
     with torch.device("meta"):
         module = torch.nn.RMSNorm(16)  # forward is a single `F.rms_norm` call
-        fuser = get_fuser(module)
+        fuser = get_fuser(module, RMSNormFuser)
         assert isinstance(fuser, RMSNormFuser)
         assert not fuser.zero_centered
         vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.float32))
@@ -251,7 +328,8 @@ def test_eps_is_derived_per_instance(default_vllm_config):
     with torch.device("meta"):
         for eps in (1e-5, 1e-6):
             module = RMSNorm(16, eps=eps)
-            built = get_fuser(module).fuse(module, "norm", default_vllm_config)
+            fuser = get_fuser(module, RMSNormFuser)
+            built = fuser.fuse(module, "norm", default_vllm_config)
             assert built.variance_epsilon == eps
 
 
@@ -262,7 +340,7 @@ def test_eps_attr_is_found_by_value_not_name(cls, default_vllm_config):
     with torch.device("meta"):
         for eps in (1e-5, 1e-6):
             module = cls(16, eps=eps)
-            fuser = get_fuser(module)
+            fuser = get_fuser(module, RMSNormFuser)
             assert fuser.eps_attr == cls.attr
             built = fuser.fuse(module, "norm", default_vllm_config)
             assert built.variance_epsilon == eps
@@ -274,7 +352,7 @@ def test_literal_eps_is_not_mistaken_for_an_attribute(default_vllm_config, caplo
     logger = "vllm.model_executor.models.transformers.fusers.rms_norm"
     with caplog.at_level("DEBUG", logger=logger), torch.device("meta"):
         module = LiteralEpsRMSNorm()
-        fuser = get_fuser(module)
+        fuser = get_fuser(module, RMSNormFuser)
         built = fuser.fuse(module, "norm", default_vllm_config)
     assert fuser.eps_attr is None
     assert built.variance_epsilon == 1e-4
@@ -287,7 +365,7 @@ def test_ambiguous_eps_attrs_are_disambiguated(default_vllm_config):
     with torch.device("meta"):
         module = AmbiguousEpsRMSNorm(16, eps=1e-6)
         before = dict(vars(module))
-        fuser = get_fuser(module)
+        fuser = get_fuser(module, RMSNormFuser)
         assert fuser.eps_attr == "variance_epsilon"
         assert vars(module) == before
 

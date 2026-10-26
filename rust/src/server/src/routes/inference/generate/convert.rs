@@ -30,6 +30,8 @@ pub(super) struct ResponseOptions {
     pub include_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
+    /// Whether the caller requested final prompt token metadata.
+    pub return_token_ids: bool,
 }
 
 /// Validate and lower one raw generate request into the internal
@@ -56,6 +58,7 @@ pub(super) fn prepare_generate_request(
             .unwrap_or(false);
     let include_logprobs = request.sampling_params.inner.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
+    let return_token_ids = request.return_token_ids.unwrap_or(false);
     let mut sampling_params = request.sampling_params.inner;
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
@@ -73,12 +76,15 @@ pub(super) fn prepare_generate_request(
         sampling_params,
         decode_options: TextDecodeOptions::default(),
         intermediate: false,
+        prompt_truncation: None,
         priority: request.priority,
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
         session_id: ctx.session_id,
-        reasoning_parser_kwargs: None,
+        kv_hints: None,
+        reasoning_parser_kwargs: request.reasoning_parser_kwargs.unwrap_or_default(),
+        reasoning_ended: request.reasoning_ended,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,
     };
@@ -92,6 +98,7 @@ pub(super) fn prepare_generate_request(
             include_continuous_usage,
             include_logprobs,
             include_prompt_logprobs,
+            return_token_ids,
         },
     })
 }
@@ -124,7 +131,8 @@ mod tests {
                 "max_tokens": 7,
                 "logprobs": 2,
                 "prompt_logprobs": 1,
-                "ignore_eos": true
+                "ignore_eos": true,
+                "routed_experts_prompt_start": 2
             },
             "kv_transfer_params": {
                 "connector": "x"
@@ -151,6 +159,10 @@ mod tests {
             Some(1)
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
+        assert_eq!(
+            prepared.text_request.sampling_params.routed_experts_prompt_start,
+            Some(2)
+        );
         assert_eq!(prepared.text_request.priority, -3);
         assert_eq!(prepared.text_request.cache_salt.as_deref(), Some("salt"));
         assert_eq!(
@@ -161,6 +173,62 @@ mod tests {
                 .and_then(|mut xargs| xargs.remove("kv_transfer_params")),
             Some(json!({"connector": "x"}))
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_accepts_python_extra_args() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [11, 22],
+            "sampling_params": {"extra_args": {"custom": 1}},
+            "kv_transfer_params": {"connector": "x"}
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["test-model"]),
+            ResolvedRequestContext::default(),
+            None,
+        )
+        .expect("prepare request");
+
+        let xargs = prepared.text_request.sampling_params.vllm_xargs.expect("xargs");
+        assert_eq!(xargs.get("custom"), Some(&json!(1)));
+        assert_eq!(
+            xargs.get("kv_transfer_params"),
+            Some(&json!({"connector": "x"}))
+        );
+    }
+
+    #[test]
+    fn prepare_generate_request_preserves_watermarking_defaults_and_opt_out() {
+        // Python's `SamplingParams` declares `watermarking: bool | None`, so an
+        // explicit `null` means the same as omitting it.
+        for (watermarking, expected) in [
+            (None, None),
+            (Some(json!(null)), None),
+            (Some(json!(true)), Some(true)),
+            (Some(json!(false)), Some(false)),
+        ] {
+            let mut body = json!({
+                "token_ids": [11, 22],
+                "sampling_params": {}
+            });
+            if let Some(watermarking) = watermarking {
+                body["sampling_params"]["watermarking"] = watermarking;
+            }
+            let prepared = prepare_generate_request(
+                serde_json::from_value(body.clone()).expect("parse request"),
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare request");
+            assert_eq!(
+                prepared.text_request.sampling_params.watermarking, expected,
+                "{body}"
+            );
+        }
     }
 
     #[test]
@@ -189,6 +257,54 @@ mod tests {
             prepared.text_request.sampling_params.thinking_token_budget,
             Some(64)
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_forwards_reasoning_controls() {
+        for (controls, expected) in [
+            (json!({}), (json!({"chat_template_kwargs": {}}), None)),
+            (
+                json!({
+                    "reasoning_ended": false,
+                    "reasoning_parser_kwargs": {
+                        "chat_template_kwargs": {"enable_thinking": true}
+                    }
+                }),
+                (
+                    json!({"chat_template_kwargs": {"enable_thinking": true}}),
+                    Some(false),
+                ),
+            ),
+            (
+                json!({"reasoning_ended": true, "reasoning_parser_kwargs": {}}),
+                (json!({"chat_template_kwargs": {}}), Some(true)),
+            ),
+        ] {
+            let mut body = json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "token_ids": [11, 22, 33],
+                "sampling_params": {}
+            });
+            body.as_object_mut().unwrap().extend(controls.as_object().unwrap().clone());
+            let request: GenerateRequest = serde_json::from_value(body).expect("parse request");
+
+            let prepared = prepare_generate_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare");
+
+            assert_eq!(
+                (
+                    serde_json::to_value(&prepared.text_request.reasoning_parser_kwargs).unwrap(),
+                    prepared.text_request.reasoning_ended,
+                ),
+                expected,
+                "controls: {controls}"
+            );
+        }
     }
 
     #[test]

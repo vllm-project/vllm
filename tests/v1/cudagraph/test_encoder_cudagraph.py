@@ -12,7 +12,10 @@ Test organization:
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
 """
 
-from typing import Any
+from collections.abc import Hashable
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -28,6 +31,15 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphReplayBuffers,
     EncoderItemSpec,
 )
+
+HAS_DEVICE_GRAPH = current_platform.is_cuda_alike() or current_platform.is_xpu()
+
+if current_platform.is_xpu():
+    from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
+
+    # Route torch.cuda graph/stream APIs to torch.xpu, as XPUModelRunner does.
+    with _torch_cuda_wrapper():
+        pass
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -97,6 +109,50 @@ class _MockModel(SupportsEncoderCudaGraph):
     def get_encoder_cudagraph_budget_range(self, vllm_config):
         return (self._min_budget, self._max_budget)
 
+    def get_max_frames_per_video(self) -> int:
+        return 0
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        return []
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        return EncoderCudaGraphCaptureInputs(values={})
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        return EncoderCudaGraphReplayBuffers(values={})
+
+    def encoder_cudagraph_forward(
+        self, inputs: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        return torch.zeros(0)
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        return torch.zeros(0)
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        return {}
+
 
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     """Create a minimal EncoderCudaGraphManager with only token_budgets set.
@@ -104,6 +160,8 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     Skips the parts of __init__ that require a real VllmConfig / model
     by patching the attributes directly after construction.
     """
+    from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
     mgr = object.__new__(EncoderCudaGraphManager)
     mgr.token_budgets = sorted(budgets)
     mgr.path_token_budgets = {"default": mgr.token_budgets}
@@ -116,9 +174,15 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     )
     mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
+    mgr._capture_axes = ()
     mgr.graph_hits = 0
     mgr.graph_misses = 0
     mgr.log_stats_interval = 100
+    mgr.config = EncoderCudaGraphConfig(
+        modalities=["image"],
+        buffer_keys=[],
+        out_hidden_size=32,
+    )
     return mgr
 
 
@@ -145,14 +209,6 @@ class TestGenerateBudgets:
     def test_large_range(self):
         result = EncoderCudaGraphManager._generate_budgets(64, 8192)
         assert result == [64, 128, 256, 512, 1024, 2048, 4096, 8192]
-
-    def test_capture_skipped_without_supported_modalities(self):
-        manager = _make_manager_with_budgets([64])
-        manager.config.modalities = []
-
-        manager.capture(graph_pool=object())
-
-        assert manager.graph_pool is None
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +254,138 @@ class TestFindBudgetGraph:
     def test_num_graphs_to_capture_tracks_budgets(self):
         mgr = _make_manager_with_budgets([8192, 2048, 4096])
         assert mgr.get_num_graphs_to_capture() == 3
+
+
+# ---------------------------------------------------------------------------
+# _execute_local greedy packing with budget-cliff deferral (no GPU required)
+# ---------------------------------------------------------------------------
+
+
+def _run_packing(
+    mgr: EncoderCudaGraphManager, specs: list[EncoderItemSpec]
+) -> list[tuple[list[int], str, int]]:
+    """Run _execute_local with graph replay and postprocess mocked out.
+
+    Returns:
+        (batch_indices, path, token_budget) for every graph replay.
+
+    """
+    mgr.model = MagicMock()
+
+    runs: list[tuple[list[int], str, int]] = []
+
+    def fake_run(mm_kwargs, token_budget, path="default", axis_keys=()):
+        runs.append((list(mm_kwargs["indices"]), path, token_budget))
+        n_tokens = sum(
+            specs[i].get_path_output_tokens(path) for i in mm_kwargs["indices"]
+        )
+        return torch.zeros(n_tokens, 32)
+
+    def fake_postprocess(
+        graph_outputs,
+        batch_indices,
+        per_item_out_tokens,
+        outputs_by_orig_idx,
+        clone,
+        batch_mm_kwargs,
+    ):
+        for i in batch_indices:
+            outputs_by_orig_idx[i] = torch.zeros(per_item_out_tokens[i], 32)
+
+    mgr.model.postprocess_encoder_output = fake_postprocess
+    with (
+        patch.object(mgr, "_get_item_specs", lambda mm_kwargs: specs),
+        patch.object(
+            mgr,
+            "_select_items",
+            lambda mm_kwargs, indices: ({"indices": indices}, ()),
+        ),
+        patch.object(mgr, "_run_budget_graph", fake_run),
+    ):
+        result = mgr._execute_local({})
+    assert len(result) == len(specs)
+    return runs
+
+
+class TestExecuteLocalPacking:
+    """Greedy packing defers items that cross a budget cliff."""
+
+    @staticmethod
+    def _spec(tokens: int) -> EncoderItemSpec:
+        return EncoderItemSpec(input_size=tokens, output_tokens=tokens)
+
+    def test_cliff_deferral_splits_batch(self):
+        # Merging would force 4200 tokens into the 8192 budget; deferring
+        # the 4000-token item costs 256 + 4096 instead.
+        mgr = _make_manager_with_budgets([256, 4096, 8192])
+        runs = _run_packing(mgr, [self._spec(4000), self._spec(200)])
+        assert runs == [([1], "default", 256), ([0], "default", 4096)]
+
+    def test_tie_does_not_defer(self):
+        # 4096 + 4096 ties the merged 8192 budget; merging wins because it
+        # saves one replay.
+        mgr = _make_manager_with_budgets([256, 4096, 8192])
+        runs = _run_packing(mgr, [self._spec(4000), self._spec(4000)])
+        assert runs == [([0, 1], "default", 8192)]
+
+    def test_deferral_requires_item_outweighing_batch(self):
+        # The third 1366-token item would save budget if deferred (4096+2048
+        # < 8192) but is smaller than the current batch (4096), so it merges:
+        # deferring mid-size items fragments flood packing into extra replays.
+        mgr = _make_manager_with_budgets([256, 2048, 4096, 8192])
+        runs = _run_packing(mgr, [self._spec(1366)] * 3)
+        assert runs == [([0, 1, 2], "default", 8192)]
+
+    def test_packing_without_cliff_unchanged(self):
+        mgr = _make_manager_with_budgets([256, 4096])
+        runs = _run_packing(mgr, [self._spec(100), self._spec(100)])
+        assert runs == [([0, 1], "default", 256)]
+
+    def test_small_items_split_to_avoid_cliff(self):
+        # Merging 3+ items of 100 tokens crosses 256 -> 4096; splitting
+        # into pairs costs 256 + 256 < 4096.
+        mgr = _make_manager_with_budgets([256, 4096])
+        runs = _run_packing(mgr, [self._spec(100)] * 4)
+        assert runs == [([0, 1], "default", 256), ([2, 3], "default", 256)]
+
+    def test_max_batch_size_split_unchanged(self):
+        mgr = _make_manager_with_budgets([1024, 4096])
+        mgr.max_batch_size = 3
+        runs = _run_packing(mgr, [self._spec(100)] * 4)
+        assert runs == [([0, 1, 2], "default", 1024), ([3], "default", 1024)]
+
+    def test_oversized_item_still_falls_back_to_eager(self):
+        mgr = _make_manager_with_budgets([256, 4096])
+        runs = _run_packing(mgr, [self._spec(100), self._spec(9000)])
+        assert runs == [([0], "default", 256)]
+        assert mgr.graph_misses == 1
+
+    def test_multi_path_deferral_skips_zero_token_paths(self):
+        mgr = _make_manager_with_budgets([256, 4096, 8192])
+        mgr.path_token_budgets = {
+            "a": [0, 256, 4096, 8192],
+            "b": [256, 4096, 8192],
+        }
+        specs = [
+            EncoderItemSpec(
+                input_size=300,
+                output_tokens=300,
+                path_output_tokens={"a": 200, "b": 100},
+            ),
+            EncoderItemSpec(
+                input_size=4000,
+                output_tokens=4000,
+                path_output_tokens={"a": 0, "b": 4000},
+            ),
+        ]
+        runs = _run_packing(mgr, specs)
+        # Path b alone triggers deferral (256 + 4096 < 8192); the deferred
+        # item has zero tokens on path a, so that path is skipped.
+        assert runs == [
+            ([0], "a", 256),
+            ([0], "b", 256),
+            ([1], "b", 4096),
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +544,7 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
         per_image_output = token_budget // max_batch_size
         grid_config = [
@@ -434,6 +623,7 @@ def _make_manager_for_gpu(
     mgr.use_dp = False
     mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
+    mgr._capture_axes = ()
     mgr.graph_hits = 0
     mgr.graph_misses = 0
     mgr.log_stats_interval = 100
@@ -483,12 +673,10 @@ def _make_video_mm_kwargs(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
-)
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA, ROCm or XPU graph")
 class TestEncoderCudaGraphCaptureReplay:
     def setup_method(self):
-        self.device = torch.device("cuda:0")
+        self.device = torch.device(current_platform.device_type, 0)
         self.dtype = torch.float16
         self.model = SimpleMockViTModel().to(self.device).half()
         self.mgr = _make_manager_for_gpu(
@@ -572,6 +760,103 @@ class TestEncoderCudaGraphCaptureReplay:
         assert len(result) == n_images
         for out in result:
             assert out.shape == (4, _HIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# E-only capture and output lifecycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA, ROCm or XPU graph")
+@pytest.mark.usefixtures("dist_init", "workspace_init")
+@pytest.mark.parametrize("profile_only", [False, True])
+@torch.inference_mode()
+def test_eonly_capture_preserves_outputs_across_replay_and_fallback(profile_only):
+    """The E-only entry captures only the encoder and preserves cached outputs."""
+    from vllm.distributed.ec_transfer.ec_connector.base import (
+        ECConnectorBase,
+        ECConnectorMetadata,
+    )
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu.ec_connector import ActiveECConnector
+    from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+    from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+    from vllm.v1.worker.workspace import lock_workspace
+
+    device = torch.device(current_platform.device_type, 0)
+    dtype = torch.float16
+    model = SimpleMockViTModel().to(device).half()
+    manager = _make_manager_for_gpu(model, _BUDGETS, _MAX_BATCH, device, dtype)
+    encoder = object.__new__(EncoderRunner)
+    encoder.device = device
+    encoder.cudagraph_manager = manager
+    runner = object.__new__(MMEncoderModelRunner)
+    runner.model_state = SimpleNamespace(encoder_runner=encoder)
+    # No decoder manager is installed: capture must be encoder-only.
+    with patch(
+        "vllm.v1.worker.mm_encoder_model_runner.lock_workspace", wraps=lock_workspace
+    ) as lock:
+        runner.capture_model(profile_only=profile_only)
+        assert lock.call_count == int(not profile_only)
+    assert len(manager.budget_graphs["default"]) == len(_BUDGETS)
+
+    cache: dict[str, torch.Tensor] = {}
+    pending_sends: dict[str, torch.Tensor] = {}
+    connector = MagicMock(spec=ECConnectorBase)
+    connector.is_producer = True
+    connector.is_consumer = False
+    connector.get_finished.return_value = (None, None)
+    connector.save_caches.side_effect = lambda *, encoder_cache, mm_hash: (
+        pending_sends.update({mm_hash: encoder_cache[mm_hash]})
+    )
+    with patch(
+        "vllm.v1.worker.gpu.ec_connector.get_ec_transfer", return_value=connector
+    ):
+        ec = ActiveECConnector(SimpleNamespace(), cache)
+    scheduled = cast(
+        SchedulerOutput,
+        SimpleNamespace(
+            ec_connector_metadata=ECConnectorMetadata(), finished_req_ids=frozenset()
+        ),
+    )
+    saved_outputs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    # Mixed sizes exercise packing order; 64 is the boundary, 81 falls back.
+    for grids in ([[1, 8, 8], [1, 4, 4]], [[1, 16, 16]], [[1, 18, 18]], [[1, 4, 4]]):
+        inputs = _make_mm_kwargs(grids, device, dtype)
+        expected = model.encoder_eager_forward(inputs).split(
+            [t * (h // 2) * (w // 2) for t, h, w in grids]
+        )
+        with ec.maybe_get_output(scheduled) as ec_output:
+            outputs = manager.execute(inputs)
+            assert outputs is not None
+            cache[str(len(cache))] = outputs[0]
+        assert ec_output is not None
+        assert ec_output.finished_sending is None
+        assert outputs is not None
+        for actual, eager in zip(outputs, expected):
+            torch.testing.assert_close(actual, eager)
+        for previous, snapshot in saved_outputs:
+            torch.testing.assert_close(previous, snapshot, rtol=0, atol=0)
+        saved_outputs.extend((output, output.clone()) for output in outputs)
+    assert manager.graph_hits == 4
+    assert manager.graph_misses == 1
+    assert pending_sends.keys() == cache.keys()
+    connector.get_finished.return_value = (set(cache), None)
+    with ec.maybe_get_output(scheduled) as ec_output:
+        pass
+    assert ec_output is not None
+    assert ec_output.finished_sending == set(cache)
+
+
+def test_eonly_without_encoder_graph_skips_capture():
+    from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+    from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+
+    encoder = object.__new__(EncoderRunner)
+    encoder.cudagraph_manager = None
+    runner = object.__new__(MMEncoderModelRunner)
+    runner.model_state = SimpleNamespace(encoder_runner=encoder)
+    assert runner.capture_model() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +949,7 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
         per_item_output = token_budget // max_batch_size
         frames_per_item = max_frames_per_batch // max_batch_size
@@ -761,6 +1047,278 @@ class TestGetInputModality:
 
 
 # ---------------------------------------------------------------------------
+# GPU tests — DeepSeek-VL2 batched-tile encoder CUDA graph
+# ---------------------------------------------------------------------------
+
+# DeepSeek-VL2 mock constants (kept small for fast capture)
+_DSV2_H = 2  # projector output side per tile (h = w)
+_DSV2_DIM = 16  # hidden size
+_DSV2_IMG_SIZE = 4  # each tile is 4×4 pixels
+_DSV2_BUDGETS = [16, 64]
+_DSV2_MAX_BATCH = 4
+
+
+def _dsv2_output_tokens(tw: int, th: int) -> int:
+    """Expected output tokens for an image with (tw, th) local tiles."""
+    h = w = _DSV2_H
+    return h * (w + 1) + th * h * (tw * w + 1) + 1
+
+
+def _make_deepseek_vl2_mm_kwargs(
+    spatial_crops: list[list[int]],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, Any]:
+    """spatial_crops: [[tw, th], ...] per image."""
+    total_tiles = sum(1 + int(tw) * int(th) for tw, th in spatial_crops)
+    pixel_values = torch.randn(
+        total_tiles, 3, _DSV2_IMG_SIZE, _DSV2_IMG_SIZE, device=device, dtype=dtype
+    )
+    return {
+        "pixel_values": pixel_values,
+        "images_spatial_crop": torch.tensor(
+            spatial_crops, dtype=torch.long, device=device
+        ),
+    }
+
+
+class MockDeepseekVL2Model(torch.nn.Module, SupportsEncoderCudaGraph):
+    """Mock of DeepseekVLV2ForCausalLM for CUDA graph tests.
+
+    Simulates the batched-tile ViT pattern: pixel_values is
+    [N_tiles, 3, H, W], output is assembled with newlines and
+    view-separator in postprocess_encoder_output.
+    """
+
+    def __init__(self):
+        super().__init__()
+        hw = _DSV2_H * _DSV2_H
+        in_features = 3 * _DSV2_IMG_SIZE * _DSV2_IMG_SIZE
+        self.proj = torch.nn.Linear(in_features, hw * _DSV2_DIM)
+        self.image_newline = torch.nn.Parameter(torch.randn(_DSV2_DIM))
+        self.view_seperator = torch.nn.Parameter(torch.randn(_DSV2_DIM))
+        self.global_view_pos = "head"
+
+    def get_max_frames_per_video(self) -> int:
+        return 1
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=_DSV2_DIM,
+        )
+
+    def get_encoder_cudagraph_budget_range(self, vllm_config) -> tuple[int, int]:
+        return (_dsv2_output_tokens(1, 1), 128)
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        h = w = _DSV2_H
+        specs = []
+        for row in mm_kwargs["images_spatial_crop"].tolist():
+            tw, th = int(row[0]), int(row[1])
+            if tw == 0 or th == 0:
+                break
+            specs.append(
+                EncoderItemSpec(
+                    input_size=1 + tw * th,
+                    output_tokens=h * (w + 1) + th * h * (tw * w + 1) + 1,
+                )
+            )
+        return specs
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        images_spatial_crop = mm_kwargs["images_spatial_crop"]
+
+        if not indices:
+            return {
+                "pixel_values": pixel_values[:0],
+                "images_spatial_crop": images_spatial_crop[:0],
+            }
+
+        tiles_per_image = [
+            1 + int(row[0]) * int(row[1]) for row in images_spatial_crop.tolist()
+        ]
+        cum = [0]
+        for t in tiles_per_image:
+            cum.append(cum[-1] + t)
+
+        selected_pv = torch.cat([pixel_values[cum[i] : cum[i + 1]] for i in indices])
+        return {
+            "pixel_values": selected_pv,
+            "images_spatial_crop": images_spatial_crop[list(indices)],
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        hw = _DSV2_H * _DSV2_H
+        max_tiles = (token_budget + hw - 1) // hw
+        dummy = torch.randn(
+            max_tiles, 3, _DSV2_IMG_SIZE, _DSV2_IMG_SIZE, device=device, dtype=dtype
+        )
+        return EncoderCudaGraphCaptureInputs(values={"pixel_values": dummy})
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values": mm_kwargs["pixel_values"]}
+        )
+
+    def _tile_forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """Project tiles: [N, 3, H, W] → [N, hw, DIM]."""
+        n = pixel_values.shape[0]
+        flat = pixel_values.view(n, -1)
+        hw = _DSV2_H * _DSV2_H
+        return self.proj(flat).view(n, hw, _DSV2_DIM)
+
+    def encoder_cudagraph_forward(
+        self, values: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        return self._tile_forward(values["pixel_values"])
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        # Manager always runs `postprocess_encoder_output` after this, whether
+        # the batch went through eager or CUDA graph replay, so this must
+        # return the same raw per-tile shape as `encoder_cudagraph_forward`.
+        return self._tile_forward(mm_kwargs["pixel_values"])
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        assert batch_mm_kwargs is not None
+        output = outputs["default"]
+        images_spatial_crop = batch_mm_kwargs["images_spatial_crop"]
+        _, hw, n_dim = output.shape
+        h = w = int(hw**0.5)
+
+        tile_offset = 0
+        for rank, img_idx in enumerate(indices):
+            tw = int(images_spatial_crop[rank][0])
+            th = int(images_spatial_crop[rank][1])
+            n_tiles = 1 + tw * th
+            tiles = output[tile_offset : tile_offset + n_tiles]
+            tile_offset += n_tiles
+
+            global_f = tiles[0].view(h, w, n_dim)
+            newline_g = self.image_newline.view(1, 1, n_dim).expand(h, 1, n_dim)
+            global_f = torch.cat([global_f, newline_g], dim=1).view(-1, n_dim)
+
+            local_f = tiles[1:].view(th, tw, h, w, n_dim)
+            local_f = local_f.permute(0, 2, 1, 3, 4).reshape(th * h, tw * w, n_dim)
+            newline_l = self.image_newline.view(1, 1, n_dim).expand(th * h, 1, n_dim)
+            local_f = torch.cat([local_f, newline_l], dim=1).view(-1, n_dim)
+
+            if self.global_view_pos == "head":
+                emb = torch.cat([global_f, self.view_seperator[None], local_f])
+            else:
+                emb = torch.cat([local_f, self.view_seperator[None], global_f])
+
+            if isinstance(dest, dict):
+                dest[img_idx] = emb.clone() if clone else emb
+            else:
+                dest[rank] = emb.clone() if clone else emb
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+class TestDeepseekVL2CudaGraph:
+    """CUDA graph tests for the batched-tile encoder pattern (DeepSeek-VL2)."""
+
+    def setup_method(self):
+        self.device = torch.device("cuda:0")
+        self.dtype = torch.float16
+        self.model = MockDeepseekVL2Model().to(self.device).half()
+        self.mgr = _make_manager_for_gpu(
+            self.model, _DSV2_BUDGETS, _DSV2_MAX_BATCH, self.device, self.dtype
+        )
+        self.graph_pool = current_platform.graph_pool_handle()
+        self.mgr.capture(graph_pool=self.graph_pool)
+
+    def test_capture_creates_one_graph_per_budget(self):
+        assert set(self.mgr.budget_graphs["default"].keys()) == set(_DSV2_BUDGETS)
+
+    def test_execute_returns_one_tensor_per_image(self):
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs(
+            [[1, 1], [1, 1]], self.device, self.dtype
+        )
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert len(result) == 2
+
+    def test_output_tokens_1x1_tile(self):
+        # global=h*(w+1)=2*3=6, local=1*2*(1*2+1)=6, sep=1 → 13
+        expected = _dsv2_output_tokens(1, 1)
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs([[1, 1]], self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert result[0].shape == (expected, _DSV2_DIM)
+
+    def test_output_tokens_2x1_tile(self):
+        # global=6, local=1*2*(2*2+1)=10, sep=1 → 17
+        expected = _dsv2_output_tokens(2, 1)
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs([[2, 1]], self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert result[0].shape == (expected, _DSV2_DIM)
+
+    def test_output_tokens_multi_image(self):
+        # Image 0: tw=1,th=1 → 13;  Image 1: tw=2,th=1 → 17
+        e0 = _dsv2_output_tokens(1, 1)
+        e1 = _dsv2_output_tokens(2, 1)
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs(
+            [[1, 1], [2, 1]], self.device, self.dtype
+        )
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert result[0].shape == (e0, _DSV2_DIM)
+        assert result[1].shape == (e1, _DSV2_DIM)
+
+    def test_eager_fallback_when_tokens_exceed_all_budgets(self):
+        # tw=4,th=4: global=6, local=4*2*(4*2+1)=72, sep=1 → 79 > max budget 64
+        tw, th = 4, 4
+        expected = _dsv2_output_tokens(tw, th)
+        assert expected > _DSV2_BUDGETS[-1], "test precondition: must exceed max budget"
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs([[tw, th]], self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].shape == (expected, _DSV2_DIM)
+        assert self.mgr.graph_misses >= 1
+
+    def test_graph_hit_counter(self):
+        mm_kwargs = _make_deepseek_vl2_mm_kwargs(
+            [[1, 1], [1, 1]], self.device, self.dtype
+        )
+        self.mgr.execute(mm_kwargs)
+        assert self.mgr.graph_hits == 2
+
+
+# ---------------------------------------------------------------------------
 # GPU tests — video capture, replay, fallback, and mixed image+video
 # ---------------------------------------------------------------------------
 
@@ -768,12 +1326,10 @@ _VIDEO_MAX_BATCH = 4
 _VIDEO_MAX_FRAMES = 8  # 2 frames per item at max_batch_size=4
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
-)
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA, ROCm or XPU graph")
 class TestEncoderCudaGraphVideoReplay:
     def setup_method(self):
-        self.device = torch.device("cuda:0")
+        self.device = torch.device(current_platform.device_type, 0)
         self.dtype = torch.float16
         self.model = SimpleMockViTVideoModel().to(self.device).half()
         self.mgr = _make_manager_for_gpu(

@@ -17,7 +17,18 @@ following `quantization.quant_algo` values:
 - `FP8_PER_CHANNEL_PER_TOKEN`: per-channel weight scale and dynamic per-token activation quantization.
 - `FP8_PB_WO` (ModelOpt may emit `fp8_pb_wo`): block-scaled FP8 weight-only (typically 128×128 blocks).
 - `NVFP4`: ModelOpt NVFP4 checkpoints (use `quantization="modelopt_fp4"`).
+- `W4A16_NVFP4`: weight-only ModelOpt NVFP4 checkpoints with 16-bit
+  activations (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
+- `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
+  (use `quantization="modelopt_mixed"`).
+
+For per-tensor `FP8`, vLLM converts E4M3FN weights and scales to E4M3FNUZ
+when required by the GPU, for example on AMD MI300.
+
+For Qwen3-based DFlash and DSpark drafts, `quantized_layers` and exclusion lists
+use the exported checkpoint's module names. vLLM maps these names to the draft's
+module prefix and decoder layer indices before constructing quantized layers.
 
 !!! note
     For NVFP4 checkpoints, vLLM selects a GEMM kernel automatically at load
@@ -28,8 +39,8 @@ following `quantization.quant_algo` values:
     workloads. Use `--linear-backend` to override the automatic selection
     (this replaces the deprecated `VLLM_NVFP4_GEMM_BACKEND` environment
     variable). Values relevant to NVFP4 include `cutlass`,
-    `flashinfer_cutlass`, `flashinfer_trtllm`, `flashinfer_cudnn`, and
-    `marlin`; the full list is documented under `KernelConfig` on the
+    `flashinfer_cutlass`, `flashinfer_cutedsl`, `flashinfer_trtllm`,
+    `flashinfer_cudnn`, and `marlin`; see `KernelConfig` on the
     [Engine Arguments](../../configuration/engine_args.md) page and shown by
     `vllm serve --help=KernelConfig`.
 
@@ -37,6 +48,15 @@ following `quantization.quant_algo` values:
     For models quantized to MXFP8 with BF16 activations on SM100-family GPUs,
     use `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
     GEMM backend.
+
+## Benchmarking with dummy weights
+
+For performance experiments with random weights, use `--load-format dummy`.
+ModelOpt NVFP4 MoE layers initialize positive quantization scales with matching
+gate/up global scales, including for FlashInfer MegaMoE
+(`--moe-backend flashinfer_moe_ep_cutedsl`).
+Dummy weights are for benchmarking, not model quality evaluation. Normal
+checkpoint loading uses the checkpoint's scales.
 
 ## Quantizing HuggingFace Models with PTQ
 
