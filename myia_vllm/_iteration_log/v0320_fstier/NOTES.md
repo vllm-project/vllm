@@ -2620,3 +2620,60 @@ on 24/09 at 97.8 %. No heavy work from this lane; watch 97 %. Not ours to
 fix (`.wslconfig` / `wsl --shutdown` would kill engine and hub).
 
 Security: five known actors, no new IP, zero #431 signature. nbaudit ok.
+
+### 26/10 07:41Z — write rate keeps falling on its own (3.7 GB/h, 0.18 KB/token); disk serving migrates up-tier
+
+Window 05:41->07:41Z (2 h). Cumulative boot 21:48:52Z -> 07:41Z = 9 h 52.
+
+| metric | cumulative | delta 2 h |
+|---|---|---|
+| fs writes (`tiering_write_bytes_total`) | 89.71 GB | **+7.45 GB = 3.7 GB/h** (16.7 -> 5.1 -> 5.0 -> 3.7) |
+| fs reads (`tiering_read_bytes_total`) | 48.14 GB | +5.33 GB = 2.7 GB/h (up from 0.32) |
+| prompt tokens | 186.07 M | +40.80 M = 20.4 M tok/h |
+| cached share | **91.6 %** (device 129.11 / host 37.54 / disk 3.79 M) | window: device serves 91.8 % of prompt |
+| computed prefill | 15.96 M = 8.6 % | 2.27 M = **5.6 % of window** |
+| preemptions | 14 | **+0 for 6 h** |
+| WEDGE | 0 new since 04:05Z | — |
+| fs chunk hits | 1,825 | +940 over 8 h (435 in the first 2 h) |
+| fs tier size | **251 GB = at the 250 GiB cap** | pruner active, as designed |
+| /dev/shm | 25G/63G (39 %) | RAM-tier floor |
+| VRAM | GPU0 22,636 / GPU1 21,508 MiB | GPU0 364 MiB under the 23,000 line |
+
+**x5 verdict this window: 7.45 GB / 40.80 M tok = 0.18 KB/token = ÷9.3** (was
+÷5.9 at 05:41Z). The cruise keeps deepening with no code change — the filter's
+end-state is arriving on its own.
+
+**Rewrites are now 84 % of what remains** (birth-time scan, 30-min window, 96
+files: 15 NEW 0.39 GB vs 81 REWRITES 2.13 GB — up from 51 % at 00:40Z). v2
+(PR #211) would cut this scan window from 2.52 to 0.78 GB/h; at this depth its
+saving approaches ~100 GB/day, which strengthens (not changes) the Q39
+recommendation: fold into the next image bump, no dedicated restart.
+
+**Disk-served share, two honest readings.** Cumulative: 2.04 % of prompt tokens
+(floor = 1.76 %) — passing. Window: ~0.7-0.9 % — below floor, because device
+now serves 91.8 % of the window's prompt and computed prefill is down to 5.6 %
+with preemptions flat for 6 h. This is the filter's intended end-state, not a
+serving failure: hot socles live in GPU/RAM and the fs tier degrades toward
+restart/cold-replay insurance (fs reads still ran at 2.7 GB/h this window).
+The floor was written to catch "the filter killed disk utility"; disk utility
+falling because serving migrated to faster tiers is the success case. Recorded
+as-is; **Monday's cold-working-set diurnal window remains the gate before
+closing #198.**
+
+**Window+1 400s: 4 in 3 h** (07:07, 07:09, 07:35, 07:42Z; 0.9-4.2 MB bodies,
+all via the site hairpin — AsyncOpenAI and Bun UAs, 26+ min apart, no
+retry-loop). Known signature (claudish #674/#685); the hub recreate carrying
+the fix is scheduled 09:00-11:00Z today. Nothing new to escalate from the
+engine side.
+
+**Host commit 92.8 %** (366.7/395.3 GB, margin 28.6 GB) — fourth consecutive
+rise (88.6 -> 90.1 -> 92.4 -> 92.8). No heavy work from this lane; watch 97 %.
+
+Security: two known actors with 200s (hairpin 248, internal no-XFF 216),
+20 x 401 from the known dead-key process (fp 1f7f6080cb65), zero new IP, no
+unknown key. nbaudit ok (07:05Z, wave 2 Image/). G: write OK. Condensation
+nominal (heartbeats only). GPU 2 = CoursIA training (24,091 MiB, expected).
+
+Coordination: CoursIA-2's [LIFT DEMANDE] on #21704 re-routed to
+myia-ai-01:CoursIA (the reserve is that persona's, review 5593125735) — vllm
+does not lift another lane's reserve; DM answered and marked read.
