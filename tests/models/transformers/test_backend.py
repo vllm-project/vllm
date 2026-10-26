@@ -148,6 +148,26 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
     )
 
 
+def test_whole_graph_compile(
+    vllm_runner: type[VllmRunner], example_prompts: list[str]
+) -> None:
+    """Compiling attention and the KV-cache op into one Inductor graph must
+    match eager, so vllm:: ops have to receive eager strides."""
+    kwargs_ref = {"model_impl": "transformers", "max_model_len": 2048}
+    kwargs_test = {
+        **kwargs_ref,
+        "compilation_config": {"mode": 2, "backend": "inductor"},
+    }
+    check_implementation(
+        vllm_runner,
+        vllm_runner,
+        example_prompts,
+        model="Qwen/Qwen3-0.6B",
+        kwargs_ref={**kwargs_ref, "enforce_eager": True},
+        kwargs_test=kwargs_test,
+    )
+
+
 def get_sinks(model) -> dict[int, torch.Tensor]:
     """The sink tensor each attention layer was handed, keyed by layer index."""
     sinks = {}
