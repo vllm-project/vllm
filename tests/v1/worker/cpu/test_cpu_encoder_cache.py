@@ -16,6 +16,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.worker.cpu.encoder_cache import EncoderCache
+from vllm.v1.worker.cpu.encoder_runner import EncoderRunner
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
 
@@ -61,6 +62,18 @@ def test_consumed_input_updates_are_request_local_and_replayable() -> None:
     assert "same" in cache.encoder_outputs
 
     cache.free_encoder_cache("same")
+    cache.update_encoder_inputs("a", {0: source[0].data})
+    runner = EncoderRunner(
+        model=torch.nn.Module(),
+        max_num_tokens=32,
+        hidden_size=HIDDEN_SIZE,
+        encoder_cache=cache,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    hashes, inputs = runner.prepare_mm_inputs({"a": [0]})
+    assert hashes == ["same"]
+    assert inputs == [(feature.modality, feature.data)]
 
 
 def test_consumed_input_releases_storage_before_request_finishes() -> None:
