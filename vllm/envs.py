@@ -309,7 +309,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
-    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES: int = 256 * 1024 * 1024
+    VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES: int = 0
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD: int = 256
@@ -2140,20 +2140,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Size cap for the lm_head skinny-GEMM (wvSplitK) weight guard: weights
     # larger than this skip the skinny path at 1 < n <= 5 (see
     # vllm.model_executor.layers.utils.lmhead_skinny_guard_permits).
-    # wvSplitK re-reads the weight once per K-shard, so past the
-    # cache-resident regime the re-read costs more than the split-K launch
-    # saves. The 256 MiB default is the measured crossover for the
-    # DeepSeek-V4.1-Flash TP=4 decode shapes on MI355X (gfx950): the
-    # [32320, 5120] draft lm_head shard (~315 MiB) is the site that
-    # motivated the guard, and weights below the cap keep winning on
-    # wvSplitK. Raise it only if profiling shows wvSplitK still winning on
-    # a larger weight at your serving point; set it very large (e.g.
-    # 2**60) to disable the guard. It is deliberately not derived from the
-    # device properties: gfx950 exposes a 4 MiB per-XCD L2, far below the
-    # measured crossover, so a hardware-derived cap would disable the
-    # fastpath on the shapes where it wins.
+    # wvSplitK's cost at n activation rows scales as ~n passes over the
+    # weight, so once the weight exceeds the last-level (memory-side)
+    # cache those extra passes are HBM round trips. 0 (the default)
+    # derives the cap from that cache size once at first use (256 MiB on
+    # MI355X, 128 MiB on MI300X-class parts), with a 256 MiB fallback
+    # where the size cannot be read — see the guard for how it's read.
+    # The portable device-properties API cannot be used: it exposes only
+    # the far smaller L2 (4 MiB on gfx950), which would disable the
+    # fastpath on every real lm_head shard. Set a value explicitly to
+    # override the hardware-derived cap; set it very large (e.g. 2**60)
+    # to disable the guard.
     "VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES": lambda: int(
-        os.getenv("VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES", str(256 * 1024 * 1024))
+        os.getenv("VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES", "0")
     ),
     # Limits when we run shared_experts in a separate stream.
     # We found out that for large batch sizes, the separate stream

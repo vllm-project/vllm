@@ -2,16 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """lm_head skinny-GEMM weight-size guard: core contracts.
 
-wvSplitK_hf_sml re-reads the weight matrix once per K-shard, so its
-effective bandwidth collapses on weights far larger than L2. At the
-DSV4.1-Flash TP=4 serving point the draft vocab-parallel lm_head shard
-([32320, 5120] bf16, ~315 MiB, one call per decode step) hit this
-collapse. The guard keeps every weight above
-VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES (default 256 MiB) on the generic GEMM
-fall-through at 0 < n <= 5. The swap is NOT bit-exact (different GEMM
-kernel, different accumulation order) -- these tests check the decision
-table, dispatch selection, cap tuning, and numerical agreement within
-bf16 GEMM tolerance.
+wvSplitK_hf_sml's cost at n activation rows scales as ~n passes over the
+weight, so past the last-level (memory-side) cache its effective
+bandwidth collapses. At the DSV4.1-Flash TP=4 serving point the draft
+vocab-parallel lm_head shard ([32320, 5120] bf16, ~315 MiB, one call per
+decode step) hit this collapse. The guard keeps every weight above
+VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES on the generic GEMM fall-through at
+0 < n <= 5; the default cap is the memory-side cache size, read once
+from the hardware (256 MiB on MI355X, 128 MiB on MI300X-class parts),
+with a 256 MiB fallback where that cannot be read. The swap is NOT
+bit-exact (different GEMM kernel, different accumulation order) -- these
+tests check the decision table, dispatch selection, cap tuning and
+hardware-derivation, and numerical agreement within bf16 GEMM tolerance.
 """
 
 import os
@@ -21,6 +23,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.utils import (
+    _amd_l3_cache_bytes,
     _skinny_gemm_max_weight_bytes,
     _skinny_guard_warned,
     lmhead_skinny_guard_permits,
@@ -79,8 +82,9 @@ def _x(n, k, seed=1):
 
 
 def _set_cap(max_bytes):
-    # None -> the 256 MiB default; an int -> that exact cap. The accessor
-    # caches the env read, so clear it after every change.
+    # None -> the hardware-derived default (memory-side cache size, with
+    # the 256 MiB fallback); an int -> that exact cap. The accessor caches
+    # its one evaluation, so clear it after every change.
     if max_bytes is None:
         os.environ.pop(_MAX_BYTES_VAR, None)
     else:
@@ -132,7 +136,10 @@ def _has_cijk(names):
 
 def test_guard_decision():
     """Decision table: bytes-gated at 0 < n <= 5; n=1 (no pathology)
-    always permits; the cap is tunable."""
+    always permits; the cap is tunable. The default (auto) cap gates the
+    315.5 MiB site shape on every part it can run on: the memory-side
+    cache is 256 MiB (MI355X) / 128 MiB (MI300X-class), and the fallback
+    is 256 MiB."""
     small = torch.zeros(SMALL_SHAPE, dtype=torch.bfloat16)
     big = torch.zeros(BIG_SHAPE, dtype=torch.bfloat16)
     assert lmhead_skinny_guard_permits(small, 5)
@@ -147,7 +154,78 @@ def test_guard_decision():
     assert not lmhead_skinny_guard_permits(big, 5), "lowered cap must gate"
 
     _set_cap(None)
-    assert not lmhead_skinny_guard_permits(big, 5), "default cap must gate"
+    assert not lmhead_skinny_guard_permits(big, 5), "auto cap must gate"
+
+
+# Canned amdsmi cache lists (amdsmi_get_gpu_cache_info(...)["cache"]),
+# trimmed to the fields the parse keys on; sizes are KB as amdsmi
+# reports them.
+_AMD_SMI_MI355X = [
+    # L1 data / L1 inst / L2: the levels below the boundary.
+    {
+        "cache_properties": ["DATA_CACHE", "SIMD_CACHE"],
+        "cache_level": 1,
+        "cache_size": 32,
+    },
+    {
+        "cache_properties": ["INST_CACHE", "SIMD_CACHE"],
+        "cache_level": 1,
+        "cache_size": 64,
+    },
+    {
+        "cache_properties": ["DATA_CACHE", "SIMD_CACHE"],
+        "cache_level": 2,
+        "cache_size": 4096,
+    },
+    # The memory-side cache (MALL): 256 MiB, the level the guard keys on.
+    {
+        "cache_properties": ["DATA_CACHE", "SIMD_CACHE"],
+        "cache_level": 3,
+        "cache_size": 262144,
+    },
+]
+_AMD_SMI_MI300X_CLASS = [
+    {"cache_properties": ["DATA_CACHE"], "cache_level": 2, "cache_size": 8192},
+    {"cache_properties": ["DATA_CACHE"], "cache_level": 3, "cache_size": 131072},
+]
+
+
+def test_l3_parse_selects_level3_data_cache():
+    """The parse takes the level-3 DATA_CACHE (the memory-side cache),
+    not the L2 below it, in amdsmi's KB units."""
+    assert _amd_l3_cache_bytes(_AMD_SMI_MI355X) == 256 * 1024 * 1024
+    assert _amd_l3_cache_bytes(_AMD_SMI_MI300X_CLASS) == 128 * 1024 * 1024
+    # Empty list, or instruction caches only: no L3 to key on.
+    assert _amd_l3_cache_bytes([]) is None
+    assert (
+        _amd_l3_cache_bytes(
+            [{"cache_properties": ["INST_CACHE"], "cache_level": 3, "cache_size": 64}]
+        )
+        is None
+    )
+
+
+def test_cap_env_hardware_fallback_precedence(monkeypatch):
+    """Unset env: the cap is the L3 size the library reports; an
+    unreadable L3 falls back to the documented 256 MiB; an explicit env
+    value overrides the hardware."""
+    _set_cap(None)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.utils._amd_l3_cache_bytes",
+        lambda cache_info=None: 128 * 1024 * 1024,
+    )
+    _skinny_gemm_max_weight_bytes.cache_clear()
+    assert _skinny_gemm_max_weight_bytes() == 128 * 1024 * 1024
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.utils._amd_l3_cache_bytes",
+        lambda cache_info=None: None,
+    )
+    _skinny_gemm_max_weight_bytes.cache_clear()
+    assert _skinny_gemm_max_weight_bytes() == 256 * 1024 * 1024
+
+    _set_cap(1024 * 1024 * 1024)
+    assert _skinny_gemm_max_weight_bytes() == 1024 * 1024 * 1024
 
 
 def test_census_warning_fires_once_per_site(caplog):
