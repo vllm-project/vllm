@@ -62,6 +62,13 @@ from .worker import MooncakeStoreWorker
 
 logger = init_logger(__name__)
 
+# The accumulator lives as long as the connector does, so the two ledgers it
+# keeps need ceilings: a block whose coverage never completes would pin its
+# payload for the process lifetime, and the released ledger grows with every
+# block announced.
+_MAX_PENDING_BLOCKS = 1 << 14
+_MAX_RELEASED_BLOCKS = 1 << 18
+
 
 @dataclass
 class _PendingResidency:
@@ -88,6 +95,14 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
     coverage only: the payload announced is the first one seen, and the block is
     announced once per residency epoch, which ``AllBlocksCleared`` ends.
 
+    Both ledgers are capped so that an accumulator that lives for the whole
+    process cannot grow without bound. A block whose coverage never completes is
+    dropped once enough newer blocks were reported, so the reason a rank stopped
+    covering its namespaces is what leaves it unannounced. The released ledger
+    keeps the most recent announcements, which costs a repeated announcement of a
+    block stored again after more traffic than that; the payload a consumer sees
+    is a true statement about the Store either way.
+
     An instance is reached by one thread at a time: a worker fills a container of
     its own per poll, and the engine's aggregation and the scheduler's step run
     the containers they own serially.
@@ -101,12 +116,16 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
         self._num_workers = num_workers
         # Blocks whose coverage is still short of their group's probe set.
         self._pending: dict[BlockKey, _PendingResidency] = {}
-        # Blocks released in this residency epoch, drained or not.
-        self._released: set[BlockKey] = set()
+        # Blocks released in this residency epoch, drained or not, oldest first
+        # so the oldest entries are the ones dropped at the ceiling.
+        self._released: dict[BlockKey, None] = {}
         # Released blocks and clear events awaiting the publisher.
         self._ready: list[KVCacheEvent] = []
         # Per group, the namespaces a later lookup probes.
         self._required: dict[int, frozenset[str]] = {}
+        # Blocks dropped at either ceiling, kept for the repr.
+        self._dropped_pending = 0
+        self._dropped_released = 0
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
         """Record events that carry no cross-rank coverage contract.
@@ -170,7 +189,8 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
                 self._ready.append(event)
                 continue
             self._release(store_block_key(event), event)
-        self._released |= other._released
+        for key in other._released:
+            self._remember_released(key)
         for key, pending in other._pending.items():
             self._record(key, pending.event, frozenset(pending.covered))
         return self
@@ -208,6 +228,7 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
         if pending is None:
             pending = _PendingResidency(event, set())
             self._pending[key] = pending
+            self._cap_pending()
         pending.covered |= namespaces
         if probe_set <= pending.covered:
             del self._pending[key]
@@ -224,8 +245,38 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
         if key in self._released:
             return
         pending = self._pending.pop(key, None)
-        self._released.add(key)
+        self._remember_released(key)
         self._ready.append(pending.event if pending is not None else event)
+
+    def _remember_released(self, key: BlockKey) -> None:
+        """Keep a released block from being announced again this epoch."""
+        self._released[key] = None
+        dropped = 0
+        while len(self._released) > _MAX_RELEASED_BLOCKS:
+            del self._released[next(iter(self._released))]
+            dropped += 1
+        if dropped:
+            self._dropped_released += dropped
+            logger.warning_once(
+                "Mooncake Store residency ledger reached its ceiling; the oldest "
+                "announced blocks are forgotten, so a block stored again after "
+                "that much traffic is announced a second time."
+            )
+
+    def _cap_pending(self) -> None:
+        """Drop the blocks whose coverage has been incomplete the longest."""
+        dropped = 0
+        while len(self._pending) > _MAX_PENDING_BLOCKS:
+            del self._pending[next(iter(self._pending))]
+            dropped += 1
+        if dropped:
+            self._dropped_pending += dropped
+            logger.warning_once(
+                "Mooncake Store residency coverage never completed for a block; "
+                "the accumulator holds at most %d such blocks, so the oldest are "
+                "dropped without an announcement.",
+                _MAX_PENDING_BLOCKS,
+            )
 
     def _retire_epoch(self) -> None:
         """Forget everything learned before the current residency epoch ended.
@@ -266,11 +317,16 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
         self._ready.clear()
 
     def __repr__(self) -> str:
-        return (
-            f"<MooncakeStoreKVEvents workers={self._num_workers} "
-            f"pending={len(self._pending)} released={len(self._released)} "
-            f"ready={len(self._ready)}>"
+        state = (
+            f"workers={self._num_workers} pending={len(self._pending)} "
+            f"released={len(self._released)} ready={len(self._ready)}"
         )
+        if self._dropped_pending or self._dropped_released:
+            state += (
+                f" dropped_pending={self._dropped_pending}"
+                f" dropped_released={self._dropped_released}"
+            )
+        return f"<MooncakeStoreKVEvents {state}>"
 
 
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):

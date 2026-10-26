@@ -916,6 +916,58 @@ def test_completed_block_leaves_no_pending_state_behind():
     assert accumulator.pop_ready_events() == []
 
 
+def test_pending_coverage_is_capped_and_drops_the_oldest_block(monkeypatch):
+    """A block whose coverage never completes must not pin its payload for the
+    process lifetime: at the ceiling the oldest waiting block is dropped without
+    an announcement, which is the direction that keeps the accumulator bounded.
+    """
+    monkeypatch.setattr(mooncake_store_connector, "_MAX_PENDING_BLOCKS", 2)
+    accumulator = mooncake_store_connector.MooncakeStoreKVEvents()
+    first = _namespace(0, tp_rank=0)
+    required = {0: frozenset([first, _namespace(0, tp_rank=1)])}
+    blocks = [_make_block_stored(name, group_idx=0) for name in (b"a", b"b", b"c")]
+
+    for block in blocks:
+        accumulator.add_residency(
+            _residency([block], {store_block_key(block): [first]}), required
+        )
+
+    assert accumulator.get_all_events() == blocks[1:]
+    assert accumulator.pop_ready_events() == []
+    assert "dropped_pending=1" in repr(accumulator)
+
+
+def test_released_ledger_is_capped_and_forgets_the_oldest_block(monkeypatch):
+    """The released ledger is what suppresses a second announcement; at its
+    ceiling the oldest block is forgotten, so storing it again is announced once
+    more instead of its key being pinned for the process lifetime.
+    """
+    monkeypatch.setattr(mooncake_store_connector, "_MAX_RELEASED_BLOCKS", 2)
+    accumulator = mooncake_store_connector.MooncakeStoreKVEvents()
+    required = {0: frozenset([_namespace(0, tp_rank=0)])}
+    blocks = [_make_block_stored(name, group_idx=0) for name in (b"a", b"b", b"c")]
+
+    for block in blocks:
+        accumulator.add_residency(
+            _residency([block], {store_block_key(block): required[0]}), required
+        )
+
+    assert accumulator.pop_ready_events() == blocks
+
+    # The newest block is still remembered, so reporting it again is silent.
+    accumulator.add_residency(
+        _residency([blocks[2]], {store_block_key(blocks[2]): required[0]}), required
+    )
+    assert accumulator.pop_ready_events() == []
+
+    # The oldest block fell out of the ledger and is a new announcement.
+    accumulator.add_residency(
+        _residency([blocks[0]], {store_block_key(blocks[0]): required[0]}), required
+    )
+    assert accumulator.pop_ready_events() == [blocks[0]]
+    assert "dropped_released=2" in repr(accumulator)
+
+
 def test_worker_container_survives_the_engine_transport_pickle():
     """Worker containers are pickled into the engine's step output, so their
     state must survive the trip and stay mergeable on the engine side.
