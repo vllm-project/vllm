@@ -1455,7 +1455,7 @@ def test_prefill_many_drains_acks_under_socket_backpressure(
 @pytest.mark.parametrize("policy", ["target_only", "error"])
 @pytest.mark.parametrize("is_final", [True, False])
 def test_prefill_acknowledgements_cannot_revive_a_lost_connection(
-    protocol_peer, policy, is_final
+    protocol_peer, clock, policy, is_final
 ):
     def disconnect_after_one_ack(peer):
         for _ in range(2):
@@ -1469,7 +1469,8 @@ def test_prefill_acknowledgements_cannot_revive_a_lost_connection(
         # The fixture closes after this ACK; the second request gets EOF.
 
     endpoint = protocol_peer(disconnect_after_one_ack)
-    session = RemoteDraftSession(endpoint, IDENTITY, failure_policy=policy)
+    # This exercises EOF, so host scheduling must not expire the round first.
+    session = RemoteDraftSession(endpoint, IDENTITY, failure_policy=policy, clock=clock)
     try:
         session.connect()
         keys = (session.open_sequence(1), session.open_sequence(2))
