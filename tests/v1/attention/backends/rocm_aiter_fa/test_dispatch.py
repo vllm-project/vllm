@@ -436,6 +436,64 @@ def test_non_causal_in_every_phase(query_lens, seq_lens, threshold, kv_cache_dty
     case.check(batch, query, case.run(batch, query))
 
 
+# Context chunk size for the zero-query cases, small so contexts of a few
+# hundred tokens take every chunking path.
+SMALL_CHUNK = 96
+
+# Real rows (query_lens, seq_lens) in reorder order, one per chunking path.
+REAL_ROWS = {
+    "decode": ([1, 1], [100, 37]),
+    "prefill": ([64, 7], [64, 7]),
+    "under-one-chunk": ([40, 3], [80, 19]),
+    "exactly-one-chunk": ([16], [16 + SMALL_CHUNK]),
+    "many-chunks": ([8, 24], [8 + 400, 24 + 250]),
+    "mixed-uneven": ([1, 40, 3, 64], [100, 300, 19, 64]),
+}
+
+# Seq lens of two trailing rows with no query tokens: FULL CUDA graph padding
+# (seq_len 0), or requests an async KV connector is still loading
+# (seq_len > 0, vllm-project/vllm#51486), here with more context than any
+# real row so a planner that counts them adds chunks.
+ZERO_QUERY_ROWS = {"pad-seq0": [0, 0], "kv-load": [700, 37]}
+
+
+def _tensors(args, kwargs):
+    for value in (*args, *kwargs.values()):
+        if isinstance(value, torch.Tensor):
+            yield value
+
+
+@pytest.mark.parametrize("tail", list(ZERO_QUERY_ROWS))
+@pytest.mark.parametrize("rows", list(REAL_ROWS))
+@pytest.mark.parametrize("window", [None, SMALL_WINDOW], ids=["full", "sliding"])
+def test_zero_query_rows_after_real_rows(spy, monkeypatch, window, rows, tail):
+    """Rows with no query tokens after the real ones change nothing: the real
+    rows match the reference and no kernel is handed an empty tensor."""
+    from vllm.v1.attention.backends import rocm_aiter_fa
+
+    monkeypatch.setattr(rocm_aiter_fa, "_CP_TOKENS_PER_ITER_ROCM", SMALL_CHUNK)
+    q_lens, s_lens = REAL_ROWS[rows]
+    tail_seq = ZERO_QUERY_ROWS[tail]
+    q_lens, s_lens = q_lens + [0] * len(tail_seq), s_lens + tail_seq
+    shape = QWEN3_235B if window is None else MUSE_SPARK_SLIDING
+    case = FaCase(shape, sliding_window=window).setup(blocks_for(s_lens, 16))
+    # Padded Q/output, as the runner allocates them: a kernel that runs a
+    # zero-query row reads and writes the row its query_start_loc points at.
+    num_tokens = sum(q_lens)
+    batch = case.batch(q_lens, s_lens, num_padded_tokens=num_tokens + 8)
+    query = case.query(num_tokens + 8)
+    spy.reset()
+    output = case.run(batch, query)
+    case.check(batch, query, output)
+    assert torch.isnan(output[num_tokens:]).all(), "a zero-query row was written"
+    empty = [
+        name
+        for name, args, kwargs in spy.calls
+        if any(t.numel() == 0 for t in _tensors(args, kwargs))
+    ]
+    assert not empty, f"empty tensor passed to {empty}"
+
+
 def test_kv_update_bypass_layer_reads_new_tokens_from_cache(spy):
     """A layer whose KV write is done by a fused model op (no KV sharing)
     gets key/value None and must gather its new tokens from the cache."""
