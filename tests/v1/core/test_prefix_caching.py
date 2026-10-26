@@ -4240,23 +4240,25 @@ def test_eagle_identical_prompt_hit(
     assert num_tokens == expected_blocks * block_size
 
 
-def test_kv_events_reconstruct_lookahead_block_hashes():
+@pytest.mark.parametrize("lookahead", [1, 2])
+def test_kv_events_reconstruct_lookahead_block_hashes(lookahead: int):
     block_size = 2
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, num_blocks=20),
         max_model_len=8192,
         enable_caching=True,
         use_eagle=False,
-        num_hash_lookahead_tokens=1,
+        num_hash_lookahead_tokens=lookahead,
         hash_block_size=block_size,
         enable_kv_cache_events=True,
     )
+    token_ids = list(range(2 * block_size + lookahead))
     request = make_request(
         "request",
-        [0, 1, 2, 3, 4],
+        token_ids,
         block_size,
         sha256,
-        num_hash_lookahead_tokens=1,
+        num_hash_lookahead_tokens=lookahead,
     )
     assert manager.allocate_slots(request, request.num_tokens) is not None
 
@@ -4267,7 +4269,9 @@ def test_kv_events_reconstruct_lookahead_block_hashes():
         for block_hash in request.block_hashes
     ]
     assert event.token_ids == [0, 1, 2, 3]
-    assert event.lookahead_token_ids == [[2], [4]]
+    assert event.lookahead_token_ids == [
+        token_ids[end : end + lookahead] for end in (2, 4)
+    ]
     reconstructed_hashes = []
     parent_hash = event.parent_block_hash
     assert event.extra_keys is not None
@@ -4409,6 +4413,63 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
         second.block_hashes, 2 * hash_block_size
     )
     assert per_group_hits[0] == 2 * hash_block_size
+
+
+@pytest.mark.parametrize("lookahead", [0, 1, 2])
+@pytest.mark.parametrize("diverge_offset", [0, 1, 2])
+def test_mamba_partial_hit_requires_matching_lookahead_tokens(
+    lookahead: int, diverge_offset: int
+):
+    """A partial Mamba hit at boundary b also needs tokens [b, b + lookahead)."""
+    hash_block_size = 16
+    mamba_block_size = 544
+    prompt_len = 1249
+    config = _make_hybrid_kv_cache_config(hash_block_size, 200, ["full", "mamba"])
+    config.kv_cache_groups[1].kv_cache_spec = replace(
+        config.kv_cache_groups[1].kv_cache_spec, block_size=mamba_block_size
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=False,
+        num_hash_lookahead_tokens=lookahead,
+        hash_block_size=hash_block_size,
+    )
+    boundary = (prompt_len - max(1, lookahead)) // hash_block_size * hash_block_size
+    assert boundary % mamba_block_size != 0
+
+    token_ids = list(range(prompt_len))
+    producer = make_request(
+        "producer",
+        token_ids,
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    for chunk_end in (boundary, prompt_len):
+        assert (
+            manager.allocate_slots(producer, chunk_end - producer.num_computed_tokens)
+            is not None
+        )
+        producer.num_computed_tokens = chunk_end
+        manager.new_step_starts()
+    manager.free(producer)
+
+    shared_len = boundary + diverge_offset
+    consumer_ids = token_ids[:shared_len] + [
+        100_000 + i for i in range(prompt_len + hash_block_size - shared_len)
+    ]
+    consumer = make_request(
+        "consumer",
+        consumer_ids,
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    _, num_computed, _ = manager.get_computed_blocks(consumer)
+    # No Mamba state is retained below the prompt's partial boundary.
+    assert num_computed == (boundary if diverge_offset >= lookahead else 0)
 
 
 def test_eagle_with_sliding_window():
