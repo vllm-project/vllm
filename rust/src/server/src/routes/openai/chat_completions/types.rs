@@ -444,6 +444,8 @@ pub(super) struct ChatCompletionStreamResponse {
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// Set only on the chunk carrying the finish reason.
+    pub kv_transfer_params: Option<Value>,
 }
 
 impl ChatCompletionStreamResponse {
@@ -455,6 +457,7 @@ impl ChatCompletionStreamResponse {
             usage: None,
             metrics: None,
             prompt_token_ids: None,
+            kv_transfer_params: None,
         }
     }
 }
