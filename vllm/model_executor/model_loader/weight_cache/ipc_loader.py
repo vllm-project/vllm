@@ -17,6 +17,7 @@ import torch.nn as nn
 
 from vllm.config import (
     CacheConfig,
+    KernelConfig,
     ModelConfig,
     ParallelConfig,
     VllmConfig,
@@ -198,6 +199,7 @@ class IpcModelLoader(BaseModelLoader):
                 model_config,
                 vllm_config.cache_config,
                 vllm_config.parallel_config,
+                vllm_config.kernel_config,
                 is_reload=True,
             ).entries
         else:
@@ -237,7 +239,10 @@ class IpcModelLoader(BaseModelLoader):
                     f"{'draft' if self.is_draft else 'target'} group"
                 )
             state = self._fetch_entries(
-                model_config, vllm_config.cache_config, vllm_config.parallel_config
+                model_config,
+                vllm_config.cache_config,
+                vllm_config.parallel_config,
+                vllm_config.kernel_config,
             )
             state_fetched = True
             return self._build_model(vllm_config, model_config, prefix, state)
@@ -379,6 +384,7 @@ class IpcModelLoader(BaseModelLoader):
         model_config: ModelConfig,
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
+        kernel_config: KernelConfig,
         *,
         is_reload: bool = False,
     ) -> WeightCacheState:
@@ -396,6 +402,7 @@ class IpcModelLoader(BaseModelLoader):
             is_draft=self.is_draft,
             enable_expert_parallel=parallel_config.enable_expert_parallel,
             expert_placement_strategy=parallel_config.expert_placement_strategy,
+            kernel_config=kernel_config,
         )
         # Recorded before model construction so that a later standalone
         # load_weights reload keys on the same pre-construction values the
