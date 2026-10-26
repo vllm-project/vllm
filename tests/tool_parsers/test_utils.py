@@ -7,6 +7,7 @@ import json
 import pytest
 
 from vllm.tool_parsers.utils import (
+    MAX_NESTING_DEPTH,
     UnexpectedAstError,
     coerce_to_schema_type,
     coerce_typed_value,
@@ -328,6 +329,13 @@ class TestSchemaAdmitsAnyValue:
     def test_declared_type_sibling_narrows_union(self):
         assert not schema_admits_any_value({"type": "string", "anyOf": [{}]})
 
+    def test_deeply_nested_schema_is_constrained(self):
+        # A client-supplied schema must not recurse to the interpreter limit.
+        schema: dict = {"type": "integer"}
+        for _ in range(MAX_NESTING_DEPTH * 10):
+            schema = {"anyOf": [schema]}
+        assert not schema_admits_any_value(schema)
+
 
 class TestSanitizeNonFinite:
     def test_nonfinite_scalars_become_strings(self):
@@ -465,6 +473,21 @@ class TestExtractTypesFromSchema:
 
     def test_false_boolean_schema_is_unknown(self):
         assert extract_types_from_schema(False) == ["string"]
+
+    def test_false_schema_honors_fallback(self):
+        # ``false`` admits no value, so it contributes no type to a union;
+        # the historical string default applies only when the caller wants one.
+        assert extract_types_from_schema(False) == ["string"]
+        assert extract_types_from_schema(False, fallback=[]) == []
+        schema = {"anyOf": [False, {"type": "integer"}]}
+        assert extract_types_from_schema(schema, fallback=[]) == ["integer"]
+
+    def test_deeply_nested_schema_honors_fallback(self):
+        schema: dict = {"type": "integer"}
+        for _ in range(MAX_NESTING_DEPTH * 10):
+            schema = {"allOf": [schema]}
+        assert extract_types_from_schema(schema, fallback=[]) == []
+        assert extract_types_from_schema(schema) == ["string"]
 
     def test_ref_schema_honors_fallback(self):
         # A $ref constrains the value elsewhere; without resolving it the

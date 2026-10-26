@@ -1077,7 +1077,13 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     return candidate, added_text
 
 
-def schema_admits_any_value(schema: Any) -> bool:
+# Shared bound for recursive walks over model output and tool schemas.  Real
+# arguments and schemas nest a handful of levels deep; beyond this we stop
+# recursing rather than approach the interpreter's limit.
+MAX_NESTING_DEPTH = 200
+
+
+def schema_admits_any_value(schema: Any, *, _depth: int = 0) -> bool:
     """Whether *schema* is explicitly untyped, i.e. admits any JSON value.
 
     An empty dict or ``true`` schema is untyped, as is a union with an
@@ -1085,7 +1091,8 @@ def schema_admits_any_value(schema: Any) -> bool:
     every present ``anyOf``/``oneOf`` must have an untyped branch, and
     every ``allOf`` branch must be untyped.  ``type``/``enum``/``const``
     narrow the schema, and an unresolved ``$ref`` is unknown rather than
-    untyped.
+    untyped.  Nesting beyond :data:`MAX_NESTING_DEPTH` is treated as
+    constrained, so callers keep coercing.
     """
     if schema is True:
         return True
@@ -1093,18 +1100,20 @@ def schema_admits_any_value(schema: Any) -> bool:
         return False
     if any(key in schema for key in ("type", "enum", "const", "$ref", "$dynamicRef")):
         return False
+    if _depth >= MAX_NESTING_DEPTH:
+        return False
 
     for choice_field in ("anyOf", "oneOf"):
         choices = schema.get(choice_field)
         if isinstance(choices, list) and not any(
-            schema_admits_any_value(choice) for choice in choices
+            schema_admits_any_value(choice, _depth=_depth + 1) for choice in choices
         ):
             return False
 
     all_of = schema.get("allOf")
     if not isinstance(all_of, list):
         return True
-    return all(schema_admits_any_value(choice) for choice in all_of)
+    return all(schema_admits_any_value(choice, _depth=_depth + 1) for choice in all_of)
 
 
 def _json_type_name(value: Any) -> str | None:
@@ -1130,26 +1139,30 @@ def extract_types_from_schema(
     schema: Any,
     *,
     fallback: list[str] | None = None,
+    _depth: int = 0,
 ) -> list[str]:
     """Extract all possible type strings from a JSON Schema definition.
 
     Handles ``type`` (string or list), ``enum``/``const`` value inference,
     and recursive ``anyOf``/``oneOf``/``allOf``.  A schema with no declared
-    type returns *fallback* (default ``["string"]``); absent, ``false``, and
-    other non-dict schemas return ``["string"]`` instead.  The fallback rule
-    includes a schema whose only constraint is an unresolved
-    ``$ref``/``$dynamicRef``: its type is unknown rather than untyped, so
-    the caller's fallback decides how conservative to be — coercion callers
-    pass ``[]`` to leave such values verbatim, while callers needing a
-    concrete type keep the string default.  Explicit ``type``/``enum``
-    siblings of a ``$ref`` still apply.
+    type returns *fallback* (default ``["string"]``); ``true`` and ``false``
+    schemas and nesting beyond :data:`MAX_NESTING_DEPTH` also return
+    *fallback*.  Absent (``None``) and other non-dict schemas return
+    ``["string"]`` instead.  The fallback rule includes a schema whose only
+    constraint is an unresolved ``$ref``/``$dynamicRef``: its type is
+    unknown rather than untyped, so the caller's fallback decides how
+    conservative to be — coercion callers pass ``[]`` to leave such values
+    verbatim, while callers needing a concrete type keep the string
+    default.  Explicit ``type``/``enum`` siblings of a ``$ref`` still apply.
     """
     if fallback is None:
         fallback = ["string"]
-    if schema is True:
+    if schema is True or schema is False:
         return list(fallback)
     if not isinstance(schema, dict):
         return ["string"]
+    if _depth >= MAX_NESTING_DEPTH:
+        return list(fallback)
 
     types: set[str] = set()
 
@@ -1176,7 +1189,11 @@ def extract_types_from_schema(
     for choice_field in ("anyOf", "oneOf", "allOf"):
         if choice_field in schema and isinstance(schema[choice_field], list):
             for choice in schema[choice_field]:
-                types.update(extract_types_from_schema(choice, fallback=fallback))
+                types.update(
+                    extract_types_from_schema(
+                        choice, fallback=fallback, _depth=_depth + 1
+                    )
+                )
 
     if types:
         return list(types)
