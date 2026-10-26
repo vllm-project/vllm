@@ -47,6 +47,7 @@ WORKDIR /workspace/
 
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/test/xpu"
+ARG INTEL_OMIX_VERSION=0.4.1
 
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
@@ -70,39 +71,13 @@ RUN apt-get update -y && \
     python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# Install UMD
-RUN mkdir neo && \
-    cd neo && \
-    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.40.13/intel-igc-core-2_2.40.13+22418_amd64.deb && \
-    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.40.13/intel-igc-opencl-2_2.40.13+22418_amd64.deb && \
-    wget https://github.com/intel/compute-runtime/releases/download/26.31.39395.13/intel-ocloc_26.31.39395.13-0_amd64.deb && \
-    wget https://github.com/intel/compute-runtime/releases/download/26.31.39395.13/intel-opencl-icd_26.31.39395.13-0_amd64.deb && \
-    wget https://github.com/intel/compute-runtime/releases/download/26.31.39395.13/libigdgmm12_22.10.0_amd64.deb && \
-    wget https://github.com/intel/compute-runtime/releases/download/26.31.39395.13/libze-intel-gpu1_26.31.39395.13-0_amd64.deb && \
-    wget https://github.com/oneapi-src/level-zero/releases/download/v1.32.0/libze1_1.32.0+u24.04_amd64.deb && \
-    wget https://github.com/oneapi-src/level-zero/releases/download/v1.32.0/libze-dev_1.32.0+u24.04_amd64.deb && \
-    dpkg -i *.deb && \
-    cd .. && \
-    rm -rf neo
-
-# Install XPU-Manager payloads without registering conflicting libze package
-# dependencies in dpkg.
-# Note that ocl-icd-opencl-dev is required by DLE upgrade but xpu-smi, should
-# can be removed in future.
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends software-properties-common && \
-    add-apt-repository -y ppa:kobuk-team/intel-graphics-staging && \
-    apt-get update -y && \
-    apt-get install -y --no-install-recommends libhwloc15 libpciaccess0 libigsc1 intel-metrics-library && \
-    apt-get install -y ocl-icd-opencl-dev && \
-    mkdir xpu-m && \
-    cd xpu-m && \
-    wget https://github.com/intel/xpumanager/releases/download/v2.2.0/xpu-smi_2.2.0-1.24.04_amd64.deb && \
-    apt install -y ./xpu-smi_2.2.0-1.24.04_amd64.deb --install-suggests && \
-    cd .. && \
-    rm -rf xpu-m && \
-    add-apt-repository --remove -y ppa:kobuk-team/intel-graphics-staging && \
-    apt-get update -y
+RUN \
+    curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | \
+        gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble/intel-omix/${INTEL_OMIX_VERSION} unified" \
+        > /etc/apt/sources.list.d/intel-gpu-noble.list && \
+    apt-get update -o APT::Update::Error-Mode=any && \
+    apt-get install -y intel-gpu-compute
 
 ENV PATH="/root/.local/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
