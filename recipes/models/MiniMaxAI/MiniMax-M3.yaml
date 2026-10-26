@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3 vision-language MoE (427B total / 26B active) for frontier coding, agent toolchains, and 1M-token reasoning via MSA sparse attention — native multimodal (image + video + computer use); BF16 plus MXFP8, NVIDIA Blackwell NVFP4, and AMD MI355X MXFP4 variants. Runs on NVIDIA (Hopper/Blackwell) and AMD CDNA4/CDNA3."
   date_added: 2026-06-12
-  date_updated: 2026-10-25
+  date_updated: 2026-10-26
   tasks:
     - text
     - multimodal
@@ -263,9 +263,10 @@ variants:
           - "--stream-interval"
           - "20"
       # B300 AgentX lane (InferenceX #4357): TP2, TP4 or TP8 on one 8-GPU node.
-      # Per-concurrency --max-num-seqs, active-sequence caps, all-reduce
-      # backend and CUDA graph sizes are in the guide. This image predates
-      # the --disable-x aliases, so use --no-enable-flashinfer-autotune.
+      # Per-point --max-num-seqs, active-sequence caps, memory utilization,
+      # all-reduce backend and CUDA graph sizes are in the b300_agentx preset.
+      # The lane passes --no-enable-flashinfer-autotune; this image also
+      # accepts --disable-flashinfer-autotune (#61479).
       b300:
         docker_image: "vllm/vllm-openai:nightly-49cb2bbf71cfd36ee5aa33d1e184b1cddff55294"
         extra_args:
@@ -550,6 +551,8 @@ presets:
     image: "vllm/vllm-openai:nightly-49cb2bbf71cfd36ee5aa33d1e184b1cddff55294@sha256:8c1434bfee7d7626eef78ef70600434ffba4a1b8813cb1d1c8707ad25f47035e"
     select:
       features: { spec_decoding: eagle3_gqa, text_only: true, thinking_always_on: true }
+    # The lane passes this; the builder's NVFP4 command does not.
+    args: ["--enable-chunked-prefill"]
     json_args:
       "--compilation-config": { cudagraph_mode: "FULL_AND_PIECEWISE" }
     # The variant's B300 block carries the shared flags. Only the TP2 points keep
