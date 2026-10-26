@@ -73,6 +73,7 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+    from vllm.utils.session_prefix import PrefixContext
 
 logger = init_logger(__name__)
 
@@ -225,9 +226,12 @@ class BaseRenderer(ABC, Generic[_T]):
         # render pool can silently use another request's `max_length`.
         # Pool last: multimodal processors may add tokens while they are
         # created, and the pooled copies only see tokens added before this.
+        self._init_tokenizer_pool()
+
+    def _init_tokenizer_pool(self) -> None:
         if isinstance(self.tokenizer, HfTokenizer):
             maybe_make_thread_pool(
-                self.tokenizer, config.model_config.renderer_num_workers + 1
+                self.tokenizer, self.model_config.renderer_num_workers + 1
             )
 
     def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
@@ -455,6 +459,11 @@ class BaseRenderer(ABC, Generic[_T]):
         # the cache (both are registered as resources in __init__).
         self._join_mm_warmup()
         self._resources.close()
+
+    def session_prefix_context(
+        self, session_id: str | None, cache_salt: str | None
+    ) -> "PrefixContext | None":
+        return None
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
