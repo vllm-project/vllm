@@ -430,9 +430,11 @@ steps:
   - vllm/models/deepseek_v41/nvidia/model_state.py
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
+  - tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+  - pytest -v -s tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py -k swa_decode_meta
 
 - label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
   key: dsv4-mono-decode-numerics-amd
