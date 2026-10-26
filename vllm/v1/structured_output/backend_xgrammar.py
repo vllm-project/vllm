@@ -10,7 +10,11 @@ import torch
 import vllm.envs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams, check_json_nesting
+from vllm.sampling_params import (
+    SamplingParams,
+    check_json_nesting,
+    check_json_ref_cycle,
+)
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
@@ -529,6 +533,9 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 raise VLLMValidationError("Invalid JSON grammar specification.") from e
         else:
             schema = so_params.json
+
+        # Tool parsers call this directly, before SamplingParams validation.
+        check_json_ref_cycle(schema)
 
         try:
             if has_xgrammar_unsupported_json_features(schema):

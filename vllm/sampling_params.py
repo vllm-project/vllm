@@ -260,6 +260,123 @@ def check_json_nesting(
         )
 
 
+def _resolve_local_json_pointer(root: Any, ref: str) -> Any:
+    """Return the target of a local JSON pointer, or None when it does not resolve."""
+    if not ref.startswith("#"):
+        return None
+    pointer = ref[1:]
+    if pointer == "":
+        return root
+    # A fragment without a leading slash is a plain name, not a JSON pointer.
+    if not pointer.startswith("/"):
+        return None
+    node: Any = root
+    for part in pointer[1:].split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def _json_schema_emits_token(node: Any, terminating_refs: dict[str, bool]) -> bool:
+    """Whether `node` can emit a token before it has to follow a `$ref`."""
+    if not isinstance(node, dict):
+        return True
+
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        # Sibling keywords are ignored. xgrammar follows the reference alone,
+        # so an enum next to a cyclic `$ref` still allows no token.
+        return terminating_refs.get(ref, True)
+
+    # `enum` and `const` emit a token even when a sibling anyOf or oneOf
+    # cannot. `allOf` is not inspected: xgrammar does not implement it
+    # consistently, and a multi-branch allOf still admits a token.
+    if "const" in node or "enum" in node:
+        return True
+
+    for key in ("anyOf", "oneOf"):
+        branches = node.get(key)
+        if (
+            isinstance(branches, list)
+            and branches
+            and not any(
+                _json_schema_emits_token(branch, terminating_refs)
+                for branch in branches
+            )
+        ):
+            return False
+    return True
+
+
+def _has_non_terminating_json_ref_cycle(schema: dict[str, Any]) -> bool:
+    """Whether `schema` is a `$ref` cycle that can never emit a token."""
+    if not isinstance(schema, dict):
+        return False
+
+    refs: set[str] = set()
+
+    def collect(node: Any) -> None:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str):
+                refs.add(ref)
+            for value in node.values():
+                collect(value)
+        elif isinstance(node, list):
+            for value in node:
+                collect(value)
+
+    collect(schema)
+    if not refs:
+        return False
+
+    # Least fixpoint: a ref terminates once its target can emit a token.
+    # Refs that stay false are those with no base case.
+    terminating_refs: dict[str, bool] = dict.fromkeys(refs, False)
+    for _ in range(len(refs)):
+        changed = False
+        for ref in refs:
+            if terminating_refs[ref]:
+                continue
+            target = _resolve_local_json_pointer(schema, ref)
+            # Dangling and remote refs are reported by the backend.
+            if target is None or _json_schema_emits_token(target, terminating_refs):
+                terminating_refs[ref] = True
+                changed = True
+        if not changed:
+            break
+    return not _json_schema_emits_token(schema, terminating_refs)
+
+
+def check_json_ref_cycle(spec: str | dict[str, Any] | None) -> None:
+    """Reject a JSON schema whose `$ref` cycle never emits a token.
+
+    xgrammar compiles that schema, then the grammar allows no token and the
+    request dies on the first sampled token.
+
+    Raises:
+        VLLMValidationError: If `spec` has no terminating branch.
+
+    """
+    if isinstance(spec, str):
+        try:
+            spec = json_mod.loads(spec)
+        except RecursionError:
+            return
+        except ValueError:
+            # Malformed JSON is reported by the backend validation.
+            return
+    if isinstance(spec, dict) and _has_non_terminating_json_ref_cycle(spec):
+        raise VLLMValidationError(
+            "The JSON schema contains a '$ref' cycle with no base case, "
+            "so no output can satisfy it. Give the recursion a terminating "
+            "branch, for example by making the recursive property optional "
+            "or adding a non-recursive anyOf branch."
+        )
+
+
 def _is_non_tekken_mistral(tokenizer: TokenizerLike) -> bool:
     return is_mistral_tokenizer(tokenizer) and not tokenizer.is_tekken
 
@@ -1291,6 +1408,10 @@ class SamplingParams(
         # Reject deep nesting before any backend walks or converts the schema
         check_json_nesting(self.structured_outputs.json)
         check_json_nesting(self.structured_outputs.structural_tag, structural_tag=True)
+        # Before backend selection. `auto` treats an xgrammar validation
+        # error as an unsupported feature and falls back to guidance, which
+        # accepts a `$ref` cycle that allows no token.
+        check_json_ref_cycle(self.structured_outputs.json)
         # Reject json_object=False early to avoid engine-side crashes
         if self.structured_outputs.json_object is False:
             raise VLLMValidationError(
