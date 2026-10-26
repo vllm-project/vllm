@@ -590,7 +590,12 @@ def _build_renderer(model_config: MockModelConfig):
 
 
 def _build_online_renderer(
-    engine, model_registry: OpenAIModelRegistry
+    engine,
+    model_registry: OpenAIModelRegistry,
+    *,
+    reasoning_parser: str | None = None,
+    tool_parser: str | None = None,
+    enable_auto_tools: bool = False,
 ) -> OnlineRenderer:
     return OnlineRenderer(
         model_config=engine.model_config,
@@ -598,6 +603,9 @@ def _build_online_renderer(
         request_logger=None,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
+        enable_auto_tools=enable_auto_tools,
+        tool_parser=tool_parser,
+        reasoning_parser=reasoning_parser,
     )
 
 
@@ -621,7 +629,13 @@ def _build_serving_chat(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    online_renderer = _build_online_renderer(engine, models.registry)
+    online_renderer = _build_online_renderer(
+        engine,
+        models.registry,
+        reasoning_parser=reasoning_parser or None,
+        tool_parser=tool_parser,
+        enable_auto_tools=enable_auto_tools,
+    )
 
     serving_chat = OpenAIServingChat(
         engine,
@@ -3440,3 +3454,54 @@ async def test_non_streaming_finish_reason_matches_tool_calls(
     assert bool(choice.message.tool_calls) == (text != "Hello, how are you?"), (
         "finish_reason must reflect whether tool calls were emitted"
     )
+
+
+_RUN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "run",
+        "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+    },
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reasoning_parser, tool_parser, stop, tools, tool_choice, expected",
+    [
+        ("deepseek_v3", None, ["</block>"], None, None, True),
+        ("", "hermes", ["</block>"], [_RUN_TOOL], "auto", True),
+        ("", "hermes", ["</block>"], None, None, False),
+        ("", "hermes", ["</block>"], [_RUN_TOOL], "none", False),
+        ("deepseek_v3", "hermes", None, [_RUN_TOOL], "auto", False),
+        ("", None, ["</block>"], None, None, False),
+    ],
+)
+async def test_stop_strings_match_only_answer_when_parsed(
+    reasoning_parser: str,
+    tool_parser: str | None,
+    stop: list[str] | None,
+    tools: list[dict] | None,
+    tool_choice: str | None,
+    expected: bool,
+):
+    mock_engine = _build_mock_engine()
+    serving_chat = _build_serving_chat(
+        mock_engine,
+        reasoning_parser=reasoning_parser,
+        tool_parser=tool_parser,
+        enable_auto_tools=tool_parser is not None,
+    )
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        stop=stop,
+        tools=tools,
+        tool_choice=tool_choice,
+    )
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    make_filter = mock_engine.generate.call_args.kwargs["content_filter_factory"]
+    assert (make_filter is not None) is expected
