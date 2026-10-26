@@ -4,6 +4,7 @@
 varying sizes and stages that take turns lagging behind."""
 
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,7 +13,9 @@ import torch
 
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.distributed.pp_transport import PPTransport
+from vllm.distributed.pp_transport.copy_engine import CopyEngineTransport
 from vllm.distributed.pp_transport.nccl import NcclTransport
+from vllm.platforms import current_platform
 
 from ..utils import (
     init_test_distributed_environment,
@@ -78,6 +81,22 @@ def _run_chain(
     torch.distributed.barrier(group=pp_group.cpu_group)
 
 
+def _copy_engine(pp_group, persistent, profile_send) -> PPTransport:
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=pp_group.world_size,
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
+    )
+    transport, reason = CopyEngineTransport.create(
+        config, pp_group, persistent, profile_send
+    )
+    assert transport is not None, reason
+    return transport
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def nccl_chain_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     _run_chain(
@@ -90,13 +109,30 @@ def nccl_chain_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port
     )
 
 
+@ray.remote(num_gpus=1, max_calls=1)
+def copy_engine_chain_worker(
+    monkeypatch, tp_size, pp_size, rank, distributed_init_port
+):
+    _run_chain(_copy_engine, pp_size, rank, distributed_init_port)
+
+
+def _run(monkeypatch: pytest.MonkeyPatch, pp_size: int, test_target) -> None:
+    # NVML, not CUDA: the test process must not initialize CUDA.
+    if test_target is copy_engine_chain_worker and not (
+        current_platform.is_cuda()
+        and current_platform.is_fully_connected(list(range(pp_size)))
+    ):
+        pytest.skip("copy engines need NVLink-connected CUDA GPUs")
+    multi_process_parallel(monkeypatch, 1, pp_size, test_target)
+
+
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("test_target", [nccl_chain_worker])
+@pytest.mark.parametrize("test_target", [nccl_chain_worker, copy_engine_chain_worker])
 def test_pp_transport_pp2(monkeypatch: pytest.MonkeyPatch, test_target):
-    multi_process_parallel(monkeypatch, 1, 2, test_target)
+    _run(monkeypatch, 2, test_target)
 
 
 @multi_gpu_test(num_gpus=4)
-@pytest.mark.parametrize("test_target", [nccl_chain_worker])
+@pytest.mark.parametrize("test_target", [nccl_chain_worker, copy_engine_chain_worker])
 def test_pp_transport_pp4(monkeypatch: pytest.MonkeyPatch, test_target):
-    multi_process_parallel(monkeypatch, 1, 4, test_target)
+    _run(monkeypatch, 4, test_target)

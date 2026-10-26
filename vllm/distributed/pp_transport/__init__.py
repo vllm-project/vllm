@@ -8,9 +8,17 @@ Sampled tokens flowing back from the last stage go through ``PPHandler``.
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+import torch
+
+import vllm.envs as envs
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.sequence import IntermediateTensors
+
+logger = init_logger(__name__)
 
 
 class PPTransport(ABC):
@@ -33,15 +41,37 @@ class PPTransport(ABC):
         """Receive the previous stage's outputs for this step."""
 
 
-def create_pp_transport(profile_send: dict[str, Any] | None) -> PPTransport:
-    """Called on every PP rank at startup.
+def create_pp_transport(
+    vllm_config: "VllmConfig",
+    persistent: dict[str, torch.Tensor] | None,
+    profile_send: dict[str, Any] | None,
+) -> PPTransport:
+    """Collective over the PP group, at startup.
 
     Args:
+        vllm_config: The engine config.
+        persistent: The model runner's persistent receive tensors (non-first
+            ranks), into which received tensors are copied.
         profile_send: The profile run's outputs (non-last ranks), the largest
             send this rank makes.
 
     """
-    from vllm.distributed.parallel_state import get_tp_group
+    from vllm.distributed.parallel_state import get_pp_group, get_tp_group
     from vllm.distributed.pp_transport.nccl import NcclTransport
 
+    mode = envs.VLLM_PP_TRANSPORT
+    if mode != "nccl":
+        from vllm.distributed.pp_transport.copy_engine import CopyEngineTransport
+
+        transport, reason = CopyEngineTransport.create(
+            vllm_config, get_pp_group(), persistent, profile_send
+        )
+        if transport is not None:
+            logger.info_once("PP transport: copy engines")
+            return transport
+        if mode == "copy_engine":
+            raise RuntimeError(
+                f"VLLM_PP_TRANSPORT=copy_engine is not usable here: {reason}"
+            )
+        logger.info_once("PP transport: NCCL (copy engines unavailable: %s)", reason)
     return NcclTransport(get_tp_group(), profile_send)
