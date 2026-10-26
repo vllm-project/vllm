@@ -2141,29 +2141,31 @@ class SpeculativeConfig:
     def use_ngram(self) -> bool:
         return self.method in ("ngram", "ngram_gpu")
 
+    def num_mtp_modules(self) -> int:
+        """Number of MTP modules the drafter selects among by draft step."""
+        assert self.draft_model_config is not None
+        hf_config = self.draft_model_config.hf_config
+        if hf_config.model_type == "qwen3_5_mtp":
+            # Qwen3.5 declares `mtp_num_hidden_layers` instead of
+            # `num_nextn_predict_layers`; hf_config_override normalizes it.
+            return getattr(hf_config, "n_predict", None) or 1
+        return getattr(hf_config, "num_nextn_predict_layers", 1)
+
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
             return False
-        hf_config = self.draft_model_config.hf_config
-
-        # DeepSeek-style MTP declares its module count via
-        # `num_nextn_predict_layers`; Qwen3.5 MTP uses `mtp_num_hidden_layers`.
-        # Honor both so multi-layer Qwen3.5 MTP routes to the multi-module
-        # speculator (which selects a distinct module per draft step). On
-        # multimodal Qwen3.5 the field lives under the nested text config, so
-        # fall back to that (mirroring the n_predict resolution above).
-        def _num_mtp_layers(cfg: object) -> int | None:
-            n = getattr(cfg, "num_nextn_predict_layers", None)
-            if n is None:
-                n = getattr(cfg, "mtp_num_hidden_layers", None)
-            return n
-
-        num_mtp_layers = _num_mtp_layers(hf_config)
-        if num_mtp_layers is None:
-            num_mtp_layers = _num_mtp_layers(get_hf_text_config(hf_config))
-        if num_mtp_layers is None:
-            num_mtp_layers = 1
-        return min(num_mtp_layers, self.num_speculative_tokens) > 1
+        k = self.num_speculative_tokens
+        num_modules = self.num_mtp_modules()
+        declared = getattr(self.draft_model_config.hf_config, "n_predict", None) or 1
+        if min(declared, k) > min(num_modules, k):
+            logger.warning_once(
+                "The MTP draft model declares %d modules but speculative "
+                "decoding will use %d, so later draft steps reuse earlier "
+                "modules. This lowers draft acceptance, not output quality.",
+                declared,
+                num_modules,
+            )
+        return min(num_modules, k) > 1
 
     def __repr__(self) -> str:
         method = self.method
