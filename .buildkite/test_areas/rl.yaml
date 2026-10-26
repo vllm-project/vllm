@@ -14,7 +14,10 @@ steps:
   commands:
   - pytest -v -s entrypoints/rl/weight_transfer
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer
+  - >-
+    pytest -v -s
+    entrypoints/rl
+    --ignore=entrypoints/rl/weight_transfer
   mirror:
     amd:
       label: ":amd: (MI355 DPX) RL Entrypoints"

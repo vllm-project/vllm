@@ -41,7 +41,12 @@ steps:
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
-    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
+    - >-
+      pytest -v -s
+      kernels/core
+      --ignore=kernels/core/test_minimax_reduce_rms.py
+      kernels/test_concat_mla_q.py
+      kernels/test_fused_qk_norm_rope_gate.py
   mirror:
     amd:
       label: ":amd: (MI300) Core Operation Kernels"
@@ -65,7 +70,14 @@ steps:
       - vllm/platforms/rocm.py
       - tests/kernels/test_fused_qk_norm_rope_gate.py
       commands:
-      - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py
+      - >-
+        pytest -v -s
+        kernels/core
+        --ignore=kernels/core/test_minimax_reduce_rms.py
+        kernels/test_fused_qk_norm_rope_gate.py
+        kernels/test_concat_mla_q.py
+        kernels/test_top_k_per_row.py
+        kernels/test_rocm_fp32_router_gemm.py
 
 - label: ":nvidia: (H100) MiniMax Reduce RMS Kernels"
   key: kernels-minimax-reduce-rms-test-2-gpus
@@ -351,7 +363,15 @@ steps:
       - vllm/envs.py
       - vllm/platforms/rocm.py
       commands:
-      - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - >-
+        pytest -v -s
+        kernels/attention
+        --ignore=kernels/attention/test_triton_unified_attention_diffkv.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_decode.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+        --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
@@ -489,7 +509,11 @@ steps:
   - vllm/envs.py
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - >-
+      pytest -v -s
+      kernels/moe
+      --ignore=kernels/moe/test_modular_oai_triton_moe.py
+      --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 5
   mirror:
@@ -742,7 +766,11 @@ steps:
       - tests/kernels/test_gate_linear_rocm_dispatch.py
       - tests/kernels/test_bf16x3_router_gemm_rocm.py
       commands:
-      - pytest -v -s tests/kernels/test_rocm_fp32_router_gemm.py tests/kernels/test_gate_linear_rocm_dispatch.py tests/kernels/test_bf16x3_router_gemm_rocm.py
+      - >-
+        pytest -v -s
+        tests/kernels/test_rocm_fp32_router_gemm.py
+        tests/kernels/test_gate_linear_rocm_dispatch.py
+        tests/kernels/test_bf16x3_router_gemm_rocm.py
 
 # Disabled until b12x transitive dependencies are locked.
 # - label: ":nvidia: (DGX Spark) [Nightly] b12x Linear Kernels"
@@ -1101,4 +1129,12 @@ steps:
   - tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
   - tests/kernels/models/amd/test_dsv41_mono_gfx942.py
   commands:
-  - pytest -v -s tests/kernels/models/amd/test_dsv41_gfx942_topk.py tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py tests/kernels/models/amd/test_dsv41_gfx942_sparse_indexer.py tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py tests/kernels/models/amd/test_dsv41_mono_gfx942.py
+  - >-
+    pytest -v -s
+    tests/kernels/models/amd/test_dsv41_gfx942_topk.py
+    tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py
+    tests/kernels/models/amd/test_dsv41_gfx942_sparse_indexer.py
+    tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
+    tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
+    tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
+    tests/kernels/models/amd/test_dsv41_mono_gfx942.py

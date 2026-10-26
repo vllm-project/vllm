@@ -287,7 +287,11 @@ steps:
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark-dspark-tp2.txt
-  - pytest -s -v watermarking/test_compatibility.py watermarking/test_engine_compatibility.py watermarking/test_parallel_compatibility.py
+  - >-
+    pytest -s -v
+    watermarking/test_compatibility.py
+    watermarking/test_engine_compatibility.py
+    watermarking/test_parallel_compatibility.py
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval Watermark Feature Combination"
