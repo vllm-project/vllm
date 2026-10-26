@@ -405,9 +405,9 @@ def compile_on_one_rank() -> bool:
     if not is_torch_equal_or_newer("2.14.0.dev"):
         return False
     # Inductor implements the mode for CUDA/ROCm and XPU only.
-    supported = current_platform.is_cuda_alike() or current_platform.is_xpu()
-    default_value = "1" if supported else "0"
-    return os.environ.get("VLLM_COMPILE_ON_ONE_RANK", default_value) == "1"
+    if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+        return False
+    return os.environ.get("VLLM_COMPILE_ON_ONE_RANK", "0") == "1"
 
 
 def env_with_choices(
@@ -817,7 +817,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_MEGA_AOT_ARTIFACT": use_mega_aot_artifact,
     # Compile with torch's compile-on-one-rank mode, which resolves the device
     # at run time instead of baking the compile-time index into the cached
-    # code, so a compile cache can be reused on any device index.
+    # code, so a compile cache can be reused on any device index (e.g. across
+    # --device-ids). Off by default. Requires torch >= 2.14 on CUDA/ROCm or
+    # XPU; not yet compatible with use_inductor_graph_partition or
+    # debug_dump_path.
     "VLLM_COMPILE_ON_ONE_RANK": compile_on_one_rank,
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id

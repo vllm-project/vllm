@@ -205,6 +205,7 @@ def test_load_on_another_device(monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache:
     monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
     monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
     monkeypatch.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+    monkeypatch.setenv("VLLM_COMPILE_ON_ONE_RANK", "1")
     for device_index, loaded in ((0, 0), (1, 1)):
         monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", str(loaded))
         disable_envs_cache()
