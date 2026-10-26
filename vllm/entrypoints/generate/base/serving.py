@@ -393,11 +393,11 @@ def clamp_prompt_logprobs(
     return prompt_logprobs
 
 
-def align_step_logprobs(
+def drop_misaligned_logprobs(
     token_ids: Sequence[int], top_logprobs: Sequence[dict[int, Logprob] | None]
 ) -> Sequence[dict[int, Logprob] | None]:
-    """`top_logprobs`, or all-None positions if it is shorter than `token_ids`,
-    since its alignment with the tokens is then unknown."""
+    """Return `top_logprobs`, or one None per token if it is shorter than
+    `token_ids`, since the alignment is then unknown."""
     if len(top_logprobs) >= len(token_ids):
         return top_logprobs
     logger.warning(

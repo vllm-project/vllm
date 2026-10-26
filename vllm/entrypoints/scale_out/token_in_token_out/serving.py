@@ -20,10 +20,10 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
-    align_step_logprobs,
     build_spec_decoding_metrics,
     chat_top_logprobs_limit,
     clamp_prompt_logprobs,
+    drop_misaligned_logprobs,
     format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -847,7 +847,7 @@ class ServingTokens(GenerateBaseServing):
         """
         logprobs_content: list[ChatCompletionLogProbsContent] = []
 
-        top_logprobs = align_step_logprobs(token_ids, top_logprobs)
+        top_logprobs = drop_misaligned_logprobs(token_ids, top_logprobs)
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
@@ -894,7 +894,7 @@ class ServingTokens(GenerateBaseServing):
         """
         logprobs_content: list[GenerateLogProbsContent] = []
 
-        top_logprobs = align_step_logprobs(token_ids, top_logprobs)
+        top_logprobs = drop_misaligned_logprobs(token_ids, top_logprobs)
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
