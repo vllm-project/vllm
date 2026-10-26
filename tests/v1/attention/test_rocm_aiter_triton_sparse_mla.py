@@ -331,37 +331,23 @@ def test_aiter_sparse_mla_stays_off_with_kv_connector(monkeypatch, model) -> Non
     assert not rocm._aiter_sparse_mla_enabled(has_kv_transfer=True)
 
 
-@pytest.mark.parametrize("wo_a_fp8", [False, True])
-@pytest.mark.parametrize(
-    "num_heads", [64, 128], ids=["aiter", "aiter_decode_opus_prefill"]
-)
-@torch.inference_mode()
-def test_deepseek_v4_forward_mqa_matches_reference(
-    monkeypatch,
-    workspace_init,
-    num_heads: int,
-    wo_a_fp8: bool,
-) -> None:
-    """forward_mqa on a mixed decode + prefill batch matches a torch reference
-    whichever kernels serve it: each row comes out inverse-RoPE'd exactly once,
-    by the store of the kernel that wrote it or by the standalone pass. With an
-    fp8 wo_a no row is rotated here (inverse_rope_group_quant does it later)."""
-    import vllm.models.deepseek_v4.amd.rocm as rocm
+def _swa_forward_mqa_case(
+    monkeypatch, rocm, builder_cls, layer_cls, num_heads: int, compress_ratio: int
+):
+    """An SWA-only layer of ``layer_cls`` over a mixed decode + prefill batch,
+    with a real fp8_ds_mla cache and ``builder_cls`` metadata. Returns the
+    layer, the builder, q, positions and the torch reference: attention with
+    the sink over each token's window, before the inverse RoPE."""
     from tests.v1.attention.utils import create_vllm_config
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
     from vllm.models.deepseek_v4.common.ops.cache_utils import (
         quantize_and_insert_k_cache,
     )
-    from vllm.platforms.rocm import on_gfx950
-    from vllm.utils.torch_utils import set_random_seed
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
 
-    if not on_gfx950():
-        pytest.skip("the aiter sparse MLA kernel is gfx950-only")
     device = torch.device("cuda")
-    set_random_seed(0)
     head_dim, nope_dim, rope_dim = 512, 448, 64
     window, block_size, max_model_len = 128, 64, 1024
 
@@ -398,7 +384,10 @@ def test_deepseek_v4_forward_mqa_matches_reference(
         block_size=block_size,
         max_num_seqs=num_reqs,
         max_num_batched_tokens=256,
-        hf_config_override={"compress_ratios": [1], "sliding_window": window},
+        hf_config_override={
+            "compress_ratios": [compress_ratio],
+            "sliding_window": window,
+        },
     )
     vllm_config.model_config.model_arch_config.total_num_attention_heads = num_heads
     swa_spec = SlidingWindowMLASpec(
@@ -427,9 +416,7 @@ def test_deepseek_v4_forward_mqa_matches_reference(
         causal=True,
     )
     monkeypatch.setattr(rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True)
-    swa_builder = rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder(
-        swa_spec, ["swa"], vllm_config, device
-    )
+    swa_builder = builder_cls(swa_spec, ["swa"], vllm_config, device)
     swa_metadata = swa_builder.build(0, common)
     monkeypatch.setattr(
         rocm,
@@ -443,15 +430,14 @@ def test_deepseek_v4_forward_mqa_matches_reference(
     freqs = torch.outer(torch.arange(max_model_len, device=device).float(), inv_freq)
     cos_sin_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
 
-    # An SWA-only layer, with the attributes the decode and prefill paths read.
-    attn = rocm.DeepseekV4ROCMAiterMLAAttention.__new__(
-        rocm.DeepseekV4ROCMAiterMLAAttention
-    )
+    # The attributes the decode and prefill paths read.
+    attn = layer_cls.__new__(layer_cls)
     torch.nn.Module.__init__(attn)
     attn.prefix = "attn"
     attn.swa_cache_layer = SimpleNamespace(prefix="swa", kv_cache=swa_cache)
     attn.kv_cache = None
-    attn.compress_ratio = 1
+    attn.compressed_cache_prefix = None
+    attn.compress_ratio = compress_ratio
     attn.window_size = window
     attn.max_image_tokens = 0
     attn.topk_indices_buffer = torch.full(
@@ -464,16 +450,9 @@ def test_deepseek_v4_forward_mqa_matches_reference(
     attn.kv_cache_dtype = "fp8_ds_mla"
     attn._has_kv_transfer = False
     attn.rotary_emb = SimpleNamespace(cos_sin_cache=cos_sin_cache)
-    attn._wo_a_fp8_weight = torch.empty(0) if wo_a_fp8 else None
-    attn._use_aiter_sparse_mla_decode = rocm._aiter_sparse_mla_enabled(False)
-    attn._use_aiter_sparse_mla_prefill = swa_builder._use_aiter_sparse_mla_prefill
 
     q = (torch.randn(num_tokens, num_heads, head_dim, device=device) * 0.5).bfloat16()
-    output = torch.empty_like(q)
-    attn.forward_mqa(q, None, positions, output)
 
-    # Reference: attention with the sink over each token's window of the
-    # dequantized cache, then the inverse GPT-J RoPE on the last 64 lanes.
     keys = torch.empty(
         num_reqs, max(seq_lens), head_dim, dtype=torch.bfloat16, device=device
     )
@@ -495,17 +474,102 @@ def test_deepseek_v4_forward_mqa_matches_reference(
         m = torch.maximum(scores.amax(-1), attn.attn_sink)
         p = torch.exp(scores - m[:, None])
         expected[row] = p @ k / (p.sum(-1) + torch.exp(attn.attn_sink - m))[:, None]
-    if not wo_a_fp8:
-        cos, sin = cos_sin_cache[positions].unsqueeze(1).chunk(2, dim=-1)
-        even = expected[..., nope_dim::2].clone()
-        odd = expected[..., nope_dim + 1 :: 2].clone()
-        expected[..., nope_dim::2] = even * cos + odd * sin
-        expected[..., nope_dim + 1 :: 2] = odd * cos - even * sin
+    return attn, swa_builder, q, positions, expected
 
+
+def _inverse_gptj_rope(x, positions, cos_sin_cache, nope_dim: int) -> torch.Tensor:
+    cos, sin = cos_sin_cache[positions].unsqueeze(1).chunk(2, dim=-1)
+    x = x.clone()
+    even = x[..., nope_dim::2].clone()
+    odd = x[..., nope_dim + 1 :: 2].clone()
+    x[..., nope_dim::2] = even * cos + odd * sin
+    x[..., nope_dim + 1 :: 2] = odd * cos - even * sin
+    return x
+
+
+def _max_row_rel_err(actual: torch.Tensor, expected: torch.Tensor) -> torch.Tensor:
     # Per row, so a single unrotated or twice-rotated row cannot hide.
-    err = (output.float() - expected).flatten(1).norm(dim=1)
-    rel = err / expected.flatten(1).norm(dim=1)
-    assert rel.max() < 1e-2, rel
+    err = (actual.float() - expected).flatten(1).norm(dim=1)
+    return (err / expected.flatten(1).norm(dim=1)).max()
+
+
+@pytest.mark.parametrize("wo_a_fp8", [False, True])
+@pytest.mark.parametrize(
+    "num_heads", [64, 128], ids=["aiter", "aiter_decode_opus_prefill"]
+)
+@torch.inference_mode()
+def test_deepseek_v4_forward_mqa_matches_reference(
+    monkeypatch,
+    workspace_init,
+    num_heads: int,
+    wo_a_fp8: bool,
+) -> None:
+    """forward_mqa on a mixed decode + prefill batch matches a torch reference
+    whichever kernels serve it: each row comes out inverse-RoPE'd exactly once,
+    by the store of the kernel that wrote it or by the standalone pass. With an
+    fp8 wo_a no row is rotated here (inverse_rope_group_quant does it later)."""
+    import vllm.models.deepseek_v4.amd.rocm as rocm
+    from vllm.platforms.rocm import on_gfx950
+    from vllm.utils.torch_utils import set_random_seed
+
+    if not on_gfx950():
+        pytest.skip("the aiter sparse MLA kernel is gfx950-only")
+    set_random_seed(0)
+    attn, swa_builder, q, positions, expected = _swa_forward_mqa_case(
+        monkeypatch,
+        rocm,
+        rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
+        rocm.DeepseekV4ROCMAiterMLAAttention,
+        num_heads,
+        compress_ratio=1,
+    )
+    attn._wo_a_fp8_weight = torch.empty(0) if wo_a_fp8 else None
+    attn._use_aiter_sparse_mla_decode = rocm._aiter_sparse_mla_enabled(False)
+    attn._use_aiter_sparse_mla_prefill = swa_builder._use_aiter_sparse_mla_prefill
+
+    output = torch.empty_like(q)
+    attn.forward_mqa(q, None, positions, output)
+
+    if not wo_a_fp8:
+        expected = _inverse_gptj_rope(
+            expected, positions, attn.rotary_emb.cos_sin_cache, attn.nope_head_dim
+        )
+    assert _max_row_rel_err(output, expected) < 1e-2
+
+
+@torch.inference_mode()
+def test_deepseek_v41_forward_mqa_mxfp8_matches_reference(
+    monkeypatch, workspace_init
+) -> None:
+    """V4.1's forward_mqa into the MXFP8 wo_a input: aiter's store applies the
+    inverse RoPE and quantizes every decode and prefill row."""
+    import vllm.models.deepseek_v41.amd.rocm as rocm
+    from vllm.platforms.rocm import on_gfx950
+    from vllm.utils.torch_utils import set_random_seed
+
+    if not on_gfx950():
+        pytest.skip("the aiter sparse MLA kernel is gfx950-only")
+    set_random_seed(0)
+    attn, swa_builder, q, positions, expected = _swa_forward_mqa_case(
+        monkeypatch,
+        rocm,
+        rocm.DeepseekV41ROCMAiterSparseSWAMetadataBuilder,
+        rocm.DeepseekV41ROCMAiterMLAAttention,
+        num_heads=64,
+        compress_ratio=0,
+    )
+    attn._use_aiter_sparse_mla = swa_builder._use_aiter_sparse_mla
+
+    output = attn._alloc_attn_out(q.shape[0], q)
+    attn.forward_mqa(q, None, positions, output)
+
+    expected = _inverse_gptj_rope(
+        expected, positions, attn.rotary_emb.cos_sin_cache, attn.nope_head_dim
+    )
+    blocks = output.data.float().view(q.shape[0], -1, 32)
+    blocks = blocks * torch.exp2(output.scale.float() - 127).unsqueeze(-1)
+    # MXFP8 rounding alone puts rows about 0.03 rel-L2 off.
+    assert _max_row_rel_err(blocks.view_as(q), expected) < 0.05
 
 
 @pytest.mark.parametrize("output", ["bf16", "mxfp8"])
