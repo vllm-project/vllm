@@ -16,6 +16,7 @@ startup_rpc_checks:
 final_rpc_checks:
   - check_monokernel_ran
 server_args: >-
+  --revision 314113f8a7dadb388215396ba5fbee2c610a04d6
   --tokenizer-mode deepseek_v41
   --language-model-only
   --tensor-parallel-size 4
@@ -24,7 +25,7 @@ server_args: >-
   --block-size 128
   --moe-backend aiter
   --attention-config '{"indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
-  --speculative-config '{"method":"dspark","num_speculative_tokens":5}'
+  --speculative-config '{"method":"dspark","revision":"314113f8a7dadb388215396ba5fbee2c610a04d6","num_speculative_tokens":5}'
   --monokernel
   --worker-extension-cls tests.evals.gsm8k.monokernel_checks.MonokernelCheckExtension
 env:

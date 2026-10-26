@@ -15,6 +15,7 @@ startup_rpc_checks:
 final_rpc_checks:
   - check_monokernel_ran
 server_args: >-
+  --revision 314113f8a7dadb388215396ba5fbee2c610a04d6
   --tokenizer-mode deepseek_v41
   --language-model-only
   --tensor-parallel-size 4

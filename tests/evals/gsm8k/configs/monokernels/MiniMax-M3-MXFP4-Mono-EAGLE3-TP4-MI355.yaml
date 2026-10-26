@@ -16,6 +16,7 @@ startup_rpc_checks:
 final_rpc_checks:
   - check_monokernel_ran
 server_args: >-
+  --revision b83d14e3d64bf373a207f3c2a7e9f0b0f1e7fc3a
   --language-model-only
   --tensor-parallel-size 4
   --max-model-len 8192
@@ -26,7 +27,7 @@ server_args: >-
   --attention-config '{"indexer_kv_dtype":"fp8"}'
   --moe-backend aiter
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-  --speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3","num_speculative_tokens":3,"attention_backend":"TRITON_ATTN"}'
+  --speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3","revision":"44cafa5ace418d8b22e2958df0c6aa1f2476842c","num_speculative_tokens":3,"attention_backend":"TRITON_ATTN"}'
   --monokernel
   --worker-extension-cls tests.evals.gsm8k.monokernel_checks.MonokernelCheckExtension
 env:

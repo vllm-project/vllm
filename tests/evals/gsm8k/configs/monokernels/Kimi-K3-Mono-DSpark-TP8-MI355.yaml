@@ -18,6 +18,7 @@ startup_rpc_checks:
 final_rpc_checks:
   - check_monokernel_ran
 server_args: >-
+  --revision f831ab66814297da540d832a5235f8e904f29d06
   --language-model-only
   --tensor-parallel-size 8
   --decode-context-parallel-size 8
@@ -26,7 +27,7 @@ server_args: >-
   --max-num-seqs 1
   --kv-cache-dtype fp8
   --attention-config '{"backend":"ROCM_AITER_MLA","mla_prefill_backend":"ROCM_AITER_FA"}'
-  --speculative-config '{"method":"dspark","model":"Inferact/Kimi-K3-DSpark",
+  --speculative-config '{"method":"dspark","model":"Inferact/Kimi-K3-DSpark","revision":"cf6b8244620e7ea4b0651d214f28e89eac75bed6",
   "num_speculative_tokens":7,"attention_backend":"ROCM_AITER_MLA",
   "kv_cache_dtype":"fp8","draft_sample_method":"probabilistic",
   "rejection_sample_method":"block"}'

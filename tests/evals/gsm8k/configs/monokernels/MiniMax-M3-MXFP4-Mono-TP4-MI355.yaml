@@ -15,6 +15,7 @@ startup_rpc_checks:
 final_rpc_checks:
   - check_monokernel_ran
 server_args: >-
+  --revision b83d14e3d64bf373a207f3c2a7e9f0b0f1e7fc3a
   --language-model-only
   --tensor-parallel-size 4
   --max-model-len 8192
