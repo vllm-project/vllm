@@ -4,8 +4,8 @@
 // (github.com/deepseek-ai/DeepGEMM) as of the release before its SM100 kernels
 // went MX-only: the shared-storage layout with fp32 per-key scales and fp32
 // weights, the grid-stride contiguous-KV scheduler and the 2D/3D TMA load.
-// Trimmed to what the fused kernel instantiates (no metadata schedule, no
-// multicast).
+// Trimmed to what the fused kernel instantiates (FP8 only, no metadata
+// schedule, no multicast, no paging).
 #pragma once
 
 #include <cute/arch/copy_sm90_tma.hpp>
@@ -16,72 +16,46 @@
 #include <deep_gemm/common/types.cuh>
 #include <deep_gemm/common/utils.cuh>
 
-namespace fused_mqa_dg {
+namespace fused_mqa_topk::dg {
 namespace math = deep_gemm::math;
 
-template <uint32_t kNumHeads, uint32_t kHeadDim, bool kIsMXSF, uint32_t BLOCK_Q,
+// FP8 Q/K (one byte per element), fp32 per-key scales, fp32 weights: the
+// DeepGEMM layout without its MX / FP4 variants.
+template <uint32_t kNumHeads, uint32_t kHeadDim, uint32_t BLOCK_Q,
           uint32_t SPLIT_KV, uint32_t kNumQStages, uint32_t kNumKVStages,
           uint32_t kNumTmemStages, typename qk_dtype_t,
           typename reduce_dtype_t = float>
 struct MQALogitsSharedStorage {
-  static constexpr bool kIsFP4 =
-      cute::is_same_v<qk_dtype_t, cutlass::float_e2m1_t>;
-
   using Barrier = cutlass::arch::ClusterTransactionBarrier;
-  using sf_dtype_t = cute::conditional_t<kIsMXSF, uint32_t, float>;
+  DG_STATIC_ASSERT(sizeof(qk_dtype_t) == 1, "FP8 Q/K only");
 
-  static constexpr uint32_t kNumUTCCPAlignedElems = 128;
-  static constexpr uint32_t kQKBytesPerElem = sizeof(qk_dtype_t);
-  static constexpr uint32_t kNumQKBytesPerToken =
-      kIsFP4 ? (kHeadDim / 2) : kHeadDim;
   static constexpr uint32_t BLOCK_QH = BLOCK_Q * kNumHeads;
   static constexpr uint32_t UMMA_N = math::constexpr_align(BLOCK_QH, 8u);
-  // Align to one 8-row Q/K swizzle tile: FP4 uses head_dim / 2 bytes, FP8 use
-  // head_dim bytes per token
-  static constexpr uint32_t kSwizzleAlignment = 8 * kNumQKBytesPerToken;
-  static constexpr uint32_t kNumSFQ =
-      math::constexpr_align(UMMA_N, kNumUTCCPAlignedElems);
-  static constexpr uint32_t kNumSFKV =
-      math::constexpr_align(SPLIT_KV, kNumUTCCPAlignedElems);
-  static constexpr uint32_t kNumQBytesPerStage = UMMA_N * kNumQKBytesPerToken;
-  static constexpr uint32_t kNumKVBytesPerStage =
-      SPLIT_KV * kNumQKBytesPerToken;
-  static constexpr uint32_t kNumQElementsPerStage =
-      kNumQBytesPerStage / kQKBytesPerElem;
-  static constexpr uint32_t kNumKVElementsPerStage =
-      kNumKVBytesPerStage / kQKBytesPerElem;
-  // MX SF formats store per-block scale factors; FP8 stores one per-KV scale
-  // and no Q scale
-  static constexpr uint32_t kNumScaleQ = kIsMXSF ? kNumSFQ : 1;
-  static constexpr uint32_t kNumScaleKV = kIsMXSF ? kNumSFKV : SPLIT_KV;
+  // Align to one 8-row Q/K swizzle tile (head_dim bytes per FP8 token).
+  static constexpr uint32_t kSwizzleAlignment = 8 * kHeadDim;
+  static constexpr uint32_t kNumQElementsPerStage = UMMA_N * kHeadDim;
+  static constexpr uint32_t kNumKVElementsPerStage = SPLIT_KV * kHeadDim;
   // TMA destinations in shared memory must be 128-byte aligned.
   static constexpr uint32_t kTmaAlignment = 128;
   static constexpr uint32_t kNumWeightBytesPerRow = math::constexpr_align(
       kNumHeads * static_cast<uint32_t>(sizeof(reduce_dtype_t)), 16u);
-  static constexpr uint32_t kNumWeightElementsPerRow =
-      kNumWeightBytesPerRow / static_cast<uint32_t>(sizeof(reduce_dtype_t));
   static constexpr uint32_t kNumWeightBytesPerStage =
       math::constexpr_align(BLOCK_Q * kNumWeightBytesPerRow, kTmaAlignment);
   static constexpr uint32_t kNumWeightElementsPerStage =
       kNumWeightBytesPerStage / static_cast<uint32_t>(sizeof(reduce_dtype_t));
 
-  DG_STATIC_ASSERT(kNumQBytesPerStage % kSwizzleAlignment == 0,
+  DG_STATIC_ASSERT(kNumQElementsPerStage % kSwizzleAlignment == 0,
                    "Unaligned TMA swizzling");
-  DG_STATIC_ASSERT(kNumKVBytesPerStage % kSwizzleAlignment == 0,
+  DG_STATIC_ASSERT(kNumKVElementsPerStage % kSwizzleAlignment == 0,
                    "Unaligned TMA swizzling");
   DG_STATIC_ASSERT(kSwizzleAlignment % 128 == 0,
                    "TMA destination must be 128-byte aligned");
-  DG_STATIC_ASSERT(kTmaAlignment % 128 == 0,
-                   "TMA destination must be 128-byte aligned");
-  DG_STATIC_ASSERT(kNumWeightBytesPerStage % kTmaAlignment == 0,
-                   "Unaligned weight TMA stage");
 
   alignas(kSwizzleAlignment)
       qk_dtype_t smem_q[kNumQStages][kNumQElementsPerStage];
   alignas(kSwizzleAlignment)
       qk_dtype_t smem_kv[kNumKVStages][kNumKVElementsPerStage];
-  alignas(kTmaAlignment) sf_dtype_t smem_sf_q[kNumQStages][kNumScaleQ];
-  alignas(kTmaAlignment) sf_dtype_t smem_sf_kv[kNumKVStages][kNumScaleKV];
+  alignas(kTmaAlignment) float smem_sf_kv[kNumKVStages][SPLIT_KV];
   alignas(kTmaAlignment)
       reduce_dtype_t smem_weights[kNumQStages][kNumWeightElementsPerStage];
   // Barriers require 8-byte alignment, already guaranteed by the preceding
@@ -99,10 +73,6 @@ struct MQALogitsSharedStorage {
 // ..., each visiting the KV range [min k_start, max k_end) of its rows.
 template <uint32_t BLOCK_Q, uint32_t SPLIT_KV, uint32_t kNumSMs>
 struct SM100MQALogitsScheduler {
-  static constexpr bool kIsPaged = false;
-  static constexpr bool kHasPartialBlock = false;
-  static constexpr uint32_t kPageKV = 0;
-
   uint32_t current_q_block_idx;
   uint32_t num_q_blocks;
   uint32_t num_q_tokens;
@@ -175,7 +145,7 @@ template <uint32_t BLOCK_INNER, uint32_t BLOCK_OUTER, uint32_t kSwizzleMode,
 CUTLASS_DEVICE void tma_copy(
     void const* desc_ptr, cutlass::arch::ClusterTransactionBarrier* barrier_ptr,
     dtype_t* smem_ptr, const uint32_t& inner_idx, const uint32_t& outer_idx,
-    const uint32_t& num_tma_multicast = 1, const uint32_t& batch_idx = 0) {
+    const uint32_t& batch_idx = 0) {
   constexpr auto kCacheHint =
       static_cast<uint64_t>(cute::TMA::CacheHintSm90::EVICT_NORMAL);
   constexpr uint32_t kPackFactor = deep_gemm::get_smem_pack_factor<dtype_t>();
@@ -205,4 +175,4 @@ CUTLASS_DEVICE void tma_copy(
   }
 }
 
-}  // namespace fused_mqa_dg
+}  // namespace fused_mqa_topk::dg

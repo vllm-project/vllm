@@ -8,16 +8,20 @@ row's top-k keys (k = 512, 1024 or 2048), without materializing the
 ``[rows, keys]`` logits matrix that the dense path (``fp8_fp4_mqa_logits`` +
 ``top_k_per_row_prefill``) needs.
 
-Above 4K keys the kernel is persistent (one CTA per SM); each CTA owns two
-8-row candidate slots. The scratch (~296 MiB on a 148-SM GPU) is allocated once
-per device and reused by every call, independently of the number of rows or
-keys.
+The kernel is persistent (one CTA per SM); each CTA owns two 8-row candidate
+slots. The scratch (~296 MiB on a 148-SM GPU) is allocated once per device and
+reused by every call, independently of the number of rows or keys. It is tuned
+for the chunks vLLM sends it (rows that see >= fused_mqa_topk_min_keys keys);
+smaller key counts are supported but not optimized.
 """
 
+import functools
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -31,10 +35,8 @@ FUSED_MQA_TOPK_TOPKS = (512, 1024, 2048)
 FUSED_MQA_TOPK_MAX_KEYS = 1 << 20
 # Rows per fused call. The kernel has no row limit, but prefill chunks above
 # 16384 rows (--max-num-batched-tokens > 16384) are not validated end to end,
-# so the chunk planner splits fused chunks at this many rows. None: one fused
-# call per chunk, any size.
-# TODO: check for other prefill chunk sizes.
-FUSED_MQA_TOPK_MAX_ROWS: int | None = 16384
+# so the chunk planner splits fused chunks at this many rows.
+FUSED_MQA_TOPK_MAX_ROWS = 16384
 
 
 def fused_mqa_topk_min_keys(topk: int) -> int:
@@ -46,9 +48,10 @@ def fused_mqa_topk_min_keys(topk: int) -> int:
     return 1 << 16 if topk > 1024 else 1 << 15
 
 
-_CANDIDATES_PER_ROW = 16384
-_RETAINED_PER_ROW = 4096
-_SLOTS_PER_SM = 2
+# Mirrors csrc/fused_mqa_topk/constants.h (the op checks the workspace shapes).
+_CANDIDATES_PER_ROW = 16384  # kCandidatesPerRow
+_RETAINED_PER_ROW = 4096  # kRetainedPerRow
+_SLOTS_PER_SM = 2  # candidate slots per persistent CTA
 
 
 @dataclass
@@ -56,7 +59,7 @@ class FusedMQATopKWorkspace:
     """Caller-owned scratch of the fused kernel (see fused_mqa_topk.cu)."""
 
     counter: torch.Tensor  # [2] int32, zero between calls (the kernel restores it)
-    values: torch.Tensor  # [8S, 16384] fp16, S = 2 slots per SM
+    values: torch.Tensor  # [8S, 16384] uint16 (low 16 bits of fp24 codes), S = 2/SM
     indices: torch.Tensor  # [8S, 16384] int32
     retained: torch.Tensor  # [8S, 4096] fp32
     retained_indices: torch.Tensor  # [8S, 4096] int32
@@ -78,12 +81,72 @@ class FusedMQATopKWorkspace:
 _WORKSPACES: dict[int, FusedMQATopKWorkspace] = {}
 
 
+@functools.cache
 def fused_mqa_topk_available() -> bool:
     """True when the fused op is compiled in and the GPU is SM100-family."""
     return (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
         and hasattr(torch.ops._C, "fused_mqa_topk_prefill")
+    )
+
+
+def fused_mqa_topk_model_supported(hf_text_config: Any) -> bool:
+    """Whether a sparse-attention model's indexer shape fits the fused kernel:
+    32 index heads of dimension 128 and a per-row top-k (per pool for kpool
+    indexers) of 512, 1024 or 2048. Lets the prefill chunk planner skip the
+    fused planning for models the kernel cannot serve (e.g. DeepSeek-V3.2, 64
+    index heads)."""
+    topk = getattr(hf_text_config, "index_topk", None)
+    kpool = getattr(hf_text_config, "index_kpool", None) or 1
+    return (
+        getattr(hf_text_config, "index_n_heads", None) == FUSED_MQA_TOPK_HEADS
+        and getattr(hf_text_config, "index_head_dim", None) == FUSED_MQA_TOPK_HEAD_DIM
+        and topk is not None
+        and topk // kpool in FUSED_MQA_TOPK_TOPKS
+    )
+
+
+def use_fused_mqa_topk(
+    q: torch.Tensor,
+    q_scale: torch.Tensor | None,
+    topk_tokens: int,
+    *,
+    fp4_cache: bool,
+    full_context: bool,
+    candidate_selection: bool = False,
+) -> bool:
+    """Whether an indexer layer call may use the fused kernel for its prefill
+    chunks (each chunk then also needs fused_mqa_topk_chunk).
+
+    q / q_scale: the layer's quantized indexer queries; topk_tokens: the top-k
+    the kernel selects (pools for kpool indexers). full_context: every rank
+    ranks its rows over the whole context (no DCP, or PCP after the KV
+    all-gather); pure DCP needs the per-shard top-k merge. The FP4 cache, FP4
+    queries and v4.1 candidate selection stay on the dense path.
+    """
+    return (
+        envs.VLLM_USE_FUSED_MQA_TOPK
+        and full_context
+        and not fp4_cache
+        and q_scale is None
+        and not candidate_selection
+        and topk_tokens in FUSED_MQA_TOPK_TOPKS
+        and q.dtype == torch.float8_e4m3fn
+        and q.dim() == 3
+        and tuple(q.shape[1:]) == (FUSED_MQA_TOPK_HEADS, FUSED_MQA_TOPK_HEAD_DIM)
+        and q.is_cuda
+        and fused_mqa_topk_available()
+    )
+
+
+def fused_mqa_topk_chunk(max_seqlen_k: int, keys: int, topk_tokens: int) -> bool:
+    """Whether a prefill chunk of a fused-eligible layer takes the fused
+    kernel: its longest row sees at least fused_mqa_topk_min_keys keys (the
+    dense path is as fast below) and its gathered keys fit the kernel."""
+    return (
+        max_seqlen_k >= fused_mqa_topk_min_keys(topk_tokens)
+        and keys <= FUSED_MQA_TOPK_MAX_KEYS
     )
 
 
@@ -95,7 +158,9 @@ def get_fused_mqa_topk_workspace(
     The per-row part (counts, defer) holds at least ``rows`` query rows and grows
     when a larger call arrives; the profiling run asks for the largest prefill
     chunk (max_num_batched_tokens rows) so serving never grows it. The block
-    counter is zeroed once; every launch leaves it zeroed again.
+    counter is zeroed once; every launch leaves it zeroed again. The workspace is
+    shared by every call on the device, so calls must not run concurrently (they
+    are issued on one stream).
     """
     rows = (rows + 7) // 8 * 8
     index = (
@@ -111,7 +176,7 @@ def get_fused_mqa_topk_workspace(
         ws = FusedMQATopKWorkspace(
             counter=torch.zeros(2, dtype=torch.int32, device=dev),
             values=torch.empty(
-                (8 * slots, _CANDIDATES_PER_ROW), dtype=torch.float16, device=dev
+                (8 * slots, _CANDIDATES_PER_ROW), dtype=torch.uint16, device=dev
             ),
             indices=torch.empty(
                 (8 * slots, _CANDIDATES_PER_ROW), dtype=torch.int32, device=dev
@@ -139,34 +204,7 @@ def get_fused_mqa_topk_workspace(
         logger.info(
             "Grew the fused MQA+top-k row workspace on cuda:%d to %d rows.", index, rows
         )
-        _WORKSPACES[index] = ws
     return ws
-
-
-def fused_mqa_topk_config_supported(q: torch.Tensor, topk_tokens: int) -> bool:
-    """Whether this indexer's query layout and top-k fit the fused kernel."""
-    return (
-        topk_tokens in FUSED_MQA_TOPK_TOPKS
-        and q.dtype == torch.float8_e4m3fn
-        and q.dim() == 3
-        and tuple(q.shape[1:]) == (FUSED_MQA_TOPK_HEADS, FUSED_MQA_TOPK_HEAD_DIM)
-        and q.is_cuda
-        and fused_mqa_topk_available()
-    )
-
-
-def fused_mqa_topk_supported(
-    q: torch.Tensor, k: torch.Tensor, topk_tokens: int
-) -> bool:
-    """Static eligibility of an indexer prefill chunk for the fused kernel."""
-    return (
-        k.dtype == torch.float8_e4m3fn
-        and k.dim() == 2
-        and k.shape[1] == FUSED_MQA_TOPK_HEAD_DIM
-        and q.shape[0] > 0
-        and 0 < k.shape[0] <= FUSED_MQA_TOPK_MAX_KEYS
-        and fused_mqa_topk_config_supported(q, topk_tokens)
-    )
 
 
 def fused_mqa_topk_key_scales(scales: torch.Tensor) -> torch.Tensor:
@@ -188,76 +226,26 @@ def fused_mqa_topk_prefill(
     starts: torch.Tensor,
     ends: torch.Tensor,
     output: torch.Tensor,
-    *,
-    rows_start_at_zero: bool = False,
-) -> bool:
+) -> None:
     """Fused replacement of ``fp8_fp4_mqa_logits`` + ``top_k_per_row_prefill``.
 
-    q: [rows, 32, 128] fp8 e4m3; k: [keys, 128] fp8 e4m3; scales: [keys] fp32;
-    weights: [rows, 32] fp32; starts/ends: [rows] int32, the visible key range
-    ``[start, end)`` of each row; output: [rows, k] int32 with k (the top-k)
-    512, 1024 or 2048.
+    q: [rows, 32, 128] fp8 e4m3; k: [keys, 128] fp8 e4m3 (keys <=
+    FUSED_MQA_TOPK_MAX_KEYS); scales: [keys] fp32; weights: [rows, 32] fp32;
+    starts/ends: [rows] int32, the visible key range ``[start, end)`` of each
+    row; output: [rows, k] int32 with k (the top-k) 512, 1024 or 2048. All
+    contiguous; q, k, scales, weights and output 16-byte aligned (the op checks
+    the contract).
 
     Writes the same convention as ``ops.top_k_per_row_prefill``: indices
     relative to the row's ``start`` (i.e. ``key - start``), unordered, ``-1``
-    padded when fewer than k keys are visible. ``rows_start_at_zero=True``
-    promises every ``start`` is 0 (single-request chunk) and skips the
-    relative-index conversion.
-
-    Returns False (and leaves ``output`` untouched) for unsupported inputs so
-    the caller can fall back to the dense path.
+    padded when fewer than k keys are visible.
     """
-    rows, keys = q.shape[0], k.shape[0]
-    if (
-        not fused_mqa_topk_supported(q, k, output.shape[1] if output.dim() == 2 else 0)
-        or scales.dtype != torch.float32
-        or scales.numel() != keys
-        or weights.dtype != torch.float32
-        or tuple(weights.shape) != (rows, FUSED_MQA_TOPK_HEADS)
-        or starts.dtype != torch.int32
-        or ends.dtype != torch.int32
-        or starts.numel() != rows
-        or ends.numel() != rows
-        or output.dtype != torch.int32
-        or output.shape[0] != rows
-    ):
-        return False
-
     logger.info_once(
         "Using the single-launch fused MQA+top-k prefill kernel "
         "(FP8, 32 heads, top-k %d).",
         output.shape[1],
     )
-    q = q.contiguous()
-    k = k.contiguous()
-    scales = scales.contiguous()
-    weights = weights.contiguous()
-    starts = starts.contiguous()
-    ends = ends.contiguous()
-
-    # The kernel writes the output with 16-byte stores; any other layout goes
-    # through a temporary (never the case for the indexer's own buffers).
-    direct = output.is_contiguous() and output.data_ptr() % 16 == 0
-    out = (
-        output
-        if direct
-        else torch.empty_like(output, memory_format=torch.contiguous_format)
-    )
-    ws = get_fused_mqa_topk_workspace(q.device, rows)
-    # The kernel emits absolute key indices; the dense top-k (and the sparse
-    # attention consumer) use indices relative to the row start. relative=True
-    # converts in place (rows with start 0 are skipped on the GPU).
+    ws = get_fused_mqa_topk_workspace(q.device, q.shape[0])
     torch.ops._C.fused_mqa_topk_prefill(
-        q,
-        k,
-        scales,
-        weights,
-        starts,
-        ends,
-        out,
-        *ws.as_args(),
-        not rows_start_at_zero,
+        q, k, scales, weights, starts, ends, output, *ws.as_args()
     )
-    if not direct:
-        output.copy_(out)
-    return True

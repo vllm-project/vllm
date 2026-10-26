@@ -12,11 +12,11 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
-    fused_mqa_topk_config_supported,
+    fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
-    fused_mqa_topk_min_keys,
     fused_mqa_topk_prefill,
     get_fused_mqa_topk_workspace,
+    use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.model_executor.layers.sparse_attn_indexer import (
@@ -24,6 +24,8 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     _merge_dcp_topk_global,
     _reserve_row_shard_exchange_transient,
     as_fp32_logits,
+    dense_logits_rows,
+    dense_prefill_topk,
 )
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
@@ -38,7 +40,6 @@ from vllm.models.glm5next.common.sparse_indexer import (
 from vllm.models.glm5next.nvidia.ops import kpool_compress as kpool_ops
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
-    fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
     has_deep_gemm,
     mqa_logits_mx_inputs,
@@ -151,6 +152,16 @@ def sparse_attn_indexer_kpool(
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
+    # Fused MQA+top-k prefill over the pools for this layer (per chunk:
+    # fused_mqa_topk_chunk). Pure DCP needs the per-shard top-k merge.
+    fused = use_fused_mqa_topk(
+        q_quant,
+        q_scale,
+        topk_tokens // max(index_kpool, 1),
+        fp4_cache=use_fp4_cache,
+        full_context=dcp_world_size == 1,
+    )
+
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
@@ -164,14 +175,7 @@ def sparse_attn_indexer_kpool(
         )
         # The fused prefill kernel's fixed-size workspace is persistent;
         # allocate it during profiling so it is accounted for.
-        if (
-            envs.VLLM_USE_FUSED_MQA_TOPK
-            and dcp_world_size == 1
-            and not use_fp4_cache
-            and fused_mqa_topk_config_supported(
-                q_quant, topk_tokens // max(index_kpool, 1)
-            )
-        ):
+        if fused:
             get_fused_mqa_topk_workspace(q_quant.device, q_quant.shape[0])
 
         # Reserve profiler-visible memory for the worst-case decode logits,
@@ -385,27 +389,23 @@ def sparse_attn_indexer_kpool(
             else:
                 topk_dst = topk_indices_buffer[row_start:row_end, :topk_tokens]
 
-            # Single-launch fused MQA-logits + top-k over the pools (SM100, FP8,
-            # 32 heads, top-k 512/1024/2048): no logits buffer, for chunks whose
-            # rows see at least fused_mqa_topk_min_keys(select_k) pools. It needs every
-            # row's whole context, so DCP (per-shard top-k + merge) stays dense.
-            use_fused = envs.VLLM_USE_FUSED_MQA_TOPK and dcp_world_size == 1
-            if chunk.local_total_seq_lens == 0:
+            # Local pool ids -> request-relative global pool ids.
+            dcp_merge = (dcp_rank, dcp_world_size, pool_cp_interleave)
+            if chunk.local_total_seq_lens == 0 or num_rows == 0:
                 topk_dst.fill_(-1)
                 _merge_dcp_topk_global(
                     q_slice.new_empty((num_rows, 0), dtype=torch.float32),
                     topk_dst,
                     select_k,
-                    dcp_rank,
-                    dcp_world_size,
-                    pool_cp_interleave,
+                    *dcp_merge,
                     row_starts=None,
                 )
-            elif not (
-                use_fused
-                and chunk.max_seqlen_k >= fused_mqa_topk_min_keys(select_k)
-                and q_scale_slice is None
-                and fused_mqa_topk_prefill(
+            # Single-launch fused MQA-logits + top-k over the pools: no logits
+            # buffer. It needs DCP = 1, where the pool-id merge is a no-op.
+            elif fused and fused_mqa_topk_chunk(
+                chunk.max_seqlen_k, k_quant_cast.shape[0], select_k
+            ):
+                fused_mqa_topk_prefill(
                     q_slice_cast,
                     k_quant_cast,
                     fused_mqa_topk_key_scales(k_scale_cast),
@@ -413,57 +413,28 @@ def sparse_attn_indexer_kpool(
                     cu_seqlen_ks,
                     cu_seqlen_ke,
                     topk_dst,
-                    # A single-request chunk has every row start at 0.
-                    rows_start_at_zero=chunk.block_table.shape[0] == 1,
                 )
-            ):
-                # Fused-planned chunks are not bounded by the logits budget, so
-                # the dense fallback splits their rows to stay within it.
-                dense_rows = max(1, num_rows)
-                if use_fused:
-                    budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-                    dense_rows = max(1, budget // (4 * max(1, chunk.max_seqlen_k)))
-                for sub in range(0, max(1, num_rows), dense_rows):
+            else:
+                # Fused-planned chunks are not bounded by the logits budget:
+                # split their rows (budget-planned chunks fit in one call).
+                dense_rows = dense_logits_rows(chunk.max_seqlen_k)
+                for sub in range(0, num_rows, dense_rows):
                     rows = slice(sub, min(sub + dense_rows, num_rows))
-                    sub_ks, sub_ke = cu_seqlen_ks[rows], cu_seqlen_ke[rows]
-                    sub_q_scale, sub_weights = mqa_logits_mx_inputs(
+                    dense_prefill_topk(
                         q_slice_cast[rows],
                         q_scale_slice[rows] if q_scale_slice is not None else None,
+                        k_quant_cast,
+                        k_scale_cast,
                         weights[row_start + rows.start : row_start + rows.stop],
-                    )
-                    # Compressed: row i starts at K position cu_seqlen_ks[i].
-                    row_ends = sub_ke - sub_ks
-                    logits = as_fp32_logits(
-                        fp8_fp4_mqa_logits(
-                            (q_slice_cast[rows], sub_q_scale),
-                            (k_quant_cast, k_scale_cast),
-                            sub_weights,
-                            sub_ks,
-                            sub_ke,
-                            chunk.max_seqlen_k,
-                        ),
-                        row_ends,
-                    )
-                    sub_dst = topk_dst[rows]
-                    torch.ops._C.top_k_per_row_prefill(
-                        logits,
-                        torch.zeros_like(row_ends),
-                        row_ends,
-                        sub_dst,
-                        logits.shape[0],
-                        logits.stride(0),
-                        logits.stride(1),
+                        cu_seqlen_ks[rows],
+                        cu_seqlen_ke[rows],
+                        chunk.max_seqlen_k,
+                        topk_dst[rows],
                         select_k,
-                    )
-                    # Local pool ids -> request-relative global pool ids.
-                    _merge_dcp_topk_global(
-                        logits,
-                        sub_dst,
-                        select_k,
-                        dcp_rank,
-                        dcp_world_size,
-                        pool_cp_interleave,
-                        row_starts=None,
+                        None,
+                        False,
+                        0,
+                        dcp_merge,
                     )
 
             if index_kpool > 1:

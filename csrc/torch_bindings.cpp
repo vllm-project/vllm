@@ -16,8 +16,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "fused_mqa_topk_prefill(Tensor q, Tensor k, Tensor scales, "
       "Tensor weights, Tensor starts, Tensor ends, Tensor! out, "
       "Tensor! counter, Tensor! values, Tensor! indices, Tensor! retained, "
-      "Tensor! retained_indices, Tensor! counts, Tensor! defer, "
-      "bool relative) -> ()");
+      "Tensor! retained_indices, Tensor! counts, Tensor! defer) -> ()");
 #endif
 
   // Compute per-token-group FP8 quantized tensor and scaling factor.

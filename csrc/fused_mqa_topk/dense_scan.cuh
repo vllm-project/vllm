@@ -2,21 +2,22 @@
 // Copyright (c) 2025 DeepSeek
 // Dense FP8 MQA scoring of one 8-row block over its whole KV range: DeepGEMM's
 // SM100 MQA logits pipeline (contiguous KV, 32 heads, D = 128) with the logits
-// store replaced by a per-score policy. Used by the <= 4K resident kernel and
-// by the persistent kernel's exact recovery rescan.
+// store replaced by a per-score policy. Used by the persistent kernel's exact
+// recovery rescan (rescan.cuh).
 //
 // Roles (384 threads): warps 0-7 reduce the 32 heads (4 rows per warpgroup),
 // warp 8 loads Q and the weights, warp 9 the KV tiles and their scales, warp 10
 // issues the UMMAs, warp 11 is idle.
 //
 // Policy interface (all called by the math warps):
-//   kWeightScale, kScoreScale     score = (sum_h kWeightScale * w_h * (s_h +
-//   |s_h|)) * kScoreScale * scale_kv begin_block(sched, q_block, query_base)
-//   after the block's Q / weights landed begin_split(split, query_base) before
-//   the split's scores score(i, kv_offset, kv_lane, split, score)    row
-//   query_base + i of the warpgroup end_split(split, num_splits, kv_base) after
-//   the split's scores end_block(sched, q_block)                     before the
-//   block's Q stage is released
+//   kWeightScale: score = (sum_h kWeightScale * w_h * (s_h + |s_h|)) * scale_kv
+//   begin_block(sched, q_block, query_base): after the block's Q / weights
+//       landed
+//   begin_split(split): before the split's scores
+//   score(i, kv_offset, kv_lane, split, score): row query_base + i of the
+//       warpgroup
+//   end_split(split, num_splits, kv_base): after the split's scores
+//   end_block(sched, q_block): before the block's Q stage is released
 #pragma once
 
 #include <cutlass/arch/reg_reconfig.h>
@@ -31,19 +32,27 @@
 #include <deep_gemm/ptx/tcgen05.cuh>
 #include <deep_gemm/ptx/utils.cuh>
 
+#include "common.cuh"
+#include "constants.h"
 #include "deep_gemm_compat.cuh"
 
-namespace fused_mqa_dense {
+namespace fused_mqa_topk::dense {
 using namespace deep_gemm;
 
-constexpr uint32_t kNumHeads = 32, kHeadDim = 128, BLOCK_Q = 8, SPLIT_KV = 256;
+constexpr uint32_t BLOCK_Q = kBlockRows, SPLIT_KV = kTileKeys;
 constexpr uint32_t kNumKVStages = 2, kNumTmemStages = 2;
 constexpr uint32_t UMMA_M = 128, UMMA_N = BLOCK_Q * kNumHeads, UMMA_K = 32;
+// The rescan scores exactly one 8-row block: the scheduler is built with that
+// block as its `sm_idx`, and its grid stride (kNumSMs) exceeds any block count
+// (rows < 2^26), so next_q_block yields that block only. A smaller stride would
+// also score block + stride, outside the rescan's row bounds and output rows.
+constexpr uint32_t kSingleBlockStride = 1u << 31;
 using Scheduler =
-    fused_mqa_dg::SM100MQALogitsScheduler<BLOCK_Q, SPLIT_KV, 4096>;
-using SharedStorage = fused_mqa_dg::MQALogitsSharedStorage<
-    kNumHeads, kHeadDim, false, BLOCK_Q, SPLIT_KV, 1, kNumKVStages,
-    kNumTmemStages, cutlass::float_e4m3_t, float>;
+    dg::SM100MQALogitsScheduler<BLOCK_Q, SPLIT_KV, kSingleBlockStride>;
+using SharedStorage =
+    dg::MQALogitsSharedStorage<kNumHeads, kHeadDim, BLOCK_Q, SPLIT_KV, 1,
+                               kNumKVStages, kNumTmemStages,
+                               cutlass::float_e4m3_t, float>;
 
 // The policy's state lives in dynamic shared memory right after the pipeline
 // storage. Barrier words are zeroed before init: the persistent kernel reuses
@@ -81,16 +90,16 @@ CUTLASS_DEVICE void score_block(const Scheduler& block, Policy& policy,
       barrier.init(count);
     };
     init(smem.full_q_barriers[0], 1);
-    init(smem.empty_q_barriers[0], 256 + 32);
+    init(smem.empty_q_barriers[0], kMathThreads + 32);  // + the UMMA warp
 #pragma unroll
     for (uint32_t i = 0; i < kNumKVStages; ++i) {
       init(smem.full_kv_barriers[i], 1);
-      init(smem.empty_kv_barriers[i], 256);
+      init(smem.empty_kv_barriers[i], kMathThreads);
     }
 #pragma unroll
     for (uint32_t i = 0; i < kNumTmemStages; ++i) {
       init(smem.full_tmem_barriers[i], 1);
-      init(smem.empty_tmem_barriers[i], 256);
+      init(smem.empty_tmem_barriers[i], kMathThreads);
     }
     cutlass::arch::fence_barrier_init();
   }
@@ -102,11 +111,10 @@ CUTLASS_DEVICE void score_block(const Scheduler& block, Policy& policy,
   RingPipeline<1> q_pipeline;
   RingPipeline<kNumKVStages> kv_pipeline;
   RingPipeline<kNumTmemStages> tmem_pipeline;
-  cudaGridDependencySynchronize();
 
   uint32_t q_block_idx, kv_base, num_kv_splits;
   if (warp_idx == kSpecWarpStart) {
-    cutlass::arch::warpgroup_reg_dealloc<56>();
+    cutlass::arch::warpgroup_reg_dealloc<kSpecRegs>();
     if (cute::elect_one_sync()) {
       Scheduler scheduler = block;
       while (scheduler.next_q_block(q_block_idx, kv_base, num_kv_splits)) {
@@ -114,10 +122,10 @@ CUTLASS_DEVICE void score_block(const Scheduler& block, Policy& policy,
         smem.empty_q_barriers[q_stage_idx].wait(q_phase ^ 1);
         const uint32_t q_token_base =
             scheduler.get_q_tma_token_base(q_block_idx);
-        fused_mqa_dg::tma_copy<kHeadDim, BLOCK_Q * kNumHeads, 0>(
+        dg::tma_copy<kHeadDim, BLOCK_Q * kNumHeads, 0>(
             &tensor_map_q, &smem.full_q_barriers[q_stage_idx],
             smem.smem_q[q_stage_idx], 0, q_token_base * kNumHeads);
-        fused_mqa_dg::tma_copy<kNumHeads, BLOCK_Q, 0>(
+        dg::tma_copy<kNumHeads, BLOCK_Q, 0>(
             &tensor_map_weights, &smem.full_q_barriers[q_stage_idx],
             smem.smem_weights[q_stage_idx], 0, q_token_base);
         smem.full_q_barriers[q_stage_idx].arrive_and_expect_tx(
@@ -126,7 +134,7 @@ CUTLASS_DEVICE void score_block(const Scheduler& block, Policy& policy,
     }
     __syncwarp();
   } else if (warp_idx == kSpecWarpStart + 1) {
-    cutlass::arch::warpgroup_reg_dealloc<56>();
+    cutlass::arch::warpgroup_reg_dealloc<kSpecRegs>();
     Scheduler scheduler = block;
     while (scheduler.next_q_block(q_block_idx, kv_base, num_kv_splits)) {
 #pragma unroll 1
@@ -137,10 +145,10 @@ CUTLASS_DEVICE void score_block(const Scheduler& block, Policy& policy,
           smem.empty_kv_barriers[kv_stage_idx].wait(kv_phase ^ 1);
           const uint32_t kv_tma_offset =
               scheduler.get_kv_tma_offset(kv_base, kv_split_idx);
-          fused_mqa_dg::tma_copy<kHeadDim, SPLIT_KV, 0>(
+          dg::tma_copy<kHeadDim, SPLIT_KV, 0>(
               &tensor_map_kv, &smem.full_kv_barriers[kv_stage_idx],
               smem.smem_kv[kv_stage_idx], 0, kv_tma_offset);
-          fused_mqa_dg::tma_copy<SPLIT_KV, 1, 0>(
+          dg::tma_copy<SPLIT_KV, 1, 0>(
               &tensor_map_sf_kv, &smem.full_kv_barriers[kv_stage_idx],
               smem.smem_sf_kv[kv_stage_idx], kv_tma_offset, 0);
           smem.full_kv_barriers[kv_stage_idx].arrive_and_expect_tx(
@@ -150,7 +158,7 @@ CUTLASS_DEVICE void score_block(const Scheduler& block, Policy& policy,
       }
     }
   } else if (warp_idx == kSpecWarpStart + 2) {
-    cutlass::arch::warpgroup_reg_dealloc<56>();
+    cutlass::arch::warpgroup_reg_dealloc<kSpecRegs>();
     DG_TRAP_ONLY_DEVICE_ASSERT(ptx::ld_shared(&smem.tmem_ptr_in_smem) == 0);
     auto instr_desc = cute::UMMA::make_instr_desc<
         cutlass::float_e4m3_t, cutlass::float_e4m3_t, float, UMMA_M, UMMA_N,
@@ -192,9 +200,9 @@ CUTLASS_DEVICE void score_block(const Scheduler& block, Policy& policy,
       smem.empty_q_barriers[q_stage_idx].arrive();
     }
   } else if (warp_idx == kSpecWarpStart + 3) {
-    cutlass::arch::warpgroup_reg_dealloc<56>();
+    cutlass::arch::warpgroup_reg_dealloc<kSpecRegs>();
   } else {
-    cutlass::arch::warpgroup_reg_alloc<224>();
+    cutlass::arch::warpgroup_reg_alloc<kMathRegs>();
     const uint32_t math_thread_idx = warp_idx * 32 + lane_idx;
     const uint32_t query_base = (warp_idx / 4) * 4;
     float weights[4][kNumHeads];
@@ -212,12 +220,13 @@ CUTLASS_DEVICE void score_block(const Scheduler& block, Policy& policy,
       policy.begin_block(scheduler, q_block_idx, query_base);
       for (uint32_t kv_split_idx = 0; kv_split_idx < num_kv_splits;
            ++kv_split_idx) {
-        policy.begin_split(kv_split_idx, query_base);
+        policy.begin_split(kv_split_idx);
         CUTE_TIE_DECL(kv_pipeline.advance(), kv_stage_idx, kv_phase);
         smem.full_kv_barriers[kv_stage_idx].wait(kv_phase);
 #pragma unroll
         for (uint32_t kv_half = 0; kv_half < 2; ++kv_half) {
-          const uint32_t kv_lane = (math_thread_idx % 128) + kv_half * 128;
+          const uint32_t kv_lane =
+              (math_thread_idx % kMathWgThreads) + kv_half * kMathWgThreads;
           const uint32_t kv_offset =
               scheduler.get_logits_col(kv_base, kv_split_idx, kv_lane);
           const float scale_kv =
@@ -242,32 +251,12 @@ CUTLASS_DEVICE void score_block(const Scheduler& block, Policy& policy,
               ptx::tcgen05_before_thread_sync();
               smem.empty_tmem_barriers[tmem_stage_idx].arrive();
             }
-            // relu(s) = (s + |s|) / 2: two FFMA2 chains per row.
-            float2 sum_0[2] = {};
-            float2 sum_1[2] = {};
 #pragma unroll
-            for (uint32_t j = 0; j < kNumHeads; j += 4) {
-#pragma unroll
-              for (uint32_t r = 0; r < 2; ++r) {
-                const float* a = accum_pair[r];
-                auto transform = [&](uint32_t at, float2 sum) {
-                  const auto x = make_float2(a[at], a[at + 1]);
-                  const auto abs_x =
-                      make_float2(fabsf(a[at]), fabsf(a[at + 1]));
-                  const auto w = make_float2(weights[pair + r][at],
-                                             weights[pair + r][at + 1]);
-                  return __ffma2_rn(__fadd2_rn(x, abs_x), w, sum);
-                };
-                sum_0[r] = transform(j, sum_0[r]);
-                sum_1[r] = transform(j + 2, sum_1[r]);
-              }
-            }
-#pragma unroll
-            for (uint32_t r = 0; r < 2; ++r) {
-              const auto sum = __fadd2_rn(sum_0[r], sum_1[r]);
-              policy.score(pair + r, kv_offset, kv_lane, kv_split_idx,
-                           (sum.x + sum.y) * (Policy::kScoreScale * scale_kv));
-            }
+            for (uint32_t r = 0; r < 2; ++r)
+              policy.score(
+                  pair + r, kv_offset, kv_lane, kv_split_idx,
+                  reduce_heads<true>(accum_pair[r], weights[pair + r]) *
+                      scale_kv);
           }
         }
         policy.end_split(kv_split_idx, num_kv_splits, kv_base);
@@ -276,9 +265,20 @@ CUTLASS_DEVICE void score_block(const Scheduler& block, Policy& policy,
       cutlass::arch::fence_view_async_shared();
       smem.empty_q_barriers[q_stage_idx].arrive();
     }
-    cutlass::arch::NamedBarrier(256, 0).sync();
+    cutlass::arch::NamedBarrier(kMathThreads, kBarDenseMath).sync();
     if (warp_idx == 0) cute::TMEM::Allocator1Sm().free(0, kNumTmemCols);
   }
 }
 
-}  // namespace fused_mqa_dense
+// Invalidates the pipeline's barriers so the next score_block can re-initialise
+// the same shared memory (mbarrier.inval before reuse).
+CUTLASS_DEVICE void invalidate_barriers(SharedStorage& smem) {
+  for (auto& b : smem.full_q_barriers) mbar_inval(&b);
+  for (auto& b : smem.empty_q_barriers) mbar_inval(&b);
+  for (auto& b : smem.full_kv_barriers) mbar_inval(&b);
+  for (auto& b : smem.empty_kv_barriers) mbar_inval(&b);
+  for (auto& b : smem.full_tmem_barriers) mbar_inval(&b);
+  for (auto& b : smem.empty_tmem_barriers) mbar_inval(&b);
+}
+
+}  // namespace fused_mqa_topk::dense

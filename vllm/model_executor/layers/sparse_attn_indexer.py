@@ -30,11 +30,11 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
-    fused_mqa_topk_config_supported,
+    fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
-    fused_mqa_topk_min_keys,
     fused_mqa_topk_prefill,
     get_fused_mqa_topk_workspace,
+    use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
@@ -308,6 +308,18 @@ def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.cons
         tl.store(dst_ptr + offs, vals.to(tl.float32), mask=mask)
 
 
+def dense_logits_rows(max_seqlen_k: int) -> int:
+    """Query rows per dense MQA-logits call that keep its fp32 [rows,
+    max_seqlen_k] logits within VLLM_SPARSE_INDEXER_MAX_LOGITS_MB.
+
+    Chunks the planner bounded by the logits budget already fit in one call;
+    chunks planned for the fused kernel (not bounded by it) are split when they
+    take the dense path.
+    """
+    budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    return max(1, budget // (4 * max(1, max_seqlen_k)))
+
+
 def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:
     """Upcast SM100's BF16 MQA logits for the FP32 top-k kernels.
 
@@ -329,6 +341,87 @@ def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor
         logits, out, row_ends.contiguous(), logits.stride(0), BLOCK=block
     )
     return out
+
+
+def dense_prefill_topk(
+    q: torch.Tensor,
+    q_scale: torch.Tensor | None,
+    k: torch.Tensor,
+    k_scale: torch.Tensor,
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    max_seqlen_k: int,
+    topk_indices: torch.Tensor,
+    topk_tokens: int,
+    candidates: torch.Tensor | None,
+    candidate_write: bool,
+    candidate_block_size: int,
+    dcp_merge: tuple[int, int, int] | None,
+) -> None:
+    """Dense MQA logits + per-row top-k of one row slice of a prefill chunk.
+
+    candidates: the slice's v4.1 candidate blocks (None: no two-level
+    selection). dcp_merge: (dcp_rank, dcp_world_size, cp_interleave) to merge
+    the per-shard top-k into the global one (None under PCP, where the top-k
+    already ran over the whole context).
+    """
+    # DeepGEMM returns compressed logits: row i starts at K position
+    # cu_seqlen_ks[i]. None means every row starts at column zero.
+    row_starts: torch.Tensor | None = None
+    if current_platform.is_xpu():
+        if q_scale is not None:
+            raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
+        logits = torch.ops.vllm.xpu_fp8_mqa_logits(
+            q, k, k_scale, weights, cu_seqlen_ks, cu_seqlen_ke
+        )
+        row_starts = cu_seqlen_ks
+        row_ends = cu_seqlen_ke
+    else:
+        q_scale, weights = mqa_logits_mx_inputs(q, q_scale, weights)
+        row_ends = cu_seqlen_ke - cu_seqlen_ks
+        logits = as_fp32_logits(
+            fp8_fp4_mqa_logits(
+                (q, q_scale),
+                (k, k_scale),
+                weights,
+                cu_seqlen_ks,
+                cu_seqlen_ke,
+                max_seqlen_k,
+            ),
+            row_ends,
+        )
+    if candidates is not None:
+        # Two-level selection (v4.1): the candidate source publishes its top
+        # blocks; later indexers mask their scores to them. Both before the
+        # row top-k.
+        if candidate_write:
+            _select_candidate_blocks(
+                logits,
+                row_starts,
+                row_ends,
+                candidates.shape[1],
+                candidate_block_size,
+                candidates,
+            )
+        else:
+            _apply_candidate_mask(
+                logits, row_starts, row_ends, candidates, candidate_block_size
+            )
+    ops.top_k_per_row_prefill(
+        logits,
+        torch.zeros_like(row_ends) if row_starts is None else row_starts,
+        row_ends,
+        topk_indices,
+        logits.shape[0],
+        logits.stride(0),
+        logits.stride(1),
+        topk_tokens,
+    )
+    if dcp_merge is not None:
+        _merge_dcp_topk_global(
+            logits, topk_indices, topk_tokens, *dcp_merge, row_starts=row_starts
+        )
 
 
 def _gather_workspace_shapes(
@@ -485,6 +578,17 @@ def sparse_attn_indexer(
         )
         assert candidate_block_size > 0
 
+    # Fused MQA+top-k prefill for this layer (per chunk: fused_mqa_topk_chunk).
+    # Under PCP every rank ranks its rows over the whole (gathered) context.
+    fused = use_fused_mqa_topk(
+        q_quant,
+        q_scale,
+        topk_tokens,
+        fp4_cache=use_fp4_cache,
+        full_context=use_pcp or dcp_world_size == 1,
+        candidate_selection=candidate_blocks is not None,
+    )
+
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
@@ -504,16 +608,7 @@ def sparse_attn_indexer(
             )
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
-        # Under PCP every rank ranks its rows over the whole (gathered)
-        # context; pure DCP needs the per-shard top-k merge, so it stays dense.
-        uses_fused = (
-            envs.VLLM_USE_FUSED_MQA_TOPK
-            and (use_pcp or dcp_world_size == 1)
-            and not use_fp4_cache
-            and candidate_blocks is None
-            and fused_mqa_topk_config_supported(q_quant, topk_tokens)
-        )
-        if uses_fused:
+        if fused:
             # The fused prefill kernel's fixed-size workspace is persistent;
             # allocate it during profiling so it is accounted for.
             get_fused_mqa_topk_workspace(q_quant.device, q_quant.shape[0])
@@ -709,145 +804,70 @@ def sparse_attn_indexer(
             q_scale_slice = q_scale[row_start:row_end] if q_scale is not None else None
             topk_indices = topk_indices_buffer[row_start:row_end, :topk_tokens]
 
-            # DeepGEMM returns compressed logits: row i starts at K position
-            # cu_seqlen_ks[i]. None means every row starts at column zero.
-            row_starts: torch.Tensor | None = None
+            # Under PCP the top-k runs over the whole gathered context: no merge.
+            dcp_merge = (
+                (dcp_rank, dcp_world_size, cp_kv_cache_interleave_size)
+                if deinterleave_idx is None
+                else None
+            )
             if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
-                logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
-            else:
-                # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
-                # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
-                if use_fp4_cache:
-                    q_slice_cast = q_slice.view(torch.int8)
-                    k_quant_cast = k_quant.view(torch.int8)
-                    k_scale_cast = k_scale.view(torch.int32).squeeze(-1)
-                else:
-                    q_slice_cast = q_slice
-                    k_quant_cast = k_quant
-                    k_scale_cast = k_scale.view(
-                        torch.int32 if mqa_logits_use_mx_scales() else torch.float32
-                    ).squeeze(-1)
-                # Single-launch fused MQA-logits + top-k (SM100, FP8, 32 heads,
-                # top-k 512/1024/2048): no logits buffer, for chunks whose rows
-                # see at least fused_mqa_topk_min_keys keys (dense is as fast below).
-                # It needs every row's whole context: no DCP, or PCP + DCP after
-                # the de-interleaving gather. Pure DCP (per-shard top-k + merge),
-                # the FP4 cache and v4.1 candidate selection stay dense.
-                use_fused = (
-                    envs.VLLM_USE_FUSED_MQA_TOPK
-                    and (dcp_world_size == 1 or deinterleave_idx is not None)
-                    and not current_platform.is_xpu()
-                )
-                if (
-                    use_fused
-                    and chunk.max_seqlen_k >= fused_mqa_topk_min_keys(topk_tokens)
-                    and q_scale_slice is None
-                    and candidate_blocks is None
-                    and fused_mqa_topk_prefill(
-                        q_slice_cast,
-                        k_quant_cast,
-                        fused_mqa_topk_key_scales(k_scale_cast),
-                        weights[row_start:row_end],
-                        cu_seqlen_ks,
-                        cu_seqlen_ke,
+                if dcp_merge is not None:
+                    # Every DCP rank joins the merge, also with no local keys.
+                    _merge_dcp_topk_global(
+                        q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32),
                         topk_indices,
-                        # A single-request chunk has every row start at 0.
-                        rows_start_at_zero=chunk.block_table.shape[0] == 1,
-                    )
-                ):
-                    continue
-                # Fused-planned chunks are not bounded by the logits budget, so
-                # the dense fallback splits their rows to stay within it.
-                dense_rows = q_slice_cast.shape[0]
-                if use_fused:
-                    budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-                    dense_rows = max(1, budget // (4 * max(1, chunk.max_seqlen_k)))
-                for sub in range(0, q_slice_cast.shape[0], dense_rows):
-                    rows = slice(sub, min(sub + dense_rows, q_slice_cast.shape[0]))
-                    tokens = slice(row_start + rows.start, row_start + rows.stop)
-                    sub_ks, sub_ke = cu_seqlen_ks[rows], cu_seqlen_ke[rows]
-                    sub_q_scale = (
-                        q_scale_slice[rows] if q_scale_slice is not None else None
-                    )
-                    if current_platform.is_xpu():
-                        if sub_q_scale is not None:
-                            raise RuntimeError(
-                                "XPU fp8_mqa_logits does not support FP4 Q"
-                            )
-                        logits = torch.ops.vllm.xpu_fp8_mqa_logits(
-                            q_slice_cast[rows],
-                            k_quant_cast,
-                            k_scale_cast,
-                            weights[tokens],
-                            sub_ks,
-                            sub_ke,
-                        )
-                        row_starts = sub_ks
-                        row_ends = sub_ke
-                    else:
-                        sub_q_scale, chunk_weights = mqa_logits_mx_inputs(
-                            q_slice_cast[rows], sub_q_scale, weights[tokens]
-                        )
-                        row_ends = sub_ke - sub_ks
-                        logits = as_fp32_logits(
-                            fp8_fp4_mqa_logits(
-                                (q_slice_cast[rows], sub_q_scale),
-                                (k_quant_cast, k_scale_cast),
-                                chunk_weights,
-                                sub_ks,
-                                sub_ke,
-                                chunk.max_seqlen_k,
-                            ),
-                            row_ends,
-                        )
-                    num_rows = logits.shape[0]
-                    if candidate_blocks is not None:
-                        # Two-level selection (v4.1): the candidate source
-                        # publishes its top blocks; later indexers mask their
-                        # scores to them. Both before the row top-k.
-                        chunk_candidates = candidate_blocks[tokens]
-                        if candidate_write:
-                            _select_candidate_blocks(
-                                logits,
-                                row_starts,
-                                row_ends,
-                                chunk_candidates.shape[1],
-                                candidate_block_size,
-                                chunk_candidates,
-                            )
-                        else:
-                            _apply_candidate_mask(
-                                logits,
-                                row_starts,
-                                row_ends,
-                                chunk_candidates,
-                                candidate_block_size,
-                            )
-                    ops.top_k_per_row_prefill(
-                        logits,
-                        torch.zeros_like(row_ends)
-                        if row_starts is None
-                        else row_starts,
-                        row_ends,
-                        topk_indices[rows],
-                        num_rows,
-                        logits.stride(0),
-                        logits.stride(1),
                         topk_tokens,
+                        *dcp_merge,
                     )
-
-            if deinterleave_idx is None:
-                # Under the PCP path the top-k already ran over the whole
-                # context.
-                _merge_dcp_topk_global(
-                    logits,
+                continue
+            # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
+            # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
+            if use_fp4_cache:
+                q_slice_cast = q_slice.view(torch.int8)
+                k_quant_cast = k_quant.view(torch.int8)
+                k_scale_cast = k_scale.view(torch.int32).squeeze(-1)
+            else:
+                q_slice_cast = q_slice
+                k_quant_cast = k_quant
+                k_scale_cast = k_scale.view(
+                    torch.int32 if mqa_logits_use_mx_scales() else torch.float32
+                ).squeeze(-1)
+            # Single-launch fused MQA-logits + top-k: no logits buffer.
+            if fused and fused_mqa_topk_chunk(
+                chunk.max_seqlen_k, k_quant_cast.shape[0], topk_tokens
+            ):
+                fused_mqa_topk_prefill(
+                    q_slice_cast,
+                    k_quant_cast,
+                    fused_mqa_topk_key_scales(k_scale_cast),
+                    weights[row_start:row_end],
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
                     topk_indices,
+                )
+                continue
+            # Fused-planned chunks are not bounded by the logits budget: split
+            # their rows (budget-planned chunks fit in one call).
+            dense_rows = dense_logits_rows(chunk.max_seqlen_k)
+            for sub in range(0, q_slice.shape[0], dense_rows):
+                rows = slice(sub, min(sub + dense_rows, q_slice.shape[0]))
+                tokens = slice(row_start + rows.start, row_start + rows.stop)
+                dense_prefill_topk(
+                    q_slice_cast[rows],
+                    q_scale_slice[rows] if q_scale_slice is not None else None,
+                    k_quant_cast,
+                    k_scale_cast,
+                    weights[tokens],
+                    cu_seqlen_ks[rows],
+                    cu_seqlen_ke[rows],
+                    chunk.max_seqlen_k,
+                    topk_indices[rows],
                     topk_tokens,
-                    dcp_rank,
-                    dcp_world_size,
-                    cp_kv_cache_interleave_size,
-                    row_starts=row_starts,
+                    candidate_blocks[tokens] if candidate_blocks is not None else None,
+                    candidate_write,
+                    candidate_block_size,
+                    dcp_merge,
                 )
 
         if row_shard is not None:

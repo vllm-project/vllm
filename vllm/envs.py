@@ -1094,10 +1094,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable SPMD mode for TPU backend.
     "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
-    # Use the single-launch fused FP8 MQA-logits + top-k kernel for eligible
-    # sparse MLA indexer prefill chunks on SM100-family GPUs (FP8 indexer cache,
-    # 32 index heads, top-k 512/1024/2048, no DCP/PCP). Falls back to the dense
-    # path otherwise. Default: on (set to 0 for the dense path).
+    # Use the single-launch fused FP8 MQA-logits + top-k kernel for the sparse
+    # MLA indexer prefill chunks it supports on SM100-family GPUs (see
+    # use_fused_mqa_topk / fused_mqa_topk_chunk); other chunks take the dense
+    # path. Default: on (set to 0 for the dense path).
     "VLLM_USE_FUSED_MQA_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MQA_TOPK", "1"))
     ),
