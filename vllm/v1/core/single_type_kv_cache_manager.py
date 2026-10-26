@@ -999,11 +999,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             kv_cache_spec.sliding_window, kv_cache_spec.block_size, drop_eagle_block
         )
 
-        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(max_num_blocks) to
-        # O(max_num_blocks / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
+        # Optimization: probe every `stride` blocks from the right.
+        # stride = sliding_window_contiguous_blocks means we only check one
+        # block per candidate run of contiguous blocks.
+        stride = max(1, sliding_window_contiguous_blocks)
+
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [block_pool.null_block] * max_num_blocks
@@ -1012,21 +1012,37 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
         match_found = False
-        # Search from right to left and early stop when a match is found.
-        for i in range(max_num_blocks - 1, -1, -1):
-            if cached_block := block_pool.get_cached_block(
-                block_hashes[i], kv_cache_group_ids
-            ):
+
+        # Alignment stride for jumping past misaligned indices.
+        # When block_size != alignment_tokens, we need to skip by the
+        # alignment period to find the next aligned candidate.
+        from math import gcd
+        alignment_stride = max(1, alignment_tokens // gcd(alignment_tokens, block_size)) if block_size != alignment_tokens else 1
+
+        # Search from right to left with stride-based probing.
+        i = max_num_blocks - 1
+        while i >= 0:
+            # Probe at stride boundaries.
+            if i % stride != 0 and num_contiguous_blocks == 0:
+                i -= 1
+                continue
+
+            cached_block = block_pool.get_cached_block(block_hashes[i], kv_cache_group_ids)
+            if cached_block:
                 # Skip prefix matching check if the block is not aligned with
                 # `alignment_tokens`.
                 if num_contiguous_blocks == 0 and block_size != alignment_tokens:
                     post_pop_blocks = i if drop_eagle_block else i + 1
                     if (post_pop_blocks * block_size) % alignment_tokens != 0:
+                        # Miss: jump to next aligned boundary
+                        i = (i // alignment_stride) * alignment_stride - 1
                         continue
+
                 # Add the cached block to the computed blocks.
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed[i] = cached
                 num_contiguous_blocks += 1
+
                 if num_contiguous_blocks >= sliding_window_contiguous_blocks:
                     # Trim the trailing blocks.
                     # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
@@ -1035,15 +1051,28 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                         del computed[i + num_contiguous_blocks :]
                     match_found = True
                     break
+
+                # Continue expanding left on a hit.
+                i -= 1
             else:
+                # Miss: reset contiguous count and jump past the stride.
                 num_contiguous_blocks = 0
+                # Resume at the next aligned edge below the current index.
+                if block_size != alignment_tokens:
+                    # Align to the previous alignment boundary
+                    i = ((i + 1) // alignment_stride) * alignment_stride - stride - 1
+                else:
+                    i -= stride
+
         if not match_found:
             # The first `num_contiguous_blocks` is a cache hit even if
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
             for computed in computed_blocks:
                 del computed[num_contiguous_blocks:]
+            # Compute the cached-prefix fallback directly by finding
+            # the longest aligned prefix from the left.
             while (
-                block_size != alignment_tokens  # Faster for common case.
+                block_size != alignment_tokens
                 and len(computed_blocks[0]) * block_size % alignment_tokens != 0
             ):
                 for computed in computed_blocks:
