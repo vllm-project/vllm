@@ -4,7 +4,7 @@
 
 import math
 from collections.abc import Hashable, Iterable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch import nn
@@ -38,6 +38,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
@@ -121,6 +122,12 @@ from ..common.mm_preprocess import (
     KimiK3MultiModalProcessor,
     KimiK3ProcessingInfo,
 )
+from .specialized_decode.runtime import specialized_decode_config
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+    from .specialized_decode.runtime.decode import SpecializedDecode
 
 logger = init_logger(__name__)
 
@@ -317,15 +324,19 @@ class KimiRoutedOutputTransform(nn.Module):
         Args:
             hidden_states: Routed expert output in latent space.
             residual: Optional tensor of the up-projection's output shape to
-                accumulate into. It is consumed in the GEMM's beta-add
-                epilogue, so adding it costs no extra kernel.
+                accumulate into. Unquantized projections fuse the addition
+                into the GEMM epilogue.
 
         """
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
-        if residual is not None:
+        if residual is not None and isinstance(
+            self.up_proj.quant_method, UnquantizedLinearMethod
+        ):
             return residual.addmm_(hidden_states, self.up_proj.weight.t())
         hidden_states, _ = self.up_proj(hidden_states)
+        if residual is not None:
+            return residual.add_(hidden_states)
         return hidden_states
 
 
@@ -1421,8 +1432,34 @@ class KimiLinearForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=logit_scale
         )
+        # decode_backend=latency_specialized: a specialized decode executor over
+        # self.model, built by the model state once the weights are loaded.
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDecode | None = None
+        # The final norm is applied in compute_logits unless the specialized decode
+        # applies it in forward.
+        self.needs_norm_in_logits = True
+
+    def build_specialized_decode(self) -> None:
+        from .specialized_decode.runtime.decode import SpecializedDecode
+
+        self.specialized_decode = SpecializedDecode(
+            self.model, self.specialized_decode_config
+        )
+        # From here on forward() returns normalized hidden states on every step: the
+        # specialized decode's last AttnRes applies the norm, and forward() applies it
+        # to each step that falls back to the stock forward (prefills, larger batches,
+        # PIECEWISE steps).
+        self.needs_norm_in_logits = False
+
+    def get_model_state_cls(self) -> "type[ModelState]":
+        from .model_state import KimiK3ModelState
+
+        return KimiK3ModelState
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if self.specialized_decode is not None:
+            return self.specialized_decode.embed_input_ids(input_ids)
         return self.model.embed_input_ids(input_ids)
 
     def make_empty_intermediate_tensors(
@@ -1441,25 +1478,29 @@ class KimiLinearForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        return self.model(
+        decode = self.specialized_decode
+        if decode is not None:
+            step = decode.plan(positions, intermediate_tensors)
+            if step is not None:
+                return decode.run(step, input_ids, inputs_embeds)
+        hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
+        if not self.needs_norm_in_logits:
+            assert decode is not None
+            hidden_states = decode.normalize(hidden_states)
+        return hidden_states
 
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, ...]:
-        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+        return MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
-        if vllm_config.cache_config.use_kda_recoverssm:
-            dtypes = MambaStateDtypeCalculator.append_kda_recoverssm_record(
-                dtypes, vllm_config.model_config.dtype
-            )
-        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
@@ -1473,22 +1514,13 @@ class KimiLinearForCausalLM(
             if vllm_config.speculative_config
             else 0
         )
-        shapes = MambaStateShapeCalculator.kda_state_shape(
+        return MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_attn_config["num_heads"],
             hf_config.linear_attn_config["head_dim"],
             conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
             num_spec=num_spec,
         )
-        if vllm_config.cache_config.use_kda_recoverssm:
-            return MambaStateShapeCalculator.append_kda_recoverssm_record(
-                shapes,
-                hf_config.linear_attn_config["num_heads"],
-                hf_config.linear_attn_config["head_dim"],
-                tp_world_size=tp_size,
-                spec_query_len=1 + num_spec,
-            )
-        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(
@@ -1502,7 +1534,8 @@ class KimiLinearForCausalLM(
     ) -> torch.Tensor | None:
         # The model's final norm is applied here (not at the end of forward) so
         # that the pre-norm hidden states can be fed to the MTP draft model.
-        hidden_states = self.model.norm(hidden_states, None)
+        if self.needs_norm_in_logits:
+            hidden_states = self.model.norm(hidden_states, None)
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1925,6 +1958,9 @@ class KimiK3ForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
+
+    def get_model_state_cls(self) -> "type[ModelState]":
+        return self.language_model.get_model_state_cls()
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.language_model.mamba_cache.copy_inputs_before_cuda_graphs(

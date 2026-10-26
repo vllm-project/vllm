@@ -53,10 +53,10 @@ def _aiter_w4a16_silu_via_a8w4(
         from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
 
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-        should_use_cdna4_mx_scale_swizzle,
+        get_aiter_mx_scale_swizzle,
     )
 
-    swz = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
+    swz = get_aiter_mx_scale_swizzle()
     quant_dtype = torch.float8_e4m3fn
 
     g1_gammas = gammas if apply_router_weight_on_input else None
@@ -181,7 +181,11 @@ def aiter_triton_kernel_w4a16_moe_forward(
             gating_output,
             topk,
             score_mode=score_mode,
-            bias=e_score_correction_bias,
+            bias=(
+                e_score_correction_bias.float()
+                if e_score_correction_bias is not None
+                else None
+            ),
             renorm=renormalize,
             routed_scaling_factor=scale,
             use_grouped_topk=use_grouped_topk,
@@ -197,6 +201,17 @@ def aiter_triton_kernel_w4a16_moe_forward(
         gather_src = gather_idx.to(torch.long) // topk
         hidden_states = hidden_states[gather_src]
         gather_idx = None
+
+    # Expert parallelism: mark gates whose expert is not on this rank so the
+    # scatter combine skips them, instead of zero-filling the skipped experts'
+    # output rows.
+    gate_valid = None
+    if expert_map is not None:
+        topk_ids = routing_data.topk_ids
+        assert topk_ids is not None, (
+            "expert-parallel W4A16 requires aiter routing to expose topk_ids"
+        )
+        gate_valid = (expert_map[topk_ids.long()] >= 0).to(torch.int32).contiguous()
 
     assert quant_config.w1_precision is not None
     assert quant_config.w2_precision is not None
@@ -226,6 +241,11 @@ def aiter_triton_kernel_w4a16_moe_forward(
 
     # SILU on gfx1250: use the verified a8w4 kernel (dynamic MXFP8); a16w4 faults.
     if activation == MoEActivation.SILU and on_gfx1250():
+        if expert_map is not None:
+            raise NotImplementedError(
+                "Expert parallelism is not supported for SILU on gfx1250 "
+                "(the a8w4 fallback kernel has no expert_map support)."
+            )
         return _aiter_w4a16_silu_via_a8w4(
             hidden_states,
             w1_data,
@@ -280,6 +300,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
         unpadded_N=unpadded_N_w1,
         unpadded_K=unpadded_K_w1,
         backend=a16w4_backend,
+        expert_map=expert_map,
+        gate_valid=gate_valid,
     )
 
     out = moe_gemm_a16w4(
@@ -297,6 +319,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
         unpadded_N=unpadded_N_w2,
         unpadded_K=unpadded_K_w2,
         backend=a16w4_backend,
+        expert_map=expert_map,
+        gate_valid=gate_valid,
     )
 
     return out
@@ -349,7 +373,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
         return (
-            not moe_parallel_config.use_ep
+            not moe_parallel_config.use_all2all_kernels
             and not moe_parallel_config.enable_eplb
             and moe_parallel_config.dp_size <= 1
         )

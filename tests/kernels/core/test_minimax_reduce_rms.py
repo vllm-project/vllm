@@ -280,8 +280,8 @@ def test_minimax_reduce_rms_qk(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not HAS_TRITON,
-    reason="CUDA and Triton required",
+    not (current_platform.is_cuda() or current_platform.is_xpu()) or not HAS_TRITON,
+    reason="CUDA or XPU and Triton required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 7, 128, 333, 2049])
 @pytest.mark.parametrize("hidden_dims", [(3072, 512), (768, 256), (3000, 500)])
@@ -303,7 +303,7 @@ def test_minimax_qk_norm_triton_fallback(
     monkeypatch.setattr(rms_norm_tp, "_all_reduce_variance", lambda v: v)
 
     q_size, kv_size = hidden_dims
-    device = "cuda"
+    device = current_platform.device_type
     torch.manual_seed(seed)
     qkv = torch.randn(num_tokens, q_size + 2 * kv_size, dtype=dtype, device=device)
     q_weight = torch.randn(q_size, dtype=dtype, device=device)

@@ -62,6 +62,10 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    restore_quantized_lm_heads,
+    share_source_lm_heads,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
@@ -78,6 +82,7 @@ from vllm.profiler.wrapper import (
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import warn_if_flashinfer_kernels_missing
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
@@ -198,6 +203,10 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        if self.use_v2_model_runner and not HAS_TRITON:
+            raise ValueError("Model Runner V2 requires Triton.")
+
         super().__init__(
             vllm_config=vllm_config,
             local_rank=local_rank,
@@ -233,8 +242,6 @@ class Worker(WorkerBase):
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
         validate_worker_profiler_config(self.profiler_config)
-
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
@@ -509,6 +516,13 @@ class Worker(WorkerBase):
             # Set random seed.
             set_random_seed(self.model_config.seed)
 
+            # Initialize shared locality resources before weight loading and capture.
+            from vllm.distributed.localization import (
+                maybe_init_localized_resources,
+            )
+
+            self.localized_resources = maybe_init_localized_resources(self.device)
+
             # cuBLAS(Lt) asks CUDA for its handle memory directly. When torch's own
             # cudaMalloc fails, torch frees its unused cache and retries, but a cuBLAS
             # request never triggers that because torch doesn't see it. Profiling can
@@ -698,9 +712,15 @@ class Worker(WorkerBase):
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
         cudagraph_memory_estimate = 0
-        if (
-            current_platform.is_cuda_alike() or current_platform.is_xpu()
-        ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+        compilation_config = self.vllm_config.compilation_config
+        if (current_platform.is_cuda_alike() or current_platform.is_xpu()) and (
+            compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            or (
+                self.use_v2_model_runner
+                and compilation_config.cudagraph_mm_encoder
+                and not self.model_config.enforce_eager
+            )
+        ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
@@ -903,6 +923,18 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
+
+    def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
+        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+            _find_simple_cpu_offload_connector,
+        )
+
+        if not has_kv_transfer_group():
+            return None
+        connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
+        if connector is None:
+            return None
+        return connector.get_aligned_num_cpu_blocks()
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
@@ -1376,6 +1408,7 @@ class Worker(WorkerBase):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
@@ -1406,9 +1439,11 @@ class Worker(WorkerBase):
                     self.profiler_config,
                     worker_name=trace_name,
                     local_rank=self.local_rank,
+                    profiler_kwargs=profiler_kwargs,
                 )
 
             self.profiler.set_output_name(trace_name)
+            self.profiler.set_profiler_kwargs(profiler_kwargs)
             self.profiler.start(
                 delay_iterations=delay_iterations,
                 max_iterations=max_iterations,
@@ -1544,12 +1579,19 @@ class Worker(WorkerBase):
                 "active. Call finish_weight_update first."
             )
 
+        draft_model = self.get_draft_model() if is_draft else None
         try:
             if is_draft:
                 self._set_draft_weight_update_target()
+            if draft_model is not None:
+                # Load through the unquantized target head, as without
+                # draft_lm_head_quantization; finish re-derives the copies.
+                share_source_lm_heads(draft_model)
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
             self.weight_transfer_engine.reset_weight_update_target()
+            if draft_model is not None:
+                restore_quantized_lm_heads(draft_model, refresh=False)
             raise
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
@@ -1589,6 +1631,10 @@ class Worker(WorkerBase):
             except BaseException:
                 self._weight_update_active = False
                 self.weight_transfer_engine.reset_weight_update_target()
+                if self._weight_update_is_draft and (
+                    (draft_model := self.get_draft_model()) is not None
+                ):
+                    restore_quantized_lm_heads(draft_model, refresh=False)
                 raise
 
     def finish_weight_update(self) -> None:
@@ -1605,6 +1651,10 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.finish_weight_update()
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
+            if self._weight_update_is_draft and (
+                (draft_model := self.get_draft_model()) is not None
+            ):
+                restore_quantized_lm_heads(draft_model)
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
