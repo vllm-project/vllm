@@ -67,11 +67,25 @@ pub async fn chat_completions(
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
+    let requested_max_tokens = body.max_completion_tokens;
 
     let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    let max_model_len = state.chat.engine_core_client().max_model_len();
+    if let Some(max_tokens) = requested_max_tokens
+        && max_tokens > max_model_len
+    {
+        return ApiError::invalid_request(
+            format!(
+                "max_completion_tokens={max_tokens} cannot be greater than \
+                max_model_len={max_model_len}. Please request fewer output tokens."
+            ),
+            Some("max_completion_tokens"),
+        )
+        .into_response();
+    }
     let request_span = tracing::info_span!(
         "chat_completions",
         request_id = %prepared.request_id,

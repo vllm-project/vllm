@@ -26,7 +26,7 @@ use vllm_chat::{
     ChatRequestProcessor, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
     DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
 };
-use vllm_engine_core_client::mock_engine::default_ready_response;
+use vllm_engine_core_client::mock_engine::{DEFAULT_MOCK_MAX_MODEL_LEN, default_ready_response};
 use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
@@ -945,6 +945,34 @@ async fn scale_out_generate_route_can_be_enabled() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn inference_generate_accepts_max_tokens_above_max_model_len() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-generate-max-tokens",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        true,
+    );
+
+    let (status, _) = post_json(
+        &mut app,
+        "/inference/v1/generate",
+        json!({
+            "model": "model",
+            "token_ids": [11, 22],
+            "sampling_params": {"max_tokens": DEFAULT_MOCK_MAX_MODEL_LEN + 1}
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3116,6 +3144,67 @@ async fn chat_completions_empty_allowed_token_ids_returns_openai_error() {
             .expect("message string")
             .contains("allowed_token_ids should not be empty")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_max_tokens_above_max_model_len_returns_400() {
+    let (mut app, _engine_task) = test_app_with_engine_handle().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": DEFAULT_MOCK_MAX_MODEL_LEN + 1
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "BadRequestError");
+    assert_eq!(json["error"]["param"], "max_completion_tokens");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_max_tokens_above_max_model_len_returns_400() {
+    let (mut app, _engine_task) = test_app_with_engine_handle().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "max_tokens": DEFAULT_MOCK_MAX_MODEL_LEN + 1
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "BadRequestError");
+    assert_eq!(json["error"]["param"], "max_tokens");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_max_tokens_equal_max_model_len_returns_200() {
+    let (mut app, _engine_task) = test_app_with_engine_handle().await;
+
+    let (status, _) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": DEFAULT_MOCK_MAX_MODEL_LEN
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
