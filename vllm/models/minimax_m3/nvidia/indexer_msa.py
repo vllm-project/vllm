@@ -55,6 +55,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -761,12 +762,6 @@ def prefill_local_score(
     )
 
 
-def _max_decode_query_len(vllm_config: VllmConfig) -> int:
-    spec = vllm_config.speculative_config
-    n = getattr(spec, "num_speculative_tokens", None) if spec is not None else None
-    return 1 + (n or 0)
-
-
 def resolve_index_k_shard(
     vllm_config: VllmConfig,
     total_index_heads: int,
@@ -834,7 +829,7 @@ def _unsupported_reason(
     method = getattr(spec, "method", None)
     if method not in _SPEC_METHODS:
         return f"speculative method {method!r} is not supported"
-    if total_index_heads * _max_decode_query_len(vllm_config) > 32:
+    if total_index_heads * max_decode_query_len(vllm_config) > 32:
         return "index heads x decode query length exceed the score kernel's 32"
     return None
 
@@ -877,7 +872,7 @@ def get_comm(
         vllm_config.model_config.max_model_len,
         vllm_config.cache_config.block_size,
         vllm_config.scheduler_config.max_num_seqs,
-        _max_decode_query_len(vllm_config),
+        max_decode_query_len(vllm_config),
         int(
             vllm_config.model_config.hf_text_config.sparse_attention_config[
                 "sparse_index_dim"
@@ -954,7 +949,7 @@ class IndexKShardComm:
             self.hpr = total_index_heads // self.world
             self.max_decode_tokens = (
                 vllm_config.scheduler_config.max_num_seqs
-                * _max_decode_query_len(vllm_config)
+                * max_decode_query_len(vllm_config)
             )
             self.device = torch.device("cuda", torch.accelerator.current_device_index())
             shape = (
