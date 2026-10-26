@@ -4565,8 +4565,22 @@ async fn stream_without_include_usage_keeps_existing_shape() {
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
+    let chunks = sse_json_payloads(&text);
+    let (final_chunk, non_final_chunks) = chunks.split_last().expect("stream must contain chunks");
+
+    assert!(!non_final_chunks.is_empty());
+
+    for chunk in non_final_chunks {
+        let choice = &chunk["choices"][0];
+        assert_eq!(
+            choice.get("finish_reason"),
+            Some(&serde_json::Value::Null),
+            "non-final choice must include finish_reason: null: {choice}",
+        );
+    }
+
+    assert_eq!(final_chunk["choices"][0]["finish_reason"], "stop");
     assert!(!text.contains("\"usage\":"), "{text}");
-    assert!(text.contains("\"finish_reason\":\"stop\""), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
 }
 
