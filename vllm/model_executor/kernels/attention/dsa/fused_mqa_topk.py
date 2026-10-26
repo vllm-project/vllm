@@ -32,16 +32,16 @@ FUSED_MQA_TOPK_TOPKS = (512, 1024, 2048)
 # Largest gathered key range a single call accepts (no row limit: the per-row
 # workspace is sized from the call, see get_fused_mqa_topk_workspace).
 FUSED_MQA_TOPK_MAX_KEYS = 1 << 20
-# Rows per fused call. The kernel has no row limit, but prefill chunks above
+# Rows per fused_mqa_topk call. The kernel has no row limit, but prefill chunks above
 # 16384 rows (--max-num-batched-tokens > 16384) are not validated end to end,
-# so the chunk planner splits fused chunks at this many rows.
+# so the chunk planner splits fused_mqa_topk chunks at this many rows.
 FUSED_MQA_TOPK_MAX_ROWS = 16384
 
 
 def fused_mqa_topk_min_keys(topk: int) -> int:
     """Keys per row below which the dense logits + top-k path is as fast or
     faster, so callers keep prefill chunks whose longest row sees fewer keys on
-    the dense path. B300 real captures, fused vs dense: top-512 0.89x at 16K
+    the dense path. B300 real captures, fused_mqa_topk vs dense: top-512 0.89x at 16K
     keys and 1.06x at 32K; top-1024 0.93x / 1.01x; top-2048 0.92x at 32K and
     1.13x at 64K."""
     return 1 << 16 if topk > 1024 else 1 << 15
@@ -55,7 +55,7 @@ _SLOTS_PER_SM = 2  # candidate slots per persistent CTA
 
 @dataclass
 class FusedMQATopKWorkspace:
-    """Caller-owned scratch of the fused kernel (see fused_mqa_topk.cu)."""
+    """Caller-owned scratch of the fused_mqa_topk kernel (see fused_mqa_topk.cu)."""
 
     counter: torch.Tensor  # [2] int32, zero between calls (the kernel restores it)
     values: torch.Tensor  # [8S, 16384] uint16 (low 16 bits of fp24 codes), S = 2/SM
@@ -82,7 +82,7 @@ _WORKSPACES: dict[int, FusedMQATopKWorkspace] = {}
 
 @functools.cache
 def fused_mqa_topk_available() -> bool:
-    """True when the fused op is compiled in and the GPU is SM100-family."""
+    """True when the fused_mqa_topk op is compiled in and the GPU is SM100-family."""
     return (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
@@ -98,7 +98,7 @@ def use_fused_mqa_topk(
     full_context: bool,
     candidate_selection: bool = False,
 ) -> bool:
-    """The one eligibility rule of the fused kernel, shared by the prefill
+    """The one eligibility rule of the fused_mqa_topk kernel, shared by the prefill
     chunk planner and the indexer layers (each prefill chunk then also needs
     fused_mqa_topk_chunk).
 
@@ -122,9 +122,10 @@ def use_fused_mqa_topk(
 
 
 def fused_mqa_topk_chunk(max_seqlen_k: int, keys: int, topk_tokens: int) -> bool:
-    """Whether a prefill chunk of a fused-eligible layer takes the fused
-    kernel: its longest row sees at least fused_mqa_topk_min_keys keys (the
-    dense path is as fast below) and its gathered keys fit the kernel."""
+    """Whether a prefill chunk of a fused_mqa_topk-eligible layer takes the
+    fused_mqa_topk kernel: its longest row sees at least fused_mqa_topk_min_keys
+    keys (the dense path is as fast below) and its gathered keys fit the
+    kernel."""
     return (
         max_seqlen_k >= fused_mqa_topk_min_keys(topk_tokens)
         and keys <= FUSED_MQA_TOPK_MAX_KEYS

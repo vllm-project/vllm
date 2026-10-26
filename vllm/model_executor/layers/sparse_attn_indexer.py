@@ -488,7 +488,7 @@ def sparse_attn_indexer(
 
     # Fused MQA+top-k prefill for this layer (per chunk: fused_mqa_topk_chunk).
     # Under PCP every rank ranks its rows over the whole (gathered) context.
-    fused = use_fused_mqa_topk(
+    fused_mqa_topk = use_fused_mqa_topk(
         query_shape=q_quant.shape[1:],
         topk=topk_tokens,
         fp4_cache=use_fp4_cache,
@@ -515,8 +515,8 @@ def sparse_attn_indexer(
             )
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
-        if fused:
-            # The fused prefill kernel's fixed-size workspace is persistent;
+        if fused_mqa_topk:
+            # The fused_mqa_topk kernel's fixed-size workspace is persistent;
             # allocate it during profiling so it is accounted for.
             get_fused_mqa_topk_workspace(q_quant.device, q_quant.shape[0])
 
@@ -717,7 +717,7 @@ def sparse_attn_indexer(
             if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
-            elif fused and fused_mqa_topk_chunk(
+            elif fused_mqa_topk and fused_mqa_topk_chunk(
                 chunk.max_seqlen_k, k_quant.shape[0], topk_tokens
             ):
                 # Single-launch fused MQA-logits + top-k: no logits buffer. It
@@ -745,9 +745,10 @@ def sparse_attn_indexer(
                     k_scale_cast = k_scale.view(
                         torch.int32 if mqa_logits_use_mx_scales() else torch.float32
                     ).squeeze(-1)
-                # Fused-planned chunks are not bounded by the logits budget:
-                # split their rows (budget-planned chunks, the only ones under
-                # DCP, are one window, so the merge below sees all the rows).
+                # Chunks planned for fused_mqa_topk are not bounded by the logits
+                # budget: split their rows (budget-planned chunks, the only ones
+                # under DCP, are one window, so the merge below sees all the
+                # rows).
                 dense_rows = dense_logits_rows(chunk.max_seqlen_k)
                 for sub in range(0, q_slice.shape[0], dense_rows):
                     rows = slice(sub, min(sub + dense_rows, q_slice.shape[0]))

@@ -154,7 +154,7 @@ def sparse_attn_indexer_kpool(
 
     # Fused MQA+top-k prefill over the pools for this layer (per chunk:
     # fused_mqa_topk_chunk). Pure DCP needs the per-shard top-k merge.
-    fused = use_fused_mqa_topk(
+    fused_mqa_topk = use_fused_mqa_topk(
         query_shape=q_quant.shape[1:],
         topk=topk_tokens // max(index_kpool, 1),
         fp4_cache=use_fp4_cache,
@@ -172,9 +172,9 @@ def sparse_attn_indexer_kpool(
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         )
-        # The fused prefill kernel's fixed-size workspace is persistent;
+        # The fused_mqa_topk kernel's fixed-size workspace is persistent;
         # allocate it during profiling so it is accounted for.
-        if fused:
+        if fused_mqa_topk:
             get_fused_mqa_topk_workspace(q_quant.device, q_quant.shape[0])
 
         # Reserve profiler-visible memory for the worst-case decode logits,
@@ -391,7 +391,7 @@ def sparse_attn_indexer_kpool(
             if chunk.local_total_seq_lens == 0:
                 logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
                 topk_dst.fill_(-1)
-            elif fused and fused_mqa_topk_chunk(
+            elif fused_mqa_topk and fused_mqa_topk_chunk(
                 chunk.max_seqlen_k, k_quant.shape[0], select_k
             ):
                 # Single-launch fused MQA-logits + top-k over the pools: no
@@ -407,9 +407,10 @@ def sparse_attn_indexer_kpool(
                 )
                 logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
             else:
-                # Fused-planned chunks are not bounded by the logits budget:
-                # split their rows (budget-planned chunks, the only ones under
-                # DCP, are one window, so the merge below sees all the rows).
+                # Chunks planned for fused_mqa_topk are not bounded by the logits
+                # budget: split their rows (budget-planned chunks, the only ones
+                # under DCP, are one window, so the merge below sees all the
+                # rows).
                 # One pass also for 0 rows: the merge is collective.
                 dense_rows = dense_logits_rows(chunk.max_seqlen_k)
                 for sub in range(0, max(1, num_rows), dense_rows):

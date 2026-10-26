@@ -24,30 +24,32 @@ from vllm.v1.attention.backends.mla.indexer import (
 LOGITS_BUDGET = 512 * 1024**2
 
 
-def _split(seq_lens, q_lens, fused, offset=0, workspace=1048576):
+def _split(seq_lens, q_lens, plan_fused_mqa_topk, offset=0, workspace=1048576):
     return DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
         torch.tensor(seq_lens),
         torch.tensor(q_lens),
         workspace,
         LOGITS_BUDGET,
         request_offset=offset,
-        plan_fused=fused,
+        plan_fused_mqa_topk=plan_fused_mqa_topk,
     )
 
 
 @pytest.mark.parametrize("q_rows", [16384, 32768])
-@pytest.mark.parametrize("fused", [False, True])
-def test_planner_one_fused_call_per_chunk(fused, q_rows):
-    # One fused call per FUSED_MQA_TOPK_MAX_ROWS rows; dense splits by the
+@pytest.mark.parametrize("plan_fused_mqa_topk", [False, True])
+def test_planner_one_fused_mqa_topk_call_per_chunk(plan_fused_mqa_topk, q_rows):
+    # One fused_mqa_topk call per FUSED_MQA_TOPK_MAX_ROWS rows; dense splits by the
     # logits budget.
-    chunks = _split([524288], [q_rows], fused)
-    expected = -(-q_rows // FUSED_MQA_TOPK_MAX_ROWS) if fused else q_rows // 256
+    chunks = _split([524288], [q_rows], plan_fused_mqa_topk)
+    expected = (
+        -(-q_rows // FUSED_MQA_TOPK_MAX_ROWS) if plan_fused_mqa_topk else q_rows // 256
+    )
     assert len(chunks) == expected
     assert sum(q.stop - q.start for _, q in chunks) == q_rows
 
 
 def test_planner_fused_any_length_and_short_queries():
-    # No length threshold and no minimum query count on the fused path.
+    # No length threshold and no minimum query count with fused_mqa_topk.
     assert _split([524288], [512], True) == [(slice(0, 1), slice(0, 512))]
     assert _split([4096], [4096], True) == [(slice(0, 1), slice(0, 4096))]
     # A 40000-row step is split at FUSED_MQA_TOPK_MAX_ROWS.
@@ -58,7 +60,7 @@ def test_planner_fused_any_length_and_short_queries():
 
 
 def test_planner_packs_requests_in_one_fused_call():
-    # Requests share one fused call up to the row cap; dense needs a split.
+    # Requests share one fused_mqa_topk call up to the row cap; dense needs a split.
     assert _split([4096] * 4, [4096] * 4, True) == [(slice(0, 4), slice(0, 16384))]
     assert len(_split([4096] * 4, [4096] * 4, False)) > 1
     # The second request would push the call past the row cap.
@@ -70,19 +72,22 @@ def test_planner_packs_requests_in_one_fused_call():
 
 def test_planner_fused_never_packs_past_key_limit():
     # Two 600K-key continuation steps of 50 rows: dense packs them into one
-    # logits-budget chunk; the fused planner keeps one fused chunk per request so
+    # logits-budget chunk; fused_mqa_topk planning keeps one chunk per request so
     # no chunk reaches the dense path (whose logits buffer is not reserved).
     args = ([600_000, 600_000], [50, 50], False, 0, 4_000_000)
     assert _split(*args) == [(slice(0, 2), slice(0, 100))]
-    fused = (*args[:2], True, *args[3:])
-    assert _split(*fused) == [(slice(0, 1), slice(0, 50)), (slice(1, 2), slice(0, 50))]
+    planned = (*args[:2], True, *args[3:])
+    assert _split(*planned) == [
+        (slice(0, 1), slice(0, 50)),
+        (slice(1, 2), slice(0, 50)),
+    ]
 
 
 def test_planner_keeps_budget_beyond_fused_key_limit():
-    # A single request longer than the fused key limit is budget-planned.
-    fused = _split([2_000_000], [256], True, workspace=4_000_000)
+    # A single request longer than the fused_mqa_topk key limit is budget-planned.
+    planned = _split([2_000_000], [256], True, workspace=4_000_000)
     dense = _split([2_000_000], [256], False, workspace=4_000_000)
-    assert fused == dense and len(dense) == 4
+    assert planned == dense and len(dense) == 4
 
 
 @pytest.mark.parametrize("topk", [512, 1024, 2048])

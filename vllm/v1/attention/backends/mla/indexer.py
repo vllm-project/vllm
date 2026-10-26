@@ -937,8 +937,8 @@ def dense_logits_rows(max_seqlen_k: int, max_logits_bytes: int | None = None) ->
     logits fit max_logits_bytes (default: VLLM_SPARSE_INDEXER_MAX_LOGITS_MB).
 
     The prefill chunk planner sub-chunks requests with it; the indexers split
-    the rows of fused-planned chunks (not bounded by the budget) that take the
-    dense path.
+    the rows of chunks planned for fused_mqa_topk (not bounded by the budget)
+    that take the dense path.
     """
     if max_logits_bytes is None:
         max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
@@ -1046,9 +1046,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
         # Plan prefill chunks for the fused MQA+top-k kernel (not bounded by
         # the logits budget). PCP + DCP has its own planner. v4.1 candidate
-        # selection is not excluded: its pre-candidate indexers take the
-        # fused kernel and the others row-split their dense logits. Indexers
-        # that pad their heads to 32 run fused on budget-planned chunks.
+        # selection is not excluded: its pre-candidate indexers take
+        # fused_mqa_topk and the others row-split their dense logits. Indexers
+        # that pad their heads to 32 run fused_mqa_topk on budget-planned
+        # chunks.
         model_config = self.vllm_config.model_config
         cfg = model_config.hf_text_config if model_config is not None else None
         self.plan_fused_mqa_topk = cfg is not None and use_fused_mqa_topk(
@@ -1397,7 +1398,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
-        plan_fused: bool = False,
+        plan_fused_mqa_topk: bool = False,
     ) -> list[tuple[slice, slice]]:
         """Split this step's prefill requests into chunks, respecting:
         - N constraint: total_seq_lens <= workspace_size (existing O(N)
@@ -1407,7 +1408,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         When a single request-level chunk still exceeds the logits budget,
         sub-chunks on the query dimension (M) to bound peak memory.
 
-        With ``plan_fused`` (chunks for the fused MQA+top-k kernel, which needs
+        With ``plan_fused_mqa_topk`` (chunks for the fused MQA+top-k kernel, which needs
         no logits buffer) chunks whose gathered keys fit FUSED_MQA_TOPK_MAX_KEYS
         are bounded by FUSED_MQA_TOPK_MAX_ROWS rows instead of the logits
         budget. Requests are never packed past that key limit, so only a single
@@ -1416,10 +1417,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         Returns list of (req_slice, query_slice) tuples.
         """
-
-        def fused(n: int) -> bool:
-            return plan_fused and n <= FUSED_MQA_TOPK_MAX_KEYS
-
         chunks: list[tuple[slice, slice]] = []
         n = len(compressed_seq_lens_cpu)
         max_logits_elems = max_logits_bytes // 4
@@ -1434,11 +1431,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     compressed_seq_lens_cpu[end].item(),
                 )
                 new_m, new_n = chunk_m + q, chunk_n + s
-                if fused(new_n):
+                if plan_fused_mqa_topk and new_n <= FUSED_MQA_TOPK_MAX_KEYS:
                     fits = new_m <= FUSED_MQA_TOPK_MAX_ROWS
                 else:
-                    # Fused planning never packs past the key limit.
-                    fits = not plan_fused and new_m * new_n <= max_logits_elems
+                    # fused_mqa_topk planning never packs past the key limit.
+                    fits = not plan_fused_mqa_topk and new_m * new_n <= max_logits_elems
                 if new_n <= workspace_size and fits:
                     chunk_m, chunk_n = new_m, new_n
                     end += 1
@@ -1460,7 +1457,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 if chunk_n > 0
                 else max(1, chunk_m)
             )
-            if fused(chunk_n):
+            if plan_fused_mqa_topk and chunk_n <= FUSED_MQA_TOPK_MAX_KEYS:
                 max_q = FUSED_MQA_TOPK_MAX_ROWS
             for q_off in range(0, chunk_m, max_q):
                 sub_m = min(max_q, chunk_m - q_off)
@@ -1597,7 +1594,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.max_prefill_buffer_size,
                     max_logits_bytes,
                     request_offset=num_decodes,
-                    plan_fused=self.plan_fused_mqa_topk,
+                    plan_fused_mqa_topk=self.plan_fused_mqa_topk,
                 )
 
             chunks = []

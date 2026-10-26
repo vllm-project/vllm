@@ -28,7 +28,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillMetadata,
 )
 
-requires_fused = pytest.mark.skipif(
+requires_fused_mqa_topk = pytest.mark.skipif(
     not torch.cuda.is_available() or not fused_mqa_topk_available(),
     reason="Requires the SM100 fused MQA+top-k extension",
 )
@@ -125,7 +125,7 @@ def _inputs(rows, keys, seed=913):
     return q, k, scales, weights
 
 
-@requires_fused
+@requires_fused_mqa_topk
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize(
     "keys,rows,case",
@@ -185,7 +185,7 @@ def test_single_request_matches_dense(keys, rows, case, topk):
     assert ((out >= 0).sum(1) == (dense >= 0).sum(1)).all()
 
 
-@requires_fused
+@requires_fused_mqa_topk
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize(
     "lens", [[3000, 5000, 1000], [40000, 1500, 70000, 9], [600000, 200000]]
@@ -210,7 +210,8 @@ def test_multi_request_chunk_matches_dense(lens, topk):
     assert ((out >= 0).sum(1) == (dense >= 0).sum(1)).all()
     # Both paths agree on (nearly) every selected key. The dense path's bf16
     # logits blur the k-th boundary, the more so for small k at long contexts
-    # (~98.6% overlap for top-512 over 600K keys; the fused keys are exact).
+    # (~98.6% overlap for top-512 over 600K keys; the fused_mqa_topk keys are
+    # exact).
     overlap = sum(
         len(set(a[a >= 0].tolist()) & set(b[b >= 0].tolist()))
         for a, b in zip(out.cpu(), dense.cpu())
@@ -218,7 +219,7 @@ def test_multi_request_chunk_matches_dense(lens, topk):
     assert overlap >= 0.98 * int((dense >= 0).sum())
 
 
-@requires_fused
+@requires_fused_mqa_topk
 @pytest.mark.parametrize("rows", [32768, 32770])
 def test_large_chunk_single_call(rows):
     """Prefill chunks above 16384 rows (e.g. --max-num-batched-tokens 32768)
@@ -233,7 +234,7 @@ def test_large_chunk_single_call(rows):
     _check(out, q, k, scales, weights, starts, ends)
 
 
-@requires_fused
+@requires_fused_mqa_topk
 def test_rescan_scores_only_its_block():
     """The exact rescan of a block touches only that block's 8 rows.
 
@@ -274,7 +275,7 @@ def test_rescan_scores_only_its_block():
     )
 
 
-@requires_fused
+@requires_fused_mqa_topk
 def test_cuda_graph_replay():
     rows, keys = 64, 65536
     q, k, scales, weights = _inputs(rows, keys)
@@ -296,7 +297,7 @@ def test_cuda_graph_replay():
     _check(out, q, k, scales, weights, starts, ends)
 
 
-@requires_fused
+@requires_fused_mqa_topk
 def test_op_rejects_bad_inputs():
     """The launcher does not re-check; the op enforces its contract."""
     q, k, scales, weights = _inputs(16, 4096)
@@ -339,7 +340,7 @@ def _kpool_inputs(pool_lens=(20000, 70000), q_rows=96, tail=2, seed=919):
     )
 
 
-def _run_kpool_indexer(monkeypatch, inputs, fused, budget_mb=512):
+def _run_kpool_indexer(monkeypatch, inputs, fused_mqa_topk, budget_mb=512):
     """Run the GLM-5.3-Flash kpool indexer prefill on one packed chunk."""
     q, k, scales, weights, starts, ends, positions = inputs
     rows, keys = q.shape[0], k.shape[0]
@@ -378,7 +379,7 @@ def _run_kpool_indexer(monkeypatch, inputs, fused, budget_mb=512):
         lambda: SimpleNamespace(attn_metadata={"indexer": metadata}),
     )
     monkeypatch.setattr(kpool_indexer, "current_workspace_manager", lambda: workspace)
-    monkeypatch.setattr(envs, "VLLM_USE_FUSED_MQA_TOPK", fused)
+    monkeypatch.setattr(envs, "VLLM_USE_FUSED_MQA_TOPK", fused_mqa_topk)
     monkeypatch.setattr(envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", budget_mb)
     calls: list[torch.Size] = []
     fused_fn = kpool_indexer.fused_mqa_topk_prefill
@@ -415,40 +416,47 @@ def _row_sets(out):
     return [set(r[r >= 0].tolist()) for r in out.cpu()]
 
 
-@requires_fused
+@requires_fused_mqa_topk
 def test_kpool_indexer_fused_matches_dense(monkeypatch):
-    """GLM-5.3-Flash kpool indexer: the fused kernel ranks the top-512 pools of
+    """GLM-5.3-Flash kpool indexer: the fused_mqa_topk kernel ranks the top-512 pools of
     a packed multi-request chunk like the dense logits + top-k path."""
     inputs = _kpool_inputs()
-    fused, calls = _run_kpool_indexer(monkeypatch, inputs, fused=True)
+    fused_mqa_topk_out, calls = _run_kpool_indexer(
+        monkeypatch, inputs, fused_mqa_topk=True
+    )
     assert calls == [torch.Size([inputs[0].shape[0], TOPK // KPOOL])]
-    dense, calls = _run_kpool_indexer(monkeypatch, inputs, fused=False)
+    dense, calls = _run_kpool_indexer(monkeypatch, inputs, fused_mqa_topk=False)
     assert calls == []
-    assert ((fused >= 0).sum(1) == (dense >= 0).sum(1)).all()
+    assert ((fused_mqa_topk_out >= 0).sum(1) == (dense >= 0).sum(1)).all()
     # Same pools up to the dense path's bf16 boundary blur (see above); every
     # row also keeps its request's incomplete tail tokens.
-    overlap = sum(len(a & b) for a, b in zip(_row_sets(fused), _row_sets(dense)))
+    overlap = sum(
+        len(a & b) for a, b in zip(_row_sets(fused_mqa_topk_out), _row_sets(dense))
+    )
     assert overlap >= 0.98 * int((dense >= 0).sum())
 
 
-@requires_fused
+@requires_fused_mqa_topk
 def test_kpool_indexer_short_chunk_stays_dense(monkeypatch):
     """Chunks whose rows see fewer than fused_mqa_topk_min_keys pools keep the
-    dense path (the fused kernel is not faster there)."""
+    dense path (the fused_mqa_topk kernel is not faster there)."""
     inputs = _kpool_inputs(pool_lens=(9000, 20000))
     assert int((inputs[5] - inputs[4]).max()) < fused_mqa_topk_min_keys(TOPK // KPOOL)
-    _, calls = _run_kpool_indexer(monkeypatch, inputs, fused=True)
+    _, calls = _run_kpool_indexer(monkeypatch, inputs, fused_mqa_topk=True)
     assert calls == []
 
 
-@requires_fused
+@requires_fused_mqa_topk
 def test_kpool_indexer_dense_fallback_splits_rows(monkeypatch):
-    """Fused-planned chunks skip the logits budget; when such a chunk takes the
-    dense path, its rows are split to stay within the budget and select the
+    """Chunks planned for fused_mqa_topk skip the logits budget; when such a
+    chunk takes the dense path, its rows are split to stay within the budget
+    and select the
     same pools as one unbudgeted dense pass."""
     inputs = _kpool_inputs()
-    whole, _ = _run_kpool_indexer(monkeypatch, inputs, fused=False)
-    split, calls = _run_kpool_indexer(monkeypatch, inputs, fused=False, budget_mb=1)
+    whole, _ = _run_kpool_indexer(monkeypatch, inputs, fused_mqa_topk=False)
+    split, calls = _run_kpool_indexer(
+        monkeypatch, inputs, fused_mqa_topk=False, budget_mb=1
+    )
     assert calls == []
     # top_k_per_row_prefill breaks bf16 ties at the k-th score arbitrarily (two
     # identical dense runs differ too), so compare the selected scores.
