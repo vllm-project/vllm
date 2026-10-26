@@ -49,12 +49,16 @@ M1 also needs an fp8 KV cache and MLA's W_UK / W_UV as AITER MXFP4 bmms
 attention ops, then K2, and startup logs why. The KDA layers run K1 and K2 either
 way.
 
+KV transfer support is limited to built-in MoRIIO READ and WRITE consumers.
+Keep the producer on `decode_backend=auto` and use matching cache layouts.
+
 If you request the specialized decode for anything else, startup fails with one
 `ValueError` that lists every unsupported setting:
 
 - **Config, in the model's `__init__`:** pipeline, data, expert or prefill
-  context parallelism, EPLB, DBO, LoRA, KV connectors, routed-expert capture,
-  sleep mode, CPU weight offload, weight updates, no speculative decoding,
+  context parallelism, EPLB, DBO, LoRA, unsupported KV connectors,
+  routed-expert capture, sleep mode, CPU weight offload, weight updates,
+  no speculative decoding,
   adaptive verification, dynamic speculative decoding, ReplaySSM / RecoverSSM,
   the V1 model runner, `STOCK_TORCH_COMPILE`, another model's shapes, another
   GPU.

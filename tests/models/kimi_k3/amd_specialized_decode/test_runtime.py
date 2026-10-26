@@ -8,7 +8,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    KVTransferConfig,
+    ModelConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
 from vllm.models.kimi_k3.amd.specialized_decode import runtime
 from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
     FFN,
@@ -157,8 +165,81 @@ def test_an_unknown_backend_is_refused():
         specialized_decode_config(cfg)
 
 
-def test_supported_config_is_accepted(on_mi355x):
-    assert specialized_decode_config(_vllm_config()) == DecodeConfig(q=8)
+def test_supported_config_is_accepted(supported_vllm_config):
+    assert specialized_decode_config(supported_vllm_config) == DecodeConfig(q=8)
+
+
+@pytest.fixture
+def supported_vllm_config(tmp_path, monkeypatch, on_mi355x):
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # CUDA must not auto-enable a process-wide setting in this ROCm fixture.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    KimiLinearConfig(
+        architectures=["KimiLinearForCausalLM"],
+        hidden_size=7168,
+        num_experts=896,
+        attn_res_block_size=12,
+        linear_attn_config={
+            "kda_layers": [1],
+            "full_attn_layers": [2],
+            "num_heads": 96,
+            "head_dim": 128,
+            "short_conv_kernel_size": 4,
+        },
+    ).save_pretrained(tmp_path)
+    cfg = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype=torch.bfloat16, max_model_len=1024, seed=0
+        ),
+        # Config-only tests do not need executor auto-detection of local GPUs.
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=8, distributed_executor_backend="mp"
+        ),
+        additional_config={"decode_backend": "latency_specialized"},
+        speculative_config=SpeculativeConfig(method="ngram", num_speculative_tokens=7),
+    )
+    # a served DCP1 step: one request, an fp8 KV cache (M1c)
+    cfg.scheduler_config.max_num_seqs = 1
+    cfg.cache_config.cache_dtype = "fp8"
+    return cfg
+
+
+@pytest.mark.parametrize("read_mode", [False, True])
+@pytest.mark.parametrize("backend", ["rdma", "xgmi"])
+def test_moriio_consumer_is_supported(supported_vllm_config, read_mode, backend):
+    supported_vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="MoRIIOConnector",
+        kv_role="kv_consumer",
+        kv_connector_extra_config={"read_mode": read_mode, "backend": backend},
+    )
+    assert specialized_decode_config(supported_vllm_config) == DecodeConfig(q=8)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"kv_connector": "NixlConnector"},
+        {"kv_connector": "MultiConnector"},
+        {"kv_connector_module_path": "custom.connector"},
+        {"kv_role": "kv_producer"},
+        {"kv_role": "kv_both"},
+    ],
+)
+def test_unsupported_kv_transfer_is_refused(supported_vllm_config, overrides):
+    supported_vllm_config.kv_transfer_config = KVTransferConfig(
+        **(
+            {
+                "kv_connector": "MoRIIOConnector",
+                "kv_role": "kv_consumer",
+                "kv_connector_extra_config": {"read_mode": True},
+            }
+            | overrides
+        )
+    )
+    with pytest.raises(ValueError, match="KV transfer connectors"):
+        specialized_decode_config(supported_vllm_config)
 
 
 @pytest.mark.parametrize("dcp", [1, 8])
@@ -198,7 +279,14 @@ def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
         ({"parallel_config.pipeline_parallel_size": 2}, "pipeline parallelism"),
         ({"parallel_config.decode_context_parallel_size": 2}, "other than 1 or 8"),
         ({"parallel_config.decode_context_parallel_size": 4}, "other than 1 or 8"),
-        ({"kv_transfer_config": object()}, "KV transfer connectors"),
+        (
+            {
+                "kv_transfer_config": KVTransferConfig(
+                    kv_connector="NixlConnector", kv_role="kv_consumer"
+                )
+            },
+            "KV transfer connectors",
+        ),
         ({"speculative_config": None}, "without speculative decoding"),
         ({"speculative_config.num_speculative_tokens": 16}, "more than 15"),
         ({"speculative_config.enable_adaptive_verification": True}, "adaptive"),
