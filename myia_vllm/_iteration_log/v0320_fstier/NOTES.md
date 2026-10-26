@@ -2537,3 +2537,39 @@ Security: no new IP with 200s (hairpin 783, internal 444, user-Paris 13, web2
 
 nbaudit: ok, series 19451 now scoped to `Image/` (wave 2 armed). CoursIA
 #22462 answered with measured figures only (this file + PR #104/#123/#131/#195).
+
+### 26/10 03:41Z — cycle: the write rate is collapsing on its own, and the hit rate is rising
+
+Window since boot 21:48:52Z -> 03:41Z = 5 h 52 min. Delta vs the 01:41Z cycle
+(2 h 26 min in between).
+
+| metric | cumulative | delta over 2 h 26 |
+|---|---|---|
+| fs writes | 69.95 GB (11.9 GB/h avg) | **+12.39 GB = 5.1 GB/h** (was 16.7) |
+| fs reads | 42.18 GB | +2.84 GB |
+| prompt tokens | 100.98 M | +42.53 M = **17.5 M tok/h** (load continues) |
+| cached share | **89.1 %** (device 51.1 / host 34.8 / disk 3.16) | up from 84.2 % |
+| computed prefill | 11.02 M = 10.9 % | down from 15.8 % |
+| preemptions | 14 | +0 |
+| WEDGE events | 0 in the last 2 h | 12 in the 2 h before |
+| KV usage | 59 % | — |
+
+**The intended cruise is arriving without the v2 patch.** As the working set
+stabilises, the hot socles are all admitted *and* already on disk, so new
+admissions stop and the cascade has nothing to carry: 16.7 -> 5.1 GB/h. The
+57 % write-rate drop in one window is a steady-state effect of Phase 1(a)
+alone, not of any new change. The 51 % rewrite share still applies to whatever
+remains (and to the burst at any restart), so v2 stays worth its restart — but
+the projected ceiling moved: in cruise the filter alone may already sit near
+the x5 target, and the honest comparison is now *cruise vs cruise*, not
+burst-inclusive vs baseline.
+
+The hit rate rising (84.2 -> 89.1 %) with preemptions flat is exactly the
+"cruisière longue" signature the surveillance spec asks for.
+
+**Host commit 90.1 %** (356.2/395.3 GB, margin 39.1 GB) — the 09/10 alert
+level. No heavy work; reported. First consumer remains vmmemWSL.
+
+Security: same four known actors, zero new IP, zero #431 signature. nbaudit ok
+(03:06Z, Image/). Condensation log: no event, only heartbeats. CoursIA
+confirmed our #22462 figures are integrated as-is, caveat included (c.6406755988).
