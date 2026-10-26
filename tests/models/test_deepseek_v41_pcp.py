@@ -123,6 +123,12 @@ def test_pcp_gathers_routing_ids_once_after_local_input_preparation(
             routing_ids = routing_ids.repeat(pcp_size)
         torch.testing.assert_close(run_layers.call_args.args[3], routing_ids)
     assert gather.call_count == 2 * int(needs_gather)
+    if pcp_size == 2 and not use_ep and not use_sp:
+        replay = Mock(return_value=(embed(local_ids), embed(local_ids)))
+        replay.replay_batch = object()
+        model.decoder_replay_layers = replay
+        model_module.DeepseekV4Model.forward(model, local_ids, torch.arange(4), None)
+        torch.testing.assert_close(replay.call_args.args[2], local_ids)
 
 
 @pytest.mark.parametrize("rows", [[], [0, 3]])
