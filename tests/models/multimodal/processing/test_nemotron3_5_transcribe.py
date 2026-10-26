@@ -511,3 +511,21 @@ def test_encoder_returns_zeros_when_no_row_has_frames(tiny_tower, name, num_fram
         )
     assert states.shape == (3, encoder.d_model, num_frames)
     assert not states.any()
+
+
+@pytest.mark.usefixtures("dist_init")
+def test_fp8_encoder_attention_is_refused(tmp_path):
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.models.nemotron3_5_transcribe_audio import (
+        Nemotron3_5TranscribeAudioTower,
+    )
+
+    (tmp_path / "config.json").write_text(json.dumps(CHECKPOINT_CONFIG))
+    model_config = ModelConfig(str(tmp_path), mm_encoder_attn_dtype="fp8")
+    # vLLM's encoder attention refuses FP8 with another message, except on the
+    # FlashInfer cuDNN and ROCm AITER backends; the tower refuses it on all.
+    with (
+        set_current_vllm_config(VllmConfig(model_config=model_config)),
+        pytest.raises(ValueError, match=r"Nemotron-3\.5-Transcribe does not support"),
+    ):
+        Nemotron3_5TranscribeAudioTower(TINY_AUDIO_CONFIG)

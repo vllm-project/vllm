@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import async_tensor_h2d
 
 from .utils import maybe_prefix
+from .vision import get_multimodal_config
 
 # Checkpoint tensors that the inference path does not use. The speaker
 # encoder's own preprocessor is unused because both encoders read the mel
@@ -984,6 +985,14 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        mm_config = get_multimodal_config()
+        if mm_config is not None and mm_config.mm_encoder_attn_dtype == "fp8":
+            raise ValueError(
+                "Nemotron-3.5-Transcribe does not support "
+                "mm_encoder_attn_dtype='fp8': the audio tower's attention runs in "
+                "the model dtype. The FP8 checkpoints quantize the tower's linear "
+                "layers without this setting."
+            )
         self.preprocessor = AudioPreprocessor(audio_config["preprocessor"])
         self.encoder = ParallelExpertEncoder(
             audio_config, quant_config, maybe_prefix(prefix, "encoder")
