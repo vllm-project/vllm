@@ -2641,6 +2641,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         num_hash_lookahead_tokens=0,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
+        mamba_prompt_tail_checkpoint=False,
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )

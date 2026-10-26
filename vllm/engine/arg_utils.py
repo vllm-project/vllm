@@ -821,6 +821,7 @@ class EngineArgs:
     enable_mamba_shared_prefix_checkpoint: bool = (
         CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
+    mamba_prompt_tail_checkpoint: bool = CacheConfig.mamba_prompt_tail_checkpoint
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
 
@@ -1444,6 +1445,10 @@ class EngineArgs:
         cache_group.add_argument(
             "--enable-mamba-shared-prefix-checkpoint",
             **cache_kwargs["enable_mamba_shared_prefix_checkpoint"],
+        )
+        cache_group.add_argument(
+            "--mamba-prompt-tail-checkpoint",
+            **cache_kwargs["mamba_prompt_tail_checkpoint"],
         )
         cache_group.add_argument(
             "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
@@ -2325,6 +2330,7 @@ class EngineArgs:
             enable_mamba_shared_prefix_checkpoint=(
                 self.enable_mamba_shared_prefix_checkpoint
             ),
+            mamba_prompt_tail_checkpoint=self.mamba_prompt_tail_checkpoint,
             replayssm_buffer_len=self.replayssm_buffer_len,
             use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,

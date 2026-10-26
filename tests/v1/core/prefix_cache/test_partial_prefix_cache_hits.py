@@ -194,6 +194,7 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
         use_eagle_block_drop=use_eagle,
         num_hash_lookahead_tokens=0,
         mamba_partial_cache_hit=True,
+        mamba_prompt_tail_checkpoint=True,
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=bool(checkpoint_blocks),
         mamba_prefill_checkpoint_alignment=16,
@@ -253,6 +254,7 @@ def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
         dcp_world_size=dcp_world_size,
         scheduler_block_size=scheduler_block_size,
         mamba_partial_cache_hit=True,
+        mamba_prompt_tail_checkpoint=True,
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
@@ -274,9 +276,11 @@ def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
 
     # Partial hits off: no extra stop, the tail runs in one chunk.
     mock.mamba_partial_cache_hit = False
+    mock.mamba_prompt_tail_checkpoint = False
     req.num_computed_tokens = 9728
     assert split(self=mock, request=req, num_new_tokens=272) == 272
     mock.mamba_partial_cache_hit = True
+    mock.mamba_prompt_tail_checkpoint = True
 
     # A request resumed mid-block (partial hash hit at 9984): the first chunk
     # stops at the next block boundary (10240), later chunk ends re-align.
@@ -302,6 +306,7 @@ def test_mamba_align_split_when_block_exceeds_scheduling_budget():
         num_hash_lookahead_tokens=0,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
+        mamba_prompt_tail_checkpoint=False,
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
@@ -344,6 +349,7 @@ def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
         num_hash_lookahead_tokens=0,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
+        mamba_prompt_tail_checkpoint=False,
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
@@ -1995,6 +2001,7 @@ def test_mamba_align_split_stops_below_eagle_proof_boundary():
         num_hash_lookahead_tokens=0,
         hash_block_size=hash_block_size,
         mamba_partial_cache_hit=True,
+        mamba_prompt_tail_checkpoint=True,
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )

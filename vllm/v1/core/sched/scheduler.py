@@ -453,6 +453,10 @@ class Scheduler(SchedulerInterface):
             self.mamba_partial_cache_hit
             and self.kv_cache_manager.mamba_shared_prefix_checkpoint
         )
+        self.mamba_prompt_tail_checkpoint = (
+            self.mamba_partial_cache_hit
+            and self.cache_config.mamba_prompt_tail_checkpoint
+        )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
         # is called once per scheduled step in FIFO order, so these stay in sync.
@@ -613,7 +617,7 @@ class Scheduler(SchedulerInterface):
                 self.use_eagle_block_drop,
                 num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             )
-            if self.mamba_partial_cache_hit and not use_internal_checkpoint
+            if self.mamba_prompt_tail_checkpoint and not use_internal_checkpoint
             else 0
         )
         junction = request.shared_prefix_boundary

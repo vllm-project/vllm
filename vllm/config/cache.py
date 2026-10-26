@@ -315,6 +315,14 @@ class CacheConfig:
     prompt tail. Off by default; only takes effect with prefix caching enabled,
     EAGLE on the Mamba group, and a prefix match unit smaller than the Mamba
     block size."""
+    mamba_prompt_tail_checkpoint: bool = True
+    """With prefix caching and a prefix match unit smaller than the Mamba block
+    size, stop a prefill at the prompt's last prefix-match-unit boundary so its
+    Mamba "align" state is cached and a longer follow-up prompt can hit there.
+    When the backend cannot export that state within the final chunk (e.g. the
+    chunk starts and ends inside one Mamba block), this costs an extra forward
+    step per prompt. Disable to skip that stop: follow-up prompts then resume
+    from an earlier Mamba state and recompute more tokens."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.
@@ -414,6 +422,7 @@ class CacheConfig:
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
             "enable_mamba_shared_prefix_checkpoint",
+            "mamba_prompt_tail_checkpoint",
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",
