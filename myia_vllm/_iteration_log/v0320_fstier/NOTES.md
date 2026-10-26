@@ -2412,3 +2412,53 @@ the tier's store path) instead of relying on the idempotent write.
 **Watch**: VRAM GPU 0 22,942 (margin 58 MiB under 23,000). If it crosses:
 `GPU_UTIL_SWIFT15=0.70` at next restart — not tonight, and not without a fresh
 measurement first.
+
+### 26/10 00:15Z — the residual half is measured, and it is re-writes
+
+First decisive split of what the fs tier still writes, taken 2 h 15 min after the
+filter went live (engine start 21:48:52Z). Instrument: `stat -c '%W %Y %s'` per
+file touched in a 30 min window, birth time from **statx** (GNU `find -newerBt`
+is **unsupported** on this filesystem — it prints "does not provide a way to
+find the birth time" and silently returns 0 files; Python's `st_birthtime` is
+also absent on Linux and falls back to `None`, which silently classifies every
+file as a rewrite. Both traps produce a confident, wrong answer; use
+`subprocess` + `stat(1)`, which is what `myia_vllm/scripts/fs_tier/`-style
+helpers must do here.)
+
+| 30 min window | files | GB |
+|---|---|---|
+| touched | 303 | 7.95 |
+| **new** (birth inside window) | 149 | 3.91 |
+| **re-write** (birth before window) | 154 | 4.04 |
+
+**Half the remaining fs bandwidth rewrites a file that already exists.** This
+is the `_fs_admitted_keys` pass-through: once a key is admitted, `complete_store`
+sends it to the fs unconditionally on every RAM store, and the tier rewrites the
+whole block. The keys are content-addressed (64-hex sha256 filenames), so a
+re-write carries bytes identical to what is already on disk — safe to skip by
+construction, which is exactly what overlay v2 does.
+
+Engine-start to 00:04Z (2 h 15 min), from `/metrics`:
+
+| | value | baseline |
+|---|---|---|
+| fs bytes written | 42.10 GB (**18.7 GB/h**) | 33-47 GB/h |
+| fs bytes read back | 27.01 GB (12.0 GB/h) | 4.4 GB/h |
+| read/write ratio | **64 %** | 9.3 % |
+| fs chunk queries → hits | 9,030 → 1,023 (**11.3 %**) | 6.4 % |
+| prompt tokens from disk | 1.735 M of 38.76 M = **4.48 %** | 2.2 % |
+| bytes written per prompt token | **1.06 KB** | 1.7 KB |
+
+The 64 % read-back is inflated by the post-restart re-prefill (the engine had to
+reload everything from cold at 21:48Z) — treat it as a warm-start upper bound,
+not a steady state. The disk-served share, in contrast, is a steady-state
+figure for the same window and it is **2.0× the baseline**, comfortably above
+the gate's 80 %-of-baseline floor.
+
+Projection, stated as a projection and not a result: v2 removes the ~51 %
+re-write share, 18.7 → ~9.2 GB/h, i.e. **1.06 → ~0.52 KB per prompt token
+(÷3.3 vs baseline)**. The ×5 target of issue #198 is then reached by Phase 1(b)
+(GDN latest-state rule), not by v2 alone.
+
+**Watch**: VRAM GPU 0 22,956 MiB at 00:03Z — 44 MiB under the 23,000 alert line,
+GPU 1 21,508. `preemptions_total` 10 in this generation. No night-time restart.
