@@ -41,6 +41,26 @@ unspecified semantics, not a default layout. Raw storage without semantic
 layer views is omitted. A connector that requires explicit semantics must
 reject such entries or use its existing spec-aware registration path.
 
+### MLA views without a K/V selector
+
+`KV` specifically selects between separately stored K and V; it is not a count
+of cache tensors or latent vectors. MLA stores a shared latent representation
+without a separate V allocation, so its descriptor does not need a `KV` axis.
+For example, a standard MLA view with shape `[blocks, 1, states, content]`
+still declares `(BLOCK, HEAD, STATE, CONTENT)`: the size-one dimension is a
+head slot. The spec defines the latent content's encoding.
+
+Custom MLA views must describe their own indexing order. A
+`[blocks, states, content]` view declares `(BLOCK, STATE, CONTENT)`; a view
+with an extra placeholder dimension `[1, blocks, states, content]` declares
+`(SINGLETON, BLOCK, STATE, CONTENT)`. A size-one dimension that has a semantic
+role, such as `HEAD`, keeps that role rather than becoming `SINGLETON`.
+
+`validate_shape` accepts these views without a `KV` axis. Declaring a size-one
+axis as `KV` is rejected: it would not say whether the entry represents K, V
+or a shared latent. Component roles and content encoding require spec-aware
+handling rather than relaxing the two-element `KV` contract.
+
 ## Custom allocators
 
 An out-of-tree backend or model runner should construct descriptors where it
