@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ctypes
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -22,6 +23,147 @@ class nixlRemoteDisconnectError(Exception):  # noqa: N801
 
 def _remote_disconnect() -> Exception:
     return nixlRemoteDisconnectError("NIXL_ERR_REMOTE_DISCONNECT")
+
+
+@pytest.fixture
+def registration_transport():
+    """Track native registrations while constructing the real transport."""
+    agent = MagicMock()
+    registered = set()
+
+    def add_remote_agent(metadata):
+        name = metadata.decode()
+        registered.add(name)
+        return name
+
+    agent.add_remote_agent.side_effect = add_remote_agent
+    agent.remove_remote_agent.side_effect = registered.remove
+    agent.check_xfer_state.return_value = "DONE"
+    with (
+        patch.object(nixl_module, "_NixlAgent", return_value=agent),
+        patch.object(nixl_module, "_NixlAgentConfig"),
+    ):
+        transport = NixlTransport(
+            "test:1", memoryview(np.zeros((8, 1024), dtype=np.uint8))
+        )
+    try:
+        yield transport, agent, registered
+    finally:
+        transport.close()
+
+
+class TestNixlRegistrationRollback:
+    def test_failed_registration_keeps_newer_sync_agent(self, registration_transport):
+        """An older rollback must not remove a newer sync registration's agent."""
+        transport, agent, registered = registration_transport
+        old_preparing, release_old = threading.Event(), threading.Event()
+        new_preparing, release_new = threading.Event(), threading.Event()
+
+        def prep_xfer_dlist(*args, **kwargs):
+            if not old_preparing.is_set():
+                old_preparing.set()
+                assert release_old.wait(timeout=5)
+                raise RuntimeError("old registration failed")
+            new_preparing.set()
+            assert release_new.wait(timeout=5)
+            return MagicMock(name="remote_dlist")
+
+        agent.prep_xfer_dlist.side_effect = prep_xfer_dlist
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            try:
+                old = transport.add_remote_peer_async(
+                    "peer:1", b"peer", 0x1000, 8, 1024
+                )
+                assert old_preparing.wait(timeout=5)
+                transport.remove_remote_peer("peer:1")
+                new = caller.submit(
+                    transport.add_remote_peer, "peer:1", b"peer", 0x1000, 8, 1024
+                )
+                # Let an un-serialized sync build reach prep before rollback.
+                # A serialized build waits until the old registration finishes.
+                new_preparing.wait(timeout=1)
+                release_old.set()
+                with pytest.raises(RuntimeError, match="old registration failed"):
+                    old.result(timeout=5)
+                assert new_preparing.wait(timeout=5)
+                release_new.set()
+                new.result(timeout=5)
+
+                assert registered == {"peer"}
+                transfer = transport.write_blocks("peer:1", [0], [1])
+                assert transfer is not None
+                assert transfer in transport.poll().done
+            finally:
+                release_old.set()
+                release_new.set()
+
+    @pytest.mark.parametrize("asynchronous", [False, True])
+    @pytest.mark.parametrize("stage", ["get_xfer_descs", "prep_xfer_dlist"])
+    def test_failed_registration_rolls_back_and_can_retry(
+        self, registration_transport, asynchronous, stage
+    ):
+        """Failed descriptor setup must not leak an agent or damage healthy peers."""
+        transport, agent, registered = registration_transport
+        transport.add_remote_peer("healthy:1", b"healthy", 0x2000, 8, 1024)
+        error = RuntimeError("descriptor setup failed")
+        getattr(agent, stage).side_effect = error
+        register = (
+            transport.add_remote_peer_async
+            if asynchronous
+            else transport.add_remote_peer
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            result = register("peer:1", b"peer", 0x1000, 8, 1024)
+            if asynchronous:
+                result.result(timeout=5)
+        assert exc_info.value is error
+        assert registered == {"healthy"}
+        assert transport.write_blocks("peer:1", [0], [1]) is None
+        assert transport.write_blocks("healthy:1", [0], [1]) is not None
+
+        getattr(agent, stage).side_effect = None
+        result = register("peer:1", b"peer", 0x1000, 8, 1024)
+        if asynchronous:
+            result.result(timeout=5)
+        transfer = transport.write_blocks("peer:1", [0], [1])
+        assert transfer is not None
+        assert transfer in transport.poll().done
+        transport.remove_remote_peer("peer:1")
+        assert registered == {"healthy"}
+
+    @pytest.mark.parametrize("stage", ["get_xfer_descs", "prep_xfer_dlist"])
+    def test_failed_duplicate_registration_keeps_published_agent(
+        self, registration_transport, stage
+    ):
+        """Loading existing metadata does not transfer its cleanup ownership."""
+        transport, agent, registered = registration_transport
+        transport.add_remote_peer("peer:1", b"peer", 0x1000, 8, 1024)
+        getattr(agent, stage).side_effect = RuntimeError("descriptor setup failed")
+
+        with pytest.raises(RuntimeError, match="descriptor setup failed"):
+            transport.add_remote_peer("peer:1", b"peer", 0x1000, 8, 1024)
+
+        assert registered == {"peer"}
+        transfer = transport.write_blocks("peer:1", [0], [1])
+        assert transfer is not None
+        assert transfer in transport.poll().done
+
+    @pytest.mark.parametrize("stage", ["get_xfer_descs", "prep_xfer_dlist"])
+    def test_failed_rollback_preserves_registration_error(
+        self, registration_transport, stage, caplog
+    ):
+        """A cleanup error must not replace the descriptor setup error."""
+        transport, agent, _ = registration_transport
+        error = RuntimeError("descriptor setup failed")
+        getattr(agent, stage).side_effect = error
+        agent.remove_remote_agent.side_effect = RuntimeError("rollback failed")
+
+        future = transport.add_remote_peer_async("peer:1", b"peer", 0x1000, 8, 1024)
+        with pytest.raises(RuntimeError) as exc_info:
+            future.result(timeout=5)
+        assert exc_info.value is error
+        assert transport.write_blocks("peer:1", [0], [1]) is None
+        assert "rollback failed" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -141,36 +283,47 @@ class TestNixlTransportWithMockedAgent:
         assert worker_threads and caller not in worker_threads
         assert transport.write_blocks("peer:1", [0], [1]) is not None
 
-    def test_registration_landing_after_remove_is_discarded(self):
+    @pytest.mark.parametrize("asynchronous", [False, True])
+    def test_registration_landing_after_remove_is_discarded(
+        self, registration_transport, asynchronous
+    ):
         """A late registration must not revive a peer that was reaped.
 
         The session is torn down and remove_remote_peer runs while the
         worker is still building descriptors; publishing afterwards would
         leave a registered peer with no session and leak its handles.
         """
-        transport = self._make_transport()
+        transport, agent, registered = registration_transport
         building = threading.Event()
         release = threading.Event()
 
         def blocking_prep(*args, **kwargs):
             building.set()
-            release.wait(timeout=5)
+            assert release.wait(timeout=5)
             return MagicMock(name="remote_dlist")
 
-        transport._agent.prep_xfer_dlist.side_effect = blocking_prep
-
-        future = transport.add_remote_peer_async("peer:1", b"meta", 0x1000, 8, 1024)
-        assert building.wait(timeout=5)
-        transport.remove_remote_peer("peer:1")
-        release.set()
-
-        with pytest.raises(RuntimeError, match="superseded"):
-            future.result(timeout=5)
-        assert "peer:1" not in transport._remote_dlists
+        agent.prep_xfer_dlist.side_effect = blocking_prep
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            try:
+                future = (
+                    transport.add_remote_peer_async("peer:1", b"peer", 0x1000, 8, 1024)
+                    if asynchronous
+                    else caller.submit(
+                        transport.add_remote_peer, "peer:1", b"peer", 0x1000, 8, 1024
+                    )
+                )
+                assert building.wait(timeout=5)
+                transport.remove_remote_peer("peer:1")
+                release.set()
+                with pytest.raises(RuntimeError, match="superseded"):
+                    future.result(timeout=5)
+            finally:
+                release.set()
+        assert registered == set()
         assert transport.write_blocks("peer:1", [0], [1]) is None
         # The handles the worker built were released rather than leaked.
-        assert transport._agent.release_dlist_handle.called
-        assert transport._agent.remove_remote_agent.called
+        assert agent.release_dlist_handle.called
+        assert agent.remove_remote_agent.called
 
     def test_write_blocks_returns_none_for_unknown_peer(self):
         """write_blocks returns None if peer not registered."""
