@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 LATENT, ROPE, PAGE = 512, 64, 64
@@ -45,6 +46,60 @@ def test_kv_balanced_backend_is_registered_and_opt_in():
         assert backend not in _get_backend_priorities(
             use_mla=True, device_capability=DeviceCapability(major, 0)
         )
+
+
+def test_kv_balanced_backend_rejects_unsupported(monkeypatch):
+    """Selection rejects what the kernel can't run on top of TOKENSPEED_MLA's
+    checks: a non-BF16 model or a kv_lora_rank other than 512."""
+    import vllm.config
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend import (
+        KvBalancedMLABackend,
+    )
+    from vllm.platforms.interface import DeviceCapability
+
+    pytest.importorskip("tokenspeed_mla")
+    text_config = SimpleNamespace(
+        qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128, kv_lora_rank=512
+    )
+    config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=text_config))
+    monkeypatch.setattr(vllm.config, "get_current_vllm_config", lambda: config)
+
+    def reasons(dtype=torch.bfloat16):
+        return KvBalancedMLABackend.validate_configuration(
+            head_size=576,
+            dtype=dtype,
+            kv_cache_dtype="fp8",
+            block_size=64,
+            use_mla=True,
+            has_sink=False,
+            use_sparse=False,
+            use_mm_prefix=False,
+            use_per_head_quant_scales=False,
+            device_capability=DeviceCapability(10, 0),
+            attn_type=AttentionType.DECODER,
+        )
+
+    assert reasons() == []
+    assert "dtype not supported" in reasons(torch.float16)
+    text_config.kv_lora_rank = 256
+    assert any("kv_lora_rank 512" in reason for reason in reasons())
+
+
+def test_kv_balanced_impl_falls_back_to_tokenspeed(monkeypatch):
+    """A step the KV-balanced decode doesn't run is TokenSpeed's forward_mqa."""
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend import KvBalancedMLAImpl
+    from vllm.v1.attention.backends.mla.tokenspeed_mla import TokenspeedMLAImpl
+
+    calls = []
+    monkeypatch.setattr(
+        TokenspeedMLAImpl, "forward_mqa", lambda self, *args: ("tokenspeed", None)
+    )
+    impl = object.__new__(KvBalancedMLAImpl)
+    impl.kv_balanced = lambda *args: calls.append(args) or None
+    assert impl.forward_mqa("q", "cache", "metadata", "layer") == ("tokenspeed", None)
+    impl.kv_balanced = lambda *args: ("kv_balanced", None)
+    assert impl.forward_mqa("q", "cache", "metadata", "layer") == ("kv_balanced", None)
+    assert calls == [(impl, "q", "cache", "metadata", "layer")]
 
 
 def _paged(rows_per_request, device):

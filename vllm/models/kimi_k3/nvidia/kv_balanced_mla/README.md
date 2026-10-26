@@ -35,15 +35,19 @@ on the kernel.
 ## Supported deployments
 
 Those of `TOKENSPEED_MLA` (an FP8 E4M3 KV cache on an SM100-family GPU, DeepSeek
-MLA head dimensions) with `kv_lora_rank` 512, more than 64 query rows per request
-(heads × query tokens), with or without decode context parallel. Backend selection
-rejects any other configuration with the reason.
+MLA head dimensions) with a BF16 model and `kv_lora_rank` 512, with or without
+decode context parallel. Backend selection rejects any other configuration with
+the reason. The kernel also needs more than 64 query rows per request (heads ×
+query tokens, with the heads of all DCP ranks); with fewer, for example TP8
+without DCP and four speculative tokens (12 × 5), startup fails with a
+`RuntimeError`.
 
-At run time, a step the kernel can't run uses TokenSpeed's decode: more requests
-than the split-KV scratch can address, a strided query, a micro-batch lane first
-seen after the workspace is locked, or the first call for a decode shape inside
-CUDA graph capture. `tokenspeed_mla_min_split_kv` applies only to
-TokenSpeed's decode.
+At run time, a step the kernel can't run uses TokenSpeed's decode: a non-FP8
+query, more query rows per request than the reserved buffers hold, a decode shape
+that needs TokenSpeed's M64 tiles, more requests than the split-KV scratch can
+address, a strided query, a micro-batch lane first seen after the workspace is
+locked, or the first call for a decode shape inside CUDA graph capture.
+`tokenspeed_mla_min_split_kv` applies only to TokenSpeed's decode.
 
 The split-KV scratch (FP16 partial outputs) is reserved when the model is built,
 and its size is logged.

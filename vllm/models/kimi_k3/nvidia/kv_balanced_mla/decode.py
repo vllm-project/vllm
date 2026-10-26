@@ -18,7 +18,7 @@ locked, or the first call for a shape inside CUDA graph capture (the eager warmu
 runs first).
 """
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -218,8 +218,8 @@ class KvBalancedDecode:
             else None
         )
         # The FP8 query and cache scales; V is stored as V / k_scale.
-        q_scale = cast(float, layer._q_scale_float)
-        k_scale = cast(float, layer._k_scale_float)
+        q_scale = layer._q_scale_float
+        k_scale = layer._k_scale_float
         out = core.decode(
             q,
             kv_c_and_k_pe_cache,

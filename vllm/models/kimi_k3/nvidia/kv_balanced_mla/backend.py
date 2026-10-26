@@ -26,7 +26,8 @@ from .decode import LATENT, KvBalancedDecode
 
 
 class KvBalancedMLABackend(TokenspeedMLABackend):
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["fp8", "fp8_e4m3"]
+    # The kernel writes a BF16 latent.
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
 
     @staticmethod
     def get_name() -> str:
