@@ -431,7 +431,7 @@ presets:
     # captured separately.
     points:
       tp2_c1:
-        label: "1 client · TP2"
+        label: "C1 · TP2"
         concurrency: 1
         default: true
         tp: 2
@@ -445,7 +445,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "4092"
       tp4_c1:
-        label: "1 client · TP4"
+        label: "C1 · TP4"
         concurrency: 1
         tp: 4
         args:
@@ -458,7 +458,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "4092"
       tp4_c4:
-        label: "4 clients · TP4"
+        label: "C4 · TP4"
         concurrency: 4
         tp: 4
         args:
@@ -471,7 +471,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "4092"
       tp4_c8:
-        label: "8 clients · TP4"
+        label: "C8 · TP4"
         concurrency: 8
         tp: 4
         args:
@@ -484,7 +484,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "8190"
       tp4_c16:
-        label: "16 clients · TP4"
+        label: "C16 · TP4"
         concurrency: 16
         tp: 4
         args:
@@ -497,7 +497,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "8190"
       tp4_c32:
-        label: "32 clients · TP4"
+        label: "C32 · TP4"
         concurrency: 32
         tp: 4
         args:
@@ -510,7 +510,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "8190"
       tp4_c128:
-        label: "128 clients · TP4"
+        label: "C128 · TP4"
         concurrency: 128
         tp: 4
         args:
@@ -562,7 +562,7 @@ presets:
       "--speculative-config": { enable_adaptive_verification: false }
     points:
       dep2_c8:
-        label: "8 clients · DEP2"
+        label: "C8 · DEP2"
         concurrency: 8
         args:
           - "--max-num-seqs"
@@ -572,7 +572,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "576"
       dep2_c16:
-        label: "16 clients · DEP2"
+        label: "C16 · DEP2"
         concurrency: 16
         args:
           - "--max-num-seqs"
@@ -582,7 +582,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "576"
       dep2_c24:
-        label: "24 clients · DEP2"
+        label: "C24 · DEP2"
         concurrency: 24
         args:
           - "--max-num-seqs"
@@ -594,7 +594,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "4096"
       dep2_c32:
-        label: "32 clients · DEP2"
+        label: "C32 · DEP2"
         concurrency: 32
         default: true
         args:
@@ -607,7 +607,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "4096"
       dep2_kv_c64:
-        label: "64 clients · DEP2 + host KV"
+        label: "C64 · DEP2 + host KV"
         concurrency: 64
         args:
           - "--max-num-seqs"
@@ -623,7 +623,7 @@ presets:
           - "--kv-offloading-size"
           - "32"
       dep2_kv_c128:
-        label: "128 clients · DEP2 + host KV"
+        label: "C128 · DEP2 + host KV"
         concurrency: 128
         args:
           - "--max-num-seqs"
@@ -639,7 +639,7 @@ presets:
           - "--kv-offloading-size"
           - "32"
       dep4_c96:
-        label: "96 clients · DEP4"
+        label: "C96 · DEP4"
         concurrency: 96
         args:
           - "--data-parallel-size"
@@ -655,7 +655,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "8190"
       dep4_c128:
-        label: "128 clients · DEP4"
+        label: "C128 · DEP4"
         concurrency: 128
         args:
           - "--data-parallel-size"
@@ -673,7 +673,7 @@ presets:
     runbook: |
       The host-KV points add vLLM's native CPU KV offloading, 32 GiB per DP rank (64 GiB per
       server), and lower GPU memory to 0.955 to keep headroom for the indexer logits; with
-      48 sequences per rank, about 32 of 128 clients queue.
+      48 sequences per rank, about 32 of 128 sessions queue.
 
       The lane fronts the server with vLLM Router 0.1.14 (`--policy consistent_hash`,
       `--intra-node-data-parallel-size` equal to the server's DP size, as on the router tab),
@@ -713,7 +713,7 @@ presets:
     # one-request graph.
     points:
       c1:
-        label: "1 client"
+        label: "C1"
         concurrency: 1
         args:
           - "--max-num-seqs"
@@ -725,7 +725,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "4092"
       c8:
-        label: "8 clients"
+        label: "C8"
         concurrency: 8
         default: true
         args:
@@ -740,7 +740,7 @@ presets:
           - "--max-cudagraph-capture-size"
           - "8190"
       c16:
-        label: "16 clients"
+        label: "C16"
         concurrency: 16
         args:
           - "--max-num-seqs"
@@ -794,7 +794,7 @@ presets:
       "--speculative-config": { enable_adaptive_verification: false }
     points:
       c8:
-        label: "8 clients"
+        label: "C8"
         concurrency: 8
         args:
           - "--max-num-seqs"
@@ -806,7 +806,7 @@ presets:
           - "--compilation-config"
           - *dsv41_cg8190
       c16:
-        label: "16 clients"
+        label: "C16"
         concurrency: 16
         args:
           - "--max-num-seqs"
@@ -818,7 +818,7 @@ presets:
           - "--compilation-config"
           - *dsv41_cg8190
       c32:
-        label: "32 clients"
+        label: "C32"
         concurrency: 32
         default: true
         args:
@@ -831,7 +831,7 @@ presets:
           - "--compilation-config"
           - *dsv41_cg8190_replay
       c64:
-        label: "64 clients"
+        label: "C64"
         concurrency: 64
         args:
           - "--max-num-seqs"
@@ -843,7 +843,7 @@ presets:
           - "--compilation-config"
           - *dsv41_cg8190_replay
       kv_c128:
-        label: "128 clients · host KV"
+        label: "C128 · host KV"
         concurrency: 128
         select:
           kv_offload: simple
@@ -862,7 +862,7 @@ presets:
           - "--compilation-config"
           - *dsv41_cg8190_replay
       kv_c192:
-        label: "192 clients · host KV"
+        label: "C192 · host KV"
         concurrency: 192
         select:
           kv_offload: simple
@@ -914,20 +914,20 @@ presets:
       OMP_NUM_THREADS: "1"
     points:
       tp2_c1:
-        label: "1 client · TP2"
+        label: "C1 · TP2"
         concurrency: 1
       tp2_c2:
-        label: "2 clients · TP2"
+        label: "C2 · TP2"
         concurrency: 2
       tp2_c4:
-        label: "4 clients · TP2"
+        label: "C4 · TP2"
         concurrency: 4
       tp2_c8:
-        label: "8 clients · TP2"
+        label: "C8 · TP2"
         concurrency: 8
         default: true
       tp2_c16:
-        label: "16 clients · TP2"
+        label: "C16 · TP2"
         concurrency: 16
         args:
           - "--max-num-batched-tokens"
@@ -935,7 +935,7 @@ presets:
           - "--max-num-seqs"
           - "4"
       tp2_c32:
-        label: "32 clients · TP2"
+        label: "C32 · TP2"
         concurrency: 32
         args:
           - "--max-num-batched-tokens"
@@ -943,10 +943,10 @@ presets:
           - "--max-num-seqs"
           - "8"
       tp2_c64:
-        label: "64 clients · TP2"
+        label: "C64 · TP2"
         concurrency: 64
       tp4_c1:
-        label: "1 client · TP4"
+        label: "C1 · TP4"
         concurrency: 1
         description: "The Engram tables stay in HBM at TP4."
         tp: 4
@@ -954,7 +954,7 @@ presets:
           - "--engram-config"
           - '{"cpu_offload":false}'
       tp4_c2:
-        label: "2 clients · TP4"
+        label: "C2 · TP4"
         concurrency: 2
         description: "The Engram tables stay in HBM at TP4."
         tp: 4
@@ -962,7 +962,7 @@ presets:
           - "--engram-config"
           - '{"cpu_offload":false}'
     runbook: |
-      Excess clients queue behind the sequence cap at c16 and c32. Throughput runs replace
+      Excess sessions queue behind the sequence cap at c16 and c32. Throughput runs replace
       block rejection with DSpark's golden acceptance length (3.51); the preset keeps real
       block rejection, as the lane's accuracy eval and ordinary serving do.
 
