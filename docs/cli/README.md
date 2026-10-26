@@ -279,7 +279,8 @@ vllm run-batch \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
 
-See [vllm run-batch](./run-batch.md) for the full reference of all available arguments.
+See the [batch inference examples](../../examples/features/openai_batch/README.md) for more
+usage guidance. Run `vllm run-batch --help` for the full list of arguments.
 
 ## preload
 
