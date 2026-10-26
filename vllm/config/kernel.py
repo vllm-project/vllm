@@ -277,6 +277,9 @@ class KernelConfig:
     """
     vLLM IR op priority for dispatching/lowering during the forward pass.
     Platform defaults appended automatically during VllmConfig.__post_init__.
+
+    Deprecated: vLLM IR is being removed, and this option will be removed in
+    v0.34.0. Kernels will be selected by the platform, as for other custom ops.
     """
 
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
@@ -298,9 +301,10 @@ class KernelConfig:
     specialized_decode: SpecializedDecodeBackend | None = None
     """Which specialized decode to run decode steps on. `monokernel` runs most
     or all of a decoder layer in a single persistent launch, which pays off at
-    the small batch sizes of low-latency serving; `auto` lets vLLM pick, which
-    today means the monokernel. None runs vLLM's regular decode. A deployment
-    that cannot run the selection is refused at startup."""
+    the small batch sizes of low-latency serving (DeepSeek-V4.1 on MI355X,
+    DeepSeek-V4-Pro at TP8 on MI355X); `auto` lets vLLM pick, which today means
+    the monokernel. None runs vLLM's regular decode. A deployment that cannot
+    run the selection is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
