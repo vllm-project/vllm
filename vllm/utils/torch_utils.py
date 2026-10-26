@@ -64,8 +64,14 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.float32: np.float32,
     torch.float64: np.float64,
     torch.uint8: np.uint8,
+    torch.uint16: np.uint16,
+    torch.uint32: np.uint32,
+    torch.uint64: np.uint64,
+    torch.int8: np.int8,
+    torch.int16: np.int16,
     torch.int32: np.int32,
     torch.int64: np.int64,
+    torch.bool: np.bool_,
 }
 
 

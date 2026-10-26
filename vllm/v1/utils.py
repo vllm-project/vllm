@@ -30,9 +30,8 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import ZmqListener, get_open_zmq_ipc_path, get_tcp_uri
-from vllm.utils.serial_utils import NUMPY_VIEW_DTYPES
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import PIN_MEMORY, TORCH_DTYPE_TO_NUMPY_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -814,10 +813,9 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
     """
     if tensor.is_cpu and tensor.is_contiguous():
         # Avoid several torch ops, each of which releases and re-acquires the GIL.
-        # View BF16/FP8 as NumPy-compatible dtypes before exporting their bytes.
-        view_dtype = NUMPY_VIEW_DTYPES.get(tensor.dtype)
+        # View dtypes NumPy cannot export as bytes.
         try:
-            if view_dtype is not None:
+            if tensor.dtype not in TORCH_DTYPE_TO_NUMPY_DTYPE:
                 tensor = tensor.view(torch.uint8)
             return memoryview(tensor.numpy()).cast("B")
         except (TypeError, RuntimeError):

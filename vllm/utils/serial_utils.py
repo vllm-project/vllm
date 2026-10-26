@@ -43,11 +43,6 @@ EMBED_DTYPES: Mapping[EmbedDType, DTypeInfo] = {
     "fp8_e4m3": DTypeInfo(torch.float8_e4m3fn, torch.uint8, np.uint8),
     "fp8_e5m2": DTypeInfo(torch.float8_e5m2, torch.uint8, np.uint8),
 }
-NUMPY_VIEW_DTYPES: dict[torch.dtype, torch.dtype] = {
-    info.torch_dtype: info.torch_view_dtype
-    for info in EMBED_DTYPES.values()
-    if info.torch_dtype != info.torch_view_dtype
-}
 MM_METADATA_DTYPES: Mapping[MmMetadataDType, DTypeInfo] = {
     "int32": DTypeInfo(torch.int32, torch.int32, np.int32),
     "int64": DTypeInfo(torch.int64, torch.int64, np.int64),
