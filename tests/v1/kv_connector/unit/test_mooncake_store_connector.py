@@ -3,6 +3,8 @@
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -32,6 +34,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+    MultiConnector,
+)
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -45,7 +52,7 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
-from .utils import create_vllm_config
+from .utils import create_request, create_vllm_config
 
 
 def _make_vllm_config():
@@ -807,6 +814,246 @@ def _gated_recv(gate: threading.Event, value: int):
         return value.to_bytes(4, "big")
 
     return recv
+
+
+@contextmanager
+def _multi_store_lookup(hit_lengths=(16, 32), *, nested=False, limit=4):
+    configs = [
+        {
+            "kv_connector": "MooncakeStoreConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "lookup_async": True,
+                "lookup_prefetch_limit": limit[i]
+                if isinstance(limit, tuple)
+                else limit,
+                "cache_prefix": f"store-{i}",
+            },
+        }
+        for i in range(len(hit_lengths))
+    ]
+    if nested:
+        configs = [
+            {
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {"connectors": configs},
+            }
+        ]
+    config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"connectors": configs},
+    )
+    gates = [threading.Event() for _ in hit_lengths]
+    started = [threading.Event() for _ in hit_lengths]
+    sockets = [MagicMock() for _ in hit_lengths]
+    for sock, gate, start, hit in zip(sockets, gates, started, hit_lengths):
+        gate.set()
+        sock.recv.side_effect = _gated_recv(gate, hit)
+        sock.send_multipart.side_effect = (
+            lambda *args, start=start, **kwargs: start.set()
+        )
+    with (
+        set_current_vllm_config(config),
+        patch.object(worker, "make_zmq_socket", side_effect=sockets),
+    ):
+        connector = MultiConnector(
+            config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+        )
+    stores = connector.sub_connectors
+    if nested:
+        stores = stores[0].sub_connectors
+    try:
+        yield connector, stores, sockets, gates, started
+    finally:
+        for gate in gates:
+            gate.set()
+        for store in stores:
+            store.connector_scheduler.client.close()
+        connector.shutdown()
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("hits", [(16, 32), (0, 32), (0, 0)])
+def test_multi_store_preschedule_keeps_lookup_results_with_their_store(nested, hits):
+    """Each store adopts its own RPC, while the first-hit policy is unchanged."""
+    with _multi_store_lookup(hits, nested=nested) as (connector, stores, sockets, _, _):
+        request = create_request(num_tokens=48)
+        with ThreadPoolExecutor(max_workers=1) as input_thread:
+            request.kv_preschedule_handle = input_thread.submit(
+                connector.on_preschedule_request, request
+            ).result(timeout=5)
+        handle = request.kv_preschedule_handle
+        assert handle is not None, "MultiConnector did not start child lookups"
+        states = handle.handles[0].handles if nested else handle.handles
+        for state, expected in zip(states, hits):
+            assert state.future.result(timeout=5).hit_length == expected
+        assert all(not store.connector_scheduler.client._lookups for store in stores)
+        connector.on_new_request(request)
+        expected = next((hit for hit in hits if hit), 0)
+        assert connector.get_num_new_matched_tokens(request, 0) == (
+            expected,
+            bool(expected),
+        )
+        assert request.kv_preschedule_handle is None
+        blocks = KVCacheBlocks(([KVCacheBlock(i) for i in range(3)],))
+        connector.update_state_after_alloc(request, blocks, expected)
+        chosen = hits.index(expected) if expected else -1
+        for i, store in enumerate(stores):
+            spec = store.connector_scheduler.load_specs.get(request.request_id)
+            assert (spec is not None and spec.can_load) == (i == chosen)
+        assert connector.get_num_new_matched_tokens(request, 0) == (
+            expected,
+            bool(expected),
+        )
+        assert [sock.send_multipart.call_count for sock in sockets] == [1, 1]
+
+
+@pytest.mark.parametrize("first_limit", [0, 4])
+def test_multi_store_preschedule_retains_later_handle_when_first_is_pending(
+    first_limit,
+):
+    with _multi_store_lookup((0, 32), limit=(first_limit, 4)) as (
+        connector,
+        stores,
+        sockets,
+        gates,
+        _,
+    ):
+        gates[0].clear()
+        request = create_request(num_tokens=48)
+        request.kv_preschedule_handle = connector.on_preschedule_request(request)
+        handle = request.kv_preschedule_handle
+        assert handle is not None, "MultiConnector did not start child lookups"
+        second = handle.handles[1]
+        assert second.future.result(timeout=5).hit_length == 32
+        assert connector.get_num_new_matched_tokens(request, 0) == (None, False)
+        assert handle.handles == [None, second]
+        gates[0].set()
+        stores[0].connector_scheduler.client._lookups[request.request_id].future.result(
+            timeout=5
+        )
+        assert connector.get_num_new_matched_tokens(request, 0) == (32, True)
+        assert request.kv_preschedule_handle is None
+        assert [sock.send_multipart.call_count for sock in sockets] == [1, 1]
+
+
+@pytest.mark.parametrize("probe", [False, True])
+@pytest.mark.parametrize("all_groups", [False, True])
+def test_multi_store_preschedule_abort_cancels_each_handle_before_id_reuse(
+    probe, all_groups
+):
+    """Abort must clean up both adopted and not-yet-probed child lookups."""
+    with _multi_store_lookup() as (connector, _, sockets, gates, started):
+        for gate in gates:
+            gate.clear()
+        blocker = create_request(num_tokens=48)
+        blocker.kv_preschedule_handle = connector.on_preschedule_request(blocker)
+        assert blocker.kv_preschedule_handle is not None
+        for event in started:
+            assert event.wait(timeout=5)
+        request = create_request(request_id=1000, num_tokens=48)
+        request.kv_preschedule_handle = connector.on_preschedule_request(request)
+        handle = request.kv_preschedule_handle
+        assert handle is not None, "MultiConnector did not start child lookups"
+        futures = [state.future for state in handle.handles]
+        if probe:
+            assert connector.get_num_new_matched_tokens(request, 0) == (None, False)
+        if all_groups:
+            assert connector.request_finished_all_groups(request, ([],)) == (
+                False,
+                None,
+            )
+        else:
+            assert connector.request_finished(request, []) == (False, None)
+        assert request.kv_preschedule_handle is None
+        assert all(future.cancelled() for future in futures)
+        output = SchedulerOutput.make_empty()
+        output.finished_req_ids = {request.request_id}
+        connector.build_connector_meta(output)
+        for gate in gates:
+            gate.set()
+        for state in blocker.kv_preschedule_handle.handles:
+            state.future.result(timeout=5)
+        replacement = create_request(request_id=1000, num_tokens=64)
+        replacement.kv_preschedule_handle = connector.on_preschedule_request(
+            replacement
+        )
+        assert replacement.kv_preschedule_handle is not None
+        for state in replacement.kv_preschedule_handle.handles:
+            state.future.result(timeout=5)
+        assert connector.get_num_new_matched_tokens(replacement, 0) == (16, True)
+        assert [sock.send_multipart.call_count for sock in sockets] == [2, 2]
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_multi_store_running_lookup_cannot_replace_reused_request_id(nested):
+    """An uncancellable RPC may finish after its request ID has been reused."""
+    with _multi_store_lookup(nested=nested) as (
+        connector,
+        _,
+        sockets,
+        gates,
+        _,
+    ):
+        recv_started = [threading.Event() for _ in sockets]
+        for sock, gate, started, hit in zip(sockets, gates, recv_started, (16, 32)):
+            gate.clear()
+
+            def recv(gate=gate, started=started, hit=hit):
+                started.set()
+                gate.wait()
+                return hit.to_bytes(4, "big")
+
+            sock.recv.side_effect = recv
+        request = create_request(request_id=1000, num_tokens=48)
+        request.kv_preschedule_handle = connector.on_preschedule_request(request)
+        handle = request.kv_preschedule_handle
+        assert handle is not None
+        states = list(handle.handles[0].handles if nested else handle.handles)
+        for event, state in zip(recv_started, states):
+            assert event.wait(timeout=5)
+            assert state.future.running()
+        assert connector.get_num_new_matched_tokens(request, 0) == (None, False)
+        assert connector.request_finished_all_groups(request, ([],)) == (False, None)
+        assert request.kv_preschedule_handle is None
+        assert all(not state.future.cancelled() for state in states)
+
+        # The old recv calls have already captured their results. The queued
+        # replacement must receive different results from the same stores.
+        for sock, gate, hit in zip(sockets, gates, (0, 48)):
+            sock.recv.side_effect = _gated_recv(gate, hit)
+        replacement = create_request(request_id=1000, num_tokens=64)
+        replacement.kv_preschedule_handle = connector.on_preschedule_request(
+            replacement
+        )
+        new_handle = replacement.kv_preschedule_handle
+        assert new_handle is not None
+        new_states = list(
+            new_handle.handles[0].handles if nested else new_handle.handles
+        )
+        assert connector.get_num_new_matched_tokens(replacement, 0) == (None, False)
+        for gate in gates:
+            gate.set()
+        assert [state.future.result(timeout=5).hit_length for state in states] == [
+            16,
+            32,
+        ]
+        assert [state.future.result(timeout=5).hit_length for state in new_states] == [
+            0,
+            48,
+        ]
+        assert connector.get_num_new_matched_tokens(replacement, 0) == (48, True)
+        assert replacement.kv_preschedule_handle is None
+        assert [sock.send_multipart.call_count for sock in sockets] == [2, 2]
+
+
+def test_multi_store_preschedule_remains_disabled_by_default():
+    with _multi_store_lookup(limit=0) as (connector, _, sockets, _, _):
+        request = create_request(num_tokens=48)
+        assert connector.on_preschedule_request(request) is None
+        assert [sock.send_multipart.call_count for sock in sockets] == [0, 0]
 
 
 def test_admission_lookup_retains_completed_result_until_scheduled():

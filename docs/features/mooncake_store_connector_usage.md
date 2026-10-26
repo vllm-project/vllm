@@ -274,6 +274,16 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - **kv_consumer**: For instances that load KV caches from the pool.
 - **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
 
+### Arrival-time lookup with MultiConnector
+
+Arrival-time lookup also works when MooncakeStoreConnector is a child of
+MultiConnector, including nested MultiConnector configurations. Set
+`lookup_async` and `lookup_prefetch_limit` in each Mooncake child's
+`kv_connector_extra_config`. Each child has its own in-flight limit and TTL;
+limits are not shared across children. The existing first-hit selection policy
+and GPU allocation/load path are unchanged. Earlier queries may do extra work
+for requests that later abort or hit fully in local GPU cache.
+
 ### kv_connector_extra_config
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.

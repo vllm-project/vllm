@@ -337,6 +337,11 @@ class TestExampleConnector(ExampleConnector):
         kv_cache_config: KVCacheConfig,
     ):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
+        self._check_preschedule_handle = (
+            config.kv_transfer_config.kv_connector_extra_config.get(
+                "test_preschedule_handle", False
+            )
+        )
         self._connector = ExampleConnector(config, role, kv_cache_config)
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
@@ -354,6 +359,7 @@ class TestExampleConnector(ExampleConnector):
             "call_record",
             "name",
             "_event_file",
+            "_check_preschedule_handle",
             "__class__",
             "__dict__",
             "__getattribute__",
@@ -367,8 +373,17 @@ class TestExampleConnector(ExampleConnector):
         # Intercept calls to the connector interface and write an event
         # for each one to a file, which can be read back in the main test proc.
         if callable(attr):
+            if name == "on_preschedule_request" and self._check_preschedule_handle:
+                return lambda request: (self.name, request.request_id)
 
             def wrapper(*args, **kwargs):
+                if name == "on_new_request" and self._check_preschedule_handle:
+                    request = args[0]
+                    assert request.kv_preschedule_handle == (
+                        self.name,
+                        request.request_id,
+                    )
+                    request.kv_preschedule_handle = None
                 self.call_record[name] += 1
 
                 # Include args that we're interested in

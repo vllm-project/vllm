@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from collections.abc import Callable, Iterable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -49,6 +49,11 @@ logger = init_logger(__name__)
 class MultiKVConnectorMetadata(KVConnectorMetadata):
     metadata: tuple[KVConnectorMetadata, ...]
     extra_async_saves: dict[str, int] | None = None
+
+
+@dataclass
+class MultiKVConnectorPrescheduleHandle:
+    handles: list[object | None]
 
 
 @dataclass
@@ -444,9 +449,38 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
     # Scheduler-side methods
     # ==============================
+    def on_preschedule_request(
+        self, request: "Request"
+    ) -> MultiKVConnectorPrescheduleHandle | None:
+        """Start child work on the input thread without adopting its handles."""
+        handles = [c.on_preschedule_request(request) for c in self._connectors]
+        if not any(handle is not None for handle in handles):
+            return None
+        return MultiKVConnectorPrescheduleHandle(handles)
+
+    @contextmanager
+    def _child_preschedule_handle(
+        self, request: "Request", index: int
+    ) -> Iterator[None]:
+        """Expose this child's handle and preserve its consumption on return."""
+        state = request.kv_preschedule_handle
+        if state is None:
+            yield
+            return
+        assert isinstance(state, MultiKVConnectorPrescheduleHandle)
+        request.kv_preschedule_handle = state.handles[index]
+        try:
+            yield
+        finally:
+            state.handles[index] = request.kv_preschedule_handle
+            request.kv_preschedule_handle = (
+                state if any(h is not None for h in state.handles) else None
+            )
+
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
-        connector = self._connectors[self._requests_to_connector[request.request_id]]
-        return connector.get_loaded_kv_cache_group_ids(request)
+        index = self._requests_to_connector[request.request_id]
+        with self._child_preschedule_handle(request, index):
+            return self._connectors[index].get_loaded_kv_cache_group_ids(request)
 
     def get_num_new_matched_tokens(
         self,
@@ -455,9 +489,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[int | None, bool]:
         to_return = (0, False)
         for i, c in enumerate(self._connectors):
-            toks, load_async = c.get_num_new_matched_tokens(
-                request, num_computed_tokens
-            )
+            with self._child_preschedule_handle(request, i):
+                toks, load_async = c.get_num_new_matched_tokens(
+                    request, num_computed_tokens
+                )
             # If there is a connector still looking up the matches,
             # we return None to indicate that we are not done yet.
             if toks is None:
@@ -477,25 +512,28 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         chosen_connector = self._requests_to_connector.get(request.request_id)
         if chosen_connector is None:
             return super().get_external_cache_hit_sources(request, num_external_tokens)
-        return self._connectors[chosen_connector].get_external_cache_hit_sources(
-            request, num_external_tokens
-        )
+        with self._child_preschedule_handle(request, chosen_connector):
+            return self._connectors[chosen_connector].get_external_cache_hit_sources(
+                request, num_external_tokens
+            )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         for i, c in enumerate(self._connectors):
-            if i == chosen_connector:
-                # Forward call to the chosen connector (if any).
-                c.update_state_after_alloc(request, blocks, num_external_tokens)
-            else:
-                # Other connectors still receive the request's real blocks
-                c.update_state_after_alloc(request, blocks, 0)
+            with self._child_preschedule_handle(request, i):
+                if i == chosen_connector:
+                    # Forward call to the chosen connector (if any).
+                    c.update_state_after_alloc(request, blocks, num_external_tokens)
+                else:
+                    # Other connectors still receive the request's real blocks
+                    c.update_state_after_alloc(request, blocks, 0)
 
     def on_new_request(self, request: "Request") -> None:
-        for c in self._connectors:
-            c.on_new_request(request)
+        for i, c in enumerate(self._connectors):
+            with self._child_preschedule_handle(request, i):
+                c.on_new_request(request)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -565,8 +603,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         async_saves = 0
         kv_txfer_params = None
-        for c in self._connectors:
-            async_save, txfer_params = per_connector_fn(c)
+        for i, c in enumerate(self._connectors):
+            with self._child_preschedule_handle(request, i):
+                async_save, txfer_params = per_connector_fn(c)
             if async_save:
                 async_saves += 1
             if txfer_params is not None:
@@ -603,10 +642,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: tuple[list[int], ...],
         partial_tail_offloads: list[tuple[int, int, int]],
     ) -> bool:
-        accepted = [
-            c.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
-            for c in self._connectors
-        ]
+        accepted = []
+        for i, c in enumerate(self._connectors):
+            with self._child_preschedule_handle(request, i):
+                accepted.append(
+                    c.register_finished_partial_tail(
+                        request, block_ids, partial_tail_offloads
+                    )
+                )
         return any(accepted)
 
     def request_finished_all_groups(
