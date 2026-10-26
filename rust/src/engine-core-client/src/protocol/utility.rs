@@ -64,8 +64,9 @@ impl FromStr for PauseMode {
 
 /// Process checkpoint lifecycle of an engine, as Python's `CheckpointState`.
 ///
-/// Scheduling runs only while `Running`. Display/from-str serde keeps the
-/// Python literal strings on the MessagePack wire and in JSON responses.
+/// It serves only while `Running`, and may go through the cycle any number of
+/// times. Display/from-str serde keeps the Python literal strings on the
+/// MessagePack wire and in JSON responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SerializeDisplay, DeserializeFromStr)]
 pub enum CheckpointState {
     /// Serving requests.
@@ -103,16 +104,17 @@ impl FromStr for CheckpointState {
     type Err = String;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        [
-            Self::Running,
-            Self::Preparing,
-            Self::Prepared,
-            Self::Restoring,
-            Self::Failed,
-        ]
-        .into_iter()
-        .find(|state| state.as_str() == value)
-        .ok_or_else(|| format!("invalid checkpoint state `{value}`"))
+        match value {
+            "running" => Ok(Self::Running),
+            "preparing" => Ok(Self::Preparing),
+            "prepared" => Ok(Self::Prepared),
+            "restoring" => Ok(Self::Restoring),
+            "failed" => Ok(Self::Failed),
+            other => Err(format!(
+                "invalid checkpoint state `{other}`; expected one of: running, preparing, \
+                 prepared, restoring, failed"
+            )),
+        }
     }
 }
 

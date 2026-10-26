@@ -109,7 +109,9 @@ pub async fn status(State(state): State<Arc<AppState>>) -> CheckpointResult {
     let status = match checkpoint_state {
         CheckpointState::Prepared => StatusCode::OK,
         CheckpointState::Failed => StatusCode::INTERNAL_SERVER_ERROR,
-        _ => StatusCode::SERVICE_UNAVAILABLE,
+        CheckpointState::Running | CheckpointState::Preparing | CheckpointState::Restoring => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
     };
     state_response(status, checkpoint_state, error)
 }

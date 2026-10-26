@@ -987,7 +987,8 @@ impl EngineCoreClient {
 
     /// Start preparing every engine for a process checkpoint: drain with
     /// `mode`, then release the KV cache and what a checkpoint must not contain.
-    /// Returns why the engines cannot prepare, with nothing changed.
+    /// Returns the first refusal from any engine. An engine that refuses
+    /// changes nothing, but with data parallelism the others may have started.
     pub async fn checkpoint_prepare(&self, mode: PauseMode) -> Result<Option<String>> {
         let refusals: Vec<Option<String>> =
             self.call_utility("checkpoint_prepare", (mode,)).await?;
@@ -1005,18 +1006,18 @@ impl EngineCoreClient {
     /// Engines move independently: failed if any failed, otherwise the state
     /// all engines share, otherwise the transition in progress.
     pub async fn checkpoint_state(&self) -> Result<(CheckpointState, Option<String>)> {
-        let states: Vec<(CheckpointState, Option<String>)> =
+        let mut states: Vec<(CheckpointState, Option<String>)> =
             self.call_utility("checkpoint_state", ()).await?;
-        if let Some(failed) = states.iter().find(|(state, _)| *state == CheckpointState::Failed) {
-            return Ok(failed.clone());
+        if let Some(index) = states.iter().position(|(state, _)| *state == CheckpointState::Failed)
+        {
+            return Ok(states.swap_remove(index));
         }
-        let state = if states.iter().map(|(state, _)| state).all_equal() {
-            // `engine_count >= 1` is enforced during startup handshake.
-            states[0].0
-        } else if states.iter().any(|(state, _)| *state == CheckpointState::Preparing) {
-            CheckpointState::Preparing
-        } else {
-            CheckpointState::Restoring
+        let state = match states.iter().map(|(state, _)| *state).all_equal_value() {
+            Ok(state) => state,
+            Err(_) if states.iter().any(|(state, _)| *state == CheckpointState::Preparing) => {
+                CheckpointState::Preparing
+            }
+            Err(_) => CheckpointState::Restoring,
         };
         Ok((state, None))
     }

@@ -1837,11 +1837,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def checkpoint_state_async(self) -> tuple[CheckpointState, str | None]:
         # Engines move independently: failed if any failed, otherwise a state
-        # all share or the transition in progress.
-        states = {
-            CheckpointState(state): error
-            for state, error in await self.call_utility_all_async("checkpoint_state")
-        }
+        # all share or the transition in progress. A failure reports the first
+        # failed engine's error.
+        states: dict[CheckpointState, str | None] = {}
+        for state, error in await self.call_utility_all_async("checkpoint_state"):
+            states.setdefault(CheckpointState(state), error)
         if CheckpointState.FAILED in states:
             return CheckpointState.FAILED, states[CheckpointState.FAILED]
         if len(states) == 1:
