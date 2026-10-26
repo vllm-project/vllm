@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
 use std::slice;
 
 use indexmap::IndexMap;
@@ -724,7 +723,9 @@ pub struct PromptLogprob {
     pub decoded_token: String,
 }
 
-pub type PromptLogprobs = Vec<Option<HashMap<u32, PromptLogprob>>>;
+/// Each scored position's candidates in the engine's order (the prompt token
+/// first), serialized in that order like Python's dict.
+pub type PromptLogprobs = Vec<Option<IndexMap<u32, PromptLogprob>>>;
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbs` class.
 #[derive(Debug, Clone, Serialize)]

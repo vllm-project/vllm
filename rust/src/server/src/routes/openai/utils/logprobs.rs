@@ -335,6 +335,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prompt_logprobs_maps_keep_engine_order() {
+        // Prompt token `C` is the rank-3 token: the engine row is `[C, A, B, C]`.
+        let mut scored_positions = sample_logprobs().positions;
+        let prompt_token = scored_positions[0].entries[2].clone();
+        scored_positions[0].entries.insert(0, prompt_token);
+        let prompt_logprobs = vllm_text::DecodedPromptLogprobs {
+            first_token_id: 10,
+            first_token: "first".to_string(),
+            scored_positions,
+        };
+
+        let maps = prompt_logprobs_to_maps(Some(&prompt_logprobs), &[10, 3]).unwrap();
+        let token_ids = maps[1].as_ref().unwrap().keys().copied().collect::<Vec<_>>();
+        assert_eq!(token_ids, [3, 1, 2]);
+    }
+
     fn sample_logprobs() -> DecodedLogprobs {
         DecodedLogprobs {
             positions: vec![DecodedPositionLogprobs {
