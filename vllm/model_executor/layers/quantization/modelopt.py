@@ -99,6 +99,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -116,6 +117,7 @@ from vllm.model_executor.utils import (
     replace_parameter,
     set_weight_attrs,
 )
+from vllm.platforms import current_platform
 from vllm.utils.b12x import B12X_BLOCK_CODECS
 from vllm.utils.math_utils import cdiv
 
@@ -353,8 +355,8 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             else:
                 kv_cache_quant_method = None
 
-            # "ignore" is the key in config.json
-            exclude_modules = config.get("ignore", [])
+            # ModelOpt checkpoints use either key across export versions.
+            exclude_modules = config.get("ignore", config.get("exclude_modules", []))
             group_size_raw = config.get("group_size")
 
         if not quant_method:
@@ -1022,6 +1024,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
+
+        # Keep dummy scales positive and gate/up global scales identical.
+        for param, value in (
+            (w13_weight_scale, 1.0),
+            (w2_weight_scale, 1.0),
+            (w13_weight_scale_2, 1e-3),
+            (w2_weight_scale_2, 1e-3),
+            (w13_input_scale, 1e-2),
+            (w2_input_scale, 1e-2),
+        ):
+            set_weight_attrs(param, {"dummy_weight_value": value})
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
@@ -2164,10 +2177,17 @@ class KFp8StaticTensor(QuantKeyScheme):
     def process(self, layer, role) -> None:
         if role is WEIGHT:
             weight = layer.weight
-            max_w_scale = layer.weight_scale.max()
-            if not (layer.weight_scale == layer.weight_scale[0]).all():
+            weight_scale = layer.weight_scale
+            if current_platform.is_fp8_fnuz() and weight.dtype == torch.float8_e4m3fn:
+                weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                    weight, weight_scale, getattr(layer, "input_scale", None)
+                )
+                if input_scale is not None:
+                    replace_parameter(layer, "input_scale", input_scale)
+            max_w_scale = weight_scale.max()
+            if not (weight_scale == weight_scale[0]).all():
                 max_w_scale, weight = requantize_with_max_scale(
-                    layer.weight, layer.weight_scale, layer.logical_widths
+                    weight, weight_scale, layer.logical_widths
                 )
             # Transposed here rather than in the kernel: ModelOpt maps each
             # fp8 key to exactly one kernel, so the layout is key-determined.
