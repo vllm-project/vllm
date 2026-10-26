@@ -509,6 +509,44 @@ def test_deepseek_v41_quant_config_rejects_fp8_mtp_shared_expert_fse(
     )
 
 
+def test_deepseek_v41_fp8_experts_keep_fp8_fse_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.deepseek_v41 import quant_config as deepseek_v41_quant_config
+
+    hf_config = SimpleNamespace(
+        num_hidden_layers=2,
+        expert_dtype="fp8",
+        quantization_config={
+            "quant_method": "fp8",
+            "fmt": "e4m3",
+            "scale_fmt": "ue8m0",
+            "weight_block_size": [128, 128],
+        },
+    )
+    current_vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config)
+    )
+    monkeypatch.setattr(
+        vllm_config_module, "get_current_vllm_config", lambda: current_vllm_config
+    )
+    monkeypatch.setattr(
+        deepseek_v41_quant_config,
+        "get_current_vllm_config",
+        lambda: current_vllm_config,
+    )
+    quant_config = deepseek_v41_quant_config.DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True,
+        weight_block_size=[128, 128],
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.2.ffn.experts",
+        "model.layers.2.ffn.shared_experts",
+    ) == (True, None)
+
+
 def test_deepseek_v4_heterogeneous_fhmoe_keeps_native_intermediate_width() -> None:
     from vllm.models.deepseek_v4.amd.model import _prepare_native_fp8_shared_expert
 

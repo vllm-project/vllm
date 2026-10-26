@@ -191,12 +191,12 @@ def is_shared_expert_quant_fse_compatible(
             '\'{"*shared_experts*": "mxfp4"}\'',
         )
 
-    if isinstance(quant_config, (DeepseekV4FP8Config, DeepseekV41FP8Config)):
+    if (
+        isinstance(quant_config, (DeepseekV4FP8Config, DeepseekV41FP8Config))
+        and quant_config.expert_dtype == "fp4"
+    ):
         from vllm.config import get_current_vllm_config
         from vllm.model_executor.models.utils import extract_layer_index
-
-        if quant_config.expert_dtype != "fp4":
-            return False, "DeepSeek-V4/V4.1 routed experts are not MXFP4"
 
         hf_config = get_current_vllm_config().model_config.hf_config
 
