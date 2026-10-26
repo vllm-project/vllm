@@ -918,6 +918,29 @@ class TestTieringOffloadingManager:
         tier1_submit_store.assert_not_called()
         tier2_submit_store.assert_not_called()
 
+    def test_held_promotions_keep_primary_hits(self, manager_setup):
+        chunks = to_keys(range(2))
+        self._start_request()
+        self.manager.prepare_store(chunks[:1], _CTX)
+        self.manager.complete_store(chunks[:1], _CTX, success=True)
+        self.secondary_tier1.chunks[chunks[1]] = True
+
+        self.manager._promotions_held = True
+
+        assert self.manager.lookup(chunks[0], _CTX) is LookupResult.HIT
+        assert self.manager.lookup(chunks[1], _CTX) is LookupResult.MISS
+
+    def test_reset_holds_promotions_until_flushed(self, manager_setup):
+        chunk = to_keys(range(1))[0]
+        self._start_request()
+        self.secondary_tier1.chunks[chunk] = True
+
+        self.manager.reset_cache()
+        assert self.manager.lookup(chunk, _CTX) is LookupResult.MISS
+
+        self.manager.on_reset_flushed()
+        assert self.manager.lookup(chunk, _CTX) is not LookupResult.MISS
+
     def test_lookup_batches_submit_load_per_request(self, manager_setup, monkeypatch):
         """lookup() defers submit_load until on_schedule_end(), one per request.
 
