@@ -823,6 +823,57 @@ steps:
   - pytest -v -s tools/test_check_agent_files.py
   - pytest -v -s tools/test_check_trust_remote_code.py
 
+- label: ":computer: (CPU) Session Prefix Reuse"
+  key: cpu-session-prefix
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 35
+  device: cpu-small
+  working_dir: "/vllm-workspace"
+  source_file_dependencies: &session-prefix-deps
+  - requirements/
+  - vllm/utils/session_prefix.py
+  - vllm/renderers/
+  - vllm/tool_parsers/deepseekv31_tool_parser.py
+  - examples/tool_chat_template_deepseekv31.jinja
+  - vllm/multimodal/
+  - vllm/config/model.py
+  - vllm/config/cache.py
+  - vllm/config/scheduler.py
+  - vllm/config/utils.py
+  - vllm/engine/arg_utils.py
+  - vllm/entrypoints/openai/chat_completion/serving.py
+  - tests/utils_/test_session_prefix.py
+  - tests/renderers/test_session_prefix.py
+  - tests/config/test_config_utils.py
+  - tests/entrypoints/openai/chat_completion/test_serving_chat.py
+  - tests/renderers/test_session_prefix_media_fallback.py
+  commands:
+  # Resolve the repository image's dependencies before creating a pinned overlay.
+  - uv venv --system-site-packages .venv-session-prefix-actual
+  - .venv-session-prefix-actual/bin/python -m pytest -v tests/renderers/test_session_prefix.py -k 'test_real_renderer_chat_growth_matches_native_and_hits or test_deepseek_documented_tools_preserve_native_ids_and_reuse'
+  - |
+    .venv-session-prefix-actual/bin/python -c "import importlib.metadata as m; print('Session-prefix actual dependency audit:', {n:m.version(n) for n in ('transformers', 'tokenizers')})"
+  # The audited environment must really reuse; these tests assert exact/partial hits.
+  - uv venv --system-site-packages .venv-session-prefix-audited
+  - uv pip install --python .venv-session-prefix-audited/bin/python transformers==5.20.2 tokenizers==0.23.2 huggingface-hub==1.31.0
+  - .venv-session-prefix-audited/bin/python -m pytest -v tests/utils_/test_session_prefix.py tests/renderers/test_session_prefix.py tests/renderers/test_session_prefix_media_fallback.py tests/config/test_config_utils.py
+
+- label: ":nvidia: (H200 MIG 18GB) Session Prefix Serving"
+  key: session-prefix-serving
+  device: h200_18gb
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace"
+  source_file_dependencies: *session-prefix-deps
+  commands:
+  - uv venv --system-site-packages .venv-session-prefix-gpu
+  - uv pip install --python .venv-session-prefix-gpu/bin/python transformers==5.20.2 tokenizers==0.23.2 huggingface-hub==1.31.0
+  - |
+    printf '#!/bin/sh\nexec "%s" -m vllm.entrypoints.cli.main "$@"\n' "$PWD/.venv-session-prefix-gpu/bin/python" > .venv-session-prefix-gpu/bin/vllm
+    chmod +x .venv-session-prefix-gpu/bin/vllm
+  - export PATH="$PWD/.venv-session-prefix-gpu/bin:$PATH"
+  - .venv-session-prefix-gpu/bin/python -m pytest -v tests/entrypoints/openai/chat_completion/test_serving_chat.py -k 'test_session_prefix_text_requests_preserve_native_ids_and_outputs'
+
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
   depends_on:

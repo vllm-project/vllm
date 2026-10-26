@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
+    from vllm.utils.session_prefix import PrefixContext
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -220,6 +221,10 @@ class TokenizeParams:
 
     truncate_prompt_tokens_param: str = "truncate_prompt_tokens"
     """Override this to edit the message for validation errors."""
+
+    session_prefix_context: "PrefixContext | None" = field(
+        default=None, compare=False, repr=False
+    )
 
     @property
     def max_input_tokens(self) -> int | None:
