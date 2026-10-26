@@ -1327,6 +1327,9 @@ def test_gpu_prefix_hit_refreshes_cpu_lru() -> None:
         block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
     )
     assert sched.get_num_new_matched_tokens(req_a2, 2 * BLOCK_SIZE) == (0, False)
+    sched.update_state_after_alloc(
+        req_a2, KVCacheBlocks(blocks=([],)), num_external_tokens=0
+    )
 
     # Storing 2 new blocks evicts the 2 LRU blocks, which are now req_b's.
     req_c = make_request(num_blocks=2)
@@ -2901,7 +2904,7 @@ def test_finished_eager_store_does_not_duplicate_completed_partial_tail() -> Non
 
 def test_gpu_prefix_hit_refreshes_cpu_mamba_boundary() -> None:
     """A hybrid GPU prefix hit refreshes the CPU attention blocks and the Mamba
-    state at the hit boundary, not older Mamba states."""
+    state at the hit boundary, not older Mamba states, once admitted."""
     block_size = 4 * BLOCK_SIZE
     fix = _make_hybrid_attention_mamba_scheduler(block_size=block_size)
     sched = fix.scheduler
@@ -2926,7 +2929,12 @@ def test_gpu_prefix_hit_refreshes_cpu_mamba_boundary() -> None:
     cpu_pool.free_blocks([*attention, *mamba])
     cpu_pool.free_blocks(newer)
 
+    lru_before = cpu_pool.free_block_queue.get_all_free_blocks()
     assert sched.get_num_new_matched_tokens(req, 2 * block_size) == (0, False)
+    assert cpu_pool.free_block_queue.get_all_free_blocks() == lru_before
+    sched.update_state_after_alloc(
+        req, KVCacheBlocks(blocks=([], [])), num_external_tokens=0
+    )
 
     lru_order = cpu_pool.free_block_queue.get_all_free_blocks()
     assert lru_order[-3:] == [mamba[1], attention[1], attention[0]]
