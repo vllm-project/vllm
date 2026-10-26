@@ -130,8 +130,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     })
     .await
     .context("failed to connect to engine core")?;
-    let server_info = ServerInfoSnapshot::from_engine(&client)
-        .unwrap_or_else(|| ServerInfoSnapshot::from_config(config));
+    let server_info = ServerInfoSnapshot::new(config, &client);
 
     let llm = Llm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))

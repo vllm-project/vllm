@@ -20,52 +20,45 @@ pub(crate) enum ServerInfoConfigFormat {
 /// Snapshot returned by `/server_info`.
 #[derive(Debug, Clone)]
 pub(crate) struct ServerInfoSnapshot {
-    vllm_config_text: String,
-    vllm_config_json: Value,
+    /// The engine's `VllmConfig` as seen from this frontend, or `None` if the
+    /// engine reports none (it was started without `VLLM_SERVER_DEV_MODE`).
+    vllm_config: Option<Value>,
+    /// The Rust frontend's own `Config`, which has no Python counterpart.
+    rust_frontend_config: Value,
     vllm_env: BTreeMap<String, String>,
     system_env: BTreeMap<String, String>,
 }
 
 impl ServerInfoSnapshot {
-    /// Capture the `VllmConfig` reported by the first engine, as seen from this
-    /// frontend, or `None` if the engine reports none (it was started without
-    /// `VLLM_SERVER_DEV_MODE`).
-    pub(crate) fn from_engine(client: &EngineCoreClient) -> Option<Self> {
-        let engine_config = client.ready_response().vllm_config.clone()?;
-        Some(Self::from_vllm_config(frontend_vllm_config(
-            engine_config,
-            client,
-        )))
-    }
-
-    /// Capture the runtime configuration fields available to the Rust frontend.
-    pub(crate) fn from_config(config: &Config) -> Self {
-        Self::from_vllm_config(
-            serde_json::to_value(config).expect("server info value must serialize"),
-        )
-    }
-
-    fn from_vllm_config(vllm_config_json: Value) -> Self {
+    pub(crate) fn new(config: &Config, client: &EngineCoreClient) -> Self {
         Self {
-            vllm_config_text: render_config_text(&vllm_config_json),
-            vllm_config_json,
+            vllm_config: engine_vllm_config(client),
+            rust_frontend_config: serde_json::to_value(config)
+                .expect("server info value must serialize"),
             vllm_env: collect_vllm_env(),
             system_env: collect_system_env(),
         }
     }
 
     pub(crate) fn response(&self, config_format: ServerInfoConfigFormat) -> Value {
-        let vllm_config = match config_format {
-            ServerInfoConfigFormat::Text => Value::String(self.vllm_config_text.clone()),
-            ServerInfoConfigFormat::Json => self.vllm_config_json.clone(),
+        let render = |config: &Value| match config_format {
+            ServerInfoConfigFormat::Text => Value::String(render_config_text(config)),
+            ServerInfoConfigFormat::Json => config.clone(),
         };
 
         json!({
-            "vllm_config": vllm_config,
+            "vllm_config": self.vllm_config.as_ref().map(render),
+            "rust_frontend_config": render(&self.rust_frontend_config),
             "vllm_env": self.vllm_env.clone(),
             "system_env": self.system_env.clone(),
         })
     }
+}
+
+/// The `VllmConfig` reported by the first engine, as seen from this frontend.
+fn engine_vllm_config(client: &EngineCoreClient) -> Option<Value> {
+    let engine_config = client.ready_response().vllm_config.clone()?;
+    Some(frontend_vllm_config(engine_config, client))
 }
 
 /// Replace the fields of one engine's `VllmConfig` that Python's `/server_info`
@@ -159,9 +152,7 @@ mod tests {
         EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode,
     };
 
-    use super::{
-        ServerInfoConfigFormat, ServerInfoSnapshot, is_public_vllm_env_key, render_config_text,
-    };
+    use super::{engine_vllm_config, is_public_vllm_env_key, render_config_text};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn engine_vllm_config_reports_frontend_view() {
@@ -229,9 +220,8 @@ mod tests {
         }
         let client = client_task.await.unwrap().expect("connect multi-engine client");
 
-        let snapshot = ServerInfoSnapshot::from_engine(&client).expect("engine reports config");
         assert_eq!(
-            snapshot.response(ServerInfoConfigFormat::Json)["vllm_config"],
+            engine_vllm_config(&client).expect("engine reports config"),
             json!({
                 "model_config": {"model": "test-model", "max_model_len": 4096},
                 "cache_config": {
