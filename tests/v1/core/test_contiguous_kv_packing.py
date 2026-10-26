@@ -168,8 +168,11 @@ def test_replayssm_low_head_packed_alignment(layout):
         state_alignment=16,
         block_stride_alignment=16,
     )
-    spec = replace(spec, page_size_padded=spec.state_content_size_bytes + 1)
-    assert spec.page_size_bytes % 16 == 0
+    with pytest.raises(AssertionError, match="page_size_padded must be aligned"):
+        replace(spec, page_size_padded=spec.state_content_size_bytes + 1)
+    padded_page_size = spec.state_content_size_bytes + 16
+    spec = replace(spec, page_size_padded=padded_page_size)
+    assert spec.page_size_bytes == padded_page_size
     # Block-outer packing must also align an overlay with a larger, odd page.
     other_bytes = (
         2 * spec.page_size_bytes + 4

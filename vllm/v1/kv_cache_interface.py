@@ -1113,10 +1113,8 @@ class MambaSpec(KVCacheSpec):
     def __post_init__(self):
         super().__post_init__()
         if self.page_size_padded is not None:
-            object.__setattr__(
-                self,
-                "page_size_padded",
-                round_up(self.page_size_padded, self.state_alignment),
+            assert self.page_size_padded % self.state_alignment == 0, (
+                "page_size_padded must be aligned to state_alignment"
             )
 
     @property

@@ -188,7 +188,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     A = -torch.ones(heads, device="cuda")
     null = NULL_BLOCK_ID
     block_tables = [
-        [[2, 3], [null, 5], [4, 4], [null, null], [null, null]],
+        [[null, 3], [null, 5], [4, 4], [null, null], [null, null]],
         [[8, 9], [null, 11], [10, 10], [null, null], [null, null]],
         [[14, 15], [null, 17], [16, 16], [null, null], [null, null]],
     ]
@@ -212,7 +212,8 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         ]
         grouped.append((mixers, spec, _cuda_ints(table)))
     context = ReplaySSMModelContext.create(grouped, max_num_reqs=6)
-    # Batch row 0 crosses token 16; row 1 rejects all drafts and stops at 15.
+    # Row 0 crosses token 16, but only later groups have a destination.
+    # Row 1 rejects all drafts and stops at 15.
     # Row 2 uses in-place replay; row 3 has null slots in every group.
     # Row 4 is a padded request, and row 5 is unused buffer capacity.
     mapping = _cuda_ints([2, 0, 1, 3, -1])
@@ -224,8 +225,9 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         num_reqs=5,
     )
     reset_histories = [
-        {**history, offset + 2: history[offset + 3], offset + 5: (0, 0)}
-        for offset, history in zip((0, 6, 12), histories, strict=True)
+        {**histories[0], 5: (0, 0)},
+        {**histories[1], 8: histories[1][9], 11: (0, 0)},
+        {**histories[2], 14: histories[2][15], 17: (0, 0)},
     ]
     for (mixers, _, _), expected in zip(grouped, reset_histories, strict=True):
         assert mixers[0]._replayssm_ring_start.tolist() == [
@@ -268,6 +270,11 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         committed = mixers[0]._replayssm_prev_num_accepted
         for row, (start, flush) in plans.items():
             dst, src = table[row]
+            if dst == null:
+                assert starts[src].item() == start
+                assert committed[src].item() == flush + 1
+                assert (starts[null].item(), committed[null].item()) == (11, 9)
+                continue
             for name in names:
                 destinations.setdefault(caches[name][1].data_ptr(), set()).add(dst)
                 x, dt, B = rings[name]

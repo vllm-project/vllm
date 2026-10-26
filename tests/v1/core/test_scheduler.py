@@ -86,21 +86,23 @@ pytestmark = pytest.mark.cpu_test
 
 
 @pytest.mark.parametrize(
-    ("async_scheduling", "outcome"),
+    ("async_scheduling", "outcome", "num_speculative_tokens"),
     [
-        (False, outcome)
+        (False, outcome, 3)
         for outcome in ("accepted", "rejected", "finished", "preempted", "stale")
     ]
-    + [(True, "accepted")],
+    + [(True, "accepted", 3), (False, "accepted", 0), (False, "finished", 0)],
 )
-def test_mamba_decode_checkpoint_publication(async_scheduling: bool, outcome: str):
+def test_mamba_decode_checkpoint_publication(
+    async_scheduling: bool, outcome: str, num_speculative_tokens: int
+):
     """Publish accepted checkpoints before retirement; never publish rejected work."""
     block_size = 16
     scheduler = create_scheduler(
         model="Qwen/Qwen3-0.6B",
         enable_prefix_caching=True,
         async_scheduling=async_scheduling,
-        num_speculative_tokens=3,
+        num_speculative_tokens=num_speculative_tokens or None,
         speculative_method="ngram_gpu",
         block_size=block_size,
         kv_cache_spec=MambaSpec(
@@ -108,14 +110,14 @@ def test_mamba_decode_checkpoint_publication(async_scheduling: bool, outcome: st
             shapes=((1, 1),),
             dtypes=(torch.float32,),
             mamba_cache_mode="align",
-            num_speculative_blocks=1,
+            num_speculative_blocks=int(num_speculative_tokens > 0),
         ),
     )
     (request,) = create_requests(
         num_requests=1,
-        num_tokens=block_size - 2,
+        num_tokens=block_size - (2 if num_speculative_tokens else 1),
         block_size=block_size,
-        max_tokens=5 if outcome == "finished" else 32,
+        max_tokens=2 + num_speculative_tokens if outcome == "finished" else 32,
     )
     scheduler.add_request(request)
     prefill = scheduler.schedule()
@@ -127,10 +129,15 @@ def test_mamba_decode_checkpoint_publication(async_scheduling: bool, outcome: st
             sampled_token_ids=[[0]],
         ),
     )
-    scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [[1, 2, 3]]))
+    draft_tokens = list(range(1, num_speculative_tokens + 1))
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [draft_tokens])
+    )
     decode = scheduler.schedule()
-    assert decode.num_scheduled_tokens[request.request_id] == 4
-    assert len(decode.scheduled_spec_decode_tokens[request.request_id]) == 3
+    assert decode.num_scheduled_tokens[request.request_id] == 1 + num_speculative_tokens
+    assert len(decode.scheduled_spec_decode_tokens.get(request.request_id, [])) == (
+        num_speculative_tokens
+    )
     if outcome in ("preempted", "stale"):
         assert scheduler.reset_prefix_cache(reset_running_requests=True)
         assert request.status == RequestStatus.PREEMPTED
@@ -139,7 +146,7 @@ def test_mamba_decode_checkpoint_publication(async_scheduling: bool, outcome: st
             # Resume before the old decode completes; its output must stay uncached.
             assert scheduler.schedule().num_scheduled_tokens[request.request_id] > 0
             assert request.status == RequestStatus.RUNNING
-    accepted = 1 if outcome == "rejected" else 4
+    accepted = 1 if outcome == "rejected" else 1 + num_speculative_tokens
     scheduler.update_from_output(
         decode,
         ModelRunnerOutput(
@@ -151,9 +158,11 @@ def test_mamba_decode_checkpoint_publication(async_scheduling: bool, outcome: st
     if outcome == "accepted":
         # The next allocation retires the checkpoint from the request's table.
         scheduler.update_draft_token_ids(
-            DraftTokenIds([request.request_id], [[5, 6, 7]])
+            DraftTokenIds([request.request_id], [draft_tokens])
         )
-        assert scheduler.schedule().num_scheduled_tokens[request.request_id] == 4
+        assert scheduler.schedule().num_scheduled_tokens[request.request_id] == (
+            1 + num_speculative_tokens
+        )
     elif outcome == "finished":
         assert request.is_finished()
     elif outcome in ("preempted", "stale"):

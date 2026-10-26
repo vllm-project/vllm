@@ -395,8 +395,22 @@ steps:
   optional: true
   num_devices: 2
   source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/
   - csrc/
+  - vllm/config/
+  - vllm/model_executor/layers/mamba/
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/nemotron_h.py
+  - vllm/model_executor/models/nemotron_h_mtp.py
+  - vllm/model_executor/warmup/replayssm_warmup.py
+  - vllm/platforms/interface.py
+  - vllm/v1/attention/backends/mamba_attn.py
+  - vllm/v1/attention/backends/mamba2_attn.py
+  - vllm/v1/core/
+  - vllm/v1/kv_cache_interface.py
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt
   mirror:

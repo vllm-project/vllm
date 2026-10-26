@@ -1,0 +1,25 @@
+model_name: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+accuracy_threshold: 0.93
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+# Require draft steps and report natural acceptance without a performance bound.
+min_acceptance_length: 1.0
+expect_prefix_cache_hits: false
+env:
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --tensor-parallel-size 2
+  --enable-expert-parallel
+  --dtype bfloat16
+  --mamba-backend flashinfer
+  --mamba-ssm-cache-dtype float16
+  --enable-mamba-cache-stochastic-rounding
+  --mamba-cache-philox-rounds 5
+  --use-replayssm
+  --replayssm-buffer-len 16
+  --no-enable-prefix-caching
+  --mamba-cache-mode none
+  --speculative-config '{"method":"mtp","num_speculative_tokens":5}'

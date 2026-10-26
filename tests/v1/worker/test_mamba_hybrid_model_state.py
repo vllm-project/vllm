@@ -13,14 +13,25 @@ from tests.v1.attention.test_gdn_metadata_builder import (
     DEVICE,
     _create_gdn_builder,
 )
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.mamba import MambaBackendEnum
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+from vllm.v1.attention.backends.mamba2_attn import (
+    Mamba2AttentionBackend,
+    Mamba2AttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
     RecoverSSMPostprocessMetadata,
 )
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
     MambaHybridModelState,
@@ -111,9 +122,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     state.vllm_config = SimpleNamespace(num_speculative_tokens=k)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
-    state._use_flashinfer_replayssm = True
-    state._is_prefilling_gpu = torch.tensor([True, True, False])
-    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
+    state._use_flashinfer_replayssm = False
     state.recoverssm = None
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
 
@@ -156,9 +165,6 @@ def test_padded_prompt_tail_builds_as_spec_decode(
         "model_specific_attn_metadata"
     ]
     assert mamba_metadata.is_prefilling.tolist() == [False, False, True]
-    # Preserve decode history, but reset the fresh prefill's stale history.
-    assert state._is_prefilling_gpu.tolist() == [False, False, True]
-
     builder = _create_gdn_builder(num_speculative_tokens=k)
     common = create_common_attn_metadata(
         BatchSpec(seq_lens=seq_lens, query_lens=query_lens), BLOCK_SIZE, DEVICE
@@ -225,24 +231,98 @@ def _input_batch(
     )
 
 
-def test_replayssm_resumed_chunk_past_prompt_resets_history(monkeypatch):
-    """A resumed multi-token chunk uses prefill even after the prompt ends."""
-    state = _mamba_hybrid_state(num_speculative_tokens=3)
-    state._use_flashinfer_replayssm = True
-    state._is_prefilling_gpu = torch.zeros(2, dtype=torch.bool)
-    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
-    batch = _input_batch([4, 8], [3, 0], [False, False])
-    batch.seq_lens_cpu_upper_bound = torch.tensor([68, 72], dtype=torch.int32)
-    batch.seq_lens = batch.seq_lens_cpu_upper_bound
-    metadata = _prepare_attn_metadata(state, monkeypatch, batch)
-    common = create_common_attn_metadata(
-        BatchSpec(seq_lens=[68, 72], query_lens=[4, 8]), BLOCK_SIZE, DEVICE
-    ).replace(is_prefilling=metadata.is_prefilling)
-    num_decodes, num_prefills, _, _ = split_decodes_and_prefills(
-        common, decode_threshold=4, treat_short_extends_as_decodes=False
+@pytest.mark.parametrize(
+    "query_lens,seq_lens,prefilling,prompt_tail,for_capture,expected",
+    [
+        ([4, 8], [68, 72], [False, False], None, False, [False, True]),
+        (
+            [4, 4, 4],
+            [68, 68, 4],
+            [False, True, True],
+            [False, True, False],
+            False,
+            [False, False, True],
+        ),
+        ([4, 4], [68, 68], [False, False], None, True, [False, False, False]),
+    ],
+    ids=["resumed-chunk", "padded-prompt-tail", "full-graph-padding"],
+)
+def test_replayssm_uses_built_mamba_decode_split(
+    query_lens, seq_lens, prefilling, prompt_tail, for_capture, expected
+):
+    """ReplaySSM uses Mamba's split, including resumed chunks and graph padding."""
+    gdn_builder = _create_gdn_builder(num_speculative_tokens=3, full_cuda_graph=True)
+    config = gdn_builder.vllm_config
+    config.model_config.hf_text_config.mamba_chunk_size = 256
+    mamba_builder = Mamba2AttentionMetadataBuilder(
+        gdn_builder.kv_cache_spec, ["mamba"], config, DEVICE
     )
-    assert (num_decodes, num_prefills) == (1, 1)
-    assert state._is_prefilling_gpu.tolist() == [False, True]
+    # Classification uses the provider-independent Mamba builder on CPU.
+    state_config = create_vllm_config(max_num_seqs=4, max_num_batched_tokens=16)
+    state_config.speculative_config = config.speculative_config
+    state_config.cache_config.use_replayssm = True
+    state_config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    state = MambaHybridModelState(state_config, torch.nn.Module(), None, DEVICE)
+    # The groups use these backend types without instantiating them.
+    groups = [
+        AttentionGroup(
+            GDNAttentionBackend,  # type: ignore[type-abstract]
+            ["gdn"],
+            gdn_builder.kv_cache_spec,
+            kv_cache_group_id=0,
+            metadata_builders=[gdn_builder],
+        ),
+        AttentionGroup(
+            Mamba2AttentionBackend,  # type: ignore[type-abstract]
+            ["mamba"],
+            mamba_builder.kv_cache_spec,
+            kv_cache_group_id=1,
+            metadata_builders=[mamba_builder],
+        ),
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(group.layer_names, group.kv_cache_spec) for group in groups
+        ],
+    )
+    num_reqs, num_tokens = len(query_lens), sum(query_lens)
+    padded_reqs = len(expected)
+    buffers = InputBuffers(padded_reqs, num_tokens, DEVICE)
+    batch = InputBatch.make_dummy(num_reqs, num_tokens, buffers)
+    batch.num_reqs_after_padding = padded_reqs
+    batch.num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
+    batch.num_draft_tokens_per_req = np.array(
+        [min(length - 1, 3) for length in query_lens], dtype=np.int32
+    )
+    batch.query_start_loc_np = np.array(
+        [0, *np.cumsum(query_lens), *([num_tokens] * (padded_reqs - num_reqs))],
+        dtype=np.int32,
+    )
+    buffers.query_start_loc.copy_(torch.from_numpy(batch.query_start_loc_np))
+    batch.query_start_loc = buffers.query_start_loc
+    batch.seq_lens_cpu_upper_bound = torch.tensor(
+        seq_lens + [0] * (padded_reqs - num_reqs), dtype=torch.int32
+    )
+    batch.seq_lens = batch.seq_lens_cpu_upper_bound
+    batch.is_prefilling_np = np.array(prefilling)
+    batch.prefill_runs_as_decode_np = (
+        np.array(prompt_tail) if prompt_tail is not None else None
+    )
+    metadata = state.prepare_attn(
+        batch,
+        CUDAGraphMode.FULL if for_capture else CUDAGraphMode.NONE,
+        block_tables=(torch.ones(padded_reqs, 8, dtype=torch.int32),) * 2,
+        slot_mappings=torch.zeros(2, num_tokens, dtype=torch.int64),
+        attn_groups=[[group] for group in groups],
+        kv_cache_config=kv_cache_config,
+        for_capture=for_capture,
+    )
+    assert list(metadata) == ["gdn", "mamba"]
+    assert metadata["mamba"].num_decodes == expected.count(False)
+    assert state._is_prefilling_gpu[:padded_reqs].tolist() == expected
+    assert state._replayssm_query_start_loc is batch.query_start_loc
 
 
 def _prepare_attn_metadata(

@@ -13,7 +13,7 @@ from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Counter
 
 from ...models.utils import check_logprobs_close
-from ...utils import large_gpu_mark, multi_gpu_test
+from ...utils import large_gpu_mark, multi_gpu_marks, multi_gpu_test
 
 try:
     from flashinfer.mamba.checkpointing_ssu import (  # noqa: F401
@@ -162,53 +162,84 @@ def test_replayssm_flashinfer_decode_matches_baseline(
 
 
 @pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
-@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+@pytest.mark.parametrize(
+    ("use_v2_model_runner", "speculative_method", "tensor_parallel_size"),
+    [
+        pytest.param(False, "ngram", 1, id="v1"),
+        pytest.param(True, "ngram", 1, id="v2"),
+        pytest.param(
+            False, "mtp", 2, id="v1-mtp-fp16-tp2", marks=multi_gpu_marks(num_gpus=2)
+        ),
+        pytest.param(
+            True, "mtp", 2, id="v2-mtp-fp16-tp2", marks=multi_gpu_marks(num_gpus=2)
+        ),
+    ],
+)
 def test_replayssm_flashinfer_spec_decode_matches_baseline(
-    vllm_runner, model_name, monkeypatch, use_v2_model_runner
+    vllm_runner,
+    model_name,
+    monkeypatch,
+    use_v2_model_runner,
+    speculative_method,
+    tensor_parallel_size,
 ):
+    speculative_config = {"method": speculative_method, "num_speculative_tokens": 3}
+    if speculative_method == "ngram":
+        speculative_config["prompt_lookup_max"] = 3
     common = dict(
         max_model_len=1024,
         trust_remote_code=True,
         enable_prefix_caching=False,
         mamba_cache_mode="none",
         mamba_backend="flashinfer",
-        speculative_config={
-            "method": "ngram",
-            "num_speculative_tokens": 3,
-            "prompt_lookup_max": 3,
-        },
+        tensor_parallel_size=tensor_parallel_size,
+        speculative_config=speculative_config,
     )
+    if speculative_method == "mtp":
+        common.update(
+            dtype="bfloat16",
+            mamba_ssm_cache_dtype="float16",
+            enable_mamba_cache_stochastic_rounding=True,
+            mamba_cache_philox_rounds=5,
+            disable_log_stats=False,
+        )
+    outputs = []
     try:
         with monkeypatch.context() as patch:
             patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
             envs.disable_envs_cache()
-            with vllm_runner(model_name, **common) as llm:
-                assert (
-                    llm.llm.llm_engine.vllm_config.use_v2_model_runner
-                    is use_v2_model_runner
-                )
-                baseline = llm.generate_greedy_logprobs(
-                    FLASHINFER_PROMPTS, max_tokens=32, num_logprobs=5
-                )
-            with vllm_runner(
-                model_name,
-                use_replayssm=True,
-                replayssm_buffer_len=16,
-                **common,
-            ) as llm:
-                assert (
-                    llm.llm.llm_engine.vllm_config.use_v2_model_runner
-                    is use_v2_model_runner
-                )
-                replay = llm.generate_greedy_logprobs(
-                    FLASHINFER_PROMPTS, max_tokens=32, num_logprobs=5
-                )
+            for use_replayssm in (False, True):
+                with vllm_runner(
+                    model_name,
+                    use_replayssm=use_replayssm,
+                    replayssm_buffer_len=16,
+                    **common,
+                ) as llm:
+                    config = llm.llm.llm_engine.vllm_config
+                    assert config.use_v2_model_runner is use_v2_model_runner
+                    if speculative_method == "mtp":
+                        before = _metric_counts(llm.llm)
+                    output = llm.generate_greedy_logprobs(
+                        FLASHINFER_PROMPTS, max_tokens=32, num_logprobs=5
+                    )
+                    outputs.append(output)
+                    if speculative_method == "mtp":
+                        after = _metric_counts(llm.llm)
+                        accepted = after[
+                            "vllm:spec_decode_num_accepted_tokens"
+                        ] - before.get("vllm:spec_decode_num_accepted_tokens", 0)
+                        drafted = after[
+                            "vllm:spec_decode_num_draft_tokens"
+                        ] - before.get("vllm:spec_decode_num_draft_tokens", 0)
+                        assert 0 < accepted < drafted, (accepted, drafted)
+                        assert any(len(item[0]) > 16 for item in output)
+                        assert _prefix_cache_hits(llm) == 0
     finally:
         envs.disable_envs_cache()
 
     check_logprobs_close(
-        outputs_0_lst=baseline,
-        outputs_1_lst=replay,
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
         name_0="baseline_spec",
         name_1="replayssm_flashinfer_spec",
     )

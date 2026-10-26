@@ -31,6 +31,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
+    mamba_state_alignment,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -536,8 +537,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         self.mamba_config = vllm_config.mamba_config
         self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
-        # FlashInfer loads state and ring caches with 16-byte cp.async instructions.
-        self.state_alignment = 16 if self.use_flashinfer_replayssm else 1
+        self.state_alignment = mamba_state_alignment(vllm_config)
         if self.use_replayssm and self.num_heads % self.tp_size != 0:
             raise ValueError(
                 "--use-replayssm requires tensor-parallel heads to divide evenly"
