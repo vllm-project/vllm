@@ -3017,3 +3017,69 @@ annoncé à claudish.
 (`vllm-gos-fs-patch-20261026T2030Z`, 20:27Z) — moteur sain, patch actif,
 middleware `x-claudish-client`/`x-claudish-machine` recâblé côté moteur, leur
 recreate hub autorisé.
+
+---
+
+## 26/10 20:41Z — Cycle de surveillance (fenêtre 19:55→21:43Z, moteur réchauffé 1 h 49) — écritures fs réelles 18,53 Go, **9,2 Go de réécritures supprimées** ; ⚠️ GPU 0 à 23 137 MiB (ligne d'alerte 23 000)
+
+**Moteur.** StartedAt `19:54:57Z` (inchangé), health 200 à **5,2 ms** (21:43Z),
+`RC=0`, OOM=false, 3 conteneurs up, 0 occurrence de
+`out of memory|Traceback|AssertionError|not found in cache` sur 20 000 lignes,
+`/dev/shm` **24G/63G (39 %)**, KV **831 723** tokens.
+
+**Écritures fs — mesure par date de naissance (référence correcte depuis 19:55Z).**
+
+| mesure | valeur |
+|---|---|
+| **fichiers `.bin` nés depuis le boot** | **706** ⇒ **18,53 Go réellement écrits** |
+| fichiers relus/touchés seulement | 402 (10,55 Go lus) |
+| compteur `tiering_write_bytes_total` | **27,72 Go = octets SOUMIS** (surestimation post-patch) |
+| ⇒ **réécritures supprimées** | **27,72 − 18,53 = 9,19 Go (33 % des soumis)** |
+| fs lu | 11,02 Go (chunk hits fs **420**, primary 9 291) |
+| tier RAM (`kv_offload_store_bytes`) | 77,5 Go |
+| ratio réel | **0,46 Ko/token prompt** (18,53 Go / 40,23 M tokens) |
+
+Comparaison : pré-patch en fenêtre froide = 1,128 Ko/token ⇒ **÷2,4** dans un
+régime comparable. La cible **÷5** de #198 reste **non démontrée** : elle exige
+une fenêtre froide stricte (prochain restart), pas cette fenêtre réchauffée où
+le tier RAM absorbe l'essentiel. **#198 reste ouverte.**
+
+**Décomposition en deux régimes** : au boot (19:55→20:23Z) 5,98 Go soumis,
+**0 octet écrit** (100 % sauté — les blobs étaient déjà là) ; 20:23→21:43Z,
+21,74 Go soumis / 18,53 Go écrits ⇒ 3,21 Go sautés (14,8 %). Le gain du patch
+porte donc sur les réécritures *d'un même contenu déjà sur disque*, pas sur la
+première écriture — c'est exactement le périmètre demandé par l'user.
+
+**Compteurs moteur.** prompt 40,231 M · device 26,863 M · host 10,543 M ·
+disk 551 088 · prefix queries 40,440 M / hits 26,863 M = **66,5 %** (le moteur
+réchauffe : 84,6 % au boot, la valeur remonte à chaque cycle) · **préemptions 0** ·
+`prompt_tokens_total` 40,2 M en 1 h 49.
+
+**Watchdog** : 3 793 sondes `OK health=200 decode=200`, un seul `WEDGE fail 1/2`
+à 19:59:05Z (démarrage, compteurs frais — comportement attendu), **jamais
+`fail 2/2`**, aucun restart.
+
+**⚠️ VRAM — GPU 0 = 23 131 → 23 138 → 23 137 MiB** (3 relevés consécutifs,
+21:40/21:41/21:43Z) ⇒ **plateau, pas une pente** (high-water d'allocateur en
+charge) mais **1 427 MiB de marge seulement** et **138 MiB au-dessus de la
+ligne d'alerte 23 000**. GPU 1 = 22 006 MiB, GPU 2 = 99 MiB (libre).
+La spec impose `GPU_UTIL_SWIFT15=0.70` au prochain restart ; tout redémarrage
+exige le GO user ⇒ **Q41 ouverte au registre** (rollback 0.73 → 0.70 au
+prochain restart naturel, recommandation de la lane).
+
+**Sécurité (census 2 h).** 528 requêtes : 509×200, 19×401 (clé morte connue
+`1f7f6080cb65`, aucune tentative réussie), **0×400** (le remède #431 du hub
+tient), IP avec 200 = hairpin `90.65.170.144` + l'entrée « ? » (direct) ⇒
+**aucune nouvelle IP externe**. Tailles de corps : 285 entre 100K-1M, 215 < 1K,
+28 entre 10-100K. Une seule clé en usage (MEDIUM).
+
+**Hôte.** Commit **354,5/395,3 Go = 89,7 %** (marge 40,7 Go) ⇒ **au-dessus du
+seuil 85 % : aucun travail lourd** (pas de passe Lean). G: écriture OK.
+nbaudit `ok:true` 21:06Z (`Image/`). Condensation RSM : bannière 21:41Z
+`primary=qwen3.6-35b-a3b @ http://localhost:5002/v1 key=VLLM_API_KEY_MEDIUM`,
+fallback `key=OK` — battement nominal.
+
+**Coordination.** GO hub toujours sans ACK à 21:40Z (claudish n'a pas encore
+reçu l'ACK du recreate) — le moteur, lui, sert normalement et la clé externe
+n'a pas degradation. Message Maintenance INFO (durcissement du lanceur de la
+tâche `fstier-prune`, sans changement fonctionnel) lu et marqué lu.
