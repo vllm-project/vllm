@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
+    has_flashinfer,
     is_flashinfer_cutedsl_bf16_gemm_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
@@ -222,6 +223,127 @@ direct_register_custom_op(
     op_func=cuda_flashinfer_bf16_gemm_impl,
     fake_impl=cuda_flashinfer_bf16_gemm_fake,
 )
+
+
+# FlashInfer cluster split-K tactics (mma_m, mma_n, split_k, ab_stages) pinned
+# per (N, K) weight shape and token count on SM103.
+#
+# Qwen3.5/3.8-27B MLP gate_up at TP1 with 16 tokens (MTP verify of four
+# requests): the preceding GDN layer's recurrent-state write-back drains from
+# L2 while this GEMM runs. Alone, this tactic is ~3 us slower per call than
+# FlashInfer's warp split-K, so timing the GEMM in isolation, as the autotuner
+# does, does not pick it; inside the decode step it is faster, so it is pinned.
+_SM103_PINNED_SPLITK_TACTICS: dict[
+    tuple[int, int], dict[int, tuple[int, int, int, int]]
+] = {
+    (34816, 5120): {16: (128, 16, 1, 6)},
+}
+
+
+def _use_sm103_pinned_splitk_bf16_gemm() -> bool:
+    return (
+        not envs.VLLM_BATCH_INVARIANT
+        and current_platform.is_device_capability(103)
+        and has_flashinfer()
+    )
+
+
+@functools.cache
+def _pinned_splitk_bf16_runner(
+    n: int, k: int, m: int
+) -> Callable[..., torch.Tensor] | None:
+    tactic = _SM103_PINNED_SPLITK_TACTICS.get((n, k), {}).get(m)
+    if tactic is None:
+        return None
+    try:
+        from flashinfer.gemm.kernels.dense_bf16_gemm_sm100_splitk import (
+            SplitKTactic,
+            run_splitk_dense,
+            validate_tactic,
+        )
+
+        splitk_tactic = SplitKTactic(*tactic)
+        validate_tactic(splitk_tactic, m, n, k)
+    except (ImportError, TypeError, ValueError) as e:
+        logger.warning_once(
+            "FlashInfer split-K tactic %s for M=%d, N=%d, K=%d is unavailable "
+            "(%s); using F.linear.",
+            tactic,
+            m,
+            n,
+            k,
+            e,
+        )
+        return None
+    return functools.partial(
+        run_splitk_dense,
+        pdl=current_platform.is_arch_support_pdl(),
+        tactic=splitk_tactic,
+    )
+
+
+def cuda_pinned_splitk_bf16_gemm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    n, k = weight.shape
+    m = x.numel() // k
+    runner = _pinned_splitk_bf16_runner(n, k, m)
+    if runner is None or not _can_use_flashinfer_cutedsl_bf16(x, weight, None):
+        return torch.nn.functional.linear(x, weight)
+    out = x.new_empty((m, n))
+    runner(x.view(m, k), weight.t(), None, out)
+    return out.view(*x.shape[:-1], n)
+
+
+def cuda_pinned_splitk_bf16_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+
+def cuda_pinned_splitk_bf16_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if (
+        bias is not None
+        or weight.dtype != torch.bfloat16
+        or tuple(weight.shape) not in _SM103_PINNED_SPLITK_TACTICS
+    ):
+        return torch.nn.functional.linear(x, weight, bias)
+    return torch.ops.vllm.cuda_pinned_splitk_bf16_gemm(x, weight)
+
+
+direct_register_custom_op(
+    op_name="cuda_pinned_splitk_bf16_gemm",
+    op_func=cuda_pinned_splitk_bf16_gemm_impl,
+    fake_impl=cuda_pinned_splitk_bf16_gemm_fake,
+)
+
+
+def warmup_pinned_splitk_bf16_gemm(model: torch.nn.Module) -> None:
+    """Compile the pinned split-K kernels before CUDA graph capture."""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    seen: set[tuple[int, int]] = set()
+    for module in model.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if (
+            not isinstance(quant_method, UnquantizedLinearMethod)
+            or quant_method._gemm_impl is not cuda_pinned_splitk_bf16_gemm
+        ):
+            continue
+        weight = module.weight
+        shape = tuple(weight.shape)
+        if shape in seen or weight.dtype != torch.bfloat16:
+            continue
+        seen.add(shape)
+        for m in _SM103_PINNED_SPLITK_TACTICS.get(shape, ()):
+            cuda_pinned_splitk_bf16_gemm_impl(weight.new_zeros((m, shape[1])), weight)
 
 
 def use_aiter_triton_gemm(n, m, k, dtype):
@@ -688,6 +810,14 @@ def dispatch_unquantized_gemm(
 
     backend_spec = _FLASHINFER_BF16_BACKENDS.get(linear_backend)
     if backend_spec is None:
+        # Some callers dispatch inside torch.compile-traced forward code, where
+        # the platform and package checks cannot be traced.
+        if (
+            linear_backend == "auto"
+            and not torch.compiler.is_compiling()
+            and _use_sm103_pinned_splitk_bf16_gemm()
+        ):
+            return cuda_pinned_splitk_bf16_gemm
         return default_unquantized_gemm
 
     if not backend_spec.is_supported():

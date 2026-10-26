@@ -216,6 +216,11 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
 
+    if current_platform.is_device_capability(103):
+        from vllm.model_executor.layers.utils import warmup_pinned_splitk_bf16_gemm
+
+        warmup_pinned_splitk_bf16_gemm(worker.get_model())
+
     _warmup_gemm_rs_ar()
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
