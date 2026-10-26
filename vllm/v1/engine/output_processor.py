@@ -796,7 +796,13 @@ class OutputProcessor:
                         engine_core_output.prefill_stats.num_cache_creation_tokens
                     )
                 if req_state.remote_prefill_cached_tokens is not None:
-                    req_state.num_cached_tokens = req_state.remote_prefill_cached_tokens
+                    # kv_transfer_params comes from the client request, so keep
+                    # the reported count within [0, prompt_len] like the local
+                    # count in PrefillStats.
+                    req_state.num_cached_tokens = min(
+                        max(req_state.remote_prefill_cached_tokens, 0),
+                        req_state.prompt_len,
+                    )
                 req_state.is_prefilling = False
 
             if engine_core_output.spec_decode_metrics is not None:
