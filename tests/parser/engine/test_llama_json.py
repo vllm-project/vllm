@@ -345,6 +345,33 @@ def test_brace_in_plain_text_is_not_a_tool_call(parser, mock_request):
     assert tools is None
 
 
+def test_tool_choice_none_preserves_bare_json(parser, mock_request):
+    mock_request.tools = [{"type": "function", "function": {"name": "a"}}]
+    mock_request.tool_choice = "none"
+    text = '{"name":"a","arguments":{"x":1}}'
+
+    _, content, tools = parser.parse(text, mock_request)
+
+    assert content == text
+    assert tools is None
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 5])
+def test_tool_choice_none_streaming_preserves_bare_json(
+    parser,
+    mock_request,
+    chunk_size,
+):
+    mock_request.tools = [{"type": "function", "function": {"name": "a"}}]
+    mock_request.tool_choice = "none"
+    text = '{"name":"a","arguments":{"x":1}}'
+
+    results = _stream(parser, mock_request, text, chunk_size)
+
+    assert "".join(delta.content or "" for delta in results if delta) == text
+    assert all(not delta.tool_calls for delta in results if delta)
+
+
 @pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 11])
 @pytest.mark.parametrize("with_marker", [False, True])
 def test_streaming_parallel_calls_are_chunk_invariant(

@@ -137,7 +137,7 @@ class LlamaJsonParser(ParserEngine):
             return delta_text, delta_token_ids
 
         self._at_output_start = False
-        if not delta_text.startswith("{"):
+        if self._suppress_tool_calls or not delta_text.startswith("{"):
             return delta_text, delta_token_ids
 
         delta_text = TOOL_START + delta_text
