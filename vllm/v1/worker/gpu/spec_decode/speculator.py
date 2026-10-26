@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -116,7 +117,6 @@ class DraftModelSpeculator(BaseSpeculator):
         self.scheduler_config = vllm_config.scheduler_config
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = vllm_config.model_config.max_model_len
         self.draft_max_seq_len = self.max_model_len
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -210,6 +210,11 @@ class DraftModelSpeculator(BaseSpeculator):
         # Whether every draft attention builder can refresh its decode metadata
         # in place, so the refresh can be recorded in the draft CUDA graph.
         self.supports_decode_metadata_update = False
+
+    @property
+    def max_model_len(self) -> int:
+        # Auto-fit can reduce the limit after the speculator is built.
+        return self.vllm_config.model_config.max_model_len
 
     @abstractmethod
     def load_draft_model(
@@ -389,7 +394,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 if dcp_local_seq_lens is None
                 else dcp_local_seq_lens[:num_reqs_padded]
             ),
-            max_seq_len=self.draft_max_seq_len,
+            max_seq_len=min(self.draft_max_seq_len, self.max_model_len),
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
@@ -446,6 +451,7 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
         spec_step_idx: int = 0,
+        num_steps: int = 1,
     ) -> torch.Tensor:
         if draft_logits is None and self.use_local_argmax_reduction:
             return self.get_draft_top_tokens(hidden_states, spec_step_idx)
@@ -455,7 +461,7 @@ class DraftModelSpeculator(BaseSpeculator):
             sampler = (
                 gumbel_sample
                 if self.draft_watermarker is None
-                else self.draft_watermarker.sample
+                else partial(self.draft_watermarker.sample, num_steps=num_steps)
             )
             sampled = sampler(
                 logits,

@@ -141,6 +141,7 @@ def FusedMoEFactory(
     runner_cls: type[MoERunner] | None = None,
     runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
+    moe_config_cls: type[FusedMoEConfig] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
     skip_padding: bool = False,
 ) -> MoERunner:
@@ -219,6 +220,7 @@ def FusedMoEFactory(
         runner_cls: Custom MoERunner class (None = use default MoERunner)
         runner_args: Additional arguments for runner constructor
         routed_experts_cls: Custom RoutedExperts class (None = use default)
+        moe_config_cls: Custom FusedMoEConfig class (None = use default)
         routed_experts_args: Additional arguments for routed_experts constructor
         skip_padding: Whether grouped routing should invalidate padding rows.
 
@@ -356,7 +358,7 @@ def FusedMoEFactory(
         # since model_config is not set in the pytest test.
         moe_in_dtype = params_dtype
 
-    moe_config = FusedMoEConfig(
+    moe_config = (moe_config_cls or FusedMoEConfig)(
         num_experts=global_num_experts,
         experts_per_token=top_k,
         hidden_dim=hidden_size,
@@ -375,9 +377,11 @@ def FusedMoEFactory(
         shared_expert_prefix=shared_expert_prefix,
         activation=moe_activation,
         device=vllm_config.device_config.device,
-        routing_method=router.routing_method_type,  # Not ideal
+        routing_method=router.kernel_routing_method_type,
         has_hash_routing=hash_indices_table is not None,
-        require_decomposed_backend=expert_substitution is not None,
+        require_decomposed_backend=(
+            expert_substitution is not None or not router.supports_monolithic_kernels
+        ),
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
@@ -433,9 +437,10 @@ def FusedMoEFactory(
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
-        # TODO get from router? needs to be truncated?
-        e_score_correction_bias=e_score_correction_bias,
+        # TODO needs to be truncated?
+        e_score_correction_bias=router.prepare_monolithic_bias(e_score_correction_bias),
         apply_router_weight_on_input=apply_router_weight_on_input,
+        hash_indices_table=hash_indices_table,
         **routed_experts_args if routed_experts_args is not None else {},
     )
 

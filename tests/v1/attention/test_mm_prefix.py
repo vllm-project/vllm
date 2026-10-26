@@ -727,6 +727,7 @@ def test_composite_shared_cache_across_image_and_causal_steps(
         backend = TritonFlashInferBackend
         causal_metadata_type = FlashInferMetadata
         block_size = backend.get_supported_kernel_block_sizes()[0]
+        assert isinstance(block_size, int)
     else:
         backend = TritonFlashAttentionBackend
         causal_metadata_type = FlashAttentionMetadata
