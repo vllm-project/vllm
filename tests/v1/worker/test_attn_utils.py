@@ -445,7 +445,10 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
     pool = attn_utils_module.get_hisparse_host_pool(vllm_config, kv_cache_config)
     backing = pool.allocate(8)
     runtime = SimpleNamespace(
-        _host_cache=backing, registered_host_pool=pinned, hot_backing=object()
+        _host_cache=backing,
+        registered_host_pool=pinned,
+        hot_backing=object(),
+        host_pool=pool,
     )
     forward_context = {
         "layer": SimpleNamespace(hisparse_cache=SimpleNamespace(runtime=runtime))
@@ -454,6 +457,7 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
     attn_utils_module.release_hisparse_profiling_cache(forward_context)
 
     assert not hasattr(runtime, "_host_cache")
+    assert runtime.host_pool is None
     reused = attn_utils_module.get_hisparse_host_pool(vllm_config, kv_cache_config)
     assert reused is pool
     assert reused.allocate(8) is backing
