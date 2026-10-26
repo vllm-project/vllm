@@ -32,29 +32,14 @@ class RoutedExpertsCaptureSource(Protocol):
 
 @dataclass(frozen=True)
 class RoutedExpertsCaptureLayout:
-    """Describe how to restore this DP rank's routing rows.
+    """Restore this DP rank's rows; sizes and ranges stay fixed during graph replay."""
 
-    Args:
-        source_ranges: Ordered (start, length) spans to record. Offsets refer
-            to the input rows, or to the rank-ordered concatenation after
-            gathering. Spans may skip padding or rows owned by other DP ranks.
-        gather_group: Optional device process group for gathering input rows.
-            None means no communication. All group ranks must participate,
-            even when their source_ranges are empty.
-        shard_sizes: Physical input row counts, including padding, in group
-            rank order. Required when gather_group is set; otherwise empty.
-            All group ranks must agree on these sizes. The backend must support
-            the supplied sizes, including uneven or empty shards when used.
-
-    For shards of seven rows each, source_ranges=((0, 3), (7, 2)) selects
-    three rows from the first shard and two from the second, in that order.
-
-    Sizes and ranges must remain fixed for each captured graph's replays.
-
-    """
-
+    # Ordered (start, length) spans in input or rank-concatenated gathered rows.
     source_ranges: tuple[tuple[int, int], ...]
+    # All group ranks participate, even with empty ranges. None skips gathering.
     gather_group: dist.ProcessGroup | None = None
+    # Physical row counts in group order, agreed by all ranks; empty without a group.
+    # The backend must support the supplied sizes, including uneven/empty shards.
     shard_sizes: tuple[int, ...] = ()
 
 
@@ -122,12 +107,7 @@ class RoutedExpertsCapturer:
         *,
         layout: RoutedExpertsCaptureLayout | None = None,
     ) -> None:
-        """Record logical expert IDs, optionally restoring explicit row spans.
-
-        The backend must provide the same collective plan on every group rank.
-        Sizes and spans must remain stable across graph replay. When no layout
-        is supplied, preserve the default row-restoration behavior.
-        """
+        """Record logical IDs using explicit spans or default row restoration."""
         if not 0 <= layer_id < self.device_buffer.shape[1]:
             raise IndexError(
                 f"routed-experts layer {layer_id} exceeds capture buffer "
