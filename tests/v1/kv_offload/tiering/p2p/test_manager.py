@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from tests.v1.kv_offload.tiering.test_tiering_offloading import _mock_mmap_region
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
 from vllm.v1.kv_offload.base import (
@@ -30,7 +31,11 @@ from vllm.v1.kv_offload.tiering.base import (
     TieringOffloadingMetrics,
     TransferJob,
 )
-from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
+from vllm.v1.kv_offload.tiering.manager import (
+    CPUPrimaryTierOffloadingManager,
+    TieringOffloadingManager,
+)
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _RECONNECT_MAX_BACKOFF_S,
@@ -2426,3 +2431,66 @@ class TestReconnectBackoff:
         assert conn.sent == [{TYPE_KEY: DisconnectMsg.TYPE}]
         assert conn.close_calls == 1
         assert self.PEER not in mgr._sessions
+
+
+# ---------------------------------------------------------------------------
+# Serving a peer while a cache reset holds promotions
+# ---------------------------------------------------------------------------
+
+
+def test_held_promotions_answer_peer_lookups_with_miss(monkeypatch):
+    """A P2P server looks a peer's keys up through its ParentManager, not the
+    scheduler, so the hold must stop the promotion such a lookup would start
+    and tell the peer the key is absent."""
+    consumer, server = _build_paired_managers()
+    region = _mock_mmap_region(4)
+    example = ExampleSecondaryTierManager(
+        offloading_spec=SimpleNamespace(),
+        primary_kv_view=region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    key = OffloadKey(b"secondary-only")
+    example.chunks[key] = True
+    promotions: list[TransferJob] = []
+    submit_load = example.submit_load
+
+    def record_submit_load(job: TransferJob) -> None:
+        promotions.append(job)
+        submit_load(job)
+
+    monkeypatch.setattr(example, "submit_load", record_submit_load)
+    # Drive the server's polls on this thread, once per step.
+    tiering = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=region),
+        secondary_tiers=[example, server],
+        tier_poll_interval_s=0,
+    )
+    step_end = ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+
+    def peer_lookup(kv_request_id: str) -> LookupResult:
+        ctx = ReqContext(
+            req_id=kv_request_id,
+            kv_transfer_params=_remote_kv_source_kv_params("B", 2, kv_request_id),
+        )
+        _annotate_req_context(ctx)
+        consumer.on_new_request(ctx)
+        for _ in range(3):
+            list(consumer.get_finished_jobs())
+            tiering.on_schedule_end(step_end)
+        assert consumer.lookup(key, ctx) is LookupResult.RETRY
+        consumer.on_schedule_end(step_end)
+        # The server receives the LookupMsg and serves it in one step.
+        tiering.on_schedule_end(step_end)
+        list(consumer.get_finished_jobs())
+        return consumer.lookup(key, ctx)
+
+    try:
+        tiering.reset_cache()
+        assert peer_lookup("req-held") is LookupResult.MISS
+        assert promotions == []
+
+        tiering.on_reset_flushed()
+        peer_lookup("req-released")
+        assert [job.keys for job in promotions] == [[key]]
+    finally:
+        tiering.shutdown()
