@@ -65,6 +65,44 @@ def compute_local_expert_ids(
         raise ValueError(f"Unknown expert placement strategy: {placement}")
 
 
+def compute_eplb_local_expert_ids(
+    num_experts: int,
+    num_redundant_experts: int,
+    ep_size: int,
+    ep_rank: int,
+) -> set[int] | None:
+    """Compute the logical expert ids *ep_rank* must load when EPLB is on.
+
+    With EPLB the model allocates ``num_experts + num_redundant_experts``
+    physical expert slots, partitioned across ranks with the linear
+    strategy (EPLB force-disables round-robin), and each physical slot is
+    populated from the logical expert given by the initial
+    physical-to-logical map.  Redundant slots may therefore need logical
+    experts outside this rank's default partition.  Runtime rebalancing
+    moves weights GPU-to-GPU without touching disk, so loading only needs
+    to satisfy the initial map.
+
+    Returns ``None`` when EP is not active (``ep_size <= 1``).
+    """
+    # Imported lazily: this module must stay cheap to import (it is used by
+    # weight_utils), and the map must come from EplbState so the filter and
+    # the weight loader can never disagree on the initial placement.
+    from vllm.distributed.eplb.eplb_state import EplbState
+
+    local_physical = compute_local_expert_ids(
+        num_experts + num_redundant_experts,
+        ep_size,
+        ep_rank,
+        placement="linear",
+    )
+    if local_physical is None:
+        return None
+    initial_map = EplbState.build_initial_global_physical_to_logical_map(
+        num_experts, num_redundant_experts
+    )
+    return {initial_map[p] for p in local_physical}
+
+
 def should_skip_weight(
     weight_name: str,
     local_expert_ids: set[int] | None,

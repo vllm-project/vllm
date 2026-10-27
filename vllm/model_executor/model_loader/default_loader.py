@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
+    compute_eplb_local_expert_ids,
     compute_local_expert_ids,
 )
 from vllm.model_executor.model_loader.weight_utils import (
@@ -442,13 +443,6 @@ class DefaultModelLoader(BaseModelLoader):
         ):
             return
 
-        # When EPLB is enabled, redundant physical expert slots may map to
-        # logical experts that belong to other ranks in the default partition.
-        # The weight loader needs to see ALL logical expert weights so it can
-        # populate these redundant slots.  Skip the filter entirely.
-        if parallel_config.enable_eplb:
-            return
-
         num_experts = model_config.get_num_experts()
         if num_experts <= 0:
             return
@@ -471,12 +465,28 @@ class DefaultModelLoader(BaseModelLoader):
         ep_size = dp_size * pcp_size * tp_size
         ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
 
-        self.local_expert_ids = compute_local_expert_ids(
-            num_experts,
-            ep_size,
-            ep_rank,
-            placement=parallel_config.expert_placement_strategy,
-        )
+        if parallel_config.enable_eplb:
+            # EPLB owns num_experts + num_redundant_experts physical slots
+            # per layer; redundant slots map to logical experts outside this
+            # rank's default partition, so filter by what the initial
+            # placement actually needs instead of the plain EP shard.
+            if parallel_config.enable_elastic_ep:
+                # Elastic EP pads the physical capacity and the placement
+                # evolves at runtime; keep loading all expert weights.
+                return
+            self.local_expert_ids = compute_eplb_local_expert_ids(
+                num_experts,
+                parallel_config.eplb_config.num_redundant_experts,
+                ep_size,
+                ep_rank,
+            )
+        else:
+            self.local_expert_ids = compute_local_expert_ids(
+                num_experts,
+                ep_size,
+                ep_rank,
+                placement=parallel_config.expert_placement_strategy,
+            )
         if self.local_expert_ids is not None:
             logger.info_once(
                 "EP weight filter: ep_size=%d, ep_rank=%d, loading %d/%d experts",
