@@ -326,7 +326,9 @@ def get_quant_config(
     # 1. composed online quantization, before `maybe_compose_online_quantization`,
     # 2. Ambiguous online shorthands as `"mxpf4"`, `"mxfp8"`, for which `online_args`
     # is not set yet.
-    if quant_cls is OnlineQuantizationConfig and online_args is not None:
+    # `quant_cls` is the class registered for this method name, which an
+    # out-of-tree platform may have overridden with its own subclass.
+    if issubclass(quant_cls, OnlineQuantizationConfig) and online_args is not None:
         assert isinstance(online_args, QuantizationConfigArgs)
         # Activation-only overrides apply to pre-quantized checkpoints; without
         # a weight key, standalone online quantization would silently no-op.
@@ -338,7 +340,7 @@ def get_quant_config(
                     f"quantization_config.{name} = {spec} does not set a weight "
                     "quantization key, which online quantization requires."
                 )
-        return OnlineQuantizationConfig(args=online_args)
+        return quant_cls(args=online_args)
 
     model_name_or_path = (
         maybe_download_from_modelscope(
@@ -375,12 +377,16 @@ def get_quant_config(
             )
             fp8_args = resolve_quantization_config("fp8_per_tensor", online_args)
             assert fp8_args is not None
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=fp8_args)
             return OnlineQuantizationConfig(args=fp8_args)
         if model_config.quantization in _ONLINE_SHORTHANDS:
             assert not isinstance(online_args, dict)
             args = merge_quantization_config(
                 _ONLINE_SHORTHANDS[model_config.quantization], online_args
             )
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=args)
             return OnlineQuantizationConfig(args=args)
         return maybe_compose_online_quantization(quant_cls())
 
@@ -395,6 +401,8 @@ def get_quant_config(
             args = merge_quantization_config(
                 _ONLINE_SHORTHANDS[model_config.quantization], online_args
             )
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=args)
             return OnlineQuantizationConfig(args=args)
         raise ValueError(f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
