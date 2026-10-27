@@ -573,7 +573,7 @@ def _check_pruned_encoder_cudagraphs(worker):
 def test_qwen3_vl_pruning_disables_encoder_cudagraphs(
     pruning_method, vllm_runner, image_assets, monkeypatch
 ):
-    """Pruning keeps image outputs eager even when encoder CG is enabled."""
+    """Pruning in data mode keeps image outputs eager with encoder CG enabled."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = MODEL_CONFIGS["qwen3_vl"]
@@ -585,6 +585,7 @@ def test_qwen3_vl_pruning_disables_encoder_cudagraphs(
             max_model_len=config.max_model_len,
             max_num_seqs=1,
             enable_prefix_caching=False,
+            mm_encoder_tp_mode="data",
             video_pruning_rate=0.5,
             video_pruning_method=pruning_method,
             limit_mm_per_prompt={"image": 1, "video": 1},
