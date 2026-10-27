@@ -10,29 +10,18 @@ and runs it on the RDNA hybrid W4A16 op (HIP skinny GEMM for decode, Triton
 for prefill).
 """
 
-from typing import TYPE_CHECKING
-
 import torch
 from torch.nn import Module, Parameter
 
-from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16 import (
     pack_int4_exllama_shuffle,
     skinny_int4_layout,
 )
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
+from vllm.model_executor.layers.quantization.online.rdna_lm_head import (
+    RdnaLMHeadMethod,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
 from vllm.utils.platform_utils import num_compute_units
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-
-logger = init_logger(__name__)
 
 GROUP_SIZE = 32
 _UINT4_MAX = 15
@@ -108,88 +97,24 @@ def quantize_lm_head_int4(
     return skinny_int4_layout(shuffled), scales, pack_zero_points(zero_points)
 
 
-def _on_gfx1x() -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx1x
+class Int4LMHeadMethod(RdnaLMHeadMethod):
+    """int4 per-group-32 lm_head on the RDNA hybrid W4A16 op."""
 
-    return on_gfx1x()
+    scheme = "int4_per_group_32"
+    # Zero points pack 8 rows per int32 word.
+    n_align = 8
+    k_align = GROUP_SIZE
 
-
-class Int4LMHeadMethod(QuantizeMethodBase):
-    """Loads the fp16/bf16 lm_head as usual, then replaces it with an int4
-    per-group-32 copy run by the RDNA hybrid W4A16 op.
-
-    A tied head only rebinds its own ``weight``, so the input embeddings keep
-    their full-precision weight.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._unquantized = UnquantizedEmbeddingMethod()
-
-    @classmethod
-    def from_config(
-        cls, quant_method: QuantizeMethodBase, vllm_config: "VllmConfig", prefix: str
-    ) -> "Int4LMHeadMethod":
-        """Check that ``lm_head_quantization`` can replace ``quant_method``."""
-        if not _on_gfx1x():
-            raise ValueError(
-                "lm_head_quantization='int4_per_group_32' needs a ROCm gfx11 or "
-                "gfx12 GPU."
-            )
-        if not isinstance(
-            quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
-        ):
-            raise ValueError(
-                f"lm_head_quantization needs an unquantized lm_head, but {prefix} "
-                f"uses {type(quant_method).__name__}."
-            )
-        model_config = vllm_config.model_config
-        if (
-            model_config is not None
-            and model_config.head_dtype is not None
-            and model_config.head_dtype != model_config.dtype
-        ):
-            raise ValueError(
-                "lm_head_quantization is not supported with a head_dtype that "
-                "differs from the model dtype."
-            )
-        if vllm_config.lora_config is not None:
-            raise ValueError("lm_head_quantization is not supported with LoRA.")
-        return cls()
-
-    def create_weights(self, layer: Module, *weight_args, **extra_weight_attrs):
-        self._unquantized.create_weights(layer, *weight_args, **extra_weight_attrs)
-
-    def process_weights_after_loading(self, layer: Module) -> None:
-        weight = layer.weight
-        n, k = weight.shape
-        if weight.dtype not in (torch.float16, torch.bfloat16):
-            raise ValueError(
-                f"lm_head_quantization needs an fp16/bf16 lm_head, got {weight.dtype}."
-            )
-        if n % 8 or k % GROUP_SIZE:
-            raise ValueError(
-                f"lm_head_quantization needs a vocab shard divisible by 8 and a "
-                f"hidden size divisible by {GROUP_SIZE}, got {n} x {k}."
-            )
-        w_q, w_s, w_zp = quantize_lm_head_int4(weight.data)
+    def quantize_weight(self, layer: Module, weight: torch.Tensor) -> None:
+        w_q, w_s, w_zp = quantize_lm_head_int4(weight)
         replace_parameter(layer, "weight", w_q)
         layer.weight_scale = Parameter(w_s, requires_grad=False)
         layer.weight_zero_point = Parameter(w_zp, requires_grad=False)
-        logger.info_once(
-            "Quantized the lm_head to int4 per-group-%d (%d x %d per rank).",
-            GROUP_SIZE,
-            n,
-            k,
-        )
 
-    def apply(
-        self, layer: Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    def matmul(
+        self, layer: Module, x_2d: torch.Tensor, bias: torch.Tensor | None
     ) -> torch.Tensor:
-        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
-        output = torch.ops.vllm.rdna_hybrid_w4a16_apply(
+        return torch.ops.vllm.rdna_hybrid_w4a16_apply(
             x_2d,
             layer.weight,
             layer.weight_scale,
@@ -198,4 +123,3 @@ class Int4LMHeadMethod(QuantizeMethodBase):
             num_compute_units(),
             GROUP_SIZE,
         )
-        return output.reshape(*x.shape[:-1], output.shape[-1])
