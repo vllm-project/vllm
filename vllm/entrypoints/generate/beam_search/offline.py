@@ -136,7 +136,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             self.llm_engine.input_processor.generation_config_fields,
             tokenizer.eos_token_id,
         )
-        sort_beams_key = create_sort_beams_key_function(eos_token_ids, length_penalty)
+        sort_beams_key = create_sort_beams_key_function(length_penalty)
         instances: list[BeamSearchInstance] = []
 
         for lora_req, prompt, prompt_priority in zip(
