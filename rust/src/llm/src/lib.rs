@@ -124,7 +124,7 @@ impl Llm {
 
         let prepared = req.prepare(self.randomize_request_id)?;
         let remote_prefill_cached_tokens = prepared.remote_prefill_cached_tokens();
-        let prompt_token_ids = prepared.prompt_token_ids().into();
+        let prompt_token_ids = prepared.prompt_token_ids;
         let external_request_id = prepared
             .engine_request
             .external_req_id
@@ -138,7 +138,7 @@ impl Llm {
         let arrival_time = prepared.engine_request.arrival_time;
         let max_tokens_param =
             (prepared.engine_request.sampling_params.as_ref()).map(|p| p.max_tokens);
-        let prompt_len = prepared.prompt_token_ids().len() as u32;
+        let prompt_len = prompt_token_ids.len() as u32;
 
         let stream = self.client.call(prepared.engine_request).await?;
 

@@ -40,8 +40,8 @@ use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
-    IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
-    setup_mock_engine_with_init, spawn_mock_engine_task,
+    IpcNamespace, decode_prompt_token_ids, setup_bootstrapped_mock_engine,
+    setup_mock_engine_sockets, setup_mock_engine_with_init, spawn_mock_engine_task,
 };
 use crate::transport::ConnectedEngine;
 use crate::{
@@ -2792,8 +2792,14 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let outputs_bytes = hex::decode(outputs_hex).unwrap();
     let sampling_mask_outputs_bytes = hex::decode(sampling_mask_outputs_hex).unwrap();
 
-    let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
+    // Python sends prompt token ids as int32, the Rust frontend as uint32.
+    let mut decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
+    assert_eq!(
+        decode_prompt_token_ids(&decoded_request),
+        Some(vec![11, 22])
+    );
+    decoded_request.prompt_token_ids = expected_request.prompt_token_ids.clone();
     assert_eq!(decoded_request, expected_request);
 
     // All-default sampling params -> empty map; must decode to Python defaults.
@@ -2839,8 +2845,13 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         },
     );
 
-    let decoded_multimodal_request: EngineCoreRequest =
+    let mut decoded_multimodal_request: EngineCoreRequest =
         rmp_serde::from_slice(&multimodal_request_bytes).unwrap();
+    assert_eq!(
+        decode_prompt_token_ids(&decoded_multimodal_request),
+        Some(vec![101, 102, 103, 104])
+    );
+    decoded_multimodal_request.prompt_token_ids = sample_multimodal_request().prompt_token_ids;
     assert_eq!(decoded_multimodal_request, sample_multimodal_request());
 
     // The decode assertion above proves Python wire -> Rust struct. Also compare

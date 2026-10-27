@@ -5,6 +5,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+use bytes::Bytes;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use zeromq::{DealerSocket, PushSocket};
@@ -15,7 +16,37 @@ use crate::mock_engine::{
     MockEngineConfig, MockEngineDataSockets, connect_to_bootstrapped_frontend, connect_to_frontend,
     default_ready_response,
 };
+use crate::protocol::dtype::{Endianness, TensorDtype};
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage};
+use crate::protocol::request::EngineCoreRequest;
+
+/// Decode the `[request type, payload, aux frames...]` of an add request,
+/// resolving its prompt token ids if they were sent in an auxiliary frame.
+pub fn decode_add_request(frames: &[Bytes]) -> EngineCoreRequest {
+    let mut request: EngineCoreRequest =
+        rmp_serde::from_slice(&frames[1]).expect("decode add request");
+    if let Some(ids) = &mut request.prompt_token_ids {
+        ids.resolve_aux_frame(&frames[1..]).expect("resolve prompt token ids");
+    }
+    request
+}
+
+/// The prompt token ids of a request, which must be inline or resolved by
+/// [`decode_add_request`].
+pub fn decode_prompt_token_ids(request: &EngineCoreRequest) -> Option<Vec<u32>> {
+    let ids = request.prompt_token_ids.as_ref()?;
+    assert!(matches!(
+        ids.dtype.scalar,
+        TensorDtype::U32 | TensorDtype::I32
+    ));
+    let bytes = ids.data.as_raw_view().expect("prompt token ids are inline");
+    let decode = match ids.dtype.endianness {
+        Endianness::Little => u32::from_le_bytes,
+        Endianness::Big => u32::from_be_bytes,
+        Endianness::Native => u32::from_ne_bytes,
+    };
+    Some(bytes.chunks_exact(4).map(|c| decode(c.try_into().unwrap())).collect())
+}
 
 /// Per-test IPC endpoint namespace backed by a unique temporary directory.
 ///

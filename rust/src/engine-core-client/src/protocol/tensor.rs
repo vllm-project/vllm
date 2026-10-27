@@ -212,6 +212,13 @@ pub type WireTensor = WireArray<TensorDtype>;
 /// Numeric array with a typed NumPy descriptor or native-endian Torch dtype.
 pub type WireNdArray = WireArray<NumpyDtype>;
 
+/// A rank-1 uint32 array, such as prompt token ids.
+impl From<Vec<u32>> for WireNdArray {
+    fn from(data: Vec<u32>) -> Self {
+        Self::from_u32(vec![data.len()], data).expect("rank-1 shape matches the data")
+    }
+}
+
 /// Python array/tensor payload reference inside [`WireNdArray`].
 ///
 /// The data can be either an inline msgpack raw-view extension or an index into

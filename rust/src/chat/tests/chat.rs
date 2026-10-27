@@ -22,7 +22,9 @@ use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, StopReason,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
-use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
+use vllm_engine_core_client::test_utils::{
+    IpcNamespace, decode_prompt_token_ids, spawn_mock_engine_task,
+};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::tokenizer::DynTokenizer;
@@ -338,12 +340,10 @@ async fn chat_streams_text_events() {
                 // more fields here in the future
                 assert_eq!(
                     String::from_utf8(
-                        request
-                            .prompt_token_ids
-                            .as_ref()
+                        decode_prompt_token_ids(&request)
                             .unwrap()
-                            .iter()
-                            .map(|&id| id as u8)
+                            .into_iter()
+                            .map(|id| id as u8)
                             .collect()
                     )
                     .unwrap(),

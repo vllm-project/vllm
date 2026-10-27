@@ -149,7 +149,11 @@ impl ActiveRequest {
     ) -> Result<Self, EngineCoreFinishReason> {
         let request_id = request.request_id;
         let client_index = request.client_index;
-        let prompt_len = request.prompt_token_ids.as_ref().map(|ids| ids.len()).unwrap_or_default();
+        let prompt_len = request
+            .prompt_token_ids
+            .as_ref()
+            .map(|ids| ids.shape.iter().product())
+            .unwrap_or_default();
 
         let Some(sampling_params) = request.sampling_params else {
             warn!(

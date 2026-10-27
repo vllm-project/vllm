@@ -11,7 +11,7 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use crate::protocol::kv_hints::KvHintsEnvelope;
 use crate::protocol::multimodal::MmFeatures;
 use crate::protocol::sampling::EngineCoreSamplingParams;
-use crate::protocol::tensor::{WireArrayData, WireNdArray};
+use crate::protocol::tensor::WireNdArray;
 use crate::protocol::{OpaqueValue, lora};
 use crate::{Error, Result};
 
@@ -76,7 +76,9 @@ pub struct ReasoningParserKwargs {
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreRequest {
     pub request_id: String,
-    pub prompt_token_ids: Option<PromptTokenIds>,
+    /// A rank-1 uint32 array, so that a long prompt goes in its own auxiliary
+    /// frame and the engine copies it into a buffer, not one int per token.
+    pub prompt_token_ids: Option<WireNdArray>,
     /// Multimodal features attached to the request.
     pub mm_features: Option<MmFeatures>,
     pub sampling_params: Option<EngineCoreSamplingParams>,
@@ -166,113 +168,6 @@ impl EngineCoreRequest {
     }
 }
 
-/// Prompt token ids, sent as a uint32 NumPy array so that a long prompt goes in
-/// its own auxiliary frame instead of being copied into the message, and the
-/// engine copies it into a buffer instead of decoding one Python int per token.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PromptTokenIds(PromptTokenIdsRepr);
-
-#[derive(Debug, Clone, PartialEq)]
-enum PromptTokenIdsRepr {
-    Ids(Vec<u32>),
-    /// After [`EngineCoreRequest::extract_aux_frames`], or when decoded from a
-    /// reference to an auxiliary frame.
-    Wire(WireNdArray),
-}
-
-impl std::ops::Deref for PromptTokenIds {
-    type Target = [u32];
-
-    fn deref(&self) -> &[u32] {
-        self.as_slice()
-    }
-}
-
-impl From<Vec<u32>> for PromptTokenIds {
-    fn from(ids: Vec<u32>) -> Self {
-        Self(PromptTokenIdsRepr::Ids(ids))
-    }
-}
-
-impl PromptTokenIds {
-    /// The token ids. Not available once they have been moved to an auxiliary
-    /// frame for sending.
-    pub fn as_slice(&self) -> &[u32] {
-        match &self.0 {
-            PromptTokenIdsRepr::Ids(ids) => ids,
-            PromptTokenIdsRepr::Wire(_) => panic!("prompt token ids were moved for sending"),
-        }
-    }
-
-    /// The number of token ids, also once they have been moved for sending.
-    pub fn len(&self) -> usize {
-        match &self.0 {
-            PromptTokenIdsRepr::Ids(ids) => ids.len(),
-            PromptTokenIdsRepr::Wire(array) => array.shape.iter().product(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    fn extract_aux_frame(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
-        if let PromptTokenIdsRepr::Ids(ids) = &mut self.0 {
-            let ids = std::mem::take(ids);
-            let shape = vec![ids.len()];
-            let array = WireNdArray::from_u32(shape, ids).expect("shape matches the ids");
-            self.0 = PromptTokenIdsRepr::Wire(array);
-        }
-        if let PromptTokenIdsRepr::Wire(array) = &mut self.0 {
-            array.extract_aux_frame(aux_frames, threshold);
-        }
-    }
-}
-
-impl Serialize for PromptTokenIds {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        match &self.0 {
-            PromptTokenIdsRepr::Wire(array) => array.serialize(serializer),
-            // Not prepared for sending (e.g. in tests): encode inline.
-            PromptTokenIdsRepr::Ids(ids) => WireNdArray::from_u32(vec![ids.len()], ids.clone())
-                .expect("shape matches the ids")
-                .serialize(serializer),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for PromptTokenIds {
-    /// Accept the NumPy array tuple, or a plain array of ints as Python test
-    /// fixtures send.
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        use serde::de::Error as _;
-        let value = rmpv::Value::deserialize(d)?;
-        let rmpv::Value::Array(items) = &value else {
-            return Err(D::Error::custom("expected prompt token ids array"));
-        };
-        if !items.first().is_some_and(rmpv::Value::is_str) {
-            let ids: Vec<u32> = rmpv::ext::from_value(value).map_err(D::Error::custom)?;
-            return Ok(ids.into());
-        }
-        let array: WireNdArray = rmpv::ext::from_value(value).map_err(D::Error::custom)?;
-        match &array.data {
-            WireArrayData::RawView(bytes) if bytes.len() % 4 == 0 => Ok(bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_ne_bytes(c.try_into().expect("4-byte chunk")))
-                .collect::<Vec<_>>()
-                .into()),
-            WireArrayData::RawView(bytes) => Err(D::Error::custom(format!(
-                "prompt token ids byte length {} is not a multiple of 4",
-                bytes.len()
-            ))),
-            WireArrayData::AuxIndex(_) => Ok(Self(PromptTokenIdsRepr::Wire(array))),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use rmpv::Value;
@@ -287,6 +182,7 @@ mod tests {
     use crate::protocol::sampling::EngineCoreSamplingParams;
     use crate::protocol::tensor::{WireArrayData, WireNdArray, WireTensor};
     use crate::protocol::{decode_value, encode_msgpack};
+    use crate::test_utils::{decode_add_request, decode_prompt_token_ids};
 
     const AUX_FRAME_THRESHOLD: usize = 256;
 
@@ -344,7 +240,7 @@ mod tests {
         let mut short = request.clone();
         assert!(short.extract_aux_frames(AUX_FRAME_THRESHOLD).is_empty());
         let encoded = encode_msgpack(&short).unwrap();
-        let Value::Array(mut array) = decode_value(&encoded).unwrap() else {
+        let Value::Array(array) = decode_value(&encoded).unwrap() else {
             panic!("expected array");
         };
         let Value::Array(wire) = &array[1] else {
@@ -354,13 +250,7 @@ mod tests {
         assert_eq!(wire[1], Value::from(vec![Value::from(3)]));
         let decoded: EngineCoreRequest = rmp_serde::from_slice(&encoded).unwrap();
         assert_eq!(decoded, request);
-        assert_eq!(decoded.prompt_token_ids.unwrap().as_slice(), ids);
-
-        // An array of ints still decodes.
-        array[1] = Value::from(ids.iter().map(|&id| Value::from(id)).collect::<Vec<_>>());
-        let encoded = rmp_serde::to_vec(&Value::Array(array)).unwrap();
-        let decoded: EngineCoreRequest = rmp_serde::from_slice(&encoded).unwrap();
-        assert_eq!(decoded.prompt_token_ids.unwrap().as_slice(), ids);
+        assert_eq!(decode_prompt_token_ids(&decoded), Some(ids));
 
         // A long prompt goes in its own auxiliary frame, without a copy.
         let long_ids: Vec<u32> = (0..AUX_FRAME_THRESHOLD as u32).collect();
@@ -374,13 +264,23 @@ mod tests {
             aux_frames[0].as_ref(),
             bytemuck::cast_slice::<u32, u8>(&long_ids)
         );
-        let Value::Array(array) = decode_value(&encode_msgpack(&long).unwrap()).unwrap() else {
+        let encoded = encode_msgpack(&long).unwrap();
+        let Value::Array(array) = decode_value(&encoded).unwrap() else {
             panic!("expected array");
         };
         let Value::Array(wire) = &array[1] else {
             panic!("expected ndarray tuple");
         };
         assert_eq!(wire[2], Value::from(1));
+        let frames = [
+            Bytes::from_static(b"\x00"),
+            encoded.into(),
+            aux_frames[0].clone(),
+        ];
+        assert_eq!(
+            decode_prompt_token_ids(&decode_add_request(&frames)),
+            Some(long_ids)
+        );
     }
 
     #[test]

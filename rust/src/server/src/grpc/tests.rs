@@ -48,7 +48,9 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
-use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
+use vllm_engine_core_client::test_utils::{
+    IpcNamespace, decode_add_request, decode_prompt_token_ids, spawn_mock_engine_task_with_ready,
+};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
 use vllm_llm::Llm;
 use vllm_text::tokenizer::DynTokenizer;
@@ -387,8 +389,7 @@ where
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 check_request(&request);
                 send_outputs(
                     push,
@@ -902,7 +903,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
             default_stream_output_specs(),
             multimodal_backend(),
             |request| {
-                let token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
+                let token_ids = decode_prompt_token_ids(request).expect("prompt token ids");
                 let features = request.mm_features.as_ref().expect("multimodal features");
                 assert_eq!(features.len(), 2);
 
@@ -1021,7 +1022,7 @@ async fn generate_forwards_preprocessed_multimodal_features() {
                 multimodal_backend(),
                 move |request| {
                     assert_eq!(
-                        request.prompt_token_ids.as_deref(),
+                        decode_prompt_token_ids(request).as_deref(),
                         Some(&[11, 99, 99, 12][..])
                     );
                     let features = request.mm_features.as_ref().expect("multimodal features");
@@ -2024,8 +2025,7 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
                 boxed_test_future(async move {
                     let add = recv_engine_message(dealer).await;
                     assert_eq!(add[0].as_ref(), &[0x00]);
-                    let request: EngineCoreRequest =
-                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    let request = decode_add_request(&add);
                     submitted_tx.send(()).expect("signal submitted request");
 
                     // A queued request produces no output before cancellation.

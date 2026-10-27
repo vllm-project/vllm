@@ -84,7 +84,7 @@ class EngineCoreRequest(
     omit_defaults=True,
 ):
     request_id: str
-    prompt_token_ids: list[int] | None
+    prompt_token_ids: object | None
     mm_features: object | None
     sampling_params: EngineCoreSamplingParams | None
     pooling_params: object | None
@@ -163,9 +163,15 @@ class EngineCoreOutputs(
     weight_version: str | None = None
 
 
+def token_ids(ids: list[int]) -> list:
+    # Prompt token ids as the Python frontend sends them, an int32 ndarray.
+    array = np.array(ids, dtype=np.int32)
+    return [array.dtype.str, list(array.shape), msgspec.msgpack.Ext(3, array.tobytes())]
+
+
 request = EngineCoreRequest(
     request_id="req-1",
-    prompt_token_ids=[11, 22],
+    prompt_token_ids=token_ids([11, 22]),
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(
         temperature=0.8,
@@ -207,7 +213,7 @@ request = EngineCoreRequest(
 # All defaults -> empty map. Regression guard for the sparse-map decode.
 defaults_request = EngineCoreRequest(
     request_id="req-defaults",
-    prompt_token_ids=[5, 6, 7],
+    prompt_token_ids=token_ids([5, 6, 7]),
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(),
     pooling_params=None,
@@ -217,7 +223,7 @@ defaults_request = EngineCoreRequest(
 # Embedded in a full request so the fixture also pins the `lora_request` slot.
 lora_request = EngineCoreRequest(
     request_id="req-lora",
-    prompt_token_ids=[5, 6, 7],
+    prompt_token_ids=token_ids([5, 6, 7]),
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(),
     pooling_params=None,
@@ -270,7 +276,11 @@ multimodal_features = [
 ]
 multimodal_request_wire = [
     "req-mm",
-    [101, 102, 103, 104],
+    [
+        "<i4",
+        [4],
+        msgpack.ExtType(3, np.array([101, 102, 103, 104], dtype=np.int32).tobytes()),
+    ],
     multimodal_features,
     None,
     None,
