@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.model_executor.models.qwen_longspark import _LongSparkRMSNorm
+from vllm.model_executor.models.qwen3_longspark import _LongSparkRMSNorm
 
 
 def _rms_norm_reference(

@@ -307,9 +307,7 @@ def _markov_partial_topk_tiles(
         tl.where(matches, tl.expand_dims(token_ids, 1), 2147483647), axis=0
     )
     output_offsets = (
-        batch_index * tile_stride_b
-        + tile_index * tile_stride_g
-        + tl.arange(0, TOP_K)
+        batch_index * tile_stride_b + tile_index * tile_stride_g + tl.arange(0, TOP_K)
     )
     tl.store(tile_values + output_offsets, top_values)
     tl.store(tile_ids + output_offsets, top_ids)
@@ -345,9 +343,7 @@ def _markov_tile_topk(
         tl.where(matches, tl.expand_dims(token_ids, 1), 2147483647), axis=0
     )
     tl.store(
-        candidate_ids
-        + batch_index * candidate_stride_b
-        + tl.arange(0, TOP_K),
+        candidate_ids + batch_index * candidate_stride_b + tl.arange(0, TOP_K),
         top_ids,
     )
 
@@ -383,22 +379,17 @@ def _markov_refine_candidates(
         other=0.0,
     ).to(tl.float32)
     weights = tl.load(
-        weight
-        + candidates[:, None] * weight_stride_v
-        + rank_offsets[None, :],
+        weight + candidates[:, None] * weight_stride_v + rank_offsets[None, :],
         mask=rank_offsets[None, :] < MARKOV_RANK,
         other=0.0,
     ).to(tl.float32)
     bias = tl.sum(weights * embedding[None, :], axis=1)
     bias = bias.to(tl.bfloat16).to(tl.float32)
     scores = (
-        tl.load(base + batch_index * base_stride_b + candidates).to(tl.float32)
-        + bias
+        tl.load(base + batch_index * base_stride_b + candidates).to(tl.float32) + bias
     )
     best_value = tl.max(scores, axis=0)
-    best_id = tl.min(
-        tl.where(scores == best_value, candidates, 2147483647), axis=0
-    )
+    best_id = tl.min(tl.where(scores == best_value, candidates, 2147483647), axis=0)
     tl.store(output + batch_index * output_stride, best_id)
 
 
@@ -620,10 +611,7 @@ def fused_markov_refined_argmax(
         or not base.is_cuda
         or base.dtype != torch.bfloat16
         or token_ids.dtype not in (torch.int32, torch.int64)
-        or any(
-            tensor.dtype != torch.bfloat16
-            for tensor in tensors[2:]
-        )
+        or any(tensor.dtype != torch.bfloat16 for tensor in tensors[2:])
         or any(tensor.stride(1) != 1 for tensor in tensors[2:])
     ):
         raise ValueError("refined Markov projection requires contiguous CUDA BF16")
@@ -667,9 +655,7 @@ def fused_markov_refined_argmax(
     ):
         raise ValueError("refined Markov workspaces have invalid shapes or dtypes")
 
-    _markov_project_argmax_stage1[
-        (triton.cdiv(batch_size, batch_block), chunks)
-    ](
+    _markov_project_argmax_stage1[(triton.cdiv(batch_size, batch_block), chunks)](
         base,
         token_ids,
         candidate_embedding_weight,

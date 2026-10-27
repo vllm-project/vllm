@@ -167,12 +167,15 @@ class LongSparkSpeculator(DraftModelSpeculator):
             dtype=torch.int32,
             device=device,
         )
-        self._fused_markov_weights: tuple[
-            torch.Tensor,
-            torch.Tensor,
-            torch.Tensor | None,
-            torch.Tensor | None,
-        ] | None = None
+        self._fused_markov_weights: (
+            tuple[
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor | None,
+                torch.Tensor | None,
+            ]
+            | None
+        ) = None
 
         self.target_attn_layers: list[AttentionLayerBase] = []
         self.target_attn_layer_names: list[str] = []
@@ -524,9 +527,7 @@ class LongSparkSpeculator(DraftModelSpeculator):
             if defer_decode and len(decode_batch_indices) == input_batch.num_reqs:
                 deferred_update = request_slots
             else:
-                starts = self._state_committed_lens_gpu.index_select(
-                    0, request_slots
-                )
+                starts = self._state_committed_lens_gpu.index_select(0, request_slots)
                 ends = committed_lens.index_select(0, batch_indices)
                 self._update_global_decode_batch(
                     batch_indices, request_slots, starts, ends, attn_metadata
@@ -784,10 +785,7 @@ class LongSparkSpeculator(DraftModelSpeculator):
                     candidate_embedding,
                     candidate_projection,
                 ) = self._fused_markov_weights
-                if (
-                    candidate_embedding is not None
-                    and candidate_projection is not None
-                ):
+                if candidate_embedding is not None and candidate_projection is not None:
                     sampled = fused_markov_refined_argmax(
                         logits,
                         previous,

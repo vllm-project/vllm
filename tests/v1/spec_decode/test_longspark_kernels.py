@@ -205,9 +205,7 @@ def test_longspark_refined_markov_argmax_matches_candidate_reference(
         dtype=torch.bfloat16,
         device="cuda",
     )
-    candidate_weight = torch.randn_like(
-        candidate_embedding, generator=generator
-    )
+    candidate_weight = torch.randn_like(candidate_embedding, generator=generator)
     exact_embedding = torch.randn(
         vocab_size,
         exact_rank,
@@ -220,24 +218,16 @@ def test_longspark_refined_markov_argmax_matches_candidate_reference(
     block_vocab = 64 if batch_size >= 8 else 32
     chunks = triton.cdiv(vocab_size, block_vocab)
     num_tiles = triton.cdiv(chunks, 512)
-    partial_values = torch.empty(
-        batch_size, chunks, dtype=torch.float32, device="cuda"
-    )
-    partial_ids = torch.empty(
-        batch_size, chunks, dtype=torch.int32, device="cuda"
-    )
+    partial_values = torch.empty(batch_size, chunks, dtype=torch.float32, device="cuda")
+    partial_ids = torch.empty(batch_size, chunks, dtype=torch.int32, device="cuda")
     tile_values = torch.empty(
         batch_size, num_tiles, top_k, dtype=torch.float32, device="cuda"
     )
     tile_ids = torch.empty(
         batch_size, num_tiles, top_k, dtype=torch.int32, device="cuda"
     )
-    candidate_ids = torch.empty(
-        batch_size, top_k, dtype=torch.int32, device="cuda"
-    )
-    output_storage = torch.empty(
-        batch_size, 2, dtype=torch.int64, device="cuda"
-    )
+    candidate_ids = torch.empty(batch_size, top_k, dtype=torch.int32, device="cuda")
+    output_storage = torch.empty(batch_size, 2, dtype=torch.int64, device="cuda")
     actual = fused_markov_refined_argmax(
         base,
         token_ids,
@@ -256,9 +246,9 @@ def test_longspark_refined_markov_argmax_matches_candidate_reference(
     )
 
     approximate_embedding = F.embedding(token_ids, candidate_embedding)
-    approximate_bias = F.linear(
-        approximate_embedding, candidate_weight
-    ).to(torch.bfloat16)
+    approximate_bias = F.linear(approximate_embedding, candidate_weight).to(
+        torch.bfloat16
+    )
     approximate_scores = base.float() + approximate_bias.float()
     padded_vocab = chunks * block_vocab
     if padded_vocab > vocab_size:
@@ -270,9 +260,9 @@ def test_longspark_refined_markov_argmax_matches_candidate_reference(
     chunk_scores, chunk_offsets = approximate_scores.view(
         batch_size, chunks, block_vocab
     ).max(dim=-1)
-    chunk_ids = (
-        torch.arange(chunks, device="cuda") * block_vocab
-    )[None] + chunk_offsets
+    chunk_ids = (torch.arange(chunks, device="cuda") * block_vocab)[
+        None
+    ] + chunk_offsets
     top_chunks = chunk_scores.topk(top_k, dim=-1).indices
     reference_candidates = chunk_ids.gather(1, top_chunks)
     exact_queries = F.embedding(token_ids, exact_embedding).float()
@@ -336,9 +326,7 @@ def test_longspark_prepare_graph_inputs(num_reqs: int, captured_num_reqs: int):
     )
     starts = torch.arange(30, 30 + num_reqs, dtype=torch.int32, device="cuda")
     current_positions = starts + 3
-    state_committed_lens = torch.full(
-        (128,), -1, dtype=torch.int32, device="cuda"
-    )
+    state_committed_lens = torch.full((128,), -1, dtype=torch.int32, device="cuda")
     state_committed_lens[request_slots] = starts
     anchors_out = torch.full((captured_num_reqs,), -1, dtype=torch.int64, device="cuda")
     current_positions_out = torch.full_like(anchors_out, -1)
@@ -397,9 +385,7 @@ def test_longspark_prepare_graph_inputs(num_reqs: int, captured_num_reqs: int):
     torch.testing.assert_close(request_slots_out[:num_reqs], request_slots)
     torch.testing.assert_close(starts_out[:num_reqs], starts)
     torch.testing.assert_close(ends_out[:num_reqs], current_positions)
-    torch.testing.assert_close(
-        state_committed_lens[request_slots], current_positions
-    )
+    torch.testing.assert_close(state_committed_lens[request_slots], current_positions)
     expected_positions = current_positions.long()[:, None] + torch.arange(
         block_size, dtype=torch.int64, device="cuda"
     )

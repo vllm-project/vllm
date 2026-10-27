@@ -23,7 +23,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""Qwen LongSpark DraftFreeKV model.
+"""Qwen3 LongSpark DraftFreeKV model.
 
 The module implements the inference-only portion of the MIT-licensed
 LongSpark/SpecForge DraftFreeKV checkpoint format. Target K/V ownership and
@@ -823,12 +823,15 @@ class LongSparkDraftModel(nn.Module):
 
     def fused_markov_weights(
         self,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor | None,
-        torch.Tensor | None,
-    ] | None:
+    ) -> (
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor | None,
+            torch.Tensor | None,
+        ]
+        | None
+    ):
         """Return exact weights and optional L2-sized retrieval factors."""
         processor = self.target_logits_processor
         head = self.parallel_markov_head.markov_w2
@@ -874,8 +877,7 @@ class LongSparkDraftModel(nn.Module):
                     )
                     if retained_energy.item() >= 0.60:
                         candidate_projection = (
-                            left[:, :candidate_rank]
-                            * singular_values[:candidate_rank]
+                            left[:, :candidate_rank] * singular_values[:candidate_rank]
                         ).to(torch.bfloat16)
                         candidate_embedding = (
                             embedding_weight
@@ -884,7 +886,7 @@ class LongSparkDraftModel(nn.Module):
                         candidate_projection = candidate_projection.contiguous()
                         candidate_embedding = candidate_embedding.contiguous()
                     del left, singular_values, right
-                    torch.cuda.empty_cache()
+                    torch.accelerator.empty_cache()
         return (
             embedding_weight,
             projection_weight,

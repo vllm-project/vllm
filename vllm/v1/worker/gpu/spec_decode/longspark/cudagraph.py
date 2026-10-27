@@ -16,9 +16,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 
 
-@triton.jit(
-    do_not_specialize=["num_reqs", "captured_num_reqs", "padding_request_slot"]
-)
+@triton.jit(do_not_specialize=["num_reqs", "captured_num_reqs", "padding_request_slot"])
 def _prepare_graph_inputs_kernel(
     selected_hidden_ptrs,
     query_start_loc,
@@ -81,9 +79,7 @@ def _prepare_graph_inputs_kernel(
         mask=valid_hidden,
         other=0,
     )
-    source = source_addresses.to(
-        tl.pointer_type(selected_hidden_out.dtype.element_ty)
-    )
+    source = source_addresses.to(tl.pointer_type(selected_hidden_out.dtype.element_ty))
     hidden = tl.load(
         source + source_rows * HIDDEN_SIZE + hidden_columns,
         mask=valid_hidden,
