@@ -1119,7 +1119,8 @@ def test_index_group_convert_during_piecewise_capture():
         dtype=torch.int32,
         device=device,
     )
-    builder = SparseMLAIndexGroupBuilder(logical_topk_indices)
+    builder_cls = current_platform.get_sparse_mla_index_group_builder_cls()
+    builder = builder_cls(logical_topk_indices)
     group, layer_index = builder.register_layer(is_index_producing_layer=True)
     assert layer_index == 0 and group.has_indexer
 

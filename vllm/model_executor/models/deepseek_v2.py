@@ -1447,14 +1447,13 @@ class DeepseekV2Model(nn.Module):
             )
         else:
             topk_indices_buffer = None
-        index_group_builder = (
-            SparseMLAIndexGroupBuilder(
+        index_group_builder = None
+        if topk_indices_buffer is not None:
+            builder_cls = current_platform.get_sparse_mla_index_group_builder_cls()
+            index_group_builder = builder_cls(
                 topk_indices_buffer,
                 get_sparse_mla_index_group_max_rows(vllm_config),
             )
-            if topk_indices_buffer is not None
-            else None
-        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(

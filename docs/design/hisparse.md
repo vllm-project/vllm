@@ -232,6 +232,15 @@ provides IPC event creation/import/export only for shared host pools.
 Without HiSparse, sparse attention keeps its normal stream and event path.
 ROCm does not currently provide a HiSparse backend.
 
+Sparse MLA index-group builders are selected by
+`Platform.get_sparse_mla_index_group_builder_cls()`. The default returns the
+existing `SparseMLAIndexGroupBuilder` class, which chooses ordinary or HiSparse
+groups from the attention configuration. Hardware plugins can override this
+method to return a subclass with the same constructor and `register_layer()`
+contract. Model and MTP initialization use this selection only when they have a
+top-K buffer. Attention implementations reuse a supplied builder and select a
+new one only when it is absent and a top-K buffer is available.
+
 ## Main classes
 
 | Class | Inherits / implements | Responsibility |
