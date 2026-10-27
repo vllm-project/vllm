@@ -279,6 +279,27 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
       launchFp32RouterGemm<InputT, 128, 1, kNumTokens, kNumExperts, kHiddenDim>(
           output, mat_a, mat_b, stream);
     }
+  } else if constexpr (std::is_same_v<InputT, __nv_bfloat16> &&
+                       kNumExperts == 256 && kHiddenDim == 8192) {
+    // MuseSpark1x: the 8MB weight makes this shape FFMA-bound past M~10, so
+    // the wider block wins at every M and token groups clear the M >= 28
+    // accumulator cliff. Thresholds are from a B300 sweep. BS=192/384 are not
+    // instantiable: VPT=8 requires kBlockSize to divide kHiddenDim / 8 = 1024.
+    if (!isBlackwellFamily()) {
+      launchFp32RouterGemm<InputT, 128, 1, kNumTokens, kNumExperts, kHiddenDim>(
+          output, mat_a, mat_b, stream);
+      return;
+    }
+    if constexpr (kNumTokens >= 10 && kNumTokens % 2 == 0) {
+      launchFp32RouterGemm<InputT, 256, 2, kNumTokens, kNumExperts, kHiddenDim,
+                           2>(output, mat_a, mat_b, stream);
+    } else if constexpr (kNumTokens >= 13) {
+      launchFp32RouterGemm<InputT, 256, 2, kNumTokens, kNumExperts, kHiddenDim>(
+          output, mat_a, mat_b, stream);
+    } else {
+      launchFp32RouterGemm<InputT, 256, 1, kNumTokens, kNumExperts, kHiddenDim>(
+          output, mat_a, mat_b, stream);
+    }
   } else {
     launchFp32RouterGemm<InputT, 128, 1, kNumTokens, kNumExperts, kHiddenDim>(
         output, mat_a, mat_b, stream);
@@ -287,7 +308,8 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
 
 // ---------------------------------------------------------------------------
 // Explicit instantiations for both input types.
-// Supported (E, H) pairs: (256, 3072), (128, 6144), and (256, 5120).
+// Supported (E, H) pairs: (256, 3072), (128, 6144), (256, 5120),
+// (352, 4096) [Step-5], and (256, 8192) [Muse Spark].
 // ---------------------------------------------------------------------------
 
 #define INSTANTIATE(T, M, E, H)                                    \
@@ -335,6 +357,11 @@ INSTANTIATE_ALL(__nv_bfloat16, 128, 6144)
 
 INSTANTIATE_ALL(float, 256, 5120)
 INSTANTIATE_ALL(__nv_bfloat16, 256, 5120)
+
+INSTANTIATE_ALL(float, 352, 4096)
+INSTANTIATE_ALL(__nv_bfloat16, 352, 4096)
+INSTANTIATE_ALL(float, 256, 8192)
+INSTANTIATE_ALL(__nv_bfloat16, 256, 8192)
 
 #define INSTANTIATE_LARGE(T, E, H) \
   INSTANTIATE(T, 33, E, H)         \
