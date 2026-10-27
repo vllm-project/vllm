@@ -36,6 +36,7 @@ staging buffer larger than ``_MAX_STAGED_BYTES`` (e.g. KV cache swaps).
 """
 
 import threading
+import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cache
 from typing import Any
@@ -66,6 +67,9 @@ _pending: list[Future] = []
 _d2h_streams: set[int] = set()
 # For each registered stream, the producer stream it last waited on.
 _producer_of: dict[int, torch.cuda.Stream] = {}
+# Storage base addresses of the tensors registered via
+# register_inplace_h2d_target(); views of them are matched too.
+_inplace_h2d_storages: set[int] = set()
 # Upper bound on the staging buffer an H2D copy into an existing tensor may use.
 _MAX_STAGED_BYTES = 32 << 20
 
@@ -74,6 +78,25 @@ def register_d2h_stream(stream: torch.cuda.Stream) -> None:
     """Route non_blocking D2H copies issued on ``stream`` through the worker
     thread once ``install()`` has run (see the module docstring)."""
     _d2h_streams.add(stream.cuda_stream)
+
+
+def register_inplace_h2d_target(tensor: torch.Tensor) -> None:
+    """Let non_blocking H2D copies into ``tensor`` (or a view of it) land in
+    place on the staging stream once ``install()`` has run: no staging tensor
+    and no D2D. The caller guarantees that no GPU reader of ``tensor`` is still
+    in flight whenever it is rewritten (e.g. a round-robin pool slot whose
+    readers retired). The staging stream is ordered once after the current
+    stream, so work that initialized ``tensor`` (e.g. the zero fill of a fresh
+    allocation) completes before the first in-place upload. The registration
+    lapses with ``tensor``, so a later tensor reusing its memory is not matched.
+    """
+    if not tensor.is_cuda:
+        return
+    ptr = tensor.untyped_storage().data_ptr()
+    cur = torch.cuda.current_stream(tensor.device)
+    _staging_stream(cur.device_index).wait_stream(cur)
+    _inplace_h2d_storages.add(ptr)
+    weakref.finalize(tensor, _inplace_h2d_storages.discard, ptr)
 
 
 @cache
@@ -107,6 +130,15 @@ def _h2d(
     cur.wait_stream(staging)
     tmp.record_stream(cur)
     return tmp if out is None else _orig_copy_(out, tmp, non_blocking=True)
+
+
+def _h2d_inplace(out: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+    cur = torch.cuda.current_stream(out.device)
+    staging = _staging_stream(cur.device_index)
+    with torch.cuda.stream(staging):
+        _orig_copy_(out, src, non_blocking=True)
+    cur.wait_stream(staging)
+    return out
 
 
 def _d2h(src: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor | None:
@@ -154,8 +186,15 @@ def _wait_pending() -> None:
 
 def _copy_(self: torch.Tensor, src: torch.Tensor, non_blocking: bool = False):
     if non_blocking and not _bypass():
-        if self.is_cuda and src.is_cpu and _nbytes(src) <= _MAX_STAGED_BYTES:
-            return _h2d(src, self.device, out=self)
+        if self.is_cuda and src.is_cpu:
+            if (
+                _inplace_h2d_storages
+                and self.dtype == src.dtype
+                and self.untyped_storage().data_ptr() in _inplace_h2d_storages
+            ):
+                return _h2d_inplace(self, src)
+            if _nbytes(src) <= _MAX_STAGED_BYTES:
+                return _h2d(src, self.device, out=self)
         if (
             self.is_cpu
             and src.is_cuda

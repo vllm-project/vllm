@@ -13,6 +13,7 @@ from vllm.utils.torch_utils import (
     async_tensor_h2d,
     get_accelerator_view_from_cpu_tensor,
 )
+from vllm.v1.conf_compute_utils import register_inplace_h2d_target
 
 logger = init_logger(__name__)
 
@@ -55,6 +56,11 @@ class NonUvaBuffer:
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=pin_memory)
         self.np = self.cpu.numpy()
         self._uva = torch.zeros(size, dtype=dtype, device=current_platform.device_type)
+        # Pool slots are only rewritten once their GPU readers have retired
+        # (see UvaBufferPool), so the upload from the pinned host buffer may
+        # land in place under CC.
+        if pin_memory:
+            register_inplace_h2d_target(self._uva)
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         if n is None:
