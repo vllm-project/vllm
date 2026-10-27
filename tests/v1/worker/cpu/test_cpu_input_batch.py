@@ -7,6 +7,8 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.v1.worker.cpu.input_batch import (
+    InputBatch,
+    InputBuffers,
     combine_sampled_and_draft_tokens,
     post_update,
     prepare_pos_seq_lens,
@@ -15,6 +17,33 @@ from vllm.v1.worker.cpu.input_batch import (
 from vllm.v1.worker.cpu.rope import RopeState
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+
+
+@pytest.mark.parametrize(
+    "num_reqs,num_tokens",
+    [(256, 496), (128, 512), (3, 8), (1, 7)],
+)
+def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int) -> None:
+    buffers = InputBuffers(
+        max_num_reqs=num_reqs,
+        max_num_tokens=num_tokens,
+        device=torch.device("cpu"),
+    )
+    batch = InputBatch.make_dummy(num_reqs, num_tokens, buffers)
+
+    max_per_req = -(-num_tokens // num_reqs)
+    assert batch.num_scheduled_tokens.sum() == num_tokens
+    assert batch.num_scheduled_tokens.max() == max_per_req
+    assert batch.num_scheduled_tokens.min() >= num_tokens // num_reqs
+    assert (batch.num_scheduled_tokens[:-1] <= batch.num_scheduled_tokens[1:]).all()
+
+    query_lens = batch.query_start_loc_np[1:] - batch.query_start_loc_np[:-1]
+    assert (query_lens == batch.num_scheduled_tokens).all()
+    assert torch.equal(batch.seq_lens, torch.from_numpy(batch.num_scheduled_tokens))
+    assert batch.query_start_loc_np[-1] == num_tokens
+    assert torch.equal(
+        batch.query_start_loc, torch.from_numpy(batch.query_start_loc_np)
+    )
 
 
 def test_prepare_prefill_inputs_cpu() -> None:

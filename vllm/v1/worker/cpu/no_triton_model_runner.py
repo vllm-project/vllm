@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import time
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
@@ -29,6 +30,7 @@ from vllm.model_executor.offloader import (
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -435,6 +437,133 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
             num_blocks=self.kv_cache_config.num_blocks,
         )
 
+    @torch.inference_mode()
+    def _dummy_run(
+        self,
+        num_tokens: int,
+        *,
+        skip_attn: bool = False,
+        is_profile: bool = False,
+        randomize_inputs: bool = False,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if skip_attn and not is_profile:
+            raise ValueError(
+                "skip_attn must only be True for initial memory profiling."
+            )
+
+        # Create a dummy scheduler output.
+        num_reqs = min(num_tokens, self.max_num_reqs)
+        assert num_tokens <= self.max_num_tokens, (
+            f"Dummy run with {num_tokens} tokens exceeds max_num_batched_tokens "
+            f"({self.max_num_tokens})"
+        )
+
+        # Distribute the remainder evenly so no dummy request exceeds
+        # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+        num_tokens_per_request = [
+            num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
+            for i in range(num_reqs)
+        ]
+
+        assert sum(num_tokens_per_request) == num_tokens
+        num_scheduled_tokens = {
+            f"_dummy_req_{i}": n for i, n in enumerate(num_tokens_per_request)
+        }
+        dummy_scheduler_output = SchedulerOutput.make_empty()
+        dummy_scheduler_output.total_num_scheduled_tokens = num_tokens
+        dummy_scheduler_output.num_scheduled_tokens = num_scheduled_tokens
+
+        # Disable any use of KVConnector for dummy runs.
+        self.kv_connector.set_disabled(True)
+
+        # Get the intermediate tensors for the dummy run.
+        intermediate_tensors = None
+        if not self.is_first_pp_rank:
+            assert self.intermediate_tensors is not None
+            intermediate_tensors = self.intermediate_tensors[:num_tokens]
+
+        max_loras = self.lora_config.max_loras if self.lora_config is not None else 0
+        with self.maybe_dummy_run_with_lora(
+            self.lora_config,
+            num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
+            num_sampled_tokens=None,
+            remove_lora=True,
+            num_active_loras=max_loras,
+        ):
+            # Execute the model.
+            self.execute_model(
+                dummy_scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=True,
+                skip_attn_for_dummy_run=skip_attn,
+                is_profile=is_profile,
+                randomize_inputs=randomize_inputs,
+            )
+        self.kv_connector.set_disabled(False)
+
+        # Non-last PP ranks don't produce output for sampling.
+        if not self.is_last_pp_rank:
+            return None, None
+
+        assert self.execute_model_state is not None
+        input_batch = self.execute_model_state.input_batch
+        hidden_states = self.execute_model_state.hidden_states
+        self.execute_model_state = None
+
+        assert hidden_states is not None  # Last PP rank always has hidden_states
+        sample_hidden_states = hidden_states[input_batch.logits_indices]
+        return hidden_states, sample_hidden_states
+
+    @torch.inference_mode()
+    def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
+        num_reqs = hidden_states.shape[0]
+        logits = self.model.compute_logits(hidden_states)
+        input_batch = InputBatch.make_dummy(num_reqs, num_reqs, self.input_buffers)
+        assert self.sampler is not None
+        self.sampler(logits, input_batch)
+
+    @torch.inference_mode()
+    def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
+        assert self.pooling_runner is not None
+        self.pooling_runner.dummy_pooler_run(hidden_states)
+
+    @torch.inference_mode()
+    def profile_run(self, randomize_inputs: bool = False) -> None:
+        if self.supports_mm_inputs and self.is_first_pp_rank:
+            mm_config = self.model_config.multimodal_config
+            if mm_config is not None and not mm_config.skip_mm_profiling:
+                mm_budget = MultiModalBudget(
+                    self.vllm_config, self.mm_registry, enable_cache=False
+                )
+                dummy_mm_inputs = mm_budget.get_dummy_encoder_profile_inputs()
+                self.model_state.encoder_runner.profile_encoder_cache(
+                    dummy_mm_inputs, mm_budget
+                )
+
+        hidden_states, sample_hidden_states = self._dummy_run(
+            self.max_num_tokens,
+            skip_attn=True,
+            is_profile=True,
+            randomize_inputs=randomize_inputs,
+        )
+
+        if self.is_last_pp_rank:
+            assert sample_hidden_states is not None
+            if self.pooling_runner is None:
+                self._dummy_sampler_run(sample_hidden_states)
+            else:
+                assert hidden_states is not None
+                self._dummy_pooler_run(hidden_states)
+
+        del hidden_states, sample_hidden_states
+        self.reset_encoder_cache()
+        gc.collect()
+
+    def warming_up_model(self) -> None:
+        logger.info("Warming up model for the compilation...")
+        self.profile_run()
+        logger.info("Warming up done.")
+
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:
             self.encoder_cache.reset_mm_cache()
@@ -768,6 +897,21 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
+    def prepare_dummy_attn(
+        self, input_batch: InputBatch, valid_state_slots: bool = False
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
+        if valid_state_slots:
+            state_slots = torch.arange(
+                1, input_batch.num_reqs + 1, dtype=torch.int32, device=self.device
+            )
+            for block_table in block_tables:
+                block_table[:, 0].copy_(state_slots)
+        slot_mappings = self.block_tables.get_dummy_slot_mappings(
+            input_batch.num_tokens
+        )
+        return block_tables, slot_mappings
+
     def postprocess_sampled(
         self,
         idx_mapping: torch.Tensor,
@@ -810,34 +954,30 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: SchedulerOutput,
         intermediate_tensors: IntermediateTensors | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        is_profile: bool = False,
+        valid_dummy_state_slots: bool = False,
+        randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        self.update_pp_decode_requests()
-        self.finish_requests(scheduler_output)
-        self.free_states(scheduler_output)
-        self.add_requests(scheduler_output)
-        self.update_requests(scheduler_output)
-        if self.encoder_cache is not None:
-            # add_requests initializes RoPE positions from CPU metadata first.
-            for req_id, updates in scheduler_output.encoder_input_updates.items():
-                self.encoder_cache.update_encoder_inputs(req_id, updates)
+        if not dummy_run:
+            self.update_pp_decode_requests()
+            self.finish_requests(scheduler_output)
+            self.free_states(scheduler_output)
+            self.add_requests(scheduler_output)
+            self.update_requests(scheduler_output)
+            if self.encoder_cache is not None:
+                # add_requests initializes RoPE positions from CPU metadata first.
+                for req_id, updates in scheduler_output.encoder_input_updates.items():
+                    self.encoder_cache.update_encoder_inputs(req_id, updates)
 
-        if scheduler_output.total_num_scheduled_tokens == 0:
-            empty_output = self.kv_connector.no_forward(scheduler_output)
-            return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
+            if scheduler_output.total_num_scheduled_tokens == 0:
+                empty_output = self.kv_connector.no_forward(scheduler_output)
+                return self._merge_ec_connector_no_forward(
+                    scheduler_output, empty_output
+                )
 
-        batch_req_state, _ = self.gather_batch_req_state(
-            scheduler_output, dummy_run=False
-        )
-        assert batch_req_state is not None
-        input_batch = self.prepare_inputs(scheduler_output, batch_req_state)
-        block_tables, slot_mappings = self.prepare_attn(input_batch)
-        self.model_state.preprocess_state(
-            input_batch,
-            block_tables,
-            self.kv_cache_config,
-            self.req_states.num_computed_tokens,
-        )
-
+        num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_tokens = scheduler_output.total_num_scheduled_tokens
         _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens,
@@ -847,38 +987,79 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode=0,
         )
         num_active_loras = 0
-        if self.lora_config:
-            lora_inputs = self.lora_state.make_lora_inputs(
-                input_batch.req_ids,
-                input_batch.idx_mapping_np,
-                input_batch.num_scheduled_tokens,
-                np.diff(input_batch.cu_num_logits_np),
+        if dummy_run:
+            input_batch = InputBatch.make_dummy(
+                num_reqs,
+                num_tokens,
+                self.input_buffers,
+                is_padding=not is_profile,
             )
-            num_active_loras = len(lora_inputs[2])
-            self._set_active_loras(*lora_inputs)
+            if randomize_inputs:
+                input_batch.input_ids.random_(0, self.vocab_size)
+            if skip_attn_for_dummy_run:
+                block_tables = None
+                slot_mappings = None
+            else:
+                block_tables, slot_mappings = self.prepare_dummy_attn(
+                    input_batch, valid_dummy_state_slots
+                )
+            if self.lora_config is not None:
+                num_active_loras = self.lora_config.max_loras
+        else:
+            batch_req_state, _ = self.gather_batch_req_state(
+                scheduler_output, dummy_run=False
+            )
+            assert batch_req_state is not None
+            input_batch = self.prepare_inputs(scheduler_output, batch_req_state)
+            block_tables, slot_mappings = self.prepare_attn(input_batch)
+            self.model_state.preprocess_state(
+                input_batch,
+                block_tables,
+                self.kv_cache_config,
+                self.req_states.num_computed_tokens,
+            )
 
-        slot_mappings_by_layer = build_slot_mappings_by_layer(
-            slot_mappings, self.kv_cache_config
-        )
-        attn_metadata = self.model_state.prepare_attn(
-            input_batch,
-            block_tables,
-            slot_mappings,
-            self.attn_groups,
-            self.kv_cache_config,
-        )
+            if self.lora_config:
+                lora_inputs = self.lora_state.make_lora_inputs(
+                    input_batch.req_ids,
+                    input_batch.idx_mapping_np,
+                    input_batch.num_scheduled_tokens,
+                    np.diff(input_batch.cu_num_logits_np),
+                )
+                num_active_loras = len(lora_inputs[2])
+                self._set_active_loras(*lora_inputs)
+
+        attn_metadata = None
+        slot_mappings_by_layer = None
+        if not (dummy_run and skip_attn_for_dummy_run):
+            assert block_tables is not None and slot_mappings is not None
+            slot_mappings_by_layer = build_slot_mappings_by_layer(
+                slot_mappings, self.kv_cache_config
+            )
+            attn_metadata = self.model_state.prepare_attn(
+                input_batch,
+                block_tables,
+                slot_mappings,
+                self.attn_groups,
+                self.kv_cache_config,
+            )
 
         input_ids = input_batch.input_ids
         inputs_embeds = None
         ec_connector_output = None
         if self.uses_inputs_embeds and self.is_first_pp_rank:
-            scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-            with self.ec_connector.maybe_get_output(
-                scheduler_output
-            ) as ec_connector_output:
-                inputs_embeds = self.model_state.prepare_inputs_embeds(
-                    scheduled_encoder_inputs, input_batch, self.req_states
+            if dummy_run:
+                inputs_embeds = self.model_state.dummy_inputs_embeds(
+                    input_batch.num_tokens_after_padding
                 )
+            else:
+                scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+                with self.ec_connector.maybe_get_output(
+                    scheduler_output
+                ) as ec_connector_output:
+                    inputs_embeds = self.model_state.prepare_inputs_embeds(
+                        scheduled_encoder_inputs, input_batch, self.req_states
+                    )
             if inputs_embeds is not None and not requires_raw_input_tokens(self.model):
                 input_ids = None
 
@@ -898,7 +1079,9 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
             assert self.intermediate_tensors is not None
             n = input_batch.num_tokens_after_padding
             new_tensors = {
-                k: v[:n].copy_(intermediate_tensors.tensors[k][:n])
+                k: v[:n]
+                if dummy_run
+                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
                 for k, v in self.intermediate_tensors.tensors.items()
             }
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)

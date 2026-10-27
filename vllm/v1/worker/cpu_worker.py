@@ -7,7 +7,6 @@ import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 import math
 import os
 import sys
-from typing import TYPE_CHECKING, cast
 
 import psutil
 import torch
@@ -27,9 +26,6 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.worker_base import CompilationTimes
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -278,10 +274,13 @@ class CPUWorker(Worker):
         # their Triton JIT lands in the first request's TTFT.
         kernel_config = self.vllm_config.kernel_config
         if self.use_v2_model_runner and kernel_config.enable_jit_warmup:
-            from vllm.v1.worker.gpu.warmup import warmup_kernels
+            if HAS_TRITON:
+                from vllm.v1.worker.gpu.warmup import warmup_kernels
+            else:
+                from vllm.v1.worker.cpu.warmup import warmup_kernels
 
             warmup_kernels(
-                cast("GPUModelRunner", self.model_runner),
+                self.model_runner,
                 self.execute_model,
                 self.sample_tokens,
             )
