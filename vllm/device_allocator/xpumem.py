@@ -4,7 +4,7 @@
 import atexit
 import gc
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -147,8 +147,6 @@ class XpuMemAllocator:
         self.current_tag: str = XpuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, list[Any]] = {}
         self._pending_allocators: list[Any] = []
-        self._active_pool: Any = None
-        self._pool_context = ExitStack()
         self.python_malloc_callback = self._python_malloc_callback
         self.python_free_callback = self._python_free_callback
 
@@ -329,29 +327,17 @@ class XpuMemAllocator:
             tag = XpuMemAllocator.default_tag
 
         old_tag = self.current_tag
-        old_pool = self._active_pool
-        # XPU routes nested allocations to the outermost active pool.
-        self._pool_context.close()
         self.current_tag = tag
         try:
-            data = self._pool_context.enter_context(
-                use_memory_pool_with_allocator(
-                    self.python_malloc_callback,
-                    self.python_free_callback,
-                )
-            )
-            self._active_pool = data[0]
-            # Keep every entry's pool alive (pytorch/pytorch#146431).
-            self.allocator_and_pools.setdefault(tag, []).append(data)
-            yield
+            with use_memory_pool_with_allocator(
+                self.python_malloc_callback,
+                self.python_free_callback,
+            ) as data:
+                # Keep every entry's pool alive (pytorch/pytorch#146431).
+                self.allocator_and_pools.setdefault(tag, []).append(data)
+                yield
         finally:
-            self._pool_context.close()
-            self._active_pool = old_pool
             self.current_tag = old_tag
-            if old_pool is not None:
-                self._pool_context.enter_context(
-                    _xpu_memory_module().use_mem_pool(old_pool)
-                )
 
     def get_current_usage(self) -> int:
         total = 0

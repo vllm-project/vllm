@@ -441,7 +441,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         pool = (
             get_mem_allocator_instance().use_memory_pool(tag="runtime")
             if self.vllm_config.model_config.enable_sleep_mode
-            and (current_platform.is_cuda_alike() or current_platform.is_xpu())
+            and current_platform.is_cuda_alike()
             else nullcontext()
         )
         with pool:
