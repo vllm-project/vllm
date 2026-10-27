@@ -171,6 +171,8 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
 
+With external load balancing and the `nixl_ep` backend, a scale-up rank can be prepared before it is needed and checkpointed by an external orchestrator. Launch it like any scale-up rank, with `--data-parallel-size` set to `--elastic-ep-max-dp-size`, `num_redundant_experts` in `--eplb-config` chosen so it holds as many experts per rank as the running ranks, `--kv-cache-memory-bytes` set, and `VLLM_ELASTIC_EP_JOIN_FILE` naming a JSON file. The rank loads the model, allocates its KV cache, captures CUDA graphs without contacting other ranks, and writes `<file>.parked`. Once `/scale_elastic_ep` has been sent to the running ranks, write `{"data_parallel_master_ip": ..., "data_parallel_rpc_port": ..., "data_parallel_rank": ...}` to the file: the rank joins as `data_parallel_rank` (default: its launch rank) in a world of the requested size, keeping its CUDA graphs. Rank 0 cannot be parked.
+
 ## Process Checkpoint APIs
 
 For external checkpoint/restore orchestrators, available with `--enable-sleep-mode`. Preparing drains the engine and releases its KV cache and other external state, any number of times. Until `/checkpoint/restore`, new requests get a retryable error and `/health` still returns 200, as while asleep. `--checkpoint-prepare-on-startup` prepares each engine once it starts.
