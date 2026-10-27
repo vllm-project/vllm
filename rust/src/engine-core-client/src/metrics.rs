@@ -6,14 +6,15 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_metrics::{
-    EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric, LoraAdapterNames,
-    LoraInfoLabels, MooncakeOperationCounterFamily, MooncakeOperationHistogramFamily,
-    MooncakeOperationLabels, RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics,
-    U64Counter, U64Gauge, WaitingReasonLabels,
+    CacheHitSourceLabels, EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric,
+    LoraAdapterNames, LoraInfoLabels, MooncakeOperationCounterFamily,
+    MooncakeOperationHistogramFamily, MooncakeOperationLabels, RequestMetrics,
+    SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge, WaitingReasonLabels,
 };
 
 use crate::protocol::stats::{
-    KvConnectorStats, MooncakeStats, MultiConnectorStats, NixlStats, SchedulerStats,
+    CachedTokensBySource, KvConnectorStats, MooncakeStats, MooncakeTransferStats,
+    MultiConnectorStats, NixlStats, SchedulerStats,
 };
 use crate::transport::ConnectedEngine;
 
@@ -60,6 +61,8 @@ struct SchedulerStatsHandles {
     prefix_cache_hits: U64Counter,
     external_prefix_cache_queries: U64Counter,
     external_prefix_cache_hits: U64Counter,
+    /// One handle per `CachedTokensBySource::SOURCES` entry.
+    prompt_tokens_cached_by_source: [U64Counter; 5],
 
     // Speculative decoding counters.
     spec_decode_num_drafts: U64Counter,
@@ -86,6 +89,14 @@ struct SchedulerStatsHandles {
     mooncake_operation_bytes_total: MooncakeOperationCounterFamily,
     mooncake_operation_failed_keys_total: MooncakeOperationCounterFamily,
 
+    // Mooncake connector transfer telemetry, decoded from `kv_connector_stats`.
+    mooncake_xfer_time_seconds: HistogramMetric,
+    mooncake_bytes_transferred: HistogramMetric,
+    mooncake_num_descriptors: HistogramMetric,
+    mooncake_num_failed_transfers: U64Counter,
+    mooncake_num_failed_recvs: U64Counter,
+    mooncake_num_kv_expired_reqs: U64Counter,
+
     // NIXL connector telemetry, decoded from `kv_connector_stats`.
     nixl_xfer_time_seconds: HistogramMetric,
     nixl_post_time_seconds: HistogramMetric,
@@ -94,6 +105,7 @@ struct SchedulerStatsHandles {
     nixl_num_failed_transfers: U64Counter,
     nixl_num_failed_notifications: U64Counter,
     nixl_num_kv_expired_reqs: U64Counter,
+    nixl_num_notifications_after_expiry: U64Counter,
 
     // Non-Prometheus interval accumulator for periodic text-log helpers.
     log_stats: SchedulerLogStatsAccumulator,
@@ -165,6 +177,15 @@ fn resolve_scheduler_stats_handles(
             .external_prefix_cache_queries
             .get_or_create_owned(&labels),
         external_prefix_cache_hits: metrics.external_prefix_cache_hits.get_or_create_owned(&labels),
+        prompt_tokens_cached_by_source: CachedTokensBySource::SOURCES.map(|source| {
+            metrics
+                .prompt_tokens_cached_by_source
+                .get_or_create_owned(&CacheHitSourceLabels {
+                    model_name: model_name.to_string(),
+                    engine,
+                    source,
+                })
+        }),
         spec_decode_num_drafts: metrics.spec_decode_num_drafts.get_or_create_owned(&labels),
         spec_decode_num_draft_tokens: metrics
             .spec_decode_num_draft_tokens
@@ -193,6 +214,16 @@ fn resolve_scheduler_stats_handles(
         mooncake_operation_keys_total: metrics.mooncake_operation_keys_total.clone(),
         mooncake_operation_bytes_total: metrics.mooncake_operation_bytes_total.clone(),
         mooncake_operation_failed_keys_total: metrics.mooncake_operation_failed_keys_total.clone(),
+        mooncake_xfer_time_seconds: metrics.mooncake_xfer_time_seconds.get_or_create_owned(&labels),
+        mooncake_bytes_transferred: metrics.mooncake_bytes_transferred.get_or_create_owned(&labels),
+        mooncake_num_descriptors: metrics.mooncake_num_descriptors.get_or_create_owned(&labels),
+        mooncake_num_failed_transfers: metrics
+            .mooncake_num_failed_transfers
+            .get_or_create_owned(&labels),
+        mooncake_num_failed_recvs: metrics.mooncake_num_failed_recvs.get_or_create_owned(&labels),
+        mooncake_num_kv_expired_reqs: metrics
+            .mooncake_num_kv_expired_reqs
+            .get_or_create_owned(&labels),
         nixl_xfer_time_seconds: metrics.nixl_xfer_time_seconds.get_or_create_owned(&labels),
         nixl_post_time_seconds: metrics.nixl_post_time_seconds.get_or_create_owned(&labels),
         nixl_bytes_transferred: metrics.nixl_bytes_transferred.get_or_create_owned(&labels),
@@ -202,6 +233,9 @@ fn resolve_scheduler_stats_handles(
             .nixl_num_failed_notifications
             .get_or_create_owned(&labels),
         nixl_num_kv_expired_reqs: metrics.nixl_num_kv_expired_reqs.get_or_create_owned(&labels),
+        nixl_num_notifications_after_expiry: metrics
+            .nixl_num_notifications_after_expiry
+            .get_or_create_owned(&labels),
         labels,
     }
 }
@@ -220,6 +254,8 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
     // Prefix-cache counters, including the connector-backed external cache path.
     handles.prefix_cache_queries.inc_by(stats.prefix_cache_stats.base.queries);
     handles.prefix_cache_hits.inc_by(stats.prefix_cache_stats.base.hits);
+    // Local prefix-cache hits are the `device` tier.
+    handles.prompt_tokens_cached_by_source[0].inc_by(stats.prefix_cache_stats.base.hits);
 
     if let Some(connector_prefix_cache_stats) = &stats.connector_prefix_cache_stats {
         handles
@@ -228,6 +264,10 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
         handles
             .external_prefix_cache_hits
             .inc_by(connector_prefix_cache_stats.base.hits);
+        let counts = connector_prefix_cache_stats.hits_by_source.counts();
+        for (handle, count) in handles.prompt_tokens_cached_by_source.iter().zip(counts) {
+            handle.inc_by(count);
+        }
     }
 
     // Speculative decoding counters.
@@ -295,6 +335,9 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
     if let Some(kv_connector_stats) = &stats.kv_connector_stats {
         match kv_connector_stats {
             KvConnectorStats::Nixl(stats) => record_nixl_stats(handles, stats),
+            KvConnectorStats::MooncakeTransfer(stats) => {
+                record_mooncake_transfer_stats(handles, stats)
+            }
             KvConnectorStats::Mooncake(stats) => record_mooncake_stats(handles, stats),
             KvConnectorStats::Multi(stats) => record_multi_connector_stats(handles, stats),
             KvConnectorStats::Other(_) => {}
@@ -306,9 +349,31 @@ fn record_multi_connector_stats(handles: &SchedulerStatsHandles, stats: &MultiCo
     for nixl in [&stats.nixl, &stats.nixl_pull, &stats.nixl_push].into_iter().flatten() {
         record_nixl_stats(handles, nixl);
     }
+    if let Some(mooncake_transfer) = &stats.mooncake_transfer {
+        record_mooncake_transfer_stats(handles, mooncake_transfer);
+    }
     if let Some(mooncake) = &stats.mooncake {
         record_mooncake_stats(handles, mooncake);
     }
+}
+
+fn record_mooncake_transfer_stats(handles: &SchedulerStatsHandles, stats: &MooncakeTransferStats) {
+    for value in &stats.transfer_duration {
+        handles.mooncake_xfer_time_seconds.observe(*value);
+    }
+    for value in &stats.bytes_transferred {
+        handles.mooncake_bytes_transferred.observe(*value as f64);
+    }
+    for value in &stats.num_descriptors {
+        handles.mooncake_num_descriptors.observe(*value as f64);
+    }
+    handles
+        .mooncake_num_failed_transfers
+        .inc_by(stats.num_failed_transfers.iter().sum());
+    handles.mooncake_num_failed_recvs.inc_by(stats.num_failed_recvs.iter().sum());
+    handles
+        .mooncake_num_kv_expired_reqs
+        .inc_by(stats.num_kv_expired_reqs.iter().sum());
 }
 
 fn record_mooncake_stats(handles: &SchedulerStatsHandles, stats: &MooncakeStats) {
@@ -354,13 +419,21 @@ fn record_nixl_stats(handles: &SchedulerStatsHandles, stats: &NixlStats) {
     for value in &stats.num_descriptors {
         handles.nixl_num_descriptors.observe(*value as f64);
     }
-    handles
-        .nixl_num_failed_transfers
-        .inc_by(stats.num_failed_transfers.iter().sum());
+    handles.nixl_num_failed_transfers.inc_by(
+        stats
+            .num_failed_transfers
+            .iter()
+            .chain(&stats.num_failed_handshakes)
+            .chain(&stats.num_failed_notifications)
+            .sum(),
+    );
     handles
         .nixl_num_failed_notifications
         .inc_by(stats.num_failed_notifications.iter().sum());
     handles.nixl_num_kv_expired_reqs.inc_by(stats.num_kv_expired_reqs.iter().sum());
+    handles
+        .nixl_num_notifications_after_expiry
+        .inc_by(stats.num_notifications_after_expiry.iter().sum());
 }
 
 /// Exports `vllm:lora_requests_info` as a single series covering all LoRA
@@ -419,7 +492,7 @@ mod tests {
     use crate::metrics::LoraInfoExporter;
     use crate::protocol::stats::{
         KvConnectorStats, MooncakeOperation, MooncakeRecord, MooncakeStats, MooncakeStatus,
-        MultiConnectorStats, NixlStats, SchedulerStats,
+        MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
     };
 
     fn names(values: &[&str]) -> BTreeSet<String> {
@@ -482,8 +555,10 @@ mod tests {
             bytes_transferred: vec![4096, 8192],
             num_descriptors: vec![2, 4],
             num_failed_transfers: vec![],
-            num_failed_notifications: vec![],
+            num_failed_notifications: vec![1],
+            num_failed_handshakes: vec![1],
             num_kv_expired_reqs: vec![1],
+            num_notifications_after_expiry: vec![2],
         }
     }
 
@@ -500,6 +575,53 @@ mod tests {
         )]))
     }
 
+    /// Records a bare `MooncakeConnector` payload, in the shape Python's
+    /// `MooncakeKVConnectorStats` sends, into the `vllm:mooncake_*` transfer
+    /// metrics.
+    #[test]
+    fn mooncake_transfer_stats_are_recorded_into_mooncake_metrics() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+
+        let kv_connector_stats: KvConnectorStats = serde_json::from_value(serde_json::json!({
+            "transfer_duration": [0.01, 0.02],
+            "bytes_transferred": [4096, 8192],
+            "num_descriptors": [2, 4],
+            "num_failed_transfers": [1, 1],
+            "num_failed_recvs": [1],
+            "num_kv_expired_reqs": [],
+        }))
+        .unwrap();
+        let stats = SchedulerStats {
+            kv_connector_stats: Some(kv_connector_stats),
+            ..Default::default()
+        };
+
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+
+        let rendered = metrics.render().unwrap();
+        let mooncake_transfer_series = rendered
+            .lines()
+            .filter(|line| {
+                line.starts_with("vllm:mooncake_")
+                    && !line.starts_with("vllm:mooncake_store_")
+                    && !line.contains("_bucket{")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        expect![[r#"
+            vllm:mooncake_xfer_time_seconds_sum{model_name="model",engine="0"} 0.03
+            vllm:mooncake_xfer_time_seconds_count{model_name="model",engine="0"} 2
+            vllm:mooncake_bytes_transferred_sum{model_name="model",engine="0"} 12288.0
+            vllm:mooncake_bytes_transferred_count{model_name="model",engine="0"} 2
+            vllm:mooncake_num_descriptors_sum{model_name="model",engine="0"} 6.0
+            vllm:mooncake_num_descriptors_count{model_name="model",engine="0"} 2
+            vllm:mooncake_num_failed_transfers_total{model_name="model",engine="0"} 2
+            vllm:mooncake_num_failed_recvs_total{model_name="model",engine="0"} 1
+            vllm:mooncake_num_kv_expired_reqs_total{model_name="model",engine="0"} 0"#]]
+        .assert_eq(&mooncake_transfer_series);
+    }
+
     /// Records one MultiConnector payload into Mooncake and NIXL metrics.
     #[test]
     fn kv_connector_stats_are_recorded_into_mooncake_and_nixl_metrics() {
@@ -509,6 +631,13 @@ mod tests {
         let stats = SchedulerStats {
             kv_connector_stats: Some(KvConnectorStats::Multi(Box::new(MultiConnectorStats {
                 nixl: Some(nixl_stats()),
+                mooncake_transfer: Some(MooncakeTransferStats {
+                    transfer_duration: vec![0.03],
+                    bytes_transferred: vec![2048],
+                    num_descriptors: vec![1],
+                    num_failed_recvs: vec![1],
+                    ..Default::default()
+                }),
                 mooncake: Some(mooncake_stats()),
                 ..Default::default()
             }))),
@@ -536,8 +665,24 @@ mod tests {
             )
         );
         assert!(
+            rendered.contains(
+                "vllm:nixl_num_failed_transfers_total{model_name=\"model\",engine=\"0\"} 2"
+            )
+        );
+        assert!(rendered.contains(
+            "vllm:nixl_num_notifications_after_expiry_total{model_name=\"model\",engine=\"0\"} 2"
+        ));
+        assert!(
             rendered
                 .contains("vllm:nixl_xfer_time_seconds_count{model_name=\"model\",engine=\"0\"} 2")
+        );
+        assert!(rendered.contains(
+            "vllm:mooncake_xfer_time_seconds_count{model_name=\"model\",engine=\"0\"} 1"
+        ));
+        assert!(
+            rendered.contains(
+                "vllm:mooncake_num_failed_recvs_total{model_name=\"model\",engine=\"0\"} 1"
+            )
         );
     }
 }

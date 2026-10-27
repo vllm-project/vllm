@@ -497,10 +497,12 @@ set(VLLM_EXT_SRC
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/mamba_cpu.cpp"
-    "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
+    "csrc/cpu/dynamic_4bit_int_moe_cpu.cpp"
     "csrc/cpu/cpu_fused_moe.cpp"
     "csrc/cpu/cpu_attn.cpp"
     "csrc/cpu/cpu_isa.cpp"
+    "csrc/cpu/sampling_kernels.cpp"
+    "csrc/cpu/fp8_quant.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
@@ -523,14 +525,16 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
         "csrc/cpu/cpu_tanhf_neon.hpp"
         ${VLLM_EXT_SRC})
     if (ARM_BF16_FOUND)
+        set(VLLM_EXT_SRC "csrc/cpu/sgl-kernels/conv.cpp" ${VLLM_EXT_SRC})
         if (ARM_I8MM_FOUND)
             set(VLLM_EXT_SRC "csrc/cpu/cpu_fused_moe_int8.cpp" ${VLLM_EXT_SRC})
         endif()
     endif()
 endif()
 
-if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)	
+if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_wna16.cpp"
         "csrc/cpu/shm.cpp"
         ${VLLM_EXT_SRC})
 endif()
@@ -589,13 +593,15 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/cpu_isa.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/mamba_cpu.cpp"
+        "csrc/cpu/sampling_kernels.cpp"
+        "csrc/cpu/fp8_quant.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
         "csrc/cpu/activation.cpp"
         "csrc/cpu/layernorm.cpp"
         "csrc/cpu/mla_decode.cpp"
         "csrc/cpu/pos_encoding.cpp"
-        "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
+        "csrc/cpu/dynamic_4bit_int_moe_cpu.cpp") 
 
     set(VLLM_EXT_SRC_AVX2
         "csrc/cpu/sgl-kernels/fla.cpp"
@@ -606,13 +612,15 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/cpu_isa.cpp"
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
+        "csrc/cpu/sampling_kernels.cpp"
+        "csrc/cpu/fp8_quant.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
         "csrc/cpu/activation.cpp"
         "csrc/cpu/layernorm.cpp"
         "csrc/cpu/mla_decode.cpp"
         "csrc/cpu/pos_encoding.cpp"
-        "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
+        "csrc/cpu/dynamic_4bit_int_moe_cpu.cpp") 
 
     message(STATUS "CPU extension (AVX512F + BF16 + VNNI + AMX) source files: ${VLLM_EXT_SRC_AVX512} ${VLLM_EXT_SRC_SGL}")
     message(STATUS "CPU extension (AVX512F) source files: ${VLLM_EXT_SRC_AVX512}")
