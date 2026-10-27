@@ -110,7 +110,7 @@ forward runs the stock layers, which the executor does not modify.
 | Compressed layers sharing an index source reuse one sparse-index table; the first of them builds the other KV-cache groups' tables on a side stream | all executor steps |
 | Sparse-MLA decode on a CuTe DSL kernel, a thread block cluster per token with one CTA per 128 columns (`attention/sparse_mla_cute.py`) | the target's causal decode while every token's cluster is resident at once (at width 640, up to 8 requests with DSpark on a GB300) |
 | Otherwise the TRTLLM-gen sparse-MLA decode, launched on a KV-counter buffer zeroed once | all other executor steps |
-| Engram WKV chain on a side stream right after each layer's lookup | all executor steps, with host-offloaded TP-only tables and a CuTe DSL MXFP8 `wkv` |
+| Engram WKV chain on a side stream right after each layer's lookup, its two all-gathers on a Lamport all-gather of its own | all executor steps, with TP-only tables (GPU-resident or host-offloaded) and a CuTe DSL MXFP8 `wkv` |
 | Attention metadata builds recorded at CUDA graph capture, one per batch shape the FULL decode graphs serve, and replayed | FULL-graph uniform decode |
 | LM head on FlashInfer's CuTe DSL BF16 GEMM | 1-16 rows |
 | Logits gathered with the executor's Lamport all-gather | up to 4 MiB a rank (at TP4, 32 FP32 or 64 BF16 rows) |

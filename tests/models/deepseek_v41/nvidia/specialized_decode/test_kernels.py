@@ -584,7 +584,10 @@ class _Mxfp8Linear(nn.Module):
         self.weight_scale = nn.Parameter(w_s.view(n, k // 32), requires_grad=False)
         kernel = FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearLayerConfig((n, k)))
         kernel.process_weights_after_loading(self)
-        self.quant_method = SimpleNamespace(kernel=kernel)
+        self.quant_method = SimpleNamespace(
+            kernel=kernel,
+            apply=lambda layer, x, bias=None: kernel.apply_weights(layer, x, bias),
+        )
 
     def forward(self, x):
         return self.quant_method.kernel.apply_weights(self, x)
@@ -775,15 +778,16 @@ def test_fp32_index_key_store(ratio):
 # --------------------------------------------------------------- Engram
 
 
+@pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("masked", [False, True])
-def test_engram_wkv_prefetch_matches_inline(masked):
-    """The Engram WKV started on a side stream right after its (slow) host
-    lookup, replayed from a CUDA graph, gives the stock forward's output
+def test_engram_wkv_prefetch_matches_inline(masked, cpu_offload):
+    """The Engram WKV started on a side stream right after its (slow) inline or
+    host lookup, replayed from a CUDA graph, gives the stock forward's output
     bitwise."""
     from tests.kernels.test_engram import _make_embedding
 
     hc_mult, dim, max_tokens = 4, 256, 16
-    table = _make_embedding(cpu_offload=True)
+    table = _make_embedding(cpu_offload=cpu_offload)
     lookup = table.lookup
 
     def slow_lookup(indices, out, background=False):

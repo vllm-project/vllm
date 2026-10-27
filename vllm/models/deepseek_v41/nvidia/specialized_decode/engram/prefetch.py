@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engram WKV ahead of the decoder layers.
 
-With host-offloaded tables, ``Engram`` looks up its rows on a prefetch stream
-before the decoder layers. The rest of the WKV chain (head all-gather, MXFP8
-quantize, column-parallel GEMM, output all-gather) reads only those rows, so
-for decode steps ``EngramPrefetch`` runs it on a side stream right after each
-layer's lookup, and the layer only waits for it before the fused post
-kernel. The kernels, inputs and collectives are those of ``Engram.forward``.
+``Engram`` looks up its rows before the decoder layers: inline for GPU-resident
+tables, on a prefetch stream for host-offloaded ones. The rest of the WKV chain
+(head all-gather, MXFP8 quantize, column-parallel GEMM, output all-gather) reads
+only those rows, so for decode steps ``EngramPrefetch`` runs it on a side stream
+right after each layer's lookup, and the layer only waits for it before the
+fused post kernel. The kernels and inputs are those of ``Engram.forward``,
+except that the two all-gathers run on a Lamport all-gather of the chain's own.
 
 The chain issues TP collectives on the side stream, so whether a step starts it
 depends only on the step's rows, which every TP rank shares.
@@ -15,7 +16,6 @@ depends only on the step's rows, which every TP rank shares.
 
 import torch
 
-from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
@@ -30,14 +30,12 @@ logger = init_logger(__name__)
 
 
 def prefetchable(engram: Engram) -> bool:
-    """Whether ``engram``'s WKV can run ahead: host-offloaded, TP-only tables
-    and a CuTe DSL MXFP8 WKV (FlashInfer's CUTLASS MXFP8 GEMM shares one
-    process-wide workspace with GEMMs on other streams)."""
+    """Whether ``engram``'s WKV can run ahead: TP-only tables and a CuTe DSL
+    MXFP8 WKV (FlashInfer's CUTLASS MXFP8 GEMM shares one process-wide
+    workspace with GEMMs on other streams)."""
     kernel = getattr(getattr(engram.wkv, "quant_method", None), "kernel", None)
     return (
-        engram._prefetch_stream is not None
-        and engram._prefetch_done is not None
-        and engram._batch is None
+        engram._batch is None
         and engram.embed_tokens.dp_size == 1
         and not engram.use_sequence_parallel
         and isinstance(kernel, FlashInferCutedslMxfp8LinearKernel)
@@ -64,6 +62,23 @@ class EngramPrefetch:
         }
         # Started chains no layer has waited for yet.
         self._pending: set[Engram] = set()
+        self.all_gather = None
+        if any(engram.embed_tokens.tp_size > 1 for engram in self._buffers):
+            from ...ops.cute_dsl import LamportAllGather
+
+            # Its own mailbox: the chain runs beside the executor's gathers.
+            # A rank sends its head rows, then its WKV output columns.
+            row_bytes = max(
+                max(
+                    engram.staged_rows[0].nbytes,
+                    out[0].nbytes // engram.embed_tokens.tp_size,
+                )
+                for engram, (out, _) in self._buffers.items()
+            )
+            self.all_gather = LamportAllGather(
+                rank_capacity_bytes=max_rows * row_bytes,
+                device=torch.device("cuda", torch.accelerator.current_device_index()),
+            )
         if self._buffers:
             logger.info_once(
                 "Engram WKV runs ahead of the decoder layers for decode steps of "
@@ -75,16 +90,36 @@ class EngramPrefetch:
         """Start every layer's WKV chain once its lookup is done."""
         stream = self.stream
         for engram, (out, done) in self._buffers.items():
-            assert engram._prefetch_done is not None
-            stream.wait_event(engram._prefetch_done)
+            if engram._prefetch_done is None:
+                # GPU-resident rows were looked up inline on this stream.
+                stream.wait_stream(torch.cuda.current_stream())
+            else:
+                stream.wait_event(engram._prefetch_done)
+            tp = engram.embed_tokens.tp_size
             with torch.cuda.stream(stream):
                 heads = engram.staged_rows[:num_tokens]
-                if engram.embed_tokens.tp_size > 1:
-                    heads = tensor_model_parallel_all_gather(heads, dim=1)
-                kv = engram.wkv(heads[:, : engram.embed_tokens.n_hash_cols].flatten(-2))
+                if self.all_gather is not None:
+                    # [tp * rows, heads, d] -> [rows, tp * heads, d]
+                    heads = (
+                        self.all_gather(heads)
+                        .unflatten(0, (tp, num_tokens))
+                        .transpose(0, 1)
+                        .flatten(1, 2)
+                    )
+                heads = heads[:, : engram.embed_tokens.n_hash_cols].flatten(-2)
+                # ``engram.wkv`` without its output gather; it has no bias.
+                kv = engram.wkv.quant_method.apply(engram.wkv, heads, None)
                 # Temporaries stay on this stream; only the persistent output
                 # reaches the consumer, after the event below.
-                out[:num_tokens].copy_(kv)
+                if self.all_gather is None:
+                    out[:num_tokens].copy_(kv)
+                else:
+                    # [tp * rows, cols] -> [rows, tp * cols]
+                    out[:num_tokens].view(num_tokens, tp, -1).copy_(
+                        self.all_gather(kv)
+                        .unflatten(0, (tp, num_tokens))
+                        .transpose(0, 1)
+                    )
             done.record(stream)
             self._pending.add(engram)
 

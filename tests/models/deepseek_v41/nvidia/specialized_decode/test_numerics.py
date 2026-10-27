@@ -15,6 +15,8 @@ Each check runs one rank late, so a missing wait reads a peer's stale data:
   bitwise against NCCL, and NCCL above its capacity;
 * the row-sharded decode indexer, its slices gathered with it, against the
   replicated one (equal top-k sets up to exactly tied scores);
+* the Engram WKV run ahead with its own all-gather, bitwise against the stock
+  Engram forward on NCCL;
 * one CUDA graph of all of these, replayed ``REPLAYS`` times bitwise.
 
 Needs four SM100-family GPUs with NVLink multicast and flashinfer-python
@@ -429,6 +431,64 @@ def _check_logits_gather(rank, all_gather):
         _assert_equal((got,), (want,), f"logits, {rows} rows")
 
 
+# ----------------------------------------------------------------- Engram
+
+
+def _check_engram_prefetch(rank):
+    from tests.kernels.test_engram import _make_embedding
+    from tests.models.deepseek_v41.nvidia.specialized_decode.test_kernels import (
+        _Mxfp8Linear,
+    )
+    from vllm.distributed import tensor_model_parallel_all_gather
+    from vllm.models.deepseek_v41.common.engram import Engram
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.engram.prefetch import (
+        EngramPrefetch,
+    )
+
+    class ColumnParallelWkv(_Mxfp8Linear):
+        def forward(self, x):
+            return tensor_model_parallel_all_gather(super().forward(x))
+
+    # Every rank looks up its own six of the 24 heads of a GPU-resident table.
+    table = _make_embedding(cpu_offload=False)
+    table.tp_size, table.part_n_hash_cols = TP, table.n_hash_cols // TP
+    table.head_start = rank * table.part_n_hash_cols
+    engram = Engram.__new__(Engram)
+    torch.nn.Module.__init__(engram)
+    engram.embed_tokens = table
+    engram.hc_mult, engram.dim = HC, table.dim
+    engram.eps, engram.clamp_value = 1e-6, 1e-6
+    engram.use_sequence_parallel = False
+    torch.manual_seed(rank)  # each rank's own WKV columns
+    engram.wkv = ColumnParallelWkv(
+        (HC + 1) * table.dim // TP, table.n_hash_cols * table.dim
+    )
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    engram.q_weight = _randn(generator, HC, table.dim)
+    engram.k_weight = _randn(generator, HC, table.dim)
+    with torch.device("cuda"):
+        engram._init_staging(16, table.dim)
+    prefetch = EngramPrefetch([engram], 16)
+    assert prefetch.all_gather is not None
+    for rows in (1, 6, 16):
+        hashes = torch.randint(
+            0,
+            table.part_num_embeddings,
+            (rows, table.n_hash_cols),
+            generator=generator,
+            device="cuda",
+            dtype=torch.int32,
+        )
+        hidden = _randn(generator, rows, HC, table.dim)
+        engram.prepare_embeddings(hashes)
+        _late(rank, rows)
+        prefetch.start(rows)
+        got = prefetch.forward(engram, hidden, hashes, None)
+        prefetch.join()
+        want = engram(hidden, hashes, None)
+        _assert_equal((got,), (want,), f"engram, {rows} rows")
+
+
 # ---------------------------------------------------- row-sharded indexer
 
 CONTEXTS = (84_000, 163_000, 300_000, 360_000, 406_000, 490_000, 556_000, 648_000)
@@ -792,6 +852,7 @@ def _worker(rank: int, port: int, replays: int, skip_path: str) -> None:
         _check_boundaries(arm, rank)
         _check_publishing_wo_b(arm, publisher, rank)
         _check_logits_gather(rank, all_gather)
+        _check_engram_prefetch(rank)
         keys = _check_row_sharded_indexer(rank, all_gather)
         _check_replays(arm, publisher, keys, rank, replays, all_gather)
         torch.accelerator.synchronize()
