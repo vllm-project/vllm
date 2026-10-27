@@ -100,6 +100,8 @@ def _merge_dcp_topk_global(
     dcp_world_size: int,
     cp_interleave: int,
     row_starts: torch.Tensor | None = None,
+    score_bits: int = 32,
+    num_positions: int | None = None,
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
@@ -112,6 +114,9 @@ def _merge_dcp_topk_global(
     score row. Overwrites ``topk_indices`` with global token ids (``-1`` for
     padding); the attention backend localizes them back to physical slots per
     rank.
+    The selector ranks only the high ``score_bits`` of the scores (16 when the
+    logits are upcast BF16) and the id bits that positions below
+    ``num_positions`` use.
     """
     if dcp_world_size <= 1:
         return
@@ -121,6 +126,7 @@ def _merge_dcp_topk_global(
     # stable-topk selector.
     _assert_cutedsl_dcp_merge_supported(logits, topk_indices, topk_tokens)
     from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        dcp_topk_id_bits,
         pack_dcp_topk_candidates_cutedsl,
         stable_topk_from_gathered_candidates_cutedsl,
     )
@@ -141,7 +147,11 @@ def _merge_dcp_topk_global(
     )
     gathered = get_dcp_group().all_gather(packed, dim=1)
     stable_topk_from_gathered_candidates_cutedsl(
-        gathered, topk_tokens, out=topk_indices
+        gathered,
+        topk_tokens,
+        out=topk_indices,
+        score_bits=score_bits,
+        id_bits=32 if num_positions is None else dcp_topk_id_bits(num_positions),
     )
 
 
@@ -690,6 +700,8 @@ def sparse_attn_indexer(
             # DeepGEMM returns compressed logits: row i starts at K position
             # cu_seqlen_ks[i]. None means every row starts at column zero.
             row_starts: torch.Tensor | None = None
+            # Empty chunks have no logits; match the other ranks and the warm-up.
+            score_bits = 16 if mqa_logits_use_mx_scales() else 32
             if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
@@ -724,17 +736,16 @@ def sparse_attn_indexer(
                         q_slice_cast, q_scale_slice, weights[row_start:row_end]
                     )
                     row_ends = cu_seqlen_ke - cu_seqlen_ks
-                    logits = as_fp32_logits(
-                        fp8_fp4_mqa_logits(
-                            (q_slice_cast, q_scale_slice),
-                            (k_quant_cast, k_scale_cast),
-                            chunk_weights,
-                            cu_seqlen_ks,
-                            cu_seqlen_ke,
-                            chunk.max_seqlen_k,
-                        ),
-                        row_ends,
+                    logits = fp8_fp4_mqa_logits(
+                        (q_slice_cast, q_scale_slice),
+                        (k_quant_cast, k_scale_cast),
+                        chunk_weights,
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        chunk.max_seqlen_k,
                     )
+                    score_bits = 16 if logits.dtype == torch.bfloat16 else 32
+                    logits = as_fp32_logits(logits, row_ends)
                 num_rows = logits.shape[0]
                 if candidate_blocks is not None:
                     # Two-level selection (v4.1): the candidate source
@@ -782,6 +793,8 @@ def sparse_attn_indexer(
                     dcp_world_size,
                     cp_kv_cache_interleave_size,
                     row_starts=row_starts,
+                    score_bits=score_bits,
+                    num_positions=max_model_len,
                 )
 
         if row_shard is not None:
@@ -858,6 +871,7 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
+        score_bits = 32
         if current_platform.is_xpu():
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
@@ -887,6 +901,8 @@ def sparse_attn_indexer(
                 max_model_len=max_model_len,
                 indices=decode_metadata.indices,
             )
+            if logits.dtype == torch.bfloat16:
+                score_bits = 16
             # Keeping bf16 halves top-k/candidate reads; other top-k backends and
             # DCP need fp32. SM100 decode is varlen: one context length per row.
             if topk_backend != "deep_select" or dcp_world_size != 1:
@@ -941,6 +957,8 @@ def sparse_attn_indexer(
                 dcp_rank,
                 dcp_world_size,
                 cp_kv_cache_interleave_size,
+                score_bits=score_bits,
+                num_positions=max_model_len,
             )
 
         if needs_padded_path:
