@@ -180,9 +180,11 @@ variants:
     description: "ModelSlim INT4 W4A8 for Ascend NPU. Requires --quantization ascend. Validated on 4× 910C mixed P/D."
 
   ascend_mxfp4:
-    # Use the recipe default model until the A5 MXFP4 checkpoint is public.
+    # https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8-mxfp-quarot
+    model_id: "Eco-Tech/Kimi-K3-w4a8-mxfp-quarot"
     precision: mxfp4
     label: MXFP4(ASCEND)
+    # Inherited loading estimate; not measured for this MXFP4 checkpoint.
     vram_minimum_gb: 1711
     supported_hardware: [ascend_950dt]
     extra_args:
@@ -211,6 +213,7 @@ variants:
       - "--allowed-local-media-path"
       - "/"
     extra_env:
+      VLLM_USE_MODELSCOPE: 'true'
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
@@ -220,7 +223,7 @@ variants:
     hardware_overrides:
       ascend_950dt:
         docker_image: "quay.io/ascend/vllm-ascend:kimi-k3-a5"
-    description: MXFP4 for Ascend 950DT (A5). Requires --quantization ascend and matching A5 ModelSlim weights, which are not yet public.
+    description: ModelSlim MXFP4 with QuaRot for Ascend 950DT (A5). Requires --quantization ascend. Checkpoint not yet public; VRAM estimate is unverified.
 
   fp8:
     model_id: "RedHatAI/Kimi-K3-FP8-BLOCK"
@@ -1544,6 +1547,7 @@ guide: |
   - **Prefix-match unit**: K3 is a hybrid model: its MLA attention layers and KDA (Mamba-like) layers form two KV-cache groups under the hybrid KV-cache manager. With prefix caching on, vLLM pads the attention block size up to match the Mamba state page, so both groups resolve to one (large) block size and the default prefix-cache hit boundary lands on that block — very coarse. The Blackwell profile sets `--prefix-match-unit 128`: the inflation formula always yields a multiple of 128, so 128 divides whatever block size results, and it aligns with the MLA kernel's native block boundary, giving finer prefix-hit granularity. The value is only effective when prefix caching (or a KV connector) is active; it is a no-op otherwise, and it is safe under all tensor-parallel layouts.
   - **Decode context parallelism (DCP)**: the qualified DCP layouts are part of the presets that ran them: DCP8 on the GB200 aggregated TP8 x PP2 and GB300 disaggregated TP8 pools, DCP16 on the GB200 TP16 disaggregated pools, DCP16/DCP8 at the GB300 low-latency points, and DCP8 in the MI355X AgentX cells. Each pairs `--decode-context-parallel-size` (a divisor of the tensor-parallel size) with `--dcp-comm-backend a2a` and an MLA attention backend that supports it (`TOKENSPEED_MLA` with `mla_prefill_backend: TRTLLM_RAGGED` on Blackwell, `ROCM_AITER_MLA` with `mla_prefill_backend: ROCM_AITER_FA` on MI355X). On builds that carry them, the `VLLM_USE_DIRECT_DCP_A2A`, `VLLM_USE_DIRECT_DCP_Q_GATHER` and `VLLM_USE_DIRECT_DCP_KV_GATHER` knobs default to auto; set them to `1` to pin the direct DCP ops or `0` to disable them, as the MI355X cells do.
   - Ascend W4A8 checkpoint (ModelScope): https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8
+  - Ascend MXFP4 QuaRot checkpoint (ModelScope): https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8-mxfp-quarot
   - vLLM Ascend tutorial: https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Kimi-K3.html
 
   ## AMD MI355X: disaggregated prefill and decode
