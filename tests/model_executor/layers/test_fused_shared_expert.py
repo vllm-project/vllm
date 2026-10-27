@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
 from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
@@ -458,6 +459,92 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
 
     assert compatible
     assert reason is None
+
+
+def test_deepseek_v41_quant_config_rejects_fp8_mtp_shared_expert_fse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.deepseek_v41 import quant_config as deepseek_v41_quant_config
+
+    hf_config = SimpleNamespace(
+        num_hidden_layers=2,
+        expert_dtype="fp4",
+        quantization_config={
+            "quant_method": "quark",
+            "global_quant_config": {
+                "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32}
+            },
+            "layer_quant_config": {
+                r"re:mtp\.0\.ffn\.shared_experts\.w1": {"weight": {"dtype": "fp8_e4m3"}}
+            },
+            "exclude": [],
+        },
+    )
+    current_vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config)
+    )
+    monkeypatch.setattr(
+        vllm_config_module, "get_current_vllm_config", lambda: current_vllm_config
+    )
+    monkeypatch.setattr(
+        deepseek_v41_quant_config,
+        "get_current_vllm_config",
+        lambda: current_vllm_config,
+    )
+    quant_config = deepseek_v41_quant_config.DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True,
+        weight_block_size=[128, 128],
+    )
+
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.2.ffn.experts",
+        "model.layers.2.ffn.shared_experts",
+    )
+
+    assert not compatible
+    assert (
+        reason
+        == "DeepSeek-V4/V4.1 shared experts at mtp.0.ffn.shared_experts are not MXFP4"
+    )
+
+
+def test_deepseek_v41_fp8_experts_keep_fp8_fse_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.deepseek_v41 import quant_config as deepseek_v41_quant_config
+
+    hf_config = SimpleNamespace(
+        num_hidden_layers=2,
+        expert_dtype="fp8",
+        quantization_config={
+            "quant_method": "fp8",
+            "fmt": "e4m3",
+            "scale_fmt": "ue8m0",
+            "weight_block_size": [128, 128],
+        },
+    )
+    current_vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config)
+    )
+    monkeypatch.setattr(
+        vllm_config_module, "get_current_vllm_config", lambda: current_vllm_config
+    )
+    monkeypatch.setattr(
+        deepseek_v41_quant_config,
+        "get_current_vllm_config",
+        lambda: current_vllm_config,
+    )
+    quant_config = deepseek_v41_quant_config.DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True,
+        weight_block_size=[128, 128],
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.2.ffn.experts",
+        "model.layers.2.ffn.shared_experts",
+    ) == (True, None)
 
 
 def test_deepseek_v4_heterogeneous_fhmoe_keeps_native_intermediate_width() -> None:
@@ -963,7 +1050,7 @@ def test_models_fse_init(
             ].mtp_block.ffn.is_fused_shared_expert_enabled
             warning.assert_called_once()
             assert (
-                "DeepSeek-V4 shared experts at mtp.0.ffn.shared_experts"
+                "DeepSeek-V4/V4.1 shared experts at mtp.0.ffn.shared_experts"
                 in (warning.call_args.args[1])
             )
         if aiter_fse_enabled and exclude:
@@ -1167,6 +1254,40 @@ def test_online_mxfp4_shared_expert_rejects_quark_weight_only_mxfp4_fse() -> Non
         False,
         "online shared-expert quantization keys do not match the routed expert keys",
     )
+
+
+@pytest.mark.parametrize(
+    ("exclude", "expected"),
+    [
+        ([], True),
+        (["lm_head", "model.embed_tokens"], True),
+        (["*.shared_experts.*"], False),
+        (["model.layers.0.mlp.experts"], False),
+        (["model.layers.0.mlp.experts", "*.shared_experts.*"], True),
+    ],
+)
+def test_modelopt_mxfp8_shared_expert_fse_compatibility(
+    exclude: list[str], expected: bool
+) -> None:
+    """MiniMax-M3 ships MXFP8, whose exclude list decides FSE compatibility."""
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=exclude,
+        ),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert compatible is expected
+    if expected:
+        assert reason is None
+    else:
+        assert reason == (
+            "MXFP8 excludes routed and shared experts inconsistently at "
+            "model.layers.0.mlp.shared_experts"
+        )
 
 
 def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:

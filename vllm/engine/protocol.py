@@ -36,7 +36,7 @@ class StreamingInput:
     where inputs are provided via an async generator.
     """
 
-    prompt: EngineInput
+    prompt: PromptType | EngineInput
     sampling_params: SamplingParams | None = None
 
 
@@ -172,6 +172,7 @@ class EngineClient(ABC):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Start profiling with optional per-session overrides."""
         ...
