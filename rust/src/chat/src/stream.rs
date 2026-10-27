@@ -202,7 +202,7 @@ mod tests {
                     usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     }),
                     timestamps: Default::default(),
                     finish_reason: FinishReason::stop_eos(),
@@ -244,7 +244,7 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 2,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),

@@ -18,7 +18,7 @@ mod request_metrics;
 pub use error::{Error, Result};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
-    GenerateOutputStreamExt, GeneratePromptInfo, TokenUsage, WeightVersionSpan,
+    GenerateOutputStreamExt, GeneratePromptInfo, PromptCacheUsage, TokenUsage, WeightVersionSpan,
 };
 pub use request::GenerateRequest;
 pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
