@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
+
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
 use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
@@ -45,7 +47,7 @@ impl Qwen3JsonToolParser {
 }
 
 impl ToolParser for Qwen3JsonToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
@@ -56,7 +58,7 @@ impl ToolParser for Qwen3JsonToolParser {
         Some(xgrammar_structural_tag::Model::Qwen3.builder())
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
 
@@ -73,6 +75,7 @@ impl ToolParser for Qwen3JsonToolParser {
 mod tests {
     use expect_test::expect;
     use thiserror_ext::AsReport;
+    use vllm_tokenizer::DecodedText;
 
     use super::Qwen3JsonToolParser;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
@@ -215,7 +218,7 @@ mod tests {
             let mut parser = Qwen3JsonToolParser::new(&test_tools());
             let mut output = ToolParserOutput::default();
 
-            parser.parse_into(chunk, &mut output).unwrap();
+            parser.parse_into(DecodedText::unattributed(chunk), &mut output).unwrap();
 
             // Not a tool-call start: released without waiting for the end of the stream.
             assert_eq!(output.normal_text(), chunk);

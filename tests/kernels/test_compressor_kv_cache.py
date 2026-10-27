@@ -244,8 +244,13 @@ def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
         eps=1e-20,
         head_dim=512,
     )
+    # metadata is a SimpleNamespace stub of the attention metadata.
     DeepseekV4Attention._fused_qnorm_rope_kv_insert(
-        attention, q, local_kv, local_positions, {"swa": metadata}
+        attention,
+        q,
+        local_kv,
+        local_positions,
+        {"swa": metadata},  # type: ignore[dict-item]
     )
 
     torch.testing.assert_close(
@@ -1262,6 +1267,7 @@ def test_v41_pcp_ring_links_match_request_positions(
     )
     builder = SimpleNamespace(
         capacity=capacity,
+        tail_size=1,
         device=torch.device("cpu"),
         vllm_config=SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_seqs=len(lengths))
@@ -1324,8 +1330,11 @@ def _build_pcp_ring_metadata(ranks, all_gather, spec, config, device, monkeypatc
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
 @pytest.mark.parametrize("pcp_size", [2, 4])
-def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypatch):
-    """Pairs split across PCP chunks and decode owner changes keep exact latents."""
+@pytest.mark.parametrize("num_speculative_tokens", [0, 5, 9])
+def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
+    pcp_size, num_speculative_tokens, monkeypatch
+):
+    """Cross-rank pairs and rejection rollback preserve the reference latents."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41 import compressor as compressor_module
     from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
@@ -1339,35 +1348,52 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
     torch.manual_seed(42)
     device = torch.device("cuda")
     norm = torch.randn(512, dtype=torch.bfloat16, device=device)
+    capacity = max(8, 1 << (num_speculative_tokens + 1).bit_length())
     # Block 0 is reserved as the null block; requests use physical blocks 1/2.
-    reference_state = torch.zeros(3, 8, 1024, device=device)
+    reference_state = torch.zeros(3, capacity, 1024, device=device)
     rank_states = [reference_state.clone() for _ in range(pcp_size)]
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=4),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
-        speculative_config=None,
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens
+        )
+        if num_speculative_tokens
+        else None,
     )
     spec = CircularBufferSpec(
-        block_size=8, num_kv_heads=1, head_size=1024, head_size_v=0, dtype=torch.float32
+        block_size=capacity,
+        num_kv_heads=1,
+        head_size=1024,
+        head_size_v=0,
+        dtype=torch.float32,
     )
     starts = np.zeros(2, dtype=np.int32)
-    for lengths, prefilling in [
+    steps = [
         ([7, 3], [True, True]),
         ([9, 1], [True, False]),
         ([1, 1], [False, False]),
         ([1, 1], [False, False]),
-    ]:
+    ]
+    if num_speculative_tokens:
+        steps[2:] = [([num_speculative_tokens + 1] * 2, [False, False])] * 4
+    for step, (lengths, prefilling) in enumerate(steps):
+        request_order = np.array([1, 0] if step % 2 else [0, 1])
         lengths = np.array(lengths, dtype=np.int32)
         query_start = np.concatenate(([0], np.cumsum(lengths))).astype(np.int32)
         qsl = torch.from_numpy(query_start).to(device)
         positions = torch.cat(
-            [torch.arange(s, s + n, device=device) for s, n in zip(starts, lengths)]
+            [
+                torch.arange(starts[r], starts[r] + n, device=device)
+                for r, n in zip(request_order, lengths)
+            ]
         )
         req_ids = torch.repeat_interleave(
             torch.arange(2, device=device, dtype=torch.int32),
             torch.from_numpy(lengths).to(device),
         )
-        slots = (req_ids.long() + 1) * 8 + positions % 8
+        physical_reqs = torch.tensor(request_order, device=device)[req_ids.long()]
+        slots = (physical_reqs + 1) * capacity + positions % capacity
         raw = torch.randn(sum(lengths), 1024, device=device)
         expected = torch.empty(sum(lengths), 512, dtype=torch.bfloat16, device=device)
         fused_save_compress_norm(
@@ -1387,9 +1413,10 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
         for rank in range(pcp_size):
             manager = PCPManager(pcp_size, rank, device, shard_decode_requests=True)
             segments, counts = manager._build_batch_layout(
-                lengths, starts, np.array(prefilling), query_start
+                lengths, starts[request_order], np.array(prefilling), query_start
             )
             width = max(counts)
+            assert manager._padded_gather_idx is not None
             local_indices = manager._padded_gather_idx[
                 rank * width : (rank + 1) * width
             ]
@@ -1403,9 +1430,9 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
                 num_reqs=len(local_reqs),
                 num_actual_tokens=counts[rank],
                 max_query_len=max(local_lengths),
-                max_seq_len=int(max(starts + lengths)),
+                max_seq_len=int(max(starts[request_order] + lengths)),
                 block_table_tensor=torch.tensor(
-                    np.array(local_reqs) + 1, dtype=torch.int32, device=device
+                    request_order[local_reqs] + 1, dtype=torch.int32, device=device
                 ).unsqueeze(1),
                 slot_mapping=torch.full((width * pcp_size,), -1, device=device),
                 positions=positions[local_indices],
@@ -1467,7 +1494,12 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
             )
         for state in rank_states[1:]:
             torch.testing.assert_close(state, rank_states[0], rtol=0, atol=0)
-        starts += lengths
+        starts[request_order] += lengths
+        if num_speculative_tokens and step >= 2:
+            # Alternate odd/even accepted prefixes, including first-draft rejection.
+            starts[request_order] -= lengths - np.array(
+                [1, 2] if step % 2 == 0 else [3, 1]
+            )
 
 
 def _on_gfx950() -> bool:
@@ -2761,7 +2793,7 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm stream coverage")
-def test_v41_rocm_csa2_full_pipeline():
+def test_v41_rocm_csa2_full_pipeline(monkeypatch):
     """_forward_csa2_full: one fork, then K write and q-side after the join.
 
     The default chain must run first on the current stream, the compressor
@@ -2807,8 +2839,8 @@ def test_v41_rocm_csa2_full_pipeline():
         streams["insert_cache"] = torch.cuda.current_stream()
         main_cache.fill_(5)
 
-    compressor.forward = compressor_forward
-    compressor.insert_cache = compressor_insert
+    monkeypatch.setattr(compressor, "forward", compressor_forward)
+    monkeypatch.setattr(compressor, "insert_cache", compressor_insert)
 
     def weights_proj(hidden_states_):
         order.append("weights_proj")
