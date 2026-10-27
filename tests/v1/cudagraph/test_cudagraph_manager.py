@@ -324,6 +324,35 @@ def test_full_capture_metadata_max_seq_len_is_the_graph_bound(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("capturing", "skips"), [(False, False), (True, True)], ids=["eager", "capture"]
+)
+def test_indexer_skips_scoring_only_while_capturing_a_full_graph(
+    monkeypatch, capturing, skips
+):
+    """A batch within the bound skips the q side only in a FULL graph capture. An
+    eager step, such as the warm-up run before each capture, scores, so it compiles
+    and autotunes what a later capture runs."""
+    from vllm.models.glm5next.common import attention
+
+    indexer = attention.Indexer.__new__(attention.Indexer)
+    torch.nn.Module.__init__(indexer)
+    indexer.cudagraph_seq_len_bound = indexer.topk_tokens = 2048
+    indexer.k_cache = SimpleNamespace(prefix="indexer.k_cache")
+    metadata = MagicMock(
+        spec=attention.DeepseekV32IndexerMetadata, num_prefills=0, max_seq_len=2048
+    )
+    monkeypatch.setattr(
+        attention,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"indexer.k_cache": metadata}),
+    )
+    monkeypatch.setattr(attention, "in_piecewise_cudagraph", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+
+    assert indexer._skips_scoring() is skips
+
+
+@pytest.mark.parametrize(
     "uniform_token_count,max_query_len,expected_max_query_len",
     [(1, None, 1), (None, 3, 3), (None, None, 8)],
 )
