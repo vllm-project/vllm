@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -49,8 +50,19 @@ class _SelfRestrictingDraftModel(torch.nn.Module):
         return torch.zeros(hidden_states.shape[0], dtype=torch.long)
 
 
-def _speculator(model, *, vocab_path: str | None):
-    return SimpleNamespace(model=model, vocab_size=model.lm_head.weight.shape[0])
+def _speculator(
+    model,
+    *,
+    vocab_path: str | None,
+    use_local_argmax_reduction: bool = True,
+):
+    # `use_local_argmax_reduction` is read on the success path to warn when the reduced vocabulary
+    # is attached but nothing will call it, so every fixture has to carry it.
+    return SimpleNamespace(
+        model=model,
+        vocab_size=model.lm_head.weight.shape[0],
+        use_local_argmax_reduction=use_local_argmax_reduction,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -121,6 +133,31 @@ def test_attaches_and_remaps_to_true_vocab_ids(monkeypatch, tmp_path):
     # matters when an EAGLE drafter shares its lm_head.weight with the
     # target model (see eagle/utils.py's load_eagle_model).
     assert torch.equal(weight, original_weight)
+
+
+def test_warns_when_attached_but_reduction_is_off(monkeypatch, tmp_path, caplog):
+    """Attaching is not the same as being used.
+
+    `sample_draft()` only calls `get_top_tokens()` when `use_local_argmax_reduction` is set, so a
+    reduced vocabulary attached without it changes nothing about decode. That warning branch reads
+    a field off the speculator, which is what silently broke this file's fixture once; covering it
+    here means the next change to that branch fails a test instead of an attribute lookup.
+    """
+    weight = torch.randn(8, 4)
+    model = _PlainDraftModel(_LMHead(weight))
+    vocab_file = tmp_path / "vocab.txt"
+    vocab_file.write_text("0\n2\n4\n")
+    monkeypatch.setenv("VLLM_SPEC_DRAFT_VOCAB", str(vocab_file))
+
+    with caplog.at_level(logging.WARNING):
+        _attach_reduced_draft_vocab(
+            _speculator(model, vocab_path=str(vocab_file), use_local_argmax_reduction=False)
+        )
+
+    assert "get_top_tokens" in vars(model), "the vocabulary is still attached"
+    assert any(
+        "inactive" in r.message or "inactive" in r.getMessage() for r in caplog.records
+    ), "the operator has to be told it will do nothing"
 
 
 def test_reduced_weight_never_aliases_the_shared_tensor(monkeypatch, tmp_path):
