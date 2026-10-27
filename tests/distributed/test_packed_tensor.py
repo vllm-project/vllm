@@ -9,6 +9,7 @@ These utilities enable efficient batched tensor transfer over NCCL.
 import pytest
 import torch
 
+from vllm.distributed.weight_transfer import packed_tensor
 from vllm.distributed.weight_transfer.packed_tensor import (
     pack_tensors,
     packed_ipc_consumer,
@@ -17,6 +18,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     packed_nccl_broadcast_producer,
     unpack_tensor,
 )
+from vllm.model_executor.model_loader.weight_utils import stash_weight_part
 
 
 class MockCommunicationGroup:
@@ -451,6 +453,60 @@ class TestPackedBroadcastDeferredConsumer:
 
 
 # --- Unit Tests: unpack_tensor ---
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestWeightPartsAcrossStreams:
+    """The consumer loads alternate buckets on different streams; a weight whose
+    parts arrive in different buckets is paired on the second bucket's stream."""
+
+    @pytest.mark.parametrize("num_buffers", [1, 2], ids=["one-stream", "two-streams"])
+    def test_stash_pairs_part_parked_on_other_stream(self, monkeypatch, num_buffers):
+        n = 1024
+        weight = torch.rand(n, n, device="cuda") + 1
+        scale = torch.full((1,), 3.0, device="cuda")
+        streams = packed_tensor._get_streams(torch.cuda.current_device(), num_buffers)
+        monkeypatch.setattr(packed_tensor, "_get_streams", lambda *_: streams)
+        # Leave recognizable free blocks in the first stream's pool, where the
+        # parked copy of the weight is allocated.
+        with torch.cuda.stream(streams[0]):
+            junk = [torch.full((n, n), -1.0, device="cuda") for _ in range(3)]
+        torch.cuda.synchronize()
+        del junk
+
+        class DelayedFirstBroadcast:
+            calls = 0
+
+            def broadcast(self, tensor, src):
+                self.calls += 1
+                if self.calls == 1:  # the first bucket's stream runs late
+                    torch.cuda._sleep(int(3e9))
+                src_tensor = weight if self.calls == 1 else scale
+                tensor.copy_(src_tensor.reshape(-1).view(torch.uint8))
+
+        holder = torch.nn.Module()
+        out = torch.zeros(n, n, device="cuda")
+
+        def load(tensors):
+            for name, tensor in tensors:
+                parts = stash_weight_part(holder, "w", name, tensor)
+                if parts is not None:
+                    out.copy_(parts["weight"] * parts["scale"])
+
+        group = DelayedFirstBroadcast()
+        packed_nccl_broadcast_consumer(
+            iterator=iter(
+                [("weight", ([n, n], torch.float32)), ("scale", ([1], torch.float32))]
+            ),
+            group=group,
+            src=0,
+            post_unpack_func=load,
+            buffer_size_bytes=n * n * 4 - 1,  # one bucket per tensor
+            num_buffers=num_buffers,
+        )
+        torch.cuda.synchronize()
+        assert group.calls == 2
+        torch.testing.assert_close(out, weight * 3, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

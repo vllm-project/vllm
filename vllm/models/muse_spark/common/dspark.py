@@ -372,12 +372,13 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             },
             orig_to_new_stacked=self.hf_to_vllm_mapper.orig_to_new_stacked,
         )
-        loaded = AutoWeightsLoader(self).load_weights(
+        return AutoWeightsLoader(self).load_weights(
             model_weights.items(), mapper=mapper
         )
-        self.model._build_fused_kv_buffers()
+
+    def process_weights_after_loading(self) -> None:
+        super().process_weights_after_loading()
         materialize_residual_path_constants(self.model)
-        return loaded
 
 
 EntryClass = MuseSparkDSparkForCausalLM

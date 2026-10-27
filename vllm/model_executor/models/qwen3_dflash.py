@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 
 import regex as re
 import torch
@@ -86,39 +86,6 @@ def _reads_raw_weights(projs: list[nn.Module]) -> bool:
     return not current_platform.is_cpu() and all(
         isinstance(p.quant_method, UnquantizedLinearMethod) for p in projs
     )
-
-
-def _rebuild_in_place(module: nn.Module, build: Callable[[], None]) -> None:
-    """Run `build`, then copy rebuilt tensors into the ones they replace.
-
-    A FULL CUDA graph records the context-KV step with the addresses of these
-    tensors, so a reload must refresh them in place.
-    """
-
-    def same_layout(a: object, b: object) -> bool:
-        return (
-            isinstance(a, torch.Tensor)
-            and isinstance(b, torch.Tensor)
-            and (a.shape, a.dtype, a.device) == (b.shape, b.dtype, b.device)
-        )
-
-    old = {
-        k: v
-        for k, v in vars(module).items()
-        if isinstance(v, torch.Tensor)
-        or (isinstance(v, tuple) and v and all(isinstance(t, torch.Tensor) for t in v))
-    }
-    build()
-    for name, prev in old.items():
-        new = getattr(module, name, None)
-        olds = prev if isinstance(prev, tuple) else (prev,)
-        news = new if isinstance(new, tuple) else (new,)
-        if len(olds) == len(news) and all(map(same_layout, olds, news)):
-            with torch.inference_mode():
-                for a, b in zip(olds, news):
-                    if a is not b:
-                        a.copy_(b)
-            setattr(module, name, prev)
 
 
 def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
@@ -929,7 +896,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         loader.load_weights(model_weights.items(), mapper=mapper)
 
     def process_weights_after_loading(self) -> None:
-        _rebuild_in_place(self.model, self.model._build_fused_kv_buffers)
+        self.model._build_fused_kv_buffers()
 
     def _read_mask_embedding(self) -> torch.Tensor | None:
         """Checks for an override mask embedding in `mask_embedding.pt` and returns it.

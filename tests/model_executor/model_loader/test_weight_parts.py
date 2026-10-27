@@ -3,12 +3,18 @@
 """A multi-tensor weight may be split across load_weights calls (RL weight
 updates send one bucket per call); its parts pair up across calls."""
 
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
 import torch
 from torch import nn
 
 from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
-from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+from vllm.model_executor.model_loader.weight_utils import (
+    discard_weight_parts,
+    finalize_model_weights,
+)
 from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
 
 PREFIX = "model.layers.0.self_attn.indexer"
@@ -69,6 +75,21 @@ class TestSplitWeightParts:
             finalize_model_weights(module)
         finalize_model_weights(module)
 
+    def test_aborted_update_part_does_not_pair_with_next(self):
+        """An update that failed midway leaves a stashed weight; the next update
+        sends the scale first. The scale must wait for the new weight."""
+        weight, scale = _wk_tensors()
+        stale = (weight[0], (-weight[1].float()).to(weight[1].dtype))
+        module = nn.Module()
+        _load_in_calls(module, [[stale]])  # the update that never finished
+        discard_weight_parts(module)  # the next reload starts
+
+        assert _load_in_calls(module, [[scale]]) == []
+        got = _load_in_calls(module, [[weight]])
+        expected = _load_in_calls(nn.Module(), [[weight, scale]])
+        assert len(got) == 1
+        torch.testing.assert_close(got[0], expected[0])
+
 
 class _HookCounter(nn.Module):
     def __init__(self) -> None:
@@ -103,3 +124,33 @@ def test_molmo_embedding_halves_split_across_calls(module_name):
     assert [n for n, _ in first] == ["x"]
     assert name == "model.embed_tokens.weight"
     torch.testing.assert_close(merged, torch.cat([emb, new_emb]))
+
+
+@pytest.mark.parametrize("shipped", [True, False], ids=["shipped", "omitted"])
+def test_bert_decoder_from_embeddings_only_when_omitted(monkeypatch, shipped):
+    # the embeddings and the decoder may arrive in different calls
+    import vllm.model_executor.models.bert as bert
+
+    class Loader:
+        def __init__(self, model):
+            pass
+
+        def load_weights(self, weights, mapper=None):
+            return {name for name, _ in weights}
+
+    monkeypatch.setattr(bert, "AutoWeightsLoader", Loader)
+    emb, decoder = torch.ones(3, 2), torch.zeros(3, 2)
+    model = SimpleNamespace(
+        decoder_in_checkpoint=False,
+        hf_to_vllm_mapper=None,
+        bert=SimpleNamespace(
+            embeddings=SimpleNamespace(word_embeddings=SimpleNamespace(weight=emb))
+        ),
+        mlm_head=SimpleNamespace(decoder=SimpleNamespace(weight=decoder)),
+    )
+    cls: Any = bert.BertForMaskedLM
+    if shipped:
+        cls.load_weights(model, [("mlm_head.decoder.weight", decoder)])
+    cls.load_weights(model, [("bert.embeddings.word_embeddings.weight", emb)])
+    cls.process_weights_after_loading(model)
+    assert torch.equal(decoder, torch.zeros(3, 2) if shipped else emb)

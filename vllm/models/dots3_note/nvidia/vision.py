@@ -550,9 +550,8 @@ class DotsMoEVitModel(PreTrainedModel):
         for block in self.blocks:
             if isinstance(block.mlp, MoESwiGLUFFNFP8):
                 block.mlp.process_weights_after_loading()
-        if self.config.enable_torch_compile and not getattr(self, "_compiled", False):
+        if self.config.enable_torch_compile:
             self.compile_block_modules()
-            self._compiled = True
 
     def compile_block_modules(self, **compile_kwargs: Any) -> None:
         for block in self.blocks:
