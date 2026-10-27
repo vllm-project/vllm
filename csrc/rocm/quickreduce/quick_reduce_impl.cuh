@@ -592,45 +592,88 @@ struct CodecQ8 : public CodecBase {
   __quickreduce_device_inline__ CodecQ8(int thread, int rank)
       : CodecBase(thread, rank) {}
 
+  // Quantizes one atom; the decoding scale is valid on every thread.
+  __quickreduce_device_inline__ int32x2_t encode(int32x4_t const atom,
+                                                 int& decoding_scale) {
+    // Compute the absolute maximum of the atom in the thread group
+    // In 2 blocks of values, upper/lower halves of the f16x2_t
+    int wblockmax = group_abs_max<T>(atom);
+
+    // Derive scales
+    int encoding_scale;
+    decoding_scale = packed_mul<T>(wblockmax, kScaleFactor);
+    encoding_scale = packed_add<T>(decoding_scale, kScaleEpsilon);
+    encoding_scale = packed_rcp<T>(encoding_scale);
+
+    // Apply scales to get quantized values
+    int32x4_t w;
+    for (int i = 0; i < 4; i++) {
+      w[i] = packed_mul<T>(atom[i], encoding_scale);
+      w[i] = packed_max<T>(w[i], kRangeMin);
+      w[i] = packed_min<T>(w[i], kRangeMax);
+    }
+
+    // Convert from f16x2_t to uint16x2_t
+    int32x4_t q;
+    {
+      int16_t* qi = reinterpret_cast<int16_t*>(&q);
+      T* wh = reinterpret_cast<T*>(&w);
+      for (int i = 0; i < 8; i++) qi[i] = (int16_t)rintf(T2float_cast(wh[i]));
+
+      for (int i = 0; i < 4; i++) {
+        q[i] = packed_add<int16_t>(q[i], kRangeBias);
+      }
+    }
+
+    // Pack 8 x q8 into int32x2_t
+    int32x2_t qw;
+    qw[0] = q[0] | (q[1] << 8);
+    qw[1] = q[2] | (q[3] << 8);
+    return qw;
+  }
+
+  __quickreduce_device_inline__ int32x4_t decode(int32x2_t qw, int qs) {
+    // Unpack q8 into fp16x8_t
+    int32x4_t w;
+    {
+      static uint constexpr kMask00FF = 0x00FF00FF;
+
+      // {1024.0, 1024.0}, fp16x2_t
+      static uint constexpr kHalf2_1024 = 0x64006400;
+
+      // {-1152.0, -1152.0}, fp16x2_t
+      static uint constexpr kHalf2_1152 = 0xE480E480;
+
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        if constexpr (std::is_same<T, half>::value) {
+          int32_t q8 = ((qw[i / 2] >> ((i % 2) * 8)) & kMask00FF) | kHalf2_1024;
+          w[i] = packed_add<half>(q8, kHalf2_1152);
+        } else {
+          int32_t int16_2 = (qw[i / 2] >> ((i % 2) * 8)) & kMask00FF;
+          int16_t low = static_cast<int16_t>(int16_2 & 0xFFFF);
+          int16_t high = static_cast<int16_t>((int16_2 >> 16) & 0xFFFF);
+          nv_bfloat16 bf_low = __float2bfloat16(static_cast<float>(low));
+          nv_bfloat16 bf_high = __float2bfloat16(static_cast<float>(high));
+          nv_bfloat162 bf2 = __halves2bfloat162(bf_low, bf_high);
+          int32_t packed_bf16 = *reinterpret_cast<int32_t*>(&bf2);
+          w[i] = packed_add<nv_bfloat16>(packed_bf16, kRangeMin);
+        }
+      }
+    }
+
+    // Apply decoding scales
+    for (int i = 0; i < 4; i++) {
+      w[i] = packed_mul<T>(w[i], qs);
+    }
+    return w;
+  }
+
   __quickreduce_device_inline__ void send(int32x4_t* __restrict__ send_buffer,
                                           int32x4_t const* __restrict__ data) {
     for (int k = 0; k < kRankAtoms; k++) {
-      int32x4_t const atom = data[k];
-      // Compute the absolute maximum of the atom in the thread group
-      // In 2 blocks of values, upper/lower halves of the f16x2_t
-      int wblockmax = group_abs_max<T>(atom);
-
-      // Derive scales
       int decoding_scale;
-      int encoding_scale;
-      decoding_scale = packed_mul<T>(wblockmax, kScaleFactor);
-      encoding_scale = packed_add<T>(decoding_scale, kScaleEpsilon);
-      encoding_scale = packed_rcp<T>(encoding_scale);
-
-      // Apply scales to get quantized values
-      int32x4_t w;
-      for (int i = 0; i < 4; i++) {
-        w[i] = packed_mul<T>(atom[i], encoding_scale);
-        w[i] = packed_max<T>(w[i], kRangeMin);
-        w[i] = packed_min<T>(w[i], kRangeMax);
-      }
-
-      // Convert from f16x2_t to uint16x2_t
-      int32x4_t q;
-      {
-        int16_t* qi = reinterpret_cast<int16_t*>(&q);
-        T* wh = reinterpret_cast<T*>(&w);
-        for (int i = 0; i < 8; i++) qi[i] = (int16_t)rintf(T2float_cast(wh[i]));
-
-        for (int i = 0; i < 4; i++) {
-          q[i] = packed_add<int16_t>(q[i], kRangeBias);
-        }
-      }
-
-      // Pack 8 x q8 into int32x2_t
-      int32x2_t qw;
-      qw[0] = q[0] | (q[1] << 8);
-      qw[1] = q[2] | (q[3] << 8);
+      int32x2_t qw = encode(data[k], decoding_scale);
 
       // Write quantized atom to send_buffer
       // note: only the group leader stores the scale
@@ -661,43 +704,101 @@ struct CodecQ8 : public CodecBase {
 
       *recv_buffer += kRankBufferTileStride;
 
-      // Unpack q8 into fp16x8_t
-      int32x4_t w;
-      {
-        static uint constexpr kMask00FF = 0x00FF00FF;
-
-        // {1024.0, 1024.0}, fp16x2_t
-        static uint constexpr kHalf2_1024 = 0x64006400;
-
-        // {-1152.0, -1152.0}, fp16x2_t
-        static uint constexpr kHalf2_1152 = 0xE480E480;
-
-#pragma unroll
-        for (int i = 0; i < 4; i++) {
-          if constexpr (std::is_same<T, half>::value) {
-            int32_t q8 =
-                ((qw[i / 2] >> ((i % 2) * 8)) & kMask00FF) | kHalf2_1024;
-            w[i] = packed_add<half>(q8, kHalf2_1152);
-          } else {
-            int32_t int16_2 = (qw[i / 2] >> ((i % 2) * 8)) & kMask00FF;
-            int16_t low = static_cast<int16_t>(int16_2 & 0xFFFF);
-            int16_t high = static_cast<int16_t>((int16_2 >> 16) & 0xFFFF);
-            nv_bfloat16 bf_low = __float2bfloat16(static_cast<float>(low));
-            nv_bfloat16 bf_high = __float2bfloat16(static_cast<float>(high));
-            nv_bfloat162 bf2 = __halves2bfloat162(bf_low, bf_high);
-            int32_t packed_bf16 = *reinterpret_cast<int32_t*>(&bf2);
-            w[i] = packed_add<nv_bfloat16>(packed_bf16, kRangeMin);
-          }
-        }
-      }
-
-      // Apply decoding scales
-      for (int i = 0; i < 4; i++) {
-        w[i] = packed_mul<T>(w[i], qs);
-      }
-
-      data[k] = w;
+      data[k] = decode(qw, qs);
     }
+  }
+};
+
+// Int8 codec with the same bytes and the same rounding as CodecQ8, laid out
+// for fewer remote stores. Over PCIe the two-shot kernel is bound by the
+// number of store instructions in flight, not by bytes: CodecQ8 issues a
+// 16 B scale store per wave and atom next to each 256 B data store, which
+// nearly halves the useful bandwidth. Here each thread writes both atoms of a
+// destination in one 16 B store, and the scales of all destinations are
+// gathered in LDS and written as one 256 B store per destination and block.
+// TP4 only: the scale gather uses one wave per destination.
+template <typename T, int world_size>
+struct CodecQ8Packed : public CodecQ8<T, world_size> {
+  using Base = CodecQ8<T, world_size>;
+  using Base::kRankAtoms;
+  using Base::kRankBufferTileStride;
+  using Base::kWorldSize;
+  static_assert(kRankAtoms == 2, "CodecQ8Packed supports TP4 only.");
+
+  static constexpr int kRankTransmittedTileSize =
+      Base::kRankTransmittedTileSize;
+  static constexpr int kTransmittedTileSize = Base::kTransmittedTileSize;
+  static constexpr int kDataBytes = kBlockSize * kRankAtoms * sizeof(int32x2_t);
+  static constexpr int kWaveSize = 32;
+  static constexpr int kGroupsPerWave = kWaveSize / kThreadGroupSize;
+  static constexpr int kScalesPerWave = kGroupsPerWave * kRankAtoms;
+  static constexpr int kScalesPerRank = kBlockSize / kWaveSize * kScalesPerWave;
+  static_assert(kDataBytes + kScalesPerRank * sizeof(int) <=
+                    kRankTransmittedTileSize,
+                "Packed tile must fit in the CodecQ8 tile.");
+
+  int num_sends = 0;
+  uint8_t* rank_tiles[kWorldSize];
+
+  __quickreduce_device_inline__ CodecQ8Packed(int thread, int rank)
+      : Base(thread, rank) {}
+
+  __quickreduce_device_inline__ void send(int32x4_t* __restrict__ send_buffer,
+                                          int32x4_t const* __restrict__ data) {
+    // Two sets so that phase 2 does not overwrite scales phase 1 still reads.
+    __shared__
+        __attribute__((aligned(16))) int scales[2][kWorldSize][kScalesPerRank];
+
+    int s0, s1;
+    int32x2_t q0 = Base::encode(data[0], s0);
+    int32x2_t q1 = Base::encode(data[1], s1);
+    uint8_t* tile = reinterpret_cast<uint8_t*>(send_buffer);
+    __builtin_nontemporal_store(
+        int32x4_t{q0[0], q0[1], q1[0], q1[1]},
+        reinterpret_cast<int32x4_t*>(tile) + this->thread);
+
+    int const r = num_sends % kWorldSize;
+    int const phase = (num_sends / kWorldSize) % 2;
+    int const lane = threadIdx.x % kWaveSize;
+    int const wave = this->thread / kWaveSize;
+    rank_tiles[r] = tile;
+    if (lane % kThreadGroupSize == 0) {
+      int* dst = &scales[phase][r][wave * kScalesPerWave];
+      dst[lane / kThreadGroupSize] = s0;
+      dst[kGroupsPerWave + lane / kThreadGroupSize] = s1;
+    }
+    num_sends++;
+
+    if (r == kWorldSize - 1) {
+      // LDS-only barrier: __syncthreads() would also wait for the remote
+      // data stores to complete.
+      asm volatile("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory");
+      constexpr int kLanes = kScalesPerRank * sizeof(int) / sizeof(int32x4_t);
+      if (wave < kWorldSize && lane < kLanes) {
+        int32x4_t v = reinterpret_cast<int32x4_t*>(scales[phase][wave])[lane];
+        __builtin_nontemporal_store(
+            v,
+            reinterpret_cast<int32x4_t*>(rank_tiles[wave] + kDataBytes) + lane);
+      }
+    }
+  }
+
+  __quickreduce_device_inline__ void recv(int32x4_t** __restrict__ recv_buffer,
+                                          int32x4_t* __restrict__ data) {
+    uint8_t* tile = reinterpret_cast<uint8_t*>(*recv_buffer);
+    int32x4_t qw = __builtin_nontemporal_load(
+        reinterpret_cast<int32x4_t*>(tile) + this->thread);
+    int const lane = threadIdx.x % kWaveSize;
+    int const wave = this->thread / kWaveSize;
+    int* qs = reinterpret_cast<int*>(tile + kDataBytes) +
+              wave * kScalesPerWave + lane / kThreadGroupSize;
+    int qs0 = __builtin_nontemporal_load(qs);
+    int qs1 = __builtin_nontemporal_load(qs + kGroupsPerWave);
+
+    *recv_buffer += kRankAtoms * kRankBufferTileStride;
+
+    data[0] = Base::decode(int32x2_t{qw[0], qw[1]}, qs0);
+    data[1] = Base::decode(int32x2_t{qw[2], qw[3]}, qs1);
   }
 };
 
