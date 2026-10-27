@@ -200,9 +200,10 @@ class ParallelConfig:
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
     disk, which can drastically reduce storage I/O for MoE models with
-    per-expert weight tensors (e.g. DeepSeek, Mixtral, Kimi-K2.5).  Has no
-    effect on 3D fused-expert checkpoints (e.g. GPT-OSS) or non-MoE
-    models."""
+    per-expert weight tensors (e.g. DeepSeek, Mixtral, Kimi-K2.5).  With EPLB,
+    each rank also reads the experts its redundant slots replicate in the
+    initial placement; elastic EP loads every expert.  Has no effect on 3D
+    fused-expert checkpoints (e.g. GPT-OSS) or non-MoE models."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
