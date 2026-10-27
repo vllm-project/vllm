@@ -281,6 +281,12 @@ uv pip install -e .
 vLLM offers an official Docker image for deployment.
 The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai](https://hub.docker.com/r/vllm/vllm-openai/tags).
 
+The default CUDA release images use Ubuntu 24.04. Separate `-ubuntu2404`
+release tags are no longer published. Use `latest` or `v<version>` instead of
+`latest-ubuntu2404` or `v<version>-ubuntu2404`; for architecture-specific tags,
+use `latest-x86_64` / `latest-aarch64` or `v<version>-x86_64` /
+`v<version>-aarch64`.
+
 ```bash
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
