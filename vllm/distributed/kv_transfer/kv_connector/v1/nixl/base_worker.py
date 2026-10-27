@@ -273,10 +273,10 @@ class NixlBaseConnectorWorker:
                     # descs, in _ssm_region_indices order.
                     ssm_slots = np.flatnonzero(
                         np.isin(self._ssm_region_indices, group_regions)
-                    )
+                    ).astype(np.int32)
                     ssm_region_ids = (
                         ssm_slots[:, None] * ssm_regions_per_layer
-                        + np.arange(ssm_regions_per_layer)
+                        + np.arange(ssm_regions_per_layer, dtype=np.int32)
                     ).ravel()
                 ssm_region_ids = ssm_region_ids[:, None]
                 all_descs.append(

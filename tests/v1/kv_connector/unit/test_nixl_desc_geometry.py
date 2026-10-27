@@ -738,6 +738,8 @@ def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
         *ssm_descs(2, num_layers=num_regions),
         *ssm_descs(3, num_layers=2),
     ]
+    # NIXL takes int32 ids without a conversion copy.
+    assert desc_ids.dtype == np.int32
 
 
 @pytest.mark.cpu_test
