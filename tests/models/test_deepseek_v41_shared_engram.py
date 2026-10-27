@@ -3,11 +3,14 @@
 """Ownership and manifest checks for externally supplied Engram tables."""
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 import torch
 from safetensors.torch import save_file
+from torch import nn
 
+from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 from vllm.models.deepseek_v41.nvidia.ops import shared_engram_owner as owner
 from vllm.models.deepseek_v41.nvidia.ops.shared_engram_owner import (
     _OwnerServer,
@@ -110,3 +113,33 @@ def test_owner_rejects_wrong_table_encoding_before_publication(tmp_path):
             2,
             torch.float8_e8m0fnu,
         )
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+def test_external_table_views_follow_tp_head_ranges(tp_size):
+    head_sizes = (3, 5, 7, 11)
+    rows, dim, scale_width = sum(head_sizes), 64, 2
+    weight = torch.arange(rows, dtype=torch.uint8)[:, None].expand(rows, dim)
+    scales = (torch.arange(rows, dtype=torch.uint8) + 100)[:, None].expand(
+        rows, scale_width
+    )
+    packed = torch.cat((weight.flatten(), scales.flatten()))
+    heads_per_rank = (len(head_sizes) + tp_size - 1) // tp_size
+    for rank in range(tp_size):
+        head_start = rank * heads_per_rank
+        head_end = min(head_start + heads_per_rank, len(head_sizes))
+        row_start = sum(head_sizes[:head_start])
+        row_end = sum(head_sizes[:head_end])
+        embedding = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
+        nn.Module.__init__(embedding)
+        embedding._external_mapping = SimpleNamespace(cuda=packed)
+        embedding.num_embeddings = rows
+        embedding.dim = dim
+        embedding.block_size = 32
+        embedding.vocab_start_idx = row_start
+        embedding.part_num_embeddings = row_end - row_start
+        selected_weight, selected_scales = embedding._storage()
+        torch.testing.assert_close(
+            selected_weight.view(torch.uint8), weight[row_start:row_end]
+        )
+        torch.testing.assert_close(selected_scales, scales[row_start:row_end])
