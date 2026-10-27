@@ -113,10 +113,12 @@ def test_cpu_unary_activation(
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("approximate", ["none", "tanh"])
 @torch.inference_mode()
-def test_cpu_gelu_tanh_and_mul(
+def test_cpu_gelu_and_mul(
     default_vllm_config,
     dtype: torch.dtype,
+    approximate: str,
 ) -> None:
     gate = torch.tensor(
         [
@@ -203,9 +205,12 @@ def test_cpu_gelu_tanh_and_mul(
 
     x = torch.cat((val, gate), dim=-1).contiguous()
     kernel_out = torch.empty_like(val)
-    torch.ops._C.gelu_tanh_and_mul(kernel_out, x)
+    if approximate == "none":
+        torch.ops._C.gelu_and_mul(kernel_out, x)
+    else:
+        torch.ops._C.gelu_tanh_and_mul(kernel_out, x)
 
-    torch_ref = torch.nn.functional.gelu(val, approximate="tanh") * gate
+    torch_ref = torch.nn.functional.gelu(val, approximate=approximate) * gate
 
     atol = get_default_atol(kernel_out)
     rtol = get_default_rtol(kernel_out)

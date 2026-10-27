@@ -161,6 +161,10 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 - Currently, vLLM CPU uses model default settings as `dtype`. However, due to unstable float16 support in torch CPU, it is recommended to explicitly set `dtype=bfloat16` if there are any performance or accuracy problem.  
 - On AMD Zen CPUs (`ZenCpuPlatform`), `float16` requires AVX512-FP16, available from Venice (6th Gen EPYC) onwards. On Turin (5th Gen EPYC) and earlier only `bfloat16` and `float32` are accepted, and models declared with `float16` are auto-downcast to `bfloat16` at model load time. See [AMD Zen optimizations](#amd-zen-optimizations).
 
+### Which GELU approximation is used on RISC-V?
+
+The RISC-V CPU backend supports both exact GELU (`approximate="none"`) and the tanh approximation (`approximate="tanh"`) for fused GELU-and-multiply operations. On RVV builds, the exact variant uses an error-function approximation that preserves every active lane, including nonnegative inputs, without depending on the processor's mask-agnostic fill policy.
+
 ### How to launch a vLLM service on CPU?
 
 - When using the online serving, it is recommended to reserve 1-2 CPU cores for the serving framework to avoid CPU oversubscription. For example, on a platform with 32 physical CPU cores, reserving CPU 31 for the framework and using CPU 0-30 for inference threads:
