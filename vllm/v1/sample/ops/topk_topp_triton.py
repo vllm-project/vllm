@@ -1615,12 +1615,193 @@ def _apply_topp_split(
     )
 
 
+# ---------------------------------------------------------------------------
+# Split-row top-k pipeline for small batches.
+# ---------------------------------------------------------------------------
+
+# Candidates kept per chunk, so the merge tile is CHUNKS * this. Past it the
+# monolithic kernel's single pass is the better shape.
+_TOPK_SPLIT_MAX_K = 64
+# Pieces the vocabulary is cut into. Raising it widens the merge tile faster
+# than it shortens each program's sweep.
+_TOPK_SPLIT_CHUNKS = 128
+_TOPK_SPLIT_MAX_BATCH = 64
+# Below this one program is not actually starved, and three launches cost more
+# than they save.
+_TOPK_SPLIT_MIN_VOCAB = 8192
+
+
+@triton.jit
+def _topk_split_chunk_kernel(
+    LOGITS,
+    LOGITS_STRIDE_0,
+    CAND_V,
+    CAND_I,
+    VOCAB,
+    CHUNK: tl.constexpr,
+    CHUNKS: tl.constexpr,
+    KCAP: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Each chunk's own top-KCAP logits and their indices, ties by lowest index.
+
+    Grid is (rows, CHUNKS). Writes [rows, CHUNKS * KCAP] float32 values and
+    int32 indices. A row's k largest elements cannot hide from this: an element
+    of the global top-k is at least as large as every element of its own chunk
+    bar at most k-1 of them.
+    """
+    row = tl.program_id(0)
+    chunk = tl.program_id(1)
+    base = chunk * CHUNK
+
+    lane = tl.arange(0, BLOCK)
+    offs = base + lane
+    # BLOCK is rounded up to a power of two, so it can reach past both the
+    # chunk and the row; both bounds are needed or a chunk takes its
+    # neighbour's elements.
+    live = (lane < CHUNK) & (offs < VOCAB)
+    vals = tl.load(
+        LOGITS + row.to(tl.int64) * LOGITS_STRIDE_0 + offs,
+        mask=live,
+        other=float("-inf"),
+    )
+    # VOCAB doubles as the "no such index" sentinel: it sorts above every real
+    # index under tl.min, so a tie is won by the lowest real index.
+    idxs = tl.where(live, offs, VOCAB)
+
+    out = (row * CHUNKS + chunk) * KCAP
+    for i in tl.static_range(KCAP):
+        best = tl.max(vals, 0)
+        at = tl.min(tl.where(vals == best, idxs, VOCAB), 0)
+        tl.store(CAND_V + out + i, best)
+        tl.store(CAND_I + out + i, at)
+        # Retire by index rather than by value, so duplicates are emitted once
+        # each instead of vanishing together.
+        vals = tl.where(idxs == at, float("-inf"), vals)
+
+
+@triton.jit
+def _topk_split_combine_kernel(
+    CAND_V,
+    CAND_I,
+    K,
+    P,
+    KEEP_V,
+    KEEP_I,
+    VOCAB,
+    NUM_CAND: tl.constexpr,
+    KCAP: tl.constexpr,
+    BLOCK: tl.constexpr,
+    TOPP_ENABLED: tl.constexpr,
+):
+    """Merge the per-chunk candidates, cut at the row's k, then apply top-p.
+
+    Grid is (rows,). Writes [rows, KCAP] survivors; positions that did not
+    survive repeat position zero, so the scatter has no invalid index to guard.
+    """
+    row = tl.program_id(0)
+    lane = tl.arange(0, BLOCK)
+    live = lane < NUM_CAND
+    vals = tl.load(CAND_V + row * NUM_CAND + lane, mask=live, other=float("-inf"))
+    idxs = tl.load(CAND_I + row * NUM_CAND + lane, mask=live, other=VOCAB)
+
+    k = tl.minimum(tl.load(K + row), KCAP)
+
+    # Triton cannot index a register tile with a loop variable, so each
+    # extracted element is placed by a predicate.
+    sorted_v = tl.full((BLOCK,), float("-inf"), tl.float32)
+    sorted_i = tl.full((BLOCK,), VOCAB, tl.int32)
+    for i in tl.static_range(KCAP):
+        best = tl.max(vals, 0)
+        at = tl.min(tl.where(vals == best, idxs, VOCAB), 0)
+        sorted_v = tl.where(lane == i, best, sorted_v)
+        sorted_i = tl.where(lane == i, at, sorted_i)
+        vals = tl.where(idxs == at, float("-inf"), vals)
+
+    head = (lane < k) & (sorted_i < VOCAB)
+    v = tl.where(head, sorted_v, float("-inf"))
+
+    if TOPP_ENABLED:
+        p = tl.load(P + row)
+        e = tl.where(head, tl.exp(v - tl.max(v, 0)), 0.0)
+        total = tl.sum(e, 0)
+        # Keep a token when the mass strictly before it is under p, written as
+        # a condition on the mass from it onward. The direct prefix form
+        # saturates: a peaked row's running prefix reaches exactly 1.0 in
+        # float32 after about seventeen terms, and `1.0 < p` is then false for
+        # p = 1, truncating a row that asked for no top-p filtering at all.
+        suffix = tl.flip(tl.cumsum(tl.flip(e, 0), 0), 0)
+        kept = head & (suffix > (1.0 - p) * total)
+    else:
+        kept = head
+
+    first_v = tl.sum(tl.where(lane == 0, sorted_v, 0.0), 0)
+    first_i = tl.sum(tl.where(lane == 0, sorted_i, 0), 0)
+    store = lane < KCAP
+    tl.store(KEEP_V + row * KCAP + lane, tl.where(kept, sorted_v, first_v), mask=store)
+    tl.store(
+        KEEP_I + row * KCAP + lane,
+        tl.where(kept, sorted_i, first_i).to(tl.int64),
+        mask=store,
+    )
+
+
+def _apply_topk_split(
+    logits: torch.Tensor,
+    k: torch.Tensor,
+    p: torch.Tensor | None,
+    max_top_k: int,
+    mask_value: float,
+) -> None:
+    """Split-row top-k/top-p pipeline for small batches; masks in place."""
+    rows, vocab = logits.shape
+    chunk = triton.cdiv(vocab, _TOPK_SPLIT_CHUNKS)
+    num_cand = _TOPK_SPLIT_CHUNKS * max_top_k
+
+    cand_v = logits.new_empty((rows, num_cand))
+    cand_i = logits.new_empty((rows, num_cand), dtype=torch.int32)
+    _topk_split_chunk_kernel[(rows, _TOPK_SPLIT_CHUNKS)](
+        logits,
+        logits.stride(0),
+        cand_v,
+        cand_i,
+        vocab,
+        CHUNK=chunk,
+        CHUNKS=_TOPK_SPLIT_CHUNKS,
+        KCAP=max_top_k,
+        BLOCK=next_power_of_2(chunk),
+        num_warps=4,
+    )
+
+    keep_v = logits.new_empty((rows, max_top_k))
+    keep_i = logits.new_empty((rows, max_top_k), dtype=torch.int64)
+    _topk_split_combine_kernel[(rows,)](
+        cand_v,
+        cand_i,
+        k,
+        p if p is not None else cand_v,
+        keep_v,
+        keep_i,
+        vocab,
+        NUM_CAND=num_cand,
+        KCAP=max_top_k,
+        BLOCK=next_power_of_2(num_cand),
+        TOPP_ENABLED=p is not None,
+        num_warps=8,
+    )
+
+    # Ordering across launches is what keeps the fill from erasing the scatter.
+    logits.fill_(mask_value)
+    logits.scatter_(-1, keep_i, keep_v)
+
+
 def apply_top_k_top_p_triton(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
     mask_value: float = float("-inf"),
     has_topp_only_rows: bool = True,
+    max_top_k: int | None = None,
 ) -> torch.Tensor:
     """Apply combined top-k and top-p masking using Triton.
 
@@ -1638,6 +1819,10 @@ def apply_top_k_top_p_triton(
         has_topp_only_rows: Whether any row has p < 1 and k >= vocab_size.
             False lets small batches skip the split top-p pipeline; pass it
             only if no such row exists, as such a row would get no top-p.
+        max_top_k: An upper bound on every row's k, or None if unknown. Lets
+            small batches take the split top-k pipeline, whose per-chunk
+            candidate count is a compile-time constant. Callers holding a host
+            mirror of top_k can supply it without a device sync.
 
     Returns:
         The masked logits tensor. It may or may not be modified in-place.
@@ -1683,6 +1868,25 @@ def apply_top_k_top_p_triton(
     )
     if use_split and not topk_enabled:
         _apply_topp_split(logits, None, p_ptr, mask_value, num_sm)
+        return logits
+
+    # Rows with an active top-k are latency-bound in the monolithic kernel for
+    # the same reason, so split them too when a bound on k is known. Knowing
+    # the survivors' indices rather than only a cutoff value makes the mask a
+    # scatter, which is why this needs its own pipeline rather than the top-p
+    # one. Measured on gfx942 only, hence the platform condition.
+    if (
+        topk_enabled
+        and max_top_k is not None
+        and 1 <= max_top_k <= _TOPK_SPLIT_MAX_K
+        and batch_size <= _TOPK_SPLIT_MAX_BATCH
+        and vocab_size >= _TOPK_SPLIT_MIN_VOCAB
+        and logits.device.type == "cuda"
+        and current_platform.is_rocm()
+    ):
+        _apply_topk_split(
+            logits, k_ptr, p_ptr if topp_enabled else None, max_top_k, mask_value
+        )
         return logits
 
     NUM_PROGRAMS = min(num_sm, batch_size)
