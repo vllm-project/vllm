@@ -364,6 +364,7 @@ def build_gdn(key: GdnBuild):
             "gdn": lay.gdn,
             "shuffled": key.shuffled,
             "ba_of": P.ba_of,
+            "ba_parts": P.BA_PARTS,
             "z_gate": sigmoid,
             "goff": P.gdn_offset(s, key.tp),
             "tid": tid,
