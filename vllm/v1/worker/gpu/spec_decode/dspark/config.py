@@ -22,7 +22,9 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator"
     )
-    supported_options = frozenset({"dspark_draft_topk", "draft_lm_head_quantization"})
+    supported_options = frozenset(
+        {"dspark_draft_topk", "dspark_fused_topk_walk", "draft_lm_head_quantization"}
+    )
     uses_separate_workspace_lane = True
     # DSpark predicts acceptance with its own confidence head.
     adaptive_verification_uses_draft_logits = False
@@ -98,6 +100,8 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
                     "Qwen3DSparkModel and Qwen3OmniDSparkModel"
                 )
             hf_config.dspark_draft_topk = dspark_draft_topk
+        elif spec.dspark_fused_topk_walk:
+            raise ValueError("dspark_fused_topk_walk requires dspark_draft_topk")
 
         if spec.draft_lm_head_quantization is not None:
             # Other drafters may read lm_head.weight directly (e.g. Muse Spark).

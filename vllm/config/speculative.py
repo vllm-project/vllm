@@ -131,6 +131,7 @@ _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
     "dspark_draft_topk",
+    "dspark_fused_topk_walk",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
     "xpress_topc",
@@ -743,6 +744,13 @@ class SpeculativeConfig:
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
 
+    dspark_fused_topk_walk: bool = False
+    """With `dspark_draft_topk`, run the sequential Markov walk over the
+    top-k candidates in one kernel and cache only those candidates' draft
+    logits. Falls back to the per-step loop with a quantized Markov head, a
+    reduced draft vocabulary, draft watermarking, the online acceptance
+    estimator, or `dspark_draft_topk` x Markov rank above 128 x 256."""
+
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C
     base-logit candidates. 0 disables the narrowing and scores the full
@@ -805,6 +813,7 @@ class SpeculativeConfig:
             "enable_adaptive_verification",
             "draft_sample_method",
             "dspark_draft_topk",
+            "dspark_fused_topk_walk",
             "xpress_topc",
             "fly_window_size",
             "fly_entropy_threshold",
@@ -1495,8 +1504,10 @@ class SpeculativeConfig:
         config_cls = get_speculator_config_class(self)
 
         for option in _METHOD_SPECIFIC_OPTIONS:
+            value = getattr(self, option)
             if (
-                getattr(self, option) is not None
+                value is not None
+                and value is not False
                 and option not in config_cls.supported_options
             ):
                 raise ValueError(
