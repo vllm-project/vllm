@@ -38,3 +38,7 @@ To preview the site with your changes, add a gitignored `sources.local.yaml`
 to that checkout with `overrides: { vllm: ~/vllm/recipes }` and run `pnpm dev`.
 This works once vllm-project/recipes reads this directory as its `vllm`
 source (vllm-project/recipes#1095).
+
+A pull request that changes this directory gets the `recipe` label and a
+comment linking its own preview deployment, rebuilt a few minutes after each
+push.

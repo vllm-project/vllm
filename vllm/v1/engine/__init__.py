@@ -108,6 +108,10 @@ class EngineCoreReadyResponse:
     coord_store_port: int = 0
     coordinator_input_address: str | None = None
     coordinator_output_address: str | None = None
+    # JSON-mode dump of this engine's VllmConfig, for frontends that serve
+    # `/server_info` without holding the config themselves (the Rust frontend).
+    # Sent only with VLLM_SERVER_DEV_MODE, the same gate as `/server_info`.
+    vllm_config: dict[str, Any] | None = None
 
 
 class EngineCoreRequest(

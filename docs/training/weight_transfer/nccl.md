@@ -106,16 +106,14 @@ decodes with exactly the values the trainer encoded with. They are not per-round
     `packed_buffer_size_bytes * packed_num_buffers` on each side (2 GiB at the
     defaults). Lower `packed_buffer_size_bytes` if that is too much headroom.
 
-### The two `WeightSource` channels must agree
+### Metadata and `iter_full()` must agree
 
-Dense NCCL is the backend that reads *both*
-[`WeightSource`](base.md#weightsource) channels, so it is the one where a
-disagreement between them is fatal. The engine builds the per-round update info
-from `metadata()` and ships it ahead of the bytes; the worker sizes its receive
-buffers from that info, and in packed mode cuts its chunk boundaries from it. The
-bytes themselves come from iterating the source.
+Dense NCCL builds the per-round update info from
+[`metadata`](base.md#weightsource) and ships it ahead of the bytes; the worker
+sizes its receive buffers from that info, and in packed mode cuts its chunk
+boundaries from it. The bytes themselves come from the source's `iter_full()`.
 
-If iteration disagrees with what `metadata()` declared — a reordered, omitted, or
+If `iter_full()` disagrees with what `metadata` declared — a reordered, omitted, or
 re-dtyped parameter — the two sides split the same byte stream differently. The
 transfer then either hangs in NCCL waiting for a length that never arrives, or
 loads garbage into the model.
@@ -126,9 +124,44 @@ rather than letting it reach the wire. `ModuleSource` satisfies this by
 construction. If you write a custom source — a Megatron export, an MoE re-fusing
 pass — this is the invariant to test first.
 
-!!! note
-    IPC does not read `metadata()` at all: it derives the update info from
-    iteration as it goes, so it cannot observe a divergence.
+### One sender
+
+Each parameter is sent by its first owner, and this backend has a single
+sender, trainer rank 0. Every parameter's `owners` must therefore start at rank
+0 or be unset; a source whose pipeline stages own different parameters is
+rejected at `trainer_init`. Other owners (FSDP peers of rank 0) only
+drive `iter_full()` to take part in the gathers.
+
+### Metadata is sent once, then reused
+
+Every `update_weights` call needs the list of parameters it carries: `names`,
+`dtype_names` and `shapes`. For a large model that list is long (about 19,000
+entries for Qwen3-30B-A3B), yet an RL trainer sends the same parameters every
+round. So the worker remembers the list:
+
+| `update_info` you send | What the worker loads |
+| ---------------------- | --------------------- |
+| `names`, `dtype_names`, `shapes` filled in | Exactly these parameters. The worker also saves this list. |
+| All three lists empty (or `{}`) | The list saved by the previous `update_weights` call on the same model. |
+| All three lists empty, nothing saved yet | Nothing. |
+
+Rules to remember:
+
+- **The first round must send the full list.** After that, send empty lists
+  whenever the parameters are the same as last round.
+- **Send the full list again whenever anything changes**: a parameter added,
+  removed, renamed, reordered, re-dtyped or reshaped. The worker does not check
+  that empty-list rounds still match what the trainer sends; a mismatch hangs in
+  NCCL or loads wrong values.
+- **The target model and the draft model keep separate lists.** A
+  `/start_draft_weight_update` round reuses only the draft's list.
+- **`init_weight_transfer_engine` clears every saved list**, so the first round
+  after a re-init must send the full list again.
+
+`NCCLTrainerWeightTransferEngine.send_weights` follows these rules for you: it
+compares `metadata` with what the last successful round sent, and sends empty
+lists when they are equal. You only need to think about them if you build
+`update_info` yourself, for example over HTTP without vLLM.
 
 ## Trainer Without vLLM over HTTP
 
@@ -159,7 +192,9 @@ Each sync: `POST /start_weight_update`, then `POST /update_weights` with
 `{"update_info": {"names", "dtype_names", "shapes"}}` **in the background**
 while rank 0 broadcasts in `names` order, then `POST /finish_weight_update`.
 `dtype_names` are `torch` attribute names (`"bfloat16"`); `shapes` are full
-checkpoint shapes.
+checkpoint shapes. From the second sync on, send `{"update_info": {}}` if the
+parameters did not change; see
+[Metadata is sent once, then reused](#metadata-is-sent-once-then-reused).
 
 - Unpacked: one broadcast per tensor.
 - Packed: concatenate `t.contiguous().view(-1).view(torch.uint8)` in `names`
@@ -237,6 +272,18 @@ client.finish_weight_update()
 Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still uses `O(N)` staging through the native loader, and the caller owns export/diff state and restart or reseed after a partial failure.
 
 [`rlhf_sparse_nccl.py`](../../../examples/rl/rlhf_sparse_nccl.py) demonstrates per-expert checkpoint patches with a Qwen3 MoE TP2/EP2 engine.
+
+## Limitations
+
+- **Pipeline-parallel trainers are not supported yet (work in progress).** Rank 0
+  is the only sender, so it must own every parameter (see
+  [One sender](#one-sender)). A source whose ranks own different parameters is
+  rejected at `trainer_init`.
+- **Full tensors on the wire.** Rank 0 materializes each parameter in full and
+  every worker receives all of it, whatever its tensor-parallel shard. For
+  large or expert-parallel models, see [sharded RDT](sharded_rdt.md) or
+  [NCCL M2N](m2n.md).
+- Sparse NCCL's pipeline-parallel behavior is untested.
 
 ## Examples
 

@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use serde_with::DefaultOnNull;
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_llm::WeightVersionSpan;
 use vllm_text::{Prompt, TruncationSide};
 
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
@@ -30,6 +32,7 @@ fn default_completion_max_tokens() -> Option<u32> {
 /// [`vllm_text::Prompt`] and add vLLM-only fields directly instead of layering
 /// wrapper deserializers on top.
 #[serde_with::skip_serializing_none]
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct CompletionRequest {
     // -------- Standard OpenAI API Parameters --------
@@ -43,6 +46,7 @@ pub struct CompletionRequest {
 
     /// Echo back the prompt in addition to the completion
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub echo: bool,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
@@ -77,10 +81,14 @@ pub struct CompletionRequest {
 
     /// Whether to stream back partial progress
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub stream: bool,
 
     /// The suffix that comes after a completion of inserted text
     pub suffix: Option<String>,
+
+    /// Prompt embeddings to generate from. Not supported yet.
+    pub prompt_embeds: Option<Value>,
 
     /// What sampling temperature to use, between 0 and 2
     pub temperature: Option<f32>,
@@ -93,8 +101,8 @@ pub struct CompletionRequest {
 
     // -------- vLLM Sampling Parameters --------
     /// Whether to apply the engine's configured watermark to this request.
-    #[serde(default = "default_true")]
-    pub watermarking: bool,
+    /// `None` requests it like `true`.
+    pub watermarking: Option<bool>,
 
     /// Options for streaming response
     pub stream_options: Option<StreamOptions>,
@@ -197,6 +205,10 @@ pub struct CompletionRequest {
     /// Include token IDs alongside generated text
     pub return_token_ids: Option<bool>,
 
+    /// Include the weight-version spans that sampled each choice's output
+    /// tokens. Not supported yet.
+    pub return_weight_versions: Option<bool>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
@@ -239,6 +251,8 @@ pub(super) struct CompletionResponse {
     pub created: u64,
     pub model: String,
     pub choices: Vec<CompletionChoice>,
+    /// Always `None`: the Rust frontend does not implement service tiers.
+    pub service_tier: Option<String>,
     pub usage: Option<Usage>,
     pub metrics: Option<PerRequestMetrics>,
     pub system_fingerprint: Option<String>,
@@ -257,6 +271,11 @@ pub(super) struct CompletionChoice {
     pub prompt_logprobs: Option<PromptLogprobs>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// Always `None`.
+    /// TODO: return routed experts when `--enable-return-routed-experts` is set.
+    pub routed_experts: Option<String>,
+    /// Always `None` until `return_weight_versions` is supported.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Mirrors the Python vLLM `CompletionStreamResponse` class.
@@ -302,4 +321,30 @@ pub(super) enum CompletionSseChunk {
     Chunk(CompletionStreamResponse),
     /// Final usage chunk emitted before `[DONE]` when `include_usage=true`.
     Usage(CompletionStreamResponse),
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::CompletionRequest;
+
+    /// Python declares these fields `bool | None`, so an explicit `null` means
+    /// the same as omitting the field.
+    #[test]
+    fn nullable_booleans_treat_null_as_omitted() {
+        let base = json!({"prompt": "hi"});
+        let omitted: CompletionRequest = serde_json::from_value(base.clone()).unwrap();
+        for field in ["echo", "stream", "watermarking"] {
+            let mut body = base.clone();
+            body[field] = Value::Null;
+            let request: CompletionRequest = serde_json::from_value(body)
+                .unwrap_or_else(|error| panic!("`{field}: null` rejected: {error}"));
+            assert_eq!(
+                serde_json::to_value(&request).unwrap(),
+                serde_json::to_value(&omitted).unwrap(),
+                "`{field}: null`"
+            );
+        }
+    }
 }
