@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 from unittest.mock import patch
 
 import pytest
+from transformers.models.idefics3.processing_idefics3 import Idefics3ProcessorKwargs
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
@@ -305,3 +307,73 @@ def test_nested_image_fields_split_per_image():
     for item in items:
         pixel_values = item["pixel_values"].data
         assert pixel_values.shape[1] == int(item["num_image_patches"].data)
+
+
+def _num_image_patches(mm_processor_kwargs) -> list[int]:
+    """Process two images with SmolVLM and return the rows each one got."""
+    model_id = "HuggingFaceTB/SmolVLM-256M-Instruct"
+    # Idefics3's token count updates these class-level defaults in place.
+    defaults = copy.deepcopy(Idefics3ProcessorKwargs._defaults)
+    with patch.object(Idefics3ProcessorKwargs, "_defaults", defaults):
+        mm_processor = MULTIMODAL_REGISTRY.create_processor(
+            ModelConfig(
+                model=model_id,
+                model_impl="transformers",
+                mm_processor_kwargs=mm_processor_kwargs,
+            )
+        )
+        image = ImageAsset("cherry_blossom").pil_image
+        result = mm_processor(
+            prompt="<image> and <image>",
+            mm_items=mm_processor.info.parse_mm_data({"image": [image, image]}),
+            hf_processor_mm_kwargs={},
+        )
+    return [
+        int(item["num_image_patches"].data) for item in result["mm_kwargs"]["image"]
+    ]
+
+
+def test_scoped_images_kwargs_reach_the_patch_count():
+    """A nested ``images_kwargs`` override must reach vLLM's per-image patch count.
+
+    The HF processor honors a nested ``images_kwargs`` in its ``__call__``, so a
+    count read from the flat kwargs alone expects the stock number of crops and
+    cannot attribute the processor's rows to the images.
+    """
+    size = {"longest_edge": 1024}
+    flat = _num_image_patches({"size": size})
+    # Precondition: the override really changes the crop count.
+    assert flat != _num_image_patches(None)
+
+    assert _num_image_patches({"images_kwargs": {"size": size}}) == flat
+
+
+def _max_image_tokens(mm_processor_kwargs) -> int:
+    """The per-image token budget SmolVLM is profiled with."""
+    model_id = "HuggingFaceTB/SmolVLM-256M-Instruct"
+    # Idefics3's token count updates these class-level defaults in place.
+    defaults = copy.deepcopy(Idefics3ProcessorKwargs._defaults)
+    with patch.object(Idefics3ProcessorKwargs, "_defaults", defaults):
+        mm_processor = MULTIMODAL_REGISTRY.create_processor(
+            ModelConfig(
+                model=model_id,
+                model_impl="transformers",
+                mm_processor_kwargs=mm_processor_kwargs,
+            )
+        )
+        return mm_processor.info.get_max_image_tokens()
+
+
+def test_scoped_images_kwargs_reach_the_profiled_token_budget():
+    """A nested ``images_kwargs`` override must also reach the profiling budget.
+
+    ``get_max_image_tokens`` sizes the memory profile from the same HF token
+    count as the patch count above, so reading the flat kwargs alone profiles
+    the stock number of crops while requests are served with the override.
+    """
+    size = {"longest_edge": 1024}
+    flat = _max_image_tokens({"size": size})
+    # Precondition: the override really changes the budget.
+    assert flat != _max_image_tokens(None)
+
+    assert _max_image_tokens({"images_kwargs": {"size": size}}) == flat

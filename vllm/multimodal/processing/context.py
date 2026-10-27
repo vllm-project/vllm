@@ -52,6 +52,11 @@ _HF_PROCESSOR_KWARG_SCOPES = (
     "videos_kwargs",
     "audio_kwargs",
 )
+_HF_MODALITY_PROCESSOR_KWARG_SCOPES = {
+    "image": "images_kwargs",
+    "video": "videos_kwargs",
+    "audio": "audio_kwargs",
+}
 
 
 def _merge_scoped_mm_processor_value(
@@ -398,6 +403,32 @@ class InputProcessingContext:
             merged,
             supported_mm_processor_kwargs=supported_mm_processor_kwargs,
         )
+
+    def get_modality_mm_kwargs(
+        self,
+        kwargs: Mapping[str, object],
+        modality: str | None,
+    ) -> dict[str, Any]:
+        """Merge ``mm_processor_kwargs`` as one modality's HF processor sees them.
+
+        The flat kwargs are overlaid with the modality's scope (e.g.
+        ``images_kwargs``), which is how the HF processor resolves them. This is
+        for vLLM-side reads such as token counts; the HF processor itself takes
+        the output of `get_merged_mm_kwargs`, which this equals when
+        ``modality`` is ``None``.
+        """
+        merged = self.get_merged_mm_kwargs(kwargs)
+        scope = _HF_MODALITY_PROCESSOR_KWARG_SCOPES.get(modality or "")
+        if scope is None:
+            return merged
+
+        flat = {
+            key: value
+            for key, value in merged.items()
+            if key not in _HF_PROCESSOR_KWARG_SCOPES
+        }
+        scoped = merged.get(scope)
+        return flat | dict(scoped) if isinstance(scoped, Mapping) else flat
 
     def call_hf_processor(
         self,
