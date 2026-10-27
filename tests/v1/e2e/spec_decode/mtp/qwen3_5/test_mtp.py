@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 import torch
-from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from safetensors.torch import save_file
 
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
+from vllm.model_executor.model_loader.weight_utils import download_weights_from_hf
 from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Vector
 
@@ -26,7 +26,7 @@ from .._correctness import check_mtp_correctness
 
 def _add_random_mtp_module(model_name: str, path: Path) -> Path:
     """Copy of `model_name` with a second MTP module of random weights."""
-    src = Path(snapshot_download(model_name))
+    src = Path(download_weights_from_hf(model_name, None, allow_patterns=["*"]))
     for file in src.iterdir():
         if file.name not in ("config.json", "model.safetensors.index.json"):
             (path / file.name).symlink_to(file)
