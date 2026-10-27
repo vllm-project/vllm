@@ -6,6 +6,7 @@ import torch
 from vllm.config import LoadConfig, replace
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
+from vllm.v1.conf_compute_utils import register_d2h_stream
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -49,6 +50,7 @@ class DraftTokensHandler:
     def __init__(self, device: torch.device | None = None):
         self.device = device
         self.copy_stream = torch.cuda.Stream(device)
+        register_d2h_stream(self.copy_stream)
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
 

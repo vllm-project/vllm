@@ -244,6 +244,12 @@ class Platform:
         return cumem_available
 
     @classmethod
+    def is_confidential_compute(cls) -> bool:
+        """Whether the device runs in a confidential-computing mode that makes
+        host<->device copies host-synchronous and host mappings incoherent."""
+        return False
+
+    @classmethod
     def get_pass_manager_cls(cls) -> str:
         """Get the pass manager class for this platform.
         It will be registered as a custom pass under the current_platform.pass_key.
