@@ -1185,40 +1185,6 @@ mod tests {
     }
 
     #[test]
-    fn chat_template_passes_media_parts_to_media_only_templates() {
-        // Like an ASR model's template: audio parts become audio tokens and
-        // text is dropped, whether it comes as a string or as parts.
-        let template = "{%- for message in messages %}<{{ message.role }}>{%- if message.content is not string %}{%- for part in message.content %}{%- if part.type == 'audio' %}<|AUDIO|>{%- endif %}{%- endfor %}{%- endif %}{%- endfor %}";
-        let rendered = render_mm(
-            template,
-            &audio_request(),
-            ChatTemplateContentFormatOption::Auto,
-        )
-        .unwrap()
-        .prompt
-        .into_text()
-        .unwrap();
-
-        assert_eq!(rendered, "<user><|AUDIO|><|AUDIO|>");
-    }
-
-    #[test]
-    fn chat_template_passes_strings_to_templates_with_unused_part_macros() {
-        // A part-rendering macro that no message reaches does not make the
-        // template render parts.
-        let template = "{%- macro render(content) %}{%- for item in content %}{{ item.text }}{%- endfor %}{%- endmacro %}{%- for message in messages %}{{ message.role + ': ' + message.content }}{%- endfor %}";
-        let request = sample_request(vec![ChatMessage::user(vec![
-            ChatContentPart::text("hello"),
-            ChatContentPart::text("world"),
-        ])]);
-
-        assert_eq!(
-            render(Some(template), &request).unwrap(),
-            "user: helloworld"
-        );
-    }
-
-    #[test]
     fn chat_template_probes_render_with_special_tokens() {
         // Parts render only with `bos_token` defined: concatenating an
         // undefined value fails.
@@ -1241,53 +1207,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered.prompt, Prompt::Text("<s>a<s>b".to_string()));
-    }
-
-    #[test]
-    fn chat_template_falls_back_to_strings_when_no_probe_renders() {
-        // The template accepts only its own input format, which no probe
-        // conversation follows.
-        let template = "{%- if messages[0].content is not string or not messages[0].content.startswith('<<<') %}{{ raise_exception('expected <<<input') }}{%- endif %}{{ messages[0].content }}";
-        let request = sample_request(vec![ChatMessage::user("<<<hello")]);
-
-        assert_eq!(render(Some(template), &request).unwrap(), "<<<hello");
-    }
-
-    #[test]
-    fn chat_templates_that_require_tools_are_probed_with_a_tool() {
-        // The `tool_use` template renders only with tools, and only parts.
-        let tool_use_template = "{%- if not tools %}{{ raise_exception('tools required') }}{%- endif %}{%- for message in messages %}{%- for part in message.content %}{{ part.text }}|{%- endfor %}{%- endfor %}";
-        let mut request = sample_request(vec![ChatMessage::user("hello")]);
-        request.tool_context = ResolvedToolContext::new(
-            &request.messages,
-            vec![ChatTool {
-                name: "get_weather".to_string(),
-                description: None,
-                parameters: serde_json::json!({"type": "object"}),
-                strict: None,
-                defer_loading: None,
-            }],
-            None,
-            true,
-        )
-        .unwrap();
-
-        let rendered = HfChatRenderer::new(
-            Some("{{ messages[0].content }}".to_string()),
-            HashMap::new(),
-            None,
-            ChatTemplateContentFormatOption::Auto,
-        )
-        .unwrap()
-        .with_tool_use_template(Some(tool_use_template.to_string()))
-        .unwrap()
-        .render(&request)
-        .unwrap()
-        .prompt
-        .into_text()
-        .unwrap();
-
-        assert_eq!(rendered, "hello|");
     }
 
     #[test]

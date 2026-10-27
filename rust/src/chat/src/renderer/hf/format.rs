@@ -378,27 +378,40 @@ fn renders_texts(prompt: &str, expected: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-
     use expect_test::expect;
+    use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
 
-    use super::{ChatTemplateContentFormatOption, ContentCapabilities, ProbeContext};
+    use super::{
+        ChatTemplateContentFormat, ChatTemplateContentFormatOption, ContentCapabilities,
+        ProbeContext,
+    };
     use crate::renderer::hf::template::CompiledChatTemplate;
+    use crate::request::{ChatContentPart, ChatMessage};
 
+    /// Probe `template` with generic special tokens, as a model's tokenizer
+    /// config provides them.
     fn probe(template: &str) -> ContentCapabilities {
+        let special_tokens = HfSpecialTokens {
+            bos_token: Some(NamedSpecialToken::Text("<s>".to_string())),
+            eos_token: Some(NamedSpecialToken::Text("</s>".to_string())),
+            ..Default::default()
+        };
+        let ctx = ProbeContext {
+            special_tokens: Some(&special_tokens),
+            template_kwargs: None,
+        };
         let template = CompiledChatTemplate::new(
             template.to_string(),
             ChatTemplateContentFormatOption::String,
             None,
-            &ProbeContext::default(),
+            &ctx,
         )
         .expect("template should compile");
-        ContentCapabilities::probe(&|ctx| template.apply(ctx), &ProbeContext::default())
+        ContentCapabilities::probe(&|ctx| template.apply(ctx), &ctx)
     }
 
-    /// One line per template: whether strings render, then the roles and
-    /// media modalities whose parts render.
+    /// Whether strings render, then the roles and media modalities whose parts
+    /// render.
     fn summary(capabilities: ContentCapabilities) -> String {
         let ContentCapabilities {
             string,
@@ -435,69 +448,299 @@ mod tests {
         )
     }
 
-    fn template_paths() -> Vec<PathBuf> {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/templates");
-        let mut paths = [dir.clone(), dir.join("vllm_examples")]
-            .iter()
-            .flat_map(|dir| fs::read_dir(dir).expect("template directory should exist"))
-            .map(|entry| entry.expect("template directory entry").path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "jinja"))
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths
+    fn format_name(format: ChatTemplateContentFormat) -> &'static str {
+        match format {
+            ChatTemplateContentFormat::String => "string",
+            ChatTemplateContentFormat::OpenAi => "openai",
+        }
+    }
+
+    fn image() -> ChatContentPart {
+        ChatContentPart::image_url("https://example.com/a.png")
+    }
+
+    fn audio() -> ChatContentPart {
+        ChatContentPart::audio_url("https://example.com/a.wav")
+    }
+
+    fn user_text_parts() -> ChatMessage {
+        ChatMessage::user(vec![ChatContentPart::text("a"), ChatContentPart::text("b")])
     }
 
     #[test]
-    fn probes_test_and_vllm_example_templates() {
-        let snapshot = template_paths()
+    fn content_format_per_capabilities_and_request() {
+        let none = ContentCapabilities {
+            string: false,
+            typed_user: false,
+            typed_system: false,
+            typed_assistant: false,
+            typed_tool: false,
+            typed_image: false,
+            typed_video: false,
+            typed_audio: false,
+        };
+        let capabilities = [
+            (
+                "all",
+                ContentCapabilities {
+                    string: true,
+                    typed_user: true,
+                    typed_system: true,
+                    typed_assistant: true,
+                    typed_tool: true,
+                    typed_image: true,
+                    typed_video: true,
+                    typed_audio: true,
+                },
+            ),
+            (
+                "string",
+                ContentCapabilities {
+                    string: true,
+                    ..none
+                },
+            ),
+            (
+                "text_parts",
+                ContentCapabilities {
+                    string: true,
+                    typed_user: true,
+                    typed_system: true,
+                    typed_assistant: true,
+                    typed_tool: true,
+                    ..none
+                },
+            ),
+            (
+                "user_parts",
+                ContentCapabilities {
+                    string: true,
+                    typed_user: true,
+                    typed_image: true,
+                    ..none
+                },
+            ),
+            (
+                "parts_only",
+                ContentCapabilities {
+                    typed_user: true,
+                    typed_system: true,
+                    typed_image: true,
+                    ..none
+                },
+            ),
+            (
+                "audio_only",
+                ContentCapabilities {
+                    typed_audio: true,
+                    ..none
+                },
+            ),
+            ("none", none),
+        ];
+        let user = || ChatMessage::user("u");
+        let requests = [
+            ("user", vec![user()]),
+            ("user_text_parts", vec![user_text_parts()]),
+            (
+                "user_image",
+                vec![ChatMessage::user(vec![image(), ChatContentPart::text("a")])],
+            ),
+            (
+                "user_audio",
+                vec![ChatMessage::user(vec![audio(), ChatContentPart::text("a")])],
+            ),
+            (
+                "user_image_audio",
+                vec![ChatMessage::user(vec![image(), audio()])],
+            ),
+            ("system_user", vec![ChatMessage::system("s"), user()]),
+            (
+                "system_image_user",
+                vec![ChatMessage::system(vec![image()]), user()],
+            ),
+            (
+                "assistant",
+                vec![user(), ChatMessage::assistant_text("a"), user()],
+            ),
+            (
+                "tool",
+                vec![user(), ChatMessage::tool_response("t", "call00000")],
+            ),
+            (
+                "tool_image",
+                vec![
+                    user(),
+                    ChatMessage::tool_response(vec![image()], "call00000"),
+                ],
+            ),
+            (
+                "developer_user",
+                vec![ChatMessage::developer("d", None), user()],
+            ),
+        ];
+
+        let header = capabilities.iter().map(|(name, _)| format!(" {name:11}"));
+        let rows = requests.iter().map(|(request, messages)| {
+            let formats = capabilities.iter().map(|(_, capabilities)| {
+                format!(
+                    " {:11}",
+                    format_name(capabilities.content_format_for(messages))
+                )
+            });
+            format!("{request:18}{}", formats.collect::<String>())
+        });
+        let table = std::iter::once(format!("{:18}{}", "", header.collect::<String>()))
+            .chain(rows)
+            .map(|line| line.trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        expect![[r#"
+                               all         string      text_parts  user_parts  parts_only  audio_only  none
+            user               openai      string      openai      openai      openai      string      string
+            user_text_parts    openai      string      openai      openai      openai      string      string
+            user_image         openai      string      string      openai      openai      string      string
+            user_audio         openai      string      string      string      openai      openai      string
+            user_image_audio   openai      string      string      string      openai      string      string
+            system_user        openai      string      openai      string      openai      string      string
+            system_image_user  openai      string      string      string      openai      string      string
+            assistant          openai      string      openai      string      openai      string      string
+            tool               openai      string      openai      string      openai      string      string
+            tool_image         openai      string      string      string      openai      string      string
+            developer_user     string      string      string      string      openai      string      string"#]].assert_eq(&table);
+    }
+
+    /// Chat template constructs that decide the content format, each distilled
+    /// from a public model's template, with a request that exercises it.
+    #[test]
+    fn probes_chat_template_constructs() {
+        // Every role's content may be parts.
+        const PARTS_EVERY_ROLE: &str = "{%- for m in messages %}<{{ m.role }}>{%- if m.content is string %}{{ m.content }}{%- else %}{%- for p in m.content %}{%- if p.type == 'image' %}<image>{%- elif p.type == 'video' %}<video>{%- elif p.type == 'text' %}{{ p.text }}{%- endif %}{%- endfor %}{%- endif %}{%- endfor %}";
+        // Only user content may be parts; other roles print it.
+        const PARTS_IN_USER: &str = "{%- for m in messages %}<{{ m.role }}>{%- if m.role == 'user' and m.content is not string %}{%- for p in m.content %}{%- if p.type == 'image' %}<image>{%- elif p.type == 'text' %}{{ p.text }}{%- endif %}{%- endfor %}{%- else %}{{ m.content }}{%- endif %}{%- endfor %}";
+        // Parts are looped over without a string branch.
+        const PARTS_ONLY: &str = "{%- for m in messages %}<{{ m.role }}>{%- for p in m.content %}{%- if p.type == 'image' %}<image>{%- else %}{{ p.text }}{%- endif %}{%- endfor %}{%- endfor %}";
+        let cases: Vec<(&str, &str, Vec<ChatMessage>)> = vec![
+            // Qwen3: content is printed.
+            (
+                "strings",
+                "{%- for m in messages %}<{{ m.role }}>{{ m.content }}{%- endfor %}",
+                vec![user_text_parts()],
+            ),
+            // Qwen3.5.
+            (
+                "parts_every_role",
+                PARTS_EVERY_ROLE,
+                vec![ChatMessage::system("s"), ChatMessage::user(vec![image()])],
+            ),
+            // GLM-4.5: tool results are printed.
+            (
+                "tool_content_printed",
+                "{%- for m in messages %}{%- if m.role == 'tool' %}<tool_response>{{ m.content }}</tool_response>{%- elif m.content is string %}{{ m.content }}{%- else %}{%- for p in m.content %}{%- if p.type == 'text' %}{{ p.text }}{%- endif %}{%- endfor %}{%- endif %}{%- endfor %}",
+                vec![
+                    ChatMessage::user("u"),
+                    ChatMessage::tool_response("t", "call00000"),
+                ],
+            ),
+            // InternVL2.5: system content is printed.
+            (
+                "system_content_printed",
+                PARTS_IN_USER,
+                vec![ChatMessage::system("s"), ChatMessage::user(vec![image()])],
+            ),
+            // GLM-4.1V: assistant content is printed.
+            (
+                "assistant_content_printed",
+                PARTS_IN_USER,
+                vec![
+                    ChatMessage::user(vec![image()]),
+                    ChatMessage::assistant_text("a"),
+                    ChatMessage::user("u"),
+                ],
+            ),
+            // Nemotron-Nano-12B-v2-VL: audio parts are skipped.
+            (
+                "audio_skipped_image",
+                PARTS_EVERY_ROLE,
+                vec![ChatMessage::user(vec![image()])],
+            ),
+            (
+                "audio_skipped_audio",
+                PARTS_EVERY_ROLE,
+                vec![ChatMessage::user(vec![audio()])],
+            ),
+            // LLaVA-1.5.
+            ("parts_only", PARTS_ONLY, vec![ChatMessage::user("u")]),
+            (
+                "parts_only_unprobed_role",
+                PARTS_ONLY,
+                vec![ChatMessage::developer("d", None), ChatMessage::user("u")],
+            ),
+            // Qwen3-ASR: text is dropped, audio becomes audio tokens.
+            (
+                "audio_only",
+                "{%- for m in messages %}{%- if m.content is not string %}{%- for p in m.content %}{%- if p.type == 'audio' %}<|audio|>{%- endif %}{%- endfor %}{%- endif %}{%- endfor %}",
+                vec![ChatMessage::user(vec![audio(), ChatContentPart::text("a")])],
+            ),
+            // Hermes 2 Pro `tool_use`: renders only with tools.
+            (
+                "tools_required",
+                "{%- if not tools %}{{ raise_exception('tools required') }}{%- endif %}{%- for m in messages %}{{ m.content }}{%- endfor %}",
+                vec![ChatMessage::user("u")],
+            ),
+            // Llama 3: `bos_token` is concatenated with the content.
+            (
+                "bos_token_concatenated",
+                "{%- for m in messages %}{%- set content = m.content %}{%- if loop.first %}{%- set content = bos_token + content %}{%- endif %}{{ content }}{%- endfor %}",
+                vec![ChatMessage::user("u")],
+            ),
+            // A part-rendering macro that no message reaches.
+            (
+                "unused_part_macro",
+                "{%- macro render(content) %}{%- for p in content %}{{ p.text }}{%- endfor %}{%- endmacro %}{%- for m in messages %}{{ m.role + ': ' + m.content }}{%- endfor %}",
+                vec![user_text_parts()],
+            ),
+            // MiMo-V2.5: a macro renders the content passed to it.
+            (
+                "macro_bound_to_content",
+                "{%- macro render_content(message_content) %}{%- if message_content is string %}{{ message_content }}{%- else %}{%- for content in message_content %}{%- if content.type == 'image' %}<image>{%- else %}{{ content.text }}{%- endif %}{%- endfor %}{%- endif %}{%- endmacro %}{%- for m in messages %}{{ render_content(m.content) }}{%- endfor %}",
+                vec![ChatMessage::user(vec![image()])],
+            ),
+            // TranslateGemma: only its own input format renders.
+            (
+                "custom_input_format",
+                "{%- for m in messages %}{%- if m.content is string or m.content[0].source_lang_code is not defined %}{{ raise_exception('expected source_lang_code') }}{%- endif %}{{ m.content[0].text }}{%- endfor %}",
+                vec![ChatMessage::user("u")],
+            ),
+        ];
+
+        let snapshot = cases
             .iter()
-            .map(|path| {
-                let template = fs::read_to_string(path).expect("template should be readable");
-                let name = path
-                    .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/templates"))
-                    .expect("template path under tests/templates")
-                    .display();
-                format!("{name:55} {}", summary(probe(&template)))
+            .map(|(name, template, messages)| {
+                let capabilities = probe(template);
+                format!(
+                    "{name:26} {:6} {}",
+                    format_name(capabilities.content_format_for(messages)),
+                    summary(capabilities),
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
-
         expect![[r#"
-            qwen3.jinja                                             string=true  parts=[] media=[]
-            qwen35.jinja                                            string=true  parts=[user,system,assistant,tool] media=[image,video]
-            step5_vl.jinja                                          string=true  parts=[user,system,assistant,tool] media=[image]
-            vllm_examples/template_alpaca.jinja                     string=true  parts=[] media=[]
-            vllm_examples/template_chatglm.jinja                    string=true  parts=[] media=[]
-            vllm_examples/template_chatglm2.jinja                   string=true  parts=[] media=[]
-            vllm_examples/template_chatml.jinja                     string=true  parts=[] media=[]
-            vllm_examples/template_falcon.jinja                     string=true  parts=[] media=[]
-            vllm_examples/template_falcon_180b.jinja                string=true  parts=[] media=[]
-            vllm_examples/template_inkbot.jinja                     string=true  parts=[] media=[]
-            vllm_examples/template_teleflm.jinja                    string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_deepseekr1.jinja       string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_deepseekv3.jinja       string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_deepseekv31.jinja      string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_functiongemma.jinja    string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_gemma3_pythonic.jinja  string=true  parts=[user,system,assistant,tool] media=[image]
-            vllm_examples/tool_chat_template_gemma4.jinja           string=true  parts=[user,assistant,tool] media=[image,video,audio]
-            vllm_examples/tool_chat_template_glm4.jinja             string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_granite.jinja          string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_granite_20b_fc.jinja   string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_hermes.jinja           string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_hunyuan_a13b.jinja     string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_internlm2_tool.jinja   string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_llama3.1_json.jinja    string=true  parts=[user,system,assistant,tool] media=[]
-            vllm_examples/tool_chat_template_llama3.2_json.jinja    string=true  parts=[user,system,assistant,tool] media=[image]
-            vllm_examples/tool_chat_template_llama3.2_pythonic.jinja string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_llama4_json.jinja      string=true  parts=[user,system,assistant,tool] media=[image]
-            vllm_examples/tool_chat_template_llama4_pythonic.jinja  string=true  parts=[user,system,assistant,tool] media=[image]
-            vllm_examples/tool_chat_template_mistral.jinja          string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_mistral3.jinja         string=true  parts=[user,system] media=[image]
-            vllm_examples/tool_chat_template_mistral_parallel.jinja string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_phi4_mini.jinja        string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_qwen3coder.jinja       string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_toolace.jinja          string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_xlam_llama.jinja       string=true  parts=[] media=[]
-            vllm_examples/tool_chat_template_xlam_qwen.jinja        string=true  parts=[] media=[]"#]].assert_eq(&snapshot);
+            strings                    string string=true  parts=[] media=[]
+            parts_every_role           openai string=true  parts=[user,system,assistant,tool] media=[image,video]
+            tool_content_printed       string string=true  parts=[user,system,assistant] media=[]
+            system_content_printed     string string=true  parts=[user] media=[image]
+            assistant_content_printed  string string=true  parts=[user] media=[image]
+            audio_skipped_image        openai string=true  parts=[user,system,assistant,tool] media=[image,video]
+            audio_skipped_audio        string string=true  parts=[user,system,assistant,tool] media=[image,video]
+            parts_only                 openai string=false parts=[user,system,assistant,tool] media=[image]
+            parts_only_unprobed_role   openai string=false parts=[user,system,assistant,tool] media=[image]
+            audio_only                 openai string=false parts=[] media=[audio]
+            tools_required             string string=true  parts=[] media=[]
+            bos_token_concatenated     string string=true  parts=[] media=[]
+            unused_part_macro          string string=true  parts=[] media=[]
+            macro_bound_to_content     openai string=true  parts=[user,system,assistant,tool] media=[image]
+            custom_input_format        string string=false parts=[] media=[]"#]].assert_eq(&snapshot);
     }
 }
