@@ -8,6 +8,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Public error type for the Rust `llm` facade.
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("operation `{operation}` is not supported by this engine client")]
+    UnsupportedOperation { operation: &'static str },
     #[error("generate request `{request_id}` has an empty prompt_token_ids")]
     EmptyPromptTokenIds { request_id: String },
     #[error("engine-core error")]
