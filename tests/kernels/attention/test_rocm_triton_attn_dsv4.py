@@ -2834,8 +2834,9 @@ def test_v41_rocm_combine_uses_shared_kernel() -> None:
 @requires_gfx950
 @pytest.mark.parametrize("rows", [4, 8, 16, 32])
 @pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("insert_padding", [False, True])
 @torch.inference_mode()
-def test_flash_native_asm_cache_and_decode(rows, ratio, monkeypatch):
+def test_flash_native_asm_cache_and_decode(rows, ratio, insert_padding, monkeypatch):
     """Native writes, prefill reads and graph replay share one paged cache."""
     from vllm.models.deepseek_v41.amd import asm_sparse_mla as asm
     from vllm.models.deepseek_v41.common.ops.cache_utils import (
@@ -2874,7 +2875,11 @@ def test_flash_native_asm_cache_and_decode(rows, ratio, monkeypatch):
     )
     torch.testing.assert_close(gathered[0].float(), expected_kv, atol=0, rtol=0)
     q = torch.randn((rows, 64, 512), dtype=torch.bfloat16, device=device)
-    md = SimpleNamespace(num_decode_tokens=rows, slot_mapping=slots[:rows])
+    insert_rows = rows - 1 if insert_padding else rows
+    md = SimpleNamespace(num_decode_tokens=rows, slot_mapping=slots[:insert_rows])
+    if insert_padding:
+        kv[rows - 1].neg_()
+    untouched = main[0, rows - 1].clone()
     attn = SimpleNamespace(
         swa_cache_layer=SimpleNamespace(kv_cache=main),
         rotary_emb=SimpleNamespace(cos_sin_cache=cs),
@@ -2906,6 +2911,8 @@ def test_flash_native_asm_cache_and_decode(rows, ratio, monkeypatch):
         return prepared
 
     prepared = run()
+    if insert_padding:
+        torch.testing.assert_close(main[0, rows - 1], untouched, atol=0, rtol=0)
     if rows >= 16:
         qp, qr = attn._asm_q
         qb = qp[..., :448].contiguous().view(torch.float8_e4m3fn).float()

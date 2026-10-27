@@ -134,13 +134,15 @@ def _prepare_qk(
     BLOCK: tl.constexpr,
     HEADS: tl.constexpr,
     PACK_ROWS: tl.constexpr,
+    INSERT_ROWS: tl.constexpr,
 ):
     row = tl.program_id(0)
     tile = tl.program_id(1)
     if tile == HEADS // 4:
-        _rope_quant_insert_kernel(
-            K, Positions, CS, Cache, Slots, CS0, C0, BLOCK, 1, True, CacheRope, R0
-        )
+        if row < INSERT_ROWS:
+            _rope_quant_insert_kernel(
+                K, Positions, CS, Cache, Slots, CS0, C0, BLOCK, 1, True, CacheRope, R0
+            )
     else:
         h = tile * 4 + tl.arange(0, 4)
         d = tl.arange(0, 512)
@@ -206,6 +208,7 @@ def prepare_qk(attn, q, kv, positions, metadata):
         cache.shape[1],
         heads,
         packed_rows,
+        metadata.slot_mapping.numel(),
         num_warps=4,
         enable_fp_fusion=False,
     )
