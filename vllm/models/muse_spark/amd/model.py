@@ -651,26 +651,22 @@ class MuseSpark1xAttention(nn.Module):
             q, k = self.rotary_emb.forward_cuda(positions, q, k)
         return q, k, v, og
 
-    def front(
+    def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """QKV+O-gate projection, QK-norm and RoPE; returns ``(q, k, v, o_gate)``."""
-        qkv, _ = self.qkv_proj(hidden_states)
-        return self._qk_norm_rope_kv_insert(qkv, positions)
-
-    def core(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor | None,
-        v: torch.Tensor | None,
     ) -> torch.Tensor:
-        """The attention op over the KV cache."""
+        """Attention over an input the caller has already normalized."""
+        qkv, _ = self.qkv_proj(hidden_states)
+
+        q, k, v, og = self._qk_norm_rope_kv_insert(qkv, positions)
+
         # Withhold k/v so the attention layer does not rewrite the KV cache.
         if self.fused_qk_norm_rope_kv_insert:
-            return self.attn(q, None, None)
-        return self.attn(q, k, v)
+            attn_output = self.attn(q, None, None)
+        else:
+            attn_output = self.attn(q, k, v)
+        return self.back(attn_output, og)
 
     def back(self, attn_output: torch.Tensor, og: torch.Tensor | None) -> torch.Tensor:
         """O-norm, O-gate and the output projection."""
@@ -701,15 +697,6 @@ class MuseSpark1xAttention(nn.Module):
         attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
         output, _ = self.o_proj(attn_output)
         return output
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        """Attention over an input the caller has already normalized."""
-        q, k, v, og = self.front(positions, hidden_states)
-        return self.back(self.core(q, k, v), og)
 
 
 class MuseSpark1xDecoderLayer(nn.Module):
@@ -843,10 +830,12 @@ class MuseSpark1xDecoderLayer(nn.Module):
             self.add_attn = MuseSpark1xResidualConnection()
             self.add_ffn = MuseSpark1xResidualConnection()
 
-    def attention_input(
-        self, x: MuseSpark1xResidualStream | torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Blend the previous layer's FFN boundary; returns ``(attn_in, stream)``."""
+    def forward(
+        self,
+        positions: torch.Tensor,
+        x: MuseSpark1xResidualStream | torch.Tensor,
+    ) -> MuseSpark1xResidualStream:
+        """Run attention and FFN; the FFN boundary is returned unblended."""
         if isinstance(x, torch.Tensor):
             stream = x
             attn_input = self.self_attn.pre_qkv_proj_norm(
@@ -857,15 +846,7 @@ class MuseSpark1xDecoderLayer(nn.Module):
                 x, self.self_attn.pre_qkv_proj_norm, out_dtype=self.default_dtype
             )
         assert stream.dtype == self.residual_dtype
-        return attn_input, stream
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        x: MuseSpark1xResidualStream | torch.Tensor,
-    ) -> MuseSpark1xResidualStream:
-        """Run attention and FFN; the FFN boundary is returned unblended."""
-        attn_input, stream = self.attention_input(x)
         attn_out = self.self_attn(positions=positions, hidden_states=attn_input)
         return self.after_attention(stream, attn_out)
 
@@ -991,24 +972,22 @@ class MuseSpark1xModel(LlamaModel):
         mono_out = None
         if self.mono is not None:
             mono_out = self.mono.try_forward(self, positions, x, aux_hidden_states)
+        for idx, layer in enumerate(
+            self.layers[self.start_layer : self.end_layer] if mono_out is None else [],
+            start=self.start_layer,
+        ):
+            x = layer(positions, x)
+            if not self.fuse_across_layers and isinstance(x, MuseSpark1xResidualStream):
+                x = norm_then_gated_residual(x)
+            if idx + 1 in self.aux_hidden_state_layers:
+                state = (
+                    norm_then_gated_residual(x)
+                    if isinstance(x, MuseSpark1xResidualStream)
+                    else x
+                )
+                aux_hidden_states.append(state)
         if mono_out is not None:
             x = mono_out
-        else:
-            for idx, layer in enumerate(
-                self.layers[self.start_layer : self.end_layer], start=self.start_layer
-            ):
-                x = layer(positions, x)
-                if not self.fuse_across_layers and isinstance(
-                    x, MuseSpark1xResidualStream
-                ):
-                    x = norm_then_gated_residual(x)
-                if idx + 1 in self.aux_hidden_state_layers:
-                    state = (
-                        norm_then_gated_residual(x)
-                        if isinstance(x, MuseSpark1xResidualStream)
-                        else x
-                    )
-                    aux_hidden_states.append(state)
 
         if not get_pp_group().is_last_rank:
             assert isinstance(x, torch.Tensor)  # fuse_across_layers is off here

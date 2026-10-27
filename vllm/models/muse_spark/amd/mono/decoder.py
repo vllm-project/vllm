@@ -701,7 +701,7 @@ class _K3Bucket(_Bucket):
                 attn_o = fa.row(table, i)
             else:
                 if i > FIRST_LAYER:
-                    o = layers[i].self_attn.core(q, None, None)
+                    o = layers[i].self_attn.attn(q, None, None)
                 attn_o = o.data_ptr()
             kv_cache, slots, cos_sin = mono.next_kv(layers[i + 1], self.no_rope)
             a = mono.layer_args[i]
@@ -821,7 +821,7 @@ class _K5Bucket(_Bucket):
                 attn_o = fa.row(table, i)
             else:
                 if i > FIRST_LAYER:
-                    o = layers[i].self_attn.core(q, None, None)
+                    o = layers[i].self_attn.attn(q, None, None)
                 attn_o = o.data_ptr()
             kv_cache, slots, cos_sin = mono.next_kv(layers[i + 1], self.no_rope)
             a = mono.layer_args[i]
@@ -1104,18 +1104,22 @@ class MuseSparkMono:
         y = layers[0](positions, x)
         if 1 in aux_layers:
             aux_hidden_states.append(norm_then_gated_residual(y))
-        first = layers[FIRST_LAYER]
-        attn_input, stream = first.attention_input(y)
-        q, k, v, g = first.self_attn.front(positions, attn_input)
-        o = first.self_attn.core(q, k, v)
-        assert g is not None
+        from ..model import norm_residual_then_norm  # model.py imports this package
+
+        attn = layers[FIRST_LAYER].self_attn
+        attn_input, stream = norm_residual_then_norm(
+            y, attn.pre_qkv_proj_norm, out_dtype=layers[FIRST_LAYER].default_dtype
+        )
+        qkv, _ = attn.qkv_proj(attn_input)
+        q, _, _, g = attn._qk_norm_rope_kv_insert(qkv, positions)
+        o = attn.attn(q, None, None)
         self._validate(o, g, stream)
         stream, q, g = bucket.run(
             self, layers, positions, o, g, stream, aux_layers, aux_hidden_states
         )
 
         last = layers[LAST_LAYER + 1]
-        o = last.self_attn.core(q, None, None)
+        o = last.self_attn.attn(q, None, None)
         y = last.after_attention(stream, last.self_attn.back(o, g))
         if LAST_LAYER + 2 in aux_layers:
             aux_hidden_states.append(norm_then_gated_residual(y))

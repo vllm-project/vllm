@@ -31,6 +31,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.models.muse_spark.amd.model import norm_residual_then_norm
 from vllm.models.muse_spark.amd.mono.decoder import (
     FIRST_LAYER,
     LAST_LAYER,
@@ -679,7 +680,7 @@ class StockLaunches:
         assert words[8] == nreq
         q = _device_view(words[0], (rows, d.q_rows), torch.bfloat16)
         out = _device_view(words[5], (rows, d.q_rows), torch.bfloat16)
-        out.copy_(layer.self_attn.core(q, None, None))
+        out.copy_(layer.self_attn.attn(q, None, None))
         return out
 
     def run_layer(self, i: int, rows: int, nreq: int, a: dict, out: dict) -> None:
@@ -700,8 +701,11 @@ class StockLaunches:
             assert out["cos_sin"] == rope.cos_sin_cache.data_ptr()
 
         y = layer.after_attention(stream, layer.self_attn.back(o, g))
-        attn_input, stream_next = nxt.attention_input(y)
-        q, _, _, g_next = nxt.self_attn.front(positions, attn_input)
+        attn_input, stream_next = norm_residual_then_norm(
+            y, nxt.self_attn.pre_qkv_proj_norm, out_dtype=nxt.default_dtype
+        )
+        qkv, _ = nxt.self_attn.qkv_proj(attn_input)
+        q, _, _, g_next = nxt.self_attn._qk_norm_rope_kv_insert(qkv, positions)
         for name, t in (("stream", stream_next), ("q", q), ("g", g_next)):
             for ptr in out[name]:
                 _device_view(ptr, t.shape, t.dtype).copy_(t)
