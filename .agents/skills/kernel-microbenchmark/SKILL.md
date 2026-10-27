@@ -1,6 +1,6 @@
 ---
 name: kernel-microbenchmark
-description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUDA, ROCm/HIP, Triton, and CuteDSL, including CUPTI timing, correctness checks, generated-code inspection, multi-GPU measurements, and SOL sanity checks.
+description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUDA, ROCm/HIP, Triton, and CuteDSL, including CUPTI timing, correctness checks, generated-code inspection, multi-GPU measurements, and SOL sanity checks. Use when measuring or comparing the performance of a single GPU kernel or op, validating a claimed kernel speedup, or investigating a noisy or surprising benchmark result.
 ---
 
 # Kernel Microbenchmark

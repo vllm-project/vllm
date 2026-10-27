@@ -25,10 +25,13 @@ import pytest
 import vllm.benchmarks.lib.endpoint_request_func as request_func_module
 from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncInput,
+    RequestFuncOutput,
+    _update_server_metrics,
     async_request_openai_audio,
     async_request_openai_chat_completions,
     async_request_openai_completions,
 )
+from vllm.benchmarks.serve import _get_server_metrics_results
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -73,19 +76,20 @@ def _token_chunk(index: int, *, chat: bool) -> bytes:
     return _sse({"id": "cmpl-test", "object": "x", "choices": [choice]})
 
 
-def _usage_chunk(n_tokens: int) -> bytes:
-    return _sse(
-        {
-            "id": "cmpl-test",
-            "object": "x",
-            "choices": [],
-            "usage": {
-                "prompt_tokens": 7,
-                "completion_tokens": n_tokens,
-                "total_tokens": 7 + n_tokens,
-            },
-        }
-    )
+def _usage_chunk(n_tokens: int, *, metrics: dict[str, Any] | None = None) -> bytes:
+    payload = {
+        "id": "cmpl-test",
+        "object": "x",
+        "choices": [],
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": n_tokens,
+            "total_tokens": 7 + n_tokens,
+        },
+    }
+    if metrics is not None:
+        payload["metrics"] = metrics
+    return _sse(payload)
 
 
 def _role_chunk(role: str = "assistant") -> bytes:
@@ -109,6 +113,7 @@ def _build_stream(
     ttft_delay: float = 0.0,
     itl_delay: float = 0.0,
     usage_delay: float = 0.0,
+    metrics: dict[str, Any] | None = None,
 ) -> list[tuple[float, bytes]]:
     """Build ``(delay_before_chunk, payload)`` pairs for one streamed response.
 
@@ -119,7 +124,7 @@ def _build_stream(
         (ttft_delay if i == 0 else itl_delay, _token_chunk(i, chat=chat))
         for i in range(n_tokens)
     ]
-    chunks.append((usage_delay, _usage_chunk(n_tokens)))
+    chunks.append((usage_delay, _usage_chunk(n_tokens, metrics=metrics)))
     chunks.append((0.0, b"data: [DONE]\n\n"))
     return chunks
 
@@ -230,6 +235,75 @@ def _run(
     if expect_success:
         assert output.success, output.error
     return output
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,request_func,api_url,chat",
+    STREAMING_ENDPOINTS[:2],
+    ids=[e[0] for e in STREAMING_ENDPOINTS[:2]],
+)
+def test_openai_request_preserves_server_queue_time_and_ttft(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint_id: str,
+    request_func,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """Capture final-chunk server metrics while retaining client timing."""
+    monkeypatch.setattr(request_func_module, "time", _FakeTime(_ScriptedClock()))
+    chunks = _build_stream(
+        1,
+        chat=chat,
+        metrics={"queue_time_ms": 0, "time_to_first_token_ms": 1250.0},
+    )
+    output = _run(request_func, api_url, endpoint_id, chunks, 1)
+
+    assert output.server_queue_time == 0.0
+    assert output.server_ttft == pytest.approx(1.25)
+    assert output.ttft == pytest.approx(1.0)
+    assert output.latency == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"metrics": None},
+        {"metrics": {"queue_time_ms": None}},
+        {"metrics": "invalid"},
+        {},
+        {"metrics": {"queue_time_ms": True, "time_to_first_token_ms": False}},
+        {"metrics": {"speculative_decoding": {}}},
+    ],
+)
+def test_server_metrics_tolerate_unavailable_values(data: dict[str, Any]) -> None:
+    output = RequestFuncOutput()
+
+    _update_server_metrics(output, data)
+
+    assert output.server_queue_time is None
+    assert output.server_ttft is None
+
+
+def test_server_metrics_results_preserve_alignment() -> None:
+    outputs = [
+        RequestFuncOutput(server_queue_time=0.1, server_ttft=0.2),
+        RequestFuncOutput(),
+        RequestFuncOutput(server_ttft=0.3),
+    ]
+
+    assert _get_server_metrics_results(outputs) == {
+        "server_queue_times": [0.1, None, None],
+        "server_ttfts": [0.2, None, 0.3],
+    }
+    assert _get_server_metrics_results([RequestFuncOutput(server_queue_time=0.0)]) == {
+        "server_queue_times": [0.0],
+        "server_ttfts": [None],
+    }
+    assert _get_server_metrics_results([RequestFuncOutput(server_ttft=0.0)]) == {
+        "server_queue_times": [None],
+        "server_ttfts": [0.0],
+    }
+    assert _get_server_metrics_results([RequestFuncOutput()]) == {}
 
 
 @pytest.mark.parametrize(
