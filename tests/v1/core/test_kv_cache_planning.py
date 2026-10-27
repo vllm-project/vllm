@@ -12,8 +12,8 @@ import torch
 
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from tests.v1.core.utils import (
+    get_kv_cache_configs,
     new_kv_cache_spec,
     new_mamba_spec,
     new_mla_spec,
@@ -26,11 +26,11 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.attention import HiSparseConfig
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
     estimate_max_model_len,
-    get_kv_cache_configs,
     get_kv_cache_groups,
     is_kv_cache_spec_uniform,
     kv_cache_groups_tp_replicas,
@@ -70,7 +70,9 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     monkeypatch, gpu_block_size, shared_host_pool
 ):
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -190,7 +192,9 @@ def test_hisparse_pool_must_fit_max_model_len(
     plus the null block. Auto-fit (-1) must pick a length that passes the same
     check."""
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     monkeypatch.setattr(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
@@ -228,10 +232,10 @@ def test_hisparse_pool_must_fit_max_model_len(
     }
 
     if ok:
-        kv_cache_planning.get_kv_cache_configs(config, [specs], [2**34])
+        get_kv_cache_configs(config, [specs], [2**34])
     else:
         with pytest.raises(ValueError, match="max seq len"):
-            kv_cache_planning.get_kv_cache_configs(config, [specs], [2**34])
+            get_kv_cache_configs(config, [specs], [2**34])
 
 
 def new_chunked_local_attention_spec(
@@ -674,6 +678,42 @@ def test_project_kv_cache_groups_to_worker():
     proj_spec = projected[0].kv_cache_spec
     assert isinstance(proj_spec, UniformTypeKVCacheSpecs)
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
+
+
+def test_kv_cache_config_skips_uniform_group_owned_by_other_pp_stage():
+    """A PP stage that owns none of a uniform-type group's layers keeps the
+    global spec, but must not allocate cache for the other stage's layers."""
+    spec_a = new_kv_cache_spec()
+    spec_b = new_kv_cache_spec(num_kv_heads=4)
+    global_groups = [
+        KVCacheGroupSpec(
+            ["layer1", "layer2"],
+            UniformTypeKVCacheSpecs(
+                block_size=16, kv_cache_specs={"layer1": spec_a, "layer2": spec_a}
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["layer3"],
+            UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer3": spec_b}),
+        ),
+    ]
+    groups = kv_cache_planning._project_kv_cache_groups_to_worker(
+        global_groups, {"layer2": spec_a}
+    )
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
+    )
+    kv_cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, groups, available_memory=2**20
+    )
+    assert [tensor.layers for tensor in kv_cache_config.kv_cache_tensors] == [
+        ["layer2"]
+    ]
 
 
 @pytest.mark.parametrize("with_draft", [False, True])

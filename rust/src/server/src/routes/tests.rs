@@ -40,6 +40,7 @@ use vllm_engine_core_client::protocol::output::{
     StopReason, UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
@@ -60,7 +61,9 @@ use super::{
     build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
     build_router_with_scale_out_endpoints, render::build_router as build_render_router,
 };
-use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::config::{
+    ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
+};
 use crate::lora::LoadLoraError;
 use crate::render::RenderState;
 use crate::state::AppState;
@@ -3949,13 +3952,28 @@ async fn happy_path_returns_sse_stream() {
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let after = METRICS.render().unwrap();
 
+    let payloads = sse_json_payloads(&text);
     assert_shared_openai_stream_envelope(
-        &sse_json_payloads(&text),
+        &payloads,
         "chat.completion.chunk",
         "Qwen/Qwen1.5-0.5B-Chat",
     );
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
     assert!(text.starts_with("data: "), "{text}");
+    // Like Python, the first chunk carries the prompt fields as explicit
+    // `null` when unset, and later chunks omit them.
+    let (first, rest) = payloads.split_first().expect("first chunk");
+    for key in ["prompt_token_ids", "prompt_text"] {
+        assert!(
+            first.as_object().expect("first chunk object").contains_key(key)
+                && first[key].is_null(),
+            "expected explicit null `{key}` on the first chunk: {text}"
+        );
+        assert!(
+            rest.iter().all(|chunk| chunk.get(key).is_none()),
+            "expected no `{key}` after the first chunk: {text}"
+        );
+    }
     assert_eq!(
         metric_delta(
             &before,
@@ -4683,6 +4701,7 @@ async fn non_stream_completions_return_json_response() {
     let response_object = json.as_object().expect("response object");
     let choice = json["choices"][0].as_object().expect("choice object");
     for (object, key) in [
+        (response_object, "service_tier"),
         (response_object, "system_fingerprint"),
         (response_object, "kv_transfer_params"),
         (choice, "logprobs"),
@@ -4690,10 +4709,89 @@ async fn non_stream_completions_return_json_response() {
         (choice, "prompt_logprobs"),
         (choice, "token_ids"),
         (choice, "prompt_token_ids"),
+        (choice, "routed_experts"),
+        (choice, "weight_versions"),
     ] {
         assert!(
             object.contains_key(key) && object[key].is_null(),
             "expected explicit null `{key}`: {json}"
+        );
+    }
+}
+
+/// With `--enable-prompt-tokens-details`, chat and completions report the
+/// prompt tokens newly written to the prefix cache next to the cached ones.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn prompt_tokens_details_report_created_cache_tokens() {
+    let cases = [
+        (
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": "hello"}]}),
+        ),
+        ("/v1/completions", json!({"prompt": "hello"})),
+    ];
+    for (uri, mut request) in cases {
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+            b"engine-openai",
+            |request_id| {
+                RequestBatchOutputs {
+                    // Prefill stats ride only on the first output; the counts
+                    // must survive the later decode output.
+                    outputs: vec![
+                        EngineCoreOutput {
+                            prefill_stats: Some(Box::new(PrefillStats {
+                                num_prompt_tokens: 5,
+                                num_cached_tokens: 2,
+                                num_local_cached_tokens: 2,
+                                num_cache_creation_tokens: 3,
+                                ..Default::default()
+                            })),
+                            ..request_output(request_id, vec![b'h' as u32], None)
+                        },
+                        request_output(
+                            request_id,
+                            vec![b'i' as u32],
+                            Some(EngineCoreFinishReason::Stop),
+                        ),
+                    ],
+                    ..Default::default()
+                }
+                .into()
+            },
+            |_| {},
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let mut app = build_router(Arc::new(
+            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
+                ApiServerOptions {
+                    enable_prompt_tokens_details: true,
+                    ..Default::default()
+                },
+            ),
+        ));
+        request["model"] = json!("model");
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        assert_eq!(
+            json["usage"]["prompt_tokens_details"],
+            json!({"cached_tokens": 2, "created_cache_tokens": 3}),
+            "{uri}"
         );
     }
 }
@@ -5298,6 +5396,94 @@ async fn chat_completions_accepts_request_body_larger_than_axum_default() {
     )));
 
     let large_template_arg = "a".repeat(2 * 1024 * 1024);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"large": large_template_arg}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_reject_request_body_above_configured_limit() {
+    let (chat, _engine_task) = test_chat_with_engine_outputs(
+        b"engine-openai-chat-body-limit",
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                request_body_limit_bytes: Some(1024),
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let large_template_arg = "a".repeat(2 * 1024);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"large": large_template_arg}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("length limit exceeded"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_accept_request_body_above_default_limit_when_unlimited() {
+    let (chat, engine_task) = test_chat_with_engine_outputs(
+        b"engine-openai-chat-unlimited-body",
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                request_body_limit_bytes: None,
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let large_template_arg = "a".repeat(DEFAULT_REQUEST_BODY_LIMIT_BYTES + 1);
     let response = app
         .call(
             Request::builder()
@@ -8959,7 +9145,7 @@ async fn start_profile_route_sends_expected_utility_call() {
     for content_type in [None, Some("application/json")] {
         let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
             boxed_test_future(async move {
-                let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+                let start = profile_start_without_overrides();
                 let call_id = recv_profile_call(dealer, start).await;
                 send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
             })
@@ -8999,6 +9185,10 @@ async fn start_profile_route_forwards_session_overrides() {
                 Value::from("sharegpt_run-1"),
                 Value::from(5000),
                 Value::from(20),
+                Value::Map(vec![
+                    (Value::from("record_shapes"), Value::from(true)),
+                    (Value::from("with_stack"), Value::from(false)),
+                ]),
             ];
             let call_id = recv_profile_call(dealer, start).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
@@ -9018,6 +9208,7 @@ async fn start_profile_route_forwards_session_overrides() {
                         "profile_prefix": "sharegpt_run-1",
                         "delay_iterations": 5000,
                         "max_iterations": 20,
+                        "profiler_kwargs": {"record_shapes": true, "with_stack": false},
                     })
                     .to_string(),
                 ))
@@ -9035,7 +9226,7 @@ async fn start_profile_route_forwards_session_overrides() {
 async fn start_profile_route_ignores_completion_payload() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let start = profile_start_without_overrides();
             let call_id = recv_profile_call(dealer, start).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
@@ -9072,7 +9263,7 @@ async fn start_profile_route_ignores_completion_payload() {
 async fn duplicate_start_profile_returns_conflict() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let start = profile_start_without_overrides();
             let call_id = recv_profile_call(dealer, start).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
@@ -9113,9 +9304,9 @@ async fn start_profile_succeeds_again_after_stop() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let expected_args = [
-                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                profile_start_without_overrides(),
                 vec![Value::from(false), Value::Nil],
-                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                profile_start_without_overrides(),
                 vec![Value::from(false), Value::Nil],
             ];
             for expected in expected_args {
@@ -9149,6 +9340,18 @@ async fn start_profile_succeeds_again_after_stop() {
     engine_task.await.expect("mock engine task");
 }
 
+/// `profile` utility arguments for a start without session overrides: Python's
+/// `profile_async(True, None, None, None, None)`.
+fn profile_start_without_overrides() -> Vec<Value> {
+    vec![
+        Value::from(true),
+        Value::Nil,
+        Value::Nil,
+        Value::Nil,
+        Value::Nil,
+    ]
+}
+
 /// Receive a `profile` utility call with the expected args and return its call id.
 async fn recv_profile_call(dealer: &mut DealerSocket, expected_args: Vec<Value>) -> u64 {
     let utility = recv_engine_message(dealer).await;
@@ -9169,7 +9372,7 @@ async fn start_profile_waits_for_inflight_stop() {
     let (release_stop_tx, release_stop_rx) = tokio::sync::oneshot::channel::<()>();
     let (app, engine_task) = test_profiling_app_with_engine_script(move |dealer, push| {
         boxed_test_future(async move {
-            let start = || vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let start = profile_start_without_overrides;
 
             let call_id = recv_profile_call(dealer, start()).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
@@ -9307,4 +9510,304 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+/// Captures the events `--enable-log-outputs` logs, one `LEVEL field=value ...`
+/// line per event.
+#[derive(Clone, Default)]
+struct OutputLogCapture(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl OutputLogCapture {
+    /// Start capturing from an empty log. The capture is the global subscriber
+    /// because offloaded handlers run on the request runtime's threads; the
+    /// tests using it are `#[serial]`.
+    fn start() -> Self {
+        static CAPTURE: std::sync::OnceLock<OutputLogCapture> = std::sync::OnceLock::new();
+        let capture = CAPTURE
+            .get_or_init(|| {
+                use tracing_subscriber::layer::SubscriberExt as _;
+                let capture = OutputLogCapture::default();
+                tracing::subscriber::set_global_default(
+                    tracing_subscriber::registry().with(capture.clone()),
+                )
+                .expect("install output log capture");
+                capture
+            })
+            .clone();
+        capture.0.lock().expect("output log lock").clear();
+        capture
+    }
+
+    fn lines(&self) -> String {
+        self.0.lock().expect("output log lock").join("\n")
+    }
+}
+
+/// Marks a span that carries a `request_id` field, so captured events can show
+/// whether they are attributed to a request. The IDs themselves are random.
+struct CapturedRequestId;
+
+impl<S> tracing_subscriber::Layer<S> for OutputLogCapture
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attrs.metadata().fields().field("request_id").is_some()
+            && let Some(span) = ctx.span(id)
+        {
+            span.extensions_mut().insert(CapturedRequestId);
+        }
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() != "vllm_server::routes::output_log" {
+            return;
+        }
+        let mut line = event.metadata().level().to_string();
+        let in_request = ctx.event_scope(event).is_some_and(|mut scope| {
+            scope.any(|span| span.extensions().get::<CapturedRequestId>().is_some())
+        });
+        if !in_request {
+            line.push_str(" <outside request span>");
+        }
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn fmt::Debug| {
+                line.push_str(&format!(" {}={value:?}", field.name()));
+            },
+        );
+        self.0.lock().expect("output log lock").push(line);
+    }
+}
+
+/// Send one request to a fresh app whose engine replies with `output_specs`,
+/// and return the logged outputs.
+async fn output_logs_for_request(
+    log_outputs: crate::config::OutputLogging,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    uri: &str,
+    body: serde_json::Value,
+) -> String {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-log-outputs",
+        output_specs,
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                log_outputs,
+                enable_scale_out: true,
+                ..Default::default()
+            },
+        ),
+    ));
+    let capture = OutputLogCapture::start();
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    capture.lines()
+}
+
+fn chat_body(stream: bool) -> serde_json::Value {
+    json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "stream": stream,
+        "messages": [{"role": "user", "content": "hello"}]
+    })
+}
+
+/// Reasoning, then content split over two updates, the last one cut off by
+/// the length limit (so its text stays visible, unlike an EOS token).
+fn reasoning_then_content_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
+    vec![
+        (token_ids("<think>Greet.</think>"), None),
+        (token_ids("Hi"), None),
+        (token_ids("!"), Some(EngineCoreFinishReason::Length)),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_chat_stream_deltas_and_complete_output() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        reasoning_then_content_output_specs(),
+        "/v1/chat/completions",
+        chat_body(true),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details stream="delta" token_ids=[61441, 71, 114, 101, 101, 116, 46, 61442]
+        INFO message=generated response stream="delta" output="[reasoning: Greet.]"
+        DEBUG message=generated response details stream="delta" token_ids=[72, 105]
+        INFO message=generated response stream="delta" output="Hi"
+        DEBUG message=generated response details stream="delta" token_ids=[33]
+        INFO message=generated response stream="delta" output="!" finish_reason="length"
+        INFO message=generated response stream="complete" output="Hi!" finish_reason="length""#]].assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_chat_text_released_at_finish_with_its_update() {
+    // With tools, the parser holds back a possible `<tool_call>` opener and
+    // releases it only when the stream finishes, after the update ended.
+    let mut body = chat_body(true);
+    body["tools"] = json!([{
+        "type": "function",
+        "function": {"name": "get_weather", "parameters": {"type": "object"}}
+    }]);
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        vec![(
+            token_ids("Hello<tool_ca"),
+            Some(EngineCoreFinishReason::Length),
+        )],
+        "/v1/chat/completions",
+        body,
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details stream="delta" token_ids=[72, 101, 108, 108, 111, 60, 116, 111, 111, 108, 95, 99, 97]
+        INFO message=generated response stream="delta" output="Hello<tool_ca" finish_reason="length"
+        INFO message=generated response stream="complete" output="Hello<tool_ca" finish_reason="length""#]].assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_chat_deltas_sent_before_a_stream_error() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        vec![
+            (token_ids("Hello"), None),
+            (token_ids("!"), Some(EngineCoreFinishReason::Error)),
+        ],
+        "/v1/chat/completions",
+        chat_body(true),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details stream="delta" token_ids=[72, 101, 108, 108, 111]
+        INFO message=generated response stream="delta" output="Hello"
+        DEBUG message=generated response details stream="delta" token_ids=[33]
+        INFO message=generated response stream="delta" output="!""#]]
+    .assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_non_stream_chat_content() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        reasoning_then_content_output_specs(),
+        "/v1/chat/completions",
+        chat_body(false),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details token_ids=[61441, 71, 114, 101, 101, 116, 46, 61442, 72, 105, 33]
+        INFO message=generated response output="Hi!" finish_reason="length""#]].assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_completion_stream_deltas_and_complete_output() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        default_stream_output_specs(),
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "stream": true}),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details stream="delta" token_ids=[104]
+        INFO message=generated response stream="delta" output="h"
+        DEBUG message=generated response details stream="delta" token_ids=[105]
+        INFO message=generated response stream="delta" output="i"
+        INFO message=generated response stream="complete" output="hi" finish_reason="stop""#]]
+    .assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_without_deltas_logs_only_complete_completion_stream() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::Complete,
+        default_stream_output_specs(),
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "stream": true}),
+    )
+    .await;
+
+    expect_test::expect![[
+        r#"INFO message=generated response stream="complete" output="hi" finish_reason="stop""#
+    ]]
+    .assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_non_stream_completion_and_generate_token_ids() {
+    let completion = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        default_stream_output_specs(),
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello"}),
+    )
+    .await;
+    let generate = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        default_stream_output_specs(),
+        "/inference/v1/generate",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "sampling_params": {"max_tokens": 3}
+        }),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details token_ids=[104, 105, 33]
+        INFO message=generated response output="hi" finish_reason="stop"
+        ---
+        DEBUG message=generated response details token_ids=[104, 105, 33]
+        INFO message=generated response output="" finish_reason="stop""#]]
+    .assert_eq(&format!("{completion}\n---\n{generate}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_disabled_logs_nothing() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::Disabled,
+        default_stream_output_specs(),
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "stream": true}),
+    )
+    .await;
+
+    assert_eq!(logs, "");
 }
