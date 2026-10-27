@@ -386,10 +386,11 @@ def gdn_tasks_batched(c, tasks, ks):
         + ba_specs(c, tr, hr, parts)
     )
     qks = got[:rounds]
-    ba = ba_sums(c, tr, hr, parts, got[rounds:])
+    b, a = ba_sums(c, tr, hr, parts, got[rounds:])
     if (tid >= 2 * HD) & (tid < 2 * HD + rounds):
-        a = c["args"]
-        decay, beta = decay_beta(*ba, ld_bf(a["dt_bias"], hr), ld_f32(a["a_log"], hr))
+        args = c["args"]
+        dtb, a_log = ld_bf(args["dt_bias"], hr), ld_f32(args["a_log"], hr)
+        decay, beta = decay_beta(b, a, dtb, a_log)
         fx.ptr_store(decay, c["scal"] + r * 4)
         fx.ptr_store(beta, c["scal"] + r * 4 + 1)
     gpu.barrier()

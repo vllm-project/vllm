@@ -621,9 +621,9 @@ def local_route(c):
 @traced
 def load_route(c):
     """The LDS route (ids, weights; a token's ``KT`` picks) -> the union U in
-    expert order: flag[e] -> slot, expert[slot], kof[slot][t] (the token's pick
-    index, -1 if not picked); the fused shared expert is U's last slot, every
-    token's pick ``TOPK`` with its SGATE weight. Returns |U|."""
+    expert order: ``flag[e]`` -> slot, ``expert[slot]``, ``kof[slot][t]`` (the
+    token's pick index, -1 if not picked); the fused shared expert is U's last
+    slot, every token's pick ``TOPK`` with its SGATE weight. Returns |U|."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rt, kt = c["rt"], c["KT"]
     kf, max_u = kof_t(c), c["max_u"]
