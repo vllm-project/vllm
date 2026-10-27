@@ -466,6 +466,23 @@ class _ModuleOffloader:
         for param_offloader in self._param_offloaders.values():
             param_offloader.sync_cpu_storage()
 
+        # Drop params holding no data (e.g. GGUF metadata): nothing to
+        # stream, and a 0-element tensor can never be pinned.
+        empty = [
+            name
+            for name, offloader in self._param_offloaders.items()
+            if offloader._cpu_storage is not None
+            and offloader._cpu_storage.numel() == 0
+        ]
+        if empty:
+            logger.debug(
+                "Pruning %d empty offloaded param(s) that hold no data: %s",
+                len(empty),
+                empty,
+            )
+            for name in empty:
+                del self._param_offloaders[name]
+
         # Remove offloaders whose parameter was deleted during
         # process_weights_after_loading (e.g. k_scale / v_scale).
         deleted = [
@@ -482,6 +499,14 @@ class _ModuleOffloader:
             )
             for name in deleted:
                 del self._param_offloaders[name]
+
+        # post_init() counted these while still empty under lazy loaders
+        # (e.g. GGUF), so recompute now that the tensors are materialized.
+        self.offloaded_bytes = sum(
+            offloader._cpu_storage.nbytes
+            for offloader in self._param_offloaders.values()
+            if offloader._cpu_storage is not None
+        )
 
     def get_param_infos(self) -> list[ParamInfo]:
         """Get parameter metadata for buffer pool allocation.
