@@ -60,13 +60,18 @@ steps:
   source_file_dependencies:
   - .buildkite/test_areas/lm_eval.yaml
   - tests/evals/gsm8k/
+  - tests/watermarking/test_watermarking_e2e.py
+  - vllm/config/vllm.py
   - vllm/config/watermarking.py
   - vllm/sampling_params.py
+  - vllm/v1/engine/core.py
+  - vllm/v1/engine/input_processor.py
   - vllm/v1/watermarking/
   - vllm/v1/worker/gpu/
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
+  - pytest -s -v watermarking/test_watermarking_e2e.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) LM Eval Watermarking"

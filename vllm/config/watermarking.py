@@ -18,6 +18,15 @@ WatermarkContextScope = Literal["none", "single_turn", "all"]
 _MIN_RECOMMENDED_DEDUP_HISTORY = 1024
 
 
+def warn_watermarking_override() -> None:
+    logger.warning_once(
+        "Watermark enforcement is enabled; overriding watermarking=False at "
+        "request admission. This does not guarantee that the decoding mode "
+        "can apply a watermark.",
+        scope="global",
+    )
+
+
 def derive_watermark_key(key: int, domain: bytes) -> int:
     digest = hashlib.sha256(domain + key.to_bytes(8, "big")).digest()
     return int.from_bytes(digest[:8], "big")
@@ -51,7 +60,7 @@ class WatermarkConfig:
     allow_target_only_watermarking: bool = False
     """Allow speculative decoding without watermarking draft tokens."""
     enforce: bool = False
-    """Watermark every generation request, ignoring request-level opt-outs."""
+    """Override request-level opt-outs; unsupported decoding remains unwatermarked."""
 
     @property
     def supports_speculative_decoding(self) -> bool:

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+from copy import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +17,8 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.parallel_sampling import ParentRequest
 
 
 def _input_processor(server_uses_watermarking: bool = True) -> InputProcessor:
@@ -481,11 +484,10 @@ def _preprocess_in_engine_core(
     from vllm.v1.engine.core import EngineCore
 
     core = object.__new__(EngineCore)
-    core.vllm_config = _input_processor().vllm_config
+    core.vllm_config = VllmConfig()
     core.vllm_config.watermark_config = watermark_config
     core.mm_receiver_cache = None
     core.request_block_hasher = None
-    core.structured_output_manager = MagicMock()
     request = _engine_core_request(params)
     core.preprocess_add_request(request)
     return request.sampling_params
@@ -532,3 +534,76 @@ def _preprocess_in_engine_core(
 def test_enforce_engine_core_backstop(kwargs, watermark_config, expected):
     params = _preprocess_in_engine_core(SamplingParams(**kwargs), watermark_config)
     assert params.watermarking is expected
+
+
+def test_enforce_override_warns_once_across_admission_paths(
+    caplog_vllm, reset_warning_once
+):
+    config = VllmConfig()
+    config.watermark_config = WatermarkConfig(key=987654321, enforce=True)
+    params = SamplingParams(watermarking=False)
+
+    with caplog_vllm.at_level("WARNING"):
+        params.watermarking = config._check_supports_watermarking(params)
+        _preprocess_in_engine_core(params, config.watermark_config)
+        _preprocess_in_engine_core(
+            SamplingParams(watermarking=False), config.watermark_config
+        )
+        config._check_supports_watermarking(SamplingParams(watermarking=False))
+
+    assert params.watermarking is True
+    assert caplog_vllm.text.count("overriding watermarking=False") == 1
+    assert "987654321" not in caplog_vllm.text
+
+
+def test_enforce_core_override_warns_once(caplog_vllm, reset_warning_once):
+    config = WatermarkConfig(key=987654321, enforce=True)
+    with caplog_vllm.at_level("WARNING"):
+        for _ in range(2):
+            params = _preprocess_in_engine_core(
+                SamplingParams(watermarking=False), config
+            )
+            assert params.watermarking is True
+
+    assert caplog_vllm.text.count("overriding watermarking=False") == 1
+    assert "987654321" not in caplog_vllm.text
+
+
+@pytest.mark.parametrize("watermarking", [None, True, False])
+@pytest.mark.parametrize("enforce", [False, True])
+def test_enforce_warning_only_for_overridden_false(
+    watermarking, enforce, caplog_vllm, reset_warning_once
+):
+    config = VllmConfig()
+    config.watermark_config = WatermarkConfig(key=42, enforce=enforce)
+    with caplog_vllm.at_level("WARNING"):
+        config._check_supports_watermarking(SamplingParams(watermarking=watermarking))
+        _preprocess_in_engine_core(
+            SamplingParams(watermarking=watermarking), config.watermark_config
+        )
+
+    assert ("overriding watermarking=False" in caplog_vllm.text) is (
+        enforce and watermarking is False
+    )
+
+
+@pytest.mark.parametrize("enforce", [False, True])
+def test_parallel_opt_out_stats_use_resolved_watermarking(enforce):
+    config = VllmConfig()
+    config.watermark_config = WatermarkConfig(key=42, enforce=enforce)
+    params = SamplingParams(n=4, watermarking=False, detokenize=False)
+    params.watermarking = config._check_supports_watermarking(params)
+    request = _engine_core_request(params)
+    request.external_req_id = request.request_id
+    parent = ParentRequest(request)
+    output_processor = OutputProcessor(None, log_stats=True)
+
+    for index in range(params.n):
+        child = copy(request)
+        child.request_id, child.sampling_params = parent.get_child_info(index)
+        output_processor.add_request(child, None, parent, index)
+        _preprocess_in_engine_core(child.sampling_params, config.watermark_config)
+
+    stats = [state.stats for state in output_processor.request_states.values()]
+    assert len(stats) == 4
+    assert all(stat is not None and stat.is_watermarked is enforce for stat in stats)

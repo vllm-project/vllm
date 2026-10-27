@@ -23,6 +23,7 @@ import zmq
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
+from vllm.config.watermarking import warn_watermarking_override
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
@@ -1112,6 +1113,8 @@ class EngineCore:
 
         watermark_config = self.vllm_config.watermark_config
         if watermark_config and watermark_config.enforce and request.sampling_params:
+            if request.sampling_params.watermarking is False:
+                warn_watermarking_override()
             request.sampling_params.watermarking = True
 
         req = Request.from_engine_core_request(request, self.request_block_hasher)

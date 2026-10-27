@@ -23,7 +23,7 @@ Watermarking is disabled when `--watermark-config` is omitted. Gumbel-max (see
 The request-level `watermarking` option has two effective states:
 
 - Omitted (`None` in Python) or `true` requests watermarking.
-- `false` explicitly opts out.
+- `false` explicitly opts out unless `enforce` is enabled.
 
 When a request asks for watermarking but the engine or generation mode cannot
 apply it, vLLM emits a server-side warning once and runs the request without a
@@ -46,6 +46,13 @@ Deployments that require watermarking can set `"enforce": true` in
 `--watermark-config` so the engine ignores request-level opt-outs, or restrict
 explicit opt-out to trusted callers at the ingress boundary.
 
+`enforce` defaults to `false`. It overrides the request flag, not the
+algorithm's coverage: greedy decoding (`temperature=0`), `top_k=1`, beam
+search and trace replay do not produce a watermark even with enforcement.
+Overriding a `watermarking=False` flag at admission emits a secret-free
+server-side warning once per emitting process, not an audit record for each
+request. The flag can also come from internal request processing.
+
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
@@ -62,14 +69,17 @@ weaker detectability. See
 When `watermark_config` is set, the Prometheus counter
 `vllm:watermark_requests_total` counts finished requests by `status`:
 
-- `watermarked`: the request was sampled with the watermark switched on.
+- `watermarked`: the frontend resolved the watermark flag to on. Under
+  enforcement, supported explicit opt-outs are counted here.
 - `skipped`: the request asked for the watermark (omitted or `true`) but could
   not use it, such as `temperature=0` and trace replay requests. A beam search
   request that asks for the watermark runs without it and logs a warning. Its
-  beam steps count as `not_watermarked`, not `skipped`.
+  beam steps count as `not_watermarked`, not `skipped`, when enforcement is off.
 - `not_watermarked`: all other finished requests. This includes explicit
   opt-outs, pooling requests, and the internal requests of beam search (one
-  per beam step), generative scoring and language detection.
+  per beam step), generative scoring and language detection when enforcement
+  is off. Enforcement overrides internal opt-outs too; their status then
+  follows the frontend's decoding-mode checks.
 
 Each finished request has exactly one status, so the sum over `status` equals
 `vllm:request_success_total` on the same instance. Requests that the client
@@ -83,7 +93,11 @@ The status is per request, not per token. A `watermarked` request can contain
 tokens without the watermark: accepted draft tokens with
 `allow_target_only_watermarking`, tokens whose context repeats
 (`deduplicate_contexts`), the first `context_width` generated tokens with
-`deduplicate_contexts: "all"`, and tokens that a grammar forces.
+`deduplicate_contexts: "all"`, and tokens that a grammar forces. `top_k=1`
+can also be counted as `watermarked` despite selecting a deterministic token
+without a watermark signal. These counters describe frontend resolution,
+not detector results or later EngineCore flag overrides. The Rust frontend
+does not expose this watermark counter.
 
 ## Architecture
 
@@ -106,8 +120,13 @@ generation.
   transcription, translation, and realtime transcription, which default to
   greedy decoding. Transcription and translation can use a nonzero temperature
   to apply the configured watermark.
+- `top_k=1` leaves only one candidate and therefore cannot embed a watermark
+  signal, even with enforcement and nonzero temperature.
 - Beam search cannot apply a watermark. The first watermarked beam request emits
-  a server-side warning and runs without watermarking.
+  a server-side warning. With enforcement off, its internal sampling requests
+  opt out. With enforcement on, those flags are overridden, but beam search
+  still selects from log probabilities rather than the sampled token; this
+  does not watermark the returned beams.
 - Trace replay replaces the sampled token and therefore cannot apply a
   watermark. The first watermarked trace replay request emits a server-side
   warning and runs without watermarking.
@@ -117,9 +136,11 @@ generation.
   Restrictive constraints can reduce the statistical evidence available to a
   detector.
 - Automatic language detection and generative scoring use unwatermarked
-  auxiliary generations. Language-detection tokens are not part of the returned
-  transcription, and generative scoring returns scores rather than generated
-  text.
+  auxiliary generations when enforcement is off. Enforcement overrides their
+  internal opt-outs, subject to the decoding-mode limitations above.
+  Language-detection tokens are not part of the returned transcription, and
+  generative scoring returns scores rather than generated text; watermark
+  sampling does not change the log probabilities used for scoring.
 - Speculative decoding has additional requirements and partial-watermarking
   modes described in [Speculative decoding](#speculative-decoding).
 

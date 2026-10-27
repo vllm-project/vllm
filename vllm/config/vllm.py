@@ -54,7 +54,7 @@ from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, get_field, replace
 from .watchdog_config import WatchdogConfig
-from .watermarking import WatermarkConfig
+from .watermarking import WatermarkConfig, warn_watermarking_override
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -1437,6 +1437,8 @@ class VllmConfig:
                 scope="global",
             )
             return False
+        if config.watermarking is False:
+            warn_watermarking_override()
         return True
 
     def _resolve_and_verify_engram_config(self) -> None:
