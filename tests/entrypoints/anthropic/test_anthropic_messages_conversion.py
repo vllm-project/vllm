@@ -40,6 +40,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     DeltaToolCall,
     FunctionCall,
+    PerRequestMetrics,
     ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -2390,3 +2391,60 @@ class TestWatermarking:
         params = _convert(request).to_sampling_params(16, {})
 
         assert params.watermarking is watermarking
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_full_response_preserves_metrics(enabled):
+    metrics = PerRequestMetrics(time_to_first_token_ms=12.5) if enabled else None
+    response = ChatCompletionResponse(
+        id="chatcmpl-metrics",
+        model="test-model",
+        choices=[
+            ChatCompletionResponseChoice(
+                index=0,
+                message=ChatMessage(role="assistant", content="hello"),
+                finish_reason="stop",
+            )
+        ],
+        usage=UsageInfo(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+        metrics=metrics,
+    )
+    result = AnthropicServingMessages.messages_full_converter(None, response)
+    payload = result.model_dump(exclude_none=True)
+    assert result.metrics == metrics
+    assert ("metrics" in payload) == enabled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_stream_metrics_only_on_final_message_delta(enabled):
+    metrics = PerRequestMetrics(time_to_first_token_ms=12.5) if enabled else None
+
+    async def source():
+        yield _make_stream_chunk()
+        yield _make_stream_chunk(delta=DeltaMessage(content="hello"))
+        yield _make_stream_chunk(finish_reason="stop")
+        yield ChatCompletionStreamResponse(
+            id="chatcmpl-metrics",
+            model="test-model",
+            choices=[],
+            usage=UsageInfo(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+            metrics=metrics,
+        )
+
+    events = _parse_sse_events(
+        [
+            event
+            async for event in AnthropicServingMessages.message_stream_converter(
+                None, source()
+            )
+        ]
+    )
+    final = [data for name, data in events if name == "message_delta"]
+    assert len(final) == 1
+    assert ("metrics" in final[0]) == enabled
+    if enabled:
+        assert final[0]["metrics"] == metrics.model_dump(exclude_unset=True)
+    assert all(
+        "metrics" not in data for name, data in events if name != "message_delta"
+    )
