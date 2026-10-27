@@ -40,6 +40,7 @@ from tests.entrypoints.scale_out.derender.utils import (
     stream_chat_derender,
 )
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 
 MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 ARGS = [
@@ -1001,6 +1002,11 @@ def _assert_inline_parity(coupled: dict, inline: dict) -> None:
             TEXT_MESSAGES[0]["content"],
             {"n": 2, "temperature": 0.8, "seed": 42},
             id="n2",
+            marks=pytest.mark.skipif(
+                current_platform.is_xpu(),
+                reason="Seeded sampling is not reproducible across the coupled "
+                "and prefix-cached inline calls on XPU (bf16 logit noise).",
+            ),
         ),
     ],
 )
