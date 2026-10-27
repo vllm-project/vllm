@@ -20,6 +20,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     _run_b12x_fp8_block_scaled_mm,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
+from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+    _flashinfer_fp8_blockscale_gemm_impl,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
@@ -419,6 +422,35 @@ def test_w8a8_block_fp8_aiter_matmul(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < max_rel_diff
+
+
+@pytest.mark.skipif(
+    current_platform.is_fp8_fnuz(),
+    reason="This platform supports e4m3fnuz, not e4m3fn.",
+)
+@pytest.mark.parametrize("M", [2, 31])
+@torch.inference_mode()
+def test_flashinfer_fp8_blockscale_gemm_strided_input(M):
+    """A column slice has a row stride larger than K; the sm90 kernel only takes
+    a data pointer and used to misread rows 1..M-1."""
+    if not has_flashinfer_fp8_blockscale_gemm():
+        pytest.skip(
+            "FlashInfer block GEMM not available (requires SM90+ and FlashInfer)"
+        )
+    torch.manual_seed(0)
+    K, N = 768, 512
+    strided = torch.randn(M, 8 * K, dtype=torch.bfloat16)[:, K : 2 * K]
+    assert not strided.is_contiguous()
+    weight, weight_scale = per_block_cast_to_fp8(
+        torch.randn(N, K, dtype=torch.bfloat16), [128, 128], use_ue8m0=False
+    )
+    weight_scale = weight_scale.to(torch.float32)
+
+    expected = _flashinfer_fp8_blockscale_gemm_impl(
+        strided.contiguous(), weight, weight_scale
+    )
+    actual = _flashinfer_fp8_blockscale_gemm_impl(strided, weight, weight_scale)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
