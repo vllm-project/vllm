@@ -14,8 +14,10 @@ startup on every TP rank with the missing requirements:
 
 - GPU: GB300 (SM103).
 - Runner: Model Runner V2.
-- Parallelism: TP=4; no pipeline, data, expert or context parallelism, no
-  micro-batching.
+- Parallelism: TP=4 (one GB300 tray) or TP=8 (two trays of an NVL72 NVLink
+  domain; each rank holds a 288-column slice of the routed experts'
+  intermediate, padded to 384); no pipeline, data, expert or context
+  parallelism, no micro-batching.
 - Speculative decoding: DSpark, without adaptive verification.
 - Attention: `FLASHINFER_MLA_SPARSE_DSV41`, fp8 KV cache, MXFP4 indexer with
   sparse logits.

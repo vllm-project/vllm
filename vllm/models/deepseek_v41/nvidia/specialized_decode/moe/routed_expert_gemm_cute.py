@@ -1096,8 +1096,19 @@ class RoutedExpertGemm1(RoutedExpertGemm):
         cta_k: int = 256,
         num_ab_stage: int = 6,
     ) -> None:
-        super().__init__(2 * padded, 2 * slice_ // 128, hidden, cta_k, num_ab_stage)
+        # 128 w13 rows (64 H columns) per m tile. TP4: 9 tiles cover the
+        # 576-column slice exactly. TP8: ceil(576 / 128) = 5 tiles cover the
+        # 288-column slice plus 32 columns of zero weights (H = 0 there); the
+        # epilogue zeroes the remaining 64 padding columns.
+        m_tiles = (2 * slice_ + 127) // 128
+        super().__init__(2 * padded, m_tiles, hidden, cta_k, num_ab_stage)
         self.slice, self.padded = slice_, padded
+        self.computed = m_tiles * 64  # H columns the m tiles write
+        if padded - self.computed != 64:
+            raise ValueError(
+                f"slice {slice_} padded to {padded} leaves "
+                f"{padded - self.computed} padding columns, not 64"
+            )
 
     @cute.jit
     def __call__(
@@ -1269,12 +1280,14 @@ class RoutedExpertGemm1(RoutedExpertGemm):
             thread = warp * 32 + lane
             pad_row = thread // 16
             if pad_row < valid:
-                pad = (row0 + pad_row) * h_row + (self.slice + (thread % 16) * 4) // 2
+                pad = (row0 + pad_row) * h_row + (
+                    self.computed + (thread % 16) * 4
+                ) // 2
                 mH[pad] = Uint16(0)
                 mH[pad + 1] = Uint16(0)
             if thread < 2 * TILE:
                 pad_row = thread // 2
-                pad_block = self.slice // 32 + thread % 2
+                pad_block = self.computed // 32 + thread % 2
                 if pad_row < valid:
                     mHS[
                         n_tile * tile_bytes

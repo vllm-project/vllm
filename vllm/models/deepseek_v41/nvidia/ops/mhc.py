@@ -58,9 +58,10 @@ def supports_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
     parallel = vllm_config.parallel_config
     config = vllm_config.model_config.hf_config
     # AllReduceMHC publishes over NVLink multicast when its mailbox gets a
-    # multicast mapping and with unicast stores otherwise.
+    # multicast mapping and with unicast stores otherwise. TP4 is one GB300
+    # tray; TP8 spans two trays of an NVL72 NVLink domain.
     return (
-        parallel.tensor_parallel_size == 4
+        parallel.tensor_parallel_size in (4, 8)
         and not parallel.enable_expert_parallel
         and config.hidden_size == 5120
         and config.hc_mult == 4

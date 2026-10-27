@@ -36,6 +36,9 @@ FUSED_MHC_MAX_ROWS = 384
 MHC_OVERLAP_MAX_ROWS = 48
 # Rows of the low-batch GEMMs: one DSpark verification step of up to 8 rows
 # (6 at one request).
+# TP4 is one GB300 tray; TP8 spans two trays of an NVL72 NVLink domain, with
+# each rank holding a 288-column slice of the routed experts' intermediate.
+SUPPORTED_TP_SIZES = (4, 8)
 LOW_BATCH_MAX_ROWS = 8
 # The FlashInfer (requirements/cuda.txt) whose internals the publishing wo_b
 # GEMM, the MXFP8 layer input and the pinned MXFP8 tactics were checked
@@ -82,9 +85,9 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
     requirements = {
         "a GB300 (SM103) GPU": current_platform.is_device_capability(103),
         "Model Runner V2": vllm_config.use_v2_model_runner,
-        "tensor parallel size 4 without pipeline, data, expert or context "
-        "parallelism or micro-batching": (
-            parallel.tensor_parallel_size == 4
+        "tensor parallel size 4 or 8 without pipeline, data, expert or "
+        "context parallelism or micro-batching": (
+            parallel.tensor_parallel_size in SUPPORTED_TP_SIZES
             and parallel.pipeline_parallel_size == 1
             and parallel.data_parallel_size == 1
             and not parallel.enable_expert_parallel
