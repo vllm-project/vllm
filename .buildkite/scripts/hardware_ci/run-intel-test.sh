@@ -246,6 +246,29 @@ extract_yaml_commands() {
 default_image_name="${REGISTRY}/${REPO}:${BUILDKITE_COMMIT}-xpu"
 #default_image_name="public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:${BUILDKITE_COMMIT}-xpu"
 image_name="${IMAGE_TAG_XPU:-${default_image_name}}"
+case "${VLLM_XPU_KERNEL_NIGHTLY:-0}" in
+  0) ;;
+  1)
+    if ! image_name="$(buildkite-agent meta-data get xpu-kernel-nightly-image)"; then
+      echo "Failed to get the kernel nightly image from Buildkite metadata" >&2
+      exit 1
+    fi
+    if [[ -z "$image_name" ]]; then
+      echo "Kernel nightly image is not ready; refusing to use a release image" >&2
+      exit 1
+    fi
+    if [[ -n "${IMAGE_TAG_XPU:-}" && "$IMAGE_TAG_XPU" != "$image_name" ]]; then
+      echo "IMAGE_TAG_XPU conflicts with the kernel nightly image" >&2
+      exit 1
+    fi
+    export IMAGE_TAG_XPU="$image_name"
+    ;;
+  *)
+    echo "VLLM_XPU_KERNEL_NIGHTLY must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
+echo "Selected Intel test image: $image_name"
 container_name="xpu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
 # ---- Command source selection ----
