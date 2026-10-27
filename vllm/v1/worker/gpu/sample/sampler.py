@@ -338,9 +338,18 @@ class Sampler:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if use_fused_sampler:
             if self.use_flashinfer:
-                sampled = flashinfer_sample(processed_logits, top_k, top_p).to(
-                    torch.int64
+                # FlashInfer takes its faster top-k-first path only for an int
+                # top_k, so pass one when every request shares the same top_k.
+                uniform_top_k = (
+                    self.sampling_states.get_uniform_top_k(idx_mapping_np)
+                    if top_k is not None
+                    else None
                 )
+                sampled = flashinfer_sample(
+                    processed_logits,
+                    top_k if uniform_top_k is None else uniform_top_k,
+                    top_p,
+                ).to(torch.int64)
             else:  # Use XPU sampler
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:

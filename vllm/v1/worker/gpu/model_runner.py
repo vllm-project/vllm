@@ -1029,9 +1029,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return
         # Warmup-param pass: warmup_kernels (run after the KV cache is sized)
         # pays for the fp32 logits pipeline, so the profiled peak must too.
+        # Requests that share a top_k take FlashInfer's leaner top-k-first
+        # path, so alternate top_k to profile the per-row path instead.
         warmup_params = SamplingParams.for_sampler_warmup()
+        other_top_k_params = warmup_params.clone()
+        other_top_k_params.top_k += 1
         for req_idx in range(num_reqs):
-            self.sampler.add_request(req_idx, warmup_params)
+            self.sampler.add_request(
+                req_idx, other_top_k_params if req_idx % 2 else warmup_params
+            )
         self.sampler.apply_staged_writes()
         self.sampler(logits, dummy_input_batch)
 
