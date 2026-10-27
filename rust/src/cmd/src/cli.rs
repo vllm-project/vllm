@@ -36,7 +36,8 @@ use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_arg
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
     CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig, RendererSelection,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogging,
+    ParserSelection, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -387,6 +388,25 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_log_requests: bool,
 
+    /// If set to True, log model outputs (generations). Output text and
+    /// finish reasons are logged at INFO, while output token IDs are logged at
+    /// DEBUG. Requires `--enable-log-requests`.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_log_outputs: bool,
+
+    /// If set to False, output deltas will not be logged. Relevant only if
+    /// `--enable-log-outputs` is set.
+    #[arg(
+        long,
+        action = ArgAction::Set,
+        default_value_t = true,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default = "default_enable_log_deltas")]
+    pub enable_log_deltas: bool,
+
     /// Include prompt_tokens_details in usage when cached prompt tokens are
     /// present.
     #[arg(
@@ -488,6 +508,18 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(skip)]
     pub disable_request_id_randomization: bool,
+
+    /// Maximum HTTP request body size in bytes (default 32 MiB); `0` removes
+    /// the limit, like the Python frontend, which has none. It is set only
+    /// through `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
+        value_parser = parse_byte_count
+    )]
+    #[serde(skip)]
+    pub http_max_request_body_size: Option<usize>,
 
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
@@ -639,6 +671,11 @@ impl SharedRuntimeArgs {
             self.disable_request_id_randomization = parse_int_flag(&value).map_err(|error| {
                 format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
             })?;
+        }
+        if let Some(value) = lookup("VLLM_HTTP_MAX_REQUEST_BODY_SIZE") {
+            let size = parse_byte_count(&value)
+                .map_err(|error| format!("invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: {error}"))?;
+            self.http_max_request_body_size = Some(size);
         }
         Ok(())
     }
@@ -806,6 +843,11 @@ impl SharedRuntimeArgs {
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
+            log_outputs: match (self.enable_log_outputs, self.enable_log_deltas) {
+                (false, _) => OutputLogging::Disabled,
+                (true, false) => OutputLogging::Complete,
+                (true, true) => OutputLogging::CompleteAndDeltas,
+            },
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
             enable_per_request_metrics: self.enable_per_request_metrics,
@@ -814,6 +856,11 @@ impl SharedRuntimeArgs {
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
+            request_body_limit_bytes: match self.http_max_request_body_size {
+                None => Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES),
+                Some(0) => None,
+                Some(limit) => Some(limit),
+            },
         }
     }
 
@@ -829,6 +876,10 @@ impl SharedRuntimeArgs {
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_enable_log_deltas() -> bool {
+    true
 }
 
 fn default_stream_interval() -> NonZeroU32 {
@@ -909,6 +960,11 @@ impl FromStr for LogStatsInterval {
 fn parse_int_flag(value: &str) -> Result<bool, String> {
     let value: i64 = value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))?;
     Ok(value != 0)
+}
+
+/// Parse a byte count environment variable as a non-negative decimal integer.
+fn parse_byte_count(value: &str) -> Result<usize, String> {
+    value.trim().parse().map_err(|_| format!("`{value}` is not a number of bytes"))
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
