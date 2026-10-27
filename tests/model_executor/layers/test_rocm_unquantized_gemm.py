@@ -288,7 +288,7 @@ def test_rocm_unquantized_gemm_padded_weight_real_kernel(monkeypatch, dtype):
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
 
-def _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x, n, m):
+def _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_rdna4, n, m):
     x = torch.randn(n, 64, dtype=torch.float16)
     weight = torch.randn(m, 64, dtype=torch.float16)
 
@@ -296,7 +296,7 @@ def _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x, n, m):
     monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
-    monkeypatch.setattr("vllm.platforms.rocm.on_gfx12x", lambda: is_gfx12x)
+    monkeypatch.setattr("vllm.platforms.rocm.on_rdna4", lambda: is_rdna4)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
     monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
@@ -323,14 +323,14 @@ def _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x, n, m):
 def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch, m):
     # wvSplitK skinny GEMM handles n in [1, 5] (see PR #40687); n > 5 must
     # fall back to torch.nn.functional.linear.
-    _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x=False, n=6, m=m)
+    _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_rdna4=False, n=6, m=m)
 
 
 @pytest.mark.parametrize("m", [1, 128])
 def test_rocm_unquantized_gemm_gfx120x_n_gt_8_falls_back(monkeypatch, m):
     # SWMMAC skinny GEMM handles n in [5, 8] on gfx120x (see PR #45559);
     # n > 8 must fall back to torch.nn.functional.linear.
-    _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_gfx12x=True, n=9, m=m)
+    _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_rdna4=True, n=9, m=m)
 
 
 def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):

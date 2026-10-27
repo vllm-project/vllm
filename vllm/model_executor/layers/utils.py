@@ -342,7 +342,7 @@ def rocm_unquantized_gemm_impl(
         on_gfx1x,
         on_gfx9,
         on_gfx11,
-        on_gfx12x,
+        on_rdna4,
         on_gfx950,
     )
 
@@ -384,7 +384,7 @@ def rocm_unquantized_gemm_impl(
 
     use_skinny_n5to8 = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
-        and on_gfx12x()
+        and on_rdna4()
         and x.dtype in [torch.float16, torch.bfloat16]
         and weight.dtype in [torch.float16, torch.bfloat16]
         and x.dim() == 2
