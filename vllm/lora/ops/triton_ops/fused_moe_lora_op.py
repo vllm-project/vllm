@@ -1169,7 +1169,7 @@ def _fused_moe_lora_kernel(
                 prev = prev.to(tl.float32)
             tl.store(c_ptrs, prev + accumulator, mask=c_mask)
         else:
-            tl.store(c_ptrs, accumulator.to(c_ptr.dtype.element_ty), mask=c_mask)
+            tl.store(c_ptrs, accumulator, mask=c_mask)
     else:
         tl.atomic_add(
             c_ptrs,
