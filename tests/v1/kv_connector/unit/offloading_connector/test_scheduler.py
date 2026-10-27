@@ -604,7 +604,7 @@ def test_sync_partial_tail_load_targets_hashed_blocks():
     scheduler.config = scheduler.config._replace(sync_load_budget_bytes=1 << 40)
     request = _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
-    scheduler.manager.lookup.return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (28, False)
     assert "req" in scheduler._current_batch_sync_loads
@@ -640,7 +640,7 @@ def test_sync_load_budget_is_shared_per_step():
     scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
     first = _make_partial_tail_request(scheduler, request_id="a")
     second = _make_partial_tail_request(scheduler, request_id="b")
-    scheduler.manager.lookup.return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
 
     assert scheduler.get_num_new_matched_tokens(first, 0) == (28, False)
     assert scheduler.get_num_new_matched_tokens(second, 0) == (28, True)
