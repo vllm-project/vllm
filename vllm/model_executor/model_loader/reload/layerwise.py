@@ -14,7 +14,6 @@ from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
-    discard_weight_parts,
     finalize_model_weights,
 )
 
@@ -99,9 +98,6 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     4. Copy processed values back to original tensor storage
     """
     from .direct import begin_direct_reload, direct_reload_enabled
-
-    # Parts parked by an update that never finished must not pair with this one
-    discard_weight_parts(model)
 
     if direct_reload_enabled():
         begin_direct_reload(model)
