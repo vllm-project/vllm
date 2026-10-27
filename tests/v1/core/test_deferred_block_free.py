@@ -544,3 +544,60 @@ def test_cow_retentions_deferred_until_copy_step_processed():
     assert not scheduler.deferred_frees
     out2 = scheduler.schedule()
     assert [r.req_id for r in out2.scheduled_new_reqs] == ["late"]
+
+
+@pytest.mark.parametrize("abort", [False, True])
+def test_async_load_into_readable_block_waits_for_inflight_step(abort):
+    """A block released with ``unpin_blocks`` stays readable by in-flight
+    steps until the pool hands it out. An async load into it is not ordered
+    after those steps, so the connector must not start it until they are
+    processed."""
+    scheduler = create_scheduler(
+        model=MODEL,
+        async_scheduling=True,
+        use_kv_connector=mock_kv(matched_tokens=16, is_async=True),
+    )
+    scheduler.defer_block_free = True
+    connector = scheduler.connector
+    with patch.object(connector, "get_num_new_matched_tokens", return_value=(0, False)):
+        _, out0, out1 = _setup_request_with_inflight_step(scheduler)
+
+    # Release every free block as still readable, so the load must reuse one.
+    pool = scheduler.kv_cache_manager.block_pool
+    readable = pool.get_new_blocks(pool.get_num_free_blocks())
+    pool.unpin_blocks(readable, lambda block: None)
+    num_free = pool.get_num_free_blocks()
+
+    loader = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, req_ids=["loader"]
+    )[0]
+    scheduler.add_request(loader)
+    with patch.object(connector, "update_state_after_alloc") as update:
+        out2 = scheduler.schedule()
+        assert loader.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert pool.get_num_free_blocks() < num_free
+        update.assert_not_called()
+
+        if abort:
+            # Nothing will report the held-back load done; its blocks must
+            # follow the in-flight fence rather than wait for the connector.
+            scheduler.finish_requests("loader", RequestStatus.FINISHED_ABORTED)
+            assert "loader" not in scheduler.requests
+            assert scheduler.deferred_frees
+
+        scheduler.update_from_output(out0, _make_model_runner_output(out0))
+        update.assert_not_called()
+
+        # The last step that may read the reused blocks is processed.
+        scheduler.update_from_output(out1, _make_model_runner_output(out1))
+        assert not scheduler.deferred_load_starts
+        if abort:
+            update.assert_not_called()
+            # Freeing fences on the newest scheduled step.
+            if out2.total_num_scheduled_tokens:
+                scheduler.update_from_output(out2, _make_model_runner_output(out2))
+            assert not scheduler.deferred_frees
+            assert pool.get_num_free_blocks() == num_free
+        else:
+            update.assert_called_once()
+            assert update.call_args.args[0] is loader
