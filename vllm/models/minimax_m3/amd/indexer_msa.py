@@ -36,6 +36,10 @@ from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerMetadataBuilder,
     MiniMaxM3IndexerPrefillMetadata,
 )
+from vllm.models.minimax_m3.common.rocm_compat import (
+    default_minimax_indexer_kv_dtype,
+    minimax_m31_rocm_nvfp4_unsupported,
+)
 
 # The single source of truth for whether the AITER attend was asked for; this
 # indexer is only usable alongside it.
@@ -770,6 +774,8 @@ def msa_indexer_unsupported_reason(
             "needs ROCm for the fp8 MFMA score/top-k, "
             f"got platform={current_platform.device_type!r}"
         )
+    if indexer_kv_dtype in ("mxfp4", "nvfp4"):
+        return minimax_m31_rocm_nvfp4_unsupported("indexer cache")
     if not _minimax_m3_aiter_sparse_pa_requested():
         # The top-k emits the attend's page table in page-16 numbering, which
         # only addresses the interleaved cache the AITER attend reads. Paired
@@ -907,7 +913,7 @@ def msa_indexer_cp_enabled(
             sparse_block_size=int(sparse_cfg["sparse_block_size"]),
             index_head_dim=int(sparse_cfg["sparse_index_dim"]),
             indexer_kv_dtype=vllm_config.attention_config.resolve_indexer_kv_dtype(
-                "bf16"
+                default_minimax_indexer_kv_dtype()
             ),
             max_model_len=vllm_config.model_config.max_model_len,
             score_type=sparse_cfg.get("sparse_score_type", "max"),

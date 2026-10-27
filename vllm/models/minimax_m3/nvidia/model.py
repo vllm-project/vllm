@@ -80,6 +80,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
     MiniMaxM3VLMultiModalProcessor,
     MiniMaxM3VLProcessingInfo,
 )
+from vllm.models.minimax_m3.common.rocm_compat import is_minimax_draft_weight
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
@@ -966,8 +967,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # The MTP module is not modeled yet.
-            if "mtp." in name:
+            # MTP / nested DSpark tensors belong to the draft, not the target.
+            if is_minimax_draft_weight(name):
                 continue
 
             # The checkpoint stores block scales as ``weight_scale_inv``; the

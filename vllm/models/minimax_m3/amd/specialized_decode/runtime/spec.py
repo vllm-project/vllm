@@ -7,6 +7,10 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from vllm.config import CompilationMode, VllmConfig
+from vllm.models.minimax_m3.common.rocm_compat import (
+    default_minimax_indexer_kv_dtype,
+    minimax_m3_sparse_attention_is_full,
+)
 
 
 @dataclass(frozen=True)
@@ -47,7 +51,9 @@ class DecodeConfig:
         if cc.kv_offloading_size is not None:
             reasons.append("does not support KV cache offloading")
 
-        index_dtype = config.attention_config.resolve_indexer_kv_dtype("bf16")
+        index_dtype = config.attention_config.resolve_indexer_kv_dtype(
+            default_minimax_indexer_kv_dtype()
+        )
         if index_dtype != "fp8":
             reasons.append('requires indexer_kv_dtype "fp8"')
         if getattr(config, "lora_config", None) is not None:
@@ -83,7 +89,12 @@ class DecodeConfig:
         layers = text_config.num_hidden_layers
         frequencies = sparse.get("sparse_attention_freq", ())[:layers]
         sparse_layers = [i for i, enabled in enumerate(frequencies) if enabled]
-        if (
+        if minimax_m3_sparse_attention_is_full(text_config):
+            reasons.append(
+                "MiniMax-M3.1 (MSA on every layer) is not supported by "
+                "specialized decode; serve without --compilation-config.monokernel"
+            )
+        elif (
             self.last_layer != layers - 1
             or layers <= self.first_layer
             or sparse_layers != list(range(self.first_layer, layers))

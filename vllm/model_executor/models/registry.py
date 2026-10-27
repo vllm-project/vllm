@@ -695,6 +695,8 @@ _SPECULATIVE_DECODING_MODELS = {
     ),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
     "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
+    "DSparkMiniMaxDraftModel": ("minimax_m3_dspark", "MiniMaxM3DSparkForCausalLM"),
+    "MiniMaxM3DSparkModel": ("minimax_m3_dspark", "MiniMaxM3DSparkForCausalLM"),
     "PEagleDraftModel": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "PeagleLlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),

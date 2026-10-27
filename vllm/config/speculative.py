@@ -4,6 +4,7 @@
 import copy
 import functools
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Self, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -34,6 +35,58 @@ else:
     )
 
 logger = init_logger(__name__)
+
+
+def _is_minimax_m3_hf_config(hf_config: Any) -> bool:
+    """True when ``hf_config`` is a MiniMax-M3 / M3.1 text or VL config."""
+    model_type = str(getattr(hf_config, "model_type", "") or "")
+    if model_type in (
+        "minimax_m3",
+        "minimax_m3_text",
+        "minimax_m3_vl",
+        "minimax_m3_mtp",
+    ):
+        return True
+    text = getattr(hf_config, "text_config", None)
+    return str(getattr(text, "model_type", "") or "") in (
+        "minimax_m3",
+        "minimax_m3_text",
+    )
+
+
+def _minimax_m3_nested_dspark_model(
+    target_model: str, hf_config: Any
+) -> str | None:
+    """Return MiniMax-M3.1's nested DSpark draft path when one exists.
+
+    Official MiniMax-M3.1 checkpoints ship the DSpark drafter under
+    ``{model}/dspark/`` rather than as a sibling Hugging Face repo. Prefer a
+    local ``dspark/config.json``; fall back to the Hub subpath when every
+    layer is MSA (the M3.1 layout). MiniMax-M3 keeps MTP modules in the
+    target weights, so it must not take this path.
+
+    Keep this policy in sync with
+    ``vllm.models.minimax_m3.common.rocm_compat.nested_minimax_dspark_model``.
+    """
+    if not target_model:
+        return None
+    local = Path(target_model) / "dspark"
+    if (local / "config.json").is_file():
+        return str(local)
+    if not _is_minimax_m3_hf_config(hf_config):
+        return None
+    text = hf_config
+    getter = getattr(hf_config, "get_text_config", None)
+    if callable(getter):
+        text = getter()
+    elif getattr(hf_config, "text_config", None) is not None:
+        text = hf_config.text_config
+    cfg = getattr(text, "sparse_attention_config", None) or {}
+    freq = cfg.get("sparse_attention_freq")
+    if freq and all(int(flag) != 0 for flag in freq):
+        return f"{str(target_model).rstrip('/')}/dspark"
+    return None
+
 
 MTPModelTypes = Literal[
     "deepseek_mtp",
@@ -91,6 +144,10 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
 )
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 _MUSE_SPARK_DSPARK_ARCHITECTURE = "MuseSparkDSparkModel"
+_MINIMAX_DSPARK_ARCHITECTURES = (
+    "DSparkMiniMaxDraftModel",
+    "MiniMaxM3DSparkModel",
+)
 
 # Draft architectures that carry an XPress refiner. EAGLEConfig rewrites a dflash
 # draft's architecture to DFlash{arch}, so a checkpoint is seen under either name;
@@ -1106,6 +1163,10 @@ class SpeculativeConfig:
                 text_config.num_kv_shared_layers = 0
             hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
 
+        if initial_architecture in _MINIMAX_DSPARK_ARCHITECTURES:
+            # Nested MiniMax-M3.1 DSpark uses model_type=minimax_m3_vl; keep
+            # the draft architecture instead of rewriting it to MiniMax MTP.
+            return hf_config
         if (
             hf_config.model_type == "minimax_m3_vl"
             or initial_architecture == "MiniMaxM3SparseForConditionalGeneration"
@@ -1250,10 +1311,16 @@ class SpeculativeConfig:
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
             elif self.method == "dspark":
-                # DeepSeek DSpark can ship the weights inside the target checkpoint
+                # DeepSeek DSpark can ship the weights inside the target checkpoint.
+                # MiniMax-M3.1 ships a nested ``{model}/dspark`` drafter instead.
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for dspark")
-                self.model = self.target_model_config.model
+                nested = _minimax_m3_nested_dspark_model(
+                    self.target_model_config.model_weights
+                    or self.target_model_config.model,
+                    self.target_model_config.hf_config,
+                )
+                self.model = nested or self.target_model_config.model
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
@@ -1423,6 +1490,10 @@ class SpeculativeConfig:
                     or _MUSE_SPARK_DSPARK_ARCHITECTURE
                     in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
+                    or any(
+                        arch in self.draft_model_config.architectures
+                        for arch in _MINIMAX_DSPARK_ARCHITECTURES
+                    )
                     or (
                         "DSparkDraftModel" in self.draft_model_config.architectures
                         and self.draft_model_config.hf_config.model_type == "qwen3"
@@ -1510,6 +1581,13 @@ class SpeculativeConfig:
                     not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
+                    and not any(
+                        arch in self.draft_model_config.architectures
+                        for arch in _MINIMAX_DSPARK_ARCHITECTURES
+                    )
+                    and not _is_minimax_m3_hf_config(
+                        self.target_model_config.hf_config
+                    )
                 ):
                     # DeepSeek-V4(.1) DSpark reuses the full target config
                     # and its weights ship in the target checkpoint.
@@ -1539,6 +1617,20 @@ class SpeculativeConfig:
                         and getattr(hf, "target_layer_ids", None) is not None
                     ):
                         hf.dspark_target_layer_ids = hf.target_layer_ids
+                elif self.method == "dspark" and any(
+                    arch in self.draft_model_config.architectures
+                    for arch in _MINIMAX_DSPARK_ARCHITECTURES
+                ):
+                    hf = self.draft_model_config.hf_config
+                    if getattr(hf, "dspark_target_layer_ids", None) is None:
+                        text = getattr(hf, "text_config", None)
+                        ids = (
+                            getattr(text, "dspark_target_layer_ids", None)
+                            if text is not None
+                            else None
+                        )
+                        if ids is not None:
+                            hf.dspark_target_layer_ids = ids
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True

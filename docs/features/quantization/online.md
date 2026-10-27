@@ -142,6 +142,23 @@ vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
   --quantization-config '{"targets":{"*mlp.experts*":"mxfp4"}}'
 ```
 
+MiniMax-M3.1-Flash on AMD MI350/MI355 is the same requantization path: the official checkpoint's NVFP4 routed experts are converted to MXFP4 at load, and the supported ROCm MSA/indexer caches stay FP8. Native NVFP4 KV/indexer is not available on ROCm.
+
+```bash
+vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
+  --tensor-parallel-size 4 \
+  --block-size 128 \
+  --kv-cache-dtype fp8 \
+  --attention-config '{"indexer_kv_dtype": "fp8"}' \
+  --quantization-config.moe mxfp4 \
+  --speculative-config '{"method": "dspark", "num_speculative_tokens": 3, "kv_cache_dtype": "fp8", "draft_sample_method": "probabilistic"}' \
+  --reasoning-parser minimax_m3 \
+  --tool-call-parser minimax_m3 \
+  --enable-auto-tool-choice
+```
+
+See [`examples/online_serving/minimax_m31_flash_rocm.sh`](../../../examples/online_serving/minimax_m31_flash_rocm.sh) for the TP4 serving recipe. Do not enable monokernel or dual-batch overlap for this model until they are proven on the all-sparse M3.1 layout.
+
 !!! info
 
     Re-quantization is available for both linear and MoE layers.

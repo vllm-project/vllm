@@ -54,6 +54,9 @@ from vllm.models.minimax_m3.amd.indexer_msa import (
     select_msa_indexer_impl_cls,
 )
 from vllm.models.minimax_m3.amd.ops.sparse_pa import ASM_PAGE_SIZE
+from vllm.models.minimax_m3.common.rocm_compat import (
+    default_minimax_indexer_kv_dtype,
+)
 from vllm.models.minimax_m3.common.sparse_attention import (
     minimax_m3_use_aiter_sparse_pa,
 )
@@ -94,7 +97,9 @@ def _build_sparse_indexer_context(
     )
 
     num_kv_heads = max(1, config.num_key_value_heads // tp_size)
-    indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("bf16")
+    indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+        default_minimax_indexer_kv_dtype()
+    )
 
     impl_cls = select_msa_indexer_impl_cls(
         topk_blocks=sparse_cfg["sparse_topk_blocks"],
@@ -216,7 +221,7 @@ class MiniMaxM3MultiTokenPredictor(nn.Module):
         indexer_ctx = _build_sparse_indexer_context(config, vllm_config)
         if indexer_ctx.msa_indexer_impl_cls is None:
             indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
-                "bf16"
+                default_minimax_indexer_kv_dtype()
             )
             if indexer_kv_dtype != "bf16":
                 raise NotImplementedError(
