@@ -7,6 +7,10 @@ MegaMoE reads linear scales, not ``scaled_fp4_quant``'s swizzled 128x4 layout.
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -193,6 +197,34 @@ def prepare_megamoe_nvfp4_inputs(
     )
 
 
+def _norm_quant_megamoe_nvfp4_warmup_inputs(
+    *, weight_dtype: torch.dtype, eps: float, gain_center: float
+) -> dict[str, object]:
+    enable_pdl = current_platform.is_cuda() and current_platform.is_arch_support_pdl()
+    # Token count changes only the launch grid, not the compiled kernel.
+    return dict(
+        grid=(1, 4),
+        x=TritonWarmupTensor(torch.bfloat16),
+        weight=TritonWarmupTensor(weight_dtype),
+        packed_out=TritonWarmupTensor(torch.uint8),
+        sf_out=TritonWarmupTensor(torch.uint8),
+        x_stride=4096,
+        packed_stride=2048,
+        sf_stride=256,
+        eps=eps,
+        gain_center=gain_center,
+        HIDDEN=4096,
+        BLOCK_K=1024,
+        USE_PDL=enable_pdl,
+        num_warps=8,
+        enable_fp_fusion=False,
+        **({"launch_pdl": True} if enable_pdl else {}),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_norm_quant_megamoe_nvfp4_warmup_inputs,
+)
 @triton.jit
 def _norm_quant_megamoe_nvfp4_kernel(
     x,
@@ -219,8 +251,7 @@ def _norm_quant_megamoe_nvfp4_kernel(
     k = block * BLOCK_K + tl.arange(0, BLOCK_K)
     hidden = tl.load(x + token * x_stride + k).to(tl.float32)
     gamma = tl.load(weight + k).to(tl.float32) + gain_center
-    # Round to BF16 as the unfused norm -> quantize path does.
-    hidden = ((hidden * rstd) * gamma).to(tl.bfloat16).to(tl.float32)
+    hidden = (hidden * rstd) * gamma
     packed, sf = _quantize_nvfp4(hidden, BLOCK_K)
     tl.store(
         packed_out
@@ -256,7 +287,7 @@ def prepare_megamoe_nvfp4_with_norm(
     assert norm_weight.shape == (hidden_size,) and norm_weight.is_contiguous()
     if num_tokens == 0:
         return
-    enable_pdl = current_platform.is_cuda() and current_platform.is_arch_support_pdl()
+    enable_pdl = current_platform.is_arch_support_pdl()
     _norm_quant_megamoe_nvfp4_kernel[(num_tokens, hidden_size // 1024)](
         hidden_states,
         norm_weight,
@@ -269,8 +300,8 @@ def prepare_megamoe_nvfp4_with_norm(
         gain_center,
         hidden_size,
         1024,
+        USE_PDL=enable_pdl,
         num_warps=8,
         enable_fp_fusion=False,
-        USE_PDL=enable_pdl,
         **({"launch_pdl": True} if enable_pdl else {}),
     )
