@@ -395,13 +395,7 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
 
 
 @requires_qsa_kernels
-@pytest.mark.parametrize(
-    "kv_dtype",
-    [
-        pytest.param(torch.bfloat16, id="bf16"),
-        pytest.param(None, id="fp8_platform"),
-    ],
-)
+@pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize(
     "num_rows,num_query_heads,num_kv_heads,page_size",
     [
@@ -417,7 +411,7 @@ def test_qsa_sparse_paged_attention_matches_reference(
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
-    kv_dtype: torch.dtype | None,
+    use_fp8: bool,
 ) -> None:
     torch.manual_seed(2)
     head_dim = 256
@@ -439,7 +433,7 @@ def test_qsa_sparse_paged_attention_matches_reference(
         device="cuda",
         dtype=torch.bfloat16,
     )
-    if kv_dtype is not None:
+    if use_fp8:
         fp8_dtype = current_platform.fp8_dtype()
         # The kernel's contract is that the cache already holds values in
         # the attention dtype's numeric space; quantize the stored cache and

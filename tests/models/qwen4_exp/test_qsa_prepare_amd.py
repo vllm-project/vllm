@@ -135,32 +135,53 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
         assert torch.equal(gate_out, gate)
 
-        # Build the expected codes with a torch-side cast. The C++
-        # reshape_and_cache_flash writes FNUZ-encoded codes on ROCm
-        # regardless of the cache tensor's typed flavor, so it cannot
-        # referee the comparison on gfx950 where the cache holds OCP
-        # codes (tested empirically: max code difference 128, a sign-bit
-        # flip from the FNUZ/OCP encoding mismatch). The torch reference
-        # applies the same divide-in-FP32-then-cast sequence as the
-        # kernel.
+        # C++ reference: both the fused Triton kernel and the C++
+        # reshape_and_cache_flash write the platform-native fp8 flavor
+        # (OCP on gfx950, FNUZ on gfx942), so the C++ op is the unfused
+        # reference on both arches. Use separate contiguous uint8 buffers
+        # (NOT zeros_like on split views — the C++ op requires contiguous
+        # caches and split views of a shared buffer are strided).
         slot = main["main_slot_mapping"]
         valid = slot >= 0
         blocks = (slot[valid] // MAIN_PAGE).long()
         pages = (slot[valid] % MAIN_PAGE).long()
         stored = kv_cache[blocks, pages]
-        expected_k = (
-            k.view(-1, MAIN_HK, MAIN_D)[valid].float() / main["main_k_scale"]
-        ).to(kv_cache.dtype)
-        expected_v = (
-            v.view(-1, MAIN_HK, MAIN_D)[valid].float() / main["main_v_scale"]
-        ).to(kv_cache.dtype)
+
+        key_ref = torch.zeros(
+            kv_cache.shape[:-1] + (MAIN_D,),
+            dtype=torch.uint8,
+            device=kv_cache.device,
+        )
+        value_ref = torch.zeros(
+            kv_cache.shape[:-1] + (MAIN_D,),
+            dtype=torch.uint8,
+            device=kv_cache.device,
+        )
+        assert key_ref.is_contiguous() and value_ref.is_contiguous()
+        k_scale_t = torch.tensor(float(main["main_k_scale"]), device="cuda")
+        v_scale_t = torch.tensor(float(main["main_v_scale"]), device="cuda")
+        reshape_and_cache_flash(
+            k.view(-1, MAIN_HK, MAIN_D),
+            v.view(-1, MAIN_HK, MAIN_D),
+            key_ref,
+            value_ref,
+            main["main_slot_mapping"],
+            "fp8",
+            k_scale_t,
+            v_scale_t,
+        )
+        # View the uint8 reference codes as the cache's fp8 dtype so
+        # _assert_codes_match's float tier compares fp8 values, not raw
+        # uint8 codes (advanced indexing produces contiguous copies, so
+        # the dtype view is valid).
+        ref_k_stored = key_ref[blocks, pages].view(kv_cache.dtype)
+        ref_v_stored = value_ref[blocks, pages].view(kv_cache.dtype)
 
         # Compare in code space (the uint8 codes): the fused kernel and
-        # the torch reference round in a slightly different order, so a
-        # value on a step boundary may flip to the adjacent code. Allowing
-        # 2 codes covers the boundary flips; a real bug — like a scale
-        # that was never applied — moves normal-sized numbers by many
-        # codes.
+        # the C++ op round in a slightly different order, so a value on a
+        # step boundary may flip to the adjacent code. Allowing 2 codes
+        # covers the boundary flips; a real bug — like a scale that was
+        # never applied — moves normal-sized numbers by many codes.
         def _assert_codes_match(actual, expected):
             code_diff = (
                 actual.view(torch.uint8).int() - expected.view(torch.uint8).int()
@@ -173,8 +194,8 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
                 ).all()
             )
 
-        _assert_codes_match(stored[..., :MAIN_D], expected_k)
-        _assert_codes_match(stored[..., MAIN_D:], expected_v)
+        _assert_codes_match(stored[..., :MAIN_D], ref_k_stored)
+        _assert_codes_match(stored[..., MAIN_D:], ref_v_stored)
         return
     cache = torch.zeros_like(kv_cache)
     key_cache, value_cache = cache.split(MAIN_D, dim=-1)
@@ -197,7 +218,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("main_fp8", [False, True])
-@pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, None])
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
     [
@@ -233,6 +254,8 @@ def test_qsa_fused_prepare_matches_unfused(
 ) -> None:
     from vllm.model_executor.layers.rotary_embedding import get_rope
 
+    if indexer_dtype is None:
+        indexer_dtype = current_platform.fp8_dtype()
     # The FP8 comparison below is a one-ulp bound on data this test generates,
     # so an unseeded run decides for itself whether it reproduces a rounding
     # difference. Seed it, or the kernel's bit-exactness is only sampled.
@@ -446,7 +469,7 @@ def test_qsa_fused_prepare_matches_unfused(
     if rope_positions is not None:
         qsa_store_cache_rows(rope_positions, raw_slots, position_rows)
 
-    if indexer_dtype == torch.float8_e4m3fn:
+    if indexer_dtype != torch.bfloat16:
         # Both paths round the same ~bf16 intermediates to e4m3. Bitwise
         # equality (the dsv4 indexer test's bar) does not hold here: the 1D
         # reference rope (forward_cuda) differs from _norm_rope by up to 1
@@ -456,7 +479,7 @@ def test_qsa_fused_prepare_matches_unfused(
     else:
         torch.testing.assert_close(fused_query, unfused_query, rtol=RTOL, atol=ATOL)
     assert torch.equal(fused_raw.view(torch.int16), unfused_raw.view(torch.int16))
-    if indexer_dtype == torch.float8_e4m3fn:
+    if indexer_dtype != torch.bfloat16:
         assert_fp8_within_one_ulp(fused_compressed, unfused_compressed)
     else:
         torch.testing.assert_close(
