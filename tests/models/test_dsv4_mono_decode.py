@@ -297,7 +297,9 @@ def _config(monokernel=True, max_model_len=8192):
             max_model_len=max_model_len,
         ),
         parallel_config=SimpleNamespace(**parallel),
-        kernel_config=SimpleNamespace(monokernel=monokernel),
+        kernel_config=SimpleNamespace(
+            specialized_decode="monokernel" if monokernel else None
+        ),
     )
 
 
