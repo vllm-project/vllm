@@ -19,14 +19,16 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import CheckpointState, EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.kv_hints import KvHintsEnvelope
 
 if TYPE_CHECKING:
     from vllm.distributed.elastic_ep.external_elastic_ep import (
+        ExternalElasticEPResizeRequest,
         ExternalElasticEPScaleStatus,
+        ExternalElasticEPSubmission,
     )
     from vllm.v1.engine import PauseMode
 
@@ -39,7 +41,7 @@ class StreamingInput:
     where inputs are provided via an async generator.
     """
 
-    prompt: EngineInput
+    prompt: PromptType | EngineInput
     sampling_params: SamplingParams | None = None
 
 
@@ -175,6 +177,7 @@ class EngineClient(ABC):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Start profiling with optional per-session overrides."""
         ...
@@ -219,6 +222,22 @@ class EngineClient(ABC):
     @abstractmethod
     async def is_sleeping(self) -> bool:
         """Check whether the engine is sleeping."""
+        ...
+
+    @abstractmethod
+    async def checkpoint_prepare(self, mode: "PauseMode" = "wait") -> str | None:
+        """Drain with `mode`, then release what a checkpoint must not contain.
+        Returns why the engine cannot prepare, with nothing changed, or None."""
+        ...
+
+    @abstractmethod
+    async def checkpoint_restore(self) -> None:
+        """Bring back what preparing released, in the restored process or in place."""
+        ...
+
+    @abstractmethod
+    async def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
+        """Return the checkpoint lifecycle state and the error that failed it."""
         ...
 
     @abstractmethod
@@ -271,6 +290,13 @@ class EngineClient(ABC):
         expected_instance_id: str | None = None,
     ) -> "ExternalElasticEPScaleStatus | None":
         """Scale the engine."""
+        raise NotImplementedError
+
+    async def submit_elastic_ep(
+        self,
+        request: "ExternalElasticEPResizeRequest",
+    ) -> "ExternalElasticEPSubmission":
+        """Accept one client's externally managed resize participation."""
         raise NotImplementedError
 
     async def get_external_elastic_ep_status(

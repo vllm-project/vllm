@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import http.client
+import json
 import os
 import threading
 import time
@@ -9,6 +11,7 @@ from contextlib import AsyncExitStack
 from functools import partial
 from types import SimpleNamespace
 from typing import Any, cast
+from urllib.parse import urlparse
 
 import msgspec
 import openai  # use the official client for correctness check
@@ -38,7 +41,9 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
 
 MODEL_NAME = os.getenv("MODEL_NAME", "ibm-research/PowerMoE-3b")
-ELASTIC_EP_MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+ELASTIC_EP_MODEL_NAME = os.getenv(
+    "ELASTIC_EP_MODEL_NAME", "deepseek-ai/DeepSeek-V2-Lite-Chat"
+)
 
 # Number of data parallel ranks for external LB testing
 DP_SIZE = int(os.getenv("DP_SIZE", "2"))
@@ -250,6 +255,7 @@ def test_external_elastic_ep_publishes_evidence_before_completion():
 
     expected_writes = [
         coordinator.key("epoch-1", "topology"),
+        coordinator.key("committed_epoch"),
         coordinator.key("epoch-1", "phase"),
         coordinator.key("epoch-1", "completed"),
     ]
@@ -897,7 +903,12 @@ def _wait_for_scale_requests_to_start(
     os.getenv("VLLM_USE_RUST_FRONTEND") == "1",
     reason="Elastic EP scaling is not supported by the Rust frontend",
 )
-def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
+@pytest.mark.parametrize("bounded_submission", [False, True])
+def test_external_lb_elastic_ep_scale_up(
+    default_server_args, monkeypatch, bounded_submission
+) -> None:
+    """A lost acceptance response cannot cancel native grow/shrink execution."""
+    monkeypatch.setenv("VLLM_ELASTIC_EP_DRAIN_REQUESTS", "1")
     server_args = [
         *default_server_args,
         "--enable-expert-parallel",
@@ -921,12 +932,71 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
 
     with server_manager:
         existing_servers = [server for server, _ in server_manager.servers]
+        initial = {
+            server.url_root: _external_elastic_ep_status(server)
+            for server in existing_servers
+        }
+        payloads = {
+            server.url_root: {
+                "operation_id": "bounded-grow",
+                "expected_instance_id": initial[server.url_root]["instance_id"],
+                "base_topology_token": initial[server.url_root]["topology_token"],
+                "new_data_parallel_size": 3,
+                "drain_timeout": 120,
+            }
+            for server in existing_servers
+        }
         with ThreadPoolExecutor(max_workers=2) as executor:
-            scale_requests = [
-                executor.submit(_send_scale_command, server, 3)
-                for server in existing_servers
-            ]
-            _wait_for_scale_requests_to_start(scale_requests)
+            if bounded_submission:
+                server = existing_servers[0]
+                address = urlparse(server.url_root)
+                connection = http.client.HTTPConnection(
+                    address.hostname, address.port, timeout=10
+                )
+                try:
+                    connection.request(
+                        "POST",
+                        "/submit_elastic_ep",
+                        body=json.dumps(payloads[server.url_root]),
+                        headers={"Content-Type": "application/json"},
+                    )
+                finally:
+                    connection.close()
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    receipt = _external_elastic_ep_status(server)["local_submission"]
+                    if receipt is not None:
+                        assert receipt["request"] == payloads[server.url_root]
+                        assert not receipt["finished"]
+                        assert receipt["error"] is None
+                        break
+                    time.sleep(0.1)
+                else:
+                    pytest.fail("Disconnected caller left no native receipt")
+                for server in existing_servers:
+                    payload = payloads[server.url_root]
+                    response = requests.post(
+                        server.url_for("submit_elastic_ep"), json=payload, timeout=10
+                    )
+                    assert response.status_code == 202, response.text
+                    receipt = response.json()
+                    assert receipt["request"] == payload
+                    assert receipt["local_size"] == 1
+                    assert not receipt["finished"]
+                    assert receipt["error"] is None
+                    conflict = requests.post(
+                        server.url_for("submit_elastic_ep"),
+                        json=payload | {"new_data_parallel_size": 2},
+                        timeout=10,
+                    )
+                    assert conflict.status_code == 409, conflict.text
+                scale_requests = []
+            else:
+                scale_requests = [
+                    executor.submit(_send_scale_command, server, 3)
+                    for server in existing_servers
+                ]
+                _wait_for_scale_requests_to_start(scale_requests)
             server_manager.start_rank(
                 rank=2,
                 dp_size=3,
@@ -936,6 +1006,10 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
             for request in scale_requests:
                 response = request.result(timeout=600)
                 assert response.status_code == 200, response.text
+
+        if bounded_submission:
+            for server in existing_servers:
+                _wait_for_external_elastic_ep_receipt(server, payloads[server.url_root])
 
         for server, _ in server_manager.servers:
             parallel_config = _get_parallel_config(server)
@@ -949,6 +1023,104 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
                     temperature=0.0,
                 )
             assert completion.choices[0].finish_reason in ("length", "stop")
+
+        if bounded_submission:
+            shrink = {}
+            for server, _ in server_manager.servers:
+                observed = _external_elastic_ep_status(server)
+                payload = {
+                    "operation_id": "bounded-shrink",
+                    "expected_instance_id": observed["instance_id"],
+                    "base_topology_token": observed["topology_token"],
+                    "new_data_parallel_size": 2,
+                    "drain_timeout": 120,
+                }
+                shrink[server.url_root] = payload
+                response = requests.post(
+                    server.url_for("submit_elastic_ep"), json=payload, timeout=10
+                )
+                assert response.status_code in (200, 202), response.text
+            for server, _ in server_manager.servers:
+                _wait_for_external_elastic_ep_receipt(server, shrink[server.url_root])
+
+            retired = next(
+                server
+                for server, _ in server_manager.servers
+                if server not in existing_servers
+            )
+            before = _external_elastic_ep_status(retired)
+            rejected = requests.post(
+                retired.url_for("submit_elastic_ep"),
+                json=shrink[retired.url_root]
+                | {
+                    "operation_id": "retired-grow",
+                    "base_topology_token": before["topology_token"],
+                    "new_data_parallel_size": 3,
+                },
+                timeout=10,
+            )
+            assert rejected.status_code == 409, rejected.text
+            after = _external_elastic_ep_status(retired)
+            assert after["topology_token"] == before["topology_token"]
+            assert after["local_submission"] == before["local_submission"]
+            replay = requests.post(
+                retired.url_for("submit_elastic_ep"),
+                json=shrink[retired.url_root],
+                timeout=10,
+            )
+            assert replay.status_code == 200, replay.text
+            assert replay.json() == before["local_submission"]
+
+            for server in existing_servers:
+                delayed = requests.post(
+                    server.url_for("submit_elastic_ep"),
+                    json=payloads[server.url_root],
+                    timeout=10,
+                )
+                assert delayed.status_code == 409, delayed.text
+                with server.get_client() as client:
+                    completion = client.completions.create(
+                        model=ELASTIC_EP_MODEL_NAME,
+                        prompt="Hello, my name is",
+                        max_tokens=5,
+                        temperature=0,
+                    )
+                assert completion.choices[0].finish_reason in ("length", "stop")
+
+
+def _external_elastic_ep_status(server: RemoteOpenAIServer):
+    response = requests.post(server.url_for("is_scaling_elastic_ep"), timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def _wait_for_external_elastic_ep_receipt(
+    server: RemoteOpenAIServer, payload: dict
+) -> None:
+    deadline = time.monotonic() + 600
+    while time.monotonic() < deadline:
+        observed = _external_elastic_ep_status(server)
+        receipt = observed["local_submission"]
+        assert observed["phase"] != "failed", observed
+        if receipt is not None:
+            assert receipt["request"] == payload
+            assert receipt["error"] is None, receipt
+            if receipt["finished"] and observed["phase"] == "completed":
+                assert observed["operation_id"] == payload["operation_id"]
+                assert (
+                    observed["effective_data_parallel_size"]
+                    == payload["new_data_parallel_size"]
+                )
+                assert observed["topology_known"]
+                replay = requests.post(
+                    server.url_for("submit_elastic_ep"), json=payload, timeout=10
+                )
+                assert replay.status_code == 200, replay.text
+                assert replay.json()["request"] == payload
+                assert replay.json()["finished"]
+                return
+        time.sleep(0.1)
+    pytest.fail(f"Native participation did not complete: {payload['operation_id']}")
 
 
 def test_external_lb_server_info(server_manager):

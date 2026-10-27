@@ -194,22 +194,21 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             )
         if quant_config is None:
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-        if isinstance(quant_config, ModelOptMixedPrecisionConfig):
-            quant_algo = quant_config._resolve_quant_algo(prefix)
-            if quant_algo == "FP8":
-                return Qwen4ExpPLEFp8EmbeddingMethod()
-            if quant_algo == "NVFP4":
-                return Qwen4ExpPLENvFp4EmbeddingMethod()
-            if quant_algo is not None:
-                raise ValueError(
-                    f"Unsupported quant_algo {quant_algo!r} for the PLE embedding "
-                    f"{prefix!r}; expected FP8 or NVFP4"
-                )
-            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-        if isinstance(
-            quant_config, ModelOptQuantConfigBase
-        ) and quant_config.is_layer_excluded(prefix):
-            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        if isinstance(quant_config, ModelOptQuantConfigBase):
+            if quant_config.is_layer_excluded(prefix):
+                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+            if isinstance(quant_config, ModelOptMixedPrecisionConfig):
+                quant_algo = quant_config._resolve_quant_algo(prefix)
+                if quant_algo == "FP8":
+                    return Qwen4ExpPLEFp8EmbeddingMethod()
+                if quant_algo == "NVFP4":
+                    return Qwen4ExpPLENvFp4EmbeddingMethod()
+                if quant_algo is not None:
+                    raise ValueError(
+                        f"Unsupported quant_algo {quant_algo!r} for the PLE embedding "
+                        f"{prefix!r}; expected FP8 or NVFP4"
+                    )
+                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if (
             isinstance(quant_config, CompressedTensorsConfig)
             and quant_config.get_scheme_dict(None, layer_name=prefix) is None
@@ -223,29 +222,32 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         # Quark quantizes only Linear and MoE layers; PLE tables stay BF16.
         if isinstance(quant_config, QuarkConfig):
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-        if not isinstance(quant_config, Fp8Config):
-            raise NotImplementedError(
-                "Qwen4Exp PLE embedding does not support quantization config "
-                f"{type(quant_config).__name__}"
-            )
-
-        ignored_layers = quant_config.ignored_layers
-        if is_layer_skipped(
-            prefix,
-            ignored_layers,
-            quant_config.packed_modules_mapping,
-            match_mode=quant_config.ignored_layers_match_mode,
-        ):
-            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-        # PLE checkpoint shards form one runtime embedding parameter.
-        shard_prefix = f"{prefix}.shard_"
-        if any(name.startswith(shard_prefix) for name in ignored_layers):
-            return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-        if not quant_config.is_checkpoint_fp8_serialized:
+        if isinstance(quant_config, Fp8Config):
+            ignored_layers = quant_config.ignored_layers
+            if is_layer_skipped(
+                prefix,
+                ignored_layers,
+                quant_config.packed_modules_mapping,
+                match_mode=quant_config.ignored_layers_match_mode,
+            ):
+                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+            # PLE checkpoint shards form one runtime embedding parameter.
+            shard_prefix = f"{prefix}.shard_"
+            if any(name.startswith(shard_prefix) for name in ignored_layers):
+                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
+            if quant_config.is_checkpoint_fp8_serialized:
+                return Qwen4ExpPLEFp8EmbeddingMethod()
             raise NotImplementedError(
                 "Qwen4Exp PLE embedding only supports serialized FP8 checkpoints"
             )
-        return Qwen4ExpPLEFp8EmbeddingMethod()
+
+        logger.warning(
+            "Falling back to unquantized PLE embedding for %s "
+            "with quantization config %s.",
+            prefix,
+            type(quant_config).__name__,
+        )
+        return Qwen4ExpPLEUnquantizedEmbeddingMethod()
 
     def apply(
         self,
@@ -773,6 +775,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             )
         active_output = buffer[: gathered_ids.shape[0]]
         prefetch_stream.wait_stream(torch.cuda.current_stream())
+        # Prevent ID storage reuse until the prefetch stream finishes reading it.
         gathered_ids.record_stream(prefetch_stream)
         with torch.cuda.stream(prefetch_stream):
             self._lookup(gathered_ids, output=active_output)

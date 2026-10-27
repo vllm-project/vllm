@@ -17,8 +17,10 @@ from vllm.config.profiler import (
     validate_profile_prefix,
 )
 from vllm.distributed.elastic_ep.external_elastic_ep import (
+    ExternalElasticEPResizeRequest,
     ExternalElasticEPScaleConflict,
     ExternalElasticEPScaleStatus,
+    ExternalElasticEPSubmission,
 )
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
@@ -32,6 +34,7 @@ from vllm.entrypoints.serve.elastic_ep.middleware import (
     set_scaling_elastic_ep,
 )
 from vllm.exceptions import (
+    GenerationError,
     GracefulHTTPError,
     MaxQueuedTokensError,
     ProfilerAlreadyActiveError,
@@ -56,7 +59,7 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import EngineCoreRequest, PauseMode
+from vllm.v1.engine import CheckpointState, EngineCoreRequest, PauseMode
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -145,6 +148,14 @@ class AsyncLLM(EngineClient):
 
         self.vllm_config = vllm_config
         self._elastic_ep_lock = asyncio.Lock()
+        self._elastic_ep_submission_lock = asyncio.Lock()
+        self._elastic_ep_submission_task: asyncio.Task[None] | None = None
+        self._elastic_ep_submission_request: ExternalElasticEPResizeRequest | None = (
+            None
+        )
+        self._elastic_ep_receipt: asyncio.Future[ExternalElasticEPSubmission] | None = (
+            None
+        )
         self.model_config = vllm_config.model_config
         self.scheduler_config = vllm_config.scheduler_config
         self.observability_config = vllm_config.observability_config
@@ -308,6 +319,8 @@ class AsyncLLM(EngineClient):
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
         shutdown_prometheus()
+        if submission := getattr(self, "_elastic_ep_submission_task", None):
+            cancel_task_threadsafe(submission)
 
         if renderer := getattr(self, "renderer", None):
             renderer.shutdown()
@@ -603,6 +616,7 @@ class AsyncLLM(EngineClient):
         session_id: str | None = None,
         kv_hints: KvHintsEnvelope | None = None,
     ) -> RequestOutputCollector:
+        self._validate_resumable_request()
         self._validate_streaming_input_sampling_params(sampling_params)
 
         inputs = dict(
@@ -696,6 +710,13 @@ class AsyncLLM(EngineClient):
 
         queue._input_stream_task = asyncio.create_task(handle_inputs())
         return queue
+
+    def _validate_resumable_request(self) -> None:
+        if self.vllm_config.is_mm_encoder_only or self.model_config.is_diffusion:
+            raise VLLMValidationError(
+                "Resumable requests are not supported for encoder-only or "
+                "diffusion models."
+            )
 
     @staticmethod
     def _validate_streaming_input_sampling_params(
@@ -813,7 +834,10 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error or admission control rejection.
-        except (VLLMClientError, GracefulHTTPError) as e:
+        except (VLLMClientError, GracefulHTTPError, GenerationError) as e:
+            if q is not None:
+                # E.g. a paused engine rejected one child: reclaim its n>1 siblings.
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
@@ -883,6 +907,16 @@ class AsyncLLM(EngineClient):
                     for start in range(0, num_outputs, chunk_size):
                         end = start + chunk_size
                         outputs_slice = engine_core_outputs[start:end]
+                        if mm_processor_cache is not None:
+                            missing_hashes = [
+                                mm_hash
+                                for eco in outputs_slice
+                                for mm_hash in eco.mm_cache_miss_hashes or ()
+                            ]
+                            # Mark before publishing errors so even queued
+                            # renders invalidate before their next cache lookup.
+                            renderer.queue_mm_cache_invalidations(missing_hashes)
+
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
                             outputs_slice,
@@ -892,16 +926,6 @@ class AsyncLLM(EngineClient):
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
-
-                        # 2b) Recover from P0/P1 cache drift: the engine flags hashes
-                        # it couldn't find (mm_cache_miss_hashes); drop them from the
-                        # P0 shadow so the client's retry resends the data and
-                        # repopulates P1. Hot-path no-op (field is None otherwise).
-                        if mm_processor_cache is not None:
-                            for eco in outputs_slice:
-                                if eco.mm_cache_miss_hashes:
-                                    for mm_hash in eco.mm_cache_miss_hashes:
-                                        mm_processor_cache.invalidate(mm_hash)
 
                         # Allow other asyncio tasks to run between chunks
                         if end < num_outputs:
@@ -987,8 +1011,9 @@ class AsyncLLM(EngineClient):
         """Pause generation to allow model weight updates.
 
         All mode handling (abort / wait / keep) and cache clearing is done
-        in the engine. New generation/encoding requests will not be scheduled
-        until resume is called.
+        in the engine. In ``abort`` and ``wait`` mode, new requests are rejected
+        with ``RetryableRequestError`` from when the pause starts until
+        :meth:`resume_generation`; ``keep`` accepts and queues them.
 
         Args:
             mode: How to handle in-flight requests:
@@ -1003,7 +1028,9 @@ class AsyncLLM(EngineClient):
         """
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+        await self.engine_core.pause_generation_async(
+            mode=mode, clear_cache=clear_cache
+        )
         # Small sleep to help ensure that final outputs from any in-flight requests are
         # returned prior to this method returning. These outputs come out of the engine
         # prior to the wait-for-idle completion event, but involve additional async
@@ -1085,7 +1112,7 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error or admission control rejection.
-        except (VLLMClientError, GracefulHTTPError):
+        except (VLLMClientError, GracefulHTTPError, GenerationError):
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
             raise
@@ -1128,6 +1155,7 @@ class AsyncLLM(EngineClient):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         async with self._profile_lock:
             if self._profile_session_guard_enabled and self._profile_session_active:
@@ -1145,6 +1173,7 @@ class AsyncLLM(EngineClient):
                     profile_prefix,
                     delay_iterations,
                     max_iterations,
+                    profiler_kwargs=profiler_kwargs,
                 )
             except Exception:
                 self._profile_session_active = False
@@ -1205,11 +1234,18 @@ class AsyncLLM(EngineClient):
 
         return fully_awake
 
-    async def checkpoint_prepare(self) -> None:
-        await self.collective_rpc("checkpoint_prepare")
+    async def checkpoint_prepare(self, mode: PauseMode = "wait") -> str | None:
+        refusal = await self.engine_core.checkpoint_prepare_async(mode)
+        if refusal is None:
+            # Preparing resets the engine's multimodal cache.
+            await self.renderer.clear_mm_cache_async()
+        return refusal
 
     async def checkpoint_restore(self) -> None:
-        await self.collective_rpc("checkpoint_restore")
+        await self.engine_core.checkpoint_restore_async()
+
+    async def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
+        return await self.engine_core.checkpoint_state_async()
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
@@ -1276,6 +1312,94 @@ class AsyncLLM(EngineClient):
             else:
                 set_scaling_elastic_ep(False)
             raise
+
+    async def submit_elastic_ep(
+        self,
+        request: ExternalElasticEPResizeRequest,
+    ) -> ExternalElasticEPSubmission:
+        """Accept this client's participation without waiting for the collective."""
+        parallel = self.vllm_config.parallel_config
+        if not (parallel.enable_elastic_ep and parallel.data_parallel_external_lb):
+            raise ValueError("Bounded submission requires external Elastic EP.")
+        async with self._elastic_ep_submission_lock:
+            task = self._elastic_ep_submission_task
+            if task is not None and not task.done():
+                if request != self._elastic_ep_submission_request:
+                    raise ExternalElasticEPScaleConflict(
+                        "Another local resize request is unresolved."
+                    )
+                receipt = self._elastic_ep_receipt
+            else:
+                receipt = asyncio.get_running_loop().create_future()
+                receipt.add_done_callback(self._consume_receipt_exception)
+                self._elastic_ep_receipt = receipt
+                self._elastic_ep_submission_request = request
+                self._elastic_ep_submission_task = asyncio.create_task(
+                    self._execute_submitted_resize(request, receipt),
+                    name=f"elastic-ep-{request.operation_id}",
+                )
+                self._elastic_ep_submission_task.add_done_callback(
+                    self._log_submission_failure
+                )
+        assert receipt is not None
+        return await asyncio.wait_for(asyncio.shield(receipt), timeout=5)
+
+    @staticmethod
+    def _consume_receipt_exception(
+        receipt: asyncio.Future[ExternalElasticEPSubmission],
+    ) -> None:
+        if not receipt.cancelled():
+            receipt.exception()
+
+    @staticmethod
+    def _log_submission_failure(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error(
+                "External Elastic EP execution could not retain its outcome",
+                exc_info=error,
+            )
+
+    async def _execute_submitted_resize(
+        self,
+        request: ExternalElasticEPResizeRequest,
+        acknowledgment: asyncio.Future[ExternalElasticEPSubmission],
+    ) -> None:
+        try:
+            receipt = await self.engine_core.accept_external_elastic_ep_request(request)
+        except asyncio.CancelledError:
+            acknowledgment.cancel()
+            raise
+        except Exception as error:
+            acknowledgment.set_exception(error)
+            return
+        if receipt.started or receipt.finished:
+            acknowledgment.set_result(receipt)
+            return
+        try:
+            await self.engine_core.record_external_elastic_ep_participation(
+                request.operation_id
+            )
+            acknowledgment.set_result(receipt)
+            await self.scale_elastic_ep(
+                request.new_data_parallel_size,
+                request.drain_timeout,
+                request.operation_id,
+                request.expected_instance_id,
+            )
+        except BaseException as error:
+            if not acknowledgment.done():
+                acknowledgment.set_exception(error)
+            await self.engine_core.record_external_elastic_ep_participation(
+                request.operation_id,
+                error=str(error) or type(error).__name__,
+            )
+            if not isinstance(error, Exception):
+                raise
+            logger.exception("External Elastic EP participation failed")
+        else:
+            await self.engine_core.record_external_elastic_ep_participation(
+                request.operation_id, finished=True
+            )
 
     async def scale_elastic_ep(
         self,

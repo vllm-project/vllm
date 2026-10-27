@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from vllm.distributed.elastic_ep.external_elastic_ep import (
+    ExternalElasticEPResizeRequest,
     ExternalElasticEPScaleConflict,
     ExternalElasticEPScaleStatus,
 )
@@ -30,6 +31,29 @@ def engine_client(request: Request) -> EngineClient:
 
 
 router = APIRouter()
+
+
+@router.post("/submit_elastic_ep", dependencies=[Depends(validate_json_request)])
+async def submit_elastic_ep(raw_request: Request):
+    try:
+        body = await raw_request.json()
+        target = msgspec.convert(body, type=ExternalElasticEPResizeRequest, strict=True)
+        receipt = await engine_client(raw_request).submit_elastic_ep(target)
+    except (json.JSONDecodeError, msgspec.ValidationError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ExternalElasticEPScaleConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except TimeoutError as error:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Acceptance response unavailable; "
+                "observe or replay the identical request."
+            ),
+        ) from error
+    return JSONResponse(
+        msgspec.to_builtins(receipt), status_code=200 if receipt.finished else 202
+    )
 
 
 def _optional_identifier(body: dict, name: str) -> str | None:

@@ -116,7 +116,7 @@ LoRA dynamic loading & unloading is enabled in the API server. This should ONLY 
 
 For further details on profiling vLLM, please refer to [this page](../../contributing/profiling.md).
 
-- `/start_profile` - Start PyTorch profiler
+- `/start_profile` - Start PyTorch profiler (accepts an optional JSON body with `profiler_kwargs` to pass keyword arguments to the underlying profiler)
 - `/stop_profile` - Stop PyTorch profiler
 
 ### SageMaker APIs
@@ -202,6 +202,54 @@ Further operations are rejected; replaying the failed operation remains availabl
 for observation. Restart the runtime before issuing another resize. Inference
 admission remains closed after commit failure, while health and status remain
 queryable. These fields do not provide an engine recovery mechanism.
+
+### Bounded external scaling submission
+
+Use `POST /submit_elastic_ep` when your orchestrator must return before joining
+engines start or a collective finishes. This opt-in route requires externally
+managed Elastic EP; synchronous `/scale_elastic_ep` and Ray callers keep their
+existing behavior.
+
+Read `POST /is_scaling_elastic_ep` on each existing client and retain its
+`instance_id` and opaque `topology_token`. Send the same operation and target to
+every existing client, with that client's original instance and token:
+
+```json
+{
+  "operation_id": "resize-42",
+  "expected_instance_id": "<this client's instance_id>",
+  "base_topology_token": "<this client's topology_token>",
+  "new_data_parallel_size": 4,
+  "drain_timeout": 120
+}
+```
+
+HTTP 202 acknowledges only this client's participation, not delivery to its
+peers or completed membership. Native execution continues independently of the
+HTTP connection. Status exposes the retained `local_submission`, including the
+owned `first_rank`/`local_size`, execution progress and error. Observe collective
+completion and every client's finished receipt, then check inference readiness.
+Serving readiness remains engine/runtime-owned, not an orchestrator grant.
+
+After a timeout or lost response, replay the identical body with its original
+instance and token. A terminal replay returns HTTP 200; conflicting reuse or a
+stale new request returns HTTP 409. One client's refusal does not establish that
+the collective was rejected. Pending or uncertain participation cannot be
+superseded. The latest receipt remains observable for the API process lifetime
+until a safe successor is accepted; tokens change on acceptance and commit, so
+delayed old requests cannot start again after that successor. A process restart
+changes its instance and requires external recovery.
+
+A retired client rejects new operations without replacing its retained retirement
+receipt. Status and identical replay of that retirement remain available.
+
+## Process Checkpoint APIs
+
+For external checkpoint/restore orchestrators, available with `--enable-sleep-mode`. Preparing drains the engine and releases its KV cache and other external state, any number of times. Until `/checkpoint/restore`, new requests get a retryable error and `/health` still returns 200, as while asleep. `--checkpoint-prepare-on-startup` prepares each engine once it starts.
+
+- `/checkpoint/prepare` - Start preparing, draining with `?mode=wait` (default), `abort` or `keep`; 200 once started or already preparing, 400 if the engine cannot prepare now
+- `/checkpoint/status` - Return the state: 200 once prepared, 503 until then, 500 after a failure
+- `/checkpoint/restore` - Bring back released state and serve; 200 if already restoring or serving, 400 while preparing or after a failure
 
 ## Server in development mode
 

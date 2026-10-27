@@ -50,7 +50,7 @@ class ScalingMiddleware:
         # waiting for the external orchestrator to remove its process.
         rank_retired = get_elastic_ep_rank_retired()
         serving_paused = get_scaling_elastic_ep() or rank_retired
-        scale_request = scope["path"] == "/scale_elastic_ep"
+        scale_request = scope["path"] in {"/scale_elastic_ep", "/submit_elastic_ep"}
         if (
             serving_paused
             and scope["path"] not in _SCALING_OBSERVABILITY_PATHS
