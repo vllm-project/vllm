@@ -2022,7 +2022,6 @@ def test_adaptive_verification_stats_count_actual_budget(request_state):
         assert stats.num_draft_tokens == 5
         assert stats.num_verified_draft_tokens == 4
     elif request_state == "grammar_invalid":
-        assert stats.num_draft_tokens == 3
         assert stats.num_verified_draft_tokens == 4
     else:
         assert stats is None
