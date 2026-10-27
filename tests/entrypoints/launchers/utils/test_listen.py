@@ -158,6 +158,14 @@ class TestTcpBindScenario:
         finally:
             cleanup_listen_socket(sock)
 
+    def test_port_required_without_uds(self):
+        # When neither ``uds`` nor ``port`` is provided, the error must be a
+        # clear ValueError rather than a TypeError from ``bind()``.
+        with pytest.raises(ValueError, match="port is required"):
+            setup_listen_address(
+                host="127.0.0.1", port=None, uds=None, reuse_port=False
+            )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Scenario: serving over HTTPS
@@ -213,12 +221,18 @@ class TestSslScenario:
 
 
 class TestReusePortScenario:
-    """Sharing one TCP port across multiple API server processes."""
+    """The SO_REUSEPORT socket option exposed by ``setup_listen_address``.
+
+    Note: the launcher binds once in the parent process and passes the same
+    socket fd to every API server worker; it does not rebind per worker.
+    These tests only cover the socket option itself.
+    """
 
     def test_two_sockets_share_same_port(self):
         """With reuse_port=True, two sockets can bind the same port.
 
-        This is what enables ``api_server_count > 1`` in the launcher.
+        Exercises the SO_REUSEPORT option. The launcher shares one bound
+        socket across workers rather than rebinding per worker.
         """
         _, sock1 = setup_listen_address(host="127.0.0.1", port=0, reuse_port=True)
         try:

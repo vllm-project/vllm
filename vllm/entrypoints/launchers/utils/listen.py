@@ -69,14 +69,6 @@ def setup_listen_address(
         if port is None:
             raise ValueError("port is required when uds is not provided")
 
-        if port == 0 and reuse_port:
-            raise ValueError(
-                "--port 0 is incompatible with --api-server-count > 1. Each "
-                "worker binds its own socket with SO_REUSEPORT; with an "
-                "ephemeral port every worker would end up on a different port. "
-                "Please pass an explicit --port, or run a single API server."
-            )
-
         host = host or ""
 
         try:
