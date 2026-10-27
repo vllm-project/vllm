@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesInputTokensRequest,
+    ResponsesInputTokensResponse,
     ResponsesRequest,
     ResponsesResponse,
     StreamingResponsesResponse,
@@ -75,6 +77,33 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     return StreamingResponse(
         content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
     )
+
+
+@router.post(
+    "/v1/responses/input_tokens",
+    dependencies=[Depends(validate_json_request)],
+    response_model=ResponsesInputTokensResponse,
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def count_input_tokens(
+    request: ResponsesInputTokensRequest, raw_request: Request
+):
+    handler = responses(raw_request)
+    if handler is None:
+        raise NotImplementedError("The model does not support Responses API")
+
+    response = await handler.count_input_tokens(request)
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(
+            content=response.model_dump(mode="json", by_alias=True),
+            status_code=response.error.code,
+        )
+    return JSONResponse(content=response.model_dump(mode="json", by_alias=True))
 
 
 @router.get("/v1/responses/{response_id}")

@@ -243,6 +243,105 @@ class PromptCacheOptionsParam(PromptCacheOptions):
         )
 
 
+def _parse_input_items(data: Any) -> Any:
+    """Parse input items that are missing required fields or that Pydantic
+    cannot disambiguate in a Union of TypedDict / BaseModel types.
+
+    Specifically handles:
+    - function_call -> ResponseFunctionToolCall
+    - reasoning     -> ResponseReasoningItem (auto-generates id)
+    - message(role=assistant) -> ResponseOutputMessage (auto-generates
+      id/status and annotations)
+
+    Invalid structures are left for Pydantic to reject.
+    """
+    if not isinstance(data, dict):
+        return data
+    input_data = data.get("input")
+
+    # Early return for None, strings, or bytes
+    if input_data is None or isinstance(input_data, (str, bytes)):
+        return data
+
+    # Convert iterators (like ValidatorIterator) to list
+    if not isinstance(input_data, list):
+        try:
+            input_data = list(input_data)
+        except TypeError:
+            # Not iterable, leave as-is for Pydantic to handle
+            return data
+
+    processed_input = []
+    for item in input_data:
+        if not isinstance(item, dict):
+            processed_input.append(item)
+            continue
+
+        item_type = item.get("type")
+
+        if item_type == "function_call":
+            try:
+                processed_input.append(ResponseFunctionToolCall(**item))
+            except ValidationError:
+                logger.debug(
+                    "Failed to parse function_call to ResponseFunctionToolCall, "
+                    "leaving for Pydantic validation"
+                )
+                processed_input.append(item)
+
+        elif item_type == "reasoning":
+            if "id" not in item:
+                item = {**item, "id": f"rs_{random_uuid()}"}
+            try:
+                processed_input.append(ResponseReasoningItem(**item))
+            except ValidationError:
+                logger.debug(
+                    "Failed to parse reasoning to ResponseReasoningItem, "
+                    "leaving for Pydantic validation"
+                )
+                processed_input.append(item)
+
+        elif item_type == "message" and item.get("role") == "assistant":
+            content = item.get("content")
+            if not isinstance(content, list):
+                # String content is a valid EasyInputMessageParam,
+                # do not coerce it to ResponseOutputMessage
+                processed_input.append(item)
+                continue
+
+            original_item = item
+            item = dict(item)
+            if "id" not in item:
+                item["id"] = f"msg_{random_uuid()}"
+            if "status" not in item:
+                item["status"] = "completed"
+            # ResponseOutputText requires annotations
+            new_content = []
+            for c in content:
+                if (
+                    isinstance(c, dict)
+                    and c.get("type") == "output_text"
+                    and "annotations" not in c
+                ):
+                    c = {**c, "annotations": []}
+                new_content.append(c)
+            item["content"] = new_content
+            try:
+                processed_input.append(ResponseOutputMessage(**item))
+            except ValidationError:
+                logger.debug(
+                    "Failed to parse assistant message to ResponseOutputMessage, "
+                    "leaving for Pydantic validation"
+                )
+                processed_input.append(original_item)
+
+        else:
+            processed_input.append(item)
+
+    data["input"] = processed_input
+    return data
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -702,102 +801,7 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def input_item_parsing(cls, data):
-        """Parse input items that are missing required fields or that Pydantic
-        cannot disambiguate in a Union of TypedDict / BaseModel types.
-
-        Specifically handles:
-        - function_call -> ResponseFunctionToolCall
-        - reasoning     -> ResponseReasoningItem (auto-generates id)
-        - message(role=assistant) -> ResponseOutputMessage (auto-generates
-          id/status and annotations)
-
-        Invalid structures are left for Pydantic to reject.
-        """
-        if not isinstance(data, dict):
-            return data
-        input_data = data.get("input")
-
-        # Early return for None, strings, or bytes
-        if input_data is None or isinstance(input_data, (str, bytes)):
-            return data
-
-        # Convert iterators (like ValidatorIterator) to list
-        if not isinstance(input_data, list):
-            try:
-                input_data = list(input_data)
-            except TypeError:
-                # Not iterable, leave as-is for Pydantic to handle
-                return data
-
-        processed_input = []
-        for item in input_data:
-            if not isinstance(item, dict):
-                processed_input.append(item)
-                continue
-
-            item_type = item.get("type")
-
-            if item_type == "function_call":
-                try:
-                    processed_input.append(ResponseFunctionToolCall(**item))
-                except ValidationError:
-                    logger.debug(
-                        "Failed to parse function_call to ResponseFunctionToolCall, "
-                        "leaving for Pydantic validation"
-                    )
-                    processed_input.append(item)
-
-            elif item_type == "reasoning":
-                if "id" not in item:
-                    item = {**item, "id": f"rs_{random_uuid()}"}
-                try:
-                    processed_input.append(ResponseReasoningItem(**item))
-                except ValidationError:
-                    logger.debug(
-                        "Failed to parse reasoning to ResponseReasoningItem, "
-                        "leaving for Pydantic validation"
-                    )
-                    processed_input.append(item)
-
-            elif item_type == "message" and item.get("role") == "assistant":
-                content = item.get("content")
-                if not isinstance(content, list):
-                    # String content is a valid EasyInputMessageParam,
-                    # do not coerce it to ResponseOutputMessage
-                    processed_input.append(item)
-                    continue
-
-                original_item = item
-                item = dict(item)
-                if "id" not in item:
-                    item["id"] = f"msg_{random_uuid()}"
-                if "status" not in item:
-                    item["status"] = "completed"
-                # ResponseOutputText requires annotations
-                new_content = []
-                for c in content:
-                    if (
-                        isinstance(c, dict)
-                        and c.get("type") == "output_text"
-                        and "annotations" not in c
-                    ):
-                        c = {**c, "annotations": []}
-                    new_content.append(c)
-                item["content"] = new_content
-                try:
-                    processed_input.append(ResponseOutputMessage(**item))
-                except ValidationError:
-                    logger.debug(
-                        "Failed to parse assistant message to ResponseOutputMessage, "
-                        "leaving for Pydantic validation"
-                    )
-                    processed_input.append(original_item)
-
-            else:
-                processed_input.append(item)
-
-        data["input"] = processed_input
-        return data
+        return _parse_input_items(data)
 
     @model_validator(mode="before")
     @classmethod
@@ -865,6 +869,58 @@ class ResponsesRequest(OpenAIBaseModel):
                 data["tool_choice"] = {**tool_choice, "name": resolved}
 
         return data
+
+
+class ResponsesInputTokensRequest(OpenAIBaseModel):
+    model: str | None = None
+    input: (
+        str
+        | list[
+            Annotated[
+                ResponseInputOutputItem, BeforeValidator(_default_input_image_details)
+            ]
+        ]
+        | None
+    ) = None
+    instructions: str | None = None
+    parallel_tool_calls: bool | None = None
+    previous_response_id: str | None = None
+    reasoning: Reasoning | None = None
+    text: ResponseTextConfig | None = None
+    tool_choice: ToolChoice | None = None
+    tools: list[Tool] | None = None
+    truncation: Literal["auto", "disabled"] = "disabled"
+    # vLLM extensions that change the rendered prompt
+    chat_template_kwargs: dict[str, Any] | None = None
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_input(cls, data):
+        if isinstance(data, dict):
+            for parameter in ("conversation", "personality"):
+                if data.get(parameter) is not None:
+                    raise VLLMValidationError(
+                        f"{parameter} is not supported for input token counting.",
+                        parameter=parameter,
+                    )
+        return _parse_input_items(data)
+
+    def to_responses_request(self) -> ResponsesRequest:
+        data = self.model_dump(include=set(type(self).model_fields), exclude_none=True)
+        data.update(
+            input=self.input if self.input is not None else [],
+            store=False,
+            stream=False,
+            background=False,
+        )
+        return ResponsesRequest.model_validate(data)
+
+
+class ResponsesInputTokensResponse(OpenAIBaseModel):
+    object: Literal["response.input_tokens"] = "response.input_tokens"
+    input_tokens: int
 
 
 class ResponsesResponse(OpenAIBaseModel):
