@@ -366,13 +366,17 @@ class RemoteDraftSession:
                 max_buffered_bytes=MAX_HANDSHAKE_BYTES + 5,
             )
             request_id = self._send(hello, deadline=deadline)
-            _, ack = self._await(
+            envelope, ack = self._await(
                 lambda env, msg: (
                     isinstance(msg, HelloAck) and env.request_id == request_id
                 ),
                 deadline,
                 request_ids=(request_id,),
             )
+            if envelope.session_id != ack.session_id:
+                raise RemoteDraftError(
+                    "session ID in HELLO acknowledgement does not match its envelope"
+                )
         except TransportTimeout:
             self._drop_connection()
             raise RemoteDraftError(
@@ -1177,6 +1181,11 @@ class RemoteDraftSession:
             except ProtocolError as e:
                 self._invalidate(f"protocol error from server: {e}")
                 raise ConnectionClosed(f"protocol error from server: {e}") from e
+            if self._alive and envelope.session_id != self._session_id:
+                if isinstance(message, ProposalResponse):
+                    self._purge_result(message)
+                logger.debug("Ignoring reply for another remote draft session")
+                continue
             if isinstance(message, ErrorReply):
                 if envelope.request_id == 0 or envelope.request_id in request_ids:
                     raise RemoteDraftError(
@@ -1188,17 +1197,28 @@ class RemoteDraftSession:
                     message.detail,
                 )
                 continue
+            if envelope.request_id not in request_ids:
+                if isinstance(message, ProposalResponse):
+                    self._abandoned_batches.discard(message.batch_id)
+                    self._purge_result(message)
+                logger.debug(
+                    "Ignoring reply to another request %d", envelope.request_id
+                )
+                continue
+            if not matches(envelope, message):
+                if isinstance(message, ProposalResponse):
+                    self._purge_result(message)
+                logger.debug(
+                    "Ignoring unexpected %s (request %d)",
+                    type(message).__name__,
+                    envelope.request_id,
+                )
+                continue
             if isinstance(message, ProposalResponse) and not self._accept_response(
                 message
             ):
                 continue
-            if matches(envelope, message):
-                return envelope, message
-            logger.debug(
-                "Ignoring unexpected %s (request %d)",
-                type(message).__name__,
-                envelope.request_id,
-            )
+            return envelope, message
 
     def _accept_response(self, response: ProposalResponse) -> bool:
         if response.sequence_number <= self._last_sequence_number:
