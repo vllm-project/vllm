@@ -2235,6 +2235,80 @@ async fn control_reports_server_and_model_info() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn control_sleep_rejects_level_above_two_before_engine_call() {
+    let mut ready = default_ready_response();
+    ready.enable_sleep_mode = true;
+    let (level_tx, level_rx) = tokio::sync::oneshot::channel();
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-sleep-level".to_vec(),
+            ready,
+            Arc::new(FakeTextBackend),
+            None,
+            move |dealer, push| {
+                boxed_test_future(async move {
+                    let frames = recv_engine_message(dealer).await;
+                    assert_eq!(frames[0].as_ref(), &[0x03]);
+                    let payload = decode_value(&frames[1]).expect("decode utility payload");
+                    let fields = payload.as_array().expect("utility payload array");
+                    let call_id = fields[1].as_u64().expect("utility call id");
+                    assert_eq!(fields[2].as_str(), Some("sleep"));
+                    let args = fields[3].as_array().expect("sleep arguments");
+                    level_tx.send(args[0].as_u64()).expect("report sleep level");
+                    send_outputs(
+                        push,
+                        UtilityCallOutput {
+                            output: UtilityOutput {
+                                call_id: call_id.into(),
+                                failure_message: None,
+                                result: Some(UtilityResultEnvelope::without_type_info(Value::Nil)),
+                            },
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = ControlClient::new(channel);
+
+    let status = client
+        .sleep(pb::SleepRequest {
+            level: Some(3),
+            ..Default::default()
+        })
+        .await
+        .expect_err("unsupported sleep level should be rejected");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(status.message(), "level must be between 0 and 2");
+
+    client
+        .sleep(pb::SleepRequest {
+            level: Some(2),
+            ..Default::default()
+        })
+        .await
+        .expect("level 2 sleep should reach the engine");
+    assert_eq!(
+        level_rx.await.expect("receive forwarded sleep level"),
+        Some(2)
+    );
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn control_lora_lifecycle_selects_adapter_for_generation() {
     let mut ready = default_ready_response();
     ready.supports_lora = true;
