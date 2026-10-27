@@ -239,3 +239,23 @@ def test_gate_linear_bf16x3_tier_traces_fullgraph(monkeypatch):
 
     eager_out, _ = gate(x)
     torch.testing.assert_close(out, eager_out, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [
+        (1, (8, 64, 4, 16)),
+        (8, (8, 64, 4, 16)),
+        (16, (32, 128, 3, 16)),
+        (24, (32, 128, 3, 16)),
+        (32, (32, 128, 3, 16)),
+    ],
+)
+def test_sm90_split16_config_boundary(num_tokens: int, expected: tuple):
+    from vllm.model_executor.layers.fused_moe.router import (
+        bf16x3_router_gemm_sm90,
+    )
+
+    assert bf16x3_router_gemm_sm90._pick_config(num_tokens, 8192, 256, 132) == (
+        expected
+    )

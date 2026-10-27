@@ -124,7 +124,7 @@ class _Sm90BF16x3RouterGemm:
         assert block_k in (64, 128)
         assert block_t % 8 == 0 and block_t <= 256
         # Portable cluster sizes; every split reduces whole float4 chunks.
-        assert split_k in (1, 2, 4, 8)
+        assert split_k in (1, 2, 4, 8, 16)
         assert _BLOCK_E * block_t % (4 * split_k) == 0
         self.block_t = block_t
         self.block_k = block_k
@@ -500,13 +500,42 @@ class _Sm90BF16x3RouterGemm:
 
 # Candidate tiles as (block_t, block_k, num_stages) -> (fixed_us, us_per_k64):
 # the time of one CTA running alone on an SM, fitted to cold-L2 CUDA-graph
-# timings on H200. Every tile is offered with split_k 1, 2, 4 and 8.
+# timings on H200. The base model offers split_k 1, 2, 4 and 8. Split 16 has
+# a larger cluster-reduction cost, so it uses a separate fit.
 _TILE_COST = {
+    (8, 128, 3): (3.25, 0.390),
     (32, 128, 3): (3.72, 0.383),
     (64, 64, 4): (4.18, 0.475),
     (96, 128, 2): (5.11, 0.513),
     (128, 128, 2): (5.88, 0.568),
 }
+
+_SPLIT16_TILE_COST = {
+    (8, 64, 4): (3.00, 0.330),
+    (8, 128, 3): (3.20, 0.410),
+    (32, 128, 3): (3.60, 0.470),
+    (64, 64, 4): (4.95, 0.350),
+}
+
+
+def _config_cost(
+    num_tokens: int,
+    e_tiles: int,
+    num_sms: int,
+    tile: tuple[int, int, int],
+    split_k: int,
+    k_tiles: int,
+    cost: tuple[float, float],
+) -> tuple[float, tuple[int, int, int, int]]:
+    block_t, block_k, num_stages = tile
+    fixed_us, us_per_k64 = cost
+    slots = num_sms if split_k <= 2 else num_sms * 15 // 16 // split_k * split_k
+    ctas = e_tiles * math.ceil(num_tokens / block_t) * split_k
+    k64_per_cta = math.ceil(k_tiles / split_k) * block_k // 64
+    return (
+        math.ceil(ctas / slots) * (fixed_us + us_per_k64 * k64_per_cta),
+        (block_t, block_k, num_stages, split_k),
+    )
 
 
 @cache
@@ -520,18 +549,36 @@ def _pick_config(num_tokens: int, K: int, E: int, num_sms: int) -> tuple:
     e_tiles = math.ceil(E / _BLOCK_E)
     best = None
     for tile, (fixed_us, us_per_k64) in _TILE_COST.items():
-        block_t, block_k, num_stages = tile
+        block_t, block_k, _ = tile
         k_tiles = math.ceil(K / block_k)
         for split_k in (1, 2, 4, 8):
             if split_k > k_tiles:
                 continue
-            slots = num_sms if split_k <= 2 else num_sms * 15 // 16 // split_k * split_k
-            ctas = e_tiles * math.ceil(num_tokens / block_t) * split_k
-            k64_per_cta = math.ceil(k_tiles / split_k) * block_k // 64
-            cost = math.ceil(ctas / slots) * (fixed_us + us_per_k64 * k64_per_cta)
-            if best is None or cost < best[0]:
-                best = (cost, (block_t, block_k, num_stages, split_k))
+            cost = _config_cost(
+                num_tokens,
+                e_tiles,
+                num_sms,
+                tile,
+                split_k,
+                k_tiles,
+                (fixed_us, us_per_k64),
+            )
+            if best is None or cost[0] < best[0]:
+                best = cost
     assert best is not None
+    for tile, tile_cost in _SPLIT16_TILE_COST.items():
+        block_t, block_k, _ = tile
+        if block_t == 8 and num_tokens > 24:
+            continue
+        k_tiles = math.ceil(K / block_k)
+        split_k = 16
+        if split_k > k_tiles:
+            continue
+        cost = _config_cost(
+            num_tokens, e_tiles, num_sms, tile, split_k, k_tiles, tile_cost
+        )
+        if cost[0] < best[0]:
+            best = cost
     return best[1]
 
 
