@@ -10,6 +10,7 @@ model while loading in seconds. Requires SM90/SM100 (DeepGEMM indexer).
 """
 
 import os
+import weakref
 
 import pytest
 import torch
@@ -42,6 +43,18 @@ def _prompt_ids(n: int, seed: int = 0) -> TokensPrompt:
     return TokensPrompt(prompt_token_ids=_ids(n, seed))
 
 
+_live_llms: weakref.WeakSet[LLM] = weakref.WeakSet()
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_llms():
+    """A failed test's traceback keeps its LLM alive past the global cleanup;
+    shut the engines down so the next test starts with a free GPU."""
+    yield
+    for llm in list(_live_llms):
+        llm.llm_engine.engine_core.shutdown()
+
+
 def _make_llm(**kwargs) -> LLM:
     args = dict(
         model=PRUNED_MODEL,
@@ -54,7 +67,9 @@ def _make_llm(**kwargs) -> LLM:
         max_num_seqs=8,
     )
     args.update(kwargs)
-    return LLM(**args)
+    llm = LLM(**args)
+    _live_llms.add(llm)
+    return llm
 
 
 def _kv_layout(worker):
@@ -74,7 +89,7 @@ def _kv_layout(worker):
 
 
 def test_kv_cache_layout(monkeypatch: pytest.MonkeyPatch):
-    """One MLA+indexer group, one kpool-tail group and 3 Mamba groups that
+    """One MLA+indexer group, one kpool-tail ring group and 3 Mamba groups that
     alias the MLA tensor, as with the full model."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     llm = _make_llm()
@@ -84,20 +99,20 @@ def test_kv_cache_layout(monkeypatch: pytest.MonkeyPatch):
     assert kinds == sorted(
         [
             ("MLAAttentionSpec", "MLAAttentionSpec"),
-            ("KpoolTailSpec",),
+            ("CircularBufferSpec",),
             ("MambaSpec",),
             ("MambaSpec",),
             ("MambaSpec",),
         ]
     )
-    tail_group = next(g for g in groups if g[0] == ["KpoolTailSpec"])
+    tail_group = next(g for g in groups if g[0] == ["CircularBufferSpec"])
     assert tail_group[2] == 4  # index_kpool
     block_size = llm.llm_engine.vllm_config.cache_config.block_size
     assert block_size % (4 * 32) == 0  # paged-MQA pool-page alignment
     for kinds, _, bs in groups:
-        # The kpool tail scratch group pages index_kpool tokens; every other
-        # group uses the auto block size.
-        assert bs == (4 if kinds == ["KpoolTailSpec"] else block_size), kinds
+        # Without drafts the kpool tail ring holds index_kpool tokens; every
+        # other group uses the auto block size.
+        assert bs == (4 if kinds == ["CircularBufferSpec"] else block_size), kinds
 
     attn = next(k for k in tensors if k[0].endswith("self_attn.attn"))
     mamba = [k for k in tensors if k[0].endswith("self_attn")]
