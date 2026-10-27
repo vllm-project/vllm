@@ -3778,3 +3778,20 @@ n'a plus rien à reprendre), 0 erreur · nbaudit `ok:true` **14:05:50Z**, `subpa
 
 **Registre** : Q41 seule, ouverte — **critère d'échec non rempli et urgence retombée** : la
 montée s'arrête à ~22 570, marge 432 MiB stable.
+
+## 27/10 16:11Z — pruneur au cap (14,28 Go repris), marginal 94,37 % sous trafic doublé, #431 en grappe croissante
+
+Cycle 2 h. Prod : health 200 @3,2 ms, StartedAt 02:15:05Z inchangé (**14 h sans restart**), RC=0, OOM 0, 3 conteneurs, 3 879 sondes OK, `/dev/shm` 24G/63G. VRAM GPU 0 **22 569 MiB** (+1 vs 22 568) — le plateau 22 500-22 600 tient un cycle de plus, marge 431 MiB sous 23 000 ; Q41 inchangée (reco rollback 0.70 au prochain restart naturel, urgence retombée). 2 WEDGE `fail 1/2` (14:39:35, 15:38:05) pendant prefills lourds 175,9 M/215,6 M tok — documenté, aucun 2/2.
+
+**Amortissement (§5quater)** : hit total 92,88 % (214 029 648/230 450 644) ; **marginal 2 h 94,37 %** (Δ 63 926 944/67 737 711). Le trafic a presque doublé (8,5 req/min mesurées vs ~6 au cycle précédent, 1 271 lignes/150 min) et le ratio marginal MONTE — le régime « sessions récurrentes servies par leurs préfixes » tient sous charge. Préemptions 0.
+
+**Pruneur fs : premier vrai trim depuis le patch anti-réécriture (PR #211).** Passage 15:50:04Z : **584 fichiers / 14,28 Go supprimés, atterrissage exact au cap (`bytes_after_expected` = 250,0 Go), 0 erreur**, 2 s d'exécution. Les cycles précédents lisaient `deleted 0` parce que le tier restait sous cap ; le journal de réécritures ≈ 0 fait maintenant grossir le stock d'âge > 30 min et le pruneur le rabat au plafond. Piège d'instrument noté : `bytes_total` dans `fstier_state.json` est la mesure AVANT passage (268,4 Go affichés alors que l'état post-run est 250,0).
+
+**#431 en grappe croissante (datapoint hub).** **5 signatures 400 + corps > 100 K en 2,5 h** (14:17:23, 15:12:28, 15:13:41, 15:38:35, 16:08:40 — toutes Bun/1.3.14, donc hub claudish), corps **882 → 887 → 952 → 1044 K, croissants**, dont une paire à **73 s d'écart** (882→887 K). Lecture : le pattern appris (« le 400 ne se re-tente pas en local, la suivante arrive plus petite = auto-compact ») ne tient plus ici — la taille CROÎT entre occurrences, donc soit la session ajoute du contenu sans que le compact la ramène sous la fenêtre, soit ce sont des tours successifs d'une session qui grossit (cadence ~30 min = tour de cron d'une lane haiku). Coût par occurrence : 1 requête morte + 1 compact. Aucun impact moteur (0 wedges 2/2, préemptions 0). À rendre à claudish avec la fenêtre exacte — le remède est hub-side (#431).
+
+**Sécurité** : empreinte nouvelle `f8628f6da447` — **1 seule occurrence sur TOUT le journal (23/10 → 27/10)** : 16:09:25Z, `/v1/models`, 401, LAN direct (pas de x_forwarded_for), UA Python-urllib/3.14, 0 octet. Famille « sonde de clé morte locale » (`b72157f4bb61`) : jamais de 200, jamais d'inférence — pas une alerte, consignée pour le census. ZOLTRAAK absent de la fenêtre (rafales ~10 h, pas repassé). Les 26×401 = 25 poller `1f7f6080cb65` (Go-http-client, /v1/models ~6 min) + 1 `f8628f6da447`. Aucune IP externe nouvelle avec 200 (seuls 90.65.170.144 site hairpin 461×200 et LAN direct).
+
+**Autres** : condensation nominale (alternance chat/fallback-built sans `primary skipped`) ; WARN `BaselineManager — NonNominativeBaselineService non disponible` = burst de 4 s à 15:46, périmètre RSM, pas un événement moteur. Commit hôte **79,4 %** (sous 85). G: OK. nbaudit ok 16:05:55Z (`Image/` armé, `consecutive_failures 0`).
+
+**Coordination** : #3962 (hang condensation 86 s) **vérifiée au champ par po-2024 — 0,7 % de fallback-truncated sur 48 h (critère ≤ 5 %, marge 7×)**, fermeture réservée au coordinateur ai-01 (RX107) ; ACK token HF de po-2023 **conforme** (empreinte `769d40e66497`, écrite dans leur seul `.env`, copie détruite, jamais affichée — Q-P2023-3 clôturée) ; message claudish 10:44Z déjà traité (classification adoptée leur côté), marqué lu.
+
