@@ -37,13 +37,19 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
+    MooncakePromMetrics,
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -901,6 +907,18 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         cls, data: dict[str, Any] | None = None
     ) -> KVConnectorStats | None:
         return MooncakeKVConnectorStats(data=data or {})
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return MooncakePromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
 
 
 class MooncakeConnectorScheduler:
@@ -1898,6 +1916,17 @@ class MooncakeConnectorWorker:
 
             if not any(local_block_ids_by_group):
                 continue
+
+            # Normalize before kernel expansion so group_concurrent_contiguous
+            # can coalesce the resulting ascending kernel runs.
+            for group_index, (local_group, remote_group) in enumerate(
+                zip(local_block_ids_by_group, remote_block_ids_by_group)
+            ):
+                if local_group:
+                    (
+                        local_block_ids_by_group[group_index],
+                        remote_block_ids_by_group[group_index],
+                    ) = _normalize_paired_block_order(local_group, remote_group)
 
             local_block_ids_by_group = self._logical_to_kernel_block_ids(
                 local_block_ids_by_group
@@ -3004,6 +3033,30 @@ class MooncakeConnectorWorker:
             _get_tensor_dense_flag(cache),
             cache.data_ptr(),
         )
+
+
+def _normalize_paired_block_order(
+    src_ids: list[int], dst_ids: list[int]
+) -> tuple[list[int], list[int]]:
+    """Reverse jointly descending consecutive runs without changing block pairs."""
+    if len(src_ids) < 2:
+        return src_ids, dst_ids
+
+    descending = (np.diff(np.asarray(src_ids, dtype=np.int64)) == -1) & (
+        np.diff(np.asarray(dst_ids, dtype=np.int64)) == -1
+    )
+    if not descending.any():
+        return src_ids, dst_ids
+    if descending.all():
+        return src_ids[::-1], dst_ids[::-1]
+
+    boundaries = np.flatnonzero(np.diff(descending, prepend=False, append=False))
+    src_ids, dst_ids = src_ids.copy(), dst_ids.copy()
+    for start, stop in boundaries.reshape(-1, 2):
+        # A run of descending edges covers one more block than edges.
+        src_ids[start : stop + 1] = src_ids[start : stop + 1][::-1]
+        dst_ids[start : stop + 1] = dst_ids[start : stop + 1][::-1]
+    return src_ids, dst_ids
 
 
 def group_concurrent_contiguous(

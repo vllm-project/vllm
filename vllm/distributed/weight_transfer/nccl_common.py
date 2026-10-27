@@ -9,6 +9,8 @@ sparse engine does not have to subclass the dense one.
 """
 
 import socket
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -133,8 +135,39 @@ def worker_init_payload(init_info: NCCLWeightTransferInitInfo) -> dict:
     return {key: value for key, value in asdict(init_info).items() if value is not None}
 
 
+def build_worker_init_payload(
+    init_info: "NCCLRendezvous",
+    *,
+    packed: bool = False,
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+) -> dict:
+    # Workers sit at rank_offset 1, after the single trainer sender rank 0.
+    worker_init_info = NCCLWeightTransferInitInfo(
+        master_address=init_info.master_address,
+        master_port=init_info.master_port,
+        rank_offset=1,
+        world_size=init_info.world_size,
+        packed=packed,
+        packed_buffer_size_bytes=packed_buffer_size_bytes,
+        packed_num_buffers=packed_num_buffers,
+    )
+    return worker_init_payload(worker_init_info)
+
+
+def run_trainer_rendezvous(
+    *, init_worker: Callable[[], None], init_trainer: Callable[[], None]
+) -> None:
+    # Workers and trainer must enter the rendezvous concurrently, so run the
+    # worker initialization RPC in a thread while opening the trainer endpoint.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(init_worker)
+        init_trainer()
+        future.result()
+
+
 class NCCLRendezvous(Protocol):
-    """The TCP rendezvous fields `trainer_init` needs.
+    """The TCP rendezvous fields used by trainer initialization helpers.
 
     Structural so each backend can keep its own trainer init info next to its
     engine (dense `NCCLTrainerInitInfo`, `SparseNCCLTrainerInitInfo`) without
