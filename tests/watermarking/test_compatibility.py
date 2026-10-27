@@ -421,6 +421,11 @@ def test_enforce_engine_core_backstop_warns_once(
                 SamplingParams(watermarking=False), config.watermark_config
             )
             assert params.watermarking is enforce
+        # Greedy cannot be watermarked, so EngineCore leaves its flag alone.
+        params = _preprocess_in_engine_core(
+            SamplingParams(temperature=0, watermarking=False), config.watermark_config
+        )
+        assert params.watermarking is False
     assert caplog_vllm.text.count("overriding watermarking=False") == int(enforce)
 
 

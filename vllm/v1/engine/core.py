@@ -1112,10 +1112,19 @@ class EngineCore:
             )
 
         watermark_config = self.vllm_config.watermark_config
-        if watermark_config and watermark_config.enforce and request.sampling_params:
-            if request.sampling_params.watermarking is False:
+        params = request.sampling_params
+        # Greedy decoding and trace replay cannot be watermarked; leave their
+        # flag as the frontend resolved it.
+        if (
+            watermark_config
+            and watermark_config.enforce
+            and params
+            and params.temperature != 0
+            and params.trace_decode_token_ids is None
+        ):
+            if params.watermarking is False:
                 warn_watermarking_override()
-            request.sampling_params.watermarking = True
+            params.watermarking = True
 
         req = Request.from_engine_core_request(request, self.request_block_hasher)
         if req.use_structured_output:
