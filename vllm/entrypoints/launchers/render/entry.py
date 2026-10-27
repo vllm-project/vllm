@@ -6,6 +6,7 @@ import contextlib
 import signal
 import socket
 from argparse import Namespace
+from typing import MutableSequence, Any
 
 from vllm import AsyncEngineArgs, envs
 from vllm.config import VllmConfig
@@ -24,10 +25,16 @@ async def build_and_serve_renderer(
     listen_address: str,
     sock: socket.socket,
     args: Namespace,
-    **uvicorn_kwargs,
+    peer_loads: tuple[MutableSequence[int], int] | None = None,
+    **uvicorn_kwargs: Any,
 ) -> asyncio.Task:
     """Build FastAPI app for a CPU-only render server, initialize state, and
     start serving.
+
+    ``peer_loads`` enables cross-process accept arbitration when several
+    workers share one listening socket (see ``NoSignalServer``). Pass
+    ``(shared_load_array, this_worker_index)`` from the multi-process
+    launcher; leave ``None`` for the single-process path.
 
     Returns the shutdown task for the caller to await.
     """
@@ -44,6 +51,7 @@ async def build_and_serve_renderer(
     return await serve_http(
         app,
         sock=sock,
+        peer_loads=peer_loads,
         enable_ssl_refresh=args.enable_ssl_refresh,
         host=args.host,
         port=args.port,

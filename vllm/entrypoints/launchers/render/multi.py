@@ -8,6 +8,7 @@ import multiprocessing
 import signal
 from multiprocessing.connection import wait as mp_wait
 from multiprocessing.process import BaseProcess
+from multiprocessing.synchronize import Barrier
 from socket import socket
 
 import uvloop
@@ -16,7 +17,7 @@ from vllm.logger import configure_logging_from_args, init_logger
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.utils import shutdown
 
-from ..launcher import setup_server
+from ..launcher import setup_server, _NOT_ACCEPTING
 from .entry import build_and_serve_renderer, build_vllm_config
 
 logger = init_logger(__name__)
@@ -28,9 +29,10 @@ STARTUP_BARRIER_TIMEOUT = 300.0
 def run_worker_proc(
     args: argparse.Namespace,
     api_process_rank: int,
-    startup_barrier: multiprocessing.Barrier,
+    startup_barrier: Barrier,
     listen_address: str,
     sock: socket,
+    api_server_loads,
 ) -> None:
     """Entrypoint for an individual API server worker process."""
     configure_logging_from_args(args)
@@ -51,9 +53,19 @@ def run_worker_proc(
     vllm_config.parallel_config._api_process_rank = api_process_rank
     vllm_config.parallel_config._api_process_count = args.api_server_count
 
+    peer_loads = (
+        (api_server_loads, api_process_rank)
+        if api_server_loads is not None
+        else None
+    )
+
     async def _serve() -> None:
         shutdown_task = await build_and_serve_renderer(
-            vllm_config, listen_address, sock, args
+            vllm_config,
+            listen_address,
+            sock,
+            args,
+            peer_loads=peer_loads,
         )
         await shutdown_task
 
@@ -76,7 +88,6 @@ def _wait_for_first_exit(processes: list[BaseProcess]) -> BaseProcess:
     sentinels = {p.sentinel: p for p in processes}
     ready = mp_wait(list(sentinels.keys()))
     first = sentinels[ready[0]]
-    # join() populates exitcode; it returns immediately for a dead process.
     first.join()
     if first.exitcode not in (0, None):
         logger.error(
@@ -106,9 +117,21 @@ def _run_multi_launch(
         spawn_context.Barrier(num_api_servers) if num_api_servers > 1 else None
     )
 
-    # ---- Shared-fd mode: bind once in the launcher ---------------------- #
+    # Shared-fd mode: bind once in the launcher.
+    # NOTE: we deliberately do *not* use SO_REUSEPORT here. The peer_loads
+    # mechanism requires all workers to share the *same* listening socket,
+    # so that accept() can be arbitrated across processes.
     listen_address, sock = setup_server(args, reuse_port=False)
     exit_stack.callback(sock.close)
+
+    # Shared per-worker load array. Each slot starts at _NOT_ACCEPTING so
+    # that a worker which has not started yet is never considered "least
+    # loaded". Only allocated for the multi-worker case.
+    api_server_loads = (
+        spawn_context.RawArray("i", [_NOT_ACCEPTING] * num_api_servers)
+        if num_api_servers > 1
+        else None
+    )
 
     processes: list[BaseProcess] = []
     exit_stack.callback(shutdown, processes)
@@ -117,7 +140,14 @@ def _run_multi_launch(
         proc = spawn_context.Process(
             target=run_worker_proc,
             name=f"ApiServer_{i}",
-            args=(args, i, startup_barrier, listen_address, sock),
+            args=(
+                args,
+                i,
+                startup_barrier,
+                listen_address,
+                sock,
+                api_server_loads,
+            ),
         )
         processes.append(proc)
         proc.start()
