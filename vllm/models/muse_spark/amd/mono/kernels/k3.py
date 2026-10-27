@@ -276,6 +276,32 @@ def sel_peer(pl, d):
     return p
 
 
+@traced
+def task_ring(load, compute, q, task, it, end, unr, *args):
+    """Tasks task .. end - 1: compute(q[0], task, it, *args) with the next len(q) tasks' loads
+    (load(task)) in flight. ``unr`` (len(q) = 2): three tasks an iteration in fixed slots (q[0],
+    q[1], qc): two tasks' loads stay in flight during each compute, no rotation copy waits for its
+    data (the tail: the second loop)."""
+    if const_expr(unr):
+        while task + 2 < end:
+            qc = load(task + 2)
+            compute(q[0], task, it, *args)
+            qa = load(task + 3)
+            compute(q[1], task + 1, it + 1, *args)
+            qb = load(task + 4)
+            compute(qc, task + 2, it + 2, *args)
+            q = [qa, qb]
+            task = task + 3
+            it = it + 3
+    while task < end:
+        nxt = load(task + len(q))
+        compute(q[0], task, it, *args)
+        q = q[1:] + [nxt]
+        task = task + 1
+        it = it + 1
+    return q, task, it
+
+
 REGION_IDS.update({"orr": 24, "mrr": 25, "ssa4p": 26})
 REGION_IDS.update(
     {
@@ -2340,246 +2366,29 @@ def build(key: Build):
             bid,
         )
         load_h_norm(hv, wv, tid, lane, wave, sc_.h.ptr, tok)
-        task = t0
-        it = fx.Int32(0)
-        if const_expr(UNR):
-            # ring: three tasks an iteration in fixed slots (q[0], q[1], qc): two tasks' loads stay in
-            # flight during each compute, no rotation copy waits for its data (the tail: the loop below)
-            while task + 2 < t1:
-                qc = gu_loads(w13, w13s, rt, task + 2, lane, wave, (task + 2) < t1)
-                gu_compute(
-                    q[0],
-                    task,
-                    it,
-                    scratch,
-                    tag,
-                    rt,
-                    tid,
-                    lane,
-                    wave,
-                    sc_.h.ptr,
-                    sc_.red.ptr,
-                )
-                qa = gu_loads(w13, w13s, rt, task + 3, lane, wave, (task + 3) < t1)
-                gu_compute(
-                    q[1],
-                    task + 1,
-                    it + 1,
-                    scratch,
-                    tag,
-                    rt,
-                    tid,
-                    lane,
-                    wave,
-                    sc_.h.ptr,
-                    sc_.red.ptr,
-                )
-                qb = gu_loads(w13, w13s, rt, task + 4, lane, wave, (task + 4) < t1)
-                gu_compute(
-                    qc,
-                    task + 2,
-                    it + 2,
-                    scratch,
-                    tag,
-                    rt,
-                    tid,
-                    lane,
-                    wave,
-                    sc_.h.ptr,
-                    sc_.red.ptr,
-                )
-                q = [qa, qb]
-                task = task + 3
-                it = it + 3
-        while task < t1:
-            nxt = gu_loads(w13, w13s, rt, task + PF_GU, lane, wave, (task + PF_GU) < t1)
-            gu_compute(
-                q[0],
-                task,
-                it,
-                scratch,
-                tag,
-                rt,
-                tid,
-                lane,
-                wave,
-                sc_.h.ptr,
-                sc_.red.ptr,
-            )
-            q = q[1:] + [nxt]
-            task = task + 1
-            it = it + 1
+        gu_ld = lambda t: gu_loads(w13, w13s, rt, t, lane, wave, t < t1)
+        gu_c = lambda ops, t, i: gu_compute(
+            ops, t, i, scratch, tag, rt, tid, lane, wave, sc_.h.ptr, sc_.red.ptr
+        )
+        task_ring(gu_ld, gu_c, q, t0, fx.Int32(0), t1, UNR)
+        dn_ld = lambda t: dn_loads(w2, w2s, w_post, rt, t, lane, wave, t < t1)
         dq = [dn_loads(w2, w2s, w_post, rt, t0, lane, wave, t0 < t1)]
         gpu.barrier()
         u0 = t0 >> 8
         u1 = last >> 8
         dn_build_picks(rt, u0, u1, tid)
         load_ac(scratch, tag, health, rt, False, sd.a.ptr, tid)
-        dq = dq + [
-            dn_loads(w2, w2s, w_post, rt, t0 + d, lane, wave, (t0 + d) < t1)
-            for d in range(1, PF_DN)
-        ]
+        dq = dq + [dn_ld(t0 + d) for d in range(1, PF_DN)]
         if tid < 2 * S:
             fx.ptr_store(fx.Float32(0.0), rt["ssacc"] + tid)
         gpu.barrier()
-        task = t0
-        it = fx.Int32(0)
         tsplit = fx.min(t1, (u0 + 1) << 8)
-        if const_expr(UNR):
-            while task + 2 < tsplit:
-                dc = dn_loads(
-                    w2, w2s, w_post, rt, task + 2, lane, wave, (task + 2) < t1
-                )
-                dn_compute_c(
-                    dq[0],
-                    task,
-                    it,
-                    u0,
-                    scratch,
-                    tag,
-                    rt,
-                    tid,
-                    lane,
-                    wave,
-                    sd.a.ptr,
-                    sd.red.ptr,
-                )
-                da = dn_loads(
-                    w2, w2s, w_post, rt, task + 3, lane, wave, (task + 3) < t1
-                )
-                dn_compute_c(
-                    dq[1],
-                    task + 1,
-                    it + 1,
-                    u0,
-                    scratch,
-                    tag,
-                    rt,
-                    tid,
-                    lane,
-                    wave,
-                    sd.a.ptr,
-                    sd.red.ptr,
-                )
-                db = dn_loads(
-                    w2, w2s, w_post, rt, task + 4, lane, wave, (task + 4) < t1
-                )
-                dn_compute_c(
-                    dc,
-                    task + 2,
-                    it + 2,
-                    u0,
-                    scratch,
-                    tag,
-                    rt,
-                    tid,
-                    lane,
-                    wave,
-                    sd.a.ptr,
-                    sd.red.ptr,
-                )
-                dq = [da, db]
-                task = task + 3
-                it = it + 3
-        while task < tsplit:
-            nxt = dn_loads(
-                w2, w2s, w_post, rt, task + PF_DN, lane, wave, (task + PF_DN) < t1
-            )
-            dn_compute_c(
-                dq[0],
-                task,
-                it,
-                u0,
-                scratch,
-                tag,
-                rt,
-                tid,
-                lane,
-                wave,
-                sd.a.ptr,
-                sd.red.ptr,
-            )
-            dq = dq[1:] + [nxt]
-            task = task + 1
-            it = it + 1
+        dn_c = lambda ops, t, i: dn_compute_c(
+            ops, t, i, u0, scratch, tag, rt, tid, lane, wave, sd.a.ptr, sd.red.ptr
+        )
+        dq, task, it = task_ring(dn_ld, dn_c, dq, t0, fx.Int32(0), tsplit, UNR)
         dn_switch(scratch, tag, health, rt, tsplit, u0, u1, sd.a.ptr, tid)
-        if const_expr(UNR):
-            while task + 2 < t1:
-                dc = dn_loads(
-                    w2, w2s, w_post, rt, task + 2, lane, wave, (task + 2) < t1
-                )
-                dn_compute_c(
-                    dq[0],
-                    task,
-                    it,
-                    u0,
-                    scratch,
-                    tag,
-                    rt,
-                    tid,
-                    lane,
-                    wave,
-                    sd.a.ptr,
-                    sd.red.ptr,
-                )
-                da = dn_loads(
-                    w2, w2s, w_post, rt, task + 3, lane, wave, (task + 3) < t1
-                )
-                dn_compute_c(
-                    dq[1],
-                    task + 1,
-                    it + 1,
-                    u0,
-                    scratch,
-                    tag,
-                    rt,
-                    tid,
-                    lane,
-                    wave,
-                    sd.a.ptr,
-                    sd.red.ptr,
-                )
-                db = dn_loads(
-                    w2, w2s, w_post, rt, task + 4, lane, wave, (task + 4) < t1
-                )
-                dn_compute_c(
-                    dc,
-                    task + 2,
-                    it + 2,
-                    u0,
-                    scratch,
-                    tag,
-                    rt,
-                    tid,
-                    lane,
-                    wave,
-                    sd.a.ptr,
-                    sd.red.ptr,
-                )
-                dq = [da, db]
-                task = task + 3
-                it = it + 3
-        while task < t1:
-            nxt = dn_loads(
-                w2, w2s, w_post, rt, task + PF_DN, lane, wave, (task + PF_DN) < t1
-            )
-            dn_compute_c(
-                dq[0],
-                task,
-                it,
-                u0,
-                scratch,
-                tag,
-                rt,
-                tid,
-                lane,
-                wave,
-                sd.a.ptr,
-                sd.red.ptr,
-            )
-            dq = dq[1:] + [nxt]
-            task = task + 1
-            it = it + 1
+        task_ring(dn_ld, dn_c, dq, task, it, t1, UNR)
         gpu.barrier()
         if tid < 2 * S:
             h2 = tid // S
