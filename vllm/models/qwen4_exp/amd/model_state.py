@@ -32,14 +32,6 @@ class Qwen4ExpModelState(MambaHybridModelState):
             self.ngram_eos_token_id = 0
             return
 
-        if vllm_config.parallel_config.pipeline_parallel_size > 1:
-            raise RuntimeError(
-                "N-gram PLE embedding currently requires "
-                "pipeline_parallel_size=1 because non-first pipeline ranks do "
-                "not receive the raw input_ids required by PLE. Please run "
-                "with PP=1."
-            )
-
         self.ngram_context_len = int(config.ngram_size) - 1
         if self.ngram_context_len <= 0:
             raise ValueError("N-gram embedding requires context length >= 1.")
