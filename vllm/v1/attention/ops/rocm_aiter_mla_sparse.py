@@ -2111,6 +2111,8 @@ _DSV4_SPARSE_ROPE_DIM = 64
 _V41_NVFP4_BYTES_PER_TOKEN = 288
 # V4.1 MXFP8 record: 512 e4m3 bytes (RoPE included) then 16 UE8M0 scales of 32.
 _V41_MXFP8_BYTES_PER_TOKEN = 528
+# V4.1 MXFP4 record: 256 packed e2m1 bytes then 16 UE8M0 scales of 32.
+_V41_MXFP4_BYTES_PER_TOKEN = 272
 
 
 def _validate_sparse_dims(
@@ -3302,6 +3304,159 @@ def _sparse_attn_decode_gfx950_partial_loaded_tile(
 
 
 @triton.jit
+def _sparse_attn_decode_gfx950_mxfp4_native_tile(
+    q_fp8,
+    q_scale,
+    cache_ptr,
+    slot,
+    valid,
+    cache_stride0,
+    scale: tl.constexpr,
+    head_mask,
+    m_i,
+    l_i,
+    acc_nope_0a,
+    acc_nope_0b,
+    acc_nope_1,
+    acc_tail,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    TRUST_EXTRA_CACHE_NAN_FREE: tl.constexpr,
+):
+    """One BLOCK_K-token tile of the 272 B MXFP4 record on the scaled MFMA.
+
+    QK reads the e2m1 bytes and their per-(token, 32 dims) scales as they are:
+    those scales lie along its reduction axis. PxV reduces over tokens, but the
+    instruction scales V per (dim, 32 tokens). So PxV runs one product per
+    32-dim scale group: each token's scale is folded into P
+    relative to the largest scale of its 32-token block (exact: both are powers
+    of two), that block maximum becomes P's E8M0 scale, and the raw e2m1 V is
+    used with a unit scale. P is at most 1, so 2**8 of headroom keeps the
+    folded values inside e4m3.
+    """
+    safe_slot = tl.where(valid, slot, 0)
+    block_idx = safe_slot // BLOCK_SIZE
+    pos_in_block = safe_slot % BLOCK_SIZE
+    token_data_ptr = (
+        cache_ptr + block_idx.to(tl.int64) * cache_stride0 + pos_in_block * 272
+    )
+    token_scale_ptr = token_data_ptr + 256
+    packed = tl.load(
+        token_data_ptr[:, None] + tl.arange(0, 256)[None, :],
+        mask=valid[:, None],
+        other=0,
+    )
+    k_scale = tl.load(
+        token_scale_ptr[:, None] + tl.arange(0, 16)[None, :],
+        mask=valid[:, None],
+        other=127,
+    )
+    if not TRUST_EXTRA_CACHE_NAN_FREE:
+        # E8M0 255 is NaN and e2m1 has no NaN, so capping the code scrubs it.
+        k_scale = tl.minimum(k_scale, 254).to(tl.uint8)
+
+    scores = tl.dot_scaled(q_fp8, q_scale, "e4m3", tl.trans(packed), k_scale, "e2m1")
+    scores *= scale * 1.4426950408889634
+    scores = tl.where(
+        head_mask[:, None] & valid[None, :],
+        scores,
+        -3.4028234663852886e38,
+    )
+    m_block = tl.max(scores, axis=1)
+    m_new = tl.maximum(m_i, m_block)
+    alpha = tl.exp2(m_i - m_new)
+    p = tl.exp2(scores - m_new[:, None])
+    p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
+    l_new = l_i * alpha + tl.sum(p, axis=1)
+
+    trust: tl.constexpr = TRUST_EXTRA_CACHE_NAN_FREE
+    pv_0a = _mxfp4_native_pv_128(
+        p, token_data_ptr, token_scale_ptr, valid, trust, 0, BLOCK_H, BLOCK_K
+    )
+    pv_0b = _mxfp4_native_pv_128(
+        p, token_data_ptr, token_scale_ptr, valid, trust, 4, BLOCK_H, BLOCK_K
+    )
+    pv_1a = _mxfp4_native_pv_128(
+        p, token_data_ptr, token_scale_ptr, valid, trust, 8, BLOCK_H, BLOCK_K
+    )
+    pv_tail = _mxfp4_native_pv_128(
+        p, token_data_ptr, token_scale_ptr, valid, trust, 12, BLOCK_H, BLOCK_K
+    )
+    acc_nope_0a = acc_nope_0a * alpha[:, None] + pv_0a
+    acc_nope_0b = acc_nope_0b * alpha[:, None] + pv_0b
+    acc_nope_1 = acc_nope_1 * alpha[:, None] + pv_1a
+    acc_tail = acc_tail * alpha[:, None] + pv_tail
+    return m_new, l_new, acc_nope_0a, acc_nope_0b, acc_nope_1, acc_tail
+
+
+@triton.jit
+def _mxfp4_native_pv_group(
+    p,
+    packed_ptr,
+    scale_ptr,
+    valid,
+    TRUST: tl.constexpr,
+    GROUP: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """P @ V for the 32 dims of scale group GROUP, as one scaled MFMA."""
+    # Masked tokens get code 0 so they cannot raise their block's maximum.
+    code = tl.load(scale_ptr + GROUP, mask=valid, other=0).to(tl.int32)
+    if not TRUST:
+        code = tl.minimum(code, 254)
+    block_max = tl.max(tl.reshape(code, (BLOCK_K // 32, 32)), axis=1)
+    p_code = tl.maximum(block_max - 8, 0)
+    shift = code - tl.reshape(
+        tl.broadcast_to(p_code[:, None], (BLOCK_K // 32, 32)), (BLOCK_K,)
+    )
+    p_folded = p * tl.exp2(shift.to(tl.float32))[None, :]
+    p_scale = tl.broadcast_to(p_code[None, :], (BLOCK_H, BLOCK_K // 32))
+    v_g = tl.load(
+        packed_ptr[:, None] + GROUP * 16 + tl.arange(0, 16)[None, :],
+        mask=valid[:, None],
+        other=0,
+    )
+    return tl.dot_scaled(
+        p_folded.to(tl.float8e4nv),
+        p_scale.to(tl.uint8),
+        "e4m3",
+        v_g,
+        None,
+        "e2m1",
+        rhs_k_pack=False,
+    )
+
+
+@triton.jit
+def _mxfp4_native_pv_128(
+    p,
+    packed_ptr,
+    scale_ptr,
+    valid,
+    TRUST: tl.constexpr,
+    FIRST_GROUP: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """P @ V over the 128 dims of scale groups FIRST_GROUP to FIRST_GROUP + 3."""
+    o0 = _mxfp4_native_pv_group(
+        p, packed_ptr, scale_ptr, valid, TRUST, FIRST_GROUP, BLOCK_H, BLOCK_K
+    )
+    o1 = _mxfp4_native_pv_group(
+        p, packed_ptr, scale_ptr, valid, TRUST, FIRST_GROUP + 1, BLOCK_H, BLOCK_K
+    )
+    o2 = _mxfp4_native_pv_group(
+        p, packed_ptr, scale_ptr, valid, TRUST, FIRST_GROUP + 2, BLOCK_H, BLOCK_K
+    )
+    o3 = _mxfp4_native_pv_group(
+        p, packed_ptr, scale_ptr, valid, TRUST, FIRST_GROUP + 3, BLOCK_H, BLOCK_K
+    )
+    return tl.cat(tl.cat(o0, o1, dim=1), tl.cat(o2, o3, dim=1), dim=1)
+
+
+@triton.jit
 def _sparse_attn_decode_gfx950_partial_kernel(
     q_ptr,
     main_cache_ptr,
@@ -3466,83 +3621,22 @@ def _sparse_attn_decode_gfx950_partial_kernel(
         extra_lo = split_id * extra_chunk
         extra_hi = tl.minimum(extra_lo + extra_chunk, extra_len)
 
-        outer_block_k: tl.constexpr = 2 * BLOCK_K
-        outer_k_offsets = tl.arange(0, outer_block_k)
-        extra_hi_full = (
-            extra_lo + ((extra_hi - extra_lo) // outer_block_k) * outer_block_k
-        )
-        for k_start in tl.range(
-            extra_lo,
-            extra_hi_full,
-            outer_block_k,
-            num_stages=NUM_STAGES,
-        ):
-            slot = tl.load(extra_indices_ptr + extra_start + k_start + outer_k_offsets)
-            valid = (slot >= 0) & (slot < extra_num_rows)
-            slot_pairs = tl.trans(tl.reshape(slot, (2, BLOCK_K)))
-            valid_pairs = tl.trans(tl.reshape(valid, (2, BLOCK_K)))
-            slot_lo, slot_hi = tl.split(slot_pairs)
-            valid_lo, valid_hi = tl.split(valid_pairs)
-            (
-                m_i,
-                l_i,
-                acc_nope_0a,
-                acc_nope_0b,
-                acc_nope_1,
-                acc_tail,
-            ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
-                q_combined,
-                extra_cache_ptr,
-                slot_lo,
-                valid_lo,
-                extra_cache_stride0,
-                scale,
-                head_mask,
-                m_i,
-                l_i,
-                acc_nope_0a,
-                acc_nope_0b,
-                acc_nope_1,
-                acc_tail,
-                EXTRA_BLOCK_SIZE,
-                NOPE_DIM,
-                BLOCK_K,
-                IS_FNUZ_EXTRA,
-                TRUST_EXTRA_CACHE_NAN_FREE,
-                EXTRA_RECORD,
+        if EXTRA_RECORD == 272:
+            q_val, q_bits = _mxfp8_quantize_rows(
+                q_combined.to(tl.float32), BLOCK_H, NOPE_DIM + ROPE_DIM
             )
-            (
-                m_i,
-                l_i,
-                acc_nope_0a,
-                acc_nope_0b,
-                acc_nope_1,
-                acc_tail,
-            ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
-                q_combined,
-                extra_cache_ptr,
-                slot_hi,
-                valid_hi,
-                extra_cache_stride0,
-                scale,
-                head_mask,
-                m_i,
-                l_i,
-                acc_nope_0a,
-                acc_nope_0b,
-                acc_nope_1,
-                acc_tail,
-                EXTRA_BLOCK_SIZE,
-                NOPE_DIM,
-                BLOCK_K,
-                IS_FNUZ_EXTRA,
-                TRUST_EXTRA_CACHE_NAN_FREE,
-                EXTRA_RECORD,
-            )
-        for tail_idx in tl.static_range(2):
-            tail_start = extra_hi_full + tail_idx * BLOCK_K
-            if tail_start < extra_hi:
-                k_pos = tail_start + k_offsets
+            q_fp8 = q_val.to(tl.float8e4nv)
+            q_scale = q_bits.to(tl.uint8)
+            # The scaled MFMA reduces 128 K-elements, and PxV reduces tokens.
+            native_k: tl.constexpr = 128
+            native_offsets = tl.arange(0, native_k)
+            for k_start in tl.range(
+                extra_lo,
+                extra_hi,
+                native_k,
+                num_stages=NUM_STAGES,
+            ):
+                k_pos = k_start + native_offsets
                 in_range = k_pos < extra_hi
                 slot = tl.load(
                     extra_indices_ptr + extra_start + k_pos,
@@ -3557,11 +3651,58 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                     acc_nope_0b,
                     acc_nope_1,
                     acc_tail,
-                ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
-                    q_combined,
+                ) = _sparse_attn_decode_gfx950_mxfp4_native_tile(
+                    q_fp8,
+                    q_scale,
                     extra_cache_ptr,
                     slot,
                     valid,
+                    extra_cache_stride0,
+                    scale,
+                    head_mask,
+                    m_i,
+                    l_i,
+                    acc_nope_0a,
+                    acc_nope_0b,
+                    acc_nope_1,
+                    acc_tail,
+                    EXTRA_BLOCK_SIZE,
+                    BLOCK_H,
+                    native_k,
+                    TRUST_EXTRA_CACHE_NAN_FREE,
+                )
+        else:
+            outer_block_k: tl.constexpr = 2 * BLOCK_K
+            outer_k_offsets = tl.arange(0, outer_block_k)
+            extra_hi_full = (
+                extra_lo + ((extra_hi - extra_lo) // outer_block_k) * outer_block_k
+            )
+            for k_start in tl.range(
+                extra_lo,
+                extra_hi_full,
+                outer_block_k,
+                num_stages=NUM_STAGES,
+            ):
+                slot = tl.load(
+                    extra_indices_ptr + extra_start + k_start + outer_k_offsets
+                )
+                valid = (slot >= 0) & (slot < extra_num_rows)
+                slot_pairs = tl.trans(tl.reshape(slot, (2, BLOCK_K)))
+                valid_pairs = tl.trans(tl.reshape(valid, (2, BLOCK_K)))
+                slot_lo, slot_hi = tl.split(slot_pairs)
+                valid_lo, valid_hi = tl.split(valid_pairs)
+                (
+                    m_i,
+                    l_i,
+                    acc_nope_0a,
+                    acc_nope_0b,
+                    acc_nope_1,
+                    acc_tail,
+                ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
+                    q_combined,
+                    extra_cache_ptr,
+                    slot_lo,
+                    valid_lo,
                     extra_cache_stride0,
                     scale,
                     head_mask,
@@ -3578,6 +3719,73 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                     TRUST_EXTRA_CACHE_NAN_FREE,
                     EXTRA_RECORD,
                 )
+                (
+                    m_i,
+                    l_i,
+                    acc_nope_0a,
+                    acc_nope_0b,
+                    acc_nope_1,
+                    acc_tail,
+                ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
+                    q_combined,
+                    extra_cache_ptr,
+                    slot_hi,
+                    valid_hi,
+                    extra_cache_stride0,
+                    scale,
+                    head_mask,
+                    m_i,
+                    l_i,
+                    acc_nope_0a,
+                    acc_nope_0b,
+                    acc_nope_1,
+                    acc_tail,
+                    EXTRA_BLOCK_SIZE,
+                    NOPE_DIM,
+                    BLOCK_K,
+                    IS_FNUZ_EXTRA,
+                    TRUST_EXTRA_CACHE_NAN_FREE,
+                    EXTRA_RECORD,
+                )
+            for tail_idx in tl.static_range(2):
+                tail_start = extra_hi_full + tail_idx * BLOCK_K
+                if tail_start < extra_hi:
+                    k_pos = tail_start + k_offsets
+                    in_range = k_pos < extra_hi
+                    slot = tl.load(
+                        extra_indices_ptr + extra_start + k_pos,
+                        mask=in_range,
+                        other=-1,
+                    )
+                    valid = in_range & (slot >= 0) & (slot < extra_num_rows)
+                    (
+                        m_i,
+                        l_i,
+                        acc_nope_0a,
+                        acc_nope_0b,
+                        acc_nope_1,
+                        acc_tail,
+                    ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
+                        q_combined,
+                        extra_cache_ptr,
+                        slot,
+                        valid,
+                        extra_cache_stride0,
+                        scale,
+                        head_mask,
+                        m_i,
+                        l_i,
+                        acc_nope_0a,
+                        acc_nope_0b,
+                        acc_nope_1,
+                        acc_tail,
+                        EXTRA_BLOCK_SIZE,
+                        NOPE_DIM,
+                        BLOCK_K,
+                        IS_FNUZ_EXTRA,
+                        TRUST_EXTRA_CACHE_NAN_FREE,
+                        EXTRA_RECORD,
+                    )
 
     pm_base = (query_idx * NUM_SPLITS + split_id) * num_heads + head_offsets
     m_store = tl.where(l_i > 0.0, m_i * 0.6931471805599453, neg_large)
@@ -4410,7 +4618,11 @@ def _rocm_sparse_attn_decode_ragged_triton(
     # one by a fixed stride and split its bf16 RoPE tail off before the dot.
     main_record = main_cache.shape[-1]
     extra_record = extra_cache.shape[-1] if has_extra else main_record
-    v41_records = (_V41_NVFP4_BYTES_PER_TOKEN, _V41_MXFP8_BYTES_PER_TOKEN)
+    v41_records = (
+        _V41_NVFP4_BYTES_PER_TOKEN,
+        _V41_MXFP8_BYTES_PER_TOKEN,
+        _V41_MXFP4_BYTES_PER_TOKEN,
+    )
     assert _ON_GFX950 or (
         main_record not in v41_records and extra_record not in v41_records
     ), "the V4.1 KV records need the gfx950 sparse decode path"
@@ -4532,7 +4744,9 @@ def _rocm_sparse_attn_decode_ragged_triton(
             BLOCK_K=block_k,
             NUM_SPLITS=num_splits,
             NUM_STAGES=1,
-            num_warps=4,
+            # The native MXFP4 tile's 16 PxV products pressure VGPRs: 2 warps
+            # was 1.05-1.7x faster than 4 across 1-256 rows on MI355X.
+            num_warps=2 if extra_record == _V41_MXFP4_BYTES_PER_TOKEN else 4,
             waves_per_eu=0,
         )
     else:

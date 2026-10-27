@@ -133,6 +133,8 @@ def _paged(data: torch.Tensor, scales: torch.Tensor, block_size: int) -> torch.T
 )
 @pytest.mark.parametrize("num_tokens", [1, 4])
 @pytest.mark.parametrize("num_heads", [16, 128])
+# 512 is the model's index_topk; it spans several tiles and decode splits.
+@pytest.mark.parametrize("num_compressed", [64, 512])
 # The record pairs the model actually allocates: the V4 layout, the V4.1 MXFP8
 # layout, and an FP4 compressed record (NVFP4 or MXFP4) beside each.
 @pytest.mark.parametrize(
@@ -147,14 +149,18 @@ def _paged(data: torch.Tensor, scales: torch.Tensor, block_size: int) -> torch.T
     ],
 )
 def test_compressed_record_matches_reference(
-    num_tokens: int, num_heads: int, swa_record: int, compressed_record: int
+    num_tokens: int,
+    num_heads: int,
+    num_compressed: int,
+    swa_record: int,
+    compressed_record: int,
 ) -> None:
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_sparse_attn_decode
 
     set_random_seed(0)
     device = torch.device("cuda")
     block_size, num_slots = 64, 512
-    num_compressed, num_swa = 64, 32
+    num_swa = 32
     scale = 1.0 / math.sqrt(HEAD_DIM)
     data, scales, compressed_stored = _PACKERS[compressed_record](
         torch.randn(num_slots, HEAD_DIM, device=device) * 0.7
