@@ -57,7 +57,6 @@ from . import k5
 from .dev import (
     BLOCKS,
     CM_DEV,
-    CM_NT,
     CM_SYS,
     THREADS,
     WAVES,
@@ -73,7 +72,6 @@ from .dev import (
     lanes_below,
     ld_f32,
     ld_i32,
-    ld_i32_if,
     ld_vec_if,
     mb_poll,
     mb_put,
@@ -85,7 +83,7 @@ from .dev import (
     uniform,
     wave_incl_scan,
 )
-from .k3 import _lay, dn_loads, fp4_mma, sel_peer, task_ring
+from .k3 import _lay, dn_loads, fp4_mma, mx_chunk, sel_peer, task_ring
 
 DM = 4096
 INTER = 4096
@@ -284,16 +282,9 @@ def build(key: BuildM):
         for i in range_constexpr(4):
             c = 4 * (wave % 4) + i
             rbase = e * (2 * INTER) + rg * INTER + j * 16
-            wb = (rbase * (DM // 2) + (2 * c) * 1024 + lane * 16) // 4
-            ops.append(ld_vec_if(ok, w13, wb, 4, W13_BYTES, CM_NT))
-            ops.append(ld_vec_if(ok, w13, wb + 256, 4, W13_BYTES, CM_NT))
-            sdw = (
-                (rbase >> 5) * (8 * (DM // 32))
-                + 64 * c
-                + 16 * (2 * (g % 2) + g // 2)
-                + r
+            ops += mx_chunk(
+                ok, w13, w13s, rbase, DM, c, lane, g, r, W13_BYTES, W13S_BYTES
             )
-            ops.append(ld_i32_if(ok, w13s, sdw, W13S_BYTES))
         return ops
 
     @traced

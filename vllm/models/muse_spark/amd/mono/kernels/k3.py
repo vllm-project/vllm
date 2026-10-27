@@ -316,6 +316,22 @@ def fp4_mma(ops, base, bl, brow, lane, acc, c, jpar, rows, row0=0):
     return acc
 
 
+def mx_chunk(ok, w, ws, rbase, k, c, lane, g, r, nbytes, sbytes):
+    """Rows rbase .. rbase + 16 x K chunk c (256) of a shuffled MXFP4 [*, k] weight w and its e8m0
+    scales ws: 2 dwordx4 + 1 scale dword. vLLM shuffle_weight((16, 16)): lane L reads the 16 B at
+    16 L of the 1 KB block (16 rows x K bytes 64 (2 c + q) ..): one instruction = 1 KB contiguous;
+    fp4_mma's permlane swaps map the pieces to the MFMA lanes. e8m0_shuffle: lane 16 g + r reads
+    the dword (rbase // 32, c, K block % 4 = 2 (g % 2) + g // 2, row r): rows r, r + 16 x K blocks
+    of 4 apart; 64 lanes = 256 B contiguous (kernel_s_dword)."""
+    wb = (rbase * (k // 2) + (2 * c) * 1024 + lane * 16) // 4
+    ops = [
+        ld_vec_if(ok, w, wb, 4, nbytes, CM_NT),
+        ld_vec_if(ok, w, wb + 256, 4, nbytes, CM_NT),
+    ]
+    sdw = (rbase >> 5) * (8 * (k // 32)) + 64 * c + 16 * (2 * (g % 2) + g // 2) + r
+    return ops + [ld_i32_if(ok, ws, sdw, sbytes)]
+
+
 def dn_loads(w2, w2s, w_post, etab, task, lane, wave, ok, nv=None):
     """Task (u, j)'s w2 operands for this wave (expert etab[u], u clamped below nv)."""
     r = lane % 16
@@ -328,16 +344,7 @@ def dn_loads(w2, w2s, w_post, etab, task, lane, wave, ok, nv=None):
     ops = []
     for i in range_constexpr(2):
         c = 2 * wave + i
-        wb = (rbase * (INTER // 2) + (2 * c) * 1024 + lane * 16) // 4
-        ops.append(ld_vec_if(ok, w2, wb, 4, W2_BYTES, CM_NT))
-        ops.append(ld_vec_if(ok, w2, wb + 256, 4, W2_BYTES, CM_NT))
-        sdw = (
-            (rbase >> 5) * (8 * (INTER // 32))
-            + 64 * c
-            + 16 * (2 * (g % 2) + g // 2)
-            + r
-        )
-        ops.append(ld_i32_if(ok, w2s, sdw, W2S_BYTES))
+        ops += mx_chunk(ok, w2, w2s, rbase, INTER, c, lane, g, r, W2_BYTES, W2S_BYTES)
     # the epilogue's w_post pair (rows 16j + 2 (lane % 8), +1): loaded with the weights,
     # not in the epilogue, where it would wait behind the whole prefetch queue
     ops.append(ld_i32_if(ok, w_post, 8 * j + lane % 8, DM * 2))
@@ -948,21 +955,9 @@ def build(key: Build):
         for rg in rgs:
             rbase = e * (2 * INTER) + rg * INTER + j * 16
             for c in cs:
-                # vLLM shuffle_weight((16, 16)): lane L reads the 16 B at 16 L of the 1 KB block (16 rows x
-                # K bytes 64 (2 c + q) ..): one instruction = 1 KB contiguous; fp4_mma's permlane swaps map
-                # the pieces to the MFMA lanes
-                wb = (rbase * (DM // 2) + (2 * c) * 1024 + lane * 16) // 4
-                ops.append(ld_vec_if(ok, w13, wb, 4, W13_BYTES, CM_NT))
-                ops.append(ld_vec_if(ok, w13, wb + 256, 4, W13_BYTES, CM_NT))
-                # e8m0_shuffle: lane 16 g + r reads the dword (rbase // 32, c, K block % 4 = 2 (g % 2) + g // 2,
-                # row r): rows r, r + 16 x K blocks of 4 apart; 64 lanes = 256 B contiguous (kernel_s_dword)
-                sdw = (
-                    (rbase >> 5) * (8 * (DM // 32))
-                    + 64 * c
-                    + 16 * (2 * (g % 2) + g // 2)
-                    + r
+                ops += mx_chunk(
+                    ok, w13, w13s, rbase, DM, c, lane, g, r, W13_BYTES, W13S_BYTES
                 )
-                ops.append(ld_i32_if(ok, w13s, sdw, W13S_BYTES))
         return ops
 
     @traced
