@@ -128,6 +128,72 @@ def build_cost_tables_from_curves(
     return draft_table, verify_table
 
 
+class UndraftedConfidence:
+    """Per-slot, per-position confidence estimates for positions an early drafting
+    stop skipped: the running mean of the slot's confidences at that position over
+    the proposals that drafted it, shrunk towards the same mean over all slots."""
+
+    # Pseudo-observations of the population mean each slot starts with.
+    PRIOR_COUNT = 20.0
+    # Most observations kept per slot and position, and per position over all slots;
+    # older ones are scaled down so the means follow recent confidences.
+    MAX_COUNT = 500.0
+    MAX_POPULATION_COUNT = 10_000.0
+
+    def __init__(self, max_num_reqs: int, num_steps: int):
+        self.sums = np.zeros((max_num_reqs, num_steps))
+        self.counts = np.zeros((max_num_reqs, num_steps))
+        self.population_sums = np.zeros(num_steps)
+        self.population_counts = np.zeros(num_steps)
+
+    def update(
+        self, confidences: np.ndarray, num_drafted: np.ndarray, slots: np.ndarray
+    ) -> None:
+        """Folds in one proposal: for each of its slots, the confidences at the
+        positions it drafted. `confidences` and `num_drafted` are indexed by slot."""
+        if len(slots) == 0:
+            return
+        drafted = np.arange(self.sums.shape[1]) < num_drafted[slots][:, None]
+        observed = np.where(drafted, confidences[slots], 0.0)
+        self.sums[slots] += observed
+        self.counts[slots] += drafted
+        self.population_sums += observed.sum(axis=0)
+        self.population_counts += drafted.sum(axis=0)
+        _rescale_counts(self.sums, self.counts, self.MAX_COUNT)
+        _rescale_counts(
+            self.population_sums, self.population_counts, self.MAX_POPULATION_COUNT
+        )
+
+    def reset(self, slot: int) -> None:
+        self.sums[slot] = 0.0
+        self.counts[slot] = 0.0
+
+    def mean(self, slots: np.ndarray) -> np.ndarray:
+        # A position no slot has drafted yet starts at 0.5.
+        population = (self.population_sums + 0.5) / (self.population_counts + 1.0)
+        return (self.sums[slots] + self.PRIOR_COUNT * population) / (
+            self.counts[slots] + self.PRIOR_COUNT
+        )
+
+
+def _rescale_counts(sums: np.ndarray, counts: np.ndarray, limit: float) -> None:
+    """Scales entries with more than `limit` observations down to `limit`, keeping
+    their means."""
+    over = counts > limit
+    scale = limit / counts[over]
+    sums[over] *= scale
+    counts[over] *= scale
+
+
+def fill_undrafted(
+    confidences: np.ndarray, num_drafted: np.ndarray, estimates: np.ndarray
+) -> np.ndarray:
+    """`confidences` with each row's positions at or past its draft count replaced
+    by `estimates`."""
+    undrafted = np.arange(confidences.shape[1]) >= num_drafted[:, None]
+    return np.where(undrafted, estimates, confidences)
+
+
 class AdaptiveVerificationManager:
     def __init__(
         self,
@@ -165,6 +231,10 @@ class AdaptiveVerificationManager:
         # accepted tokens that one more draft position must add. Set every step.
         self.draft_stop_threshold: torch.Tensor | None = None
         self._draft_stop_threshold_value = 0.0
+        # With VLLM_DYN_DRAFT, each slot's draft count from the drafter. Positions at
+        # or past it were not drafted and hold confidence 0, which would hold the
+        # budget to the stale proposal's depth; budgets estimate them instead.
+        self.num_drafted_per_req: torch.Tensor | None = None
         self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
 
@@ -183,11 +253,24 @@ class AdaptiveVerificationManager:
         self._stale_idx = 0
         for slot in self._stale_confidences:
             slot.np.fill(1.0)
+        # Per D2H slot: the draft counts and the slots of the proposal it holds.
+        self._stale_num_drafted = [
+            CpuGpuBuffer(max_num_reqs, dtype=torch.int32, device=device)
+            for _ in range(2)
+        ]
+        for slot in self._stale_num_drafted:
+            slot.np.fill(self.num_speculative_steps)
+        self._stale_slots = [np.zeros(0, dtype=np.intp) for _ in range(2)]
+        self._undrafted = UndraftedConfidence(max_num_reqs, self.num_speculative_steps)
 
     def add_request(self, req_idx: int) -> None:
         self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
+        self._stale_num_drafted[self._stale_idx].np[req_idx] = (
+            self.num_speculative_steps
+        )
         self._pending_resets.append(req_idx)
         self._confidence_probs[req_idx].fill_(1.0)
+        self._undrafted.reset(req_idx)
 
     def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
         """Dummy-run kwargs whose step timings seed the cost tables.
@@ -266,8 +349,20 @@ class AdaptiveVerificationManager:
         ready_idx = self._stale_idx ^ 1
         with gpu_sync_allowed():
             self._copy_events[ready_idx].synchronize()
+        if self.num_drafted_per_req is not None:
+            # A slot reset since that proposal now belongs to a new request.
+            slots = self._stale_slots[ready_idx]
+            slots = slots[~np.isin(slots, self._pending_resets)]
+            self._undrafted.update(
+                self._stale_confidences[ready_idx].np,
+                self._stale_num_drafted[ready_idx].np,
+                slots,
+            )
         if self._pending_resets:
             self._stale_confidences[ready_idx].np[self._pending_resets] = 1.0
+            self._stale_num_drafted[ready_idx].np[self._pending_resets] = (
+                self.num_speculative_steps
+            )
             self._pending_resets.clear()
         # Last step's copy has landed: budgets read it, this step overwrites the
         # slot they were reading before.
@@ -276,11 +371,16 @@ class AdaptiveVerificationManager:
         self._confidence_probs[input_batch.idx_mapping] = confidence_probs[:num_reqs]
         write_slot = self._stale_confidences[write_idx]
         write_slot.gpu.copy_(self._confidence_probs)
+        if self.num_drafted_per_req is not None:
+            self._stale_num_drafted[write_idx].gpu.copy_(self.num_drafted_per_req)
+            self._stale_slots[write_idx] = input_batch.idx_mapping_np.copy()
 
         current_stream = torch.cuda.current_stream(self.req_states.device)
         self._copy_stream.wait_stream(current_stream)
         with stream(self._copy_stream, current_stream):
             write_slot.copy_to_cpu()
+            if self.num_drafted_per_req is not None:
+                self._stale_num_drafted[write_idx].copy_to_cpu()
             self._copy_events[write_idx].record()
 
     def get_num_tokens(
@@ -311,6 +411,12 @@ class AdaptiveVerificationManager:
             count=num_reqs,
         )
         stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
+        if self.num_drafted_per_req is not None:
+            stale_confidences = fill_undrafted(
+                stale_confidences,
+                self._stale_num_drafted[self._stale_idx].np[slots],
+                self._undrafted.mean(slots),
+            )
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
         steps = np.arange(self.num_speculative_steps)
         valid = steps[None, :] < scheduled_drafts[:, None]

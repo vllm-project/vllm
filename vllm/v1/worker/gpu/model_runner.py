@@ -712,13 +712,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             target_layer_names=target_attn_layer_names,
             additional_attn_cg_support=additional_attn_cg_support,
         )
-        if (
-            self.adaptive_verification is not None
-            and getattr(self.speculator, "dyn_draft_mode", None) == "cost"
-        ):
-            self.adaptive_verification.draft_stop_threshold = (
-                self.speculator.dyn_draft_threshold
+        dyn_draft_mode = getattr(self.speculator, "dyn_draft_mode", None)
+        if self.adaptive_verification is not None and dyn_draft_mode is not None:
+            self.adaptive_verification.num_drafted_per_req = (
+                self.speculator.num_drafted_per_req
             )
+            if dyn_draft_mode == "cost":
+                self.adaptive_verification.draft_stop_threshold = (
+                    self.speculator.dyn_draft_threshold
+                )
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
