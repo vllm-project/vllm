@@ -720,7 +720,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     checkpoints with a vision config accept image and video inputs, while
     vision-less checkpoints run as a text-only model. Speculative decoding uses the
     `meta-models/Muse-Glimmer-30B-assistant` checkpoint, which vLLM serves through
-    its [DFlash](../features/speculative_decoding/README.md) path.
+    its DFlash path.
 
 !!! note
     Both Nemotron Nano architecture names map to the same vLLM implementation.

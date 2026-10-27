@@ -95,7 +95,6 @@ plugins:
           - https://pytorch.org/docs/stable/objects.inv
   - redirects:
       redirect_maps:
-        features/spec_decode/README.md: features/speculative_decoding/README.md
         features/spec_decode/speculators.md: features/speculative_decoding/speculators.md
         features/quantization/fp8.md: features/quantization/llm_compressor/fp8.md
         features/quantization/int4.md: features/quantization/llm_compressor/int4.md
