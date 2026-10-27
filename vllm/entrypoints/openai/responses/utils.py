@@ -391,7 +391,7 @@ def _construct_message_from_response_item(
                 parameter="input",
             )
         elif item.content and len(item.content) >= 1:
-            reasoning = item.content[0].text
+            reasoning = "\n".join(part.text for part in item.content)
         elif len(item.summary) >= 1:
             reasoning = item.summary[0].text
             logger.warning(
@@ -411,7 +411,16 @@ def _construct_message_from_response_item(
             "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
-        output_text = item.content[0].text
+        # content may be empty, hold several output-text parts, or be a refusal with no
+        # text; join all output-text parts and fall back to a refusal's text so empty,
+        # multi-part, and refusal messages all reconstruct without crashing.
+        output_text = "".join(
+            part.text for part in item.content if part.type == "output_text"
+        )
+        if not output_text:
+            output_text = next(
+                (part.refusal for part in item.content if part.type == "refusal"), ""
+            )
         if prev_assistant_msg:
             previous_content = prev_assistant_msg.get("content")
             if previous_content is None:
@@ -440,7 +449,7 @@ def _construct_message_from_response_item(
         if isinstance(content, str):
             text = content
         elif isinstance(content, list) and content:
-            text = content[0].get("text")
+            text = "".join(part.get("text", "") for part in content)
         if text is not None:
             if prev_assistant_msg:
                 previous_content = prev_assistant_msg.get("content")
