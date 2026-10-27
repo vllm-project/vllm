@@ -398,10 +398,10 @@ void octw3_rotate_rdna3(torch::Tensor x, torch::Tensor y, bool silu_mul,
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   auto stream = at::cuda::getCurrentCUDAStream();
   const int64_t n = (int64_t)rows * (k / 8);
-  vllm::moe_octw3_wmma_rdna3::
-      rotate_kernel<<<(n + 255) / 256, 256, 0, stream>>>(
-          (const half*)x.data_ptr(), (half*)y.data_ptr(), rows, k,
-          (int)x.stride(0), silu_mul, (int)had);
+  using vllm::moe_octw3_wmma_rdna3::rotate_kernel;
+  rotate_kernel<<<(n + 255) / 256, 256, 0, stream>>>(
+      (const half*)x.data_ptr(), (half*)y.data_ptr(), rows, k, (int)x.stride(0),
+      silu_mul, (int)had);
 }
 
 // Inputs:
