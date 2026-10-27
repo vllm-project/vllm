@@ -56,7 +56,7 @@ vllm serve <model> \
 | --- | --- | --- |
 | `endpoint` | required | Server socket path, or `unix://` address. TCP is rejected. |
 | `startup_timeout_ms` | `30000` | How long a client waits for the server at startup. |
-| `lookup_timeout_ms` | `1000` | Deadline for each lookup RPC. A timeout is a cache miss. Requires MORI bindings exposing this option. |
+| `lookup_timeout_ms` | `1000` | Deadline for each lookup RPC. A timeout is a cache miss. Requires MORI bindings exposing this option; released MORI (e.g. v1.2.3.post1) lacks it, so lookups are unbounded and setting it is an error. |
 | `num_workers` | `4` | Transfer threads per worker. |
 | `timeout_ms` | `30000` | How long a transfer may run before the worker treats the server as stalled. |
 | `rebuild_sliding_window` | `true` | For models with SWA bounded replay (DeepSeek-V4 on ROCm), store only the compressed KV and rebuild the sliding-window state by recomputation. |
@@ -132,7 +132,16 @@ VLLM_ROCM_USE_AITER=1 vllm serve deepseek-ai/DeepSeek-V4-Pro \
 UMBP restores only whole blocks that this cache layout stored, so the ROCm
 DeepSeek-V4 backend keeps `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA` and its
 NaN-free cache fast path with this connector, unlike connectors that may write
-other bytes into the KV cache. Speculative decoding (MTP) is not covered yet.
+other bytes into the KV cache.
+
+### Speculative decoding
+
+DSpark (`"method": "dspark"`, the DeepSeek-V4-Pro MTP recipe) works with the
+replay: its draft layers are sliding-window only and derive their window KV
+from the target's hidden states, so the recomputed window rebuilds the draft's
+cache along with the target's. EAGLE-style MTP (`"method": "mtp"`) draft groups
+are not rebuilt by the replay and are rejected at startup; set
+`"rebuild_sliding_window": false` to store them instead.
 
 ## Failure behavior
 

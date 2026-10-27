@@ -105,11 +105,18 @@ def _build_client(options: dict[str, Any]) -> Any:
     standalone.address = address
     standalone.auto_start = False
     standalone.startup_timeout_ms = int(options.get("startup_timeout_ms", 30000))
-    if not hasattr(standalone, "lookup_timeout_ms"):
+    if hasattr(standalone, "lookup_timeout_ms"):
+        standalone.lookup_timeout_ms = int(options.get("lookup_timeout_ms", 1000))
+    elif "lookup_timeout_ms" in options:
         raise RuntimeError(
             "Standalone UMBP requires MORI with lookup_timeout_ms support"
         )
-    standalone.lookup_timeout_ms = int(options.get("lookup_timeout_ms", 1000))
+    else:
+        # Released MORI (e.g. v1.2.3.post1, pinned by the ROCm image) has no
+        # lookup deadline; a stalled server then blocks the lookup.
+        logger.warning_once(
+            "MORI has no standalone lookup_timeout_ms; UMBP lookups are unbounded"
+        )
     client_config.standalone_process = standalone
 
     try:

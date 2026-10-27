@@ -54,6 +54,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
 )
 
 mori_available = importlib.util.find_spec("mori") is not None
@@ -392,13 +393,25 @@ def test_client_targets_the_server_without_sizing_a_local_pool(
     assert server.clients[0].closed
 
 
-def test_standalone_requires_mori_with_bounded_lookups(server, monkeypatch):
+def test_lookup_timeout_needs_mori_with_bounded_lookups(server, monkeypatch):
     monkeypatch.setattr(
         sys.modules["mori.cpp"], "UMBPStandaloneProcessConfig", SimpleNamespace
     )
     with pytest.raises(RuntimeError, match="lookup_timeout_ms support"):
-        _runtime().create_scheduler_handle("ns", RankTopology(), None)
+        _runtime(lookup_timeout_ms=25).create_scheduler_handle(
+            "ns", RankTopology(), None
+        )
     assert not server.clients
+
+
+def test_released_mori_without_lookup_timeout_still_attaches(server, monkeypatch):
+    # MORI v1.2.3.post1 (the ROCm image's pin) has no lookup deadline.
+    monkeypatch.setattr(
+        sys.modules["mori.cpp"], "UMBPStandaloneProcessConfig", SimpleNamespace
+    )
+    handle = _runtime().create_scheduler_handle("ns", RankTopology(), None)
+    assert not hasattr(server.clients[0].config.standalone_process, "lookup_timeout_ms")
+    handle.close()
 
 
 def test_unreachable_server_fails_at_startup(server):
@@ -789,3 +802,48 @@ def test_embedded_rank_private_pools_are_not_deduplicated(monkeypatch):
     worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, config)
 
     assert worker.get_handshake_metadata().replicated_groups == ()
+
+
+def _draft_replay_kv_cache_config(is_eagle_group: bool) -> KVCacheConfig:
+    # Target MLA latents plus a draft sliding-window group that SWA replay
+    # (rebuild_sliding_window) keeps out of prefix caching.
+    target = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16
+    )
+    draft = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=32,
+        dtype=torch.float16,
+        sliding_window=16,
+        bounded_replay=True,
+    )
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8192, layers=["layer1"], layer_stride=8192, block_stride=1024
+            ),
+            KVCacheTensor(
+                size=8192, layers=["draft"], layer_stride=8192, block_stride=1024
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer1"], target),
+            KVCacheGroupSpec(["draft"], draft, is_eagle_group=is_eagle_group),
+        ],
+    )
+
+
+def test_dspark_draft_rebuilt_by_replay_is_accepted(server):
+    # DSpark/DFlash window KV derives from the target's hidden states, so the
+    # replay that rebuilds the target's window rebuilds the draft's too.
+    config = _draft_replay_kv_cache_config(is_eagle_group=False)
+    assert config.prefix_cacheable_group_ids == (0,)
+    UMBPStoreConnector(_standalone_config(), KVConnectorRole.SCHEDULER, config)
+
+
+def test_eagle_draft_rebuilt_by_replay_is_rejected_with_a_hint(server):
+    config = _draft_replay_kv_cache_config(is_eagle_group=True)
+    with pytest.raises(NotImplementedError, match="rebuild_sliding_window: false"):
+        UMBPStoreConnector(_standalone_config(), KVConnectorRole.SCHEDULER, config)
