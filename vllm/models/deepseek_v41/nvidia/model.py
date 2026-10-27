@@ -706,14 +706,19 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
         if self.parallel_config.prefill_context_parallel_size > 1 and (
-            self.parallel_config.pipeline_parallel_size != 1
-            or self.parallel_config.data_parallel_size != 1
-            or self.parallel_config.decode_context_parallel_size != 1
+            self.parallel_config.decode_context_parallel_size != 1
+            or (
+                self.parallel_config.pipeline_parallel_size > 1
+                and self.parallel_config.data_parallel_size > 1
+                and self.parallel_config.tensor_parallel_size > 1
+                and self.parallel_config.enable_expert_parallel
+            )
             or self.parallel_config.use_ubatching
             or (
                 vllm_config.speculative_config is not None
                 and (
-                    not vllm_config.speculative_config.use_dspark()
+                    self.parallel_config.pipeline_parallel_size > 1
+                    or not vllm_config.speculative_config.use_dspark()
                     or vllm_config.speculative_config.enable_adaptive_verification
                 )
             )
@@ -725,9 +730,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             or vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
         ):
             raise NotImplementedError(
-                "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
+                "DeepSeek-V4.1 PCP currently requires DCP=1, with no "
                 "microbatching, KV transfer, or MegaMoE. "
-                "Speculative decoding requires fixed-length DSpark. "
+                "Combining PP and DP requires TP=1 or disabled expert parallel. "
+                "Speculative decoding requires fixed-length DSpark with PP=1. "
                 "Prefix caching requires SWA bounded replay."
             )
         self.use_native_mega_moe = (
