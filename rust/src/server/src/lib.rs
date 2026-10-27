@@ -29,7 +29,8 @@ use axum::body::Body;
 use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    DEFAULT_LOG_STATS_INTERVAL, HttpListenerMode, LoraModulePath, TlsConfig,
+    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath,
+    TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -64,7 +65,6 @@ const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
 /// How long the server waits for a keepalive PING reply before dropping the gRPC
 /// connection. 20s matches the gRPC-core default.
 const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
-const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Resolve the public model names accepted by the frontend.
 fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
@@ -135,7 +135,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
         .with_request_id_randomization(!config.disable_request_id_randomization)
         .with_stream_interval(config.stream_interval);
-    let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
+    let text = TextLlm::new(llm, text_backend)
+        .with_max_logprobs(config.max_logprobs)
+        .with_structured_outputs_backend(config.structured_outputs_backend);
 
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())
