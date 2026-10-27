@@ -453,6 +453,7 @@ async fn chat_completion_chunk_stream(
                 usage: final_usage,
                 timestamps,
                 finish_reason,
+                kv_transfer_params,
                 ..
             }) => {
                 if enable_log_requests {
@@ -484,6 +485,7 @@ async fn chat_completion_chunk_stream(
                     &envelope,
                     finish_reason,
                     saw_tool_calls && !is_named_tool_choice,
+                    kv_transfer_params.map(|value| *value),
                 ) {
                     Ok(chunk) => yield_chunk!(chunk),
                     Err(error) => {
@@ -802,11 +804,13 @@ fn logprobs_only_chunk(
     chunk
 }
 
-/// Build the terminal SSE chunk carrying the OpenAI finish reason.
+/// Build the terminal SSE chunk carrying the OpenAI finish reason and, like
+/// Python, the request's KV transfer params.
 fn final_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     finish_reason: FinishReason,
     use_tool_calls_finish_reason: bool,
+    kv_transfer_params: Option<Value>,
 ) -> Result<ChatCompletionStreamResponse, ApiError> {
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = chat_finish_reason_to_openai(&finish_reason, use_tool_calls_finish_reason)?;
@@ -823,6 +827,7 @@ fn final_chunk(
         stop_reason,
         ..Default::default()
     });
+    chunk.kv_transfer_params = kv_transfer_params;
     Ok(chunk)
 }
 
@@ -919,6 +924,7 @@ mod tests {
             &envelope,
             FinishReason::Stop(Some(StopReason::Text("stop".to_string()))),
             false,
+            None,
         )
         .expect("finish reason is valid");
 
@@ -928,7 +934,7 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_length_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, false)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, false, None)
             .expect("finish reason is valid");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
@@ -937,7 +943,7 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_abort_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, false)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, false, None)
             .expect("abort is a valid finish reason");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
@@ -946,12 +952,12 @@ mod tests {
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None), false).is_err());
+        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None), false, None).is_err());
     }
 
     #[test]
     fn final_chunk_maps_stop_to_tool_calls_when_tool_calls_were_streamed() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::stop_eos(), true)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::stop_eos(), true, None)
             .expect("finish reason is valid");
 
         assert_eq!(
@@ -1114,6 +1120,62 @@ mod tests {
             Some("think")
         );
         assert!(chunks[1].choices[0].logprobs.is_some());
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_puts_kv_transfer_params_on_finish_chunk_only() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Text,
+                delta: "answer".to_string(),
+                token_count: None,
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: done_usage(1, 1, 0),
+                timestamps: Default::default(),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: Some(Box::new(json!({"remote_block_ids": [1, 2]}))),
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_usage: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+        let payloads: Vec<_> = chunks
+            .iter()
+            .map(|chunk| serde_json::to_value(chunk).expect("chunk serializes"))
+            .collect();
+
+        // Start, content, finish, usage.
+        assert_eq!(payloads.len(), 4);
+        assert_eq!(payloads[2]["choices"][0]["finish_reason"], json!("stop"));
+        assert_eq!(
+            payloads[2]["kv_transfer_params"],
+            json!({"remote_block_ids": [1, 2]})
+        );
+        for index in [0, 1, 3] {
+            assert!(payloads[index].get("kv_transfer_params").is_none());
+        }
     }
 
     #[tokio::test]
