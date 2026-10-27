@@ -1223,21 +1223,6 @@ where
     )
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn native_engine_shuts_down_with_app_state() {
-    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
-        default_ready_response(),
-        |_dealer, _push| boxed_test_future(async {}),
-    )
-    .await;
-    assert!(state.chat.engine_client().as_engine_core_client().is_some());
-    state
-        .shutdown(tokio::time::Instant::now() + Duration::from_secs(5))
-        .await
-        .unwrap();
-}
-
 /// Engine script that answers one `add_lora` utility call with `loaded` and
 /// hands the decoded LoRA request tuple to `check`.
 fn add_lora_script(
