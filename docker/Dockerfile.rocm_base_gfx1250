@@ -215,31 +215,6 @@ RUN mkdir -p /app/install; \
     && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl \
     && cp /app/mori/dist/*.whl /app/install;
 
-
-###
-### FlashAttention Build
-###
-# Remove  && git submodule update --init \ for CK
-FROM base AS build_fa
-ARG FA_BRANCH
-ARG FA_REPO
-ARG USE_SCCACHE
-ENV FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE
-RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/aiter_install \
-    pip install --no-deps /aiter_install/*.whl
-RUN mkdir -p /app/install; \
-    git clone ${FA_REPO} \
-    && cd flash-attention \
-    && git checkout ${FA_BRANCH} \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-    export HIP_CLANG_PATH=/opt/sccache-wrappers \
-    && sccache --show-stats; \
-    fi \
-    && GPU_ARCHS=$(echo ${FA_GPU_ARCHS} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && cp dist/*.whl /app/install;
-
-
 ###
 ### AITER Build
 ###
@@ -264,6 +239,27 @@ RUN pip install pyyaml && cd aiter \
     && ls /app/aiter/dist/*.whl
 RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
+###
+### FlashAttention Build
+###
+FROM base AS build_fa
+ARG FA_BRANCH
+ARG FA_REPO
+ARG USE_SCCACHE
+ENV FLASH_ATTENTION_USE_SYSTEM_AITER=TRUE
+RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/aiter_install \
+    pip install --no-deps /aiter_install/*.whl
+RUN mkdir -p /app/install; \
+    git clone ${FA_REPO} \
+    && cd flash-attention \
+    && git checkout ${FA_BRANCH} \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+    export HIP_CLANG_PATH=/opt/sccache-wrappers \
+    && sccache --show-stats; \
+    fi \
+    && GPU_ARCHS=$(echo ${FA_GPU_ARCHS} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
+    && cp dist/*.whl /app/install;
 
 ###
 ### Final Build
