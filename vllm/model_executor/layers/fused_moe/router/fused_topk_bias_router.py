@@ -510,7 +510,7 @@ class FusedTopKBiasRouter(BaseRouter):
             topk=self.top_k,
             bias_vl=bias_vl.data if bias_vl is not None else None,
             input_ids=input_ids if bias_vl is not None else None,
-            is_padding=_get_padding_mask(hidden_states.shape[0]),
+            is_padding=get_moe_padding_mask(hidden_states.shape[0]),
         )
 
     def can_select_from_hidden_states(
