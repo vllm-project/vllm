@@ -190,11 +190,18 @@ do_build() {
     # signal can overtake in-flight data and receivers read stale raw-buffer rows
     # (silent dispatch corruption -> combine illegal memory accesses).
     # The patch is pinned to DeepEP d4f41e4e; skip loudly on any other ref.
-    if [[ "$name" == "DeepEP" ]] && \
-        [[ "$(git rev-parse HEAD)" == d4f41e4e* ]] && \
-        ! grep -q "Signal on every context, not just context 0" \
+    if [[ "$name" == "DeepEP" ]]; then
+        local deepep_head
+        deepep_head=$(git rev-parse HEAD)
+        if [[ "$deepep_head" != d4f41e4e* ]]; then
+            echo "WARNING: Skipping DeepEP GIN barrier data-visibility patch: HEAD is $deepep_head, expected d4f41e4e." >&2
+        elif grep -q "Signal on every context, not just context 0" \
             deep_ep/include/deep_ep/common/comm.cuh; then
-        patch --batch -p1 < "${PATCHES_DIR}/deepep-gin-barrier-data-visibility.patch"
+            echo "DeepEP GIN barrier data-visibility patch is already applied."
+        elif ! patch --batch -p1 < "${PATCHES_DIR}/deepep-gin-barrier-data-visibility.patch"; then
+            echo "ERROR: Failed to apply DeepEP GIN barrier data-visibility patch; aborting build." >&2
+            exit 1
+        fi
     fi
 
     # DeepEP CUDA 13 patch
