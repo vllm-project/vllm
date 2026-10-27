@@ -3048,6 +3048,15 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     assert!(ready_response.enable_sleep_mode);
     assert!(ready_response.supports_draft_weight_updates);
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
+    assert_eq!(
+        ready_response.vllm_config,
+        Some(serde_json::json!({
+            "model_config": {"model": "test-model", "max_model_len": 32768},
+            "cache_config": {"num_gpu_blocks": 1000, "gpu_memory_utilization": 0.9},
+            "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
+            "speculative_config": null,
+        }))
+    );
     let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
     assert!(kv_events_config.enable_kv_cache_events);
     assert_eq!(kv_events_config.publisher, "zmq");

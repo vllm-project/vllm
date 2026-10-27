@@ -27,6 +27,16 @@ _HEARTBEAT_IVL_MS = 2000
 _HEARTBEAT_TIMEOUT_MS = 10000
 _HEARTBEAT_TTL_MS = 10000
 
+# Messages a DEALER queues for its peer before send() raises. Control messages
+# are small, so a full queue means the peer has stopped reading, not a burst.
+# Set explicitly so the fail-fast bound does not depend on libzmq's default.
+_SNDHWM = 1000
+# How long a closed DEALER keeps flushing queued messages, such as the
+# best-effort DisconnectMsg. Bounded: with the default (-1), messages queued
+# for an unreachable peer make Context.destroy() hang forever, since its
+# linger only applies to sockets that are still open.
+_DEALER_LINGER_MS = 500
+
 # Events that indicate a fatal connection failure — the peer will never
 # become reachable through this socket.
 _FATAL_MONITOR_EVENTS: frozenset[int] = frozenset()  # populated after import
@@ -86,13 +96,23 @@ class ZmqConnection(ControlConnection):
         self._inbox: list[dict] = []
 
     def send(self, msg: dict) -> None:
-        """Send a msgpack-encoded message to this peer."""
+        """Send a msgpack-encoded message to this peer.
+
+        Never blocks: callers hold the tiering manager lock. Raises
+        ConnectionError once _SNDHWM messages are queued for the peer, so the
+        owning session marks the connection dead instead of stalling.
+        """
         if not self.alive:
             raise RuntimeError(
                 f"ZmqConnection: send on closed connection to {self.peer_id}"
             )
         data = msgspec.msgpack.encode(msg)
-        self._sockets.dealer.send(data)
+        try:
+            self._sockets.dealer.send(data, zmq.NOBLOCK)
+        except zmq.Again as exc:
+            raise ConnectionError(
+                f"ZmqConnection: send queue to {self.peer_id} is full"
+            ) from exc
 
     def recv(self) -> Sequence[dict]:
         """Drain and return all buffered incoming messages."""
@@ -263,6 +283,10 @@ class ZmqTransport(ControlTransport):
         dealer = self._zmq_ctx.socket(zmq.DEALER)
         _apply_heartbeat(dealer)
         dealer.identity = self._local_id.encode()
+        # ZMQ_IMMEDIATE stays 0: messages queue before the TCP connect
+        # completes, so the ConnectMsg sent right after connect() fits.
+        dealer.setsockopt(zmq.SNDHWM, _SNDHWM)
+        dealer.setsockopt(zmq.LINGER, _DEALER_LINGER_MS)
 
         # Unique per connection, not per peer: libzmq releases an inproc
         # endpoint on its reaper thread after the DEALER's close() has already

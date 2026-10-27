@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
@@ -129,7 +130,33 @@ impl GenerateRequest {
     }
 }
 
+/// The remote-prefill fields of `kv_transfer_params` read by the frontend.
+///
+/// The prefiller's scheduler fills `remote_prefill_cached_tokens` next to
+/// `do_remote_prefill` in the parameters it returns, which the P/D proxy then
+/// forwards to the decoder.
+#[derive(Deserialize)]
+struct RemotePrefillParams {
+    #[serde(default)]
+    do_remote_prefill: bool,
+    remote_prefill_cached_tokens: Option<usize>,
+}
+
 impl PreparedGenerateRequest {
+    /// Return the prefiller's cache hits when this is the decode side of a
+    /// P/D request, so response usage reports them instead of the transferred
+    /// KV that the decoder counts as cached.
+    pub fn remote_prefill_cached_tokens(&self) -> Option<usize> {
+        let params = (self.engine_request.sampling_params.as_ref()?.extra_args.as_ref()?)
+            .get("kv_transfer_params")?;
+        let params = RemotePrefillParams::deserialize(params).ok()?;
+        if params.do_remote_prefill {
+            params.remote_prefill_cached_tokens
+        } else {
+            None
+        }
+    }
+
     /// Return the original prompt token IDs copied into the raw engine request.
     pub fn prompt_token_ids(&self) -> &[u32] {
         self.engine_request
@@ -143,6 +170,7 @@ impl PreparedGenerateRequest {
 mod tests {
     use std::collections::BTreeMap;
 
+    use serde_json::json;
     use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
     use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
     use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
@@ -256,5 +284,44 @@ mod tests {
         let prepared = request.prepare(false).unwrap();
 
         assert_eq!(prepared.engine_request.mm_features, Some(Vec::new()));
+    }
+
+    #[test]
+    fn remote_prefill_cached_tokens_requires_remote_prefill() {
+        let cases = [
+            (
+                "positive",
+                Some(json!({"do_remote_prefill": true, "remote_prefill_cached_tokens": 5})),
+                Some(5),
+            ),
+            (
+                "zero",
+                Some(json!({"do_remote_prefill": true, "remote_prefill_cached_tokens": 0})),
+                Some(0),
+            ),
+            (
+                "missing_count",
+                Some(json!({"do_remote_prefill": true})),
+                None,
+            ),
+            (
+                "false_flag",
+                Some(json!({"do_remote_prefill": false, "remote_prefill_cached_tokens": 5})),
+                None,
+            ),
+            (
+                "missing_flag",
+                Some(json!({"remote_prefill_cached_tokens": 5})),
+                None,
+            ),
+            ("no_kv_transfer_params", None, None),
+        ];
+        for (name, kv_transfer_params, expected) in cases {
+            let mut request = sample_request();
+            request.sampling_params.extra_args = kv_transfer_params
+                .map(|params| [("kv_transfer_params".to_string(), params)].into());
+            let actual = request.prepare(false).unwrap().remote_prefill_cached_tokens();
+            assert_eq!(actual, expected, "{name}");
+        }
     }
 }

@@ -364,6 +364,8 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
     spec.seeds = torch.arange(3)
     spec.draft_tokens = torch.empty(3, 2, dtype=torch.long)
     spec.draft_logits = None
+    spec.draft_logits_num_shards = 1
+    spec.draft_logits_shard_idx = 0
     spec.use_fp64_gumbel = False
     spec.enable_adaptive_verification = True
     spec.input_buffers = SimpleNamespace(input_ids=torch.arange(9))

@@ -62,6 +62,62 @@ impl FromStr for PauseMode {
     }
 }
 
+/// Process checkpoint lifecycle of an engine, as Python's `CheckpointState`.
+///
+/// It serves only while `Running`, and may go through the cycle any number of
+/// times. Display/from-str serde keeps the Python literal strings on the
+/// MessagePack wire and in JSON responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SerializeDisplay, DeserializeFromStr)]
+pub enum CheckpointState {
+    /// Serving requests.
+    Running,
+    /// Draining, then releasing what a checkpoint must not contain.
+    Preparing,
+    /// Safe to capture.
+    Prepared,
+    /// Bringing back what preparing released.
+    Restoring,
+    /// Preparing or restoring failed.
+    Failed,
+}
+
+impl CheckpointState {
+    /// Return the Python literal used on the utility-call wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Preparing => "preparing",
+            Self::Prepared => "prepared",
+            Self::Restoring => "restoring",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for CheckpointState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for CheckpointState {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "running" => Ok(Self::Running),
+            "preparing" => Ok(Self::Preparing),
+            "prepared" => Ok(Self::Prepared),
+            "restoring" => Ok(Self::Restoring),
+            "failed" => Ok(Self::Failed),
+            other => Err(format!(
+                "invalid checkpoint state `{other}`; expected one of: running, preparing, \
+                 prepared, restoring, failed"
+            )),
+        }
+    }
+}
+
 /// Utility call id as carried on the engine-core MessagePack wire.
 ///
 /// Python emits utility ids as MessagePack integers, including values that may

@@ -29,6 +29,9 @@ pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default interval between periodic engine statistics logs.
 pub const DEFAULT_LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Default maximum size of an HTTP request body or a decoded gRPC message.
+pub const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+
 /// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
@@ -55,7 +58,8 @@ pub enum CoordinatorMode {
 }
 
 /// HTTP/API-server behavior switches that affect route-layer responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Educe)]
+#[educe(Default)]
 pub struct ApiServerOptions {
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
@@ -75,6 +79,11 @@ pub struct ApiServerOptions {
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
+    /// Maximum HTTP request body size in bytes
+    /// (`VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, default 32 MiB). `None` removes the
+    /// limit.
+    #[educe(Default(expression = Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES)))]
+    pub request_body_limit_bytes: Option<usize>,
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; origins are denied by default.

@@ -161,11 +161,14 @@ The gauge holds one series for each configuration that the manager reports. A ma
 | Label | Declared by | Meaning | Notes |
 | --- | --- | --- | --- |
 | `tier` | `TieringOffloadingSpec` | The tier that this series reports. | `<index>:<type>`. Index `0` is the CPU primary tier, and a secondary tier index starts at 1. `<type>` is the `type` key of the tier config, such as `1:fs`. |
-| `cpu_num_chunks` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Chunk slots in the CPU tier. | Chunks, not GPU blocks. `cpu_bytes_to_use` divided by the bytes of one chunk. |
+| `cpu_num_chunks` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Chunk slots in the CPU tier. | Chunks, not GPU blocks. |
+| `cpu_blocks_per_chunk` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | GPU blocks in one chunk. | The chunk-to-block conversion factor. Set by `blocks_per_chunk`, or derived from `block_size`. |
+| `cpu_kv_cache_size_bytes` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | Size of the CPU tier in bytes. | `cpu_num_chunks` times the bytes of one chunk slot. Each slot is rounded up to the host page size, so this can include padding. |
+| `cpu_kv_cache_size_tokens` | `CPUOffloadingSpec` or `TieringOffloadingSpec` | KV tokens the tier holds for requests of `max_model_len` tokens. | Computed like the GPU `kv_cache_size_tokens`. A group with a sliding window keeps a fixed chunk count, so this value can be larger than the byte capacity suggests. Reads `None` when `max_model_len` is 0 or the model has no KV cache group. |
 
-The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series.
+`CPUOffloadingSpec` publishes the four `cpu_` labels on its one series. `TieringOffloadingSpec` publishes them on the `0:primary` series.
 
-`CPUOffloadingSpec` publishes `cpu_num_chunks` on its one series. `TieringOffloadingSpec` publishes it on the `0:primary` series. For a worked example of a secondary tier, the `example` tier publishes one label, `example_info`.
+The spec declares the label names in the API server process, and the manager fills the values in the engine process. The names of every series bind once, at the declaration. A label that one series owns reads empty on every other series. For a worked example, the `example` secondary tier publishes one label, `example_info`.
 
 A manager adds a label with `config_info_keys()` of its spec and `config_info()` of its own class. A name that a manager fills and the spec does not declare is dropped, and the engine log then holds one warning line.
 
@@ -184,6 +187,11 @@ Implement `CachePolicy` (`vllm/v1/kv_offload/cpu/policies/base.py`) in your own 
   "cache_policy_module_path": "my_package.my_module"
 }
 ```
+
+Custom policies must implement `insert(self, key, chunk, req_context)`. The request
+context provides each key's token position through `get_offload_key_position(key)`
+so a policy can establish prefix ordering during insertion. Policies that do not
+use request-specific insertion ordering can accept and ignore `req_context`.
 
 `eviction_policy` is checked against the built-in registry first; if it isn't a registered name, vLLM imports `cache_policy_module_path` and looks up `eviction_policy` as a class name in that module — the same fallback `spec_module_path` provides for a custom `OffloadingSpec`. No import or registration call needs to run before the server starts.
 
