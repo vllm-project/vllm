@@ -945,6 +945,7 @@ def test_pin_mmap_region_worker_slot_only_registers_own_slots(
     )
     try:
         gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+        assert region._base is not None
         base = region._base.data_ptr() + PAGE_SIZE
         assert register.call_args_list == [
             call(base + row * 4 * PAGE_SIZE, 2 * PAGE_SIZE) for row in range(3)
