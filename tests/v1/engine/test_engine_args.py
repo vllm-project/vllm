@@ -108,6 +108,16 @@ def test_mm_prefix_lm_raises_batched_tokens_floor():
     assert vllm_config.scheduler_config.max_num_batched_tokens >= 2496
 
 
+@pytest.mark.parametrize("max_num_seqs", [1, 3])
+def test_encoder_decoder_raises_batched_tokens_floor(max_num_seqs: int):
+    """The default clamp to max_num_seqs * max_model_len (448 for Whisper)
+    must not leave less room than one 1500-token encoder input."""
+    engine_args = EngineArgs(model="openai/whisper-tiny", max_num_seqs=max_num_seqs)
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+    assert vllm_config.scheduler_config.max_num_batched_tokens == 1500
+
+
 def test_custom_histogram_buckets_from_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
 
