@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import copy
 import time
 import weakref
 from abc import ABC, abstractmethod
@@ -12,6 +13,7 @@ from functools import cached_property
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Generic, overload
 
+from transformers import TokenizersBackend
 from typing_extensions import TypeVar
 
 from vllm.exceptions import VLLMValidationError
@@ -48,6 +50,10 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import (
+    ThreadSafeHFTokenizerMixin,
+    maybe_make_thread_pool,
+)
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -104,6 +110,11 @@ class _SwappableExecutor(Executor):
 
 
 class BaseRenderer(ABC, Generic[_T]):
+    # Subclasses that hand over a private tokenizer copy (e.g. ``HfRenderer``,
+    # which adds special tokens before calling ``super().__init__()``) set this
+    # so the shared instance is copied only once.
+    _tokenizer_copied_by_subclass: bool = False
+
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
 
@@ -114,6 +125,17 @@ class BaseRenderer(ABC, Generic[_T]):
         self._resources = ExitStack()
         self._resources.callback(logger.debug, f"[shutdown] {self.__class__.__name__}")
         self._finalizer = weakref.finalize(self, self._resources.close)
+
+        # Tokenizers are commonly shared through ``cached_get_tokenizer``.
+        # Copy before anything (notably ``create_processor`` below) can mutate
+        # this instance, and before ``maybe_make_thread_pool`` replaces its
+        # class in place.
+        if (
+            not self._tokenizer_copied_by_subclass
+            and isinstance(tokenizer, TokenizersBackend)
+            and not isinstance(tokenizer, ThreadSafeHFTokenizerMixin)
+        ):
+            tokenizer = copy.copy(tokenizer)
 
         self.tokenizer = tokenizer
 
@@ -213,6 +235,14 @@ class BaseRenderer(ABC, Generic[_T]):
             self._resources.callback(self._mm_processor_cache.close)
         if self._mm_processor_only_cache:
             self._resources.callback(self._mm_processor_only_cache.close)
+
+        # Must be the last step: the pool snapshots the tokenizer into deep
+        # copies, so any mutation performed afterwards (e.g. special tokens
+        # added by a processor) would not be visible to those copies.
+        if self.tokenizer is not None:
+            maybe_make_thread_pool(
+                self.tokenizer, config.model_config.renderer_num_workers + 1
+            )
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer

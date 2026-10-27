@@ -48,7 +48,7 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.chat_utils.content_parser import (
     PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
 )
-from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
+from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
@@ -1031,6 +1031,10 @@ def replace_vision_chunk_video_placeholder(
 
 
 class HfRenderer(BaseRenderer[HfTokenizer]):
+    # The tokenizer is copied below, before the placeholder token is added to
+    # it, so BaseRenderer must not copy the cached instance again.
+    _tokenizer_copied_by_subclass = True
+
     def __init__(
         self,
         config: VllmConfig,
@@ -1053,11 +1057,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._executor
         )
-
-        if self.tokenizer is not None:
-            maybe_make_thread_pool(
-                self.tokenizer, config.model_config.renderer_num_workers + 1
-            )
 
     def _replace_executor(self) -> None:
         """Replace the inner render pool after a stuck worker.
