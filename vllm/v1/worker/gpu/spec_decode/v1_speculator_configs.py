@@ -25,10 +25,6 @@ class SuffixSpeculatorConfig(UnsupportedSpeculatorConfig):
     base_method = "suffix"
 
     @classmethod
-    def default_model(cls, spec: "SpeculativeConfig") -> str | None:
-        return "suffix"
-
-    @classmethod
     def configure(cls, spec: "SpeculativeConfig") -> None:
         spec._validate_suffix_decoding()
 

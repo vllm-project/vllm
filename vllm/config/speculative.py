@@ -1342,6 +1342,9 @@ class SpeculativeConfig:
             self.method = "custom_class"
         elif self.method is None and self.model in ("ngram", "[ngram]"):
             self.method = "ngram"
+        elif self.method is None and self.model is None:
+            # No draft checkpoint to detect the method from.
+            self.method = "draft_model"
         # Otherwise, it stays None until detected from the draft checkpoint.
 
         if self.method in get_args(MTPModelTypes) and self.method != "mtp":
@@ -1356,8 +1359,6 @@ class SpeculativeConfig:
         if self.model is None and self.num_speculative_tokens is not None:
             self.model = config_cls.default_model(self)
         config_cls.configure(self)
-        if self.method is None:
-            self.method = config_cls.base_method  # type: ignore[assignment]
         # The draft checkpoint may have determined the speculator.
         config_cls = get_speculator_config_class(self)
 
@@ -1387,7 +1388,8 @@ class SpeculativeConfig:
 
     @property
     def speculator_config(self) -> SpeculatorConfig:
-        """The configured speculator's config (derived on each access)."""
+        """The configured speculator's config. Derived on each access
+        so that it follows changes to the fields it depends."""
         return get_speculator_config_class(self)(self)
 
     @property
@@ -1687,8 +1689,24 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        if self.use_heterogeneous_vocab:
-            self._verify_heterogeneous_vocab_args()
+        if self.use_heterogeneous_vocab and not self.uses_draft_model():
+            raise ValueError(
+                "use_heterogeneous_vocab only works with method='draft_model'"
+            )
+
+        if self.use_heterogeneous_vocab and self.draft_sample_method != "greedy":
+            raise ValueError(
+                "use_heterogeneous_vocab currently only supports greedy draft "
+                "sampling. Set draft_sample_method='greedy' (the default) or "
+                "omit it."
+            )
+
+        if self.use_heterogeneous_vocab and self.use_local_argmax_reduction:
+            raise ValueError(
+                "use_heterogeneous_vocab is not compatible with "
+                "use_local_argmax_reduction because token-level intersection "
+                "requires the full draft logits."
+            )
 
         if self.rejection_sample_method == "fly":
             if not self.speculator_config.proposes_draft_tokens:
@@ -1715,27 +1733,6 @@ class SpeculativeConfig:
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
         return self
-
-    def _verify_heterogeneous_vocab_args(self) -> None:
-        # V1 model runner only (V2 falls back to V1 for this).
-        if not self.speculator_config.draft_has_own_vocab:
-            raise ValueError(
-                "use_heterogeneous_vocab only works with method='draft_model'"
-            )
-
-        if self.draft_sample_method != "greedy":
-            raise ValueError(
-                "use_heterogeneous_vocab currently only supports greedy draft "
-                "sampling. Set draft_sample_method='greedy' (the default) or "
-                "omit it."
-            )
-
-        if self.use_local_argmax_reduction:
-            raise ValueError(
-                "use_heterogeneous_vocab is not compatible with "
-                "use_local_argmax_reduction because token-level intersection "
-                "requires the full draft logits."
-            )
 
     def verify_equal_vocab_size_if_draft_model(self):
         if (

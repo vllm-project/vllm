@@ -65,7 +65,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             spec.num_speculative_tokens = block_size
 
     @classmethod
-    def validate_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
+    def apply_options(cls, spec: "SpeculativeConfig") -> None:
         draft = spec.draft_model_config
         hf_config = draft.hf_config
         dspark_draft_topk = spec.dspark_draft_topk

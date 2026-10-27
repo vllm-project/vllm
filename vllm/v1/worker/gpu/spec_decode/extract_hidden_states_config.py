@@ -21,10 +21,6 @@ class ExtractHiddenStatesSpeculatorConfig(SpeculatorConfig):
     proposes_draft_tokens = False
 
     @classmethod
-    def default_model(cls, spec: "SpeculativeConfig") -> str | None:
-        return "extract_hidden_states"
-
-    @classmethod
     def configure(cls, spec: "SpeculativeConfig") -> None:
         # ExtractHiddenStatesModel is instantiated manually in load_model()
         # We just need to store the target model config for KV cache shape info

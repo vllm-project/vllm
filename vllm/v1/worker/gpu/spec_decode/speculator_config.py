@@ -54,7 +54,7 @@ class SpeculatorConfig:
     proposes_draft_tokens: ClassVar[bool] = True
     adaptive_verification_uses_draft_logits: ClassVar[bool] = True
     # The draft model has its own vocabulary, which must match the target's
-    # unless use_heterogeneous_vocab.
+    # unless use_heterogeneous_vocab is set.
     draft_has_own_vocab: ClassVar[bool] = False
 
     supports_watermarking: ClassVar[bool] = False
@@ -77,7 +77,7 @@ class SpeculatorConfig:
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:
         """The `model` to use when it isn't given."""
-        return None
+        return cls.base_method
 
     @classmethod
     def configure(cls, spec: "SpeculativeConfig") -> None:
@@ -230,7 +230,6 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
                 "A speculative model was provided, but "
                 "`num_speculative_tokens` was not provided"
             )
-        config_cls.validate_draft_model_config(spec)
 
         spec.draft_tensor_parallel_size = SpeculativeConfig._verify_and_get_draft_tp(
             spec.target_parallel_config, spec.draft_tensor_parallel_size
@@ -271,11 +270,6 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
                 f"num_speculative_tokens:{spec.num_speculative_tokens}"
                 f" must be divisible by {n_predict=}"
             )
-
-    @classmethod
-    def validate_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
-        """Validate the draft model config, given `num_speculative_tokens`."""
-        return
 
 
 def _builtin(module: str, name: str) -> str:
@@ -378,9 +372,11 @@ def get_speculator_config_class(
     spec_config: "SpeculativeConfig",
 ) -> type[SpeculatorConfig]:
     """The config class for a set-up spec config."""
+    if (
+        custom_cls := get_custom_speculator_config_class(spec_config.method)
+    ) is not None:
+        return custom_cls
     config_cls = get_method_config_class(spec_config)
-    if get_custom_speculator_config_class(spec_config.method) is not None:
-        return config_cls
     declared_cls = _get_draft_declared_config_class(spec_config)
     if declared_cls is not None and issubclass(declared_cls, config_cls):
         return declared_cls
@@ -416,7 +412,16 @@ def _resolve_checkpoint_config_class(
             and declared_cls is not None
             and declared_cls.base_method != configured_cls.base_method
         ):
-            raise ValueError(_checkpoint_mismatch_message(spec_config, declared_cls))
+            draft = spec_config.draft_model_config
+            declared = declared_cls.base_method
+            raise ValueError(
+                f"speculative_config requested method={spec_config.method!r}, but "
+                f"the draft model {draft.model!r} is a {declared!r} checkpoint "
+                f"(model_type={getattr(draft.hf_config, 'model_type', None)!r}, "
+                f"architectures={getattr(draft, 'architectures', None)}). Pass a "
+                f"matching method or a matching draft checkpoint. Use "
+                f"method={declared!r} if that is what you intended."
+            )
         return configured_cls
 
     if declared_cls is not None:
@@ -427,19 +432,3 @@ def _resolve_checkpoint_config_class(
         if config_cls.matches(spec_config):
             return config_cls
     return configured_cls
-
-
-def _checkpoint_mismatch_message(
-    spec_config: "SpeculativeConfig",
-    declared_cls: type[SpeculatorConfig],
-) -> str:
-    draft = spec_config.draft_model_config
-    declared = declared_cls.base_method
-    return (
-        f"speculative_config requested method={spec_config.method!r}, but the "
-        f"draft model {draft.model!r} is a {declared!r} checkpoint "
-        f"(model_type={getattr(draft.hf_config, 'model_type', None)!r}, "
-        f"architectures={getattr(draft, 'architectures', None)}). Pass a matching "
-        f"method or a matching draft checkpoint. Use method={declared!r} if that "
-        "is what you intended."
-    )

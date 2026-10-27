@@ -16,10 +16,6 @@ class NgramSpeculatorConfig(SpeculatorConfig):
     prefer_dense_token_history = True
 
     @classmethod
-    def default_model(cls, spec: "SpeculativeConfig") -> str | None:
-        return cls.base_method
-
-    @classmethod
     def configure(cls, spec: "SpeculativeConfig") -> None:
         # Set default values if not provided
         if spec.prompt_lookup_min is None and spec.prompt_lookup_max is None:
