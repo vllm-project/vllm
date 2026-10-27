@@ -63,7 +63,6 @@ class _StubImageProcessor:
             height = int(scale_resolution / math.sqrt(aspect_ratio))
             width = int(height * aspect_ratio)
         # The OCR delta: one 2x2 merge in "4x" mode, two in "16x".
-        # transformers 5.21 takes the mode as an argument, not off the instance.
         merge_factor = 2 if downsample_mode == "4x" else 4
         best_width = ensure_divide(width, patch_size * merge_factor)
         best_height = ensure_divide(height, patch_size * merge_factor)
