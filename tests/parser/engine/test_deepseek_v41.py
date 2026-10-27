@@ -45,6 +45,7 @@ def parser_for(tokenizer, controls):
         reasoning_parser_name="deepseek_v41",
         enable_auto_tools=True,
     )
+    assert cls is not None
     return cls(tokenizer, chat_template_kwargs=controls)
 
 
@@ -133,14 +134,17 @@ def test_reasoning_adapter_controls_and_usage(
 
 def test_python_argument_conversion_and_partial_values():
     converter = deepseek_v41_config().arg_converter
+    assert converter is not None
     raw = (
         '<｜DSML｜ parameter name="object" string="false">'
         '{"a": [true, null]}</｜DSML｜ parameter>'
         '<｜DSML｜ parameter name="bad" string="false">[broken</｜DSML｜ parameter>'
+        '<｜DSML｜ parameter name="bare">7</｜DSML｜ parameter>'
         '<｜DSML｜ parameter name="text" string="true">  a<b'
     )
     assert json.loads(converter(raw, True)) == {
         "object": {"a": [True, None]},
         "bad": "[broken",
+        "bare": 7,
         "text": "  a<b",
     }

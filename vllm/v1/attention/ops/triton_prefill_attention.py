@@ -25,11 +25,24 @@ It supports page size = 1.
 
 # Adapted from
 # https://github.com/ModelTC/lightllm/blob/f2a54f0912293f683bf1d1695fd12c4098a5bf82/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py#L1
+from functools import cache
+
 import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
+
+
+def _prefer_narrow_kv_tile() -> bool:
+    """RDNA3/RDNA4 prefer a narrower KV tile than the shared default."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1x
+
+    # RDNA3/RDNA4 only: on_gfx1x() excludes gfx10xx and gfx1250.
+    return on_gfx1x()
 
 
 @triton.jit
@@ -213,6 +226,15 @@ def get_block_size(dtype: torch.dtype) -> int:
         return 64
 
 
+@cache
+def _fit_block_to_shared_memory(block: int, head_dim: int, element_size: int) -> int:
+    """Halve the tile until its Q, K and P tiles fit in shared memory."""
+    max_shared_mem = get_max_shared_memory_bytes()
+    while block > 16 and element_size * block * (2 * head_dim + block) > max_shared_mem:
+        block //= 2
+    return block
+
+
 def context_attention_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -233,9 +255,14 @@ def context_attention_fwd(
     b_seq_len: [b]
     out: [b * s, head, head_dim]
     """
-    BLOCK = get_block_size(q.dtype)
-
     Lq, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
+    BLOCK = get_block_size(q.dtype)
+    if Lk >= 512:
+        BLOCK = min(BLOCK, 32)
+    if current_platform.is_cuda():
+        BLOCK = _fit_block_to_shared_memory(
+            BLOCK, triton.next_power_of_2(Lk), q.element_size()
+        )
 
     sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
     # rescale with 1/ln(2) for triton exp2
@@ -248,6 +275,10 @@ def context_attention_fwd(
 
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
     num_warps = 4 if Lk <= 64 else 8
+
+    # BLOCK_M, num_warps and num_stages stay at the shared defaults; min()
+    # leaves dtypes whose default tile is already 32, such as float32, alone.
+    BLOCK_N = min(BLOCK, 32) if _prefer_narrow_kv_tile() else BLOCK
 
     sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
     sliding_window_k = sliding_window_k if sliding_window_k is not None else 0
@@ -272,7 +303,7 @@ def context_attention_fwd(
         kv_group_num=kv_group_num,
         BLOCK_M=BLOCK,
         BLOCK_DMODEL=triton.next_power_of_2(Lk),
-        BLOCK_N=BLOCK,
+        BLOCK_N=BLOCK_N,
         IS_CAUSAL=is_causal,
         SLIDING_WINDOW_Q=sliding_window_q,
         SLIDING_WINDOW_K=sliding_window_k,

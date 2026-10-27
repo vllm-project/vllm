@@ -32,15 +32,17 @@ from vllm.utils.torch_utils import (
 )
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
     from transformers.conversion_mapping import WeightRenaming
 
-    from vllm.config.model import ModelConfig
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
 
 ShardId: TypeAlias = str | int | tuple[int, ...]
+"""One shard of a stacked parameter. A tuple is a single contiguous span."""
+ShardIds: TypeAlias = ShardId | list[ShardId]
+"""One shard, or a list of shards the same weight is loaded into in turn."""
 
 
 @dataclass
@@ -52,7 +54,9 @@ class WeightsMapper:
     orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
-    orig_to_new_stacked: Mapping[str, tuple[str, ShardId]] = field(default_factory=dict)
+    orig_to_new_stacked: Mapping[str, tuple[str, ShardIds]] = field(
+        default_factory=dict
+    )
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
 
@@ -73,16 +77,21 @@ class WeightsMapper:
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
         )
 
-    def _map_name(self, key: str) -> str | None:
-        """Map a weight name (backward-compatible wrapper that discards shard_id)."""
+    def map_name(self, key: str) -> str | None:
+        """Map a weight name; returns ``None`` if the weight should be ignored."""
         result = self._map_name_with_shard(key)
         return result[0] if result is not None else None
 
-    def _map_name_with_shard(self, key: str) -> tuple[str, ShardId | None] | None:
+    def _map_name(self, key: str) -> str | None:
+        """Backward-compatible alias for :meth:`map_name`."""
+        return self.map_name(key)
+
+    def _map_name_with_shard(self, key: str) -> tuple[str, ShardIds | None] | None:
         """Map a weight name and extract any shard_id metadata.
 
         Returns:
-            (mapped_name, shard_id) if the name should be kept.
+            (mapped_name, shard_id) if the name should be kept. A list of shard
+            ids means the weight is loaded into each of those shards in turn.
             None if the name should be dropped.
 
         """
@@ -113,7 +122,7 @@ class WeightsMapper:
 
                 key = key.replace(substr, new_key, 1)
 
-        shard_id: ShardId | None = None
+        shard_id: ShardIds | None = None
         for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
             if substr in key:
                 key = key.replace(substr, new_key, 1)
@@ -143,9 +152,16 @@ class WeightsMapper:
             if result is None:
                 continue
             out_name, shard_id = result
-            if shard_id is not None:
-                data.shard_id = shard_id
-            yield out_name, data
+            if shard_id is None:
+                yield out_name, data
+                continue
+            shard_ids = shard_id if isinstance(shard_id, list) else [shard_id]
+            for i, one_shard_id in enumerate(shard_ids):
+                # Each shard carries its own id, so extra shards need their own
+                # tensor object; `detach` aliases the storage instead of copying.
+                shard_data = data if i == 0 else data.detach()
+                shard_data.shard_id = one_shard_id
+                yield out_name, shard_data
 
     def apply_list(self, values: list[str]) -> list[str]:
         return [
@@ -305,6 +321,22 @@ class AutoWeightsLoader:
                     f"into a single parameter {base_prefix!r}"
                 )
 
+            if param.dtype != weight_data.dtype:
+                # An exact widening -- an fp32 accumulator reading a bf16
+                # table, say -- keeps every stored value, so it is a debug
+                # line. Every other mismatch still warns.
+                exact_widening = weight_data.dtype in (
+                    torch.float16,
+                    torch.bfloat16,
+                    torch.float32,
+                ) and param.dtype in (torch.float32, torch.float64)
+                (logger.debug if exact_widening else logger.warning)(
+                    "Attempted to load weight %s with dtype %s into "
+                    "parameter with dtype %s",
+                    weight_qualname,
+                    weight_data.dtype,
+                    param.dtype,
+                )
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, weight_data)
 
@@ -320,7 +352,7 @@ class AutoWeightsLoader:
         """
         # Add persistent registered buffers.
         # Non-persistent buffers are excluded, matching PyTorch state_dict().
-        non_persistent = getattr(module, "_non_persistent_buffers_set", set())
+        non_persistent: set[str] = getattr(module, "_non_persistent_buffers_set", set())
         for buf_name, buf in module.named_buffers(recurse=False):
             if buf_name not in child_params and buf_name not in non_persistent:
                 child_params[buf_name] = buf
@@ -541,7 +573,7 @@ def maybe_fuse_shared_experts(
 
 
 def get_spec_layer_idx_from_weight_name(
-    config: "ModelConfig", weight_name: str
+    config: "PreTrainedConfig", weight_name: str
 ) -> int | None:
     """Return the MTP layer index a weight belongs to, or None.
 
@@ -570,7 +602,7 @@ def get_spec_layer_idx_from_weight_name(
 
 
 def skip_spec_layers(
-    weights: Iterable[tuple[str, torch.Tensor]], config: "ModelConfig"
+    weights: Iterable[tuple[str, torch.Tensor]], config: "PreTrainedConfig"
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Drop MTP spec-layer weights (loaded by the MTP head, not the base model).
 
@@ -593,7 +625,7 @@ def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    hf_config: "PretrainedConfig | None" = None,
+    hf_config: "PreTrainedConfig | None" = None,
     architectures: list[str] | None = None,
 ) -> nn.Module:
     """Helper function to initialize an inner model registered to vLLM,
@@ -612,11 +644,11 @@ def init_vllm_registered_model(
 
 
 @overload
-def flatten_bn(x: torch.Tensor) -> torch.Tensor: ...
+def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]: ...
 
 
 @overload
-def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]: ...
+def flatten_bn(x: torch.Tensor) -> torch.Tensor: ...
 
 
 @overload
@@ -828,17 +860,24 @@ class PPMissingLayer(torch.nn.Identity):
         return args[0] if args else next(iter(kwargs.values()))
 
 
-def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
-    """Whether the last PP rank needs the target input embedding."""
+def spec_decode_needs_target_embed(
+    vllm_config: VllmConfig, *, include_mtp: bool = False
+) -> bool:
+    """Whether the last PP rank needs the target input embedding.
+
+    MTP targets opt in when their drafter supports sharing this embedding.
+    """
     from vllm.distributed.parallel_state import get_pp_group
 
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or speculative_config.method not in (
+    if speculative_config is None:
+        return False
+    if speculative_config.method not in (
         "eagle",
         "eagle3",
         "dflash",
         "dspark",
-    ):
+    ) and not (include_mtp and speculative_config.method == "mtp"):
         return False
     pp = get_pp_group()
     return pp.world_size > 1 and pp.is_last_rank
@@ -956,7 +995,9 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
         The draft model's config if available, None otherwise.
 
     """
-    draft_model_config = vllm_config.speculative_config.draft_model_config
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    draft_model_config = speculative_config.draft_model_config
     draft_load_config = vllm_config.load_config
 
     return (
@@ -964,6 +1005,62 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
         if draft_model_config
         else None
     )
+
+
+def map_draft_quant_config(
+    quant_config: "QuantizationConfig | None",
+    weight_mapper: WeightsMapper,
+    prefix: str,
+    start_layer_id: int,
+    num_hidden_layers: int,
+) -> None:
+    """Map draft quantization settings to runtime module names."""
+    if quant_config is None:
+        return
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptQuantConfigBase
+
+    if isinstance(quant_config, ModelOptQuantConfigBase):
+        quant_config.apply_vllm_mapper(weight_mapper.get_rename_mapper())
+        root = rf"(?:{re.escape(prefix)}\.)?" if prefix else ""
+        # Match root-level layers.N, optionally prefixed or wildcarded. Offset
+        # higher IDs first so an offset of 1 cannot cascade from 0 -> 1 -> 2.
+        runtime_names = {
+            re.compile(rf"^({root}\*?)layers\.{index}(?=\.|\*|$)"): (
+                rf"\g<1>layers.{start_layer_id + index}"
+            )
+            for index in reversed(range(num_hidden_layers))
+            if start_layer_id
+        }
+        if prefix:
+            # Preserve leading wildcards and names already rooted at prefix.
+            runtime_names[re.compile(rf"^(?!\*|{re.escape(prefix)}(?:\.|\*|$))")] = (
+                f"{prefix}."
+            )
+        quant_config.apply_vllm_mapper(WeightsMapper(orig_to_new_regex=runtime_names))
+        return
+
+    # Other backends may use semantic keys or suffix rules rather than module
+    # names. Preserve their settings and only add the existing layer aliases.
+    if start_layer_id == 0:
+        return
+    exclusions = getattr(quant_config, "exclude_modules", None)
+    if not isinstance(exclusions, list):
+        return
+
+    def offset_local_layer(match: re.Match[str]) -> str:
+        layer_idx = int(match.group(1))
+        if layer_idx >= num_hidden_layers:
+            return match.group(0)
+        return f"layers.{layer_idx + start_layer_id}"
+
+    for exclusion in tuple(exclusions):
+        # Accept layers.N or *layers.N, excluding nested names such as
+        # lilicorr.layers.N, which are not decoder-layer indices.
+        global_exclusion = re.sub(
+            r"(?<![A-Za-z0-9_.])layers\.(\d+)", offset_local_layer, exclusion
+        )
+        if global_exclusion != exclusion and global_exclusion not in exclusions:
+            exclusions.append(global_exclusion)
 
 
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:

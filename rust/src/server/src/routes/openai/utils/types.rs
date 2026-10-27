@@ -39,6 +39,36 @@ where
     }
 }
 
+/// Effort level for reasoning models.
+///
+/// Fixed OpenAI HTTP request grades. Request conversion maps these names to
+/// the model-independent `vllm_chat::EffortValue` before renderer validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 // ============================================================================
 // String/Array Utilities
 // ============================================================================
@@ -231,6 +261,20 @@ pub struct StreamOptions {
     pub continuous_usage_stats: Option<bool>,
 }
 
+impl StreamOptions {
+    /// Whether no option is set, as in `"stream_options": {}`.
+    ///
+    /// Python rejects `stream_options` without `stream=true` only when the
+    /// object is non-empty, so an empty object must pass that check.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            include_usage,
+            continuous_usage_stats,
+        } = self;
+        include_usage.is_none() && continuous_usage_stats.is_none()
+    }
+}
+
 // ============================================================================
 // Tools and Function Calling
 // ============================================================================
@@ -241,6 +285,10 @@ pub struct Tool {
     #[serde(default = "default_function_tool_type")]
     pub tool_type: String,
     pub function: Function,
+    /// Tool-level form of [`Function::defer_loading`]; the function-level value
+    /// takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_loading: Option<bool>,
 }
 
 fn default_function_tool_type() -> String {
@@ -256,6 +304,9 @@ pub struct Function {
     pub parameters: Value,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
+    /// Whether the schema is loaded on demand via tool search (vLLM extension,
+    /// mirroring the OpenAI Responses and Anthropic Messages field).
+    pub defer_loading: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -380,9 +431,17 @@ impl ToolReference {
 // Chat Messages
 // ============================================================================
 
+/// One chat message, tagged by `role`.
+///
+/// The derived serde impls use `remote = "Self"` and cover only the standard
+/// roles; the trait impls below dispatch on the role tag and handle
+/// [`ChatMessage::Custom`] separately. A `#[serde(untagged)]` fallback variant
+/// would also accept malformed standard messages, such as a `tool` message
+/// without `tool_call_id`, and replace their field errors with serde's generic
+/// untagged-enum error.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "role")]
+#[serde(tag = "role", remote = "Self")]
 pub enum ChatMessage {
     #[serde(rename = "system")]
     System {
@@ -417,6 +476,67 @@ pub enum ChatMessage {
         tools: Option<Vec<Tool>>,
         name: Option<String>,
     },
+    /// Message with a role outside the OpenAI set, such as `root`. Chat
+    /// templates receive the role string unchanged.
+    #[serde(skip)]
+    Custom {
+        role: String,
+        content: MessageContent,
+    },
+}
+
+/// Role tags of the standard [`ChatMessage`] variants.
+const STANDARD_CHAT_ROLES: &[&str] = &[
+    "system",
+    "user",
+    "assistant",
+    "tool",
+    "function",
+    "developer",
+];
+
+/// Wire shape of [`ChatMessage::Custom`].
+#[derive(Deserialize, Serialize)]
+struct CustomChatMessage<R, C> {
+    role: R,
+    content: C,
+}
+
+impl Serialize for ChatMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Custom { role, content } => {
+                CustomChatMessage { role, content }.serialize(serializer)
+            }
+            _ => Self::serialize(self, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatMessage {
+    /// Dispatch on the role tag: standard roles keep their derived errors,
+    /// and any other string role becomes [`ChatMessage::Custom`].
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let is_custom = value
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| !STANDARD_CHAT_ROLES.contains(&role));
+
+        if is_custom {
+            let CustomChatMessage { role, content } =
+                CustomChatMessage::deserialize(value).map_err(serde::de::Error::custom)?;
+            Ok(Self::Custom { role, content })
+        } else {
+            Self::deserialize(value).map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -457,9 +577,7 @@ impl Usage {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: cached_tokens
-                .filter(|&c| c > 0)
-                .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
+            prompt_tokens_details: cached_tokens.map(|c| PromptTokenUsageInfo { cached_tokens: c }),
             completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
         }
     }
@@ -528,6 +646,20 @@ mod usage_tests {
             usage.prompt_tokens_details.as_ref().map(|details| details.cached_tokens),
             Some(3)
         );
+    }
+
+    #[test]
+    fn token_usage_serializes_zero_cached_tokens_when_enabled() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 8,
+                output_token_count: 2,
+                cached_token_count: 0,
+            },
+            true,
+        );
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["prompt_tokens_details"]["cached_tokens"], 0);
     }
 
     #[test]
@@ -635,13 +767,16 @@ pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
+/// Mirrors the Python vLLM `ErrorInfo` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorDetail {
     pub message: String,
+    /// The error class, such as `BadRequestError`.
     #[serde(rename = "type")]
     pub error_type: String,
     pub param: Option<String>,
-    pub code: Option<String>,
+    /// The HTTP status code.
+    pub code: u16,
 }
 
 // ============================================================================

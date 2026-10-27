@@ -17,8 +17,19 @@ pub enum Error {
     MissingChatTemplate,
     #[error("chat template error: {0}")]
     ChatTemplate(String),
+    #[error("{message}")]
+    ChatTemplateThrown { message: String },
     #[error("{0}")]
     InvalidReasoningEffort(String),
+    #[error("{message}")]
+    InvalidReasoningControl { message: String },
+    #[error("chat role `{role}` is not supported by this chat renderer")]
+    UnsupportedChatRole { role: String },
+    #[error(
+        "Chat template is passed with request, but --trust-request-chat-template is not set. \
+         Refused request with untrusted chat template."
+    )]
+    UntrustedRequestChatTemplate,
     #[error("multimodal input is not supported by this chat renderer")]
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
@@ -58,6 +69,11 @@ pub enum Error {
         #[source]
         error: BoxedError,
     },
+    #[error("failed to initialize request output parser")]
+    OutputParserInitialization {
+        #[source]
+        error: BoxedError,
+    },
     #[error(
         "gpt_oss uses native Harmony output parsing; generic {kind} parser override `{selection}` is not supported"
     )]
@@ -70,11 +86,6 @@ pub enum Error {
         #[source]
         error: BoxedError,
     },
-    #[error(
-        "this model's maximum context length is {max_model_len} tokens, \
-         but the prompt contains {prompt_len} input tokens"
-    )]
-    PromptTooLong { max_model_len: u32, prompt_len: u32 },
     #[error("chat request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("tool call stream state is inconsistent: {message}")]
@@ -85,8 +96,11 @@ pub enum Error {
     ToolChoiceRequiresTools,
     #[error("tool_choice function `{name}` was not found in the available tools")]
     ToolChoiceFunctionNotFound { name: String },
-    #[error("failed to build structural tag: {message}")]
-    StructuralTag { message: String },
+    #[error("failed to build output grammar")]
+    OutputGrammar {
+        #[source]
+        error: BoxedError,
+    },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
     #[error(transparent)]
@@ -99,11 +113,14 @@ impl Error {
     /// Whether this error represents invalid user request parameters.
     pub fn is_request_validation_error(&self) -> bool {
         match self {
-            Self::PromptTooLong { .. }
+            Self::ChatTemplateThrown { .. }
             | Self::InvalidReasoningEffort(_)
+            | Self::InvalidReasoningControl { .. }
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
-            | Self::ToolChoiceFunctionNotFound { .. } => true,
+            | Self::ToolChoiceFunctionNotFound { .. }
+            | Self::UnsupportedChatRole { .. }
+            | Self::UntrustedRequestChatTemplate => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
@@ -112,6 +129,15 @@ impl Error {
             | Self::MmLimitExceeded { .. } => true,
 
             _ => false,
+        }
+    }
+
+    /// The request parameter a validation error refers to, reported as the
+    /// `param` of the OpenAI error object.
+    pub fn param(&self) -> Option<&'static str> {
+        match self {
+            Self::Text(error) => error.param(),
+            _ => None,
         }
     }
 }

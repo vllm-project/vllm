@@ -14,6 +14,7 @@ across calls so consecutive requests keep advancing through every URL.
 """
 
 import importlib.util
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def _load_proxy_module():
     spec = importlib.util.spec_from_file_location("disagg_epd_proxy_under_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -113,16 +115,20 @@ def test_decode_rewrite_preserves_engine_reported_ec_hash(proxy):
     rewritten = proxy.rewrite_for_decode(
         request,
         {
-            0: {
-                "mm_hash": "proxy-uuid",
-                "ec_mm_hash": "engine-derived-hash",
-                "transfer_id": "transfer",
-                "image_grid_thw": [1, 2, 3],
-            }
+            0: [
+                {
+                    "mm_hash": "engine-derived-hash",
+                    "modality": "image",
+                    "transfer_id": "transfer",
+                    "metadata": {"image_grid_thw": [1, 2, 3]},
+                }
+            ]
         },
     )
 
-    assert rewritten["messages"][0]["content"][0]["uuid"] == "proxy-uuid"
+    assert rewritten["messages"][0]["content"][0]["uuid"] == proxy.content_uuid(
+        request["messages"][0]["content"][0]
+    )
     assert rewritten["messages"][0]["content"][0]["image_embeds"] == {
         "image_grid_thw": [1, 2, 3]
     }

@@ -7,11 +7,12 @@ Owns transports and a single bidirectional P2PSession per remote peer.
 
 from __future__ import annotations
 
+import contextlib
 import time
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from typing_extensions import override
 
@@ -35,6 +36,8 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
 from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+from vllm.v1.kv_offload.tiering.p2p.session.protocol import TYPE_KEY, DisconnectMsg
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -54,8 +57,8 @@ _UNBOUND_STORE_TIMEOUT_S = 60.0
 
 # How long a reaped kv_request_id is remembered so a fetch that arrives
 # after the reap can be rejected immediately. Must exceed the consumer's
-# load timeout (session.client._LOAD_TIMEOUT_S): past that the consumer has
-# already given up on its own, so there is nobody left to reject.
+# longer load timeout (session.client._PD_LOAD_TIMEOUT_S): past that the
+# consumer has already given up on its own, so there is nobody left to reject.
 _REAPED_ID_RETENTION_S = 60.0
 
 # Time we wait during shutdown for inflight transfers to drain via
@@ -67,6 +70,19 @@ _SHUTDOWN_DRAIN_TIMEOUT_S = 3.0
 # _drain_inflight_for_shutdown(). Short enough to keep latency low, long
 # enough to avoid busy-spinning the scheduler thread.
 _DRAIN_SLEEP_S = 0.001
+
+# Idle sessions are only reaped when remaining capacity is at most this
+# many slots. Session setup is expensive; below this headroom, keep idle
+# peers so a later burst does not pay handshake again.
+_IDLE_REAP_HEADROOM = 8
+
+# Reconnect backoff after a session ends on a data-plane fault, as for
+# NixlConnector's invalid peers: the first fault reconnects at once; a
+# repeat within the max of the previous wait expiring doubles the wait.
+# Expiry is by time alone: no successful transfer is required, so a peer
+# that is merely idle for the max starts over at an immediate reconnect.
+_RECONNECT_MIN_BACKOFF_S = 1.0
+_RECONNECT_MAX_BACKOFF_S = 60.0
 
 
 def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
@@ -200,11 +216,18 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     blocks from the peer) and server-role (serving blocks to the peer)
     over the same control connection.
 
-    Single-threaded: every public method runs on the scheduler thread, and
-    the engine drives polling via ``get_finished_jobs()`` once per step.
+    Never entered concurrently: every public method runs under the tiering
+    manager's ``lock``, held either by the scheduler thread for the length of
+    a step or by the tier-poll thread for the length of one round. Peers are
+    not driven by the engine, so this tier sets ``tolerates_off_thread_polling``
+    to be serviced from that thread too; without it a peer's lookup or fetch
+    waits for a step boundary, which on a saturated rank can be seconds.
     ``has_pending_work()`` keeps the engine ticking so the control transport
     and existing sessions are polled even when no requests are scheduled.
     """
+
+    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
+    tolerates_off_thread_polling: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -265,7 +288,25 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 number, or anything convertible to one.
 
         """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        backpressure_detector = kwargs.pop("backpressure_detector", None)
+        if backpressure_detector is not None:
+            # The generic (store-latency) detector is unreliable for P2P: in
+            # PD mode dropping a store can leave the decoder waiting until the
+            # load timeout instead of failing fast, and rendezvous time makes
+            # store latency a poor pressure signal. Reject it until a
+            # P2P-specific fail-fast path exists.
+            raise ValueError(
+                "Backpressure is not supported for the P2P secondary tier. "
+                "The generic store-latency detector cannot fail fast in PD "
+                "mode and rendezvous time makes store latency an unreliable "
+                "pressure signal. Remove the 'backpressure' config from the "
+                "p2p tier."
+            )
+        super().__init__(
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+        )
         try:
             timeout_s = float(unbound_store_timeout_s)
         except (TypeError, ValueError):
@@ -323,6 +364,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
 
         self._sessions: dict[str, P2PSession] = {}
+        # peer_id → (backoff, retry_at); see _schedule_reconnect_backoff.
+        self._reconnect_backoff: dict[str, tuple[float, float]] = {}
+        # peer_id → data-plane faults over this process's lifetime. Unlike
+        # the backoff it never expires, so the peer-down log shows a peer
+        # that keeps faulting under traffic too sparse to escalate.
+        self._data_plane_faults: dict[str, int] = {}
         # kv_request_id → session, set when the bound session has received
         # FetchMsg for that id. submit_store after binding routes directly
         # to the session; before binding, batches are parked in
@@ -407,7 +454,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         _annotate_req_context(req_context)
         source = req_context.get_state(P2PSourceInfo)
         if source is not None:
-            self._get_or_create_session(source.peer_id)
+            session = self._get_or_create_session(source.peer_id)
+            if session is None:
+                self._failed_req_ids.add(source.kv_request_id)
         dest = req_context.get_state(P2PDestInfo)
         if dest is not None and dest.kv_request_id:
             return RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
@@ -586,9 +635,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        # Drive one polling sweep on the scheduler thread, then hand off
-        # whatever has accumulated. The engine calls this once per step
-        # (and keeps stepping while has_pending_work() is True).
+        # Drive one polling sweep, then hand off whatever has accumulated. The
+        # engine calls this once per step (and keeps stepping while
+        # has_pending_work() is True); the tier-poll thread calls it between
+        # steps, so a peer is not left waiting for a step boundary.
         self._poll_once()
         result = self._finished_jobs
         self._finished_jobs = []
@@ -664,38 +714,95 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             self._hash_seed = get_none_hash_seed()
         return self._hash_seed
 
-    def _get_or_create_session(self, peer_id: str) -> P2PSession:
+    def _get_or_create_session(self, peer_id: str) -> P2PSession | None:
         """Return the existing session for peer_id, or open one outbound.
 
         Consumer-side helper for on_new_request: when ``remote_prefiller``
-        (PD) or ``remote_kv_source`` (symmetric P2P) is set, the consumer must reach the
-        producer at peer_id. If we already have a session toward that
-        peer (from a prior load or a peer-initiated inbound), reuse it;
-        otherwise open an outbound ControlConnection and build a
+        (PD) or ``remote_kv_source`` (symmetric P2P) is set, the consumer
+        must reach the producer at peer_id. If we already have a session
+        toward that peer (from a prior load or a peer-initiated inbound),
+        reuse it; otherwise open an outbound ControlConnection and build a
         connected session.
+
+        Returns None if the session could not be created (capacity
+        exceeded or transport error).
         """
         session = self._sessions.get(peer_id)
         if session is not None:
             return session
-        conn = self._control.connect(peer_id)
-        session = P2PSession(
-            peer_id=peer_id,
-            local_id=self._local_id,
-            transport=self._data,
-            local_block_len=self._data.block_len,
-            local_hash_seed=self._get_hash_seed(),
-            conn=conn,
-        )
+        if self._reconnect_wait(peer_id) > 0:
+            return None
+
+        max_peers = envs.VLLM_P2P_MAX_PEERS
+        if len(self._sessions) >= max_peers:
+            logger.warning(
+                "P2P %s: rejecting outbound peer %s — session limit "
+                "reached (%d/%d). Set VLLM_P2P_MAX_PEERS to increase.",
+                self._local_id,
+                peer_id,
+                len(self._sessions),
+                max_peers,
+            )
+            return None
+
+        conn = None
+        try:
+            conn = self._control.connect(peer_id)
+            session = P2PSession(
+                peer_id=peer_id,
+                local_id=self._local_id,
+                transport=self._data,
+                local_block_len=self._data.block_len,
+                local_hash_seed=self._get_hash_seed(),
+                conn=conn,
+            )
+        except Exception:
+            logger.exception(
+                "P2P %s: failed to open connection to %s",
+                self._local_id,
+                peer_id,
+            )
+            if conn is not None:
+                conn.close()
+            return None
+
         self._sessions[peer_id] = session
         return session
 
     def _accept_new_peers(self, new_connections: Sequence[ControlConnection]) -> None:
+        max_peers = envs.VLLM_P2P_MAX_PEERS
         for conn in new_connections:
             logger.info(
                 "P2P %s: accepting incoming connection from %s",
                 self._local_id,
                 conn.peer_id,
             )
+            if len(self._sessions) >= max_peers:
+                logger.warning(
+                    "P2P %s: rejecting inbound peer %s — session limit "
+                    "reached (%d/%d). Set VLLM_P2P_MAX_PEERS to increase.",
+                    self._local_id,
+                    conn.peer_id,
+                    len(self._sessions),
+                    max_peers,
+                )
+                conn.close()
+                continue
+            wait = self._reconnect_wait(conn.peer_id)
+            if wait > 0:
+                logger.info(
+                    "P2P %s: rejecting inbound peer %s — reconnect backoff "
+                    "after a data-plane fault (%.1fs left)",
+                    self._local_id,
+                    conn.peer_id,
+                    wait,
+                )
+                # Tell the peer, so its lookups fall back now rather than
+                # at the handshake deadline.
+                with contextlib.suppress(Exception):
+                    conn.send({TYPE_KEY: DisconnectMsg.TYPE})
+                conn.close()
+                continue
             try:
                 existing = self._sessions.get(conn.peer_id)
                 if existing is not None:
@@ -754,7 +861,45 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # dead session's synthetic lookups on the next serve_external_requests.
             self._failed_serve_ctxs.extend(close_result.failed_serves)
             self._data.remove_remote_peer(pid)
-            logger.warning("P2P %s: peer %s down", self._local_id, pid)
+            fault_info = ""
+            if session.data_plane_fault is not None:
+                faults = self._data_plane_faults.get(pid, 0) + 1
+                self._data_plane_faults[pid] = faults
+                fault_info = f"; data-plane fault #{faults}"
+                backoff = self._schedule_reconnect_backoff(pid)
+                if backoff:
+                    fault_info += f"; reconnect backoff {backoff:.0f}s"
+            logger.warning(
+                "P2P %s: peer %s down (%s)%s",
+                self._local_id,
+                pid,
+                session.death_reason,
+                fault_info,
+            )
+
+    def _schedule_reconnect_backoff(self, peer_id: str) -> float:
+        """Record a data-plane fault for *peer_id*; return its reconnect wait.
+
+        The wait doubles (1 s up to the max) when the previous fault's wait
+        expired less than the max ago, and is 0 otherwise. Only time is
+        checked, not whether any transfer succeeded in between.
+        """
+        now = time.monotonic()
+        for pid, (_, retry_at) in list(self._reconnect_backoff.items()):
+            if now - retry_at > _RECONNECT_MAX_BACKOFF_S:
+                del self._reconnect_backoff[pid]
+        prev = self._reconnect_backoff.get(peer_id)
+        backoff = 0.0
+        if prev is not None:
+            backoff = min(
+                max(2 * prev[0], _RECONNECT_MIN_BACKOFF_S), _RECONNECT_MAX_BACKOFF_S
+            )
+        self._reconnect_backoff[peer_id] = (backoff, now + backoff)
+        return backoff
+
+    def _reconnect_wait(self, peer_id: str) -> float:
+        entry = self._reconnect_backoff.get(peer_id)
+        return 0.0 if entry is None else entry[1] - time.monotonic()
 
     def _reap_unbound_stores(self) -> None:
         """Time out submit_store batches that no peer has ever fetched.
@@ -806,6 +951,53 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 len(batches),
             )
 
+    def _reap_idle_sessions(self) -> None:
+        """Evict idle sessions when remaining peer slots are scarce.
+
+        A session is idle when it has no pending work and its last activity
+        timestamp exceeds ``VLLM_P2P_IDLE_TIMEOUT_S``. Eviction runs only
+        when ``len(_sessions) >= VLLM_P2P_MAX_PEERS - _IDLE_REAP_HEADROOM``
+        so a quiet but healthy mesh is not torn down. Uses the same
+        teardown path as ``_reap_dead_sessions``.
+        """
+        idle_timeout = envs.VLLM_P2P_IDLE_TIMEOUT_S
+        if idle_timeout <= 0:
+            return
+        max_peers = envs.VLLM_P2P_MAX_PEERS
+        headroom = min(_IDLE_REAP_HEADROOM, max(0, max_peers - 1))
+        if len(self._sessions) < max_peers - headroom:
+            return
+        deadline = time.monotonic() - idle_timeout
+        idle: list[str] | None = None
+        for pid, s in self._sessions.items():
+            if not s.has_pending_work and s.last_activity_at <= deadline:
+                if idle is None:
+                    idle = []
+                idle.append(pid)
+        if idle is None:
+            return
+        for pid in idle:
+            session = self._sessions.pop(pid)
+            stale_kv_ids = [
+                kid for kid, s in self._kv_to_session.items() if s is session
+            ]
+            for kid in stale_kv_ids:
+                del self._kv_to_session[kid]
+            close_result = session.close()
+            for job_id in close_result.failed_jobs:
+                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            for job_id in close_result.failed_stores:
+                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            self._failed_req_ids.update(close_result.failed_req_ids)
+            self._failed_serve_ctxs.extend(close_result.failed_serves)
+            self._data.remove_remote_peer(pid)
+            logger.info(
+                "P2P %s: evicted idle peer %s (idle > %ds)",
+                self._local_id,
+                pid,
+                idle_timeout,
+            )
+
     # ------------------------------------------------------------------
     # Polling
     # ------------------------------------------------------------------
@@ -815,7 +1007,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         Drains the control transport, polls every session, accumulates
         their results into ``_finished_jobs``, and reaps any dead sessions.
-        Runs on the scheduler thread.
+        Runs under the tiering manager's lock, on the scheduler thread or on
+        the tier-poll thread.
         """
         new_connections = self._control.poll()
         if new_connections:
@@ -872,6 +1065,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         self._reap_dead_sessions()
         self._reap_unbound_stores()
+        self._reap_idle_sessions()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -902,11 +1096,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def _drain_inflight_for_shutdown(self) -> None:
         """Best-effort drain of inflight transfers before closing _data.
 
-        Mirrors session._drain_abort but as a single bounded loop. Collects
-        inflight transfer_ids from each session, repeatedly calls
+        Collects inflight transfer_ids from each session, repeatedly calls
         _data.cancel(..., mode="wait") and _data.poll() so handles can
-        surface as done/failed, and falls back to mode="immediate" once
-        _SHUTDOWN_DRAIN_TIMEOUT_S elapses so a wedged peer can't hang us.
+        surface as done/failed. Unlike session._drain_abort, which never
+        force-releases, it falls back to mode="immediate" once
+        _SHUTDOWN_DRAIN_TIMEOUT_S elapses: the engine is exiting, and a
+        wedged peer must not hang shutdown.
         """
         ids = [tid for s in self._sessions.values() for tid in s._server._inflight]
         if not ids:
