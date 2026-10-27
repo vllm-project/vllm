@@ -369,7 +369,7 @@ class SimpleCPUOffloadScheduler:
         if stale := self._pending_cpu_hits.pop(request.request_id, None):
             self._free_pending_cpu_hit(stale)
 
-        if request.skip_reading_prefix_cache:
+        if request.skip_reading_external_kv:
             return 0, False
 
         if num_computed_tokens % self.block_size != 0:
