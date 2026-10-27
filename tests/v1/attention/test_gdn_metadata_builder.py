@@ -714,8 +714,10 @@ def _expected_capture_rows(
     num_decodes = reference.num_decodes
     rows["decode_query_start_loc"] = non_spec_qsl[: num_decodes + 1]
     if reference.num_prefills > 0:
+        prefill_qsl = reference.prefill_query_start_loc
+        assert prefill_qsl is not None
         rows["non_spec_prefill_query_start_loc"] = (
-            reference.prefill_query_start_loc + reference.num_decode_tokens
+            prefill_qsl + reference.num_decode_tokens
         )
     else:
         # Every non-spec row is a decode with prior state.
@@ -822,6 +824,7 @@ def test_capture_buffers_hold_any_batch(update_block_table: bool, mamba_cache_mo
         assert meta.batch_ptr is builder.mixed_batch_buffers["batch_ptr"]
         assert torch.equal(meta.batch_ptr[:num_programs], batch_ptr[:num_programs])
         assert torch.all(meta.batch_ptr[num_programs:] == PAD_SLOT_ID)
+        assert meta.nums_dict is not None
         assert meta.nums_dict[8]["tot"] == num_programs
 
 
