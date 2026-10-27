@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Literal, Self, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
 
-import vllm.envs as envs
 from vllm.config import LoadConfig
 from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
@@ -1914,12 +1913,6 @@ class SpeculativeConfig:
             )
 
         if self.draft_lm_head_quantization is not None:
-            if envs.VLLM_RELOAD_MODE == "direct":
-                raise ValueError(
-                    "draft_lm_head_quantization is not supported with "
-                    "VLLM_RELOAD_MODE=direct: a direct reload would write the "
-                    "quantized draft lm_head into the target lm_head it shares."
-                )
             # Gemma-4 MTP scores tied embedding rows directly; no lm_head to share.
             if self.method not in ("eagle", "eagle3", "mtp") or self.use_gemma4_mtp():
                 raise ValueError(

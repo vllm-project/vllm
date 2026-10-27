@@ -40,6 +40,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
+from vllm.model_executor.utils import layout_span
 
 logger = init_logger(__name__)
 
@@ -107,8 +108,7 @@ def _checkpoint_views(
             continue
         shape, stride, dtype, offset = layout
         storage = t.untyped_storage()
-        span = 1 + sum((s - 1) * st for s, st in zip(shape, stride)) if shape else 1
-        need = (offset + span) * dtype.itemsize
+        need = (offset + layout_span(shape, stride)) * dtype.itemsize
         if need > storage.nbytes():
             raise RuntimeError(
                 f"direct reload: {name} storage has {storage.nbytes()} bytes, "
@@ -150,14 +150,10 @@ def finish_direct_reload(model: torch.nn.Module, model_config) -> None:
 
     torch.accelerator.synchronize()  # engines may write on other streams
 
-    # One-shot "already processed" guards (R7) would make the rerun below a
-    # no-op and leave the freshly written checkpoint layout in place.
-    cleared = 0
+    # One-shot "already processed" guards would make the rerun below a no-op
+    # and leave the freshly written checkpoint layout in place.
     for module in model.modules():
-        if module.__dict__.pop("_already_called_process_weights_after_loading", None):
-            cleared += 1
-    if cleared:
-        logger.info("direct reload: cleared %d one-shot post-load guards", cleared)
+        module.__dict__.pop("_already_called_process_weights_after_loading", None)
 
     device = next(
         (p.device for p in model.parameters() if p.device.type == "cuda"),
