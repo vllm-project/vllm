@@ -1018,6 +1018,68 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
     assert punica_wrapper.device == device
 
 
+def _pinning_worker_adapter_manager(dummy_model, device, tmp_path, max_loras):
+    lora_config = LoRAConfig(
+        max_lora_rank=8, max_cpu_loras=4, max_loras=max_loras, lora_dtype=DEFAULT_DTYPE
+    )
+    dummy_lora_files = f"{tmp_path}/lora_adapter"
+    os.makedirs(dummy_lora_files, exist_ok=True)
+    create_peft_lora(
+        dummy_model,
+        save_dir=dummy_lora_files,
+        target_modules=["layer1.dense1", "dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=16), lora_config=lora_config
+    )
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 4
+    manager = LRUCacheWorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
+    manager.max_num_seqs = 4
+    manager.max_num_batched_tokens = 4
+    manager.create_lora_manager(dummy_model, vllm_config)
+    return manager, dummy_lora_files
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_pinned_lora_counts_toward_gpu_slots(dist_init, dummy_model, device, tmp_path):
+    """A batch that doesn't fit next to a pinned adapter must fail clearly
+    instead of evicting an adapter the batch uses."""
+    manager, files = _pinning_worker_adapter_manager(
+        dummy_model, device, tmp_path, max_loras=2
+    )
+    manager.add_adapter(LoRARequest("1", 1, files))
+    assert manager.pin_adapter(1)
+
+    mapping = LoRAMapping((1, 2), (1, 2), is_prefill=True)
+    manager.set_active_adapters(
+        {LoRARequest("1", 1, files), LoRARequest("2", 2, files)}, mapping
+    )
+    assert set(manager._adapter_manager.lora_index_to_id) == {1, 2}
+
+    mapping = LoRAMapping((2, 3), (2, 3), is_prefill=True)
+    with pytest.raises(RuntimeError, match="pinned"):
+        manager.set_active_adapters(
+            {LoRARequest("2", 2, files), LoRARequest("3", 3, files)}, mapping
+        )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_load_inplace_keeps_lora_pinned(dist_init, dummy_model, device, tmp_path):
+    manager, files = _pinning_worker_adapter_manager(
+        dummy_model, device, tmp_path, max_loras=2
+    )
+    manager.add_adapter(LoRARequest("1", 1, files))
+    assert manager.pin_adapter(1)
+
+    manager.add_adapter(LoRARequest("1", 1, files, load_inplace=True))
+
+    adapter_manager = manager._adapter_manager
+    assert 1 in adapter_manager._registered_adapters.pinned_items
+    assert 1 in adapter_manager._active_adapters.pinned_items
+
+
 @pytest.mark.parametrize("device", DEVICES)
 def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path):
     # Should remove every LoRA not specified in the request.

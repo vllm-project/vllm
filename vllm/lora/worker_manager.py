@@ -276,10 +276,13 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             for lora_request in lora_requests
             if lora_request
         }
-        if len(loras_map) > self._adapter_manager.lora_slots:
+        pinned = self._adapter_manager._active_adapters.pinned_items
+        num_slots_needed = len(loras_map.keys() | pinned)
+        if num_slots_needed > self._adapter_manager.lora_slots:
             raise RuntimeError(
-                f"Number of requested LoRAs ({len(loras_map)}) is greater "
-                "than the number of GPU LoRA slots "
+                f"Number of requested LoRAs ({len(loras_map)}) plus pinned "
+                f"LoRAs not in the batch ({num_slots_needed - len(loras_map)}) "
+                "is greater than the number of GPU LoRA slots "
                 f"({self._adapter_manager.lora_slots})."
             )
         for lora in loras_map.values():
@@ -304,6 +307,8 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
 
                 # Remove the existing adapter if it exists
                 # Use case for LoRA inplace
+                registered = self._adapter_manager._registered_adapters
+                was_pinned = lora.id in registered.pinned_items
                 self._adapter_manager.remove_adapter(lora.id)
 
                 # Loading succeeded, now check if we will exceed cache capacity and
@@ -313,6 +318,8 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                     self._adapter_manager.remove_oldest_adapter()
                 # Then add the new adapter to the cache
                 loaded = self._adapter_manager.add_adapter(lora)
+                if was_pinned:
+                    self._adapter_manager.pin_adapter(lora.id)
             else:
                 # If the lora is already loaded, just touch it to
                 # update its position in the caches

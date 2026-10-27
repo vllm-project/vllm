@@ -1089,13 +1089,17 @@ class EngineCore:
         return self.model_executor.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
+        self.scheduler.set_lora_pinned(lora_id, pinned=False)
         return self.model_executor.remove_lora(lora_id)
 
     def list_loras(self) -> set[int]:
         return self.model_executor.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self.model_executor.pin_lora(lora_id)
+        pinned = self.model_executor.pin_lora(lora_id)
+        if pinned:
+            self.scheduler.set_lora_pinned(lora_id, pinned=True)
+        return pinned
 
     def save_sharded_state(
         self,

@@ -99,6 +99,8 @@ class Scheduler(SchedulerInterface):
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        # Pinned adapters keep their GPU slots, so they count against max_loras.
+        self.pinned_loras: set[int] = set()
         self.model_uses_mrope = vllm_config.model_config.uses_mrope
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
@@ -1078,14 +1080,15 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 # Check that adding the request still respects the max_loras constraint.
-                if (
-                    self.lora_config
-                    and request.lora_request
-                    and (
-                        len(scheduled_loras) == self.lora_config.max_loras
-                        and request.lora_request.lora_int_id not in scheduled_loras
+                if self.lora_config and request.lora_request:
+                    loras_in_slots = scheduled_loras | self.pinned_loras
+                    exceeds_max_loras = (
+                        request.lora_request.lora_int_id not in loras_in_slots
+                        and len(loras_in_slots) >= self.lora_config.max_loras
                     )
-                ):
+                else:
+                    exceeds_max_loras = False
+                if exceeds_max_loras:
                     # Scheduling would exceed max_loras, skip.
                     skip_request(request_queue)
                     continue
@@ -2893,6 +2896,12 @@ class Scheduler(SchedulerInterface):
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting) + len(self.kv_holding_waiting)
+
+    def set_lora_pinned(self, lora_id: int, pinned: bool) -> None:
+        if pinned:
+            self.pinned_loras.add(lora_id)
+        else:
+            self.pinned_loras.discard(lora_id)
 
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
