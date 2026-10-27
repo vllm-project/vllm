@@ -146,7 +146,7 @@ class ReadStrategy(ABC):
     #: The engine task reads run as.
     task: ClassVar[SupportedTask] = "generate"
     #: The modalities a request may attach media of.
-    modalities: ClassVar[frozenset[str]] = frozenset()
+    modalities: frozenset[str] = frozenset()
     #: Whether read_joint answers several questions from one canvas.
     joint_reads: bool = False
 
@@ -276,6 +276,9 @@ class NextTokenStrategy(ReadStrategy):
         prompt = self._generation_prompt()
         self.tail = prompt_tail(self._tokenizer(), prompt)
         self.label_ids = type_label_ids(self._tokenizer(), prompt)
+        # read() currently renders only images into the user turn.
+        if context.engine_client.model_config.supports_multimodal_inputs:
+            self.modalities = frozenset({"image"})
 
     def _tokenizer(self) -> TokenizerLike:
         return self.context.online_renderer.renderer.get_tokenizer()
@@ -758,7 +761,6 @@ class LiquidStrategy(NextTokenStrategy):
     """Liquid decision models (d1). The prompt and the label tokens are the
     ones the checkpoint was trained with, from the `prompt.py` it ships."""
 
-    modalities = frozenset({"image"})
     # runner.py bounds every picture at 1024 x 1024 pixels before the processor.
     max_image_pixels = 1024 * 1024
 
