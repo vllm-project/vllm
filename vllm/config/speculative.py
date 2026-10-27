@@ -1302,16 +1302,8 @@ class SpeculativeConfig:
                     config_format=self.target_model_config.config_format,
                 )
 
-                # If the target model was resolved from object storage
-                # (e.g. --load-format runai_streamer with an s3:// model),
-                # target_model_config.model points at a local config-only
-                # cache dir (it never contains safetensors) while
-                # target_model_config.model_weights keeps the original
-                # object-storage URL. A draft that shares the target
-                # checkpoint (e.g. MTP, DSpark) must inherit that weight
-                # source, otherwise draft weight loading falls back to the
-                # config-only cache dir and fails with "Cannot find any
-                # safetensors model weights".
+                # Drafts sharing the target checkpoint (e.g. MTP) must load weights
+                # from the target's object-storage source, not the local cache dir.
                 if (
                     not self.draft_model_config.model_weights
                     and self.target_model_config.model_weights
