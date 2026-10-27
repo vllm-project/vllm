@@ -141,7 +141,7 @@ def _make_addresses() -> EngineZmqAddresses:
             False,
         ),
         ({"data_parallel_backend": "mp", "data_parallel_rank_local": 0}, False),
-        ({"data_parallel_backend": "mp", "enable_elastic_ep": True}, False),
+        ({"data_parallel_backend": "mp", "enable_elastic_ep": True}, True),
         ({"data_parallel_backend": "mp", "data_parallel_size": 1}, False),
     ],
     ids=["mp", "ray", "non-master-node", "offline", "elastic-ep", "single-engine"],
@@ -150,8 +150,9 @@ def test_coordination_store_held_only_by_the_online_dp_master(
     monkeypatch: pytest.MonkeyPatch, overrides: dict[str, Any], expect_store: bool
 ) -> None:
     """The DP master node holds a coordination store for both engine backends,
-    so engines there pick world-group ports at bind time. Every other
-    deployment keeps the pre-allocated ports and must not hold one."""
+    so engines there pick world-group ports at bind time. Elastic EP also
+    creates its coordination store before startup. The remaining cases
+    below keep the pre-allocated ports and must not hold a store."""
 
     class FakeManager:
         def __init__(self, **kwargs) -> None:

@@ -2,49 +2,56 @@ group: Quantization
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200 MIG 35GB) Quantization"
-  device: h200_35gb
-  key: quantization
-  automatic_shard: true
-  timeout_in_minutes: 40
-  source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  - vllm/models/deepseek_v41/quant_config.py
-  - tests/quantization
-  commands:
-  # Pin torchao to the version compatible with the CI PyTorch and CUDA stack.
-  - uv pip install --system torchao==0.17.0 --index-url https://download.pytorch.org/whl/cu130
-  - uv pip install --system conch-triton-kernels
-  # The SM90-only checkpoint currently contains a removed weight_chan_scale
-  # parameter. It was not exercised by the previous L4 job.
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py -k 'not test_compressed_tensors_w4a8_fp8'
-  mirror:
-    amd:
-      parallelism: 4
-      label: ":amd: (MI300) Quantization Shard %N"
-      dind: false
-      device: mi300_1
-      timeout_in_minutes: 115
-      working_dir: "/vllm-workspace/tests"
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - csrc/
-      - vllm/model_executor/layers/quantization
-      - tests/quantization
-      - vllm/_aiter_ops.py
-      - vllm/platforms/rocm.py
-      - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
-      - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
-      - tests/rocm/test_moe_weight_replay.py
-      - tests/rocm/test_moe_padding.py
-      commands:
-      - uv pip install --system torchao==0.17.0
-      - uv pip install --system conch-triton-kernels
-      - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-      - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
-      - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s rocm/test_moe_padding.py; fi
+# Disabled until torchao transitive dependencies are locked.
+# - label: ":nvidia: (H200 MIG 35GB) Quantization"
+#   device: h200_35gb
+#   key: quantization
+#   automatic_shard: true
+#   timeout_in_minutes: 40
+#   source_file_dependencies:
+#   - csrc/
+#   - vllm/model_executor/layers/quantization
+#   - vllm/model_executor/models/qwen3_dflash.py
+#   - vllm/model_executor/models/utils.py
+#   - vllm/transformers_utils/model_arch_config_convertor.py
+#   - vllm/models/deepseek_v41/quant_config.py
+#   - vllm/utils/humming.py
+#   - tests/quantization
+#   commands:
+#   # Pin torchao to the version compatible with the CI PyTorch and CUDA stack.
+#   - uv pip install --system torchao==0.18.0 --index-url https://download.pytorch.org/whl/cu130
+#   - uv pip install --system conch-triton-kernels
+#   # The SM90-only checkpoint currently contains a removed weight_chan_scale
+#   # parameter. It was not exercised by the previous L4 job.
+#   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py -k 'not test_compressed_tensors_w4a8_fp8'
+#   mirror:
+#     amd:
+#       label: ":amd: (MI300) Quantization"
+#       automatic_shard: true
+#       dind: false
+#       device: mi300_1
+#       timeout_in_minutes: 115
+#       working_dir: "/vllm-workspace/tests"
+#       depends_on:
+#       - image-build-amd
+#       source_file_dependencies:
+#       - csrc/
+#       - vllm/model_executor/layers/quantization
+#       - vllm/model_executor/models/qwen3_dflash.py
+#       - vllm/model_executor/models/utils.py
+#       - tests/quantization
+#       - vllm/_aiter_ops.py
+#       - vllm/platforms/rocm.py
+#       - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
+#       - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
+#       - tests/rocm/test_moe_weight_replay.py
+#       - tests/rocm/test_moe_padding.py
+#       commands:
+#       - uv pip install --system torchao==0.17.0
+#       - uv pip install --system conch-triton-kernels
+#       - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py
+#       - pytest -v -s rocm/test_moe_weight_replay.py
+#       - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s rocm/test_moe_padding.py
 
 - label: ":nvidia: (H200 MIG 35GB) Quantized Fusions"
   device: h200_35gb
@@ -136,6 +143,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Quantized Models"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 80
       working_dir: "/vllm-workspace/tests"
