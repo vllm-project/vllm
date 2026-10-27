@@ -511,8 +511,11 @@ fn validate_chat_cross_parameters(
         return Err(e);
     }
 
+    // Like Python, `max_completion_tokens` overrides the deprecated `max_tokens`
+    // when both are set, so only check `max_tokens` when it is the effective limit.
     #[expect(deprecated, reason = "Local type still mirrors legacy upstream field")]
     if let (Some(min_tokens), Some(max_tokens)) = (req.min_tokens, req.max_tokens)
+        && req.max_completion_tokens.is_none()
         && min_tokens > max_tokens
     {
         let mut e = validator::ValidationError::new("min_tokens_exceeds_max_tokens");
