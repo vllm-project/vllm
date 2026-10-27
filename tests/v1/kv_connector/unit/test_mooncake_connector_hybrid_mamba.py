@@ -8,6 +8,7 @@ validated by this test module.
 """
 
 import asyncio
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -36,7 +37,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from .test_mooncake_connector import patch_worker_dependencies
-from .utils import create_request, create_vllm_config
+from .utils import create_request, create_vllm_config, maybe_update_block_size
 
 
 def noop_shutdown():
@@ -147,6 +148,7 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_consumer",
+        block_size=maybe_update_block_size(16),
     )
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
         vllm_config.cache_config.block_size
@@ -203,6 +205,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_consumer",
+        block_size=maybe_update_block_size(16),
     )
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
         vllm_config.cache_config.block_size
@@ -237,12 +240,19 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_transfer_params_uses_non_overlapping_physical_pages():
+@pytest.mark.parametrize(
+    "block_offsets",
+    [(0,), (1, 0), (2, 1, 0, 3, 4)],
+    ids=["single", "descending", "descending-prefix-ascending-tail"],
+)
+async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_offsets):
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
     worker.shutdown = noop_shutdown
-    # __new__ skips __init__, where this cache is created. register_kv_caches clears it.
+    # __new__ skips __init__, where these caches are created.
     worker._prepared_transfer_regions = {}
+    worker._layout_by_peer = OrderedDict()
+    worker._acked_layout_peers = set()
     worker.use_mla = False
     worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
     worker.is_kv_consumer = True
@@ -294,11 +304,15 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
 
     local_logical_block = 2
     remote_logical_block = 5
+    num_kernel_blocks = len(block_offsets) * ratio
     transfer_id = "xfer-physical-attention-pages"
     send_meta = SendBlockMeta(
         p_req_id="p-physical-attention-pages",
         transfer_id=transfer_id,
-        local_block_ids=[[local_logical_block], []],
+        local_block_ids=[
+            [local_logical_block + offset for offset in block_offsets],
+            [],
+        ],
         ready=asyncio.Event(),
     )
     xfer_meta = MooncakeXferMetadata(
@@ -309,7 +323,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
         req_blocks={
             "d-physical-attention-pages": (
                 transfer_id,
-                [[remote_logical_block], []],
+                [[remote_logical_block + offset for offset in block_offsets], []],
             )
         },
         kv_caches_base_addr=[],
@@ -338,7 +352,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     assert dst_ptrs == [
         remote_base_addr + remote_logical_block * ratio * physical_page_bytes
     ]
-    assert lengths == [ratio * physical_page_bytes]
+    assert lengths == [num_kernel_blocks * physical_page_bytes]
 
     def split_contiguous_blocks(src_ids, dst_ids):
         return [[block_id] for block_id in src_ids], [
@@ -366,17 +380,17 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     expected_src_ptrs = [
         fa_cache.data_ptr()
         + (local_logical_block * ratio + offset) * physical_page_bytes
-        for offset in range(ratio)
+        for offset in range(num_kernel_blocks)
     ]
     expected_dst_ptrs = [
         remote_base_addr + (remote_logical_block * ratio + offset) * physical_page_bytes
-        for offset in range(ratio)
+        for offset in range(num_kernel_blocks)
     ]
     assert err_reqs == []
     assert err_msg is None
     assert src_ptrs == expected_src_ptrs
     assert dst_ptrs == expected_dst_ptrs
-    assert lengths == [physical_page_bytes] * ratio
+    assert lengths == [physical_page_bytes] * num_kernel_blocks
     assert all(
         next_ptr - ptr == physical_page_bytes
         for ptr, next_ptr in zip(src_ptrs, src_ptrs[1:])
@@ -392,6 +406,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_consumer",
+        block_size=maybe_update_block_size(16),
     )
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
         vllm_config.cache_config.block_size
@@ -405,8 +420,13 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         )
         worker = connector.connector_worker
 
-        backing = torch.empty((4, 64), dtype=torch.float16)
-        fa_cache = backing[:2, :16]
+        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        fa_cache_width = (
+            fa_spec.page_size_bytes
+            // torch.tensor([], dtype=torch.float16).element_size()
+        )
+        backing = torch.empty((4, fa_cache_width), dtype=torch.float16)
+        fa_cache = backing[:2]
         gdn_cache = backing[:3]
 
         with patch.object(
@@ -438,6 +458,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_producer",
+        block_size=maybe_update_block_size(16),
     )
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
         vllm_config.cache_config.block_size
@@ -567,6 +588,7 @@ def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_producer",
+        block_size=maybe_update_block_size(16),
     )
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
         vllm_config.cache_config.block_size
