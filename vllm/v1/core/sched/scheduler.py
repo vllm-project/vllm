@@ -376,6 +376,10 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
 
+        from vllm.v1.agent_hint.session_index import SessionPrefixIndex
+
+        self.session_prefix_index = SessionPrefixIndex()
+
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
         self._pending_encoder_input_ids: dict[str, set[int]] = {}
@@ -3026,6 +3030,27 @@ class Scheduler(SchedulerInterface):
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
+        if request.session_id:
+            try:
+                blocks = self.kv_cache_manager.get_blocks(request.request_id)
+                hashes = [
+                    (
+                        b.block_hash.hex()
+                        if isinstance(b.block_hash, bytes)
+                        else str(b.block_hash)
+                    )
+                    for group in blocks.blocks
+                    for b in group
+                    if b.block_hash is not None
+                ]
+                self.session_prefix_index.record(request.session_id, hashes)
+            except Exception as e:
+                logger.warning(
+                    "session_prefix_index update failed: session_id=%s error=%s",
+                    request.session_id,
+                    e,
+                )
+
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
@@ -3513,6 +3538,8 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
+            if req_id.startswith("__kv_prefetch_"):
+                continue
             assert req_id in self.requests
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:

@@ -105,6 +105,25 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()
 
+    def bind_gpu_block_pool(self, gpu_block_pool) -> None:
+        bind = getattr(getattr(self, "connector_scheduler", None), "bind_gpu_block_pool", None)
+        if bind is not None:
+            bind(gpu_block_pool)
+
+    def request_free_prefetch(self, block_hashes):
+        fn = getattr(getattr(self, "connector_scheduler", None), "request_free_prefetch", None)
+        if fn is None:
+            from vllm.distributed.kv_transfer.kv_connector.v1.offloading.prefetch import (
+                PrefetchSubmitOutcome,
+                PrefetchSubmitResult,
+            )
+            return PrefetchSubmitResult(PrefetchSubmitOutcome.UNSUPPORTED)
+        return fn(block_hashes)
+
+    def take_prefetch_completions(self):
+        fn = getattr(getattr(self, "connector_scheduler", None), "take_prefetch_completions", None)
+        return [] if fn is None else fn()
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)

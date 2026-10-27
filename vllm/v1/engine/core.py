@@ -561,6 +561,24 @@ class EngineCore:
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
 
+    def manage_context(self, hint: dict) -> dict:
+        from vllm.v1.agent_hint.engine_executor import execute_engine_management
+        from vllm.v1.agent_hint.protocol import AgentHint
+
+        parsed = AgentHint.model_validate(hint)
+        index = getattr(self.scheduler, "session_prefix_index", None)
+        connector = self.scheduler.get_kv_connector()
+        prefetch = None
+        if connector is not None and hasattr(connector, "request_free_prefetch"):
+            from vllm.v1.core.kv_cache_utils import BlockHash
+
+            def prefetch(block_hashes: list[str]) -> object:
+                return connector.request_free_prefetch(
+                    [BlockHash(bytes.fromhex(h)) for h in block_hashes]
+                )
+
+        return execute_engine_management(parsed, index, prefetch).model_dump()
+
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
         # TODO: The scheduler doesn't really need to know the

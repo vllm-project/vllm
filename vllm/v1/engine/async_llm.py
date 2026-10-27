@@ -958,6 +958,9 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
 
+    async def manage_context(self, hint: dict[str, Any]) -> dict[str, Any]:
+        return await self.engine_core.call_utility_async("manage_context", hint)
+
     async def notify_kv_transfer_request_rejected(
         self,
         request_id: str,

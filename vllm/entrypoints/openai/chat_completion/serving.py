@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import base64
 import itertools
+import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -58,6 +60,12 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
+from vllm.v1.agent_hint import (
+    AgentHint,
+    AgentManagementResult,
+    handle_agent_management,
+    is_management_request,
+)
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
@@ -295,15 +303,89 @@ class OpenAIServingChat(GenerateBaseServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        request = self._with_header_agent_hint(request, raw_request)
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_chat_completion(request, raw_request), request, raw_request
         )
+
+    async def _create_agent_management_response(
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Request | None = None,
+    ) -> ChatCompletionResponse:
+        request_id = (
+            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
+        )
+        assert request.agent_hint is not None
+        try:
+            raw_result = await self.engine_client.manage_context(
+                request.agent_hint.model_dump()
+            )
+            management = AgentManagementResult.model_validate(raw_result)
+        except AttributeError:
+            management = handle_agent_management(request.agent_hint, request_id)
+        model_name = request.model or self.models.model_name()
+        logger.info(
+            "agent management request: session_id=%s status=%s detail=%s",
+            management.session_id,
+            management.status,
+            management.detail,
+        )
+        return ChatCompletionResponse.model_validate(
+            {
+                "id": request_id,
+                "model": model_name,
+                "choices": [
+                    ChatCompletionResponseChoice(
+                        index=0,
+                        message=ChatMessage(role="assistant", content=""),
+                        finish_reason="stop",
+                    ).model_dump()
+                ],
+                "usage": UsageInfo().model_dump(),
+                "agent_management": management.model_dump(),
+            }
+        )
+
+    @staticmethod
+    def _with_header_agent_hint(
+        request: ChatCompletionRequest,
+        raw_request: Request | None,
+    ) -> ChatCompletionRequest:
+        """Merge an X-Agent-Hint header into the body agent_hint when absent.
+
+        DSH/Pi send the spec-form hint in the header. Native vLLM only parses
+        the body field; without this bridge the scheduler never sees the
+        session and SessionPrefixIndex stays empty (blocks=0 on pause).
+        """
+        if raw_request is None or request.agent_hint is not None:
+            return request
+        raw = raw_request.headers.get("x-agent-hint")
+        if not raw:
+            return request
+        try:
+            payload = json.loads(
+                base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8")
+            )
+        except (ValueError, UnicodeDecodeError) as exc:
+            logger.warning("X-Agent-Hint decode failed: %s", exc)
+            return request
+        session = payload.get("session") if isinstance(payload, dict) else None
+        session_id = session.get("session_id") if isinstance(session, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            session_id = payload.get("session_id") if isinstance(payload, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            return request
+        return request.model_copy(update={"agent_hint": AgentHint(session_id=session_id)})
 
     async def _create_chat_completion(
         self,
         request: ChatCompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
+        if is_management_request(request.agent_hint):
+            return await self._create_agent_management_response(request, raw_request)
+
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None

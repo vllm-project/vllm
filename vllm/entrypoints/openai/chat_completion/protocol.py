@@ -62,6 +62,7 @@ from vllm.sampling_params import (
     ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
+from vllm.v1.agent_hint import AgentHint
 
 if TYPE_CHECKING:
     from vllm.parser.abstract_parser import Parser
@@ -281,6 +282,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # NOTE this will be ignored by vLLM
     user: str | None = None
+
+    agent_hint: AgentHint | None = Field(
+        default=None,
+        description=(
+            "Orchestrator-provided Agent Hint metadata. When "
+            "`context_management.manage_request` is true, the request is a "
+            "management-only request and the engine skips model execution."
+        ),
+    )
 
     # --8<-- [start:chat-completion-sampling-params]
     use_beam_search: bool = False

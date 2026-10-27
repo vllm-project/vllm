@@ -242,6 +242,9 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
     ) -> str | None:
         if request.session_id:
             return request.session_id
+        hint = getattr(request, "agent_hint", None)
+        if hint is not None and getattr(hint, "session_id", None):
+            return hint.session_id
         if value := GenerateBaseServing._get_session_id_from_headers(raw_request):
             return value
         if request.vllm_xargs:

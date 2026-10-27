@@ -1070,6 +1070,15 @@ class TieringOffloadingManager(OffloadingManager):
             return
         if state.pending_cascade_keys:
             return
+        # Keep request state alive until its in-flight secondary cascades
+        # (including fs stores) complete. Otherwise the fs job can still be
+        # running while the request context is removed, and the block never
+        # becomes visible for a later promotion.
+        if any(
+            job.transfer_job.req_context.req_id == req_id
+            for job in self._jobs.values()
+        ):
+            return
 
         for tier_idx, tier in enumerate(self.secondary_tiers):
             if tier_idx == exclude_tier_idx:
