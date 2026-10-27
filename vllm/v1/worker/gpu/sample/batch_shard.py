@@ -6,7 +6,9 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 import torch.distributed
+import torch.nn as nn
 
+from vllm.config import VllmConfig
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
@@ -48,6 +50,31 @@ class BatchShardMetadata:
     adaptive_verification_enabled: bool
 
 
+def batch_sharded_sampling_enabled(
+    vllm_config: VllmConfig, target_model: nn.Module
+) -> bool:
+    """Whether the target's sampling and verification are batch-sharded."""
+    return bool(
+        vllm_config.parallel_config.enable_batch_sharded_sampling
+        and hasattr(target_model, "compute_logits_local")
+    )
+
+
+@triton.jit
+def shard_owner(req_state_idx, NUM_SHARDS: tl.constexpr):
+    """TP rank that samples a request and holds its draft logits.
+
+    Mirrored on the host in `BatchSharder.shard_sampler_inputs`.
+    """
+    return req_state_idx % NUM_SHARDS
+
+
+@triton.jit
+def shard_row(req_state_idx, NUM_SHARDS: tl.constexpr):
+    """Row of a request in its owner's batch-sharded draft logits cache."""
+    return req_state_idx // NUM_SHARDS
+
+
 @triton.jit(
     do_not_specialize=["num_reqs", "local_logits_start", "max_num_reqs_per_rank"]
 )
@@ -74,14 +101,16 @@ def _build_shard_plan_kernel(
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    owner = req_state_idx % TP_SIZE
+    owner = shard_owner(req_state_idx, TP_SIZE)
     num_logits = tl.load(cu_num_logits_ptr + req_idx + 1) - tl.load(
         cu_num_logits_ptr + req_idx
     )
 
     req_block = tl.arange(0, PADDED_NUM_REQS)
     req_mask = req_block < num_reqs
-    owners = tl.load(idx_mapping_ptr + req_block, mask=req_mask, other=0) % TP_SIZE
+    owners = shard_owner(
+        tl.load(idx_mapping_ptr + req_block, mask=req_mask, other=0), TP_SIZE
+    )
     num_logits_per_req = tl.load(
         cu_num_logits_ptr + req_block + 1, mask=req_mask, other=0
     ) - tl.load(cu_num_logits_ptr + req_block, mask=req_mask, other=0)
