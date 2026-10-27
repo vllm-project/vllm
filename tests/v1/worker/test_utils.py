@@ -630,6 +630,9 @@ def test_hisparse_tail_restore_preserves_imported_rows(
     """Restore externally pinned host rows on every rank under sync checking."""
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is required for the device copy check")
+    monkeypatch.setattr(
+        hisparse_runtime_module, "get_hisparse_backend", CUDAHiSparseBackend
+    )
     worker = _make_hisparse_worker()
     worker.is_host_writer = is_host_writer
     worker.kernel_block_size = 4
