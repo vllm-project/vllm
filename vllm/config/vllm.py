@@ -1719,6 +1719,22 @@ class VllmConfig:
             else:
                 self.scheduler_config.async_scheduling = True
 
+        if (
+            self.kv_transfer_config
+            and self.kv_transfer_config.enable_early_recv
+            and (
+                executor_backend not in ("mp", "uni")
+                or self.parallel_config.nnodes_within_dp != 1
+                or self.parallel_config.pipeline_parallel_size != 1
+                or not self.kv_transfer_config.is_kv_consumer
+            )
+        ):
+            raise ValueError(
+                "enable_early_recv requires a KV consumer and the uni executor or "
+                "the mp executor with same-node workers, with PP=1. NIXL pull "
+                "does not support decoder pipeline parallelism."
+            )
+
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
                 if self.parallel_config.data_parallel_size > 1 and (

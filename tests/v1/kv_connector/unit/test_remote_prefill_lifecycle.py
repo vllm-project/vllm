@@ -595,6 +595,40 @@ def test_cannot_recv():
     assert_scheduler_empty(scheduler)
 
 
+@pytest.mark.parametrize("aborted", [False, True])
+def test_early_finished_recving_completes_pending_load(aborted):
+    """Early completion runs a waiting request or releases an aborted load."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    request = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=int(block_size * 2.5),
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(request)
+    output_1 = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    if aborted:
+        scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+        assert request.request_id in scheduler.requests
+    scheduler.add_finished_recving({request.request_id})
+    if not aborted:
+        assert _kv_fetch_stages(scheduler) == (0, 0, 1)
+        output_2 = scheduler.schedule()
+        assert request.request_id in output_2.num_scheduled_tokens
+        assert scheduler.running == [request]
+    scheduler.update_from_output(output_1, EMPTY_MODEL_RUNNER_OUTPUT)
+    if not aborted:
+        scheduler.update_from_output(output_2, create_model_runner_output([request]))
+        scheduler.update_from_output(
+            scheduler.schedule(), create_model_runner_output([request], use_eos=True)
+        )
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
 def test_kv_fetch_stages_cleared_on_abort():
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)

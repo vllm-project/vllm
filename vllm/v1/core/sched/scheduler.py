@@ -3496,6 +3496,11 @@ class Scheduler(SchedulerInterface):
 
         return True
 
+    def add_finished_recving(self, request_ids: set[str]) -> None:
+        self._update_from_kv_xfer_finished(
+            KVConnectorOutput(finished_recving=request_ids)
+        )
+
     def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
         """KV Connector: update the scheduler state based on the output.
 

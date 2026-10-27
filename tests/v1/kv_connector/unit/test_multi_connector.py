@@ -203,6 +203,25 @@ def mc() -> MultiConnector:
     return mc
 
 
+@pytest.mark.parametrize("enable_early_recv", [False, True])
+def test_children_follow_the_engine_early_recv_setting(enable_early_recv):
+    child = {
+        "kv_connector": "MockConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",
+        "enable_early_recv": not enable_early_recv,
+    }
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={"connectors": [child, child]},
+    )
+    vllm_config.kv_transfer_config.enable_early_recv = enable_early_recv
+    children = MultiConnector._get_connector_classes_and_configs(vllm_config)
+    assert [c.kv_transfer_config.enable_early_recv for _, c in children] == [
+        enable_early_recv
+    ] * 2
+
+
 @pytest.mark.parametrize("chosen", [0, 1])
 def test_loaded_groups_follow_the_connector_serving_the_request(mc, chosen):
     request = MagicMock(request_id="request")

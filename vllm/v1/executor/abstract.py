@@ -293,6 +293,11 @@ class Executor(ABC):
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch")
 
+    def take_early_finished_recving(self) -> set[str] | None:
+        """Requests whose remote KV loads finished, reported by the workers
+        ahead of the step outputs (see ``KVTransferConfig.enable_early_recv``)."""
+        return None
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]

@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
@@ -51,6 +52,8 @@ class AsyncOutputFuture(Future):
 class UniProcExecutor(Executor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
+        kv_config = self.vllm_config.kv_transfer_config
+        self.early_kv_recv = bool(kv_config and kv_config.enable_early_recv)
         self.driver_worker = WorkerWrapperBase(rpc_rank=0)
         distributed_init_method, rank, local_rank = self._distributed_args()
         kwargs = dict(
@@ -143,6 +146,14 @@ class UniProcExecutor(Executor):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.collective_rpc("take_draft_token_ids", single_value=True)
+
+    def take_early_finished_recving(self) -> set[str] | None:
+        if not self.early_kv_recv:
+            return None
+        # The worker runs on this thread: poll its connector right before
+        # schedule().
+        with torch.inference_mode():
+            return get_kv_transfer_group().poll_finished_recving()
 
     def check_health(self) -> None:
         # UniProcExecutor will always be healthy as long as

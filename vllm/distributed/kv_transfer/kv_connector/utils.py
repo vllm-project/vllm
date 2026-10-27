@@ -71,6 +71,7 @@ class KVOutputAggregator:
         self._recv_remaining_count = dict[str, int]()
         self._send_remaining_count = dict[str, int]()
         self._failed_recving_pending = set[str]()
+        self._early_failed_recving = set[str]()
         self._expected_finished_count = expected_finished_count
 
         self._salvaged_outputs: list[KVConnectorOutput] = []
@@ -78,6 +79,26 @@ class KVOutputAggregator:
     @classmethod
     def from_connector(cls, connector: "KVConnectorBase", world_size: int):
         return cls(connector.get_finished_count() or world_size)
+
+    def _update_finished_set(
+        self, req_ids: set[str] | None, remaining: dict[str, int], finished: set[str]
+    ) -> None:
+        for req_id in req_ids or ():
+            count = remaining.get(req_id, self._expected_finished_count) - 1
+            if count:
+                remaining[req_id] = count
+            else:
+                finished.add(req_id)
+                remaining.pop(req_id, None)
+
+    def add_finished_recving(self, req_ids: set[str]) -> set[str]:
+        """Count one worker's early receives against the normal output quorum."""
+        finished: set[str] = set()
+        self._update_finished_set(req_ids, self._recv_remaining_count, finished)
+        # Failures must reach the scheduler through its normal recovery path.
+        failed = finished & self._failed_recving_pending
+        self._early_failed_recving.update(failed)
+        return finished - failed
 
     def aggregate(
         self, outputs: list[ModelRunnerOutput | None], output_rank: int = 0
@@ -87,22 +108,8 @@ class KVOutputAggregator:
 
         # Aggregate kv_connector_output from all workers
 
-        def update_finished_set(
-            req_ids: set[str] | None,
-            remaining_count_dict: dict[str, int],
-            finished_set: set[str],
-        ) -> None:
-            for req_id in req_ids or ():
-                remaining_count = remaining_count_dict.get(
-                    req_id, self._expected_finished_count
-                )
-                remaining_count_dict[req_id] = remaining_count - 1
-                if remaining_count_dict[req_id] == 0:
-                    finished_set.add(req_id)
-                    del remaining_count_dict[req_id]
-
         finished_sending = set[str]()
-        finished_recving = set[str]()
+        finished_recving, self._early_failed_recving = self._early_failed_recving, set()
         aggregated_kv_connector_stats = None
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
@@ -133,10 +140,10 @@ class KVOutputAggregator:
                 )
                 self._expected_finished_count = kv_output.expected_finished_count
 
-            update_finished_set(
+            self._update_finished_set(
                 kv_output.finished_sending, self._send_remaining_count, finished_sending
             )
-            update_finished_set(
+            self._update_finished_set(
                 kv_output.finished_recving, self._recv_remaining_count, finished_recving
             )
 

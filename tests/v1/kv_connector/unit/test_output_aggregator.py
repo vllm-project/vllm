@@ -23,6 +23,42 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 pytestmark = pytest.mark.cpu_test
 
 
+@pytest.mark.parametrize(
+    "ordinary_rank,failed",
+    [(None, False), (0, False), (-1, False), (0, True), (-1, True)],
+)
+def test_early_receives_share_normal_quorum(ordinary_rank, failed):
+    workers = 2
+    aggregator = KVOutputAggregator(workers)
+    early = set()
+    normal = KVConnectorOutput()
+    for rank in range(workers):
+        if ordinary_rank is not None and rank == ordinary_rank % workers:
+            output = ModelRunnerOutput(
+                [],
+                {},
+                kv_connector_output=KVConnectorOutput(
+                    finished_recving={"request"},
+                    failed_recving={"request"} if failed else set(),
+                ),
+            )
+            normal = aggregator.aggregate([output]).kv_connector_output
+        else:
+            early |= aggregator.add_finished_recving({"request"})
+        if rank < workers - 1:
+            assert not early and not normal.finished_recving
+    # If an early notification completes a failed quorum, recovery stays on
+    # the ordinary output path, even when that output has no new receives.
+    if not normal.finished_recving:
+        output = ModelRunnerOutput([], {})
+        normal = aggregator.aggregate([output]).kv_connector_output
+    assert early | (normal.finished_recving or set()) == {"request"}
+    assert normal.failed_recving == ({"request"} if failed else set())
+    assert not early if failed else not (early and normal.finished_recving)
+    empty = aggregator.aggregate([ModelRunnerOutput([], {})]).kv_connector_output
+    assert not empty.finished_recving and not empty.failed_recving
+
+
 class DummyWorkerMeta(KVConnectorWorkerMetadata):
     def __init__(self, tags: set[str]):
         self.tags = set(tags)

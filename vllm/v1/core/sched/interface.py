@@ -177,6 +177,11 @@ class SchedulerInterface(ABC):
         """
         raise NotImplementedError
 
+    def add_finished_recving(self, request_ids: set[str]) -> None:
+        """Mark remote KV loads finished that the workers reported ahead of the
+        step outputs, so the requests can run in the next schedule()."""
+        raise NotImplementedError
+
     @abstractmethod
     def get_num_unfinished_requests(self) -> int:
         """Number of unfinished requests in the scheduler's internal queue."""

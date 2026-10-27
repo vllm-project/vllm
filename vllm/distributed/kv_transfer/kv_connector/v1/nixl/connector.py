@@ -387,6 +387,16 @@ class NixlPullConnector(NixlBaseConnector):
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
 
+    def has_pending_recving(self) -> bool:
+        return (
+            self.connector_worker is not None
+            and self.connector_worker.has_pending_recving()
+        )
+
+    def poll_finished_recving(self) -> set[str]:
+        assert self.connector_worker is not None
+        return self.connector_worker.poll_finished_recving()
+
 
 class NixlPushConnector(NixlBaseConnector):
     """Push-based (WRITE) NIXL KV transfer connector."""

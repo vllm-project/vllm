@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Container, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
@@ -132,6 +132,10 @@ class NixlBaseConnectorWorker:
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
+    # With early receive the worker loop polls receives through
+    # poll_finished_recving(); get_transfer_results() then only reports
+    # failures, so successes never wait for a step output.
+    _worker_polls_recving: bool = False
 
     # Layer-name routing is supported only by NixlPushConnector for HMA or
     # packed KV caches under PP.
@@ -3212,9 +3216,17 @@ class NixlBaseConnectorWorker:
         """
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
-        done_recving, newly_failed = self._pop_done_transfers(self._recving_transfers)
-        if newly_failed:
-            self._recv_failures.update(newly_failed)
+        done_recving = set[ReqId]()
+        if self._worker_polls_recving:
+            # poll_finished_recving() pops the rest; failed receives retry
+            # their retained handles here, once per step.
+            self._pop_done_transfers(self._recving_transfers, self._recv_failures)
+        else:
+            done_recving, newly_failed = self._pop_done_transfers(
+                self._recving_transfers
+            )
+            if newly_failed:
+                self._recv_failures.update(newly_failed)
 
         done_sending.update(self._replicated_pcp_done_sending)
         self._replicated_pcp_done_sending.clear()
@@ -3252,6 +3264,47 @@ class NixlBaseConnectorWorker:
                 len(failed_recv_reqs),
             )
 
+        self._finish_recved(done_recving, failed_recv_reqs)
+
+        # Handle timeout to avoid stranding blocks on remote.
+        self._reap_expired_send_leases(done_sending)
+
+        self._cleanup_remote_engines()
+        return KVConnectorTransferResults(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            failed_recving=failed_recv_reqs,
+        )
+
+    def poll_finished_recving(self) -> set[str]:
+        """Pop and post-process the receives that completed successfully.
+
+        They are not reported by `get_transfer_results()` again. A failed
+        request stays in `_recv_failures` for the regular path to report and
+        is not polled here again.
+        """
+        if not self.has_pending_recving():
+            return set()
+        done_recving, newly_failed = self._pop_done_transfers(
+            self._recving_transfers,
+            self._recving_transfers.keys() - self._recv_failures,
+        )
+        if newly_failed:
+            self._recv_failures.update(newly_failed)
+        done_recving -= self._recv_failures
+        if done_recving:
+            self._finish_recved(done_recving, set())
+        return done_recving
+
+    def has_pending_recving(self) -> bool:
+        """Whether a receive that has not failed is still in flight."""
+        return any(r not in self._recv_failures for r in self._recving_transfers)
+
+    def _finish_recved(
+        self, done_recving: set[str], failed_recv_reqs: set[str]
+    ) -> None:
+        """Notify the producers and post-process the KV of finished receives."""
+        assert self.transfer_topo is not None
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
         direct_device_recving = set[str]()
@@ -3335,16 +3388,6 @@ class NixlBaseConnectorWorker:
 
         self._sync_device_after_direct_recv(direct_device_recving)
 
-        # Handle timeout to avoid stranding blocks on remote.
-        self._reap_expired_send_leases(done_sending)
-
-        self._cleanup_remote_engines()
-        return KVConnectorTransferResults(
-            finished_sending=done_sending,
-            finished_recving=done_recving,
-            failed_recving=failed_recv_reqs,
-        )
-
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Compatibility wrapper for the legacy completion API."""
         results = self.get_transfer_results()
@@ -3416,12 +3459,15 @@ class NixlBaseConnectorWorker:
                 )
 
     def _pop_done_transfers(
-        self, transfers: dict[str, list[int]]
+        self,
+        transfers: dict[str, list[int]],
+        req_ids: Container[str] | None = None,
     ) -> tuple[set[str], set[str]]:
         """Poll transfers, retaining handles until they can be released.
 
         Args:
             transfers: Outstanding handles by request, updated in place.
+            req_ids: Only poll these requests; all of them if None.
 
         Returns:
             Requests with no outstanding handles and requests with observed
@@ -3431,6 +3477,8 @@ class NixlBaseConnectorWorker:
         done_req_ids: set[str] = set()
         failed_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
+            if req_ids is not None and req_id not in req_ids:
+                continue
             in_progress = []
             for handle in handles:
                 try:

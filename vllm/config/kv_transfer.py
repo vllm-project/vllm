@@ -85,6 +85,12 @@ class KVTransferConfig:
     enable_permute_local_kv: bool = False
     """Experiment feature flag to enable HND to NHD KV Transfer"""
 
+    enable_early_recv: bool = False
+    """Report completed NIXL pulls before the next model output. Supported with
+    the uni executor and the multiprocessing executor with same-node workers,
+    with async or synchronous scheduling, and for NIXL pull children of
+    MultiConnector."""
+
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail"
     """Policy for handling KV cache load failures.
     'recompute': reschedule the request to recompute failed blocks
