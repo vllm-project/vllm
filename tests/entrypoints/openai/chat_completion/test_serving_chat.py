@@ -934,49 +934,6 @@ async def test_chat_per_request_metrics_follow_server_flag():
 
 
 @pytest.mark.asyncio
-async def test_chat_content_ttft_uses_first_content_delta():
-    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
-    serving.parser_cls = MagicMock()
-
-    response_parser = MagicMock()
-    response_parser.parse.return_value = ("thinking", "answer", [])
-    response_parser.count_reasoning_tokens.return_value = 1
-    content_timing_parser = MagicMock()
-    content_timing_parser.parse_delta.side_effect = [
-        DeltaMessage(reasoning="thinking"),
-        DeltaMessage(content="answer"),
-    ]
-
-    reasoning_output = _make_metrics_request_output(token_ids=(100,))
-    reasoning_output.outputs[0].text = "thinking"
-    reasoning_output.outputs[0].finish_reason = None
-    reasoning_output.finished = False
-
-    content_output = _make_metrics_request_output(token_ids=(101,))
-    content_output.outputs[0].text = "answer"
-
-    response = await serving.chat_completion_full_generator(
-        ChatCompletionRequest(
-            model="test-model",
-            messages=[{"role": "user", "content": "Test prompt"}],
-        ),
-        _stream_request_outputs(reasoning_output, content_output),
-        "chatcmpl-test-id",
-        "test-model",
-        conversation=[{"role": "user", "content": "Test"}],
-        tokenizer=MagicMock(),
-        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
-        parser=response_parser,
-        content_timing_parser=content_timing_parser,
-    )
-
-    assert isinstance(response, ChatCompletionResponse)
-    assert response.usage.completion_tokens == 2
-    assert response.metrics is not None
-    assert response.metrics.time_to_first_content_token_ms == pytest.approx(1500.0)
-
-
-@pytest.mark.asyncio
 async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
     serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
     response = await serving.chat_completion_full_generator(

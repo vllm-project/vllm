@@ -70,6 +70,7 @@ def server():
         "--gpu-memory-utilization",
         "0.4",
         "--no-async-scheduling",
+        "--enable-per-request-metrics",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -169,6 +170,22 @@ async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
 
     assert msg_with.content or getattr(msg_with, "reasoning", None)
     assert msg_without.content or getattr(msg_without, "reasoning", None)
+
+
+@pytest.mark.asyncio
+async def test_per_request_metrics_report_first_content_boundary(server):
+    async with server.get_async_client() as client:
+        response = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=MESSAGES,
+            max_tokens=100,
+            temperature=0.0,
+            extra_body={"thinking_token_budget": THINK_BUDGET},
+        )
+
+    metrics = response.model_extra.get("metrics")
+    assert metrics is not None
+    assert metrics["time_to_first_content_token_ms"] > metrics["time_to_first_token_ms"]
 
 
 @pytest.mark.asyncio
