@@ -666,23 +666,22 @@ class OffloadingConnectorScheduler:
             for config in self.config.kv_group_configs
             if config.requires_cow_source
         )
-        # Most chunks a lookup may bring in at its boundary beyond the
-        # full-attention prefix: each windowed group's window, rounded out to
-        # whole chunks at both edges, an EAGLE group's extra chunk, and a
-        # partial tail's bridge chunk and block per group. Room for one more
-        # covers the chunk at which _fit_load_to_capacity() stops.
-        boundary_lookup_chunks = sum(
+        # What a lookup may bring in at its boundary beyond the full-attention
+        # prefix (see _boundary_lookup_chunks()): each windowed group's
+        # window, rounded out to whole chunks at both edges, as (chunk size,
+        # window chunks); and an EAGLE group's extra chunk and a partial
+        # tail's bridge chunk and block per group.
+        self._boundary_windows: tuple[tuple[int, int], ...] = tuple(
             (
-                0
-                if config.sliding_window_size_in_chunks is None
-                else (config.load_window_size_in_chunks(1) or 0) + 1
+                config.tokens_per_chunk,
+                (config.load_window_size_in_chunks(1) or 0) + 1,
             )
-            + int(config.is_eagle_group)
-            + (2 if self.config.supports_partial_tail else 0)
             for config in self.config.kv_group_configs
+            if config.sliding_window_size_in_chunks is not None
         )
-        self._boundary_lookup_chunks = boundary_lookup_chunks + bool(
-            boundary_lookup_chunks
+        self._boundary_extra_chunks = sum(
+            int(config.is_eagle_group) + (2 if self.config.supports_partial_tail else 0)
+            for config in self.config.kv_group_configs
         )
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
@@ -1175,13 +1174,33 @@ class OffloadingConnectorScheduler:
                         offload_keys[chunk_idx],
                     )
                 )
+
+        def boundary_chunks(end_token: int) -> int:
+            return self._boundary_lookup_chunks(num_computed_tokens, end_token)
+
+        def load_end(start_token: int) -> int:
+            # Windowed and recurrent groups keep state only every
+            # retention_interval.
+            if self._sliding_window_groups and retention_interval:
+                return round_down(start_token, retention_interval)
+            return start_token
+
         # Each chunk takes at most one slot, so a hit this small always fits.
-        if len(chunks) + self._boundary_lookup_chunks <= capacity:
+        if len(chunks) + boundary_chunks(max_hit_size_tokens) <= capacity:
             return None
         chunks.sort(key=lambda chunk: chunk[:2])
         # Chunks whose lookup is still pending; each may take a slot later.
         num_pending = 0
-        for _, _, start_token, key in chunks:
+        took_any_room = False
+        for end_token, _, start_token, key in chunks:
+            # Once lookups take room, look this chunk up only if the space
+            # left holds it and the boundary of a load that ends with it, so
+            # that the chunk after the load takes none of that room. Until
+            # then the chunks are in the bounded tier or on their way.
+            if took_any_room and capacity - num_pending < 1 + boundary_chunks(
+                end_token
+            ):
+                return load_end(start_token)
             # A lookup takes a slot only for a chunk that is not on its way to
             # the bounded tier yet; it misses if no slot is left.
             result = self.manager.lookup(key, req_status.req_context)
@@ -1193,15 +1212,25 @@ class OffloadingConnectorScheduler:
             took_room = new_capacity < capacity or result is LookupResult.RETRY
             num_pending += result is LookupResult.RETRY
             capacity = new_capacity
-            # Chunks already on their way take no room; once the boundary's
-            # lookups are left too little, stop before this chunk.
-            if took_room and capacity - num_pending < self._boundary_lookup_chunks:
-                # This chunk took room that the boundary needs. Windowed and
-                # recurrent groups keep state only every retention_interval.
-                if self._sliding_window_groups and retention_interval:
-                    return round_down(start_token, retention_interval)
-                return start_token
+            took_any_room |= took_room
+            if took_room and capacity - num_pending < boundary_chunks(end_token):
+                # This chunk took room that the boundary needs.
+                return load_end(start_token)
         return None
+
+    def _boundary_lookup_chunks(self, num_computed_tokens: int, end_token: int) -> int:
+        """Most chunks the lookup of a load ending at ``end_token`` may bring
+        in beyond the full-attention prefix. A windowed group looks up no
+        more chunks than the load covers, so a short load needs less than
+        the whole window."""
+        return self._boundary_extra_chunks + sum(
+            min(
+                window_chunks,
+                cdiv(end_token, tokens_per_chunk)
+                - num_computed_tokens // tokens_per_chunk,
+            )
+            for tokens_per_chunk, window_chunks in self._boundary_windows
+        )
 
     def _make_boundary_key(
         self,

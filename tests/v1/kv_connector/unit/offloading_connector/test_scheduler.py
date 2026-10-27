@@ -62,6 +62,7 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.output import (
+    CachedRequestData,
     KVConnectorBlockState,
     NewRequestData,
     SchedulerOutput,
@@ -98,6 +99,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -6532,3 +6534,98 @@ def test_hit_larger_than_bounded_tier_loads_every_group_at_one_boundary():
     assert hit % retention_interval == 0
     # The load and both windows at its boundary fit in the primary tier.
     assert hit // block_size + 2 * (window_chunks + 1) <= tier.num_chunks
+
+
+def _make_staged_two_group_scheduler(
+    windowed: bool, primary_chunks: int
+) -> OffloadingConnectorScheduler:
+    """A full-attention plus full or windowed scheduler over a real tiering
+    manager whose primary tier holds ``primary_chunks`` 4-token chunks."""
+    vllm_config = create_vllm_config(block_size=4)
+    vllm_config.cache_config.prefix_cache_retention_interval = None
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_bytes_to_use": primary_chunks
+            * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+            "secondary_tiers": [{"type": "example"}],
+        },
+    )
+    kwargs = dict(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    other_spec = (
+        SlidingWindowSpec(**kwargs, sliding_window=8)
+        if windowed
+        else FullAttentionSpec(**kwargs)
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], FullAttentionSpec(**kwargs)),
+            KVCacheGroupSpec(["other"], other_spec),
+        ],
+    )
+    spec = TieringOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    assert spec.num_chunks == primary_chunks
+    return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+
+
+@pytest.mark.parametrize(
+    "windowed, primary_chunks, expected",
+    [
+        (False, 12, 24),
+        # 8 full-attention chunks and the 2-chunk window at token 32.
+        (True, 12, 32),
+        # One chunk per group: a 4-token load needs one chunk of the window
+        # group, not the whole window.
+        (False, 2, 4),
+        (True, 2, 4),
+        # Too small for one chunk per group.
+        (False, 1, 0),
+        (True, 1, 0),
+    ],
+)
+def test_secondary_tier_hit_larger_than_primary_tier_loads_a_prefix(
+    windowed: bool, primary_chunks: int, expected: int
+):
+    """A real tiering manager whose secondary tier holds a hit larger than
+    the primary tier loads the prefix that fits for both groups."""
+    scheduler = _make_staged_two_group_scheduler(windowed, primary_chunks)
+    manager = scheduler.manager
+    secondary = manager.secondary_tiers[0]
+    assert isinstance(secondary, ExampleSecondaryTierManager)
+    try:
+        request = create_request(num_tokens=64, block_size=4)
+        scheduler.on_new_request(request)
+        for group_idx in range(2):
+            secondary.chunks.update(
+                (make_offload_key(block_hash, group_idx), True)
+                for block_hash in request.block_hashes
+            )
+
+        results = []
+        for _ in range(2):
+            results.append(scheduler.get_num_new_matched_tokens(request, 0))
+            scheduler.build_connector_meta(
+                SchedulerOutput(
+                    scheduled_new_reqs=[],
+                    scheduled_cached_reqs=CachedRequestData.make_empty(),
+                    num_scheduled_tokens={},
+                    total_num_scheduled_tokens=0,
+                    scheduled_spec_decode_tokens={},
+                    scheduled_encoder_inputs={},
+                    finished_req_ids=set(),
+                    free_encoder_mm_hashes=[],
+                )
+            )
+    finally:
+        manager.shutdown()
+
+    if expected:
+        # The promotions are pending on the first lookup, then the prefix loads.
+        assert results[0] == (None, False)
+        assert results[1] == (expected, True)
+    else:
+        assert results[0] == (0, False)
