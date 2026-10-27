@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 #include <hip/hip_runtime.h>
 #include "quick_reduce_impl.cuh"
@@ -106,6 +107,10 @@ struct DeviceComms {
   int world_size;
   int rank;
 
+  // gfx11 runs fp16 INT8 at TP4 through CodecQ8Packed (same result, fewer
+  // remote stores). Other targets keep CodecQ8.
+  bool packed_int8 = false;
+
   uint8_t* dbuffer;
   uint8_t** dbuffer_list;
   hipIpcMemHandle_t buffer_ipc_handle;
@@ -121,6 +126,13 @@ struct DeviceComms {
     destroy();
     this->world_size = world_size;
     this->rank = rank;
+    {
+      int device;
+      hipDeviceProp_t props;
+      HIP_CHECK(hipGetDevice(&device));
+      HIP_CHECK(hipGetDeviceProperties(&props, device));
+      packed_int8 = std::string(props.gcnArchName).rfind("gfx11", 0) == 0;
+    }
     if (max_problem_size.has_value() && max_problem_size.value() > 0) {
       this->kMaxProblemSize = max_problem_size.value();
     }
@@ -219,6 +231,20 @@ struct DeviceComms {
     auto quant_level_ = static_cast<QuickReduceQuantLevel>(quant_level);
     switch (quant_level_) {
       case QuickReduceQuantLevel::INT8:
+        // Native bf16 spills to scratch on gfx11 at TP4 (as CodecQ8 does);
+        // it keeps CodecQ8.
+        if constexpr (std::is_same<T, half>::value) {
+          if (packed_int8 && world_size == 4) {
+            using AllReduceKernel =
+                AllReduceTwoshot<T, CodecQ8Packed<T, 4>, cast_bf2half>;
+            hipLaunchKernelGGL(
+                (allreduce_prototype_twoshot<AllReduceKernel, T>), dim3(grid),
+                dim3(kBlockTwoShot), 0, stream, A, B, N, num_blocks, rank,
+                dbuffer_list, data_offset, d_flag_counters,
+                this->kMaxProblemSize);
+            break;
+          }
+        }
         TWOSHOT_DISPATCH(CodecQ8)
         break;
       case QuickReduceQuantLevel::INT6:
