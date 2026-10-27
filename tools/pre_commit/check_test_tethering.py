@@ -455,6 +455,10 @@ def _split_shell_stages(command: str) -> list[tuple[str, list[str]]]:
     (unbalanced quote, ...) yields nothing: better to miss a selection than to
     misparse one. Splitting *after* tokenizing means an operator inside a quoted
     argument stays part of that argument."""
+    # A `\`-continued line (a yaml `|` block listing one path per line) is one
+    # command to the shell; shlex would keep the escaped newline in the token.
+    # An even run of backslashes is escaped backslashes, not a continuation.
+    command = re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1 ", command)
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:

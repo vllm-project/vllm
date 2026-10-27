@@ -2,6 +2,8 @@
 
 NixlConnector is a high-performance KV cache transfer connector for vLLM's disaggregated prefilling feature. It provides fully asynchronous send/receive operations using the NIXL library for efficient cross-process KV cache transfer.
 
+`NixlPullConnector` is the canonical name for the pull connector; `NixlConnector` remains an alias, including inside `MultiConnector`. Both names use the same configuration checks and defaults.
+
 For feature compatibility details (supported model architectures, TP configurations, and feature interactions), see the [NixlConnector Compatibility Matrix](nixl_connector_compatibility.md).
 
 ## Prerequisites
@@ -107,6 +109,10 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
   --decoder-hosts localhost \
   --decoder-ports 8200
 ```
+
+### Decode context parallelism
+
+NIXL pull transfers with `--decode-context-parallel-size` greater than 1 require an MLA model. When `--cp-kv-cache-interleave-size` is omitted, vLLM resolves it from the global KV cache groups before profiling. Explicit values are preserved and must divide the cache block size without exceeding it. For a block size of 16, explicit values of 1 and 8 are valid; 3 and 32 are rejected under either connector name.
 
 ## Environment Variables
 
@@ -398,7 +404,7 @@ The `kv_load_failure_policy` setting controls how the system handles failures wh
 
 ### For NVIDIA GB-series GPUs
 
-GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set `--enable-cumem-allocator` or `--enable-sleep-mode` flags, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
+GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set the `--enable-cumem-allocator` flag, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
 
 ## Experimental Feature
 

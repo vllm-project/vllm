@@ -11,9 +11,34 @@ from vllm.model_executor.models.mimo import MiMoModel
 from vllm.models.minimax_m3.nvidia import model as minimax_m3
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    requires_aux_hidden_states,
     reserve_aux_intermediate_tensor_slots,
     verify_supports_aux_hidden_states_over_pp,
 )
+
+
+@pytest.mark.parametrize(
+    ("method", "hf_config", "expected"),
+    [
+        ("eagle3", {"eagle_config": {"use_aux_hidden_state": False}}, False),
+        ("eagle3", {"eagle_config": {"use_aux_hidden_state": True}}, True),
+        ("eagle3", {"eagle_config": {}}, True),
+        ("eagle3", {"eagle_config": None}, True),
+        ("eagle3", {}, True),
+        ("dflash", {"eagle_config": {"use_aux_hidden_state": False}}, True),
+        ("dspark", {"eagle_config": {"use_aux_hidden_state": False}}, True),
+        ("extract_hidden_states", {}, True),
+        ("mtp", {}, False),
+    ],
+)
+def test_aux_hidden_state_requirement_respects_eagle3_config(
+    method, hf_config, expected
+):
+    spec_config = SimpleNamespace(
+        method=method,
+        draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(**hf_config)),
+    )
+    assert requires_aux_hidden_states(spec_config) is expected
 
 
 def test_aux_layers_are_sorted_and_deduplicated():
@@ -105,7 +130,7 @@ def minimax_pp_stage(monkeypatch):
                 model_config=SimpleNamespace(hf_text_config=config),
                 quant_config=None,
                 speculative_config=None,
-                use_v2_model_runner=False,
+                use_v2_model_runner=True,
             )
         )
         model._set_aux_hidden_state_layers(taps)
