@@ -17,6 +17,8 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     gather_draft_sampled,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    _compute_local_logits_stats_kernel,
+    _compute_local_residual_mass_kernel,
     rejection_sample,
 )
 
@@ -770,6 +772,43 @@ def test_multiround_rejection_sample_is_unbiased(
         _assert_distribution_match(
             output[:, position], target_probs, device, label=f"position {position}"
         )
+
+
+def test_local_stats_kernels_reuse_jit_across_num_logits():
+    """Warmup compiles one num_logits; serving must not JIT another variant.
+
+    num_logits = num_reqs * (K + 1) crosses Triton's divisible-by-16 integer
+    specialization between steps (12 vs 16 here).
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    num_speculative_steps = 3
+    kernels = (_compute_local_logits_stats_kernel, _compute_local_residual_mass_kernel)
+    kernel_caches = [
+        kernel.device_caches[torch.accelerator.current_device_index()][0]
+        for kernel in kernels
+    ]
+    for kernel_cache in kernel_caches:
+        kernel_cache.clear()
+
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device)
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device)
+    for num_trials in (3, 4):
+        inputs = _build_rejection_sample_inputs(
+            target_logits_1d,
+            draft_logits_1d,
+            num_speculative_steps,
+            temperature=1.0,
+            num_trials=num_trials,
+        )
+        # Block verification also launches the residual mass kernel.
+        rejection_sample(
+            **inputs,
+            num_speculative_steps=num_speculative_steps,
+            use_block_verification=True,
+        )
+
+    assert [len(kernel_cache) for kernel_cache in kernel_caches] == [1, 1]
 
 
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])
