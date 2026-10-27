@@ -12,7 +12,7 @@ cover run vLLM's stock path.
 - Deployment (checked at startup; a deployment that cannot run the kernels
   raises): gfx950 with 256 CUs, tensor parallel size 8 with
   `--enable-expert-parallel` (linear placement, 32 experts a rank, no EPLB),
-  no PP / DP / DCP, Quark OCP-MXFP4 W4A4 experts on `AITER_MXFP4_MXFP4`
+  no PP / DP / DCP / PCP, Quark OCP-MXFP4 W4A4 experts on `AITER_MXFP4_MXFP4`
   (shuffled weights and scales), the fused QK-norm / RoPE / KV insert,
   `ROCM_AITER_FA` with a bf16 KV cache in the LBHNC layout (block size 16),
   DSpark with 7 draft tokens, no LoRA, no KV connector or offloading.
@@ -20,8 +20,6 @@ cover run vLLM's stock path.
   verify batches of 1-16 requests x 8 tokens, FULL CUDA graph or eager.
   8 / 16 rows run K3 (S = 8 / 16); 24-128 rows run HA + HM + HB with the rows
   padded up to S = 32 / 64 / 96 / 128 (`nrows` = the real rows).
-- Every rank takes the same path: the decision uses only the batch shape and
-  the attention metadata counts, which vLLM gives every rank alike.
 
 ## Launches (layer i, 1 <= i <= 60)
 
@@ -38,8 +36,8 @@ cover run vLLM's stock path.
         layer 61)
 
 Fused attention: at 8, 16 and 24-32 rows every layer from layer 2 runs its
-verify attention at the head of K3_i / HA_i
-(`kernels/attn_frag.py`) instead of vLLM's op: split over all 256 CTAs by
+verify attention at the head of K3_i / HA_i (`kernels/attn_frag.py`) instead
+of vLLM's op: split over all 256 CTAs by
 (request, kv head, key range), then merged before o_proj. It reads layer i's
 q from the previous launch, layer i's bf16 KV cache through its KV cache
 group's `block_table` (int32) and `seq_lens` (int32), the softmax scale of the
