@@ -56,7 +56,8 @@ ROWS = L.ROWS
 PS_MIN = 4  # rows from which the fused shared expert's ug runs before the route
 UG_AHEAD = 1  # ug tasks a CTA prefetches past the running one
 DB = 4  # a wave's down slots whose w2 is in flight together
-UG_COLS = 16  # intermediate columns an ug task
+UG_COLS = 32  # intermediate columns an ug task: an MXFP4 block, quantized there
+UG_K = 2  # K parts an ug task's waves split w13's K into (one per 4 waves)
 LOG2E = 1.0 / math.log(2.0)
 TAG_SLOTS = 256
 
@@ -681,13 +682,25 @@ def load_route(c):
 
 # ---------------------------------------------------------------- ug
 def ug_steps(d):
-    """A wave's K quarter of w13's steps."""
-    return d.hidden // L.FP4_STEP // 4
+    """A wave's K part of w13's steps."""
+    return d.hidden // L.FP4_STEP // UG_K
+
+
+def inter_pairs(d):
+    """INTER pairs a pick: its fp4 code words (RI / 8), then its e8m0 codes
+    (RI / 32)."""
+    return d.ri // 8 + d.ri // 32
+
+
+def ug_rows(d, wave, g):
+    """Wave ``wave``'s w13 row group in ug task group g: gate (wave % 2 == 0)
+    or up, of the block's columns 16 ((wave / 2) % 2) ..."""
+    return L.w13_group(d, wave % 2, 2 * g + (wave // 2) % 2)
 
 
 def ug_loads(c, task, live, shared=False):
-    """Task ``task``'s w13 operands for this wave (gate or up by wave % 2, K
-    quarter wave / 2) and its scale words (a word two steps where a quarter's
+    """Task ``task``'s w13 operands for this wave (``ug_rows``' row group, K
+    part wave / 4) and its scale words (a word two steps where a part's
     steps pair up, else a word a step); out of bounds (no memory access,
     zeros) where ``live`` is false. ``shared``: the fused shared expert's task
     ``task`` (no union yet)."""
@@ -697,9 +710,8 @@ def ug_loads(c, task, live, shared=False):
     n = ug_steps(d)
     slot = task // groups
     g = task % groups
-    gu = wave % 2
-    kq = wave // 2
-    rg = L.w13_group(d, gu, g)
+    kq = wave // 4
+    rg = ug_rows(d, wave, g)
     wb, sb = d.rip * d.hidden, 2 * d.rip * d.hidden // 32
     if const_expr(shared):
         e = 0
@@ -728,9 +740,9 @@ def ug_loads(c, task, live, shared=False):
 
 
 def stage_ug(c, task, ops, shared=False):
-    """Slot task / groups, columns 16 (task % groups) ..: the gate and up rows
-    against the x rows' MXFP4 codes in LDS (``ops``: ``ug_loads``); silu(g) u ->
-    fp32 -> INTER of each picking token (``shared``: every token's pick
+    """Slot task / groups, columns 32 (task % groups) ..: the gate and up rows
+    against the x rows' MXFP4 codes in LDS (``ops``: ``ug_loads``); silu(g) u
+    through MXFP4 -> INTER of each picking token (``shared``: every token's pick
     ``TOPK``)."""
     s, lane, wave = c["S"], c["lane"], c["wave"]
     d = c["moe"]
@@ -739,8 +751,8 @@ def stage_ug(c, task, ops, shared=False):
     pair = 2 if n % 2 == 0 else 1
     slot = task // groups
     g = task % groups
-    kq = wave // 2
-    rg = L.w13_group(d, wave % 2, g)
+    kq = wave // 4
+    rg = ug_rows(d, wave, g)
     tiles = ops[:n]
     words = ops[n:]
 
@@ -766,29 +778,43 @@ def stage_ug(c, task, ops, shared=False):
 
 @traced
 def _ug_out(c, slot, g, t0, n, shared):
-    """Thread (token, column pair): g, u summed over the K quarters."""
+    """Thread (token, column pair): g, u summed over the K parts, silu(g) u
+    through MXFP4 by the block (RCEIL scale, the block's 16 column pairs on 16
+    lanes of a row), as the stock decode kernel quantizes its intermediate ->
+    the pick's code words and e8m0 code in INTER."""
     tid, red, rt, d = c["tid"], c["red"], c["rt"], c["moe"]
-    if tid < n * (UG_COLS // 2):
-        i = tid // (UG_COLS // 2)
-        tt = tok(t0, i)
-        cp = tid % (UG_COLS // 2)
-        if const_expr(shared):
-            k = fx.Int32(TOPK)
-        else:
-            k = fx.ptr_load(rt["kof"] + (slot * kof_t(c) + tt))
-        gw = (0, 2, 4, 6)
-        uw = (1, 3, 5, 7)
-        v = [
-            silu_mul(
-                row_sum(red, 2 * cp + d_, i, waves=gw),
-                row_sum(red, 2 * cp + d_, i, waves=uw),
-            ).bitcast(fx.Int32)
-            for d_ in range(2)
-        ]
-        if k >= 0:
-            pick = tt * c["KT"] + k
-            at = pick * d.ri + g * UG_COLS + 2 * cp
-            c["put_words"](c["inter"], at, v)
+    i = fx.min(tid // (UG_COLS // 2), n - 1)
+    tt = tok(t0, i)
+    cp = tid % (UG_COLS // 2)
+    if const_expr(shared):
+        k = fx.Int32(TOPK)
+    else:
+        k = fx.ptr_load(rt["kof"] + (slot * kof_t(c) + tt))
+    half = cp // (ROWS // 2)
+    col = 2 * (cp % (ROWS // 2))
+    # wave w holds rows (w / 2) % 2 of gate (w even) or up, K part w / 4
+    gw = [w for w in range(WAVES) if w % 2 == 0 and (w // 2) % 2 == 0]
+    uw = [w for w in range(WAVES) if w % 2 == 1 and (w // 2) % 2 == 0]
+
+    def rows(ws, d_):
+        lo = row_sum(red, col + d_, i, waves=ws)
+        hi = row_sum(red, col + d_, i, waves=[w + 2 for w in ws])
+        return (half == 0).select(lo, hi)
+
+    h = [silu_mul(rows(gw, d_), rows(uw, d_)) for d_ in range(2)]
+    amax = fx.max(fx.Float32(fmath.absf(h[0])), fx.Float32(fmath.absf(h[1])))
+    for off in range_constexpr(4):
+        amax = xred(amax, 1 << off, fx.max)
+    e = mx_scale(amax)
+    word = pk_fp4_f32(fx.Int32(0), h[0], h[1], pow2(e), 0) << (8 * (cp % 4))
+    for off in range_constexpr(2):
+        word = xred(word, 1 << off, lambda a, b: a | b)
+    if (tid < n * (UG_COLS // 2)) & (k >= 0):
+        at = (tt * c["KT"] + k) * inter_pairs(d)
+        if cp % 4 == 0:
+            c["put_words"](c["inter"], at + g * (UG_COLS // 8) + cp // 4, [word])
+        if cp == 0:
+            c["put_words"](c["inter"], at + d.ri // 8 + g, [e])
     gpu.barrier()
 
 
@@ -842,19 +868,18 @@ def iq_scales(d, s, kt):
 
 @traced
 def load_inter(c):
-    """Every pick's INTER (fp32, RI columns) through MXFP4 by 32 columns (RCEIL
-    scale, the block's 16 column pairs on 16 lanes of a row), as the stock
-    decode kernel quantizes its intermediate -> LDS (fp4 rows of RIP, padded,
-    the pad columns zero codes; then the e8m0 codes); one poll batch."""
+    """Every pick's INTER (fp4 code words, e8m0 codes; ``_ug_out``) -> LDS (fp4
+    rows of RIP, padded, the pad columns zero codes; then the e8m0 codes), a
+    poll batch at a time."""
     s, tid, d, kt = c["S"], c["tid"], c["moe"], c["KT"]
     ri, rip = d.ri, d.rip
     ir = irow(d)
     nb = rip // 32
-    n = s * kt * ri // 2
+    pp = inter_pairs(d) // 2  # pair pairs a pick (code words and codes apart)
+    n = s * kt * pp
     per = (n + THREADS - 1) // THREADS
     got = []
     for i in range_constexpr(per):
-        # a poll batch at a time: holding every pick's words spills at 16 rows
         if const_expr(i % POLL_MAX == 0):
             got = c["poll"](
                 [
@@ -863,23 +888,19 @@ def load_inter(c):
                 ]
             )
         p = fx.min(tid + THREADS * i, n - 1)
-        pick = p // (ri // 2)
-        cp = p % (ri // 2)
-        h0, h1 = f32_of(got[i % POLL_MAX][0]), f32_of(got[i % POLL_MAX][1])
-        amax = fx.max(fx.Float32(fmath.absf(h0)), fx.Float32(fmath.absf(h1)))
-        for off in range_constexpr(4):
-            amax = xred(amax, 1 << off, fx.max)
-        e = mx_scale(amax)
-        # a lane's byte; four lanes' bytes -> a word, the block's code
-        v = pk_fp4_f32(fx.Int32(0), h0, h1, pow2(e), 0)
-        v = v << (8 * (cp % 4))
-        for off in range_constexpr(2):
-            v = xred(v, 1 << off, lambda a, b: a | b)
-        ok = tid + THREADS * i < n
-        if ok & (cp % 4 == 0):
-            fx.ptr_store(v, c["il"] + (pick * ir + cp) // 4)
-        if ok & (cp % 16 == 0):
-            fx.ptr_store(e, c["il"] + (iq_scales(d, s, kt) + pick * nb + cp // 16))
+        pick = p // pp
+        q = 2 * (p % pp)
+        w = got[i % POLL_MAX]
+        if tid + THREADS * i < n:
+            if q < ri // 8:
+                for e in range_constexpr(2):
+                    fx.ptr_store(w[e], c["il"] + (pick * ir // 4 + q + e))
+            else:
+                for e in range_constexpr(2):
+                    fx.ptr_store(
+                        w[e],
+                        c["il"] + (iq_scales(d, s, kt) + pick * nb + q - ri // 8 + e),
+                    )
     if const_expr(rip > ri):
         pw = (rip - ri) // 8  # pad dwords a pick
         pb = (rip - ri) // 32  # pad blocks a pick
