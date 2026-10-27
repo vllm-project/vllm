@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from copy import deepcopy
 
+import numpy as np
 import torch
 
 from vllm.compilation.wrapper import compile_model_with_stock_torch
@@ -28,6 +29,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
@@ -45,7 +47,7 @@ from vllm.v1.worker.cpu.attn_utils import (
 from vllm.v1.worker.cpu.block_table import CPUBlockTables
 from vllm.v1.worker.cpu.ec_connector import get_ec_connector
 from vllm.v1.worker.cpu.encoder_cache import EncoderCache
-from vllm.v1.worker.cpu.input_batch import InputBuffers
+from vllm.v1.worker.cpu.input_batch import InputBuffers, post_update
 from vllm.v1.worker.cpu.kv_connector import (
     NO_OP_KV_CONNECTOR,
     KVConnector,
@@ -61,7 +63,7 @@ from vllm.v1.worker.cpu.states import CPURequestState
 from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
 from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer, free_before_shutdown
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import clear_layer_kv_caches
+from vllm.v1.worker.utils import clear_layer_kv_caches, copy_kv_cache_blocks_inplace
 
 logger = init_logger(__name__)
 
@@ -409,6 +411,159 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
     def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
         if self.pooling_runner is not None:
             self.pooling_runner.release_late_interaction_query_cache(query_keys)
+
+    def _remove_request(self, req_id: str) -> bool:
+        self.model_state.remove_request(req_id)
+        req_idx = self.req_states.remove_request(req_id)
+        if req_idx is None:
+            return False
+        if self.pooling_runner is not None:
+            self.pooling_runner.remove_request(req_idx)
+        if self.pp_handler is not None:
+            self.pp_handler.on_req_idx_freed(req_idx)
+        if self.encoder_cache is not None:
+            self.encoder_cache.remove_request(req_id)
+        if self.prompt_logprobs_worker is not None:
+            self.prompt_logprobs_worker.remove_request(req_id)
+        self.lora_state.remove_request(req_id)
+        return True
+
+    def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
+        finished_req_ids = scheduler_output.finished_req_ids
+        if self.pooling_runner is not None:
+            # Preempted docs keep their query-use reservation until rescheduled.
+            self.pooling_runner.on_requests_finished(finished_req_ids)
+        preempted_req_ids = scheduler_output.preempted_req_ids
+        if preempted_req_ids:
+            finished_req_ids = finished_req_ids.union(preempted_req_ids)
+        # Sorted so every TP rank frees request slots in the same order.
+        # Features like batch-sharded sampling derive rank request ownership
+        # from the slot index.
+        for req_id in sorted(finished_req_ids):
+            self._remove_request(req_id)
+
+    def free_states(self, scheduler_output: SchedulerOutput) -> None:
+        if self.encoder_cache is not None:
+            for mm_hash in scheduler_output.free_encoder_mm_hashes:
+                self.encoder_cache.free_encoder_cache(mm_hash)
+
+    def update_pp_decode_requests(self) -> None:
+        if self.pp_handler is not None:
+            outputs = self.pp_handler.get_prev_sampled_outputs()
+            if outputs is not None:
+                self.postprocess_sampled(**outputs)
+
+    def add_requests(self, scheduler_output: SchedulerOutput) -> None:
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            assert new_req_data.prefill_token_ids is not None
+            req_id = new_req_data.req_id
+
+            # Streaming input update: request already exists from a prior
+            # chunk. Remove old state so it can be cleanly re-added below
+            # with the updated prompt_token_ids and mm_features.
+            self._remove_request(req_id)
+
+            prompt_len = new_req_data.prompt_len
+            sampling_params = new_req_data.sampling_params
+            self.req_states.add_request(
+                req_id=req_id,
+                prompt_len=prompt_len,
+                all_token_ids=new_req_data.prefill_token_ids,
+                num_computed_tokens=new_req_data.num_computed_tokens,
+                max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
+            )
+            req_index = self.req_states.req_id_to_index[req_id]
+
+            if self.pooling_runner is not None:
+                assert new_req_data.pooling_params is not None
+                self.pooling_runner.add_request(
+                    req_id,
+                    req_index,
+                    new_req_data.pooling_params,
+                    new_req_data.prompt_token_ids,
+                )
+
+            if self.encoder_cache is not None:
+                self.encoder_cache.add_request(req_id, new_req_data.mm_features)
+
+            self.model_state.add_request(req_index, new_req_data)
+            self.block_tables.append_block_ids(
+                req_index, new_req_data.block_ids, overwrite=True
+            )
+            self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
+
+            if self.is_last_pp_rank and new_req_data.sampling_params is not None:
+                assert self.sampler is not None
+                self.sampler.add_request(req_index, new_req_data.sampling_params)
+                assert self.prompt_logprobs_worker is not None
+                self.prompt_logprobs_worker.add_request(
+                    req_id, req_index, new_req_data.sampling_params
+                )
+
+    def update_requests(self, scheduler_output: SchedulerOutput) -> None:
+        # Add new blocks and update num_computed_tokens for the existing requests.
+        reqs = scheduler_output.scheduled_cached_reqs
+        num_computed_tokens_np = self.req_states.num_computed_tokens_np
+        for req_id, num_computed_tokens, req_new_block_ids in zip(
+            reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
+        ):
+            req_index = self.req_states.req_id_to_index[req_id]
+            num_computed_tokens_np[req_index] = num_computed_tokens
+            if req_new_block_ids is not None:
+                self.block_tables.append_block_ids(
+                    req_index, req_new_block_ids, overwrite=False
+                )
+
+        # Update CPU num_computed_prefill_tokens.
+        np.minimum(
+            self.req_states.num_computed_tokens_np,
+            self.req_states.prefill_len_np,
+            out=self.req_states.num_computed_prefill_tokens,
+        )
+
+        # Zero memory for freshly allocated cache blocks to prevent stale
+        # NaN/data from corrupting attention or SSM computation.
+        if scheduler_output.new_block_ids_to_zero:
+            assert self.kv_block_zeroer is not None
+            self.kv_block_zeroer.zero_block_ids(scheduler_output.new_block_ids_to_zero)
+
+        # Apply copy-on-write block copies for partial prefix-cache hits, after
+        # zeroing new blocks and before the forward pass reads them.
+        if scheduler_output.kv_cache_block_copies:
+            copy_kv_cache_blocks_inplace(
+                self.kv_caches,
+                self.kv_cache_config.num_blocks,
+                scheduler_output.kv_cache_block_copies,
+            )
+
+    def postprocess_sampled(
+        self,
+        idx_mapping: torch.Tensor,
+        sampled_tokens: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        query_start_loc: torch.Tensor | None = None,
+    ) -> None:
+        output_bin_counts = None
+        if self.is_last_pp_rank:
+            assert self.sampler is not None
+            output_bin_counts = self.sampler.penalties_state.output_bin_counts
+
+        post_update(
+            idx_mapping,
+            self.req_states.num_computed_tokens,
+            self.req_states.last_sampled_tokens,
+            output_bin_counts,
+            sampled_tokens,
+            num_sampled,
+            num_rejected,
+            query_start_loc,
+            self.req_states.all_token_ids,
+            self.req_states.total_len,
+        )
+        self.model_state.postprocess_state(
+            idx_mapping, num_sampled, self.req_states.num_computed_tokens
+        )
 
     def shutdown(self) -> None:
         """Release CPU tensors (model weights, KV caches, workspace) so that
