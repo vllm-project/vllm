@@ -74,3 +74,28 @@ def test_request_copies_kv_hints_from_engine_core_request():
     request = Request.from_engine_core_request(engine_request, block_hasher=None)
 
     assert request.kv_hints == kv_hints
+
+
+def test_request_accumulates_remote_kv_waits(monkeypatch):
+    engine_request = EngineCoreRequest(
+        request_id="request-1",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    request = Request.from_engine_core_request(engine_request, block_hasher=None)
+    timestamps = iter([1.0, 3.0, 5.0, 9.0])
+    monkeypatch.setattr("vllm.v1.request.time.monotonic", lambda: next(timestamps))
+
+    request.start_remote_kv_wait()
+    request.stop_remote_kv_wait()
+    request.start_remote_kv_wait()
+    request.stop_remote_kv_wait()
+
+    assert request.remote_kv_wait_time == 6.0
+    assert request.remote_kv_wait_started_at is None

@@ -132,6 +132,32 @@ model-generation turns, such as built-in tool-call workflows, because the
 response retains timing data for only one generation turn while token usage is
 accumulated across all turns.
 
+## Remote KV and Disaggregated Prefill
+
+With `--enable-per-request-metrics`, request metrics also describe remote KV
+waits. Python OpenAI responses and Python/Rust `/inference/v1/generate` responses
+return these fields in `metrics`. Enable the flag on both prefill and decode servers to
+include the prefill server's measurements. Streaming TITO responses carry
+metrics in the final usage chunk; request `stream_options.include_usage: true`.
+
+| Field | Meaning |
+| --- | --- |
+| `remote_kv_wait_time_ms` | Accumulated wall time in `WAITING_FOR_REMOTE_KVS`, including completion polling and scheduler delay, not just data transfer. |
+| `kv_initial_queue_wait_time_ms` | Queue time before the first KV allocation attempt. |
+| `kv_post_receive_queue_wait_time_ms` | Queue time after remote KV reception before the next allocation attempt. |
+| `kv_allocation_wait_time_ms` | Accumulated time from each waiting-queue admission's first allocation attempt to success, including retries. |
+| `kv_handshake_wait_worker_time_ms` | NIXL worker handshake wait, summed across workers. |
+| `kv_transfer_worker_time_ms` | NIXL completed-transfer durations, summed across handles and workers. |
+| `kv_transfer_post_worker_time_ms` | NIXL transfer-posting durations, summed across workers. |
+| `kv_transfer_bytes` | Total completed NIXL transfer bytes across workers. |
+| `prefill_queue_time_ms`, `prefill_time_to_first_token_ms` | Measurements made by the prefill server and forwarded to the decode server. |
+| `prefill_kv_allocation_wait_time_ms`, `prefill_kv_initial_queue_wait_time_ms` | Prefill server's allocation and initial queue measurements. |
+
+Unsupported or unavailable measurements are `null` in non-streaming TITO
+responses and omitted from streaming metrics. Worker durations may overlap and
+are not a wall-clock timeline decomposition. Prefill timings use the prefill
+server's local clock; timestamps from different hosts are never subtracted.
+
 ## Relationship to Prometheus Metrics
 
 The `metrics` response field provides per-request values for a single request.

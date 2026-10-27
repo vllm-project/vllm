@@ -42,6 +42,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
+    NixlRequestMetrics,
     ReqId,
     ReqMeta,
     TransferHandle,
@@ -985,6 +986,8 @@ class NixlBaseConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.expected_consumer_notifications_by_req: dict[ReqId, int] = {}
         self.xfer_stats = NixlKVConnectorStats()
+        self.request_metrics = NixlRequestMetrics()
+        self.pending_request_metrics: dict[str, dict[str, float]] = {}
 
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
@@ -1449,6 +1452,7 @@ class NixlBaseConnectorWorker:
     ):
         # Do NIXL handshake in background and add to _ready_requests when done.
         assert meta.remote is not None
+        handshake_start = time.perf_counter()
         fut = self._ensure_handshake(
             remote_engine_id,
             meta.remote.host,
@@ -1466,6 +1470,7 @@ class NixlBaseConnectorWorker:
         def request_ready(f: Future[Any], entry=(req_id, meta)):
             try:
                 f.result()
+                meta.handshake_wait_time = time.perf_counter() - handshake_start
                 self._ready_requests.put(entry)
             except Exception as e:
                 self._log_failure(
@@ -3242,6 +3247,7 @@ class NixlBaseConnectorWorker:
         for req_id in done_recving:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
+            self.pending_request_metrics.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
 
             # Skip KV sync and post-processing for failed requests
@@ -3422,6 +3428,13 @@ class NixlBaseConnectorWorker:
                     if xfer_state == "DONE":
                         res = self.nixl_wrapper.get_xfer_telemetry(handle)
                         self.xfer_stats.record_transfer(res)
+                        metrics = self.pending_request_metrics.setdefault(req_id, {})
+                        for name, value in (
+                            ("kv_transfer_worker_time_ms", res.xferDuration / 1e3),
+                            ("kv_transfer_post_worker_time_ms", res.postDuration / 1e3),
+                            ("kv_transfer_bytes", res.totalBytes),
+                        ):
+                            metrics[name] = metrics.get(name, 0) + value
                         self.nixl_wrapper.release_xfer_handle(handle)
                     elif xfer_state == "PROC":
                         in_progress.append(handle)
@@ -3445,6 +3458,10 @@ class NixlBaseConnectorWorker:
                         in_progress.append(handle)
 
             if not in_progress:
+                completed_metrics = self.pending_request_metrics.pop(req_id, None)
+                if completed_metrics is not None:
+                    self.request_metrics.requests[req_id] = completed_metrics
+                # Only report request as completed when all transfers are done.
                 done_req_ids.add(req_id)
                 del transfers[req_id]
             else:
@@ -4120,4 +4137,6 @@ class NixlBaseConnectorWorker:
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
         self._recving_transfers.clear()
+        self.pending_request_metrics.clear()
+        self.request_metrics.requests.clear()
         self._finish_shutdown()

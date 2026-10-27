@@ -127,6 +127,52 @@ class PerRequestMetrics(OpenAIBaseModel):
     tokens_per_second: float | None = None
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
+    remote_kv_wait_time_ms: float | None = None
+    kv_initial_queue_wait_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Scheduler admission to the first KV allocation attempt, in wall time."
+        ),
+    )
+    kv_post_receive_queue_wait_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Accumulated wall time from remote-KV request promotion to the next "
+            "allocation attempt; excludes worker transfer and allocation retries."
+        ),
+    )
+    kv_allocation_wait_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Accumulated wall time from each initial KV allocation attempt to success, "
+            "including capacity retries; excludes time before the first attempt."
+        ),
+    )
+    kv_handshake_wait_worker_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Summed worker waits for successful NIXL handshakes; zero when cached."
+        ),
+    )
+    kv_transfer_worker_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Sum of completed-transfer telemetry durations across handles "
+            "and workers; worker time, not wall-clock KV wait."
+        ),
+    )
+    kv_transfer_post_worker_time_ms: float | None = Field(
+        default=None,
+        description=(
+            "Sum of transfer-post durations across handles and workers; "
+            "may overlap transfer duration."
+        ),
+    )
+    kv_transfer_bytes: int | None = None
+    prefill_queue_time_ms: float | None = None
+    prefill_time_to_first_token_ms: float | None = None
+    prefill_kv_allocation_wait_time_ms: float | None = None
+    prefill_kv_initial_queue_wait_time_ms: float | None = None
 
 
 class RequestResponseMetadata(BaseModel):
