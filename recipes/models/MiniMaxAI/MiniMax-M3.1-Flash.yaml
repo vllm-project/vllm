@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
-  date_updated: 2026-10-23
+  date_updated: 2026-10-27
   tasks:
     - text
     - multimodal
@@ -376,6 +376,117 @@ strategy_overrides:
           extra_env:
             CUDA_VISIBLE_DEVICES: "0,1,2,3"
             VLLM_KV_CACHE_LAYOUT: "BLHNC"
+
+presets:
+  b300_agentx_tp4:
+    label: "AgentX TP4"
+    hardware: b300
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One TP4 engine on four of the node's eight B300 GPUs with the seven-token DSpark draft on FLASH_ATTN; GPU-resident KV up to concurrency 32, host-DRAM KV offload (about 1.5 TB per engine) at 24 and 40-56."
+    source: { label: "InferenceX #4467", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4467", key: "minimaxm31flash-fp4-b300-vllm-agentic-dspark", revision: 615ee422fa655b90a0551e7fe80230f543f57a10 }
+    image: "vllm/vllm-openai:minimax-m31-flash@sha256:86f582dae25ea92802353727164ae4eb03b37b18baf9119b805ffaec2a7ef07c"
+    tp: 4
+    select:
+      features: { text_only: true }
+    args:
+      - "--enable-prefix-caching"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--stream-interval"
+      - "20"
+    env:
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600"
+      VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: "600"
+    json_args:
+      "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1536, 2048, 3072, 4096, 6144, 8192] }
+      "--speculative-config": { attention_backend: "FLASH_ATTN" }
+    # cpu_bytes_to_use is the engine-wide host budget (split across the TP
+    # ranks); the Simple option's per-rank default is dropped.
+    points:
+      c1: { label: "1", concurrency: 1, args: ["--max-num-seqs", "2"], select: { kv_offload: "off" } }
+      c4: { label: "4", concurrency: 4, args: ["--max-num-seqs", "8"], select: { kv_offload: "off" } }
+      c8: { label: "8", concurrency: 8, args: ["--max-num-seqs", "16"], select: { kv_offload: "off" } }
+      c16: { label: "16", concurrency: 16, args: ["--max-num-seqs", "32"], select: { kv_offload: "off" } }
+      c24:
+        label: "24 (KV offload)"
+        concurrency: 24
+        args: ["--max-num-seqs", "48"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+      c32: { label: "32", concurrency: 32, args: ["--max-num-seqs", "64"], select: { kv_offload: "off" } }
+      c40:
+        label: "40 (KV offload)"
+        concurrency: 40
+        args: ["--max-num-seqs", "64"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+      c48:
+        label: "48 (KV offload)"
+        concurrency: 48
+        args: ["--max-num-seqs", "64"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+      c56:
+        label: "56 (KV offload)"
+        concurrency: 56
+        args: ["--max-num-seqs", "96"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+    runbook: |
+      The B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-b300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4467](https://github.com/SemiAnalysisAI/InferenceX/pull/4467), run [40340506758](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/40340506758)) serves the default checkpoint (MXFP8 dense layers, NVFP4 experts, NVFP4 KV and indexer K caches) as one aggregated text-only vLLM engine on a single 8-GPU B300 node. Its TP4 points run the seven-token DSpark draft with `FLASH_ATTN` draft attention; the recipe's NVIDIA default, `FLASHINFER_TS`, is what the [AgentX TP2](#preset-b300_agentx_tp2) points run.
+
+      - **GPU-resident points** (concurrency 1-16 and 32) keep the whole KV cache in HBM, with `--max-num-seqs` at twice the concurrency (64 at 32).
+      - **KV offload points** (24 and 40-56) add a host-DRAM KV tier through `SimpleCPUOffloadConnector` with lazy offload. `cpu_bytes_to_use` (1,499 GB) is the budget for the whole engine: each of the four ranks pins 349 GiB of host memory, so the engine needs about 1.5 TB of free host RAM. Pinning takes a couple of minutes at startup.
+      - The CUDA graph capture sizes go up to 8192 tokens, so prefill chunks of up to 8192 tokens also replay graphs.
+
+      The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04) so every point is measured at the same acceptance rate. The command above keeps block verification.
+
+  b300_agentx_tp2:
+    label: "AgentX TP2 + KV offload"
+    hardware: b300
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One TP2 engine on two of the node's eight B300 GPUs with the seven-token DSpark draft on FLASHINFER_TS and host-DRAM KV offload (about 750 GB per engine)."
+    source: { label: "InferenceX #4467", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4467", key: "minimaxm31flash-fp4-b300-vllm-agentic-dspark", revision: 615ee422fa655b90a0551e7fe80230f543f57a10 }
+    image: "vllm/vllm-openai:minimax-m31-flash@sha256:86f582dae25ea92802353727164ae4eb03b37b18baf9119b805ffaec2a7ef07c"
+    tp: 2
+    select:
+      features: { text_only: true }
+      kv_offload: simple
+    args:
+      - "--enable-prefix-caching"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--stream-interval"
+      - "20"
+    env:
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600"
+      VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: "600"
+    json_args:
+      "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1536, 2048, 3072, 4096, 6144, 8192] }
+      "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 749000000000, lazy_offload: true } }
+    points:
+      c24: { label: "24", concurrency: 24, args: ["--max-num-seqs", "48"] }
+      c32: { label: "32", concurrency: 32, args: ["--max-num-seqs", "48"] }
+      c40: { label: "40", concurrency: 40, args: ["--max-num-seqs", "60"] }
+      c48: { label: "48", concurrency: 48, args: ["--max-num-seqs", "72"] }
+    runbook: |
+      The TP2 points of the B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-b300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4467](https://github.com/SemiAnalysisAI/InferenceX/pull/4467), run [40340506758](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/40340506758)) serve the default checkpoint as one aggregated text-only vLLM engine on two GPUs of an 8-GPU B300 node, with the recipe's seven-token DSpark draft on `FLASHINFER_TS` (the [AgentX TP4](#preset-b300_agentx_tp4) points use `FLASH_ATTN`).
+
+      Every point adds a host-DRAM KV tier through `SimpleCPUOffloadConnector` with lazy offload. `cpu_bytes_to_use` (749 GB) is the budget for the whole engine: each of the two ranks pins about 349 GiB of host memory. The lane ran one engine per node; several TP2 engines on one node each need their own share of host RAM.
+
+      The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04) so every point is measured at the same acceptance rate. The command above keeps block verification.
 
 guide: |
   ## Overview
