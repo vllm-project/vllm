@@ -6,7 +6,9 @@ import argparse
 import contextlib
 import multiprocessing
 import signal
+from multiprocessing.connection import wait as mp_wait
 from multiprocessing.process import BaseProcess
+from socket import socket
 
 import uvloop
 
@@ -19,14 +21,18 @@ from .entry import build_and_serve_renderer, build_vllm_config
 
 logger = init_logger(__name__)
 
+# Safety net for the startup barrier.
+STARTUP_BARRIER_TIMEOUT = 300.0
+
 
 def run_worker_proc(
     args: argparse.Namespace,
-    api_process_rank: int = 0,
+    api_process_rank: int,
+    startup_barrier: multiprocessing.Barrier,
+    listen_address: str,
+    sock: socket,
 ) -> None:
     """Entrypoint for an individual API server worker process."""
-    num_api_servers: int = args.api_server_count
-
     configure_logging_from_args(args)
 
     # Interrupt initialization if SIGTERM arrives before uvicorn installs
@@ -46,23 +52,64 @@ def run_worker_proc(
     vllm_config.parallel_config._api_process_count = args.api_server_count
 
     async def _serve() -> None:
-        await build_and_serve_renderer(vllm_config, listen_address, sock, args)
+        shutdown_task = await build_and_serve_renderer(
+            vllm_config, listen_address, sock, args
+        )
+        await shutdown_task
 
     with contextlib.ExitStack() as exit_stack:
-        listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
         exit_stack.callback(sock.close)
+
+        # ---- Rendezvous ---------------------------------------------- #
+        if startup_barrier is not None:
+            try:
+                startup_barrier.wait(timeout=STARTUP_BARRIER_TIMEOUT)
+            except Exception:
+                return
+
+        # ---- All peers ready, serve ---------------------------------- #
         uvloop.run(_serve())
+
+
+def _wait_for_first_exit(processes: list[BaseProcess]) -> BaseProcess:
+    """Block until *any* worker exits; return the one that finished first."""
+    sentinels = {p.sentinel: p for p in processes}
+    ready = mp_wait(list(sentinels.keys()))
+    first = sentinels[ready[0]]
+    # join() populates exitcode; it returns immediately for a dead process.
+    first.join()
+    if first.exitcode not in (0, None):
+        logger.error(
+            "API server worker %s exited unexpectedly with code %s",
+            first.name,
+            first.exitcode,
+        )
+    else:
+        logger.info(
+            "API server worker %s exited with code %s",
+            first.name,
+            first.exitcode,
+        )
+    return first
 
 
 def _run_multi_launch(
     args: argparse.Namespace,
     exit_stack: contextlib.ExitStack,
 ) -> None:
-    """Spawn ``args.api_server_count`` workers, each binding its own socket."""
+    """Spawn ``args.api_server_count`` workers on one shared listening socket."""
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
     spawn_context = multiprocessing.get_context("spawn")
+    startup_barrier = (
+        spawn_context.Barrier(num_api_servers) if num_api_servers > 1 else None
+    )
+
+    # ---- Shared-fd mode: bind once in the launcher ---------------------- #
+    listen_address, sock = setup_server(args, reuse_port=False)
+    exit_stack.callback(sock.close)
+
     processes: list[BaseProcess] = []
     exit_stack.callback(shutdown, processes)
 
@@ -70,25 +117,23 @@ def _run_multi_launch(
         proc = spawn_context.Process(
             target=run_worker_proc,
             name=f"ApiServer_{i}",
-            args=(args, i),
+            args=(args, i, startup_barrier, listen_address, sock),
         )
         processes.append(proc)
         proc.start()
 
-    # Block until all workers exit.
-    for p in processes:
-        p.join()
-        if p.exitcode not in (0, None):
-            logger.error(
-                "API server worker %s exited unexpectedly with code %s",
-                p.name,
-                p.exitcode,
-            )
-            break
+    # As soon as ANY worker exits (normal or crash), tear down the whole set.
+    _wait_for_first_exit(processes)
 
 
 def run_multi_launch(args: argparse.Namespace) -> None:
     """Run the render server with multiple API workers."""
+
+    def _interrupt_launcher(*_) -> None:
+        raise KeyboardInterrupt("terminated")
+
+    signal.signal(signal.SIGTERM, _interrupt_launcher)
+
     with contextlib.ExitStack() as exit_stack:
         try:
             _run_multi_launch(args, exit_stack)

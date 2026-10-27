@@ -80,7 +80,10 @@ async def _run_launch_fastapi(
     exit_stack.callback(sock.close)
 
     vllm_config = build_vllm_config(args)
-    await build_and_serve_renderer(vllm_config, listen_address, sock, args)
+    shutdown_task = await build_and_serve_renderer(
+        vllm_config, listen_address, sock, args
+    )
+    await shutdown_task
 
 
 async def run_launch_fastapi(args: argparse.Namespace) -> None:
