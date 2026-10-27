@@ -156,6 +156,7 @@ class HiSparseConnectorScheduler:
             )
             for request_id, start, count in scheduled_requests
         )
+        self.coordinator.reused_readable_blocks.clear()
         command = self.coordinator.build_offload_command()
         host_block_copies = self.coordinator.take_host_block_copies()
         source_group_id = self.coordinator.host_group_id
@@ -387,6 +388,14 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.requests[request.request_id] = request
+
+    def load_must_wait_for_in_flight_steps(
+        self, request: Request, group_ids: tuple[int, ...]
+    ) -> bool:
+        assert self.connector_scheduler is not None
+        coordinator = self.connector_scheduler.coordinator
+        assert coordinator is not None
+        return coordinator.holds_reused_readable_block(request.request_id, group_ids)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

@@ -464,7 +464,7 @@ class Scheduler(SchedulerInterface):
         # processed_step_seq >= fence_seq.
         self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
         # Async KV loads registered with the connector once processed_step_seq
-        # >= fence_seq; see _load_reuses_readable_blocks. Request id ->
+        # >= fence_seq; see _load_must_wait_for_in_flight_steps. Request id ->
         # (fence_seq, num_external_tokens, prefix cache queries, hits).
         self.held_async_loads: dict[str, tuple[int, int, int, int]] = {}
 
@@ -1459,10 +1459,9 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
-                    if load_kv_async and self._load_reuses_readable_blocks(request):
-                        # The connector posts the load from the host, unordered
-                        # with the in-flight step that may still read a block
-                        # the pool just reused for it.
+                    if load_kv_async and self._load_must_wait_for_in_flight_steps(
+                        request
+                    ):
                         self.held_async_loads[request_id] = (
                             self.sched_step_seq,
                             num_external_computed_tokens,
@@ -3105,25 +3104,14 @@ class Scheduler(SchedulerInterface):
                 ),
             )
 
-    def _load_reuses_readable_blocks(self, request: Request) -> bool:
-        """Whether a group filled by ``request``'s async load got a block that
-        an in-flight step may still read.
-
-        ``BlockPool.unpin_blocks`` releases blocks their owner keeps reading
-        until the pool reuses them; the owner stops in the step scheduled next,
-        but steps already in flight still read them.
-        """
+    def _load_must_wait_for_in_flight_steps(self, request: Request) -> bool:
+        """Whether ``request``'s async load, posted from the host and unordered
+        with the steps in flight, must start only once they are processed."""
         if self.sched_step_seq <= self.processed_step_seq:
             return False
-        reused = self.kv_cache_manager.block_pool.reused_readable_block_ids
-        if not reused:
-            return False
         assert self.connector is not None
-        blocks = self.kv_cache_manager.get_blocks(request.request_id).blocks
-        return any(
-            block.block_id in reused
-            for group_id in self.connector.get_loaded_kv_cache_group_ids(request)
-            for block in blocks[group_id]
+        return self.connector.load_must_wait_for_in_flight_steps(
+            request, self.connector.get_loaded_kv_cache_group_ids(request)
         )
 
     def _register_held_async_loads(self) -> None:

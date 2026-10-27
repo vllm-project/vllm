@@ -187,6 +187,8 @@ class HiSparseCoordinator:
         self._copy_by_block: dict[int, BlockHashWithGroupId] = {}
         # Unpinned GPU block id -> (request, page) pairs still reading it.
         self._owners: dict[int, set[tuple[str, int]]] = {}
+        # Unpinned GPU block ids the pool handed out in this scheduling pass.
+        self.reused_readable_blocks: set[int] = set()
 
     def _get_request_state(self, request_id: str) -> _HiSparseRequestState:
         state = self.request_states.get(request_id)
@@ -383,11 +385,26 @@ class HiSparseCoordinator:
             self._unpin_page(request_id, state, page_idx)
 
     def _on_block_reused(self, block: KVCacheBlock) -> None:
+        self.reused_readable_blocks.add(block.block_id)
         host_hash = self._copy_by_block.get(block.block_id)
         if host_hash is not None:
             self._drop_copy(host_hash)
         for request_id, page_idx in self._owners.pop(block.block_id, ()):
             self._lose_page(request_id, page_idx)
+
+    def holds_reused_readable_block(
+        self, request_id: str, group_ids: Iterable[int]
+    ) -> bool:
+        """Whether ``request_id`` got, in this pass, an unpinned GPU block in
+        any of ``group_ids``; a step still in flight may read it."""
+        if not self.reused_readable_blocks:
+            return False
+        return any(
+            block.block_id in self.reused_readable_blocks
+            for group_id in group_ids
+            if self.managers[group_id].block_pool is self.gpu_pool
+            for block in self.managers[group_id].req_to_blocks.get(request_id, ())
+        )
 
     def _lose_page(self, request_id: str, page_idx: int) -> None:
         self._resident_requests.discard(request_id)

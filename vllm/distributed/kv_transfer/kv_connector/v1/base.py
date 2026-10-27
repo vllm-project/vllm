@@ -512,6 +512,18 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_cache_config.prefix_cacheable_group_ids
 
+    def load_must_wait_for_in_flight_steps(
+        self, request: "Request", group_ids: tuple[int, ...]
+    ) -> bool:
+        """Whether an async load filling ``group_ids`` for ``request`` must
+        start only after the steps in flight are processed.
+
+        Called right after allocation, while a step may still be on the GPU.
+        True when a block just allocated in those groups may still be read by
+        that step.
+        """
+        return False
+
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
