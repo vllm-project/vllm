@@ -550,7 +550,7 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
         lses = torch.stack(
             [t[:, rank * h_per_rank : (rank + 1) * h_per_rank] for t in gathered_lse],
             dim=0,
-        )
+        ).float()
         from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
         expected_out, expected_lse = _lse_weighted_combine(
