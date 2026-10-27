@@ -17,6 +17,7 @@ from vllm.forward_context import (
     is_forward_context_available,
     set_forward_context,
 )
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -75,7 +76,6 @@ class ActiveKVConnector(KVConnector):
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig",
         kv_caches_dict: dict[str, torch.Tensor],
-        main_stream: torch.cuda.Stream,
         output_copy_stream: torch.cuda.Stream,
     ):
         self.vllm_config = vllm_config
@@ -88,7 +88,6 @@ class ActiveKVConnector(KVConnector):
         )
 
         self._pending_load_kwargs: dict[str, Any] | None = None
-        self._main_stream = main_stream
         self._output_copy_stream = output_copy_stream
         self._kv_checksums: KVChecksumCopy | None = None
         self._disabled = False
@@ -187,7 +186,7 @@ class ActiveKVConnector(KVConnector):
                 assert self._kv_checksums is None
                 # Copied on their own event, so other outputs do not wait for them.
                 self._kv_checksums = KVChecksumCopy(
-                    pending, self._main_stream, self._output_copy_stream
+                    pending, current_stream(), self._output_copy_stream
                 )
         if not defer_finalize:
             self.kv_connector.clear_connector_metadata()
@@ -230,7 +229,6 @@ def get_kv_connector(
     vllm_config: VllmConfig,
     kv_cache_config: "KVCacheConfig",
     kv_caches_dict: dict[str, torch.Tensor],
-    main_stream: torch.cuda.Stream,
     output_copy_stream: torch.cuda.Stream,
 ) -> KVConnector:
     if not has_kv_transfer_group():
@@ -238,5 +236,5 @@ def get_kv_connector(
         return NO_OP_KV_CONNECTOR
 
     return ActiveKVConnector(
-        vllm_config, kv_cache_config, kv_caches_dict, main_stream, output_copy_stream
+        vllm_config, kv_cache_config, kv_caches_dict, output_copy_stream
     )

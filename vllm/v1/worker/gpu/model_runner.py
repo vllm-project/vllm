@@ -835,7 +835,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 self.kv_cache_config,
                 kv_caches_dict,
-                self.main_stream,
                 self.output_copy_stream,
             )
 
