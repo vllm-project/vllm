@@ -216,7 +216,7 @@ class cmake_build_ext(build_ext):
         # `num_jobs` is either the value of the MAX_JOBS environment variable
         # (if defined) or the number of CPUs available.
         num_jobs = envs.MAX_JOBS
-        if num_jobs is not None:
+        if isinstance(num_jobs, str) and num_jobs.isnumeric():
             num_jobs = int(num_jobs)
             logger.info("Using MAX_JOBS=%d as the number of jobs.", num_jobs)
         else:
@@ -645,8 +645,10 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def rocm_version_to_variant(rocm_version: str) -> str:
-        """Convert a ROCm version string to a wheel variant, e.g. 7.2.3 -> rocm723."""
-        return "rocm" + rocm_version.replace(".", "")
+        """Convert a ROCm version string to a wheel variant from its major and
+        minor version, e.g. 7.2.3 -> rocm72, 10.0.0 -> rocm100.
+        """
+        return "rocm" + "".join(rocm_version.split(".")[:2])
 
     @staticmethod
     def detect_system_rocm_variant() -> str | None:
@@ -896,6 +898,93 @@ class precompiled_wheel_utils:
         print(f"Using ROCm precompiled wheel: {wheel_url}")
         return wheel_url, download_filename
 
+    # Publication lags main by roughly 5-10 commits; anything much older is
+    # unlikely to still match the checkout's compiled sources.
+    WHEEL_SEARCH_DEPTH = 20
+    # Changes here make an older wheel's extensions unusable.
+    WHEEL_BLOCKING_PATHS = (
+        "csrc",
+        "cmake",
+        "CMakeLists.txt",
+        "pyproject.toml",
+        "vllm/_custom_ops.py",
+    )
+    # Changes here are usually harmless for an older wheel.
+    WHEEL_WARNING_PATHS = ("rust", "setup.py")
+
+    @staticmethod
+    def find_published_wheel_commit(
+        base_commit: str, variant: str | None, arch: str
+    ) -> str:
+        """Find the nearest ancestor of base_commit that has a published wheel.
+
+        Raises:
+            ValueError: If no wheel is published within WHEEL_SEARCH_DEPTH
+                commits, or compiled sources changed since the nearest one.
+
+        """
+        from urllib.error import HTTPError
+
+        utils = precompiled_wheel_utils
+        candidates = subprocess.check_output(
+            [
+                "git",
+                "rev-list",
+                "--first-parent",
+                f"--max-count={utils.WHEEL_SEARCH_DEPTH}",
+                base_commit,
+            ],
+            text=True,
+        ).splitlines()
+        for distance, commit in enumerate(candidates):
+            try:
+                wheels, _ = utils.fetch_metadata_for_variant(commit, variant)
+            except HTTPError as err:
+                if err.code != 404:
+                    raise
+                continue
+            if not any(
+                wheel.get("package_name") == "vllm"
+                and arch in wheel.get("platform_tag", "")
+                for wheel in wheels
+            ):
+                continue
+            if distance == 0:
+                return commit
+
+            diff = ["git", "diff", "--name-only", commit, base_commit, "--"]
+            blocking, warning = (
+                subprocess.check_output([*diff, *paths], text=True).strip()
+                for paths in (utils.WHEEL_BLOCKING_PATHS, utils.WHEEL_WARNING_PATHS)
+            )
+            if blocking:
+                raise ValueError(
+                    f"No precompiled wheel is published yet for {base_commit}, and "
+                    f"the nearest one ({commit}, {distance} commits older) was "
+                    f"built from different compiled sources:\n{blocking}\n"
+                    "Wait for wheel publication, rebase onto a commit with a "
+                    "published wheel, build from source (unset "
+                    "VLLM_USE_PRECOMPILED), or set VLLM_PRECOMPILED_WHEEL_COMMIT "
+                    "to a full commit SHA to skip this check."
+                )
+            if warning:
+                logger.warning(
+                    "Precompiled wheel %s predates changes to:\n%s\n"
+                    "The Rust frontend and packaged files may be stale.",
+                    commit,
+                    warning,
+                )
+            print(
+                f"No precompiled wheel is published yet for {base_commit}; using "
+                f"{commit} ({distance} commits older)"
+            )
+            return commit
+        raise ValueError(
+            f"No published precompiled wheel for variant {variant} and "
+            f"architecture {arch} within {utils.WHEEL_SEARCH_DEPTH} commits of "
+            f"{base_commit}. Wait for wheel publication or build vLLM from source."
+        )
+
     @staticmethod
     def determine_wheel_url() -> tuple[str, str | None]:
         """Try to determine the precompiled wheel URL or path to use.
@@ -906,8 +995,8 @@ class precompiled_wheel_utils:
            or CUDA variant selected from VLLM_MAIN_CUDA_VERSION, torch, or nvidia-smi
 
         If downloading from the nightly repo, the commit can be specified via
-        VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, the head commit in the main branch
-        is used.
+        VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, local checkouts search backwards
+        from their merge-base with upstream main for a compatible published wheel.
         """
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
         if wheel_location is not None:
@@ -933,6 +1022,14 @@ class precompiled_wheel_utils:
                     ", trying to fetch base commit in main branch"
                 )
                 commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+                if (
+                    envs.VLLM_USE_PRECOMPILED
+                    and not envs.VLLM_DOCKER_BUILD_CONTEXT
+                    and commit != "nightly"
+                ):
+                    commit = precompiled_wheel_utils.find_published_wheel_commit(
+                        commit, variant, arch
+                    )
             print(f"Using precompiled wheel commit {commit} with variant {variant}")
             download_filename = None
             try:
@@ -1149,17 +1246,9 @@ class precompiled_wheel_utils:
                     ["git", "fetch", "https://github.com/vllm-project/vllm", "main"]
                 )
 
-            # Then get the commit hash of the current branch that is the same as
-            # the upstream main commit.
-            current_branch = (
-                subprocess.check_output(["git", "branch", "--show-current"])
-                .decode("utf-8")
-                .strip()
-            )
-
             base_commit = (
                 subprocess.check_output(
-                    ["git", "merge-base", f"{upstream_main_commit}", current_branch]
+                    ["git", "merge-base", upstream_main_commit, "HEAD"]
                 )
                 .decode("utf-8")
                 .strip()
@@ -1295,7 +1384,9 @@ def get_vllm_version() -> str:
             # Get the Rocm Version
             rocm_version = get_rocm_version() or torch.version.hip
             if rocm_version and rocm_version != envs.VLLM_MAIN_CUDA_VERSION:
-                version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
+                version += sep + precompiled_wheel_utils.rocm_version_to_variant(
+                    rocm_version
+                )
         elif _is_tpu():
             version += f"{sep}tpu"
         elif _is_cpu():
@@ -1425,6 +1516,7 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("rocm.txt")
         if "develop" in sys.argv[1:] and "--no-deps" not in sys.argv[1:]:
             _check_requirements_preinstalled(requirements)
+        requirements += get_rocm_device_requirements()
     elif _is_tpu():
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
@@ -1434,6 +1526,24 @@ def get_requirements() -> list[str]:
     else:
         raise ValueError("Unsupported platform, please use CUDA, ROCm, or CPU.")
     return requirements
+
+
+def get_rocm_device_requirements() -> list[str]:
+    """GPU kernel packages for TheRock builds.
+
+    TheRock ships GPU kernels as separate per-arch wheels selected through
+    ``[device-<arch>]`` extras on torch, torchvision and rocm. Require them for
+    every arch this wheel was compiled for, so ``pip install vllm`` works on
+    any supported GPU.
+    """
+    if not _is_hip() or importlib.util.find_spec("rocm_sdk") is None:
+        return []
+    arches = [a for a in os.getenv("PYTORCH_ROCM_ARCH", "").split(";") if a]
+    return [
+        f"{pkg}[device-{arch}]"
+        for pkg in ("torch", "torchvision", "rocm")
+        for arch in arches
+    ]
 
 
 ext_modules = []
@@ -1601,11 +1711,11 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch==2.13.0.1"],
+        "zen": ["zentorch==2.14.0.1"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],
-        "instanttensor": ["instanttensor >= 0.1.9"],
+        "instanttensor": ["instanttensor >= 0.2.2"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
             "av",
@@ -1619,7 +1729,7 @@ setup(
         # only; also needs system GStreamer + libv4l (see docs).
         "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
         "flashinfer": [],  # Kept for backwards compatibility
-        "b12x": ["b12x==1.3.0"],
+        "b12x": ["b12x==1.5.1"],
         # Optional deps for Helion kernel development
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml

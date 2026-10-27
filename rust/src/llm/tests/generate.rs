@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 use vllm_engine_core_client::mock_engine::default_ready_response;
+use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
@@ -24,12 +26,14 @@ use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
 use vllm_engine_core_client::protocol::stats::PrefillStats;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
     Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo, GenerateRequest, Llm,
+    WeightVersionSpan,
 };
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -92,8 +96,8 @@ fn request_output_with_logprobs_and_kv(
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: prompt_logprobs.map(MaybeWireLogprobs::Direct),
         finish_reason,
-        kv_transfer_params,
-        ec_transfer_params,
+        kv_transfer_params: kv_transfer_params.map(Box::new),
+        ec_transfer_params: ec_transfer_params.map(Box::new),
         ..Default::default()
     }
 }
@@ -280,11 +284,11 @@ async fn generate_streams_outputs() {
     assert_eq!(first.request_id, internal_id);
     assert_eq!(
         first.prompt_info,
-        Some(GeneratePromptInfo {
+        Some(Box::new(GeneratePromptInfo {
             prompt_token_ids: vec![11, 22].into(),
             prompt_logprobs: Some(prompt_logprobs()),
             prompt_token_id_logprobs: None,
-        })
+        }))
     );
     assert_eq!(first.token_ids, vec![1, 2]);
     assert_eq!(
@@ -309,6 +313,156 @@ async fn generate_streams_outputs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generate_merges_outputs_by_stream_interval() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-stream-interval".to_vec();
+
+    // One logprobs position per token, so merged outputs can be checked
+    // against the logprobs of their concatenated tokens.
+    fn token_logprobs(token_ids: &[u32]) -> Logprobs {
+        Logprobs {
+            positions: token_ids
+                .iter()
+                .map(|&token_id| PositionLogprobs {
+                    entries: vec![TokenLogprob {
+                        token_id,
+                        logprob: -0.5,
+                        rank: 1,
+                    }],
+                })
+                .collect(),
+        }
+    }
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+
+                // One engine step per batch.
+                // The label changes within the merged output [2, 3, 4, 5].
+                let steps: [(&[u32], &str, Option<EngineCoreFinishReason>); 6] = [
+                    (&[1], "v7", None),
+                    (&[2], "v7", None),
+                    (&[3], "v8", None),
+                    (&[4, 5], "v8", None),
+                    (&[6], "v7", None),
+                    (&[7], "v7", Some(EngineCoreFinishReason::Length)),
+                ];
+                for (step, (token_ids, weight_version, finish_reason)) in
+                    steps.into_iter().enumerate()
+                {
+                    let mut output = request_output_with_logprobs(
+                        &request.request_id,
+                        token_ids.to_vec(),
+                        finish_reason,
+                        Some(token_logprobs(token_ids)),
+                        None,
+                    );
+                    // One [layer, top_k] = [1, 2] routing row per token.
+                    let rows: Vec<u8> = token_ids.iter().flat_map(|&id| [id as u8, 0]).collect();
+                    output.routed_experts = Some(Box::new(WireNdArray::from_raw(
+                        TensorDtype::U8,
+                        vec![token_ids.len(), 1, 2],
+                        rows,
+                    )));
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![output],
+                            weight_version: Some(weight_version.into()),
+                            timestamp: step as f64 + 1.0,
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                }
+            })
+        },
+    );
+
+    // The request's interval raises the frontend-level one.
+    let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc)
+        .await
+        .with_stream_interval(NonZeroU32::new(2).unwrap());
+    let mut request = sample_generate_request("req-stream-interval", 7);
+    request.sampling_params.stream_interval = NonZeroU32::new(3);
+    let outputs: Vec<_> = llm
+        .generate(request)
+        .await
+        .unwrap()
+        .map(|output| output.unwrap())
+        .collect()
+        .await;
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+
+    // The first output is yielded immediately, later ones once they carry at
+    // least 3 tokens, and the terminal one flushes the rest.
+    let shapes: Vec<_> = outputs
+        .iter()
+        .map(|output| {
+            (
+                output.prompt_info.is_some(),
+                output.token_ids.clone(),
+                output.finish_reason.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        [
+            (true, vec![1], None),
+            (false, vec![2, 3, 4, 5], None),
+            (false, vec![6, 7], Some(FinishReason::Length)),
+        ]
+    );
+    for output in &outputs {
+        assert_eq!(output.logprobs, Some(token_logprobs(&output.token_ids)));
+    }
+    let span = |version: &str, start, end| WeightVersionSpan {
+        version: version.into(),
+        start,
+        end,
+    };
+    let weight_versions: Vec<_> =
+        outputs.iter().map(|output| output.weight_versions.clone()).collect();
+    assert_eq!(
+        weight_versions,
+        [
+            None,
+            None,
+            Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
+        ]
+    );
+    let routed_experts: Vec<_> =
+        outputs.iter().map(|output| output.routed_experts.clone()).collect();
+    assert_eq!(
+        routed_experts,
+        [
+            None,
+            None,
+            Some(Box::new(WireNdArray::from_raw(
+                TensorDtype::U8,
+                vec![7, 1, 2],
+                vec![1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0],
+            )))
+        ]
+    );
+    let last_token_timestamps: Vec<_> =
+        outputs.iter().map(|output| output.timestamps.last_token_ts).collect();
+    assert_eq!(last_token_timestamps, [1.0, 4.0, 6.0]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
@@ -330,12 +484,12 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                     RequestBatchOutputs {
                         outputs: vec![
                             EngineCoreOutput {
-                                prefill_stats: Some(PrefillStats {
+                                prefill_stats: Some(Box::new(PrefillStats {
                                     num_prompt_tokens: 2,
                                     num_cached_tokens: 1,
                                     num_local_cached_tokens: 1,
                                     ..Default::default()
-                                }),
+                                })),
                                 new_sampling_mask: Some(MaybeWireSamplingMask::Direct(
                                     SamplingMask {
                                         rows: vec![vec![1, 33, 99]],
@@ -409,11 +563,11 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
 async fn collect_output_rejects_partial_sampling_mask() {
     let output = vllm_llm::GenerateOutput {
         request_id: "req-partial-mask".to_string(),
-        prompt_info: Some(GeneratePromptInfo {
+        prompt_info: Some(Box::new(GeneratePromptInfo {
             prompt_token_ids: Arc::from([11_u32, 22]),
             prompt_logprobs: None,
             prompt_token_id_logprobs: None,
-        }),
+        })),
         token_ids: vec![33, 44],
         logprobs: None,
         finish_reason: Some(FinishReason::Length),
@@ -424,6 +578,9 @@ async fn collect_output_rejects_partial_sampling_mask() {
             rows: vec![vec![1, 33, 99]],
         }),
         spec_decode_metrics: None,
+        weight_versions: None,
+        routed_experts: None,
+        timestamps: Default::default(),
     };
 
     let error = futures::stream::iter([Ok(output)]).collect_output().await.unwrap_err();
@@ -435,6 +592,107 @@ async fn collect_output_rejects_partial_sampling_mask() {
             ..
         }
     ));
+}
+
+/// Prefiller reuse controls response usage while decoder metrics retain KV work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_prefill_cache_usage_preserves_decoder_metrics() {
+    let remote = |cached| {
+        serde_json::json!({
+            "do_remote_prefill": true,
+            "remote_prefill_cached_tokens": cached,
+        })
+    };
+    let cases = [
+        ("positive", remote(serde_json::json!(5)), Some(5)),
+        ("zero", remote(serde_json::json!(0)), Some(0)),
+        (
+            "missing_count",
+            serde_json::json!({"do_remote_prefill": true}),
+            None,
+        ),
+    ];
+    let mut results = Vec::new();
+    let mut expected = Vec::new();
+    for (name, metadata, remote_count) in cases {
+        let ipc = IpcNamespace::new().unwrap();
+        let handshake_address = ipc.handshake_endpoint();
+        let mut request = sample_generate_request(name, 2);
+        request.prompt_token_ids = (1..=8).collect();
+        request.sampling_params.extra_args =
+            Some([("kv_transfer_params".to_string(), metadata)].into());
+        let expected_args = request.sampling_params.extra_args.clone();
+        let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+            handshake_address.clone(),
+            b"engine-cache-usage".to_vec(),
+            move |dealer, push| {
+                Box::pin(async move {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                    assert_eq!(request.sampling_params.unwrap().extra_args, expected_args);
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![
+                                EngineCoreOutput {
+                                    prefill_stats: Some(Box::new(PrefillStats {
+                                        num_prompt_tokens: 8,
+                                        num_cached_tokens: 7,
+                                        num_local_cached_tokens: 0,
+                                        num_external_cached_tokens: 7,
+                                        num_computed_tokens: 1,
+                                        ..Default::default()
+                                    })),
+                                    ..request_output(&request.request_id, vec![33], None)
+                                },
+                                request_output(
+                                    &request.request_id,
+                                    vec![44],
+                                    Some(EngineCoreFinishReason::Length),
+                                ),
+                            ],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                })
+            },
+        );
+        let model_name = request_metrics_model_name(name);
+        let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
+        let mut streamed_counts = Vec::new();
+        let collected = llm
+            .generate(request)
+            .await
+            .unwrap()
+            .inspect(|output| streamed_counts.push(output.as_ref().unwrap().cached_token_count))
+            .collect_output()
+            .await
+            .unwrap();
+        results.push((name, streamed_counts, collected.usage.cached_token_count));
+        expected.push((
+            name,
+            vec![remote_count.unwrap_or(7), remote_count.unwrap_or(0)],
+            remote_count.unwrap_or(7),
+        ));
+
+        // Decoder metrics keep counting the transferred KV as cached.
+        let rendered = METRICS.render().unwrap();
+        assert!(rendered.contains(&format!(
+            "vllm:prompt_tokens_cached_total{{model_name=\"{model_name}\",engine=\"0\"}} 7"
+        )));
+        assert!(rendered.contains(&format!(
+            "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"0\",source=\"external_kv_transfer\"}} 7"
+        )));
+        assert!(rendered.contains(&format!(
+            "vllm:request_prefill_kv_computed_tokens_sum{{model_name=\"{model_name}\",engine=\"0\"}} 1.0"
+        )));
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+        llm.shutdown().await.unwrap();
+    }
+    assert_eq!(results, expected);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -625,6 +883,7 @@ async fn abort_resolves_external_request_id_to_internal_before_reaching_engine()
                     push,
                     RequestBatchOutputs {
                         outputs: vec![request_output(&request.request_id, vec![7], None)],
+                        weight_version: Some("v7".into()),
                         ..Default::default()
                     }
                     .into(),
@@ -658,6 +917,15 @@ async fn abort_resolves_external_request_id_to_internal_before_reaching_engine()
     let terminal = stream.next().await.unwrap().unwrap();
     assert_eq!(terminal.finish_reason, Some(FinishReason::Abort));
     assert!(terminal.token_ids.is_empty());
+    // The synthesized abort output reports the spans received so far.
+    assert_eq!(
+        terminal.weight_versions,
+        Some(vec![WeightVersionSpan {
+            version: "v7".into(),
+            start: 0,
+            end: 1
+        }])
+    );
     assert!(stream.next().await.is_none());
 
     let _ = shutdown_tx.send(());
@@ -742,6 +1010,49 @@ async fn abort_by_external_id_aborts_all_internal_requests() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connecting_exports_zero_valued_request_metrics_before_any_request() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = EngineId::from_engine_index(3);
+    let model_name = request_metrics_model_name("metrics-startup-model");
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |_dealer, _push| Box::pin(async {}),
+    );
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
+
+    let rendered = METRICS.render().unwrap();
+    let mut series: Vec<_> = rendered
+        .lines()
+        .filter(|line| line.contains(&model_name))
+        .filter(|line| {
+            line.starts_with("vllm:request_success_total")
+                || line.starts_with("vllm:prompt_tokens_total")
+                || line.starts_with("vllm:generation_tokens_total")
+                || line.starts_with("vllm:e2e_request_latency_seconds_count")
+        })
+        .map(|line| line.replace(&model_name, "<model>"))
+        .collect();
+    series.sort();
+    expect_test::expect![[r#"
+        vllm:e2e_request_latency_seconds_count{model_name="<model>",engine="3"} 0
+        vllm:generation_tokens_total{model_name="<model>",engine="3"} 0
+        vllm:prompt_tokens_total{model_name="<model>",engine="3"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="abort"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="error"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="length"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="repetition"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="stop"} 0"#]]
+    .assert_eq(&series.join("\n"));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generate_records_request_metrics_in_prometheus_output() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
@@ -763,11 +1074,12 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                         engine_index: 4,
                         timestamp: 10.0,
                         outputs: vec![EngineCoreOutput {
-                            prefill_stats: Some(PrefillStats {
+                            num_nans_in_logits: 2,
+                            prefill_stats: Some(Box::new(PrefillStats {
                                 num_prompt_tokens: 2,
                                 num_computed_tokens: 2,
                                 ..Default::default()
-                            }),
+                            })),
                             ..request_output_with_events(
                                 &request.request_id,
                                 vec![1],
@@ -846,6 +1158,9 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     )));
     assert!(rendered.contains(&format!(
         "vllm:generation_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 3"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:corrupted_requests_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
     assert!(rendered.contains(&format!(
         "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
@@ -962,7 +1277,6 @@ async fn generate_without_engine_stats_exports_only_frontend_observed_metrics() 
         lora_int_id: 1,
         lora_path: "/unused".to_string(),
         base_model_name: None,
-        tensorizer_config_dict: None,
         load_inplace: false,
         is_3d_lora_weight: false,
     });

@@ -27,14 +27,17 @@ if(DEEPGEMM_SRC_DIR)
   set(deepgemm_SOURCE_DIR "${DEEPGEMM_SRC_DIR}")
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
-  # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
-  # Pinned to the fork's dev branch: upstream 2.8.0 plus the SM120
-  # port, the SM90 paged-MQA kv_block=32/next_n=4 port, configurable SwiGLU
-  # alpha/beta, and SiTU for FP8/FP4 Mega MoE. Also includes the CUDA 12.x
-  # layout header fix from vllm-project/DeepGEMM#12.
-  # TORCH_LIBRARY build with a CPython 3.10 stable-ABI floor.
-  set(_DEEPGEMM_UPSTREAM_TAG "1e1842a833699298f7afc02eefb2ed168fff6938")
+  # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
+  # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
+  # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
+  # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE and F8_128x4
+  # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40), plus
+  # fp4_fp4_mega_moe and fused post-expert RMSNorm for Muse Spark Open
+  # (vllm-project/DeepGEMM#39), and the MX MegaMoE alignment fix
+  # (vllm-project/DeepGEMM#43).
+  # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
+  set(_DEEPGEMM_UPSTREAM_TAG "0820030756945b2daec208e8e8255268360f337d")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
@@ -146,6 +149,7 @@ if(DEEPGEMM_ARCHS)
   #
   install(FILES
     "${deepgemm_SOURCE_DIR}/deep_gemm/__init__.py"
+    "${deepgemm_SOURCE_DIR}/deep_gemm/locality_domain.py"
     DESTINATION vllm/third_party/deep_gemm
     COMPONENT _deep_gemm_C)
 
