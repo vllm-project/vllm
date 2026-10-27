@@ -49,6 +49,7 @@ from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
     get_sparse_mla_index_group_max_rows,
 )
 
@@ -83,8 +84,7 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             dtype=torch.int32,
             device=current_platform.device_type,
         )
-        builder_cls = current_platform.get_sparse_mla_index_group_builder_cls()
-        index_group_builder = builder_cls(
+        index_group_builder = SparseMLAIndexGroupBuilder(
             topk_indices_buffer,
             get_sparse_mla_index_group_max_rows(vllm_config),
         )

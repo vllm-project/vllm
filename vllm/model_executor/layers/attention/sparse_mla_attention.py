@@ -682,8 +682,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         self.index_group: SparseMLAIndexGroup | None = None
         self.index_group_index = 0
         if index_group_builder is None and self.topk_indices_buffer is not None:
-            builder_cls = current_platform.get_sparse_mla_index_group_builder_cls()
-            index_group_builder = builder_cls(self.topk_indices_buffer)
+            index_group_builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
         if index_group_builder is not None:
             vllm_config = get_current_vllm_config()
             self.index_group, self.index_group_index = (

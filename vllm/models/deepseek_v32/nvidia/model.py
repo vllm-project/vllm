@@ -195,8 +195,7 @@ class DeepseekV32Model(torch.nn.Module):
             dtype=torch.int32,
             device=self.device,
         )
-        builder_cls = current_platform.get_sparse_mla_index_group_builder_cls()
-        index_group_builder = builder_cls(
+        index_group_builder = SparseMLAIndexGroupBuilder(
             self.topk_indices_buffer,
             get_sparse_mla_index_group_max_rows(vllm_config),
         )

@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
-    from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
     from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
     from vllm.v1.attention.backends.mla.prefill.selector import (
         MLAPrefillSelectorConfig,
@@ -691,16 +690,6 @@ class RocmPlatform(Platform):
         "online",
         "gpt_oss_mxfp4",
     ]
-
-    @classmethod
-    def get_sparse_mla_index_group_builder_cls(
-        cls,
-    ) -> type["SparseMLAIndexGroupBuilder"]:
-        from vllm.v1.attention.backends.mla.index_group import (
-            SparseMLAIndexGroupBuilder,
-        )
-
-        return SparseMLAIndexGroupBuilder
 
     @classmethod
     def import_kernels(cls) -> None:
