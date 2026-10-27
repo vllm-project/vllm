@@ -1219,7 +1219,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             elif quant_key == kFp8DynamicTokenSym:
                 # Per-token FP8
                 assert output_block_scale is not None
-                assert quant_group_size is None
                 from aiter.ops.quant import dynamic_per_token_scaled_quant
 
                 start_idx = num_mqa_tokens if fused_v_up_proj_quant else 0
@@ -1434,7 +1433,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         return spec
 
-    def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor, out_scale=None):
+    def _v_up_proj(
+        self,
+        x: torch.Tensor,
+        out: torch.Tensor,
+        out_scale: torch.Tensor | None = None,
+    ):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         out = out.view(-1, self.num_heads, self.v_head_dim)
@@ -3355,12 +3359,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     """
 
     def fused_output_quant_supported(self, quant_key):
+        if quant_key == kFp8DynamicTokenSym:
+            return current_platform.is_rocm()
         return quant_key in (
             kFp8StaticTensorSym,
             kNvfp4Dynamic,
             kFp8Dynamic128Sym,
             kFp8Dynamic64Sym,
-            kFp8DynamicTokenSym,
         )
 
     def __init__(
