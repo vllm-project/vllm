@@ -764,6 +764,42 @@ def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignm
     assert torch.all(rows[stride_rows] == 7)
 
 
+def test_packed_spec_offset_honours_block_stride_alignment():
+    # A block-outermost group packs specs side by side in every block. A kernel
+    # that reads one spec's pool as flat rows (here 640 B records) needs that
+    # spec to START on a row boundary inside the block, not just a stride that
+    # is a whole number of rows: an 8640 B (13.5-row) indexer page in front of
+    # it must not leave it half a row off (DeepSeek-V4-Flash's layout).
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.cache_config.kv_cache_layout = "BLHNC"
+    common = dict(block_size=64, num_kv_heads=1, dtype=torch.uint8)
+    rows = MLAAttentionSpec(
+        **common,
+        head_size=576,
+        state_content_bytes=640,
+        block_stride_alignment=640,
+        cache_dtype_str="fp8_ds_mla",
+        is_index_group_leader=True,
+    )
+    indexer = MLAAttentionSpec(
+        **common, head_size=135, cache_role=SparseCacheRole.INDEXER
+    )
+    specs = {"indexer": indexer, "target": rows}
+    groups = get_kv_cache_groups(config, specs)
+    assert len(groups) == 1 and groups[0].layer_names == ["indexer", "target"]
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, groups, available_memory=8 * 1024 * 1024
+    )
+    tensors = {t.layers[0]: t for t in cache_config.kv_cache_tensors}
+    target = tensors["target"]
+    assert target.offset % 640 == 0
+    assert target.block_stride % 640 == 0
+    # Only the padding needed to reach the next row boundary, and the padded
+    # layout still fits in one block.
+    assert target.offset == 8960
+    assert target.offset + rows.page_size_bytes <= target.block_stride
+
+
 def test_is_kv_cache_spec_uniform():
     kv_cache_spec = {
         "layer_1": new_kv_cache_spec(num_kv_heads=32),

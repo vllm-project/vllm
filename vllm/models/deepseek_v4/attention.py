@@ -198,6 +198,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         writes and scores its own index K cache layout."""
         return DeepseekV4Indexer
 
+    # The SWA cache and the compressor are built in __init__, and the SWA
+    # cache registers itself in the forward context, so a platform subclass
+    # that needs its own cache layout or compress kernel returns it here.
+    def _get_swa_cache_cls(self) -> type[DeepseekV4SWACache]:
+        return DeepseekV4SWACache
+
+    def _get_compressor_cls(self) -> type[DeepseekCompressor]:
+        return DeepseekCompressor
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -346,7 +355,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self._uses_fp8_ds_mla_layout(), cache_config.cache_dtype, cache_config
         )
 
-        self.swa_cache_layer = DeepseekV4SWACache(
+        self.swa_cache_layer = self._get_swa_cache_cls()(
             head_dim=self.head_dim,
             window_size=self.window_size,
             dtype=self.kv_cache_torch_dtype,
@@ -367,7 +376,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # attention setup above so its KV-cache prefix (self.prefix) is set.
         self.compressor = None
         if self.compress_ratio > 1:
-            self.compressor = DeepseekCompressor(
+            self.compressor = self._get_compressor_cls()(
                 vllm_config=vllm_config,
                 compress_ratio=self.compress_ratio,
                 hidden_size=self.hidden_size,

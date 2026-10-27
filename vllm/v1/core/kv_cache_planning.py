@@ -571,6 +571,34 @@ def _get_layer_block_stride(spec: KVCacheSpec) -> int:
     return round_up(spec.page_size_bytes, spec.get_block_stride_alignment())
 
 
+def _get_layers_by_spec(group: KVCacheGroupSpec) -> dict[KVCacheSpec, list[str]]:
+    """The group's layers keyed by spec, in packing order."""
+    layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
+    for layer_name in group.layer_names:
+        layers_by_spec[_get_per_layer_spec(group, layer_name)].append(layer_name)
+    return layers_by_spec
+
+
+def _get_packed_offset_alignment(spec: KVCacheSpec) -> int:
+    """Byte alignment of a spec's start offset inside a block-outermost block.
+
+    An integer ``block_stride_alignment`` covers packed layers too: kernels
+    that read the pool as flat rows of that size need every block AND every
+    spec's region inside the block to start on a row boundary.
+    """
+    alignment = spec.block_stride_alignment
+    return alignment if isinstance(alignment, int) else 1
+
+
+def _get_packed_group_bytes(group: KVCacheGroupSpec) -> int:
+    """Bytes one block-outermost block needs for this group's packed layers."""
+    offset = 0
+    for spec, layer_names in _get_layers_by_spec(group).items():
+        offset = round_up(offset, _get_packed_offset_alignment(spec))
+        offset += len(layer_names) * spec.page_size_bytes
+    return offset
+
+
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec], layout: KVCacheLayout
 ) -> int:
@@ -584,13 +612,7 @@ def _get_kv_cache_bytes_per_block(
             )
             for group in kv_cache_groups
         )
-    bytes_per_block = max(
-        sum(
-            _get_per_layer_spec(group, layer_name).page_size_bytes
-            for layer_name in group.layer_names
-        )
-        for group in kv_cache_groups
-    )
+    bytes_per_block = max(_get_packed_group_bytes(group) for group in kv_cache_groups)
     assert bytes_per_block > 0
     alignments = [
         group.kv_cache_spec.page_size_bytes
@@ -695,12 +717,10 @@ def get_kv_cache_config_from_groups(
 
     kv_cache_tensors = []
     for group in kv_cache_groups:
-        layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
-        for layer_name in group.layer_names:
-            layers_by_spec[_get_per_layer_spec(group, layer_name)].append(layer_name)
-
         byte_offset = 0
-        for spec, layer_names in layers_by_spec.items():
+        for spec, layer_names in _get_layers_by_spec(group).items():
+            if layout.is_block_outermost:
+                byte_offset = round_up(byte_offset, _get_packed_offset_alignment(spec))
             block_stride = interleaved_block_stride
             padded_page = _get_layer_block_stride(spec)
             if block_stride is None and padded_page != spec.page_size_bytes:

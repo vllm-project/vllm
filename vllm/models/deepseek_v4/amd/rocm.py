@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 import torch
@@ -50,10 +50,13 @@ from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadata,
     DeepseekSparseSWAMetadataBuilder,
+    DeepseekV4SWACache,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    _dsv4_aiter_sparse_prefill,
     build_prefill_topk_ragged_indices,
     build_ragged_indices_from_dense,
+    dsv4_aiter_sparse_mla_kernels,
     rocm_inv_rope_einsum,
     rocm_inverse_rope_rows_,
     rocm_sparse_attn_decode,
@@ -155,8 +158,15 @@ def _aiter_sparse_mla_prefill_enabled(num_heads: int, has_kv_transfer: bool) -> 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
     lengths = lengths.to(dtype=torch.int32).contiguous()
-    indptr = torch.zeros(lengths.shape[0] + 1, dtype=torch.int32, device=lengths.device)
-    torch.cumsum(lengths, dim=0, out=indptr[1:])
+    n = lengths.shape[0]
+    if 0 < n <= _INDPTR_MAX_BLOCK and lengths.is_cuda:
+        # One scan kernel instead of a fill plus a device-wide scan.
+        indptr = torch.empty(n + 1, dtype=torch.int32, device=lengths.device)
+        _build_indptr_kernel[(1,)](lengths, indptr, n, BLOCK=triton.next_power_of_2(n))
+        return indptr
+    indptr = torch.zeros(n + 1, dtype=torch.int32, device=lengths.device)
+    if n:
+        torch.cumsum(lengths, dim=0, out=indptr[1:])
     return indptr
 
 
@@ -377,6 +387,32 @@ def _compute_topk_lens_kernel(
         count += tl.sum((local_idx >= 0).to(tl.int32), axis=0)
 
     tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
+
+
+# One block is enough: `lengths` carries one entry per decode token, which is
+# bounded by max_num_seqs. Beyond that bound the caller falls back to torch.
+_INDPTR_MAX_BLOCK = 8192
+
+
+@triton.jit
+def _build_indptr_kernel(
+    lens_ptr,
+    indptr_ptr,
+    n,
+    BLOCK: tl.constexpr,
+):
+    """Lengths -> exclusive prefix sum, written as indptr[0..n].
+
+    Replaces a torch.zeros + torch.cumsum pair. indptr[0] is 0 and
+    indptr[i + 1] is the inclusive scan at i, so the whole thing is one
+    tl.cumsum plus one scalar store -- no fill, no device-wide scan.
+    """
+    offs = tl.arange(0, BLOCK)
+    m = offs < n
+    v = tl.load(lens_ptr + offs, mask=m, other=0).to(tl.int32)
+    c = tl.cumsum(v, axis=0)
+    tl.store(indptr_ptr + offs + 1, c, mask=m)
+    tl.store(indptr_ptr, 0)
 
 
 @triton.jit
@@ -767,6 +803,11 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             ),
             self.vllm_config.kv_transfer_config is not None,
         )
+        # The gfx1250 aiter prefill reads the same ragged stream.
+        self._paged_prefill = (
+            self._use_aiter_sparse_mla_prefill
+            or dsv4_aiter_sparse_mla_kernels() is not None
+        )
 
     def build(
         self,
@@ -785,7 +826,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         prefill_ragged_indices = None
         prefill_ragged_indptr = None
         if (
-            self._use_aiter_sparse_mla_prefill
+            self._paged_prefill
             and base.num_prefill_tokens > 0
             and base.prefill_swa_indices is not None
             and base.prefill_swa_lens is not None
@@ -840,6 +881,63 @@ class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
         return DeepseekV4ROCMAiterMLASparseMetadataBuilder
 
 
+class DeepseekV4ROCMAiterSWACache(DeepseekV4SWACache):
+    """The SWA cache, pitched to aiter's aligned 640 B record on gfx1250.
+
+    Same reasoning as the top-k spec in DeepseekV4ROCMAiterMLAAttention: the
+    two caches hold the identical record, so their specs move together or the
+    pooled block stride stops being a whole number of records.
+    """
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if (
+            dsv4_aiter_sparse_mla_kernels() is None
+            or self.cache_config.cache_dtype != "fp8_ds_mla"
+        ):
+            return spec
+        # page_size_padded is NOT an ordinary field: __post_init__ stamps it
+        # from (alignment, state_content_bytes) and only when padding is
+        # actually needed. Carrying the base's value over would keep a padding
+        # computed for the 576/584 record, which is smaller than the 640 page
+        # and trips the spec's own >= assertion. Clear it and let
+        # __post_init__ recompute -- at 640 the page is already a multiple of
+        # the alignment, so it correctly stays None.
+        return replace(
+            spec,
+            alignment=640,
+            state_content_bytes=640,
+            page_size_padded=None,
+            # The aiter kernels and the unified-grid merge index the pool as
+            # flat 640 B records, so physical blocks must be whole records
+            # apart. Without this the planner's block stride is whatever the
+            # largest group's page rounds to (e.g. 1067200 B on DSV4-Flash,
+            # 1667.5 records), which aiter rejects.
+            block_stride_alignment=640,
+        )
+
+
+class DeepseekV4ROCMAiterCompressor(DeepseekCompressor):
+    """The compressor, writing aiter's aligned 640 B record on gfx1250.
+
+    The aligned record interleaves each token's scales, so the token stride is
+    the whole record; the packed layout strides by data only.
+
+    The aligned-record kernels come from aiter rather than vLLM's own
+    fused_compress_quant_cache, which only writes the packed record. They are
+    bound per instance and only with the aligned record, so every other arch
+    (and an aiter build without them) keeps vLLM's launchers.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        kernels = dsv4_aiter_sparse_mla_kernels()
+        if self.head_dim == 512 and kernels is not None:
+            self.compress_fn = kernels.compress
+            self.compress_two_stage_fn = kernels.compress_two_stage
+            self._token_stride = 640
+
+
 class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     """ROCm sparse MLA attention layer for DeepSeek V4."""
 
@@ -850,6 +948,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # aiter's paged MXFP4 kernels write and score the index K cache.
             return DeepseekV4RocmMxfp4Indexer
         return super()._get_indexer_cls(vllm_config)
+
+    def _get_swa_cache_cls(self) -> type[DeepseekV4SWACache]:
+        return DeepseekV4ROCMAiterSWACache
+
+    def _get_compressor_cls(self) -> type[DeepseekCompressor]:
+        return DeepseekV4ROCMAiterCompressor
 
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]
@@ -880,6 +984,14 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
         self._use_aiter_sparse_mla_prefill = _aiter_sparse_mla_prefill_enabled(
             self.n_local_heads, self._has_kv_transfer
+        )
+        # gfx1250: the aligned 640 B record, read in place by aiter's
+        # packed-fp8 decode and prefill. Prefill shares the paged plumbing
+        # (_forward_prefill_aiter) with the gfx950 aiter path, whose flags
+        # above are gfx950-only, so the two never coexist.
+        self._use_gfx1250_aiter_sparse_mla = (
+            dsv4_aiter_sparse_mla_kernels() is not None
+            and self.kv_cache_dtype == "fp8_ds_mla"
         )
 
     def _run_sequential_pipeline(
@@ -948,6 +1060,79 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
         return self._o_proj(o, positions)
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        """The base spec, re-pitched to aiter's aligned 640 B record on gfx1250.
+
+        ``alignment`` has to move WITH the record size: left at 576 the pooled
+        block stride stays a multiple of 576, the descriptor unit falls back to
+        gcd(640, stride) = 64, and the row index stops being the slot index.
+        A replace() of the base's spec rather than a rebuild of it, so a change
+        to any other field upstream carries over on its own.
+        """
+        spec = super().get_kv_cache_spec(vllm_config)
+        if (
+            spec is None
+            or dsv4_aiter_sparse_mla_kernels() is None
+            or self.kv_cache_dtype != "fp8_ds_mla"
+        ):
+            return spec
+        # page_size_padded is stamped by __post_init__ from (alignment,
+        # state_content_bytes); the base's value was computed for the 576/584
+        # record, so clear it and let __post_init__ recompute (None at 640).
+        return replace(
+            spec,
+            alignment=640,
+            state_content_bytes=640,
+            page_size_padded=None,
+            # The aiter kernels and the unified-grid merge index the pool as
+            # flat 640 B records, so physical blocks must be whole records
+            # apart. Without this the planner's block stride is whatever the
+            # largest group's page rounds to (e.g. 1067200 B on DSV4-Flash,
+            # 1667.5 records), which aiter rejects.
+            block_stride_alignment=640,
+        )
+
+    def _fused_qnorm_rope_kv_insert(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata,
+    ) -> torch.Tensor:
+        """Aiter's fused Q-norm/RoPE + KV insert when the SWA cache holds the
+        aligned 640 B record; the base's producer (packed record) otherwise.
+
+        The aiter decode packs Q to fp8 itself (``_dsv4_aiter_sparse_decode``),
+        so this writes the bf16 Q only.
+        """
+        kernels = dsv4_aiter_sparse_mla_kernels()
+        if kernels is None or not isinstance(attn_metadata, dict):
+            return super()._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+
+        swa_metadata = attn_metadata.get(self.swa_cache_layer.prefix)
+        assert swa_metadata is not None
+        swa_kv_cache = self.swa_cache_layer.kv_cache
+        if swa_kv_cache.dtype != torch.uint8:
+            return super()._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+
+        assert positions.dtype == torch.int64
+        return kernels.qnorm_rope_kv_insert(
+            q,
+            kv,
+            swa_kv_cache,
+            swa_metadata.slot_mapping,
+            positions,
+            self.rotary_emb.cos_sin_cache,
+            swa_metadata.block_size,
+            self.eps,
+            self.padded_heads,
+            apply_q_norm=True,
+            pack_q=False,
+            write_q=True,
+            q_packed_out=None,
+            q_rope_out=None,
+        )
 
     def _prepare_and_attn(
         self,
@@ -1436,7 +1621,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # gather workspace _forward_prefill would; the dequantize / topk
             # / sparse_fwd kernels are skipped this step. The aiter prefill
             # reads the caches in place and never asks for it.
-            if not self._use_aiter_sparse_mla_prefill:
+            if not (
+                self._use_aiter_sparse_mla_prefill or self._use_gfx1250_aiter_sparse_mla
+            ):
                 swa_only = self.compress_ratio <= 1
                 N = (
                     0
@@ -1620,7 +1807,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
         inv_rope: bool = False,
     ) -> None:
-        if self._use_aiter_sparse_mla_prefill:
+        if self._use_aiter_sparse_mla_prefill or self._use_gfx1250_aiter_sparse_mla:
             self._forward_prefill_aiter(
                 q=q,
                 compressed_k_cache=compressed_k_cache,
@@ -1803,6 +1990,20 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 num_rows=compressed_k_cache.shape[0] * compressed_k_cache.shape[1],
             )
 
+        if self._use_gfx1250_aiter_sparse_mla:
+            _dsv4_aiter_sparse_prefill(
+                q[:num_prefill_tokens],
+                swa_k_cache,
+                swa_metadata.prefill_swa_ragged_indices,
+                swa_metadata.prefill_swa_ragged_indptr,
+                compressed_k_cache,
+                topk_ragged_indices,
+                topk_ragged_indptr,
+                self.attn_sink,
+                self.scale,
+                out=output[:num_prefill_tokens],
+            )
+            return
         self._aiter_sparse_mla(
             q[:num_prefill_tokens],
             output[:num_prefill_tokens],
