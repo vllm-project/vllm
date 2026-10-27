@@ -1251,6 +1251,10 @@ class SparseAttnIndexer(CustomOp):
                 candidate_blocks=self.candidate_blocks,
                 candidate_block_size=self.candidate_block_size,
                 candidate_write=self.candidate_write,
+                semantic_uncompressed_max_model_len=(
+                    self.semantic_uncompressed_max_model_len
+                ),
+                semantic_compress_ratio=self.semantic_compress_ratio,
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path requires AITER or a supported "
