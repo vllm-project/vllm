@@ -235,6 +235,26 @@ Mooncake environment variables (`MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`,
 `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES`, etc.). Those are independent of
 the vLLM JSON config.
 
+### Tenant Isolation
+
+Set `tenant_id` in the Mooncake JSON config when different vLLM deployments should use separate Mooncake tenant namespaces:
+
+```json
+{
+  "mode": "embedded",
+  "metadata_server": "P2PHANDSHAKE",
+  "master_server_address": "127.0.0.1:50051",
+  "global_segment_size": "80GB",
+  "local_buffer_size": "4GB",
+  "protocol": "rdma",
+  "device_name": "",
+  "enable_offload": false,
+  "tenant_id": "tenant-a"
+}
+```
+
+Strict isolation requires a Mooncake master started with `--enable_multi_tenants=true` and a tenant quota policy that registers each tenant. Non-default `tenant_id` also requires a Mooncake version whose `MooncakeDistributedStore.setup()` accepts the `tenant_id` parameter. In `standalone-store` mode, start the external `mooncake_client` with the matching tenant id because that process owns the real store client.
+
 ### Standalone EGM over NVLink
 
 Extended GPU Memory (EGM) lets a separate Mooncake provider contribute
@@ -421,26 +441,6 @@ handle after an error. Successful close releases the EGM pool; failed cleanup
 requires a process restart. Restarting creates a new pool and requires cold
 prefill. This example does not implement eviction-safe provider removal,
 restart recovery or forced teardown during transfers.
-
-### Tenant Isolation
-
-Set `tenant_id` in the Mooncake JSON config when different vLLM deployments should use separate Mooncake tenant namespaces:
-
-```json
-{
-  "mode": "embedded",
-  "metadata_server": "P2PHANDSHAKE",
-  "master_server_address": "127.0.0.1:50051",
-  "global_segment_size": "80GB",
-  "local_buffer_size": "4GB",
-  "protocol": "rdma",
-  "device_name": "",
-  "enable_offload": false,
-  "tenant_id": "tenant-a"
-}
-```
-
-Strict isolation requires a Mooncake master started with `--enable_multi_tenants=true` and a tenant quota policy that registers each tenant. Non-default `tenant_id` also requires a Mooncake version whose `MooncakeDistributedStore.setup()` accepts the `tenant_id` parameter. In `standalone-store` mode, start the external `mooncake_client` with the matching tenant id because that process owns the real store client.
 
 ## Environment Variables
 
