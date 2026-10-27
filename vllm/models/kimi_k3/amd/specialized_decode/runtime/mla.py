@@ -13,9 +13,6 @@ the reference M1a / M1b reproduce):
 Pure decode only (every row a decode row), as the mono step is.
 """
 
-import contextlib
-from typing import Any
-
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
@@ -83,17 +80,15 @@ def attend(wrapper, q8, kv_cache, md):
     its LSE [S, heads * dcp] (None at DCP1), both possibly strided views.
 
     ``q8`` may carry more heads than the layer: AITER's cprr pad (e.g. 96 ->
-    128, M1a writes it). forward_mqa gets the real heads and reuses ``q8`` as
-    its padded query instead of copying."""
+    128, M1a writes it). forward_mqa gets the real heads, a view whose row
+    stride spans the pad, and AITER's ``get_mla_padded_q`` widens it back to
+    ``q8`` instead of copying."""
     from vllm.platforms import current_platform
 
     attn = wrapper.mla_attn
     kv = kv_cache.view(current_platform.fp8_dtype())
     n = attn.impl._decode_num_heads
-    if q8.size(1) == n:
-        return attn.impl.forward_mqa(q8, kv, md, attn)
-    with _prepadded(q8, n):
-        return attn.impl.forward_mqa(q8[:, :n], kv, md, attn)
+    return attn.impl.forward_mqa(q8[:, :n], kv, md, attn)
 
 
 def m1c_inputs(wrapper, q, kv_cache, md):
@@ -118,34 +113,6 @@ def m1c_inputs(wrapper, q, kv_cache, md):
     )
     po = q.new_empty(so)
     return m1c_in, po, torch.empty(sl, dtype=torch.float32, device=q.device)
-
-
-@contextlib.contextmanager
-def _prepadded(padded, n):
-    """While open, AITER's ``get_mla_padded_q`` returns ``padded`` for its
-    first ``n`` heads. ``padded`` must hold the pad it would build: head
-    ``n + i`` a copy of head ``i % n``. Any other query is padded as usual."""
-    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
-
-    helper: Any = AiterMLAHelper  # mypy: no method assignment
-    orig = helper.__dict__["get_mla_padded_q"]
-
-    def get_mla_padded_q(num_heads, q, target_heads=None):
-        if (
-            num_heads == n
-            and target_heads == padded.size(1)
-            and q.data_ptr() == padded.data_ptr()
-            and q.shape == padded[:, :n].shape
-            and q.stride() == padded.stride()
-        ):
-            return padded
-        return orig.__func__(num_heads, q, target_heads)
-
-    helper.get_mla_padded_q = staticmethod(get_mla_padded_q)
-    try:
-        yield
-    finally:
-        helper.get_mla_padded_q = orig
 
 
 def post(wrapper, o, lse, md, gate):

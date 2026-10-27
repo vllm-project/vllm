@@ -551,27 +551,27 @@ def test_weight_views_reject_every_mismatch():
 
 
 def test_attend_hands_m1a_padded_query_to_forward_mqa():
+    """forward_mqa gets M1a's padded query's real heads, and AITER's pad of
+    them is M1a's buffer itself (no copy)."""
     from vllm.models.kimi_k3.amd.specialized_decode.runtime import mla
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
 
     pad = AiterMLAHelper.get_mla_padded_q
     q = torch.randn(4, 96, 8)
     padded = pad(96, q, target_heads=128)  # what M1a writes
-    other = torch.randn(4, 96, 8)
     seen = {}
 
     def forward_mqa(q, kv, md, attn):
         assert q.shape[1] == 96
-        seen["q"] = AiterMLAHelper.get_mla_padded_q(96, q, target_heads=128)
-        seen["other"] = AiterMLAHelper.get_mla_padded_q(96, other, target_heads=128)
+        seen["q"] = pad(96, q, target_heads=128)
         return None, None
 
     impl = SimpleNamespace(_decode_num_heads=96, forward_mqa=forward_mqa)
     wrapper = SimpleNamespace(mla_attn=SimpleNamespace(impl=impl))
     mla.attend(wrapper, padded, torch.zeros(4, dtype=torch.uint8), None)
-    assert seen["q"] is padded  # no copy
-    assert torch.equal(seen["other"], pad(96, other, target_heads=128))
-    assert AiterMLAHelper.get_mla_padded_q is pad  # restored
+    got = seen["q"]
+    assert got.data_ptr() == padded.data_ptr()  # no copy
+    assert got.shape == padded.shape and got.stride() == padded.stride()
 
 
 def test_qkv_gate_weights_split_the_merged_gate():
