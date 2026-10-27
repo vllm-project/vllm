@@ -442,7 +442,7 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         # 4. retry every engine.
         round_id = str(uuid.uuid4())
         for server in servers_by_rank.values():
-            _apply_ft(server, "retry", request_id=round_id)
+            _apply_ft(server, "retry", {"abort": False}, request_id=round_id)
 
         # 5. Recovery completes: every engine returns to healthy and serves again.
         _assert_serving_and_healthy(list(servers_by_rank.values()))
