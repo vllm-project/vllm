@@ -120,6 +120,25 @@ def _get_tower_quant_config(
     return quant_config if quantizable else None
 
 
+def _embed_patches(
+    patch_embedder: nn.Module,
+    pixel_values: torch.Tensor,
+    pixel_position_ids: torch.Tensor,
+    padding_positions: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """`Gemma4VisionPatchEmbedder.forward` with the pixel values cast to `dtype`.
+    Transformers casts them to `input_proj.weight.dtype`, which is the storage
+    dtype (e.g. FP8) once `input_proj` is quantized.
+    """
+    pixel_values = (2 * (pixel_values - 0.5)).to(dtype)
+    hidden_states = patch_embedder.input_proj(pixel_values)
+    position_embeddings = patch_embedder._position_embeddings(
+        pixel_position_ids, padding_positions
+    )
+    return hidden_states + position_embeddings
+
+
 # Video constants — match transformers Gemma4VideoProcessor defaults.
 _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
@@ -1404,10 +1423,12 @@ class Gemma4ForConditionalGeneration(
                 )
                 pad_tensor = (pp_tensor == -1).all(dim=-1)
 
-                inputs_embeds = vt.patch_embedder(
+                inputs_embeds = _embed_patches(
+                    vt.patch_embedder,
                     pv_tensor,
                     pp_tensor,
                     pad_tensor,
+                    self.model_dtype,
                 ).to(self.model_dtype)
                 # HuggingFace's mask builder probes `padding_mask.all()` to
                 # decide whether the mask can be skipped, which syncs.
@@ -1522,10 +1543,12 @@ class Gemma4ForConditionalGeneration(
             pp_chunk = pixel_position_ids[i : i + max_batch_size]
             pad_chunk = padding_positions[i : i + max_batch_size]
 
-            inputs_embeds = vt.patch_embedder(
+            inputs_embeds = _embed_patches(
+                vt.patch_embedder,
                 pv_chunk,
                 pp_chunk,
                 pad_chunk,
+                self.model_dtype,
             ).to(self.model_dtype)
             # HuggingFace's mask builder probes `padding_mask.all()`.
             with gpu_sync_allowed():
@@ -2036,10 +2059,12 @@ class Gemma4ForConditionalGeneration(
         pad_tensor = (pixel_position_ids == -1).all(dim=-1)
 
         vt = self.vision_tower
-        inputs_embeds = vt.patch_embedder(
+        inputs_embeds = _embed_patches(
+            vt.patch_embedder,
             pixel_values,
             pixel_position_ids,
             pad_tensor,
+            self.model_dtype,
         ).to(self.model_dtype)
 
         encoder_outputs = vt.encoder(
@@ -2063,11 +2088,7 @@ class Gemma4ForConditionalGeneration(
             pooled_states = (pooled_states - vt.std_bias) * vt.std_scale
 
         flat_pooled = pooled_states.reshape(-1, pooled_states.shape[-1])
-        gathered_states = flat_pooled[gather_indices]
-
-        # Cast to the projection layer's dtype to resolve mixed-precision crash
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
-        gathered_states = gathered_states.to(target_dtype)
+        gathered_states = flat_pooled[gather_indices].to(self.model_dtype)
 
         flat_proj_embs = self.embed_vision(
             inputs_embeds=gathered_states.unsqueeze(0)
