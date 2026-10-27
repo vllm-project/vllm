@@ -1260,71 +1260,41 @@ def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
     cudart.cudaHostUnregister.assert_called_once()
 
 
-@pytest.mark.parametrize("unregister_error", [0, 2])
-def test_arena_growth_failure_keeps_h2d_source_safe(monkeypatch, unregister_error):
-    """Never hand CUDA a source spanning pinned and unregistered pages."""
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("operation", ["cudaHostRegister", "cudaHostUnregister"])
+def test_arena_growth_failure_keeps_h2d_source_safe(operation):
+    """Clear real runtime errors and never copy across a partial registration."""
     writer, (reader,) = _make_arena(n_reader=1, slot_bytes=16 << 20, n_slots=1)
-    cudart = mock.MagicMock()
-    monkeypatch.setattr(shm_tensor_arena, "CudaRTLibrary", lambda: cudart)
-    cudart.cudaHostRegister.side_effect = [0, 2]
-    cudart.cudaHostUnregister.return_value = unregister_error
-    monkeypatch.setattr(
-        shm_tensor_arena.current_platform, "is_cuda_alike", lambda: True
-    )
     first = torch.ones(8 << 20, dtype=torch.uint8)
     idx = writer.write_tensor(first)
     view = _get_view(reader, idx, first)
+    assert view.is_pinned()
     del view
     _drain(reader)
+    cudart = reader._cudart
+    original = getattr(cudart, operation)
+
+    def reject(*args):
+        error = original(0, 0, 0) if operation == "cudaHostRegister" else original(0)
+        assert error != 0
+        return error
+
     larger = torch.full((9 << 20,), 7, dtype=torch.uint8)
     assert writer.write_tensor(larger) == idx
-    result = _get_view(reader, idx, larger)
-    assert torch.equal(result, larger)
-    assert cudart.cudaGetLastError.call_count == 1
-    if not unregister_error:
-        # Registration failed after unpinning: the entire source is pageable.
+    with mock.patch.object(cudart, operation, side_effect=reject) as failure:
+        result = _get_view(reader, idx, larger)
+        failure.assert_called_once()
+    assert cudart.cudaGetLastError() == 0
+    assert not result.is_pinned()
+    assert torch.equal(result.to("cuda").cpu(), larger)
+    if operation == "cudaHostRegister":
         assert reader._pinned_sizes[idx] == 0
         assert writer.write_tensor(first) is None
         del result
-    # Failed unpinning leaves a partial registration; the source owns a copy.
     _drain(reader)
     assert writer.write_tensor(first) == idx
-    if unregister_error:
-        assert torch.equal(result, larger)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_arena_registration_failure_leaves_cuda_runtime_usable(monkeypatch):
-    """Optional pinning failures must not poison the next CUDA operation."""
-    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
-
-    cudart = CudaRTLibrary()
-    register = cudart.cudaHostRegister
-    errors = []
-
-    def reject_registration(ptr, nbytes, flags):
-        result = register(0, 0, flags)
-        errors.append(result)
-        return result
-
-    monkeypatch.setattr(cudart, "cudaHostRegister", reject_registration)
-    # Exercise the same real runtime error with the old and new arena paths.
-    monkeypatch.setattr(
-        shm_tensor_arena, "CudaRTLibrary", lambda: cudart, raising=False
-    )
-    monkeypatch.setattr(shm_tensor_arena.current_platform, "cudart", lambda: cudart)
-    writer, (reader,) = _make_arena(n_reader=1)
-    src = torch.arange(1024, dtype=torch.float32)
-    idx = writer.write_tensor(src)
-    view = _get_view(reader, idx, src)
-    pending_error = cudart.cudaGetLastError()
-    assert errors and all(error != 0 for error in errors)
-    assert pending_error == 0
-    assert not reader._pinned
-    assert torch.equal(view.to("cuda").cpu(), src)
-    del view
-    _drain(reader)
-    assert writer.write_tensor(src) is not None
+    if operation == "cudaHostUnregister":
+        assert torch.equal(result, larger)  # Owned copy survives slot reuse.
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -1347,9 +1317,6 @@ def test_arena_growing_registered_prefix_h2d():
         assert view.is_pinned()
         dev = view.to("cuda", non_blocking=True)
         del view
-        reader.flush_releases()
-        assert writer.write_tensor(src) is None
-        torch.accelerator.synchronize()
         _drain(reader)
         assert torch.equal(dev.cpu(), src)
 

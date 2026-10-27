@@ -252,11 +252,25 @@ def _live_mm_payloads(worker) -> dict[str, list[bool]]:
     }
 
 
+def _arena_registered_bytes(worker) -> list[int]:
+    from vllm.distributed.device_communicators.shm_tensor_arena import _TENSOR_ARENAS
+
+    return [sum(arena._pinned_sizes) for arena in _TENSOR_ARENAS.values()]
+
+
 @pytest.mark.core_model
+@pytest.mark.parametrize(
+    "llm",
+    [{}, {"enable_shm_tensor_arena": True, "distributed_executor_backend": "mp"}],
+    indirect=True,
+    ids=["default", "arena"],
+)
 def test_consumed_cpu_inputs_released_during_generation(llm) -> None:
-    """An M-RoPE model must release pixels while its request is still decoding."""
+    """Release consumed pixels; arena transport must register only the used pages."""
     assert llm.llm_engine.vllm_config.use_v2_model_runner
     engine = llm.llm_engine
+    arena = engine.vllm_config.parallel_config.enable_shm_tensor_arena
+    image_size = 1536 if arena else 64
     engine.add_request(
         "cpu-input-lifetime",
         {
@@ -264,7 +278,9 @@ def test_consumed_cpu_inputs_released_during_generation(llm) -> None:
                 "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
                 "Describe the image.<|im_end|>\n<|im_start|>assistant\n"
             ),
-            "multi_modal_data": {"image": Image.new("RGB", (64, 64), "red")},
+            "multi_modal_data": {
+                "image": Image.new("RGB", (image_size, image_size), "red")
+            },
         },
         SamplingParams(temperature=0, max_tokens=16, ignore_eos=True),
     )
@@ -279,44 +295,12 @@ def test_consumed_cpu_inputs_released_during_generation(llm) -> None:
             for snapshot in snapshots
             for payloads in snapshot.values()
         ), snapshots
+        if arena:
+            sizes = llm.collective_rpc(_arena_registered_bytes)
+            assert sizes and all(len(rank) == 1 for rank in sizes), sizes
+            assert all(0 < rank[0] <= 32 * MiB_bytes for rank in sizes), sizes
         while engine.has_unfinished_requests():
             outputs = engine.step()
         assert len(outputs[0].outputs[0].token_ids) == 16
     finally:
         engine.abort_request(["cpu-input-lifetime"])
-
-
-def _arena_registered_bytes(worker) -> list[int]:
-    from vllm.distributed.device_communicators.shm_tensor_arena import _TENSOR_ARENAS
-
-    return [
-        sum(arena._pinned_sizes)
-        if hasattr(arena, "_pinned_sizes")
-        else (arena.total_bytes if arena._pinned else 0)
-        for arena in _TENSOR_ARENAS.values()
-    ]
-
-
-@pytest.mark.core_model
-@pytest.mark.parametrize(
-    "llm",
-    [{"enable_shm_tensor_arena": True, "distributed_executor_backend": "mp"}],
-    indirect=True,
-)
-def test_image_arena_registers_only_used_memory(llm) -> None:
-    """A 13.5 MiB image must not fault in the entire 2 GiB arena."""
-    outputs = llm.generate(
-        {
-            "prompt": (
-                "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
-                "Describe the image.<|im_end|>\n<|im_start|>assistant\n"
-            ),
-            "multi_modal_data": {"image": Image.new("RGB", (1536, 1536), "red")},
-        },
-        SamplingParams(temperature=0, max_tokens=16, ignore_eos=True),
-        use_tqdm=False,
-    )
-    sizes = llm.collective_rpc(_arena_registered_bytes)
-    assert sizes and all(len(rank) == 1 for rank in sizes), sizes
-    assert all(0 < size <= 32 * MiB_bytes for rank in sizes for size in rank), sizes
-    assert len(outputs[0].outputs[0].token_ids) == 16
