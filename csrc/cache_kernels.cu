@@ -284,51 +284,51 @@ __global__ void reshape_and_cache_kernel(
   const int64_t block_offset = slot_idx % block_size;
   const int h_block_count = head_size / x;  // head_size//x
 
-  const int h_block_idx = threadIdx.x;
-  if (h_block_idx >= num_heads * h_block_count) {
-    return;
-  }
-
-  const int head_idx = h_block_idx / h_block_count;
-  const int h_block = h_block_idx % h_block_count;
-
-  const scalar_t* __restrict__ key_src =
-      key + token_idx * key_stride + head_idx * head_size + h_block * x;
-  const int64_t src_value_start =
-      token_idx * value_stride + head_idx * head_size + h_block * x;
-
-  cache_t* __restrict__ key_dst =
-      key_cache + block_idx * num_heads * h_block_count * block_size * x +
-      head_idx * h_block_count * block_size * x + h_block * block_size * x +
-      block_offset * x;
-  // V cache target: standard [.., head_size, block_size], or the interleaved
-  // [.., block_size/x, head_size, x] the fused AITER writer/reader use.
-  const int64_t v_head_base = block_idx * num_heads * head_size * block_size +
-                              head_idx * head_size * block_size;
-  int64_t tgt_value_start;
-  int v_dim_stride;
-  if (interleaved_v) {
-    tgt_value_start = v_head_base + (block_offset / x) * (head_size * x) +
-                      (h_block * x) * x + (block_offset % x);
-    v_dim_stride = x;
-  } else {
-    tgt_value_start = v_head_base + h_block * x * block_size + block_offset;
-    v_dim_stride = block_size;
-  }
-
   constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
   float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
   CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
   float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
   CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
 
-  vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, x, 0, 1, k_op);
+  // The launch caps blockDim.x at 512, which can be fewer than
+  // num_heads * h_block_count, so each thread may handle several chunks.
+  for (int h_block_idx = threadIdx.x; h_block_idx < num_heads * h_block_count;
+       h_block_idx += blockDim.x) {
+    const int head_idx = h_block_idx / h_block_count;
+    const int h_block = h_block_idx % h_block_count;
 
-  const scalar_t* __restrict__ value_src = value + src_value_start;
-  cache_t* __restrict__ value_dst = value_cache + tgt_value_start;
+    const scalar_t* __restrict__ key_src =
+        key + token_idx * key_stride + head_idx * head_size + h_block * x;
+    const int64_t src_value_start =
+        token_idx * value_stride + head_idx * head_size + h_block * x;
+
+    cache_t* __restrict__ key_dst =
+        key_cache + block_idx * num_heads * h_block_count * block_size * x +
+        head_idx * h_block_count * block_size * x + h_block * block_size * x +
+        block_offset * x;
+    // V cache target: standard [.., head_size, block_size], or the interleaved
+    // [.., block_size/x, head_size, x] the fused AITER writer/reader use.
+    const int64_t v_head_base = block_idx * num_heads * head_size * block_size +
+                                head_idx * head_size * block_size;
+    int64_t tgt_value_start;
+    int v_dim_stride;
+    if (interleaved_v) {
+      tgt_value_start = v_head_base + (block_offset / x) * (head_size * x) +
+                        (h_block * x) * x + (block_offset % x);
+      v_dim_stride = x;
+    } else {
+      tgt_value_start = v_head_base + h_block * x * block_size + block_offset;
+      v_dim_stride = block_size;
+    }
+
+    vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, x, 0, 1, k_op);
+
+    const scalar_t* __restrict__ value_src = value + src_value_start;
+    cache_t* __restrict__ value_dst = value_cache + tgt_value_start;
 #pragma unroll
-  for (int i = 0; i < x; i++) {
-    v_op(value_dst[i * v_dim_stride], value_src[i]);
+    for (int i = 0; i < x; i++) {
+      v_op(value_dst[i * v_dim_stride], value_src[i]);
+    }
   }
 }
 
