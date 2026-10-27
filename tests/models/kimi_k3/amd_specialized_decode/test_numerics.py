@@ -1084,6 +1084,13 @@ def _m1_worker(
             **runner.peer_args(),
         )
 
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla as am
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+    # the head count cprr runs the gathered query at (128 for 96)
+    qheads = am._asm_dcp_verify_heads(R * NH)
+    assert qheads >= R * NH
+
     # M1a: this rank's query rows land at heads 12 * rank.. on every rank
     for S in (4, 8, 16, 32, 64):
         w = _mla_inputs(S, nb, rank, R)
@@ -1106,15 +1113,20 @@ def _m1_worker(
         assert errs["q"] < 3e-2 and errs["gate"] < 1e-2, (S, errs)
         assert _cos(_fp8_f(q8), _fp8_f(want)) > 0.999, (S, errs)
         assert errs["cache_same"] > 0.99, (S, errs)
-        # AITER cprr's padded query (96 -> 128 heads): the pad tiles heads 0..
+        # AITER cprr's padded query (96 -> 128 heads) equals the pad
+        # forward_mqa builds itself (from the contiguous q8: a view of qp
+        # would hand qp back). test_m1a_pad_through_aiter_cprr runs it.
+        if qheads == R * NH:
+            continue
         runner.step_begin()
         prefix, blocks = w["prefix"].clone(), w["blocks"].clone()
-        qp = torch.zeros(S, 128, ENTRY, dtype=torch.uint8, device=device)
+        qp = torch.zeros(S, qheads, ENTRY, dtype=torch.uint8, device=device)
         pre(w, prefix, blocks, w["kv_cache"].clone(), qp, gate)
         torch.accelerator.synchronize()
         assert not runner.health.any() and not runner.flags.any(), S
-        assert torch.equal(qp[:, : R * NH], q8), S
-        assert torch.equal(qp[:, R * NH :], q8[:, : 128 - R * NH]), S
+        pad = AiterMLAHelper.get_mla_padded_q(R * NH, q8, target_heads=qheads)
+        assert pad.data_ptr() != qp.data_ptr()
+        assert torch.equal(qp, pad), S
 
     # M1b: every sender's partials for this rank's heads, each with its own
     # empty-shard mask, combined in rank order
@@ -1267,6 +1279,98 @@ def _m1_worker(
         wants.append(want)
     for x, y in zip(*wants):
         assert torch.equal(x, y)
+
+
+@needs_gfx950
+@pytest.mark.parametrize("qlen", [4, 8])
+@torch.inference_mode()
+def test_m1a_pad_through_aiter_cprr(monkeypatch: pytest.MonkeyPatch, qlen: int) -> None:
+    """AITER's cprr asm decode, at DCP8 (96 -> 128 heads), on the padded query
+    M1a writes (mla.attend hands it over) equals the decode on the pad
+    forward_mqa builds itself, and both match attention in torch. With
+    _m1_worker's M1a == get_mla_padded_q, an AITER change the hand-off misses
+    fails here. One GPU, a DCP rank simulated (the cprr numerics test's
+    harness: real metadata builder, real kernel)."""
+    from types import SimpleNamespace
+
+    import vllm.distributed.parallel_state as ps
+    import vllm.model_executor.layers.attention.mla_attention as mla_attention
+    from tests.v1.attention import test_rocm_aiter_mla_dcp_cprr_numerics as cp
+    from vllm.config import set_current_vllm_config
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import NH
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime import mla
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla as am
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    dcp, rank, nr, ctx = 8, 3, 3, 700
+    n = dcp * NH
+    H = am._asm_dcp_verify_heads(n)
+    if n == H:
+        pytest.skip(f"cprr runs {n} heads natively: M1a writes no pad")
+    # _install_fake_groups patches these; monkeypatch restores them
+    for mod, name in (
+        (ps, "get_dcp_group"),
+        (ps, "get_tp_group"),
+        (am, "get_dcp_group"),
+        (mla_attention, "get_dcp_group"),
+    ):
+        monkeypatch.setattr(mod, name, getattr(mod, name))
+    monkeypatch.setattr(cp, "QLEN", qlen)
+
+    device = torch.device("cuda", 0)
+    torch.accelerator.set_device_index(device.index)
+    g = torch.Generator(device=device).manual_seed(0)
+    cp._ensure_workspace_manager(device)
+    cp._install_fake_groups(dcp, rank)
+    config = cp._make_vllm_config(NH)
+    with set_current_vllm_config(config):
+        name = "model.layers.0.self_attn.attn"
+        config.compilation_config.static_forward_context[name] = cp._make_ctx_layer(
+            config, monkeypatch
+        )
+        spec = MLAAttentionSpec(
+            block_size=1,
+            num_kv_heads=1,
+            head_size=cp.HEAD_SIZE,
+            dtype=config.model_config.dtype,
+            non_causal_multi_token_decode=False,
+        )
+        L = ctx + qlen
+        fp8 = current_platform.fp8_dtype()
+        kv = _randn(g, nr * L, 1, cp.HEAD_SIZE, dtype=torch.float32).to(fp8)
+        q8 = _randn(g, nr * qlen, n, cp.HEAD_SIZE, scale=0.5, dtype=torch.float32)
+        q8 = q8.to(fp8)
+        pos = torch.arange(rank, L, dcp, device=device)  # rank's residue class
+        # forward_mqa pads q8 itself
+        md, o, lse, _ = cp._run_shard(
+            config, spec, name, device, rank, rank, q8, kv, nr, qlen, ctx, dcp, pos
+        )
+        assert md.decode.dcp_route is am._DCPDecodeRoute.CPRR
+        assert md.decode.asm_decode_num_heads == H
+        # M1a's buffer (_m1_worker: M1a == get_mla_padded_q of its q8)
+        qp = torch.empty(nr * qlen, H, cp.HEAD_SIZE, dtype=fp8, device=device)
+        qp.copy_(am.AiterMLAHelper.get_mla_padded_q(n, q8, target_heads=H))
+        layer = cp._Layer(device)
+        layer.impl = cp._build_impl(NH, dcp, rank)
+        o_m1a, lse_m1a = mla.attend(SimpleNamespace(mla_attn=layer), qp, kv, md)
+        torch.accelerator.synchronize()
+
+    assert torch.equal(o_m1a, o) and torch.equal(lse_m1a, lse)
+    want, want_lse = cp._torch_reference(
+        q8.float().view(nr, qlen, n, -1),
+        kv.float().view(nr, L, -1),
+        ctx,
+        qlen,
+        cp.SCALE,
+        pos,
+    )
+    o = o.float().reshape(want.shape)
+    err = (o - want).abs().max().item() / want.abs().max().item()
+    assert err < cp.SHARD_RTOL, err
+    assert _rel_l2(o, want) < 3e-2
+    torch.testing.assert_close(
+        lse.float().reshape(want_lse.shape), want_lse, atol=5e-2, rtol=0
+    )
 
 
 @needs_gfx950

@@ -1215,6 +1215,9 @@ def cta(c):
         t = req * q + pos
         p0 = uniform(ld_i32(a["indptr"], req))
         L = uniform(ld_i32(a["indptr"], req + 1)) - p0
+        # an empty request's p0 may be pages' end: its (unused) block-0 loads
+        # read pages[0] instead
+        p0 = (L > 0).select(p0, fx.Int32(0))
         ct = ((L + per_req - 1) // per_req + TILE - 1) // TILE * TILE
         c0 = split * ct
         c1 = fx.min(L, c0 + ct)
