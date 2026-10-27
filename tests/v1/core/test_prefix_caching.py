@@ -3092,25 +3092,29 @@ def test_basic_prefix_caching_disabled():
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
-def test_cache_blocks(hash_fn):
-    """This is a unit test that tests the correctness of the _cache_full_blocks
-    function of KVCacheManager.
-    """
+@pytest.mark.parametrize(
+    "hash_block_size, hash_indices", [(2, (1, 3, 5)), (4, (0, 1, 2))]
+)
+@pytest.mark.parametrize("enable_kv_cache_events", [False, True])
+def test_cache_blocks(hash_fn, hash_block_size, hash_indices, enable_kv_cache_events):
+    """Register only completed chunks at either hash granularity."""
     block_size = 4
     block_pool = BlockPool(
         num_gpu_blocks=5,
         enable_caching=True,
-        hash_block_size=block_size,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=enable_kv_cache_events,
     )
     # Req:
     #  Block 0: [0, 1, 2, 3]
     #  Block 1: [4, 5, 6, 7]
     #  Block 2: [8, 9, 10, 11]
     #  Block 3: [12, 13]
-    req = make_request("0", list(range(14)), block_size, hash_fn)
+    req = make_request("0", list(range(14)), hash_block_size, hash_fn)
+    expected_hashes = [req.block_hashes[i] for i in hash_indices]
 
     # Test that blocks are cached correctly for 2 full blocks from the start.
-    blocks = [KVCacheBlock(block_id=i) for i in range(2)]
+    blocks = block_pool.get_new_blocks(2)
 
     block_pool.cache_full_blocks(
         request=req,
@@ -3122,11 +3126,22 @@ def test_cache_blocks(hash_fn):
     )
 
     assert len(block_pool.cached_block_hash_to_block) == 2
-    assert all([block.block_hash is not None for block in blocks])
+    assert [block.block_hash for block in blocks] == [
+        make_block_hash_with_group_id(block_hash, 0)
+        for block_hash in expected_hashes[:2]
+    ]
+    assert block_pool.get_cached_block(expected_hashes[2], [0]) is None
+    events = block_pool.take_events()
+    if enable_kv_cache_events:
+        assert len(events) == 1
+        assert events[0].token_ids == list(range(8))
+        assert events[0].parent_block_hash is None
+    else:
+        assert events == []
 
     # Test that blocks that don't start from the beginning are cached
     # correctly.
-    blocks += [KVCacheBlock(block_id=2)]
+    blocks += block_pool.get_new_blocks(1)
     block_pool.cache_full_blocks(
         request=req,
         blocks=blocks,
@@ -3136,7 +3151,19 @@ def test_cache_blocks(hash_fn):
         kv_cache_group_id=0,
     )
     assert len(block_pool.cached_block_hash_to_block) == 3
-    assert blocks[0].block_hash is not None
+    assert [block.block_hash for block in blocks] == [
+        make_block_hash_with_group_id(block_hash, 0) for block_hash in expected_hashes
+    ]
+    assert block_pool.get_cached_block(expected_hashes[2], [0]) == [blocks[2]]
+    events = block_pool.take_events()
+    if enable_kv_cache_events:
+        assert len(events) == 1
+        assert events[0].token_ids == list(range(8, 12))
+        assert events[0].parent_block_hash == kv_cache_utils.maybe_convert_block_hash(
+            expected_hashes[1]
+        )
+    else:
+        assert events == []
 
 
 def test_cache_blocks_multi_group():
