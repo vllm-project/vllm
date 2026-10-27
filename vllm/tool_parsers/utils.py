@@ -1309,7 +1309,9 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         if candidate_type in ("object", "array"):
             try:
                 parsed = json.loads(value)
-            except (json.JSONDecodeError, ValueError, TypeError):
+            except (json.JSONDecodeError, ValueError, TypeError, RecursionError):
+                # The depth bound does not cover stringified JSON; keep the
+                # string instead of failing the request.
                 continue
             if _is_json_finite(parsed):
                 return parsed
@@ -1319,7 +1321,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
 
     try:
         parsed = json.loads(value)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         return value
     # Reject non-finite results (e.g. json.loads("1e999") -> inf, or nested
     # inf/nan inside a parsed list/dict) which json.dumps would render as

@@ -217,6 +217,12 @@ class TestCoerceToSchemaType:
         def test_list_alias(self):
             assert coerce_to_schema_type("[1]", "list") == [1]
 
+        def test_deeply_nested_json_does_not_recurse(self):
+            # The nesting bound covers the document, not stringified JSON.
+            deep = "[" * 12000 + "]" * 12000
+            assert coerce_to_schema_type(deep, "object") == deep
+            assert coerce_to_schema_type(deep, "array") == deep
+
     class TestMultiType:
         def test_null_takes_priority_over_string(self):
             assert coerce_to_schema_type("null", ["string", "null"]) is None

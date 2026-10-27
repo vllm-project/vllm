@@ -417,9 +417,10 @@ class _StreamingArgs:
     converter that re-serializes its output rewrites the trailing value and
     the closing brace on every tick, which a whole-document prefix check
     would reject even though no finalized member changed.  The re-parsed
-    tail must reproduce the text already emitted from that comma, including
-    bytes an argument extender streamed (recorded by
-    :meth:`extend_streamed`); otherwise the delta falls back to a full pass.
+    tail must reproduce the text already emitted from that comma (or from
+    the document start when no comma is finalized), including bytes an
+    argument extender streamed (recorded by :meth:`extend_streamed`);
+    otherwise the delta falls back to a full pass.
     A trailing open string under a streamable key streams its content
     verbatim, so a long value is not rescanned on every delta.
 
@@ -467,6 +468,10 @@ class _StreamingArgs:
         if point is not None and (self._stop is None or point[0] <= self._stop):
             self._raw_boundary, self._corrected_boundary = point
             self._tail_parts.append(corrected[self._corrected_boundary : self._emitted])
+        else:
+            # No boundary to resume from: the emitted text is the whole safe
+            # prefix, so an extender tick must still be verifiable.
+            self._tail_parts.append(self.safe)
 
     def extend_streamed(self, text: str) -> None:
         """Record text an argument extender streamed directly to the client.
@@ -476,8 +481,7 @@ class _StreamingArgs:
         verifies the converter still produces those bytes.
         """
         self._emitted += len(text)
-        if self._raw_boundary:
-            self._tail_parts.append(text)
+        self._tail_parts.append(text)
 
     def _rewrite(
         self, text: str, *, force_parse: bool = False, stop_shift: int = 0
@@ -519,7 +523,7 @@ class _StreamingArgs:
 
     def _tail_unchanged(self, body: str) -> bool:
         """Whether re-parsing from the boundary reproduces the emitted text."""
-        return not self._raw_boundary or body.startswith("".join(self._tail_parts))
+        return body.startswith("".join(self._tail_parts))
 
     def delta(self, args_json: str) -> tuple[str, bool] | None:
         """Return (newly safe text, value_streams), or ``None`` for a full pass."""
@@ -535,8 +539,7 @@ class _StreamingArgs:
             if not _unescaped_quote(delta, is_escaped(raw, len(raw))):
                 self._raw = args_json
                 self._emitted += len(delta)
-                if self._raw_boundary:
-                    self._tail_parts.append(delta)
+                self._tail_parts.append(delta)
                 return delta, True
         if not self._properties and not self._nonfinite:
             # A non-finite literal introduced after the cache was built may
@@ -571,11 +574,14 @@ class _StreamingArgs:
                 self._raw_boundary = base + point[0]
                 self._corrected_boundary += point[1]
                 self._tail_parts = [body[point[1] : emit_rel]]
-            elif self._raw_boundary:
+            else:
                 self._tail_parts.append(delta)
         self._raw = args_json
         self.streams = streams
-        self._at_end = end == self._corrected_boundary + len(body)
+        # The safe prefix reaching the end of the corrected body is a
+        # boundary-relative property; ``end`` was computed before the
+        # boundary above may have advanced.
+        self._at_end = emit_rel == len(body)
         return delta, streams
 
 

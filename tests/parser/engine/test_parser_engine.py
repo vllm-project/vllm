@@ -974,6 +974,15 @@ class TestFixArgTypes:
         args = '{"a": ' + "[" * 5000 + "]" * 5000 + "}"
         assert engine._fix_arg_types(args, "f") == args
 
+    def test_deeply_nested_string_payload_does_not_recurse(self):
+        """A stringified payload nested past ``json.loads``' recursion limit
+        stays a string instead of crashing the request."""
+        tool = _make_tool("f", {"payload": {"type": "object"}})
+        engine = _make_engine(tools=[tool])
+        deep = "[" * 12000 + "]" * 12000
+        args = '{"payload": "' + deep + '"}'
+        assert engine._fix_arg_types(args, "f") == args
+
     def test_deeply_nested_schema_does_not_recurse(self):
         """A client-supplied schema nested past the cap must not raise."""
         schema: dict = {"type": "integer"}
@@ -2488,6 +2497,38 @@ class TestIncrementalArgRewrite:
         cache.extend_streamed("not-what-the-converter-emits")
         assert cache.delta('{"a": 1, "b": "xyz"}') is None
 
+    def test_extender_bytes_verified_without_a_resume_boundary(self):
+        """A single-member call has no top-level comma to resume from, so
+        extender bytes must still be checked against the converter."""
+        tool = _make_tool("f", {"a": {"type": "string"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs('{"a": "', properties, string_keys)
+        cache.extend_streamed("not-what-the-converter-emits")
+        assert cache.delta('{"a": "xyz"}') is None
+
+    def test_open_string_fast_path_survives_resume_advance(self, monkeypatch):
+        """A delta that finalizes a member advances the resume boundary and
+        must leave the verbatim open-string fast path armed for the next
+        tick instead of forcing a tail rewrite."""
+        tool = _make_tool("f", {"a": {"type": "integer"}, "b": {"type": "string"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs('{"a": 1', properties, string_keys)
+        assert cache.delta('{"a": 1, "b": "xx') == ('1, "b": "xx', True)
+
+        rewrites = 0
+        original = arg_rewrite._ArgsRewriter.rewrite
+
+        def counting(self):
+            nonlocal rewrites
+            rewrites += 1
+            return original(self)
+
+        monkeypatch.setattr(arg_rewrite._ArgsRewriter, "rewrite", counting)
+        assert cache.delta('{"a": 1, "b": "xxx') == ("x", True)
+        assert rewrites == 0
+
     def test_extender_ticks_reuse_the_cached_correction(self, monkeypatch):
         """A value streamed by an argument extender must not discard the
         incremental state; the next converted delta resumes after it."""
@@ -2508,10 +2549,13 @@ class TestIncrementalArgRewrite:
         fields = {f"f{i}": {"type": "string"} for i in range(40)}
         tool = _make_tool("write", fields)
         engine = _make_engine(qwen3_config(thinking=False), tools=[tool])
-        request = MagicMock(spec=ChatCompletionRequest)
-        request.tools = [tool]
-        request.tool_choice = "auto"
-        request.include_reasoning = True
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "test"}],
+            tools=[tool],
+            tool_choice="auto",
+            include_reasoning=True,
+        )
         doc = (
             "<tool_call>\n<function=write>\n"
             + "".join(f"<parameter=f{i}>value{i}</parameter>\n" for i in range(40))
