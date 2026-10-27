@@ -269,9 +269,7 @@ def set_pdeathsig(sig: int = signal.SIGTERM) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(PR_SET_PDEATHSIG, int(sig), 0, 0, 0) != 0:
         errno = ctypes.get_errno()
-        raise OSError(
-            errno, f"prctl(PR_SET_PDEATHSIG) failed: {os.strerror(errno)}"
-        )
+        raise OSError(errno, f"prctl(PR_SET_PDEATHSIG) failed: {os.strerror(errno)}")
 
 
 # Resource utilities
