@@ -7,6 +7,7 @@ use std::sync::Arc;
 use futures::Stream;
 use trait_set::trait_set;
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::RequestTimestamps;
 use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
@@ -62,6 +63,9 @@ pub(crate) enum AssistantEvent {
         /// Connector-specific encoder cache transfer parameters for
         /// disaggregated serving.
         ec_transfer_params: Option<Box<serde_json::Value>>,
+        /// Routed-expert rows for the whole request, when the engine returned
+        /// any.
+        routed_experts: Option<Box<WireNdArray>>,
     },
 }
 

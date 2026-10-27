@@ -39,6 +39,18 @@ where
     }
 }
 
+/// Deserialize an optional non-negative integer, rejecting explicit `null`.
+///
+/// An absent field stays `None` so the request uses the Python default; an
+/// explicit `null`, negative value, or non-integer fails validation like
+/// Python's non-optional `int` field.
+pub fn deserialize_optional_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    u32::deserialize(deserializer).map(Some)
+}
+
 /// Effort level for reasoning models.
 ///
 /// Fixed OpenAI HTTP request grades. Request conversion maps these names to

@@ -22,4 +22,13 @@ pub enum Error {
     },
     #[error("routed experts for request `{request_id}` changed dtype or shape")]
     RoutedExpertsShapeMismatch { request_id: String },
+    #[error(
+        "routed experts for request `{request_id}` have {actual_bytes} data bytes, \
+         expected {expected_bytes} from their shape and dtype"
+    )]
+    RoutedExpertsDataLengthMismatch {
+        request_id: String,
+        expected_bytes: usize,
+        actual_bytes: usize,
+    },
 }

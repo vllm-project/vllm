@@ -49,6 +49,9 @@ Per-request, default `0`: drops the first N prompt-token rows (e.g. routing alre
 
 ## Limitations
 
-- The Rust HTTP frontend never returns `routed_experts` and always sends `routed_experts_prompt_start = 0`. Use the Python API server.
+- Both the Python and Rust frontends return `routed_experts` on non-streaming
+  `/v1/completions` and `/v1/chat/completions`, and on `/inference/v1/generate`
+  (final chunk when streaming). OpenAI streaming chunks do not carry the field
+  in either frontend.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).

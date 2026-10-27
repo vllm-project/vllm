@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use futures::{StreamExt as _, pin_mut};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 
 use crate::{Error, FinishReason, Result, TextOutputStream};
 
@@ -39,6 +40,8 @@ pub struct CollectedTextOutput {
     pub ec_transfer_params: Option<serde_json::Value>,
     /// Sampling support sets aligned with generated token positions.
     pub sampling_mask: Option<SamplingMask>,
+    /// Routed-expert rows for the whole request, when the engine returned any.
+    pub routed_experts: Option<WireNdArray>,
 }
 
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
@@ -96,6 +99,7 @@ impl<T: TextOutputStream> T {
                                 kv_transfer_params: None,
                                 ec_transfer_params: None,
                                 sampling_mask: None,
+                                routed_experts: None,
                             })
                         };
 
@@ -109,6 +113,7 @@ impl<T: TextOutputStream> T {
                             collected.ec_transfer_params =
                                 finished.ec_transfer_params.map(|value| *value);
                             collected.sampling_mask = finished.sampling_mask;
+                            collected.routed_experts = finished.routed_experts.map(|rows| *rows);
                             return Ok(collected);
                         }
                     }
@@ -184,6 +189,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 })),
             }),
@@ -308,6 +314,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 })),
             }),

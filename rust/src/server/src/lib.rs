@@ -9,6 +9,7 @@ mod grpc;
 mod listener;
 mod lora;
 mod middleware;
+mod npy;
 mod render;
 mod routes;
 mod runtime;

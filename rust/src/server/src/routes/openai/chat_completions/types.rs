@@ -19,8 +19,8 @@ use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, ChatMessage, FunctionCallResponse, Normalizable, PromptLogprobs, ReasoningEffort,
     StreamOptions, StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta,
-    ToolChoice, Usage, default_true, deserialize_request_top_k, validate_messages, validate_stop,
-    validate_top_p_value,
+    ToolChoice, Usage, default_true, deserialize_optional_u32, deserialize_request_top_k,
+    validate_messages, validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -259,6 +259,11 @@ pub struct ChatCompletionRequest {
     /// tokens. Not supported yet.
     pub return_weight_versions: Option<bool>,
 
+    /// Number of prompt tokens to skip from the returned routed-expert rows.
+    /// Defaults to 0, like the Python frontend.
+    #[serde(default, deserialize_with = "deserialize_optional_u32")]
+    pub routed_experts_prompt_start: Option<u32>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
@@ -346,6 +351,7 @@ impl Default for ChatCompletionRequest {
             return_token_ids: None,
             return_prompt_text: None,
             return_weight_versions: None,
+            routed_experts_prompt_start: None,
             cache_salt: None,
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -401,8 +407,8 @@ pub(super) struct ChatCompletionChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
-    /// Always `None`.
-    /// TODO: return routed experts when `--enable-return-routed-experts` is set.
+    /// Base64-encoded NumPy `.npy` of the request's routed-expert rows, or
+    /// `null` when the engine returned no payload.
     pub routed_experts: Option<String>,
     /// Always `None` until `return_weight_versions` is supported.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,

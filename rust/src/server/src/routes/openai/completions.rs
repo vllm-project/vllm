@@ -38,6 +38,7 @@ use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
+use crate::npy::npy_base64;
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
     CompletionStreamResponse,
@@ -206,6 +207,7 @@ async fn collect_completion(
         PerRequestMetrics::from_timestamps(collected.timestamps, collected.usage.output_token_count)
     });
     let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details);
+    let routed_experts = collected.routed_experts.as_ref().map(npy_base64).transpose()?;
 
     if enable_log_requests {
         info!(
@@ -231,6 +233,7 @@ async fn collect_completion(
             prompt_logprobs,
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
+            routed_experts,
         }],
         usage: Some(usage),
         metrics,
@@ -691,6 +694,7 @@ mod tests {
                         kv_transfer_params: None,
                         ec_transfer_params: None,
                         sampling_mask: None,
+                        routed_experts: None,
                         timestamps: vllm_llm::RequestTimestamps {
                             queued_ts: 10.0,
                             scheduled_ts: 10.2,
@@ -792,6 +796,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    routed_experts: None,
                     timestamps: vllm_llm::RequestTimestamps {
                         queued_ts: 10.0,
                         scheduled_ts: 10.2,
@@ -916,6 +921,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -981,6 +987,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1035,6 +1042,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1092,6 +1100,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1166,6 +1175,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1242,6 +1252,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    routed_experts: None,
                     timestamps: Default::default(),
                 }),
             )),
