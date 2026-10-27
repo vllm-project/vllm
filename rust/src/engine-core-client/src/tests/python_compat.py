@@ -105,6 +105,7 @@ class EngineCoreRequest(
     abort_immediately: bool = False
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
+    include_prefill_progress: bool = False
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,7 @@ class EngineCoreOutput(
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
+    prefill_progress: object | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):

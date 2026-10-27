@@ -7,7 +7,7 @@
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
-use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::output::{PrefillProgress, StopReason};
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
@@ -57,6 +57,7 @@ pub fn to_text_request(
     stream: bool,
     served_model_names: &[String],
 ) -> Result<TextRequest, Status> {
+    let include_prefill_progress = req.include_prefill_progress;
     if !req.model.is_empty() && !served_model_names.iter().any(|n| n == &req.model) {
         return Err(Status::not_found(format!(
             "model `{}` not found",
@@ -95,6 +96,7 @@ pub fn to_text_request(
     let mut sampling_params =
         build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
     sampling_params.watermarking = req.watermarking;
+    sampling_params.include_prefill_progress = stream && include_prefill_progress;
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -331,6 +333,23 @@ pub fn to_prompt_info(
         logprobs,
         ranks,
         candidate_tokens,
+    }
+}
+
+/// Convert a worker prefill-progress snapshot to the public gRPC response.
+pub fn to_prefill_progress(progress: &PrefillProgress) -> pb::PrefillProgress {
+    pb::PrefillProgress {
+        request_id: progress.request_id.clone(),
+        sequence: progress.sequence,
+        phase: progress.phase as i32,
+        prompt_tokens: progress.prompt_tokens,
+        total_compute_tokens: progress.total_compute_tokens,
+        completed_compute_tokens: progress.completed_compute_tokens,
+        remaining_compute_tokens: progress.remaining_compute_tokens,
+        local_cached_tokens: progress.local_cached_tokens,
+        external_cached_tokens: progress.external_cached_tokens,
+        pending_kv_transfer_tokens: progress.pending_kv_transfer_tokens,
+        cache_accounting_final: progress.cache_accounting_final,
     }
 }
 

@@ -1578,6 +1578,7 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
     request = MagicMock()
     request.request_id = "req-1"
+    request.include_prefill_progress = False
     request.num_computed_tokens = 48  # Truncated at the first invalid block.
 
     scheduler._update_waiting_for_remote_kv(request)

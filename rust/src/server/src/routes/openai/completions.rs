@@ -374,6 +374,7 @@ async fn completion_chunk_stream(
                     yield_chunk!(chunk);
                 }
             }
+            Ok(DecodedTextEvent::PrefillProgress(_)) => {}
             Ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled:

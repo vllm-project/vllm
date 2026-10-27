@@ -69,6 +69,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.stats import PrefillStats
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -4996,6 +4997,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.structured_output_manager = Mock()
     scheduler.structured_output_manager.accept_tokens.return_value = False
     scheduler.requests = {request.request_id: request}
+    scheduler._prefill_progress_requests = {}
     scheduler.running = [request]
     scheduler.waiting = Mock()
     scheduler.kv_cache_manager = Mock()
@@ -8737,3 +8739,203 @@ def test_cpu_encoder_input_updates_preserve_shm_handles(use_v2_model_runner):
         {request.request_id: {1: None}} if use_v2_model_runner else {}
     )
     assert request.mm_features[0].data is handle
+
+
+def test_prefill_progress_preserves_cache_accounting_after_decode_starts():
+    request = Request(
+        "progress",
+        list(range(100)),
+        SamplingParams(max_tokens=10),
+        None,
+        include_prefill_progress=True,
+    )
+    request.status = RequestStatus.RUNNING
+    stats = PrefillStats()
+    stats.set(
+        num_prompt_tokens=100,
+        num_local_cached_tokens=20,
+        num_external_cached_tokens=0,
+    )
+
+    prefill = Scheduler._make_prefill_progress(request, stats, False, None, 0.0)
+    assert prefill is not None
+    assert prefill.total_compute_tokens == 80
+    assert prefill.remaining_compute_tokens == 80
+
+    decode = Scheduler._make_prefill_progress(request, None, True, None, 0.01)
+    assert decode is not None
+    assert decode.phase == 4  # DECODE
+    assert decode.total_compute_tokens == 80
+    assert decode.remaining_compute_tokens == 0
+
+    request.num_computed_tokens = 60
+    aborted = Scheduler._make_prefill_progress(
+        request, None, False, FinishReason.ABORT, 0.02
+    )
+    assert aborted is not None
+    assert aborted.remaining_compute_tokens == 40
+
+
+def test_prefill_progress_coalesces_work_but_never_delays_load_corrections():
+    request = Request(
+        "progress",
+        list(range(10_000)),
+        SamplingParams(max_tokens=10),
+        None,
+        include_prefill_progress=True,
+    )
+    request.status = RequestStatus.RUNNING
+    first = Scheduler._make_prefill_progress(request, None, False, None, 0.0)
+    assert first is not None
+    request.num_computed_tokens = 100
+    assert Scheduler._make_prefill_progress(request, None, False, None, 0.05) is None
+    request.num_computed_tokens = 50
+    assert Scheduler._make_prefill_progress(request, None, False, None, 0.25) is None
+    request.num_computed_tokens = 200
+    update = Scheduler._make_prefill_progress(request, None, False, None, 0.25)
+    assert update is not None
+    assert (update.sequence, update.remaining_compute_tokens) == (2, 9800)
+
+    request.num_computed_tokens = 0
+    correction = Scheduler._make_prefill_progress(request, None, False, None, 0.26)
+    assert correction is not None
+    assert correction.remaining_compute_tokens == 10_000
+    stats = PrefillStats()
+    stats.set(
+        num_prompt_tokens=10_000,
+        num_local_cached_tokens=100,
+        num_external_cached_tokens=0,
+    )
+    accounting = Scheduler._make_prefill_progress(request, stats, False, None, 0.265)
+    assert accounting is not None
+    assert accounting.remaining_compute_tokens == 9900
+    assert accounting.cache_accounting_final
+    decode = Scheduler._make_prefill_progress(request, None, True, None, 0.27)
+    assert decode is not None
+    assert decode.remaining_compute_tokens == 0
+    failed = Scheduler._make_prefill_progress(
+        request, None, False, FinishReason.ERROR, 0.28
+    )
+    assert failed is not None
+    assert failed.phase == 7  # FAILED
+
+
+def test_prefill_progress_volume_is_bounded_by_work_instead_of_chunk_count():
+    request = Request(
+        "progress",
+        list(range(10_000)),
+        SamplingParams(max_tokens=10),
+        None,
+        include_prefill_progress=True,
+    )
+    request.status = RequestStatus.RUNNING
+    snapshots = []
+    for completed in range(10_001):
+        request.num_computed_tokens = completed
+        progress = Scheduler._make_prefill_progress(
+            request, None, False, None, completed * 0.001
+        )
+        if progress is not None:
+            snapshots.append(progress)
+    assert 2 <= len(snapshots) <= 101
+    assert snapshots[-1].remaining_compute_tokens == 0
+    assert [p.sequence for p in snapshots] == list(range(1, len(snapshots) + 1))
+
+
+@pytest.mark.parametrize(
+    ("status", "phase"),
+    [
+        (RequestStatus.WAITING, 1),
+        (RequestStatus.WAITING_FOR_REMOTE_KVS, 2),
+        (RequestStatus.RUNNING, 3),
+        (RequestStatus.PREEMPTED, 5),
+    ],
+)
+def test_prefill_progress_refreshes_unchanged_unresolved_work(status, phase):
+    request = Request(
+        "refresh",
+        list(range(100)),
+        SamplingParams(max_tokens=4),
+        None,
+        include_prefill_progress=True,
+    )
+    request.status = status
+    first = Scheduler._make_prefill_progress(request, None, False, None, 0.0)
+    assert first is not None
+    assert first.phase == phase
+    assert Scheduler._make_prefill_progress(request, None, False, None, 0.5) is None
+    refresh = Scheduler._make_prefill_progress(request, None, False, None, 1.0)
+    assert refresh is not None
+    assert refresh.sequence == first.sequence + 1
+    assert refresh.remaining_compute_tokens == first.remaining_compute_tokens
+
+
+def test_prefill_progress_does_not_confirm_pending_external_kv():
+    request = Request(
+        "pending-kv",
+        list(range(100)),
+        SamplingParams(max_tokens=4),
+        None,
+        include_prefill_progress=True,
+    )
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    request.num_computed_tokens = 80
+    request.prefill_progress_cache_tokens = (20, 0)
+    request.prefill_progress_pending_kv_tokens = 60
+    progress = Scheduler._make_prefill_progress(request, None, False, None, 0.0)
+    assert progress is not None
+    assert progress.phase == 2
+    assert progress.remaining_compute_tokens == 80
+    assert progress.external_cached_tokens == 0
+    assert progress.pending_kv_transfer_tokens == 60
+    assert not progress.cache_accounting_final
+
+
+def test_prefill_progress_reports_queued_requests_and_stops_after_abort():
+    scheduler = create_scheduler(
+        max_num_seqs=1, max_num_batched_tokens=16, max_model_len=128
+    )
+    requests = create_requests(num_requests=2, num_tokens=32, max_tokens=4)
+    for request in requests:
+        request.include_prefill_progress = True
+        scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    output = scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[requests[0].request_id],
+            req_id_to_index={requests[0].request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    progress = {
+        entry.request_id: entry.prefill_progress
+        for batch in output.values()
+        for entry in batch.outputs
+    }
+    assert progress[requests[0].request_id].remaining_compute_tokens == 16
+    queued = progress[requests[1].request_id]
+    assert queued.phase == 1
+    assert queued.remaining_compute_tokens == 32
+
+    scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+    output = scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert all(
+        entry.prefill_progress is None
+        for batch in output.values()
+        for entry in batch.outputs
+    )
+    assert all(not scheduler.has_request(request.request_id) for request in requests)
