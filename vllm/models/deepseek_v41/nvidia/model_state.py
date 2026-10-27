@@ -12,6 +12,7 @@ from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dp_group, get_pcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, DPMetadata, create_forward_context
+from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
     ReplayBatch,
@@ -19,11 +20,11 @@ from vllm.models.deepseek_v41.decoder_replay_layers import (
 from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
 )
+from vllm.models.deepseek_v41.sparse_mla import DeepseekV4SparseMLAMetadataBuilder
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.mla.sparse_swa import (
-    DeepseekSparseSWAIndexBatch,
-    DeepseekSparseSWAMetadataBuilder,
-)
+from vllm.v1.attention.backends.mla.decode_prologue import DecodePrologueBatch
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
+from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -39,37 +40,15 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
-
-@triton.jit
-def _gather_lookback_kernel(
-    lookback_ptr,
-    idx_mapping_ptr,
-    query_start_loc_ptr,
-    positions_ptr,
-    all_token_ids_ptr,
-    all_token_ids_stride,
-    num_reqs,
-    DEPTH: tl.constexpr,
-    BLOCK_DEPTH: tl.constexpr,
-):
-    # One program per lookback row; rows past the batch are filled with -1.
-    batch_idx = tl.program_id(0)
-    in_batch = batch_idx < num_reqs
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx, mask=in_batch, other=0)
-    begin = tl.load(query_start_loc_ptr + batch_idx, mask=in_batch, other=0)
-    end = tl.load(query_start_loc_ptr + batch_idx + 1, mask=in_batch, other=0)
-    in_batch = in_batch & (end > begin)
-    num_computed = tl.load(positions_ptr + begin, mask=in_batch, other=0)
-
-    offs = tl.arange(0, BLOCK_DEPTH)
-    pos = num_computed - 1 - offs
-    valid = in_batch & (offs < DEPTH) & (pos >= 0)
-    ids = tl.load(
-        all_token_ids_ptr + req_state_idx.to(tl.int64) * all_token_ids_stride + pos,
-        mask=valid,
-        other=-1,
-    )
-    tl.store(lookback_ptr + batch_idx * DEPTH + offs, ids, mask=offs < DEPTH)
+# The builders whose decode builds stage into the step's prologue batch.
+# Subclasses (DeepseekV4FlashMLAMetadataBuilder and the like) arm through
+# their base here.
+_PROLOGUE_BUILDERS = (
+    CompressorMetadataBuilder,
+    DeepseekV4SparseMLAMetadataBuilder,
+    DeepseekV32IndexerMetadataBuilder,
+    DeepseekSparseSWAMetadataBuilder,
+)
 
 
 @triton.jit
@@ -222,9 +201,10 @@ class DeepseekV41ModelState(DefaultModelState):
         # The replay window and the indices of the prefix-cacheable groups, from
         # the KV cache config on first use; None until then.
         self._replay: tuple[int, torch.Tensor] | None = None
-        # Batches the per-group SWA decode index builds of each step into one
-        # kernel launch; None on devices without the pointer-indirection path.
-        self._swa_index_batch: DeepseekSparseSWAIndexBatch | None = None
+        # Batches the per-group decode prologue builds of each step into one
+        # kernel launch. Non-CUDA devices never open it, so their builders
+        # keep launching per phase.
+        self._prologue_batch = DecodePrologueBatch(device)
 
         self.decoder_replay_layers: DecoderReplayLayers | None = getattr(
             model, "decoder_replay_layers", None
@@ -298,18 +278,15 @@ class DeepseekV41ModelState(DefaultModelState):
         window = self.lookback_token_ids
         if window is None:
             return model_inputs
-        all_token_ids = req_states.all_token_ids.gpu
-        depth = window.shape[1]
-        _gather_lookback_kernel[(window.shape[0],)](
-            window,
-            input_batch.idx_mapping,
-            input_batch.query_start_loc,
-            input_batch.positions,
-            all_token_ids,
-            all_token_ids.stride(0),
-            input_batch.idx_mapping.shape[0],
-            DEPTH=depth,
-            BLOCK_DEPTH=triton.next_power_of_2(depth),
+        # prepare_attn already flushed the prologue batch, so the closed
+        # batch launches the shared lookback body directly.
+        self._prologue_batch.stage_lookback(
+            window=window,
+            idx_mapping=input_batch.idx_mapping,
+            query_start_loc=input_batch.query_start_loc,
+            positions=input_batch.positions,
+            all_token_ids=req_states.all_token_ids.gpu,
+            num_reqs=input_batch.idx_mapping.shape[0],
         )
         model_inputs["lookback_token_ids"] = window
         return model_inputs
@@ -392,7 +369,10 @@ class DeepseekV41ModelState(DefaultModelState):
                 )
             assert model_specific_attn_metadata is None
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
-        swa_index_batch = self._begin_swa_index_batch(attn_groups, ubatch_idx)
+        decode_only = not input_batch.is_prefilling_np[: input_batch.num_reqs].any()
+        prologue_batch = self._begin_prologue_batch(
+            attn_groups, ubatch_idx, decode_only
+        )
         try:
             attn_metadata = self._build_attn_metadata(
                 input_batch,
@@ -406,8 +386,8 @@ class DeepseekV41ModelState(DefaultModelState):
                 model_specific_attn_metadata=model_specific_attn_metadata,
             )
         finally:
-            if swa_index_batch is not None:
-                swa_index_batch.flush()
+            if prologue_batch is not None:
+                prologue_batch.flush()
         if self.decoder_replay_layers is not None:
             assert replay_start is not None
             self._prepare_replay_batch(
@@ -427,27 +407,30 @@ class DeepseekV41ModelState(DefaultModelState):
             values, out=self._replay_start[:num_reqs]
         )
 
-    def _begin_swa_index_batch(
-        self, attn_groups: list[list[AttentionGroup]], ubatch_idx: int
-    ) -> DeepseekSparseSWAIndexBatch | None:
-        """Open a batch staging the step's SWA decode index builds.
+    def _begin_prologue_batch(
+        self,
+        attn_groups: list[list[AttentionGroup]],
+        ubatch_idx: int,
+        decode_only: bool,
+    ) -> DecodePrologueBatch | None:
+        """Open a batch staging the step's decode prologue builds.
 
-        Arms every SWA metadata builder of the ubatch so their causal decode
-        builds stage into one launch at ``flush``, then returns the open batch.
-        Returns None where the batched kernel is unavailable; armed builders
-        then keep launching per group.
+        Arms every prologue-staging metadata builder of the ubatch so their
+        decode builds stage into one launch at ``flush``, then opens the
+        batch. Returns None on devices without the batched kernel; armed
+        builders then keep launching per phase. The flush must close every
+        bracket inside ``prepare_attn``: the ubatch path re-enters per
+        microbatch, and capture builds get no following ``prepare_inputs``.
         """
         if self.device.type != "cuda":
             return None
-        if self._swa_index_batch is None:
-            self._swa_index_batch = DeepseekSparseSWAIndexBatch(self.device)
         for groups in attn_groups:
             for group in groups:
                 builder = group.get_metadata_builder(ubatch_idx)
-                if isinstance(builder, DeepseekSparseSWAMetadataBuilder):
-                    builder.arm_index_batch(self._swa_index_batch)
-        self._swa_index_batch.begin()
-        return self._swa_index_batch
+                if isinstance(builder, _PROLOGUE_BUILDERS):
+                    builder.arm_prologue_batch(self._prologue_batch)
+        self._prologue_batch.begin(decode_only=decode_only)
+        return self._prologue_batch
 
     def _build_attn_metadata(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """The step's attention-metadata build (``DefaultModelState.prepare_attn``)."""

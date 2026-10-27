@@ -20,7 +20,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
+from vllm.v1.attention.backends.mla.decode_prologue import (
+    UNARMED_PROLOGUE_BATCH,
+    DecodePrologueBatch,
+)
 from vllm.v1.attention.backends.mla.sparse_swa import (
     _LAYER_TYPE_C1A,
     _LAYER_TYPE_C2A,
@@ -209,6 +212,15 @@ class DeepseekV4SparseMLAMetadataBuilder(
             self.compressed_slot_mapping_buffer = torch.empty(
                 max_num_batched_tokens, dtype=torch.int64, device=device
             )
+        self._prologue_batch: DecodePrologueBatch = UNARMED_PROLOGUE_BATCH
+
+    def arm_prologue_batch(self, batch: DecodePrologueBatch) -> None:
+        """Receive the batch that stages this builder's decode builds.
+
+        Staging only happens while the batch is open; a build outside an open
+        batch launches its own kernel as before.
+        """
+        self._prologue_batch = batch
 
     def build(
         self,
@@ -217,21 +229,24 @@ class DeepseekV4SparseMLAMetadataBuilder(
         fast_build: bool = False,
     ) -> DeepseekV4FlashMLAMetadata:
         cm = common_attn_metadata
-        req_id_per_token = cm.token_to_req_indices(self.req_id_per_token_buffer)
+        req_id_per_token = self._prologue_batch.token_to_req_indices(
+            cm, self.req_id_per_token_buffer
+        )
 
         slot_mapping = cm.slot_mapping
         if self.compress_ratio > 1:
             local_slots = slot_mapping
             if self.pcp_size > 1:
                 local_slots = slot_mapping.chunk(self.pcp_size)[self.pcp_rank]
-            slot_mapping = get_compressed_slot_mapping(
-                cm.num_actual_tokens,
-                local_slots,
-                cm.query_start_loc,
-                cm.seq_lens,
-                cm.block_table_tensor,
-                int(self.kv_cache_spec.num_states),
-                self.compress_ratio,
+            slot_mapping = self._prologue_batch.stage_compressed_slot_mapping(
+                fuse=self.pcp_size == 1,
+                num_tokens=cm.num_actual_tokens,
+                slot_mapping=local_slots,
+                query_start_loc=cm.query_start_loc,
+                seq_lens=cm.seq_lens,
+                block_table=cm.block_table_tensor,
+                block_size=int(self.kv_cache_spec.num_states),
+                compress_ratio=self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
             if self.pcp_size > 1:

@@ -15,6 +15,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.mla.decode_prologue import _compressed_slot_body
 
 _DSPARK_SWA_INDEX_ALIGNMENT = 64
 
@@ -72,69 +73,23 @@ class CompressedSlotMappingKernel(
         PAD_ID: tl.constexpr,
         TRITON_BLOCK_SIZE: tl.constexpr,
     ):
-        batch_idx = tl.program_id(0)
-        if batch_idx >= num_rows:
-            # Request programs cover [0, num_tokens); graph replays read the
-            # buffer's full padded width, so tail programs clear the rest.
-            offsets = (
-                num_tokens
-                + (batch_idx - num_rows) * TRITON_BLOCK_SIZE
-                + tl.arange(0, TRITON_BLOCK_SIZE)
-            )
-            tl.store(
-                compressed_slot_mapping_ptr + offsets,
-                PAD_ID,
-                mask=offsets < out_len,
-            )
-            return
-
-        query_start = tl.load(query_start_loc_ptr + batch_idx)
-        query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
-        query_len = query_end - query_start
-
-        seq_len = tl.load(seq_lens_ptr + batch_idx)
-        start_pos = seq_len - query_len
-
-        for i in range(0, query_len, TRITON_BLOCK_SIZE):
-            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-            mask = offset < query_len
-
-            pos = start_pos + i + tl.arange(0, TRITON_BLOCK_SIZE)
-            # A replayed token has a PAD slot (SWA bounded replay: its KV is
-            # cached already); its compressed KV is cached too, so PAD here.
-            slot = tl.load(
-                slot_mapping_ptr + query_start + offset, mask=mask, other=PAD_ID
-            )
-            is_valid = ((pos + 1) % COMPRESS_RATIO == 0) & (slot != PAD_ID)
-            # Under DCP a PAD slot also marks tokens owned by other ranks; the
-            # interleave is a multiple of COMPRESS_RATIO, so a state lives
-            # entirely on the rank owning its last token.
-            local_pos = (
-                pos // (cp_interleave * dcp_world_size) * cp_interleave
-                + pos % cp_interleave
-            )
-            pos_after_compress = local_pos // COMPRESS_RATIO
-
-            block_ids = pos_after_compress // block_size
-            # Padded or invalid table entries clamp to block 0, the null
-            # block, so a bogus write lands in scratch instead of an illegal
-            # slot; the load index itself can be negative for padding rows.
-            block_numbers = tl.maximum(
-                tl.load(
-                    block_table_ptr + batch_idx * block_table_stride + block_ids,
-                    mask=mask & is_valid,
-                ),
-                0,
-            )
-            slot_ids = block_numbers.to(tl.int64) * block_size + (
-                pos_after_compress % block_size
-            )
-
-            # NOTE
-            slot_ids = tl.where(is_valid, slot_ids, PAD_ID)
-            tl.store(
-                compressed_slot_mapping_ptr + query_start + offset, slot_ids, mask=mask
-            )
+        _compressed_slot_body(
+            compressed_slot_mapping_ptr,
+            slot_mapping_ptr,
+            query_start_loc_ptr,
+            seq_lens_ptr,
+            block_table_ptr,
+            block_table_stride,
+            block_size,
+            COMPRESS_RATIO,
+            dcp_world_size,
+            cp_interleave,
+            num_tokens,
+            out_len,
+            num_rows,
+            PAD_ID=PAD_ID,
+            TRITON_BLOCK_SIZE=TRITON_BLOCK_SIZE,
+        )
 
     def dispatch(  # type: ignore[override]
         self,

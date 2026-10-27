@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, cast
 
-import numpy as np
 import torch
 from transformers import DeepseekV4Config
 
@@ -34,6 +33,10 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
 )
+from vllm.v1.attention.backends.mla.decode_prologue import (
+    UNARMED_PROLOGUE_BATCH,
+    DecodePrologueBatch,
+)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
@@ -43,7 +46,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     get_kv_quant_mode,
 )
-from vllm.v1.worker.gpu.buffer_utils import _load_ptr
 
 # DeepseekV4 decode layer types, keyed by compress_ratio. Each type has a distinct
 # (topk, extra_topk, extra_page_block_size) config, so they cannot share a
@@ -472,265 +474,6 @@ def _launch_causal_decode_swa_indices(
     )
 
 
-def _same_buffer(a: torch.Tensor, b: torch.Tensor) -> bool:
-    """Whether two tensors are the same buffer with the same layout.
-
-    ``CommonAttentionMetadata.token_to_req_indices`` returns a fresh view of
-    the threaded cache per call, so the batch's shared-argument check compares
-    buffers, not tensor objects.
-    """
-    return (
-        a.dtype == b.dtype
-        and a.shape == b.shape
-        and a.stride() == b.stride()
-        and a.data_ptr() == b.data_ptr()
-    )
-
-
-class DeepseekSparseSWAIndexBatch:
-    """Stages one step's per-group SWA decode index builds for one launch.
-
-    The Deepseek V4.1 model state brackets the step's attention-metadata build
-    with :meth:`begin` and :meth:`flush`: each armed builder's causal decode
-    build records its group's buffers instead of launching, and the flush
-    issues a single pointer-indirected kernel covering every staged group.
-    While a CUDA graph is recording, the flush launches the per-group kernel
-    for each staged group instead, keeping captured builds replay-stable.
-    """
-
-    def __init__(self, device: torch.device):
-        self._device = device
-        self._groups: list[tuple[torch.Tensor, ...]] = []
-        self._shared: tuple[Any, ...] | None = None
-        self._open = False
-        # Staging for the batched launch's parameter table, sized to the
-        # largest group count seen. The host side must be pinned: a pageable
-        # H2D copy serializes on the stream through a driver staging buffer
-        # (measured as a uniform per-step stall), while a pinned copy is a
-        # true async DMA. Refilling a pinned source is only safe once the
-        # previous copy retired, so an event guards the refill; while it is
-        # pending the launch falls back to a fresh table, whose lifetime the
-        # caching allocator already guards.
-        self._params_host: torch.Tensor | None = None
-        self._params_host_rows: np.ndarray | None = None
-        self._params_device: torch.Tensor | None = None
-        self._params_copied: torch.cuda.Event | None = None
-        self._params_last: np.ndarray | None = None
-
-    @property
-    def open(self) -> bool:
-        return self._open
-
-    def begin(self) -> None:
-        assert not self._open, (
-            "an SWA index batch began before the previous one flushed"
-        )
-        self._groups = []
-        self._shared = None
-        self._open = True
-
-    def stage(
-        self,
-        *,
-        swa_indices: torch.Tensor,
-        swa_lens: torch.Tensor,
-        is_valid_token: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        block_table: torch.Tensor,
-        replay_start: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        seq_lens: torch.Tensor,
-        token_to_req_indices: torch.Tensor,
-        window_size: int,
-        block_size: int,
-        num_tokens: int,
-        num_valid_tokens: int,
-    ) -> None:
-        """Record one group's causal decode build; shared arguments must be
-        identical across the groups of a step."""
-        assert self._open
-        shared = (
-            query_start_loc,
-            seq_lens,
-            token_to_req_indices,
-            window_size,
-            block_size,
-            swa_indices.shape[-1],
-            num_tokens,
-            num_valid_tokens,
-        )
-        names = (
-            "query_start_loc",
-            "seq_lens",
-            "token_to_req_indices",
-            "window_size",
-            "block_size",
-            "index_width",
-            "num_tokens",
-            "num_valid_tokens",
-        )
-        if self._shared is None:
-            self._shared = shared
-        else:
-            for name, was, now in zip(names, self._shared, shared):
-                if isinstance(was, torch.Tensor):
-                    if not _same_buffer(was, now):
-                        raise ValueError(
-                            f"SWA index batch groups disagree on {name}; "
-                            "batched builds require one shared buffer"
-                        )
-                elif was != now:
-                    raise ValueError(
-                        f"SWA index batch groups disagree on {name} "
-                        f"({was} vs {now}); batched builds require one "
-                        "shared value"
-                    )
-        self._groups.append(
-            (
-                swa_indices,
-                swa_lens,
-                is_valid_token,
-                slot_mapping,
-                block_table,
-                replay_start,
-            )
-        )
-
-    def flush(self) -> None:
-        try:
-            if not self._groups:
-                return
-            # stage() records the shared arguments with the first group.
-            assert self._shared is not None
-            if torch.cuda.is_current_stream_capturing() or len(self._groups) == 1:
-                # A recording must capture each group's own launch; the
-                # batched kernel reads a parameter table this method rebuilds
-                # per step, which a replay would not refresh. A single group
-                # pays the table upload to fuse nothing: one launch either
-                # way, so it takes the direct path too.
-                (
-                    query_start_loc,
-                    seq_lens,
-                    token_to_req_indices,
-                    window_size,
-                    block_size,
-                    _,
-                    num_tokens,
-                    num_valid_tokens,
-                ) = self._shared
-                for (
-                    swa_indices,
-                    swa_lens,
-                    is_valid_token,
-                    slot_mapping,
-                    block_table,
-                    replay_start,
-                ) in self._groups:
-                    _launch_causal_decode_swa_indices(
-                        swa_indices,
-                        swa_lens,
-                        window_size,
-                        query_start_loc,
-                        seq_lens,
-                        token_to_req_indices,
-                        slot_mapping,
-                        is_valid_token,
-                        block_table,
-                        block_size,
-                        replay_start,
-                        num_tokens,
-                        num_valid_tokens,
-                    )
-                return
-            self._launch_batched(self._shared)
-        finally:
-            self._open = False
-            self._groups = []
-            self._shared = None
-
-    def _launch_batched(self, shared: tuple[Any, ...]) -> None:
-        (
-            query_start_loc,
-            seq_lens,
-            token_to_req_indices,
-            window_size,
-            block_size,
-            index_width,
-            num_tokens,
-            num_valid_tokens,
-        ) = shared
-        num_groups = len(self._groups)
-        rows_np = np.asarray(
-            [
-                [
-                    swa_indices.data_ptr(),
-                    swa_lens.data_ptr(),
-                    is_valid_token.data_ptr(),
-                    slot_mapping.data_ptr(),
-                    block_table.data_ptr(),
-                    replay_start.data_ptr(),
-                    swa_indices.stride(0),
-                    block_table.stride(0),
-                ]
-                for (
-                    swa_indices,
-                    swa_lens,
-                    is_valid_token,
-                    slot_mapping,
-                    block_table,
-                    replay_start,
-                ) in self._groups
-            ],
-            dtype=np.int64,
-        )
-        # Every row holds addresses and strides of persistent per-group
-        # buffers, so the table only changes when a builder reallocates or
-        # the group count moves; the copy runs on change, not per step.
-        # _params_device is None only before the first upload, so its check
-        # changes nothing and only lets mypy narrow the launch slice below.
-        if (
-            self._params_device is None
-            or self._params_last is None
-            or not np.array_equal(self._params_last, rows_np)
-        ):
-            if (
-                self._params_host is None
-                or self._params_host_rows is None
-                or self._params_device is None
-                or self._params_host.shape[0] < num_groups
-                or (self._params_copied is not None and not self._params_copied.query())
-            ):
-                self._params_host = torch.empty(
-                    num_groups, 8, dtype=torch.int64, pin_memory=True
-                )
-                self._params_host_rows = self._params_host.numpy()
-                self._params_device = torch.empty(
-                    num_groups, 8, dtype=torch.int64, device=self._device
-                )
-                self._params_copied = None
-            self._params_host_rows[:num_groups] = rows_np
-            self._params_device[:num_groups].copy_(
-                self._params_host[:num_groups], non_blocking=True
-            )
-            if self._params_copied is None:
-                self._params_copied = torch.cuda.Event()
-            self._params_copied.record()
-            self._params_last = rows_np
-        params = self._params_device[:num_groups]
-        _COMPUTE_SWA_INDICES_AND_LENS_BATCHED_KERNEL(
-            params,
-            query_start_loc,
-            seq_lens,
-            token_to_req_indices,
-            window_size,
-            block_size,
-            index_width,
-            num_tokens=num_tokens,
-            num_groups=num_groups,
-            num_valid_tokens=num_valid_tokens,
-        )
-
-
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     """Builds metadata for DeepseekV4 SWA cache.
 
@@ -878,15 +621,16 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-        self._index_batch: DeepseekSparseSWAIndexBatch | None = None
+        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        self._prologue_batch: DecodePrologueBatch = UNARMED_PROLOGUE_BATCH
 
-    def arm_index_batch(self, batch: DeepseekSparseSWAIndexBatch) -> None:
-        """Receive the batch that stages this builder's decode index builds.
+    def arm_prologue_batch(self, batch: DecodePrologueBatch) -> None:
+        """Receive the batch that stages this builder's decode builds.
 
         Staging only happens while the batch is open; a build outside an open
         batch launches its own kernel as before.
         """
-        self._index_batch = batch
+        self._prologue_batch = batch
 
     def build(
         self,
@@ -923,16 +667,23 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         # NOTE: Ensure all metadata tensors maintain fixed memory addresses
         # for CUDA graph compatibility.
-        token_to_req_indices = common_attn_metadata.token_to_req_indices(
-            self.token_to_req_indices
-        )
+        non_causal = not common_attn_metadata.causal
+        if non_causal:
+            # DSpark's non-causal kernel reads the mapping inside this build,
+            # before the prologue batch's flush would fill a staged one.
+            token_to_req_indices = common_attn_metadata.token_to_req_indices(
+                self.token_to_req_indices
+            )
+        else:
+            token_to_req_indices = self._prologue_batch.token_to_req_indices(
+                common_attn_metadata, self.token_to_req_indices
+            )
 
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
         if replay_start is None:
             # Graph captures build without it; their dummy batches replay nothing.
             replay_start = self.no_replay_start
 
-        non_causal = not common_attn_metadata.causal
         decode_swa_width = (
             self.noncausal_index_width if non_causal else self.window_size
         )
@@ -971,39 +722,23 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                     num_valid_tokens=num_decode_tokens,
                 )
             else:
-                batch = self._index_batch
-                if batch is not None and batch.open:
-                    batch.stage(
-                        swa_indices=decode_swa_indices,
-                        swa_lens=self.decode_swa_lens,
-                        is_valid_token=is_valid_token,
-                        slot_mapping=slot_mapping,
-                        block_table=block_table,
-                        replay_start=replay_start,
-                        query_start_loc=query_start_loc,
-                        seq_lens=seq_lens,
-                        token_to_req_indices=token_to_req_indices,
-                        window_size=self.window_size,
-                        block_size=self.block_size,
-                        num_tokens=slot_mapping.shape[0],
-                        num_valid_tokens=num_decode_tokens,
-                    )
-                else:
-                    _launch_causal_decode_swa_indices(
-                        decode_swa_indices,
-                        self.decode_swa_lens,
-                        self.window_size,
-                        query_start_loc,
-                        seq_lens,
-                        token_to_req_indices,
-                        slot_mapping,
-                        is_valid_token,
-                        block_table,
-                        self.block_size,
-                        replay_start,
-                        slot_mapping.shape[0],
-                        num_decode_tokens,
-                    )
+                self._prologue_batch.stage_swa_indices(
+                    fuse=self.pcp_size == 1,
+                    swa_indices=decode_swa_indices,
+                    swa_lens=self.decode_swa_lens,
+                    is_valid_token=is_valid_token,
+                    slot_mapping=slot_mapping,
+                    block_table=block_table,
+                    replay_start=replay_start,
+                    query_start_loc=query_start_loc,
+                    seq_lens=seq_lens,
+                    token_to_req_indices=token_to_req_indices,
+                    window_size=self.window_size,
+                    block_size=self.block_size,
+                    num_tokens=slot_mapping.shape[0],
+                    num_valid_tokens=num_decode_tokens,
+                    num_mapped_tokens=int(query_start_loc_cpu[-1]),
+                )
 
         # Vision variant: per-token in-image visibility for prefill tokens.
         # Decode tokens are always past the image spans (spans are prefilled
@@ -1576,163 +1311,6 @@ class ComputeSWAIndicesAndLensKernel(
         )
 
 
-@triton.jit(do_not_specialize=["num_valid_tokens"])
-def _compute_swa_indices_and_lens_batched_kernel(
-    group_params_ptr,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    token_to_req_indices_ptr,
-    window_size,
-    block_size,
-    index_width,
-    num_valid_tokens,
-    TRITON_BLOCK_SIZE: tl.constexpr,
-):
-    """Causal decode index build over every SWA group of a step in one launch.
-
-    ``group_params_ptr`` is an int64 [num_groups, 8] table: per group the
-    absolute addresses of swa_indices, swa_lens, is_valid_token, slot_mapping,
-    block_table and replay_start, then swa_indices_stride and
-    block_table_stride. Addresses let one launch write each group's own
-    persistent buffers; the batch asserts the shared arguments (query layout,
-    window, block size) are identical across groups. The decode path never
-    uses image visibility, so the body is the HAS_IMAGE=False case of
-    ``_compute_swa_indices_and_lens_kernel``.
-    """
-    pid = tl.program_id(0)
-    g = tl.program_id(1)
-    token_idx = pid
-    params = group_params_ptr + g * 8
-    swa_indices_ptr = _load_ptr(params + 0, tl.int32)
-    swa_lens_ptr = _load_ptr(params + 1, tl.int32)
-    is_valid_token_ptr = _load_ptr(params + 2, tl.int8)
-    slot_mapping_ptr = _load_ptr(params + 3, tl.int64)
-    block_table_ptr = _load_ptr(params + 4, tl.int32)
-    replay_start_ptr = _load_ptr(params + 5, tl.int32)
-    swa_indices_stride = tl.load(params + 6)
-    block_table_stride = tl.load(params + 7)
-
-    is_valid = tl.load(slot_mapping_ptr + token_idx) >= 0
-    tl.store(is_valid_token_ptr + token_idx, is_valid.to(tl.int8))
-    # Same tail bound as the per-group kernel: lens zero to the buffer end,
-    # index row-clears only within num_valid_tokens.
-    if not is_valid or pid >= num_valid_tokens:
-        tl.store(swa_lens_ptr + pid, 0)
-        if pid < num_valid_tokens:
-            for i in range(0, index_width, TRITON_BLOCK_SIZE):
-                offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-                tl.store(
-                    swa_indices_ptr + pid * swa_indices_stride + offset,
-                    -1,
-                    mask=offset < index_width,
-                )
-        return
-
-    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-
-    query_start = tl.load(query_start_loc_ptr + req_idx)
-    query_end = tl.load(query_start_loc_ptr + req_idx + 1)
-    query_len = query_end - query_start
-
-    seq_len = tl.load(seq_lens_ptr + req_idx)
-    prefix_len = seq_len - query_len
-
-    pos = prefix_len + token_idx - query_start
-    start_pos = tl.maximum(pos - (window_size - 1), 0)
-    start_pos = tl.maximum(start_pos, tl.load(replay_start_ptr + req_idx))
-    end_pos = pos + 1
-
-    swa_len = end_pos - start_pos
-    tl.store(swa_lens_ptr + pid, swa_len)
-
-    for i in range(0, index_width, TRITON_BLOCK_SIZE):
-        offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-
-        pos_offset = start_pos + offset
-        block_indices = pos_offset // block_size
-        block_numbers = tl.load(
-            block_table_ptr + req_idx * block_table_stride + block_indices,
-            mask=pos_offset < end_pos,
-        )
-        block_offsets = pos_offset % block_size
-        slot_ids = block_numbers * block_size + block_offsets
-
-        slot_ids = tl.where(offset < swa_len, slot_ids, -1)
-        tl.store(
-            swa_indices_ptr + pid * swa_indices_stride + offset,
-            slot_ids,
-            mask=offset < index_width,
-        )
-
-
-class ComputeSWAIndicesAndLensBatchedKernel(
-    VllmTritonJitKernel["ComputeSWAIndicesAndLensBatchedKernel.CompileKey"]
-):
-    @dataclass(frozen=True)
-    class CompileKey:
-        window_size: int
-        index_width: int
-        block_size: int
-        triton_block_size: int
-
-    kernel = staticmethod(_compute_swa_indices_and_lens_batched_kernel)
-
-    def dispatch(  # type: ignore[override]
-        self,
-        **compile_key_fields: int,
-    ) -> CompileKey:
-        return self.CompileKey(
-            **compile_key_fields,
-            triton_block_size=1024,
-        )
-
-    def get_warmup_keys(
-        self,
-        *,
-        window_size: int,
-        block_size: int,
-    ) -> list[CompileKey]:
-        # The batched path is causal decode only, so index_width is always
-        # the window and image widening never applies.
-        return self._trace_dispatch(self.dispatch)(
-            zip_inputs(*(dict(index_width=window_size),)),
-            window_size=window_size,
-            block_size=block_size,
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        return dict(
-            group_params=TritonWarmupTensor(torch.int64, shape=(1, 8), strides=(8, 1)),
-            query_start_loc=int32_ptr,
-            seq_lens=int32_ptr,
-            token_to_req_indices=int32_ptr,
-            window_size=compile_key.window_size,
-            block_size=compile_key.block_size,
-            index_width=compile_key.index_width,
-            num_tokens=1,
-            num_groups=1,
-            num_valid_tokens=1,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        group_params: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        seq_lens: torch.Tensor,
-        token_to_req_indices: torch.Tensor,
-        window_size: int,
-        block_size: int,
-        index_width: int,
-        *,
-        num_tokens: int,
-        num_groups: int,
-        num_valid_tokens: int,
-    ) -> LaunchSpec:
-        return (num_tokens, num_groups), dict(TRITON_BLOCK_SIZE=1024)
-
-
 class ComputeDSparkNoncausalSWAIndicesKernel(
     VllmTritonJitKernel["ComputeDSparkNoncausalSWAIndicesKernel.CompileKey"]
 ):
@@ -1904,5 +1482,4 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
 
 _COMPUTE_PREFILL_METADATA_KERNEL = ComputePrefillMetadataKernel()
 _COMPUTE_SWA_INDICES_AND_LENS_KERNEL = ComputeSWAIndicesAndLensKernel()
-_COMPUTE_SWA_INDICES_AND_LENS_BATCHED_KERNEL = ComputeSWAIndicesAndLensBatchedKernel()
 _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL = ComputeDSparkNoncausalSWAIndicesKernel()

@@ -19,6 +19,24 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 
 ---
 
+## Branch status: dsv41-decode-fusions
+
+This branch carries the DeepSeek V4.1 decode-fusion series (umbrella:
+vllm-project/vllm#63308); the five merged fusion batches are
+e2e-validated, with results in the umbrella PR. The branch tip adds
+trace-driven follow-ups and a decode-prologue megakernel,
+`vllm/v1/attention/backends/mla/decode_prologue.py`: one Triton launch
+covers the per-group decode metadata builds — token map, compressed
+slot mappings, native indexer decode lens, ring slot mapping, SWA
+indices — that previously launched one eager op per phase. The
+remaining prologue GPU work is the two deep_gemm
+`sm90_paged_mqa_logits_metadata` schedules, the lookback gather, and
+one pinned host-to-device copy of the params table.
+
+E2e validation of the branch tip is still pending: the CUDA tests in
+`tests/v1/attention/test_deepseek_v4_swa_visible.py` await a GPU run,
+and the A/B campaign for it remains to be run.
+
 ## About
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.

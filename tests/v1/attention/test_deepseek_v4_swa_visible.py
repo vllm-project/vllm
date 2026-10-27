@@ -24,8 +24,8 @@ from vllm.models.deepseek_v4.common.ops.cache_utils import (
     combine_topk_swa_indices,
 )
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.mla.decode_prologue import DecodePrologueBatch
 from vllm.v1.attention.backends.mla.sparse_swa import (
-    DeepseekSparseSWAIndexBatch,
     DeepseekSparseSWAMetadataBuilder,
     _compute_image_visibility_kernel,
     _compute_swa_indices_and_lens_kernel,
@@ -930,7 +930,8 @@ def run_step_builds(
 @pytest.mark.parametrize("mix_prefill", [False, True])
 def test_batched_decode_indices_match_per_group_builds(mix_prefill):
     """One staged launch fills each group's decode buffers exactly as the
-    per-group launches do."""
+    per-group launches do; a mixed batch stages nothing and launches per
+    phase."""
     seq_lens = [30, 12, 45]
     query_lens = [1, 1, 20] if mix_prefill else [1, 1, 1]
     num_tokens = sum(query_lens)
@@ -953,10 +954,10 @@ def test_batched_decode_indices_match_per_group_builds(mix_prefill):
         b.decode_swa_lens[:num_tokens].fill_(-7)
         b.is_valid_token[:num_tokens].fill_(True)
 
-    batch = DeepseekSparseSWAIndexBatch(torch.device("cuda"))
+    batch = DecodePrologueBatch(torch.device("cuda"))
     for b in builders:
-        b.arm_index_batch(batch)
-    batch.begin()
+        b.arm_prologue_batch(batch)
+    batch.begin(decode_only=not mix_prefill)
     run_step_builds(builders, seq_lens, query_lens)
     batch.flush()
 
@@ -974,12 +975,13 @@ def test_batched_decode_indices_match_per_group_builds(mix_prefill):
 def make_stage_args(
     device: torch.device, seq_lens: list[int], query_lens: list[int]
 ) -> dict:
-    """Direct ``DeepseekSparseSWAIndexBatch.stage`` arguments for one group."""
+    """Direct ``DecodePrologueBatch.stage_swa_indices`` arguments for one group."""
     query_start_loc, seq_lens_t, token_to_req, slot_mapping, block_table = make_batch(
         seq_lens, query_lens, device
     )
     num_tokens = int(query_start_loc[-1])
     return dict(
+        fuse=True,
         swa_indices=torch.zeros(
             num_tokens, 1, WINDOW, dtype=torch.int32, device=device
         ),
@@ -995,29 +997,39 @@ def make_stage_args(
         block_size=BLOCK_SIZE,
         num_tokens=num_tokens,
         num_valid_tokens=num_tokens,
+        num_mapped_tokens=num_tokens,
     )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_index_batch_flush_launches_and_refuses_divergent_shared_args():
-    """A staged group's flush matches the reference rows, and a group whose
-    shared arguments diverge refuses to stage."""
+def test_prologue_batch_flush_launches_and_refuses_divergent_shared_args():
+    """A staged group's flush matches the reference rows, groups sharing the
+    step's buffers may stage divergent per-row scalars, and a group whose
+    shared buffers diverge refuses to stage."""
     device = torch.device("cuda")
     seq_lens = [30, 12]
     query_lens = [1, 1]
-    batch = DeepseekSparseSWAIndexBatch(device)
-    batch.begin()
+    batch = DecodePrologueBatch(device)
+    batch.begin(decode_only=True)
     first = make_stage_args(device, seq_lens, query_lens)
-    batch.stage(**first)
+    batch.stage_swa_indices(**first)
 
-    with pytest.raises(ValueError, match="disagree on window_size"):
-        batch.stage(**{**first, "window_size": WINDOW + 1})
+    # window_size rides in the row, so a narrower window stages alongside.
+    narrower = make_stage_args(device, seq_lens, query_lens)
+    narrower["query_start_loc"] = first["query_start_loc"]
+    narrower["seq_lens"] = first["seq_lens"]
+    narrower["window_size"] = WINDOW - 2
+    batch.stage_swa_indices(**narrower)
 
-    second = make_stage_args(device, seq_lens, query_lens)
-    second["query_start_loc"] = first["query_start_loc"]
-    second["token_to_req_indices"] = first["token_to_req_indices"]
+    with pytest.raises(ValueError, match="disagree on query_start_loc"):
+        divergent = make_stage_args(device, seq_lens, query_lens)
+        divergent["seq_lens"] = first["seq_lens"]
+        batch.stage_swa_indices(**divergent)
+
     with pytest.raises(ValueError, match="disagree on seq_lens"):
-        batch.stage(**second)
+        divergent = make_stage_args(device, seq_lens, query_lens)
+        divergent["query_start_loc"] = first["query_start_loc"]
+        batch.stage_swa_indices(**divergent)
 
     batch.flush()
     assert not batch.open
@@ -1033,6 +1045,67 @@ def test_index_batch_flush_launches_and_refuses_divergent_shared_args():
     )
     assert first["swa_lens"].cpu().tolist() == lens
     assert first["swa_indices"][:, 0].cpu().tolist() == rows
+    narrow_rows, narrow_lens = ref_swa_slot_rows(
+        seq_lens,
+        query_lens,
+        [[], []],
+        narrower["block_table"],
+        WINDOW - 2,
+        MAX_IMG,
+        WINDOW,
+    )
+    assert narrower["swa_lens"].cpu().tolist() == narrow_lens
+    assert narrower["swa_indices"][:, 0].cpu().tolist() == narrow_rows
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_prologue_batch_lookback_phase_gathers_the_window():
+    """A staged lookback row fills the window exactly as the reference does,
+    alongside another phase of the same launch; rows past the batch stay -1."""
+    device = torch.device("cuda")
+    seq_lens = [30, 12]
+    query_lens = [1, 1]
+    depth = 4
+    batch = DecodePrologueBatch(device)
+    batch.begin(decode_only=True)
+    first = make_stage_args(device, seq_lens, query_lens)
+    batch.stage_swa_indices(**first)
+
+    num_reqs = len(seq_lens)
+    positions = torch.tensor(
+        [seq_lens[r] - query_lens[r] for r in range(num_reqs)],
+        dtype=torch.int64,
+        device=device,
+    )
+    # The persistent buffer is wider than the batch, like the model state's.
+    window = torch.full((num_reqs + 3, depth), -1, dtype=torch.int32, device=device)
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
+    all_token_ids = (
+        torch.arange(num_reqs * 64, dtype=torch.int32, device=device)
+        .view(num_reqs, 64)
+        .add_(
+            torch.arange(num_reqs, dtype=torch.int32, device=device).unsqueeze(1) * 1000
+        )
+    )
+    batch.stage_lookback(
+        window=window,
+        idx_mapping=idx_mapping,
+        query_start_loc=first["query_start_loc"],
+        positions=positions,
+        all_token_ids=all_token_ids,
+        num_reqs=num_reqs,
+    )
+    batch.flush()
+
+    expected = torch.full_like(window, -1)
+    for r in range(num_reqs):
+        begin = int(first["query_start_loc"][r])
+        num_computed = int(positions[begin])
+        for d in range(depth):
+            pos = num_computed - 1 - d
+            if pos >= 0:
+                expected[r, d] = all_token_ids[r, pos]
+    assert torch.equal(window, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -1042,7 +1115,7 @@ def test_armed_builder_launches_directly_outside_open_batch():
     query_lens = [1, 1]
     armed = make_builder(vision=False)
     reference = make_builder(vision=False)
-    armed.arm_index_batch(DeepseekSparseSWAIndexBatch(torch.device("cuda")))
+    armed.arm_prologue_batch(DecodePrologueBatch(torch.device("cuda")))
 
     md = build_metadata(armed, seq_lens, query_lens, None)
     ref_md = build_metadata(reference, seq_lens, query_lens, None)
