@@ -49,7 +49,7 @@ from vllm.parser.engine.parser_engine_config import (
 )
 from vllm.parser.glm47_moe import glm47_moe_config
 from vllm.parser.parser_manager import ParserManager
-from vllm.parser.qwen3 import Qwen3Parser
+from vllm.parser.qwen3 import Qwen3Parser, qwen3_config
 from vllm.tool_parsers.utils import (
     MAX_NESTING_DEPTH,
     coerce_typed_value,
@@ -2435,14 +2435,95 @@ class TestIncrementalArgRewrite:
         cache = _StreamingArgs('{"a": 1}', properties, string_keys)
         assert cache.delta('{"a": 2}') is None
 
-    def test_rewritten_tail_falls_back_to_full_pass(self):
-        """A longer text that does not extend the cache is a rewrite, not an
-        append."""
-        tool = _make_tool("f", {"a": {"type": "integer"}})
+    def test_rewritten_emitted_tail_falls_back_to_full_pass(self):
+        """A change to text already emitted from the resume boundary is a
+        rewrite, not an append."""
+        tool = _make_tool("f", {"a": {"type": "integer"}, "b": {"type": "string"}})
         properties = find_tool_properties([tool], "f")
         string_keys = ParserEngine._streamable_string_keys(properties)
         cache = _StreamingArgs('{"a": 1, "b": "x"}', properties, string_keys)
         assert cache.delta('{"a": 1, "b": "y", "c": 2}') is None
+
+    def test_changed_unemitted_tail_resumes(self):
+        """A changed value that was never emitted leaves the emitted text
+        intact, so only the tail after the last finalized member is
+        rewritten."""
+        tool = _make_tool("f", {"a": {"type": "integer"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs('{"a": 1, "b": "x"}', properties, string_keys)
+        assert cache.delta('{"a": 1, "b": "y", "c": 2}') == ('"y", "c": ', False)
+
+    def test_reserializing_converter_resumes(self):
+        """A converter that re-serializes its whole output every tick must
+        still resume from the last finalized member instead of full-passing."""
+        tool = _make_tool("f", {"a": {"type": "integer"}, "b": {"type": "string"}})
+        engine = _make_engine(_converter_config(_kv_converter), tools=[tool])
+        chunks = ["a=1", " b=he", "llo", " c=2"]
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        expected = []
+        emitted = ""
+        for i in range(2, len(chunks) + 1):
+            converted = _kv_converter("".join(chunks[:i]), True)
+            corrected = _ArgsRewriter(converted, properties, final=False).rewrite()
+            safe, _ = ParserEngine._safe_arg_prefix(corrected, string_keys)
+            expected.append(safe[len(emitted) :])
+            emitted = safe
+
+        assert actual[1:] == expected
+        assert "".join(actual) + flush == engine._fix_arg_types(
+            _kv_converter("".join(chunks), False), "f"
+        )
+
+    def test_extender_bytes_are_verified_against_the_converter(self):
+        """Text an extender streamed ahead of the converter must match the
+        converter's tail, or the cache falls back."""
+        tool = _make_tool("f", {"a": {"type": "integer"}, "b": {"type": "string"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs('{"a": 1, "b": "x"}', properties, string_keys)
+        cache.extend_streamed("not-what-the-converter-emits")
+        assert cache.delta('{"a": 1, "b": "xyz"}') is None
+
+    def test_extender_ticks_reuse_the_cached_correction(self, monkeypatch):
+        """A value streamed by an argument extender must not discard the
+        incremental state; the next converted delta resumes after it."""
+        from tests.parser.engine.streaming_helpers import (
+            collect_tool_arguments,
+            simulate_tool_streaming,
+        )
+
+        constructions = 0
+        original = arg_rewrite._StreamingArgs.__init__
+
+        def counting(self, *args, **kwargs):
+            nonlocal constructions
+            constructions += 1
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(arg_rewrite._StreamingArgs, "__init__", counting)
+        fields = {f"f{i}": {"type": "string"} for i in range(40)}
+        tool = _make_tool("write", fields)
+        engine = _make_engine(qwen3_config(thinking=False), tools=[tool])
+        request = MagicMock(spec=ChatCompletionRequest)
+        request.tools = [tool]
+        request.tool_choice = "auto"
+        request.include_reasoning = True
+        doc = (
+            "<tool_call>\n<function=write>\n"
+            + "".join(f"<parameter=f{i}>value{i}</parameter>\n" for i in range(40))
+            + "</function>\n</tool_call>"
+        )
+        chunks = [doc[i : i + 4] for i in range(0, len(doc), 4)]
+
+        results = simulate_tool_streaming(engine, request, chunks)
+        assert json.loads(collect_tool_arguments(results)) == {
+            f"f{i}": f"value{i}" for i in range(40)
+        }
+        assert constructions <= 5, f"{constructions} caches for {len(chunks)} ticks"
 
     def test_rewrite_behind_identical_tail_falls_back_to_full_pass(self):
         """The cached prefix is compared in full: an open-string converter

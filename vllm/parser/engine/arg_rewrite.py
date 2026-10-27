@@ -413,11 +413,15 @@ class _StreamingArgs:
     A corrected document prefix is final once every member in it is
     delimited, so each delta rewrites only the tail from the last top-level
     comma at or before the emitted prefix instead of the whole document.
-    The emitted boundary matches a full :class:`_ArgsRewriter` pass plus
-    ``safe_arg_prefix``, so delta boundaries are unchanged; text that does
-    not extend the cached document falls back to a full pass.  A trailing
-    open string under a streamable key streams its content verbatim, so a
-    long value is not rescanned on every delta.
+    The gate is the finalized prefix, not the whole previous document: a
+    converter that re-serializes its output rewrites the trailing value and
+    the closing brace on every tick, which a whole-document prefix check
+    would reject even though no finalized member changed.  The re-parsed
+    tail must reproduce the text already emitted from that comma, including
+    bytes an argument extender streamed (recorded by
+    :meth:`extend_streamed`); otherwise the delta falls back to a full pass.
+    A trailing open string under a streamable key streams its content
+    verbatim, so a long value is not rescanned on every delta.
 
     The tail is only resumed from a comma whose member starts with a quoted
     key, and never past the offset where the rewriter first structurally
@@ -438,6 +442,7 @@ class _StreamingArgs:
         "_stop",
         "_nonfinite",
         "safe",
+        "_tail_parts",
     )
 
     def __init__(
@@ -454,9 +459,25 @@ class _StreamingArgs:
         self._corrected_boundary = 0
         self._emitted = len(self.safe)
         self._at_end = len(self.safe) == len(corrected)
-        point = _resume_point(args_json, corrected, len(self.safe), 0)
+        # Corrected text emitted since the resume boundary, kept to verify
+        # that resuming from the boundary reproduces it.  Parts, not a
+        # string, so extender deltas do not rebuild it on every tick.
+        self._tail_parts: list[str] = []
+        point = _resume_point(args_json, corrected, self._emitted, 0)
         if point is not None and (self._stop is None or point[0] <= self._stop):
             self._raw_boundary, self._corrected_boundary = point
+            self._tail_parts.append(corrected[self._corrected_boundary : self._emitted])
+
+    def extend_streamed(self, text: str) -> None:
+        """Record text an argument extender streamed directly to the client.
+
+        The emitted offset must advance with the extender so the next
+        converted delta resumes after the text already sent; ``delta``
+        verifies the converter still produces those bytes.
+        """
+        self._emitted += len(text)
+        if self._raw_boundary:
+            self._tail_parts.append(text)
 
     def _rewrite(
         self, text: str, *, force_parse: bool = False, stop_shift: int = 0
@@ -485,12 +506,28 @@ class _StreamingArgs:
         # is a C-level memcmp, so this stays far cheaper than a rewriter pass.
         return args_json.startswith(raw)
 
+    def _resumable(self, args_json: str) -> bool:
+        """Whether every member finalized before the resume boundary is intact.
+
+        A re-serializing converter rewrites the trailing member on every
+        tick, so the whole-document check fails even when the prefix the
+        cache depends on is unchanged.
+        """
+        return bool(self._raw_boundary) and args_json.startswith(
+            self._raw[: self._raw_boundary]
+        )
+
+    def _tail_unchanged(self, body: str) -> bool:
+        """Whether re-parsing from the boundary reproduces the emitted text."""
+        return not self._raw_boundary or body.startswith("".join(self._tail_parts))
+
     def delta(self, args_json: str) -> tuple[str, bool] | None:
         """Return (newly safe text, value_streams), or ``None`` for a full pass."""
         raw = self._raw
-        if not self._extends(args_json):
+        extends = self._extends(args_json)
+        if not extends and not self._resumable(args_json):
             return None
-        if self.streams and self._at_end:
+        if extends and self.streams and self._at_end:
             delta = args_json[len(raw) :]
             # No unescaped quote means the delta stays inside the cached open
             # string, so a non-finite-looking token in it is string content
@@ -498,6 +535,8 @@ class _StreamingArgs:
             if not _unescaped_quote(delta, is_escaped(raw, len(raw))):
                 self._raw = args_json
                 self._emitted += len(delta)
+                if self._raw_boundary:
+                    self._tail_parts.append(delta)
                 return delta, True
         if not self._properties and not self._nonfinite:
             # A non-finite literal introduced after the cache was built may
@@ -513,6 +552,11 @@ class _StreamingArgs:
             tail, force_parse=self._nonfinite, stop_shift=base - skip
         )
         body = tail_out[skip:]
+        # Only the finalized prefix is known to match; if the new tail does
+        # not reproduce the emitted text from the resume boundary, a full
+        # pass must decide what to emit.
+        if not self._tail_unchanged(body):
+            return None
         emit_rel = max(len(safe_tail) - skip, 0)
         end = self._corrected_boundary + emit_rel
         delta = ""
@@ -521,12 +565,17 @@ class _StreamingArgs:
             delta = body[self._emitted - self._corrected_boundary : emit_rel]
             self._emitted = end
             point = _resume_point(raw_tail, body, emit_rel, skip)
+            if point is not None and (
+                self._stop is None or base + point[0] <= self._stop
+            ):
+                self._raw_boundary = base + point[0]
+                self._corrected_boundary += point[1]
+                self._tail_parts = [body[point[1] : emit_rel]]
+            elif self._raw_boundary:
+                self._tail_parts.append(delta)
         self._raw = args_json
         self.streams = streams
         self._at_end = end == self._corrected_boundary + len(body)
-        if point is not None and (self._stop is None or base + point[0] <= self._stop):
-            self._raw_boundary = base + point[0]
-            self._corrected_boundary += point[1]
         return delta, streams
 
 

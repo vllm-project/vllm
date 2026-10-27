@@ -978,9 +978,11 @@ class ParserEngine(Parser):
                 if not diff or not slot.open_value_streams:
                     return None
                 slot.append_streamed(diff)
-                # Emitted outside the incremental state, which is resynced on
-                # the next converted delta.
-                slot.arg_cache = None
+                # The extender emits directly to the client; advancing the
+                # cache with it lets the next converted delta resume after
+                # the sent text instead of rebuilding the whole document.
+                if slot.arg_cache is not None:
+                    slot.arg_cache.extend_streamed(diff)
                 return diff
             slot.extend_open_value = None
         elif structural is not None and structural.isdisjoint(raw_delta):
