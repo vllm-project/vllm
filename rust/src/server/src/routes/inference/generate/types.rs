@@ -65,6 +65,11 @@ pub struct GenerateRequest {
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
+    /// Encode the top `sampling_params.logprobs` candidates of every position
+    /// as the base64 arrays of `logprobs.top_k` instead of per-token
+    /// `logprobs.content`; non-streaming only, requires
+    /// `sampling_params.logprobs >= 1`.
+    pub packed_top_k_logprobs: Option<bool>,
     pub output_mode: Option<GenerateOutputMode>,
     /// Whether reasoning has ended before the first generated token, as
     /// resolved by `/render`. `true` applies structured outputs from the first
@@ -245,9 +250,27 @@ pub(super) struct PlaceholderRangeInfo {
 
 /// Mirrors the Python vLLM `GenerateLogProbs` class: output logprobs for one
 /// choice, carrying integer token ids rather than the OpenAI string token.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub(super) struct GenerateLogProbs {
     pub content: Option<Vec<GenerateLogProbsContent>>,
+    /// Set instead of `content` for `packed_top_k_logprobs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<PackedTopK>,
+}
+
+/// Mirrors the Python vLLM `PackedTopK` class: the top-k candidates of every
+/// generated position (engine slots `1..=k`, in engine order), each array
+/// `num_positions x k` in row-major order as standard padded base64. In a
+/// response, `token_ids` and `logprobs` hold placeholders that
+/// `top_k_response` replaces with the encoded arrays.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct PackedTopK {
+    pub num_positions: usize,
+    pub k: usize,
+    /// Little-endian `int32` token ids.
+    pub token_ids: String,
+    /// Little-endian `float32` raw engine logprobs (not clamped).
+    pub logprobs: String,
 }
 
 /// Mirrors the Python vLLM `GenerateLogProbsContent` class: the sampled token
