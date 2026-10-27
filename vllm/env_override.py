@@ -150,7 +150,7 @@ _maybe_promote_torch_symbols_for_rocm()
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import is_torch_equal, is_torch_equal_or_newer
+from vllm.utils.torch_version import is_torch_equal, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -526,7 +526,7 @@ def _update_scheduler_patched(self) -> None:
 # For more context, see https://github.com/vllm-project/vllm/issues/30905.
 def _patch_get_raw_stream_if_needed():
     """Workaround for TorchInductor autotune get_raw_stream() bug."""
-    from vllm.utils.torch_utils import is_torch_equal
+    from vllm.utils.torch_version import is_torch_equal
 
     # Only apply the patch for torch 2.9.0 or 2.9.1
     if is_torch_equal("2.9.0") or is_torch_equal("2.9.1"):
@@ -689,7 +689,7 @@ def _apply_fxgraphcache_pickle_patch(pickler_cls, bypass_cls):
 
 def _patch_fxgraphcache_pickle_if_needed():
     """Apply FxGraphCachePickler.dumps ValueError backport when on torch 2.10.x."""
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
+    from vllm.utils.torch_version import is_torch_equal_or_newer
 
     if not is_torch_equal_or_newer("2.10.0") or is_torch_equal_or_newer("2.11.0"):
         return
@@ -916,17 +916,54 @@ def _patch_inductor_fallback_allow_list() -> None:
 
 _patch_inductor_fallback_allow_list()
 
-# ============================================================
-# Triton Autotuner determinism
-# ============================================================
-# Replace the Autotuner.run so it always pick the first running configuration.
-# Useful to eliminate autotune variability leading to non determinism.
-if os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower() in (
-    "1",
-    "true",
-):
-    from vllm.triton_utils.force_first_config import (
-        install as _install_force_first_config,
-    )
 
-    _install_force_first_config()
+def _apply_inductor_pattern_matcher_patch() -> None:
+    """Allow custom ops and functionalization wrappers with unsupported dtypes."""
+    from torch._inductor import pattern_matcher
+    from torch._inductor.lowering import fallback_node_due_to_unsupported_type
+
+    def fallback_for_builtin(node, allow_cpu_inputs=True):
+        return (
+            isinstance(node.target, torch._ops.OpOverload)
+            and torch._library.utils.is_builtin(node.target)
+            and fallback_node_due_to_unsupported_type(node, allow_cpu_inputs)
+        )
+
+    pattern_matcher.fallback_node_due_to_unsupported_type = fallback_for_builtin
+
+
+def _patch_inductor_pattern_matcher() -> None:
+    """Apply the backport when Inductor imports its pattern matcher."""
+    import sys
+
+    target_name = "torch._inductor.pattern_matcher"
+    if target_name in sys.modules:
+        _apply_inductor_pattern_matcher_patch()
+        return
+
+    import importlib.abc
+
+    class _PatternMatcherPatchFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != target_name:
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(fullname)
+            if spec is None or spec.loader is None:
+                return None
+            original_exec = spec.loader.exec_module
+
+            def _exec_then_patch(module):
+                original_exec(module)
+                _apply_inductor_pattern_matcher_patch()
+
+            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
+            return spec
+
+    sys.meta_path.insert(0, _PatternMatcherPatchFinder())
+
+
+# Remove once the minimum supported torch includes
+# https://github.com/pytorch/pytorch/pull/196013.
+if not is_torch_equal_or_newer("2.16.0.dev"):
+    _patch_inductor_pattern_matcher()

@@ -6,10 +6,13 @@ These tests verify that ParsableContext correctly delegates to the unified
 Parser (via parse) and properly builds response output items.
 """
 
+import json
 from collections.abc import Sequence
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -17,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.mcp.tool import HarmonyPythonTool
 from vllm.entrypoints.openai.responses.context import ParsableContext
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -82,6 +86,18 @@ class _ReasoningOnlyParser(DelegatingParser):
 
     def parse_delta(self, *args, **kwargs) -> DeltaMessage | None:
         return None
+
+
+class _CountingParser(_NoOpParser):
+    """Parser that records the ids it counts; token id 7 is reasoning."""
+
+    def __init__(self, tokenizer, *args, **kwargs):
+        super().__init__(tokenizer)
+        self.counted_ids: list[list[int]] = []
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        self.counted_ids.append(list(token_ids))
+        return sum(token_id == 7 for token_id in token_ids)
 
 
 class _StubToolParser:
@@ -153,6 +169,7 @@ def _make_request_output(
     text: str = "Hello, world!",
     token_ids: Sequence[int] = (1, 2, 3),
     finish_reason: str = "stop",
+    num_cache_creation_tokens: int | None = None,
 ) -> RequestOutput:
     return RequestOutput(
         request_id="test",
@@ -170,6 +187,7 @@ def _make_request_output(
             )
         ],
         finished=True,
+        num_cache_creation_tokens=num_cache_creation_tokens,
     )
 
 
@@ -305,6 +323,65 @@ def test_process_extracts_tool_calls():
     assert tool_item.status == "completed"
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "session_name", "dispatched_name", "arguments"),
+    [
+        ("code_interpreter", "python", "python", {"code": "print(42)"}),
+        ("web_search_preview", "browser", "search", {"query": "vLLM"}),
+        ("container.exec", "container", "exec", {"cmd": ["pwd"]}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_builtin_tool_output_preserves_function_call_id(
+    tool_name, session_name, dispatched_name, arguments
+):
+    """Built-in tool outputs remain correlated with their originating call."""
+    tool_session = MagicMock()
+    tool_session.call_tool = AsyncMock(
+        return_value=SimpleNamespace(content=[SimpleNamespace(text="result")])
+    )
+    context = _make_context(None, available_tools=[session_name])
+    tool_call = ResponseFunctionToolCall(
+        id=f"fc_{session_name}",
+        call_id=f"call_{session_name}",
+        type="function_call",
+        name=tool_name,
+        arguments=json.dumps(arguments),
+    )
+    context.response_messages.append(tool_call)
+    context._tool_sessions[session_name] = tool_session
+
+    output = await context.call_tool()
+
+    tool_session.call_tool.assert_awaited_once_with(dispatched_name, arguments)
+    assert output[0].call_id == tool_call.call_id
+
+
+@pytest.mark.asyncio
+async def test_local_python_tool_output_preserves_function_call_id():
+    """Local code-interpreter output remains correlated with its call."""
+
+    async def process(_):
+        yield SimpleNamespace(content=[SimpleNamespace(text="result")])
+
+    python_tool = object.__new__(HarmonyPythonTool)
+    python_tool.python_tool = MagicMock(process=process)
+    context = _make_context(None, available_tools=["python"])
+    tool_call = ResponseFunctionToolCall(
+        id="fc_python",
+        call_id="call_python",
+        type="function_call",
+        name="code_interpreter",
+        arguments='{"code": "print(42)"}',
+    )
+    context.response_messages.append(tool_call)
+    context._tool_sessions["python"] = python_tool
+
+    output = await context.call_tool()
+
+    assert output[0].call_id == tool_call.call_id
+
+
 # ---------------------------------------------------------------------------
 # Tests: finish_reason tracking
 # ---------------------------------------------------------------------------
@@ -339,6 +416,33 @@ def test_multi_turn_accumulation():
     assert texts == ["First turn", "Second turn"]
 
 
+def test_reasoning_tokens_counted_per_round():
+    """Each round is counted on its own ids, not the concatenated rounds."""
+    ctx = _make_context(_CountingParser)
+
+    ctx.append_output(_make_request_output(token_ids=[7, 7, 1]))
+    ctx.append_output(_make_request_output(token_ids=[7, 2]))
+
+    assert ctx.response_parser.counted_ids == [[7, 7, 1], [7, 2]]
+    assert ctx.num_reasoning_tokens == 3
+
+
+def test_cache_creation_tokens_counted_per_round():
+    ctx = _make_context(None)
+
+    for count, expected in [(None, 0), (0, 0), (3, 3), (4, 7)]:
+        ctx.append_output(_make_request_output(num_cache_creation_tokens=count))
+        assert ctx.num_cache_creation_tokens == expected
+
+
+def test_reasoning_tokens_zero_without_parser():
+    ctx = _make_context(None)
+
+    ctx.append_output(_make_request_output(token_ids=[7, 7, 1]))
+
+    assert ctx.num_reasoning_tokens == 0
+
+
 def test_num_init_messages_offset():
     """Initial messages are preserved and offset works correctly."""
     init_messages = [MagicMock(type="message")]
@@ -352,3 +456,27 @@ def test_num_init_messages_offset():
     items = ctx.make_response_output_items()
     assert len(items) == 1
     assert items[0].type == "message"
+
+
+def test_length_truncation_marks_last_item_incomplete():
+    """A turn cut by max_output_tokens ends in an ``incomplete`` item, both
+    with a parser (tool call) and without one (plain message)."""
+    request = _make_request(
+        tool_choice="auto",
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+    )
+    ctx = _make_context(_ToolCallingParser, request=request, enable_auto_tools=True)
+    ctx.append_output(_make_request_output(text="calling tool", finish_reason="length"))
+    assert ctx.response_messages[-1].type == "function_call"
+    assert ctx.response_messages[-1].status == "incomplete"
+
+    ctx = _make_context(None)
+    ctx.append_output(_make_request_output(text="cut mid sen", finish_reason="length"))
+    assert ctx.response_messages[-1].type == "message"
+    assert ctx.response_messages[-1].status == "incomplete"

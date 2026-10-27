@@ -7,16 +7,94 @@ from typing import cast
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.model_executor.layers.attention.attention import get_attention_context
+from vllm.model_executor.layers.attention.mla_attention import split_kv_b_proj
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    KimiK3MergedQKVGateLinear,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.platforms import current_platform
+
+_OPT_KV_LORA_RANK = 512
+_OPT_ROT_DIM = 64
+_OPT_MIN_SIZE = 2048
 
 
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
-    """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm fusion."""
+    """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm and output gate
+    fusions and a fused decode Q-prep path."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._use_eager_qk_rmsnorm_fusion = bool(rocm_aiter_ops.is_enabled())
+        self._fused_qk_prep = self._fused_qk_prep_supported()
+        self._identity_rope: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._qkv_gate_fused = isinstance(
+            self.fused_qkv_a_proj, KimiK3MergedQKVGateLinear
+        )
+        self._fused_q_heads = self.num_heads
+        if self._fused_qk_prep:
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+            self._fused_q_heads = AiterMLAHelper.get_actual_mla_num_heads(
+                self.num_heads
+            )
+        # The fold reads q_b_proj.weight as plain bf16/fp16 rows, so a quantized
+        # q_b_proj keeps the unfused path.
+        self._fold_qb_uk = (
+            self._fused_qk_prep
+            and self.q_b_proj is not None
+            and isinstance(self.q_b_proj.quant_method, UnquantizedLinearMethod)
+            and self.rotary_emb is None
+            and not self.dcp_q_replicate
+            and self.indexer is None
+        )
+        self._w_fold: torch.Tensor | None = None
+
+    def _fused_qk_prep_supported(self) -> bool:
+        attn = self.mla_attn
+        if not (
+            rocm_aiter_ops.is_mla_enabled()
+            and attn.kv_cache_dtype.startswith("fp8")
+            and self.kv_lora_rank == _OPT_KV_LORA_RANK
+            and self.qk_rope_head_dim == _OPT_ROT_DIM
+            and self.kv_lora_rank * self.num_heads >= _OPT_MIN_SIZE
+        ):
+            return False
+        # The fused kernel writes q_out only for slot >= 0, so padded rows would
+        # be garbage after a DCP query all-gather. PCP and HiSparse rewrite the
+        # KV inputs/slots before the standalone write, which this path bypasses.
+        if attn.impl.dcp_world_size > 1 or attn.use_pcp:
+            return False
+        if attn.hisparse_cache is not None or attn.q_pad_num_heads is not None:
+            return False
+        # Only the W_UK variants reproduced in _fused_decode are supported.
+        return (
+            attn.is_aiter_triton_fp4_bmm_enabled
+            or not attn.is_aiter_triton_fp8_bmm_enabled
+        )
+
+    def get_input_quant_key(self) -> QuantKey | None:
+        if self.indexer is not None:
+            return None
+        consumers = (
+            [self.fused_qkv_a_proj]
+            if self.q_lora_rank is not None
+            else [self.kv_a_proj_with_mqa, self.q_proj]
+        )
+        if self.g_proj is not None:
+            consumers.append(self.g_proj)
+        if any(layer is None for layer in consumers):
+            return None
+        keys = [get_input_quant_key(layer) for layer in consumers if layer is not None]
+        return keys[0] if all(key == keys[0] for key in keys) else None
 
     def _normalize_q_kv(
         self,
@@ -38,13 +116,181 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
 
         return q_layernorm(q_c), kv_layernorm(kv_c)
 
+    @staticmethod
+    def _compute_w_fold(
+        w_qb: torch.Tensor,
+        w_uk: torch.Tensor,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+    ) -> torch.Tensor:
+        """W_fold = [W_UK @ W_qb_nope ; W_qb_pe]: one GEMM gives [ql_nope | q_pe].
+
+        ``w_qb`` is the q_b_proj weight [N * (P + R), Lq], ``w_uk`` is [L, N, P].
+        Rows hold all heads' nope rows, then all pe rows, so the two output
+        halves of ``x @ W_fold.T`` are contiguous: [B, N * L] and [B, N * R]."""
+        N, P, R = num_heads, qk_nope_head_dim, qk_rope_head_dim
+        L = w_uk.shape[0]
+        w = w_qb.view(N, P + R, -1).float()
+        nope = torch.einsum("lnp,npk->nlk", w_uk.float(), w[:, :P])  # [N, L, Lq]
+        return (
+            torch.cat([nope.reshape(N * L, -1), w[:, P:].reshape(N * R, -1)])
+            .to(w_qb.dtype)
+            .contiguous()
+        )
+
+    @staticmethod
+    def _split_fold_output(
+        y: torch.Tensor,
+        num_heads: int,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        B, N, L = y.shape[0], num_heads, kv_lora_rank
+        return y[:, : N * L].view(B, N, L), y[:, N * L :].view(B, N, qk_rope_head_dim)
+
+    @torch.no_grad()
+    def _build_w_fold(self) -> None:
+        assert self.q_b_proj is not None
+        w_qb = self.q_b_proj.weight  # [N * (P + R), q_lora_rank]
+        W_UK, _ = split_kv_b_proj(
+            self.mla_attn.kv_b_proj,
+            w_qb.dtype,
+            self.kv_lora_rank,
+            self.num_heads,
+            self.qk_nope_head_dim,
+            self.v_head_dim,
+        )  # [L, N, P]
+        self._w_fold = self._compute_w_fold(
+            w_qb, W_UK, self.num_heads, self.qk_nope_head_dim, self.qk_rope_head_dim
+        )
+
+    def process_weights_after_loading(self) -> None:
+        if self._fold_qb_uk:
+            self._build_w_fold()
+
+    def _fused_decode(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        positions: torch.Tensor,
+        output_shape: tuple[int, int],
+        attn_metadata,
+        layer,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode-only MLA through one fused AITER launch.
+
+        Replaces the fp8 KV-cache write plus the ``[ql_nope | q_pe]`` concat and
+        that query's static fp8 quant with a single
+        ``fused_qk_rope_concat_and_cache_mla``. On an untouched upstream build
+        the concat and quant already arrive as one inductor-fused kernel, so
+        this collapses two launches into one.
+        """
+        from aiter.ops.cache import fused_qk_rope_concat_and_cache_mla
+
+        attn = self.mla_attn
+        if q.dim() == 2:
+            from aiter.ops.triton.gemm.basic.gemm_a16w16 import gemm_a16w16
+
+            assert self._w_fold is not None
+            y = gemm_a16w16(q, self._w_fold)
+            ql_nope, q_pe = self._split_fold_output(
+                y, self.num_heads, self.kv_lora_rank, self.qk_rope_head_dim
+            )
+        else:
+            q_nope, q_pe = q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+            q_nope_t = q_nope.transpose(0, 1)
+
+            if attn.is_aiter_triton_fp4_bmm_enabled:
+                from aiter.ops.triton.batched_gemm_a16wfp4 import (
+                    batched_gemm_a16wfp4,
+                )
+
+                ql_nope = batched_gemm_a16wfp4(
+                    q_nope_t,
+                    attn.W_K,
+                    attn.W_K_scale,
+                    transpose_bm=True,
+                    prequant=True,
+                    y_scale=layer._q_scale,
+                )
+            else:
+                assert attn.W_UK_T is not None  # guaranteed by _fused_qk_prep_supported
+                B, N = q_nope.shape[0], q_nope.shape[1]
+                L = attn.W_UK_T.shape[-1]
+                ql_nope = q_nope_t.new_empty((B, N, L))
+                torch.bmm(q_nope_t, attn.W_UK_T, out=ql_nope.transpose(0, 1))
+
+        if self._identity_rope is None:
+            # cos = 1, sin = 0 makes the kernel's RoPE the identity, which is
+            # what a NoPE model needs. One row suffices because the `_opt`
+            # kernel clamps `pos` into [0, cos_cache.size(0)); a full-length
+            # cache would cost ~268 MB at K3's 1M max_position_embeddings.
+            half = self.qk_rope_head_dim // 2
+            opts = {"dtype": kv_c_normed.dtype, "device": kv_c_normed.device}
+            self._identity_rope = (
+                torch.ones(1, half, **opts),
+                torch.zeros(1, half, **opts),
+            )
+        cos_cache, sin_cache = self._identity_rope
+
+        # An fp8 KV cache is allocated as uint8 and re-viewed as fp8 before use;
+        # the AITER kernel rejects the raw uint8 dtype outright.
+        fp8_dtype = current_platform.fp8_dtype()
+        if kv_cache.dtype != fp8_dtype:
+            kv_cache = kv_cache.view(fp8_dtype)
+
+        head_size = attn.kv_lora_rank + self.qk_rope_head_dim
+        num_tokens, num_heads = ql_nope.shape[:2]
+        q_out_padded = torch.empty(
+            (num_tokens, self._fused_q_heads, head_size),
+            dtype=fp8_dtype,
+            device=ql_nope.device,
+        )
+        q_out = q_out_padded[:, :num_heads]
+        fused_qk_rope_concat_and_cache_mla(
+            ql_nope,
+            q_pe,
+            kv_c_normed,
+            k_pe.squeeze(1),
+            kv_cache.view(kv_cache.shape[0], -1, head_size),
+            q_out,
+            slot_mapping.flatten(),
+            layer._k_scale,
+            layer._q_scale,
+            positions,
+            cos_cache,
+            sin_cache,
+            is_neox=True,
+            is_nope_first=True,
+        )
+
+        # forward_mqa is MLA-specific and not on AttentionImpl; MLAAttention
+        # annotates its own call to it the same way.
+        attn_out, _ = attn.impl.forward_mqa(q_out, kv_cache, attn_metadata, attn)  # type: ignore[attr-defined]
+        output = ql_nope.new_empty(output_shape)
+        attn._v_up_proj(attn_out, out=output)
+        return output
+
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
         llama_4_scaling: torch.Tensor | None = None,
+        skip_o_proj: bool = False,
     ) -> torch.Tensor:
         q_c = None
+        num_tokens = (
+            hidden_states.orig_shape[0]
+            if isinstance(hidden_states, QuantizedActivation)
+            else hidden_states.shape[0]
+        )
+        gate = None
 
         if self.q_lora_rank is not None:
             assert self.fused_qkv_a_proj is not None, (
@@ -58,6 +304,14 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             )
 
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            if self._qkv_gate_fused:
+                qkv_lora, gate = qkv_lora.split(
+                    [
+                        self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+                        self.num_heads * self.v_head_dim,
+                    ],
+                    dim=-1,
+                )
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
@@ -85,36 +339,76 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         # Add head dim of 1 to k_pe.
         k_pe = k_pe.unsqueeze(1)
 
-        q = q_proj_layer(q_proj_input)[0]
-        heads = self.num_heads
-        if self.dcp_q_replicate:
-            heads *= q_proj_layer.group_size
-        q = q.view(-1, heads, self.qk_head_dim)
+        output_shape = (num_tokens, self.num_heads * self.v_head_dim)
 
-        if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
+        attn_metadata = layer = kv_cache = slot_mapping = None
+        fuse = self._fused_qk_prep and not self.dcp_q_replicate
+        if fuse:
+            attn_metadata, layer, kv_cache, slot_mapping = get_attention_context(
+                self.mla_attn.layer_name
+            )
+            fuse = (
+                attn_metadata is not None
+                and slot_mapping is not None
+                and kv_cache.numel() > 0
+                and attn_metadata.num_actual_tokens == attn_metadata.num_decode_tokens
             )
 
-        if self.indexer and self.is_sparse and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+        if fuse and self._fold_qb_uk and llama_4_scaling is None:
+            q = q_proj_input
+        else:
+            q = q_proj_layer(q_proj_input)[0]
+            heads = self.num_heads
+            if self.dcp_q_replicate:
+                heads *= q_proj_layer.group_size
+            q = q.view(-1, heads, self.qk_head_dim)
 
-        if llama_4_scaling is not None:
-            q *= llama_4_scaling
+            if self.rotary_emb is not None:
+                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                    positions, q[..., self.qk_nope_head_dim :], k_pe
+                )
+
+            if self.indexer and self.is_sparse and not self.skip_topk:
+                self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+
+            if llama_4_scaling is not None:
+                q *= llama_4_scaling
 
         q_dcp_replicated = None
         if self.dcp_q_replicate:
             q_dcp_replicated, q = q, q_proj_layer._local_view(q)
 
-        attn_out = self.mla_attn(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
-            q_dcp_replicated=q_dcp_replicated,
-        )
+        if fuse:
+            attn_out = self._fused_decode(
+                q,
+                kv_c_normed,
+                k_pe,
+                positions,
+                output_shape,
+                attn_metadata,
+                layer,
+                kv_cache,
+                slot_mapping,
+            )
+        else:
+            attn_out = self.mla_attn(
+                q,
+                kv_c_normed,
+                k_pe,
+                output_shape=output_shape,
+                q_dcp_replicated=q_dcp_replicated,
+            )
 
         if self.g_proj is not None:
-            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
+            gate = self.g_proj(hidden_states)[0]
+        if gate is not None:
+            if rocm_aiter_ops.is_enabled():
+                from aiter.ops.triton.fusions.fused_sigmoid_mul import fused_sigmoid_mul
 
+                attn_out = fused_sigmoid_mul(attn_out, gate)
+            else:
+                attn_out = attn_out * gate.sigmoid()
+
+        if skip_o_proj:  # the specialized decode runs o_proj in its kernel
+            return attn_out
         return self.o_proj(attn_out)[0]

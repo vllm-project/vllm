@@ -62,7 +62,7 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> No
 
         monkeypatch.setattr(
             hisparse_binding,
-            "HiSparseHostPool",
+            "get_hisparse_host_pool",
             lambda vllm_config, kv_cache_config: host_pool,
         )
         monkeypatch.setattr(hisparse_binding, "allocate_hisparse_kv_caches", allocate)
@@ -112,6 +112,8 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="test")),
         compilation_config=SimpleNamespace(static_forward_context={}),
         kv_caches=[],
+        attn_groups=[],
+        speculative_config=None,
     )
     result = gpu_model_runner.GPUModelRunner.initialize_kv_cache_tensors(
         runner,

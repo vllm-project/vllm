@@ -53,12 +53,14 @@ fn finished() -> Finished {
         usage: vllm_llm::TokenUsage {
             prompt_token_count: 0,
             output_token_count: 0,
-            cached_token_count: 0,
+            prompt_cache_usage: Default::default(),
         },
         finish_reason: FinishReason::stop_eos(),
         kv_transfer_params: None,
         ec_transfer_params: None,
         sampling_mask: None,
+        spec_decode_metrics: None,
+        timestamps: Default::default(),
     }
 }
 
@@ -99,6 +101,7 @@ fn request_with_tools() -> ChatRequest {
             "required": ["city"]
         }),
         strict: None,
+        defer_loading: None,
     }];
     ChatRequest {
         tool_context: ResolvedToolContext::new(&[], tools, Some(ChatToolChoice::Auto), true)
@@ -129,8 +132,10 @@ fn interrupted_final_message_is_preserved() {
             usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             }),
+            timestamps: Default::default(),
+            spec_decode_metrics: None,
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -180,8 +185,10 @@ fn interrupted_analysis_message_is_preserved() {
             usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             }),
+            timestamps: Default::default(),
+            spec_decode_metrics: None,
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
             ec_transfer_params: None,
