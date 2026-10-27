@@ -284,6 +284,7 @@ pub(crate) fn prepare_responses_request(
             include_stop_str_in_output,
             stop_strings: stop.map(|stop| stop.into_vec()),
             min_tokens: min_tokens.unwrap_or(0),
+            detokenize: true,
         },
         intermediate: stream.unwrap_or(false),
         prompt_truncation,
@@ -846,7 +847,7 @@ pub(crate) fn build_usage(usage: &vllm_chat::ChatTokenUsage) -> ResponseUsage {
     ResponseUsage {
         input_tokens: usage.prompt_token_count,
         input_tokens_details: InputTokensDetails {
-            cached_tokens: usage.cached_token_count,
+            cached_tokens: usage.prompt_cache_usage.cached_token_count,
             input_tokens_per_turn: vec![],
             cached_tokens_per_turn: vec![],
         },
@@ -982,7 +983,10 @@ mod tests {
             engine: TokenUsage {
                 prompt_token_count: 5,
                 output_token_count: 7,
-                cached_token_count: 3,
+                prompt_cache_usage: vllm_llm::PromptCacheUsage {
+                    cached_token_count: 3,
+                    cache_creation_token_count: 2,
+                },
             },
             reasoning_tokens: 2,
         });
