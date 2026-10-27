@@ -487,6 +487,8 @@ class Scheduler(SchedulerInterface):
             {} if self.log_stats and self.connector is not None else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
+        # Requests affected by KV load failures since the last stats.
+        self._num_kv_load_failed_reqs = 0
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
@@ -2274,6 +2276,7 @@ class Scheduler(SchedulerInterface):
                 self._handle_invalid_blocks(
                     kv_connector_output.invalid_block_ids,
                     num_scheduled_tokens,
+                    failed_kv_load_req_ids,
                 )
             )
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
@@ -3231,11 +3234,14 @@ class Scheduler(SchedulerInterface):
         )
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
+        num_kv_load_failed_reqs = self._num_kv_load_failed_reqs
+        self._num_kv_load_failed_reqs = 0
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
+            num_kv_load_failed_reqs=num_kv_load_failed_reqs,
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
@@ -3640,13 +3646,18 @@ class Scheduler(SchedulerInterface):
                 and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
             ):
                 affected_req_ids.add(req_id)
+                if req_id not in self.failed_recving_kv_req_ids:
+                    self._num_kv_load_failed_reqs += 1
                 if self.recompute_kv_load_failures:
                     request.num_computed_tokens = 0
                     self.failed_recving_kv_req_ids.add(req_id)
         return set() if self.recompute_kv_load_failures else affected_req_ids
 
     def _handle_invalid_blocks(
-        self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]
+        self,
+        invalid_block_ids: set[int],
+        num_scheduled_tokens: dict[str, int],
+        already_failed_req_ids: set[str] | None = None,
     ) -> set[str]:
         """Handle requests affected by invalid KV cache blocks.
 
@@ -3697,6 +3708,13 @@ class Scheduler(SchedulerInterface):
 
         if not total_failed_requests:
             return set()
+
+        new_async_failed = (
+            len(async_failed_req_ids - already_failed_req_ids)
+            if already_failed_req_ids
+            else len(async_failed_req_ids)
+        )
+        self._num_kv_load_failed_reqs += new_async_failed + len(sync_failed_req_ids)
 
         # evict invalid blocks and downstream dependent blocks from cache
         # only when not using recompute policy (where blocks will be recomputed

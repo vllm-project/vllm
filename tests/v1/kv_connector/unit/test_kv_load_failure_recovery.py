@@ -35,8 +35,10 @@ def scheduler():
     return create_scheduler(vllm_config)
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("report_invalid_blocks", [False, True])
 @pytest.mark.parametrize("policy", ["fail", "recompute"])
-def test_failed_receive_completion_honors_failure_policy(policy):
+def test_failed_receive_completion_honors_failure_policy(policy, report_invalid_blocks):
     """Failed receives still need completion to free blocks or resume computation."""
     scheduler = create_scheduler(create_vllm_config(kv_load_failure_policy=policy))
     request = create_request(num_tokens=3 * scheduler.block_size)
@@ -54,10 +56,25 @@ def test_failed_receive_completion_honors_failure_policy(policy):
     scheduler_output = scheduler.schedule()
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
-    output = create_model_runner_output([], finished_recving={request.request_id})
+    (req_block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    invalid_block_ids = set(req_block_ids) if report_invalid_blocks else None
+    output = create_model_runner_output(
+        [],
+        finished_recving={request.request_id},
+        invalid_block_ids=invalid_block_ids,
+    )
     assert output.kv_connector_output is not None
     output.kv_connector_output.failed_recving = {request.request_id}
-    scheduler.update_from_output(scheduler_output, output)
+    outputs = scheduler.update_from_output(scheduler_output, output)
+
+    # Counted once under both policies (even when the connector reports both
+    # failed_recving and invalid_block_ids), then reset for the next stats.
+    stats = outputs[0].scheduler_stats
+    assert stats is not None
+    assert stats.num_kv_load_failed_reqs == 1
+    next_stats = scheduler.make_stats()
+    assert next_stats is not None
+    assert next_stats.num_kv_load_failed_reqs == 0
 
     if policy == "fail":
         assert request.status == RequestStatus.FINISHED_ERROR
@@ -67,6 +84,43 @@ def test_failed_receive_completion_honors_failure_policy(policy):
         assert request.num_computed_tokens == 0
         next_output = scheduler.schedule()
         assert request.request_id in next_output.num_scheduled_tokens
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
+def test_invalid_blocks_then_failed_recving_counts_once(policy):
+    """When invalid_block_ids arrives before failed_recving (e.g. across steps
+    with KVOutputAggregator under TP > 1), the request is counted once."""
+    scheduler = create_scheduler(create_vllm_config(kv_load_failure_policy=policy))
+    request = create_request(num_tokens=3 * scheduler.block_size)
+    scheduler.add_request(request)
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
+    scheduler.connector.get_num_new_matched_tokens.side_effect = [
+        (2 * scheduler.block_size, True),
+        (0, False),
+    ]
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    (req_block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    step1_output = create_model_runner_output(
+        [],
+        finished_recving=set(),
+        invalid_block_ids={req_block_ids[1]},
+    )
+    step1_outputs = scheduler.update_from_output(scheduler_output, step1_output)
+    assert step1_outputs[0].scheduler_stats is not None
+    assert step1_outputs[0].scheduler_stats.num_kv_load_failed_reqs == 1
+
+    step2_output = create_model_runner_output([], finished_recving={request.request_id})
+    assert step2_output.kv_connector_output is not None
+    step2_output.kv_connector_output.failed_recving = {request.request_id}
+    step2_outputs = scheduler.update_from_output(scheduler_output, step2_output)
+    assert step2_outputs[0].scheduler_stats is not None
+    assert step2_outputs[0].scheduler_stats.num_kv_load_failed_reqs == 0
 
 
 @pytest.mark.parametrize(
@@ -223,6 +277,7 @@ def test_sync_load_failure(
     assert scheduler.connector.request_finished.call_count == 2
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "num_prompt_blocks,"
     "num_external_computed_blocks,"
@@ -289,7 +344,7 @@ def test_sync_load_failure_with_shared_blocks(
         [request1, request2], invalid_block_ids=invalid_block_ids, use_eos=True
     )
 
-    scheduler.update_from_output(scheduler_output, model_runner_output)
+    outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
 
     # req_id -> num_computed_tokens
     # all the common prefix blocks will be computed by request1
@@ -304,6 +359,11 @@ def test_sync_load_failure_with_shared_blocks(
             request.num_computed_tokens == expected_computed_tokens[request.request_id]
         )
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
+
+    # request2 only shares the invalid blocks, and is counted too.
+    stats = outputs[0].scheduler_stats
+    assert stats is not None
+    assert stats.num_kv_load_failed_reqs == 2
 
 
 @pytest.mark.parametrize(

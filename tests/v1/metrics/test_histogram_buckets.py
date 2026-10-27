@@ -9,7 +9,7 @@ any change to a default bucket boundary must show up as a failing test here.
 import prometheus_client
 import pytest
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import KVTransferConfig, ModelConfig, VllmConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.watermarking import WatermarkConfig
 from vllm.v1.metrics.buckets import (
@@ -19,6 +19,7 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import SchedulerStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -329,5 +330,28 @@ def test_watermark_requests_counter_registration(with_config: bool):
         PrometheusStatLogger(config)
         names = {m.name for m in prometheus_client.REGISTRY.collect()}
         assert ("vllm:watermark_requests" in names) == with_config
+    finally:
+        unregister_vllm_metrics()
+
+
+@pytest.mark.parametrize("with_connector", [True, False])
+def test_kv_load_failed_requests_counter(with_connector: bool):
+    """The KV load failed requests counter exists only with a KV connector and
+    counts each engine's SchedulerStats separately."""
+    config = build_logger_config(ObservabilityConfig())
+    if with_connector:
+        config.kv_transfer_config = KVTransferConfig(
+            kv_connector="ExampleConnector", kv_role="kv_both"
+        )
+    stats = SchedulerStats(num_kv_load_failed_reqs=2)
+    try:
+        logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
+        logger.record(scheduler_stats=stats, iteration_stats=None, engine_idx=1)
+        for engine, expected in ((0, 0), (1, 2)):
+            value = prometheus_client.REGISTRY.get_sample_value(
+                "vllm:kv_load_failed_requests_total",
+                {"model_name": TEST_MODEL, "engine": str(engine)},
+            )
+            assert value == (expected if with_connector else None)
     finally:
         unregister_vllm_metrics()
