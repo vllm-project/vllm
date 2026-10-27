@@ -188,12 +188,11 @@ def maybe_roundup_layer_hidden_size(
     return hidden_size
 
 
-# AITER's per_1x32 MXFP8 activation quant groups 32 elements per E8M0 exponent.
+# Elements per E8M0 exponent in AITER's per_1x32 MXFP8 activation quant.
 MXFP8_GROUP_SIZE = 32
 
 # The AITER activation each MoEActivation is handed to fused_moe() as, mirroring
-# rocm_aiter_fused_moe_impl() in experts/rocm_aiter_moe.py. Anything absent is an
-# activation AITER rejects outright there.
+# rocm_aiter_fused_moe_impl(); AITER rejects anything absent here.
 _AITER_MOE_ACTIVATION_NAMES = {
     MoEActivation.SILU: "silu",
     MoEActivation.GELU: "gelu",
@@ -208,20 +207,13 @@ def mori_use_mxfp8_dispatch(
 ) -> bool:
     """Whether MoRI should carry MXFP8 activations instead of raw BF16.
 
-    Only safe when AITER would have quantized the activations to MXFP8 itself
-    anyway: it consumes a pre-quantized FP8 operand plus E8M0 scales by sorting
-    the scales rather than re-quantizing, but a BF16-activation kernel would
-    dequantize the FP8 payload without ever applying the scales, and an
-    FP4-activation kernel would hand the FP8 payload to an MXFP4 quant that
-    only accepts BF16/FP16.
-
-    The activation and gate mode must therefore be the ones AiterExperts will
-    pass (experts/rocm_aiter_moe.py), not stand-ins: they select which input
-    decides the dtype, and the branches read different ones. SiTUv2 reads
-    AITER_SITUV2_*, while Silu/Swiglu on INTERLEAVE reads
-    AITER_BF16_FP8_MOE_BOUND, which vLLM pins to 0 on paths that never consult
-    it -- so asking about the wrong activation reads a knob that says nothing
-    about this model.
+    Only safe where AITER would have produced MXFP8 itself: it sorts a
+    pre-quantized FP8 operand's E8M0 scales rather than re-quantizing, while a
+    BF16-activation kernel would cast the payload back and never apply the
+    scales, and an FP4-activation one would hand it to an MXFP4 quant that
+    takes BF16/FP16 only. So ask AITER with the activation and gate mode
+    AiterExperts will pass, not stand-ins: they select which input decides the
+    dtype, and the branches read different ones.
     """
     if not current_platform.is_rocm() or not quant_config.use_mxfp4_w4a16:
         return False
@@ -232,12 +224,9 @@ def mori_use_mxfp8_dispatch(
     if moe.hidden_dim % MXFP8_GROUP_SIZE != 0:
         return False
 
-    try:
-        from aiter import QuantType, dtypes
-        from aiter.fused_moe import resolve_activation_dtype
-        from aiter.ops.flydsl.moe_common import GateMode
-    except ImportError:
-        return False
+    from aiter import QuantType, dtypes
+    from aiter.fused_moe import resolve_activation_dtype
+    from aiter.ops.flydsl.moe_common import GateMode
 
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -257,8 +246,9 @@ def mori_use_mxfp8_dispatch(
     else:
         gate_mode = GateMode.INTERLEAVE
 
-    # M is unknown this early; resolve_activation_dtype returns None rather
-    # than guessing when the answer would have depended on the token count.
+    # The token count is unknown this early, hence M=None. AITER still
+    # resolves a dtype unless the branch it takes depends on M, where it
+    # answers None instead of guessing and the dispatch stays BF16.
     return (
         resolve_activation_dtype(
             QuantType.per_1x32,
