@@ -46,12 +46,21 @@ class NonUvaBuffer:
         from vllm.platforms import current_platform
 
         # Pinned memory can be available without UVA, e.g. under NVIDIA
-        # Confidential Computing.
+        # Confidential Computing, where UVA is disabled because the device
+        # view of pinned host memory is not coherent.
         pin_memory = is_pin_memory_available()
+        if current_platform.is_confidential_compute():
+            logger.info_once(
+                "NVIDIA Confidential Computing detected; using explicit "
+                "host-to-device copies instead of UVA buffers (pinned host "
+                "memory: %s).",
+                "available" if pin_memory else "unavailable",
+            )
         if not pin_memory:
             logger.warning_once(
-                "Pinned memory is not available on this platform; falling back "
-                "to device memory for UVA buffers."
+                "Pinned host memory is not available on this platform; UVA "
+                "buffers fall back to pageable host memory with explicit "
+                "host-to-device copies."
             )
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=pin_memory)
         self.np = self.cpu.numpy()
