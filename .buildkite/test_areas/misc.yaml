@@ -401,6 +401,8 @@ steps:
       - vllm/model_executor/models/extract_hidden_states.py
       - vllm/model_executor/models/llama.py
       - vllm/models/qwen3_5/
+      - vllm/model_executor/models/qwen3_5.py
+      - vllm/model_executor/models/qwen3_5_mtp.py
       - vllm/model_executor/models/qwen3_next.py
       - vllm/model_executor/models/registry.py
       - vllm/transformers_utils/configs/extract_hidden_states.py
