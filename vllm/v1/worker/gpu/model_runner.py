@@ -2013,6 +2013,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
             else:
                 scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+                if self.is_encoder_decoder:
+                    # Encoder-decoder models run the encoder in batch order
+                    # (see `EncoderDecoderModelState`); the tower LoRA mapping
+                    # below must follow the same order.
+                    scheduled_encoder_inputs = {
+                        req_id: scheduled_encoder_inputs[req_id]
+                        for req_id in input_batch.req_ids
+                        if req_id in scheduled_encoder_inputs
+                    }
                 if self.supports_mm_inputs and self.lora_config is not None:
                     set_active_mm_loras(
                         model=self.model,
