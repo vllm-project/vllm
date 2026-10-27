@@ -373,21 +373,38 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
-@pytest.mark.parametrize("num_tokens", [32, 100])
-def test_mla_v_up_proj_runs_tuned_aiter_triton_bf16_bmm(monkeypatch, num_tokens):
-    """A W_UV shape with a tuned AITER Triton bf16 BMM config runs on that
-    kernel and matches the torch.bmm path it replaces."""
+@pytest.mark.parametrize(
+    ("num_heads", "v_head_dim", "kv_lora_rank", "num_tokens", "tuned", "gfx950_only"),
+    [
+        # AITER's gfx942/gfx950 N=1024, K=4096 config tunes up to 1024 tokens.
+        pytest.param(4, 1024, 4096, 32, True, False, id="n1024-k4096-m32"),
+        pytest.param(4, 1024, 4096, 100, True, False, id="n1024-k4096-m100"),
+        pytest.param(4, 1024, 4096, 2048, False, False, id="n1024-k4096-m2048"),
+        # Kimi-K2 W_UV at TP8 (B=8, N=128, K=512): tuned up to 128 tokens.
+        pytest.param(8, 128, 512, 64, True, True, id="kimi-tp8-m64"),
+        pytest.param(8, 128, 512, 256, False, True, id="kimi-tp8-m256"),
+    ],
+)
+def test_mla_v_up_proj_follows_tuned_aiter_triton_bf16_bmm(
+    monkeypatch, num_heads, v_head_dim, kv_lora_rank, num_tokens, tuned, gfx950_only
+):
+    """_v_up_proj runs AITER's Triton bf16 BMM exactly for shapes AITER has a
+    tuned config for, and matches the torch.bmm path it replaces."""
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.platforms.rocm import on_gfx950
 
     if not is_aiter_found_and_supported():
         pytest.skip("AITER is not available on this platform")
-    # AITER ships tuned gfx942/gfx950 configs for N=1024, K=4096 (up to 1024
-    # tokens); real MLA W_UV shapes have none in CI.
-    num_heads, qk_nope_head_dim, v_head_dim, kv_lora_rank = 4, 128, 1024, 4096
-    assert rocm_aiter_ops.is_triton_bf16_bmm_tuned(
-        num_heads, num_tokens, v_head_dim, kv_lora_rank
-    ), "AITER has no tuned BATCHED_GEMM-A16W16 N=1024 K=4096 config; pick another"
+    if gfx950_only and not on_gfx950():
+        pytest.skip("AITER tunes this shape for gfx950 only")
+    assert (
+        rocm_aiter_ops.is_triton_bf16_bmm_tuned(
+            num_heads, num_tokens, v_head_dim, kv_lora_rank
+        )
+        is tuned
+    ), "AITER's tuned BATCHED_GEMM-A16W16 configs changed; update this case"
 
+    qk_nope_head_dim = 128
     set_random_seed(0)
     kv_b_weight = 0.02 * torch.randn(
         num_heads * (qk_nope_head_dim + v_head_dim),
@@ -421,7 +438,8 @@ def test_mla_v_up_proj_runs_tuned_aiter_triton_bf16_bmm(monkeypatch, num_tokens)
         ]
         outs[use_triton] = out
 
-    assert any("batched_gemm_bf16" in k for k in kernels[True]), kernels[True]
+    ran_triton = any("batched_gemm_bf16" in k for k in kernels[True])
+    assert ran_triton is tuned, kernels[True]
     assert not any("batched_gemm_bf16" in k for k in kernels[False]), kernels[False]
     torch.testing.assert_close(outs[True], outs[False])
 

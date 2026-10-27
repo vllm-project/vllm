@@ -4366,13 +4366,13 @@ class rocm_aiter_ops:
         """
         from aiter.ops.triton.batched_gemm_bf16 import batched_gemm_bf16
 
-        return batched_gemm_bf16(X, W, dtype=Y.dtype, YQ=Y)
+        return batched_gemm_bf16(X, W, dtype=Y.dtype, YQ=Y, backend="triton")
 
     @staticmethod
     @functools.cache
     def is_triton_bf16_bmm_tuned(B: int, M: int, N: int, K: int) -> bool:
         """Whether AITER has a tuned triton_bf16_bmm config for this shape on
-        the current GPU. Untuned shapes run a generic default."""
+        the current GPU."""
         if not current_platform.is_rocm():
             return False
         try:

@@ -726,7 +726,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
-        self.is_aiter_triton_bf16_bmm_enabled = rocm_aiter_ops.is_enabled()
+        self.is_aiter_triton_bf16_bmm_enabled = rocm_aiter_ops.is_mla_enabled()
 
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
