@@ -7,6 +7,7 @@ while keeping per-block content compact, so padding bytes at the end of each pag
 never addressed by the logical view.
 """
 
+import importlib
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -302,6 +303,63 @@ def test_flashinfer_sparse_full_graphs_exclude_prefill_keep_varlen_decode(
     )
 
 
+@pytest.mark.parametrize(
+    ("module_name", "backend_name"),
+    [
+        ("vllm.models.deepseek_v41.sparse_mla", "DeepseekV4FlashMLABackend"),
+        (
+            "vllm.models.deepseek_v41.nvidia.flashinfer_sparse",
+            "DeepseekV4FlashInferMLASparseBackend",
+        ),
+        (
+            "vllm.models.deepseek_v41.nvidia.flashinfer_sparse",
+            "DeepseekSparseSWAFlashInferBackend",
+        ),
+        (
+            "vllm.models.deepseek_v41.nvidia.flashmla",
+            "DeepseekSparseSWAFlashMLABackend",
+        ),
+        ("vllm.models.deepseek_v41.compressor", "CompressorBackend"),
+    ],
+    ids=["flashmla", "flashinfer_mla", "swa_flashinfer", "swa_flashmla", "compressor"],
+)
+@pytest.mark.parametrize("num_speculative_tokens", [0, 7])
+def test_dsv41_sparse_builders_keep_varlen_decode_graphs_only(
+    module_name, backend_name, num_speculative_tokens
+):
+    """DSV4.1 sparse builders graph varlen decode but not prefill (#59970).
+
+    Prefill metadata is not graph-safe, so FULL capture must degrade to uniform
+    decode batches sized by the speculation width instead of every batch.
+    """
+    backend = getattr(importlib.import_module(module_name), backend_name)
+    config: Any = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens,
+            parallel_drafting=False,
+        ),
+        use_v2_model_runner=True,
+    )
+    spec = MLAAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+    )
+    group = AttentionGroup(backend, ["target"], spec, 0)
+    group.metadata_builders = [object.__new__(backend.get_builder_cls())]
+    groups = [[group]]
+
+    support = get_attn_cg_support(groups, config)
+    assert support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+    assert support.min_cg_attn_backend == backend_name
+
+    decode_width = 1 + num_speculative_tokens
+    unsupported = attn_utils.get_varlen_cudagraph_unsupported_backend
+    assert unsupported(groups, config, decode_width) is None
+    assert unsupported(groups, config, decode_width + 1) == (
+        backend_name,
+        decode_width,
+    )
+
+
 def test_get_kv_sharing_fast_prefill_eligible_layers(monkeypatch: pytest.MonkeyPatch):
     """Fast prefill applies to the contiguous suffix of KV-sharing layers.
 
@@ -539,6 +597,7 @@ def test_reshape_padded_kv_cache_strides_by_padded_page():
     # Content dim packs K and V: 2 * head_size.
     assert kv_cache.shape == (num_blocks, 1, 16, 2 * spec.head_size)
     assert kv_cache.dtype == spec.dtype
+    assert spec.page_size_padded is not None
     assert kv_cache.stride(0) == spec.page_size_padded // elem_size
     assert kv_cache[1].storage_offset() == spec.page_size_padded // elem_size
     # Within one block the (unpadded) content stays compact.
@@ -882,3 +941,47 @@ def test_packed_token_cache_cannot_be_split():
     packed = torch.zeros(3, 1, 2048, 1152, dtype=torch.uint8)[:, :, :1024]
     with pytest.raises(ValueError, match="cannot be split"):
         map_kv_caches_to_kernel_blocks({"layer.0": packed}, [group])
+
+
+def test_copy_kv_cache_blocks_overlaid_views_copy_whole_block():
+    """Hybrid overlays: a Mamba state view and an attention view of one tensor
+    share a base address but span different bytes per block, and several such
+    tensors live in one allocation (so the whole-storage fast path is off).
+    The copy must cover the attention span even though the narrow Mamba view
+    is encountered first; otherwise the pages past the Mamba state size in
+    the destination block keep whatever they held before."""
+    num_blocks = 4
+    num_tensors = 2
+    block_stride = 64  # bytes per scheduler block in every tensor
+    state_bytes = 24  # Mamba state occupies only the leading bytes of a block
+    tensor_bytes = num_blocks * block_stride
+    raw = torch.arange(num_tensors * tensor_bytes, dtype=torch.int32).to(torch.uint8)
+    storage = raw.untyped_storage()
+
+    caches: list[torch.Tensor] = []
+    for tensor_idx in range(num_tensors):
+        base = tensor_idx * tensor_bytes
+        mamba = torch.empty(0, dtype=torch.int8)
+        mamba.set_(storage)
+        mamba = mamba.as_strided(
+            (num_blocks, 1, 1, state_bytes), (block_stride, 1, 1, 1), base
+        )
+        # 2 kernel pages of 8 int16 per scheduler block cover the whole block.
+        attn = torch.empty(0, dtype=torch.int16)
+        attn.set_(storage)
+        attn = attn.as_strided((num_blocks * 2, 1, 8, 2), (16, 16, 2, 1), base // 2)
+        assert mamba.data_ptr() == attn.data_ptr()
+        caches += [mamba, attn]
+
+    expected = raw.view(num_tensors, num_blocks, block_stride).clone()
+    expected[:, 2] = expected[:, 0]
+
+    copy_kv_cache_blocks_inplace(
+        caches,
+        num_blocks,
+        [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+    )
+
+    torch.testing.assert_close(
+        raw.view(num_tensors, num_blocks, block_stride), expected
+    )
