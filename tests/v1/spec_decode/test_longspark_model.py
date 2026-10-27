@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import pytest
 import torch
 
+from vllm import SamplingParams
 from vllm.model_executor.models.qwen3_longspark import _LongSparkRMSNorm
 
 
@@ -61,3 +64,54 @@ def test_longspark_rms_norm_matches_native_bf16(
         torch.testing.assert_close(actual_residual, expected_residual, rtol=0, atol=0)
 
     torch.testing.assert_close(actual, expected, rtol=1.6e-2, atol=1e-3)
+
+
+@pytest.mark.slow_test
+def test_longspark_draft_width_preserves_greedy_outputs(vllm_runner, monkeypatch):
+    """Shorter drafts must preserve target outputs and propose exactly K tokens."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    target = os.getenv("LONGSPARK_TEST_TARGET_MODEL", "Qwen/Qwen3-4B")
+    draft = os.getenv("LONGSPARK_TEST_DRAFT_MODEL", "Hehy/LongSpark-Qwen3-4B")
+    prompts = [
+        "Explain why the night sky is dark.",
+        "Write a Python function that returns the first n Fibonacci numbers.",
+    ]
+    sampling = SamplingParams(temperature=0, max_tokens=64, ignore_eos=True)
+    runner_kwargs = dict(
+        dtype="bfloat16",
+        max_model_len=1024,
+        max_num_seqs=4,
+        gpu_memory_utilization=0.6,
+        enable_prefix_caching=False,
+        attention_config={"backend": "FLASH_ATTN"},
+        compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32]},
+        disable_log_stats=False,
+    )
+    outputs_by_width = {}
+    for width, enforce_eager in ((1, False), (3, True), (7, False)):
+        with vllm_runner(
+            target,
+            **runner_kwargs,
+            enforce_eager=enforce_eager,
+            speculative_config={
+                "method": "longspark",
+                "model": draft,
+                "num_speculative_tokens": width,
+            },
+        ) as runner:
+            outputs_by_width[width] = runner.generate(prompts, sampling)
+            metrics = {m.name: m for m in runner.llm.get_metrics()}
+            steps = metrics["vllm:spec_decode_num_drafts"].value
+            proposed = metrics["vllm:spec_decode_num_draft_tokens"].value
+            accepted = metrics["vllm:spec_decode_num_accepted_tokens"].value
+            assert steps > 0 and proposed == width * steps
+            assert accepted > 0
+            print(
+                f"LongSpark width={width}: drafts={steps}, proposed={proposed}, "
+                f"accepted={accepted}, enforce_eager={enforce_eager}"
+            )
+    with vllm_runner(target, **runner_kwargs) as runner:
+        reference = runner.generate(prompts, sampling)
+    for width, outputs in outputs_by_width.items():
+        assert outputs == reference, f"Greedy outputs changed at draft width {width}"

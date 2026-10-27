@@ -224,10 +224,10 @@ class LongSparkSpeculator(DraftModelSpeculator):
             raise ValueError("LongSpark MRV2 does not yet support target LoRA")
         if vllm_config.model_config.supports_multimodal_inputs:
             raise ValueError("LongSpark MRV2 currently supports text-only targets")
-        if self.num_speculative_steps != int(config.block_size):
+        if not 1 <= self.num_speculative_steps <= int(config.block_size):
             raise ValueError(
-                "LongSpark num_speculative_tokens must match checkpoint "
-                f"block_size={config.block_size}"
+                "LongSpark requires 1 <= num_speculative_tokens <= checkpoint "
+                f"block_size ({config.block_size}); got {self.num_speculative_steps}"
             )
 
     def load_draft_model(

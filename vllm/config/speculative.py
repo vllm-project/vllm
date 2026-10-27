@@ -2070,10 +2070,11 @@ class SpeculativeConfig:
         mask_token_id = getattr(draft, "mask_token_id", None)
         if mask_token_id is None or not 0 <= mask_token_id < target.vocab_size:
             raise ValueError("LongSpark mask_token_id must be in the target vocabulary")
-        if self.num_speculative_tokens != getattr(draft, "block_size", None):
+        block_size = getattr(draft, "block_size", 0)
+        if not 1 <= self.num_speculative_tokens <= block_size:
             raise ValueError(
-                "LongSpark num_speculative_tokens must match checkpoint "
-                f"block_size={getattr(draft, 'block_size', None)}"
+                "LongSpark requires 1 <= num_speculative_tokens <= checkpoint "
+                f"block_size ({block_size}); got {self.num_speculative_tokens}"
             )
         parallel = self.target_parallel_config
         topology = {

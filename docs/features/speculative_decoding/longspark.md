@@ -40,8 +40,14 @@ print(outputs[0].outputs[0].text)
 `method` and `num_speculative_tokens` may be omitted. A checkpoint with
 `model_type="draftfreekv"` and architecture `DraftFreeKVModel` is detected as
 LongSpark, and its `block_size` selects the checkpoint's draft width.
+To use fewer draft tokens, set `num_speculative_tokens` to any integer from
+1 through the checkpoint's `block_size`, inclusive. For example,
+`"num_speculative_tokens": 3` uses the first three proposals from a seven-token
+checkpoint. The trained draft block and checkpoint weights keep their original
+shape; only the requested number of proposals is sampled and verified. Do not
+change the checkpoint's `block_size` to select a runtime draft length.
 
-The equivalent server command is:
+The following server command uses three speculative tokens:
 
 ```bash
 vllm serve Qwen/Qwen3-4B \
@@ -49,7 +55,8 @@ vllm serve Qwen/Qwen3-4B \
     --no-enable-prefix-caching \
     --speculative-config '{
       "method": "longspark",
-      "model": "Hehy/LongSpark-Qwen3-4B"
+      "model": "Hehy/LongSpark-Qwen3-4B",
+      "num_speculative_tokens": 3
     }'
 ```
 
@@ -64,7 +71,8 @@ checkpoint's validated execution contract:
   vocabulary, attention, MLP, layer-count, and RoPE configuration;
 - TP, PP, DCP, PCP, and draft TP all equal to 1;
 - text-only requests, without target LoRA or prefix caching; and
-- `num_speculative_tokens` matching the checkpoint's `block_size`.
+- `1 <= num_speculative_tokens <= block_size`, where `block_size` comes from
+  the checkpoint; omitting `num_speculative_tokens` uses the full block.
 
 The fused Triton kernels are shape-parameterized. Query/KV head counts, GQA
 ratio, head dimension, global/raw/local window sizes, Markov rank, delta width,
@@ -91,3 +99,7 @@ lossless.
 
 Available checkpoint pairs are listed in the
 [LongSpark collection](https://huggingface.co/collections/Hehy/longspark).
+
+The repository [README](../../../README.md#longspark) includes local serving and
+`vllm bench serve` commands, plus LongSpark/DFlash measurements on long-context
+inputs and MT-Bench.
