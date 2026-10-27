@@ -1681,6 +1681,14 @@ class Worker(WorkerBase):
         if model_runner := getattr(self, "model_runner", None):
             model_runner.shutdown()
 
+        engram_config = self.vllm_config.engram_config
+        if engram_config is not None and engram_config.shared_host_endpoint:
+            from vllm.models.deepseek_v41.nvidia.ops.shared_engram_owner import (
+                close_attached_tables,
+            )
+
+            close_attached_tables()
+
         # Release kept-alive cumem pools while the pluggable allocator wrappers
         # and callbacks are still alive, so MemPool teardown is not deferred to
         # interpreter finalization (pytorch/pytorch#145168).
