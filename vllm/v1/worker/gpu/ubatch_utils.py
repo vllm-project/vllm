@@ -51,9 +51,7 @@ class UBatchState(NamedTuple):
 
 
 def create_ubatch_slices(
-    input_batch: InputBatch,
-    num_ubatches: int,
-    uniform_token_count: int | None = None,
+    input_batch: InputBatch, num_ubatches: int, uniform_token_count: int | None = None
 ) -> UBatchSlices:
     """Split a DP-padded batch into the slices its microbatches run on.
 
