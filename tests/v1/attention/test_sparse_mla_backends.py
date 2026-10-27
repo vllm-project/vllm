@@ -4289,10 +4289,11 @@ def _record_fa4_kernels(monkeypatch, num_heads, *, device):
     def fake_trtllm(**kwargs):
         trtllm_calls.append(kwargs)
         rows = kwargs["query"].shape[0]
-        out = torch.full(
-            (rows, 1, num_heads, 512), 2.0, dtype=torch.bfloat16, device=device
-        )
-        return (out, lse(rows)) if kwargs.get("return_lse") else out
+        # Like FlashInfer, write into the caller-owned ``out`` / ``lse``.
+        out = kwargs["out"].fill_(2.0)
+        if not kwargs.get("return_lse"):
+            return out
+        return out, kwargs["lse"].copy_(lse(rows))
 
     monkeypatch.setattr(flashattn_sparse_module, "flash_attn_varlen_func", fake_fa4)
     monkeypatch.setattr(
