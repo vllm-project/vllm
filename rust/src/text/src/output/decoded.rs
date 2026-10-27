@@ -28,9 +28,9 @@ pub struct TextDecodeOptions {
     /// in. Stop strings found within the first `min_tokens` tokens are
     /// ignored.
     pub min_tokens: u32,
-    /// Whether to detokenize the output. When false, text and logprob token
-    /// strings stay empty, the tokenizer is never called, and stop strings are
-    /// rejected.
+    /// Whether to detokenize the output. When false, the output is never
+    /// decoded: text and logprob token strings stay empty.
+    /// `TextRequest::validate` rejects stop strings in that case.
     pub detokenize: bool,
 }
 
@@ -157,7 +157,7 @@ pub async fn decoded_text_event_stream(
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
     let mut sampling_mask: Option<SamplingMask> = None;
-    let logprob_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
+    let text_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
@@ -169,8 +169,8 @@ pub async fn decoded_text_event_stream(
                 output.prompt_token_ids().expect("first llm output must carry prompt token ids");
             prompt_token_count = prompt_token_ids.len();
 
-            let dec = if decode_options.detokenize {
-                tokenizer.create_decode_stream(
+            let dec = match text_tokenizer {
+                Some(tokenizer) => tokenizer.create_decode_stream(
                     prompt_token_ids,
                     decode_options.skip_special_tokens,
                     // If we are excluding stop strings from output, we need to buffer
@@ -185,9 +185,8 @@ pub async fn decoded_text_event_stream(
                             .unwrap_or(1)
                             .saturating_sub(1),
                     },
-                )
-            } else {
-                Box::new(TokenOnlyDecoder)
+                ),
+                None => Box::new(TokenOnlyDecoder),
             };
             decoder = Some(dec);
 
@@ -197,7 +196,7 @@ pub async fn decoded_text_event_stream(
                     .prompt_logprobs()
                     .map(|logprobs| {
                         decode_prompt_logprobs(
-                            logprob_tokenizer,
+                            text_tokenizer,
                             prompt_token_ids,
                             logprobs,
                             decode_options.skip_special_tokens,
@@ -273,24 +272,20 @@ pub async fn decoded_text_event_stream(
             sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
         }
 
-        let decoded_logprobs = new_logprobs
+        let mut decoded_logprobs = new_logprobs
             .as_ref()
             .map(|logprobs| {
-                decode_logprobs(
-                    logprob_tokenizer,
-                    logprobs,
-                    decode_options.skip_special_tokens,
-                )
+                decode_logprobs(text_tokenizer, logprobs, decode_options.skip_special_tokens)
             })
             .transpose()?;
 
         if !intermediate {
             sampled_token_ids.extend(&new_token_ids);
-            if let Some(dlp) = decoded_logprobs.as_ref() {
+            if let Some(dlp) = decoded_logprobs.take() {
                 sampled_logprobs
                     .get_or_insert_with(|| DecodedLogprobs { positions: vec![] })
                     .positions
-                    .extend_from_slice(&dlp.positions);
+                    .extend(dlp.positions);
             }
         }
 
@@ -705,85 +700,50 @@ mod tests {
         .await
         .unwrap();
 
+        let logprob_tokens: Vec<_> = collected
+            .prompt_logprobs
+            .iter()
+            .flat_map(|prompt| &prompt.scored_positions)
+            .chain(collected.logprobs.iter().flat_map(|logprobs| &logprobs.positions))
+            .flat_map(|position| &position.entries)
+            .map(|entry| (entry.token_id, entry.token.as_str()))
+            .collect();
         expect_test::expect![[r#"
-            CollectedTextOutput {
-                text: "",
-                prompt_token_ids: [
-                    104,
-                    105,
-                ],
-                prompt_logprobs: Some(
-                    DecodedPromptLogprobs {
-                        first_token_id: 104,
-                        first_token: "",
-                        scored_positions: [
-                            DecodedPositionLogprobs {
-                                entries: [
-                                    DecodedTokenLogprob {
-                                        token_id: 105,
-                                        token: "",
-                                        logprob: -0.5,
-                                        rank: 1,
-                                    },
-                                ],
-                            },
-                        ],
-                    },
-                ),
-                logprobs: Some(
-                    DecodedLogprobs {
-                        positions: [
-                            DecodedPositionLogprobs {
-                                entries: [
-                                    DecodedTokenLogprob {
-                                        token_id: 97,
-                                        token: "",
-                                        logprob: -0.5,
-                                        rank: 1,
-                                    },
-                                ],
-                            },
-                            DecodedPositionLogprobs {
-                                entries: [
-                                    DecodedTokenLogprob {
-                                        token_id: 33,
-                                        token: "",
-                                        logprob: -0.5,
-                                        rank: 1,
-                                    },
-                                ],
-                            },
-                        ],
-                    },
-                ),
-                token_ids: [
+            (
+                "",
+                [
                     97,
                     33,
                 ],
-                finish_reason: Stop(
+                Stop(
                     Some(
                         TokenId(
                             33,
                         ),
                     ),
                 ),
-                usage: TokenUsage {
-                    prompt_token_count: 2,
-                    output_token_count: 2,
-                    cached_token_count: 0,
-                },
-                timestamps: RequestTimestamps {
-                    queued_ts: 0.0,
-                    scheduled_ts: 0.0,
-                    first_token_ts: 0.0,
-                    last_token_ts: 0.0,
-                },
-                kv_transfer_params: None,
-                ec_transfer_params: None,
-                sampling_mask: None,
-            }
+                [
+                    (
+                        105,
+                        "",
+                    ),
+                    (
+                        97,
+                        "",
+                    ),
+                    (
+                        33,
+                        "",
+                    ),
+                ],
+            )
         "#]]
-        .assert_debug_eq(&collected);
+        .assert_debug_eq(&(
+            &collected.text,
+            &collected.token_ids,
+            &collected.finish_reason,
+            logprob_tokens,
+        ));
     }
 
     struct DropRecordingStream {

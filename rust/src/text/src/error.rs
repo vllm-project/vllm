@@ -17,7 +17,10 @@ pub enum Error {
     EmptyPromptTokenIds { request_id: String },
     #[error("text request `{request_id}` stop strings cannot be empty")]
     EmptyStopString { request_id: String },
-    #[error("text request `{request_id}` stop strings require detokenized output")]
+    #[error(
+        "text request `{request_id}` stop strings require detokenization; enable it or use stop \
+         token IDs"
+    )]
     StopStringsRequireDetokenize { request_id: String },
     #[error(
         "Parameter 'cache_salt' must be a non-empty string of at most 128 characters \

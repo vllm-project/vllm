@@ -217,12 +217,22 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
     dealer.recv().await.expect("recv engine message").into_vec()
 }
 
-#[derive(Clone, Debug)]
-struct FakeTextBackend;
+#[derive(Clone)]
+struct FakeTextBackend {
+    tokenizer: DynTokenizer,
+}
+
+impl Default for FakeTextBackend {
+    fn default() -> Self {
+        Self {
+            tokenizer: Arc::new(TestTokenizer::new()),
+        }
+    }
+}
 
 impl TextBackend for FakeTextBackend {
     fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(TestTokenizer::new())
+        Arc::clone(&self.tokenizer)
     }
 
     fn model_id(&self) -> &str {
@@ -261,33 +271,6 @@ impl ChatRenderer for FakeTextBackend {
     }
 }
 
-/// Backend whose tokenizer panics on any encode, decode or token lookup.
-struct PanickingTokenizerBackend;
-
-impl TextBackend for PanickingTokenizerBackend {
-    fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(PanickingTokenizer)
-    }
-
-    fn model_id(&self) -> &str {
-        "test-model"
-    }
-}
-
-impl ChatBackend for PanickingTokenizerBackend {
-    fn chat_renderer(&self) -> DynChatRenderer {
-        Arc::new(FakeTextBackend)
-    }
-
-    fn new_chat_output_processor(
-        &self,
-        _request: &mut ChatRequest,
-        _options: NewChatOutputProcessorOptions<'_>,
-    ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        unreachable!("gRPC Generate does not process chat output")
-    }
-}
-
 struct FakeMultimodalBackend {
     model_info: vllm_chat::multimodal::MultimodalModelInfo,
 }
@@ -304,7 +287,7 @@ impl TextBackend for FakeMultimodalBackend {
 
 impl ChatBackend for FakeMultimodalBackend {
     fn chat_renderer(&self) -> DynChatRenderer {
-        Arc::new(FakeTextBackend)
+        Arc::new(FakeTextBackend::default())
     }
 
     fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
@@ -373,8 +356,13 @@ async fn setup_grpc_service(
     tokio::sync::watch::Receiver<bool>,
     MockEngineTask,
 ) {
-    setup_grpc_service_with_backend(engine_id, output_specs, Arc::new(FakeTextBackend), |_| {})
-        .await
+    setup_grpc_service_with_backend(
+        engine_id,
+        output_specs,
+        Arc::new(FakeTextBackend::default()),
+        |_| {},
+    )
+    .await
 }
 
 async fn setup_grpc_service_with_backend<F>(
@@ -831,7 +819,9 @@ async fn generate_without_output_text_skips_detokenization() {
             setup_grpc_service_with_backend(
                 b"engine-grpc-token-only",
                 default_stream_output_specs(),
-                Arc::new(PanickingTokenizerBackend),
+                Arc::new(FakeTextBackend {
+                    tokenizer: Arc::new(PanickingTokenizer),
+                }),
                 |_| {},
             )
             .await;
@@ -1156,7 +1146,7 @@ async fn unary_generate_rejects_preprocessed_features_for_text_only_model() {
         setup_grpc_service_with_backend(
             b"engine-grpc-preprocessed-text-only",
             default_stream_output_specs(),
-            Arc::new(FakeTextBackend),
+            Arc::new(FakeTextBackend::default()),
             |_| {},
         )
         .await;
@@ -1494,7 +1484,7 @@ async fn unary_generate_stop_strings_without_output_text_returns_invalid_argumen
         .expect_err("stop strings need detokenized output");
 
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    assert!(status.message().contains("stop strings require detokenized output"));
+    assert!(status.message().contains("stop strings require detokenization"));
 
     server_task.abort();
 }
@@ -2028,7 +2018,7 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
         setup_grpc_service_with_engine_script(
             b"engine-grpc-cancel-pending-output".to_vec(),
             default_ready_response(),
-            Arc::new(FakeTextBackend),
+            Arc::new(FakeTextBackend::default()),
             None,
             move |dealer, _push| {
                 boxed_test_future(async move {
@@ -2184,7 +2174,7 @@ async fn control_reports_server_and_model_info() {
         setup_grpc_service_with_engine_script(
             b"engine-grpc-info".to_vec(),
             ready,
-            Arc::new(FakeTextBackend),
+            Arc::new(FakeTextBackend::default()),
             None,
             |_, _| boxed_test_future(async {}),
         )
@@ -2253,7 +2243,7 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
         setup_grpc_service_with_engine_script(
             b"engine-grpc-lora".to_vec(),
             ready,
-            Arc::new(FakeTextBackend),
+            Arc::new(FakeTextBackend::default()),
             None,
             |dealer, push| {
                 boxed_test_future(async move {
@@ -2378,7 +2368,7 @@ async fn control_list_loras_requires_lora_enabled_engine() {
         setup_grpc_service_with_engine_script(
             b"engine-grpc-lora-disabled".to_vec(),
             default_ready_response(),
-            Arc::new(FakeTextBackend),
+            Arc::new(FakeTextBackend::default()),
             None,
             |_, _| boxed_test_future(async move {}),
         )
@@ -2411,7 +2401,7 @@ async fn control_forwards_weight_update_without_pause_guard() {
         setup_grpc_service_with_engine_script(
             b"engine-grpc-rl".to_vec(),
             ready,
-            Arc::new(FakeTextBackend),
+            Arc::new(FakeTextBackend::default()),
             None,
             |dealer, push| {
                 boxed_test_future(async move {
@@ -2533,7 +2523,7 @@ async fn control_aggregates_multi_engine_capacity() {
         let client = client_task.await.unwrap().expect("connect multi-engine client");
         let chat = ChatLlm::from_shared_backend(
             Llm::new(client),
-            Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
+            Arc::new(FakeTextBackend::default()) as Arc<dyn ChatTextBackend>,
         );
         let state = AppState::new(vec!["test-model".to_string()], chat);
         let service = ControlServiceImpl::new(Arc::new(state));
@@ -2708,7 +2698,7 @@ async fn grpc_shutdown_closes_health_watch_and_server() {
         setup_grpc_service_with_engine_script(
             b"engine-grpc-health-shutdown",
             default_ready_response(),
-            Arc::new(FakeTextBackend),
+            Arc::new(FakeTextBackend::default()),
             Some(shutdown.clone()),
             |_, _| boxed_test_future(async {}),
         )
