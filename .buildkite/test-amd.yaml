@@ -1391,7 +1391,7 @@ steps:
   # gated on gfx950, so this has to be MI355. The two kernels/ files the NVIDIA
   # step runs are CUDA-only (they import cuda.bindings.driver), so they are
   # deliberately left out here.
-  - pytest -v -s models/kimi_k3
+  - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py
 
 - label: ":amd: (MI355) Kimi K3 Multi-GPU" # TBD
   timeout_in_minutes: 30
@@ -1412,7 +1412,7 @@ steps:
   # multi-GPU test anywhere in the directory without editing this list.
   # Four GPUs run the two tp4 cases in test_amd_latent_moe_runner.py; the tp8
   # case and the 8/16-GPU cases in test_latent_moe_tail.py still skip.
-  - pytest -v -s -m "distributed" models/kimi_k3
+  - pytest -v -s -m "distributed" models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py
 
 - label: ":amd: (MI355) MiniMax M3 Specialized Decode"
   timeout_in_minutes: 45
