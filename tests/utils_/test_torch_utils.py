@@ -10,6 +10,7 @@ from vllm.utils.torch_utils import (
     available_cpu_count,
     common_broadcastable_dtype,
     current_stream,
+    direct_register_custom_op,
     get_kv_cache_torch_dtype,
     is_lossless_cast,
     set_default_torch_dtype,
@@ -17,6 +18,33 @@ from vllm.utils.torch_utils import (
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
 )
+
+
+@pytest.mark.parametrize(
+    "layout_tag",
+    [
+        torch.Tag.needs_exact_strides,
+        torch.Tag.needs_fixed_stride_order,
+        torch.Tag.flexible_layout,
+    ],
+)
+def test_custom_op_respects_explicit_layout(layout_tag):
+    def identity(x: torch.Tensor) -> torch.Tensor:
+        return x.clone()
+
+    with torch.library._scoped_library("test_layout", "FRAGMENT") as lib:
+        direct_register_custom_op(
+            "identity",
+            identity,
+            target_lib=lib,
+            dispatch_key="CPU",
+            tags=(layout_tag, torch.Tag.cudagraph_unsafe),
+        )
+        tags = torch.ops.test_layout.identity.default.tags
+        assert layout_tag in tags
+        assert torch.Tag.cudagraph_unsafe in tags
+        if layout_tag != torch.Tag.needs_exact_strides:
+            assert torch.Tag.needs_exact_strides not in tags
 
 
 def test_nvfp4_4over6_cache_dtype() -> None:

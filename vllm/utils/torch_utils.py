@@ -1038,6 +1038,16 @@ def direct_register_custom_op(
 
     schema_str = infer_schema(op_func, mutates_args=mutates_args)
 
+    if not any(
+        tag in tags
+        for tag in (
+            torch.Tag.needs_exact_strides,
+            torch.Tag.needs_fixed_stride_order,
+            torch.Tag.flexible_layout,
+        )
+    ):
+        tags += (torch.Tag.needs_exact_strides,)
+
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
