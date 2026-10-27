@@ -112,6 +112,7 @@ class _MoriLookupServer:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._socket: socket.socket | None = None
+        self._owns_path = False
 
     def start(self) -> None:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -125,6 +126,7 @@ class _MoriLookupServer:
             os.unlink(self.path)
         self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._socket.bind(self.path)
+        self._owns_path = True
         self._socket.listen(16)
         self._socket.settimeout(0.2)
         self._thread = threading.Thread(
@@ -170,10 +172,12 @@ class _MoriLookupServer:
         self._stop.set()
         if self._socket is not None:
             self._socket.close()
-        if self._thread is not None:
+        if self._thread is not None and self._thread.ident is not None:
             self._thread.join(timeout=2)
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(self.path)
+        if self._owns_path:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.path)
+            self._owns_path = False
 
 
 class _MoriSchedulerHandle(UMBPSchedulerHandle):
@@ -332,6 +336,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         self._job_lock = threading.Lock()
         self._futures: dict[int, Future[TransferJobState]] = {}
         self._store_deadlines: dict[int, float] = {}
+        self._load_deadlines: dict[int, float] = {}
         self._timeout_s = timeout_s
         self._layout = layout
         self._load_layouts: dict[int, _BlockLoadLayout] = {}
@@ -518,6 +523,8 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         plans: tuple[BlockTransferPlan, ...] | BlockLoadBatch,
         range_args: _LoadArgs | None = None,
     ) -> TransferJobState:
+        with self._job_lock:
+            self._load_deadlines[id(job)] = time.monotonic() + self._timeout_s
         if not plans:
             job.complete()
             return job
@@ -671,6 +678,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                 with self._job_lock:
                     self._futures.pop(id(job), None)
                     self._store_deadlines.pop(id(job), None)
+                    self._load_deadlines.pop(id(job), None)
 
     def poll(self, job: TransferJobState) -> TransferJobState | None:
         with self._job_lock:
@@ -685,7 +693,9 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             return None
         if not future.done():
             with self._job_lock:
-                deadline = self._store_deadlines.get(id(job))
+                deadline = self._store_deadlines.get(
+                    id(job), self._load_deadlines.get(id(job))
+                )
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError(
                     "MORI UMBP transfer timed out with buffers still in use"
@@ -694,6 +704,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         with self._job_lock:
             self._futures.pop(id(job), None)
             self._store_deadlines.pop(id(job), None)
+            self._load_deadlines.pop(id(job), None)
         try:
             return future.result()
         except Exception as exc:
@@ -713,6 +724,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             with self._job_lock:
                 self._futures.pop(id(job), None)
                 self._store_deadlines.pop(id(job), None)
+                self._load_deadlines.pop(id(job), None)
             job.cancel("preempted")
             return job
         return self.wait(job)
