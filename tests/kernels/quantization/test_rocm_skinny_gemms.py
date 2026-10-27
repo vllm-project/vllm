@@ -9,7 +9,7 @@ import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx12x, on_gfx950
+from vllm.platforms.rocm import on_gfx950, on_rdna4
 from vllm.utils.platform_utils import num_compute_units
 
 # Global per-test cleanup costs more than the tests themselves.
@@ -428,8 +428,8 @@ def test_rocm_wvsplitk_kernel(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(
-    not (current_platform.is_rocm() and on_gfx12x()),
-    reason="only supported on gfx12",
+    not (current_platform.is_rocm() and on_rdna4()),
+    reason="only supported on gfx120x",
 )
 @torch.inference_mode()
 def test_rocm_swmmac_gemm_kernel(n, k, m, bias_mode, dtype, seed):
