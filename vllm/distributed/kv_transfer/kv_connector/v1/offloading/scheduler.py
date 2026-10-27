@@ -66,6 +66,9 @@ from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
+# A cache reset fence held this long is reported once.
+_RESET_FENCE_WARN_S = 60
+
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
 MATCHER_LOCALITY_KEY = "locality"
@@ -534,18 +537,58 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
     return TierFilter(matchers=tuple(matchers))
 
 
-def _create_req_context(req: Request) -> ReqContext:
+class _RequestTokens(NamedTuple):
+    num_computed_tokens: int
+    num_in_flight_tokens: int
+    num_prompt_tokens: int
+    num_tokens: int
+
+
+@dataclass
+class _VllmReqContext(ReqContext):
+    _scheduler: "OffloadingConnectorScheduler" = field(
+        kw_only=True, repr=False, compare=False
+    )
+
+    @property
+    def _request_tokens(self) -> Request | _RequestTokens:
+        tokens = self.get_state(_RequestTokens)
+        if tokens is not None:
+            return tokens
+        return self._scheduler._req_status[self.req_id].req
+
+    @property
+    def num_computed_tokens(self) -> int:
+        return self._request_tokens.num_computed_tokens
+
+    @property
+    def num_in_flight_tokens(self) -> int:
+        return self._request_tokens.num_in_flight_tokens
+
+    @property
+    def num_prompt_tokens(self) -> int:
+        return self._request_tokens.num_prompt_tokens
+
+    @property
+    def num_tokens(self) -> int:
+        return self._request_tokens.num_tokens
+
+
+def _create_req_context(
+    req: Request, scheduler: "OffloadingConnectorScheduler"
+) -> ReqContext:
     params = req.kv_transfer_params
     load_filter = TierFilter.ALL
     if params:
         raw = params.get(KV_LOAD_TIERS_KEY)
         if raw is not None:
             load_filter = _parse_tier_filter(raw)
-    return ReqContext(
+    return _VllmReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
         kv_hints=req.kv_hints,
         load_tier_filter=load_filter,
+        _scheduler=scheduler,
     )
 
 
@@ -644,6 +687,12 @@ class OffloadingConnectorScheduler:
         # Threshold value for stale jobs. All job ids >= _stale_job_threshold are
         # active jobs.
         self._stale_job_threshold: int = 0
+        # Jobs flushed by a cache reset -> worker reports still due. Their
+        # chunks are released at once, but a worker may still write them (a
+        # late DMA) until it reports; the manager learns through
+        # on_reset_flushed() once every one has.
+        self._reset_fence: dict[int, int] = {}
+        self._reset_fence_since = 0.0
         self._jobs: dict[int, TransferJobStatus] = {}
 
         # block_id -> pending store job_ids. Used to track jobs that needs
@@ -1187,16 +1236,20 @@ class OffloadingConnectorScheduler:
 
     def on_new_request(self, request: Request) -> None:
         """Called when a new request is added to the scheduler."""
-        req_context = _create_req_context(request)
-        with self._manager_locked():
-            offloading_context = self.manager.on_new_request(req_context)
+        req_context = _create_req_context(request, self)
         req_status = RequestOffloadState(
             config=self.config,
             req=request,
             req_context=req_context,
-            offloading_context=offloading_context,
+            offloading_context=RequestOffloadingContext(),
         )
         self._req_status[request.request_id] = req_status
+        try:
+            with self._manager_locked():
+                req_status.offloading_context = self.manager.on_new_request(req_context)
+        except Exception:
+            del self._req_status[request.request_id]
+            raise
 
     def get_num_new_matched_tokens(
         self,
@@ -2106,6 +2159,18 @@ class OffloadingConnectorScheduler:
     def _build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        # Every step reaches here, including the empty steps a held fence
+        # keeps the engine taking when no request is left.
+        if (
+            self._reset_fence
+            and time.monotonic() - self._reset_fence_since > _RESET_FENCE_WARN_S
+        ):
+            logger.warning_once(
+                "KV offloading: workers have not reported %d jobs a cache "
+                "reset flushed for over %d s",
+                len(self._reset_fence),
+                _RESET_FENCE_WARN_S,
+            )
         self._update_req_states(scheduler_output)
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
@@ -2185,8 +2250,11 @@ class OffloadingConnectorScheduler:
         step-scoped acquire here would never reach build_connector_meta's
         release and would hold the manager for good -- which is precisely the
         state an idle engine settles into.
+
+        A cache reset fence also keeps it stepping: the flush must reach the
+        workers and their reports come back before on_reset_flushed().
         """
-        if self._jobs:
+        if self._jobs or self._reset_fence:
             return True
         with self._manager_locked():
             return self.manager.has_pending_work()
@@ -2240,6 +2308,16 @@ class OffloadingConnectorScheduler:
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._stale_job_threshold:
+                if job_id in self._reset_fence:
+                    self._reset_fence[job_id] -= count
+                    if self._reset_fence[job_id] <= 0:
+                        del self._reset_fence[job_id]
+                        if not self._reset_fence:
+                            self.manager.on_reset_flushed()
+                            logger.info(
+                                "KV offloading: workers reported every job "
+                                "the cache reset flushed"
+                            )
                 logger.debug(
                     "Skipping stale completed job %d (pre-reset counter: %d)",
                     job_id,
@@ -2314,11 +2392,24 @@ class OffloadingConnectorScheduler:
 
         """
         req_status = self._req_status.get(request.request_id)
+        req_context = (
+            req_status.req_context
+            if req_status is not None
+            else _create_req_context(request, self)
+        )
+        # Freeze at logical completion, independent of deferred tier callbacks.
+        req_context.set_state(
+            _RequestTokens(
+                request.num_computed_tokens,
+                request.num_in_flight_tokens,
+                request.num_prompt_tokens,
+                request.num_tokens,
+            )
+        )
 
         if req_status is None:
             # Untracked request (offloading never started): no in-flight jobs,
             # nothing was deferred, so finalize immediately.
-            req_context = _create_req_context(request)
             with self._manager_locked():
                 self.manager.on_new_request(req_context)
                 self.manager.on_request_finished(req_context)
@@ -2400,6 +2491,18 @@ class OffloadingConnectorScheduler:
 
         # Discard jobs and save job_counter to be able to discard worker responses
         self._stale_job_threshold = self._job_counter
+        if self._jobs:
+            self._reset_fence.update(
+                (job_id, job.pending_count) for job_id, job in self._jobs.items()
+            )
+            self._reset_fence_since = time.monotonic()
+            logger.info(
+                "KV offloading: waiting for workers to report %d jobs "
+                "flushed by the cache reset",
+                len(self._reset_fence),
+            )
+        elif not self._reset_fence:
+            self.manager.on_reset_flushed()
         self._jobs.clear()
         self._block_id_to_pending_jobs.clear()
 
