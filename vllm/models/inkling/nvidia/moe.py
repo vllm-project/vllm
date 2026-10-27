@@ -41,6 +41,7 @@ from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
+from ..common.weights import copy_into_slots, deinterleave_into, write_loader
 from ..configs import InklingModelConfig
 
 if TYPE_CHECKING:
@@ -303,6 +304,8 @@ class InklingSinkExperts(nn.Module):
             torch.empty(d_model, n_experts * intermediate_pp),
             requires_grad=False,
         )
+        for param in (self.w13_weight, self.w2_weight):
+            param.weight_loader = write_loader
         self._unit: torch.Tensor | None = None
 
     def load_weight(self, key: str, weight: torch.Tensor) -> list[str]:
@@ -311,7 +314,9 @@ class InklingSinkExperts(nn.Module):
             if weight.shape != self.w13_weight.shape:
                 shard = self.w13_weight.shape[1]
                 weight = weight.narrow(1, self.tp_rank * shard, shard)
-            self.w13_weight.data.copy_(weight)
+            self.w13_weight.weight_loader(
+                self.w13_weight, weight, lambda p, w: p.data.copy_(w)
+            )
             return [key]
 
         assert key == "w2_weight"
@@ -320,7 +325,11 @@ class InklingSinkExperts(nn.Module):
         for expert_idx, expert_weight in enumerate(weight):
             local_weight = expert_weight.narrow(1, shard_start, shard)
             start = expert_idx * shard
-            self.w2_weight.data[:, start : start + shard].copy_(local_weight)
+            self.w2_weight.weight_loader(
+                self.w2_weight,
+                local_weight,
+                lambda p, w, s=start: p.data[:, s : s + shard].copy_(w),
+            )
         return [key]
 
     def forward(self, x: torch.Tensor, gammas: torch.Tensor) -> torch.Tensor:
@@ -455,6 +464,8 @@ class InklingMoE(nn.Module):
         # stream itself (RS -> shard sconv -> AG); the runner must return the
         # per-rank partial sum instead of all-reducing.
         self.experts.moe_config.skip_final_all_reduce = True
+        for param in self.experts.routed_experts.parameters():
+            param.weight_loader = write_loader
 
         self._routed_sel: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
@@ -569,7 +580,11 @@ class InklingMoE(nn.Module):
                 f"bad {projection} input_amax: {amax}"
             )
             input_scale = getattr(experts, f"{projection}_input_scale")
-            input_scale.data.fill_(amax / _NVFP4_INPUT_SCALE_DENOMINATOR)
+            input_scale.weight_loader(
+                input_scale,
+                torch.tensor(amax / _NVFP4_INPUT_SCALE_DENOMINATOR),
+                lambda p, w: p.data.copy_(w.expand_as(p.data)),
+            )
             return [f"experts.routed_experts.{projection}_input_scale"]
 
         param = getattr(experts, key)
@@ -590,12 +605,14 @@ class InklingMoE(nn.Module):
                 raise ValueError(
                     f"cannot load {tuple(weight.shape)} into {tuple(param.shape)}"
                 )
-            param.data[lids] = vals.reshape(len(gids), *param.shape[1:]).to(
-                param.device
+            param.weight_loader(
+                param,
+                vals.reshape(len(gids), *param.shape[1:]),
+                copy_into_slots(lids),
             )
         elif key == "w2_weight_scale" and weight.shape[-1] == 1:
             # Per-output-channel scales are replicated across TP ranks.
-            param.data[lids] = weight[gids].to(device=param.device, dtype=param.dtype)
+            param.weight_loader(param, weight[gids], copy_into_slots(lids))
         elif key.startswith("w13"):
             # Checkpoint w13 rows are interleaved [g0, u0, g1, u1, ...]; the
             # fused param layout is [w1(gate); w3(up)]. The TP-local rows form
@@ -606,14 +623,16 @@ class InklingMoE(nn.Module):
             half = param.shape[1] // 2
             for gid, lid in slots.items():
                 slab = weight[gid].narrow(0, tp_rank * 2 * half, 2 * half)
-                slab = slab.to(param.device)
-                param.data[lid, :half].copy_(slab[0::2])
-                param.data[lid, half:].copy_(slab[1::2])
+                param.weight_loader(param, slab, deinterleave_into(lid, 0, half))
         else:
             # w2: shard the packed intermediate (last) dim.
             shard = param.shape[2]
             for gid, lid in slots.items():
-                param.data[lid].copy_(weight[gid].narrow(1, tp_rank * shard, shard))
+                param.weight_loader(
+                    param,
+                    weight[gid].narrow(1, tp_rank * shard, shard),
+                    lambda p, w, lid=lid: p.data[lid].copy_(w),
+                )
         return [f"experts.routed_experts.{key}"]
 
     def finalize_load(self) -> list[str]:
