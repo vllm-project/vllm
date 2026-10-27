@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Decode-kernel routing for the ROCm AITER MLA backend.
 
-Gluon exposes a single fp8-KV regime, bh16bn128, and it is a bf16-query kernel.
-An fp8 cache reaches it only through _gluon_fp8_decode_max_batch, which keeps the
-query bf16. Every other fp8 shape has to land on the asm kernels, which ship real
-fp8 variants for gqa=16. These tests pin that down at the predicates, since a
-predicate that accepted fp8 would bypass that rule.
+Gluon exposes a single fp8-KV regime, bh16bn128. It is a bf16-query kernel that
+upcasts the cache in registers with a hardcoded scale of 1.0, and it asserts
+batch_size == 1, so it cannot serve a decode batch. Every fp8 shape therefore
+has to land on the asm kernels, which ship real fp8 variants for gqa=16. These
+tests pin that down at the predicates, since the failure it prevents is either a
+batch assertion or -- worse -- a silently wrong result.
 
 Gluon is still the route for supported non-DCP decode shapes. DCP multi-token
 verification uses segmented MLA instead, so it depends on neither Gluon's
@@ -45,7 +46,7 @@ def gluon_available(monkeypatch):
 @pytest.mark.parametrize("num_heads", [1, 2, 4, 5, 6, 8, 12, 16, 32, 128])
 @pytest.mark.parametrize("max_qo_len", [1, 2, 4, 5, 8, 15])
 def test_non_dcp_fp8_never_routes_to_gluon(kv_cache_dtype, num_heads, max_qo_len):
-    """Neither Gluon predicate accepts a non-DCP fp8 shape.
+    """No non-DCP fp8 shape reaches either Gluon entry point.
 
     The head count is deliberately swept across divisors of 16 as well as
     non-divisors: the divisor case (e.g. 8 heads at TP8) is the one that stays
@@ -64,8 +65,8 @@ def test_fp8_never_routes_to_gluon_under_any_mode(
     """VLLM_ROCM_AITER_MLA_ASM_PADDING cannot force a non-DCP fp8 cache onto Gluon.
 
     The dtype guard deliberately precedes the mode knob: honouring an explicit
-    "gluon" request under fp8 would bypass _gluon_fp8_decode_max_batch, so it is
-    overridden rather than obeyed. Pinned here because the override is a
+    "gluon" request under fp8 would hand Gluon the batch it asserts against, so
+    it is overridden rather than obeyed. Pinned here because the override is a
     correctness decision, not a preference.
     """
     monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: True)
