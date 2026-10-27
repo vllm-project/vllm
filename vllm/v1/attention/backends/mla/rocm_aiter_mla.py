@@ -2226,7 +2226,9 @@ class AiterMLAHelper:
     ) -> bool:
         # fp8 KV takes Gluon only for single-token batches
         if is_quantized_kv_cache(kv_cache_dtype):
-            return max_qo_len == 1 and num_reqs <= max_batch
+            if max_qo_len != 1:
+                return False
+            return num_reqs <= max_batch
         # Small-head (<16) single-token decode takes either the Gluon kernel or
         # the padded asm persistent decode, selected by
         # VLLM_ROCM_AITER_MLA_ASM_PADDING and the arch (Gluon is gfx950 only).
