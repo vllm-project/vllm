@@ -100,7 +100,9 @@ def minimax_pp_stage(monkeypatch):
     monkeypatch.setattr(minimax_m3, "get_pp_group", lambda: group)
     monkeypatch.setattr(parallel_state, "get_pp_group", lambda: group)
     monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
-    monkeypatch.setattr(minimax_m3, "supports_fused_moe_finalize", lambda _: False)
+    monkeypatch.setattr(
+        minimax_m3.MiniMaxM3Model, "_init_fused_moe_finalize", lambda *_: None
+    )
     monkeypatch.setattr(
         minimax_m3,
         "VocabParallelEmbedding",
