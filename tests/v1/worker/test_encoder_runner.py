@@ -460,20 +460,18 @@ def test_encoder_insertion_does_not_retain_unowned_storage(duplicate_hash):
 class _LimitedCloneAllocator(TorchDispatchMode):
     def __init__(self, successful_copies):
         super().__init__()
-        self.remaining = successful_copies
+        self.successful_copies = successful_copies
         self.attempts = 0
         self.copy_refs = []
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        is_clone = func is torch.ops.aten.clone.default
-        if is_clone:
-            self.attempts += 1
-            if self.remaining == 0:
-                raise torch.OutOfMemoryError("Compaction allocation exhausted")
-            self.remaining -= 1
+        if func is not torch.ops.aten.clone.default:
+            return func(*args, **(kwargs or {}))
+        self.attempts += 1
+        if self.attempts > self.successful_copies:
+            raise torch.OutOfMemoryError("Compaction allocation exhausted")
         result = func(*args, **(kwargs or {}))
-        if is_clone:
-            self.copy_refs.append(weakref.ref(result))
+        self.copy_refs.append(weakref.ref(result))
         return result
 
 
@@ -507,16 +505,13 @@ def test_encoder_compaction_oom_preserves_entries_and_releases_partial_copies(
     assert cache.encoder_outputs["other"] is independent
     for key, original in expected.items():
         assert cache.encoder_outputs[key] is original
-    if operation == "connector":
-        # The connector registers the chosen addresses after insertion returns.
-        cache.free_encoder_cache(["a"])
-        for key in ("b", "c", "d", "e", "f"):
-            assert cache.encoder_outputs[key] is expected[key]
-    elif operation == "evict":
-        # A later eviction can retry once allocator headroom is available.
-        cache.free_encoder_cache(["d"])
-        for key in ("e", "f"):
-            current = cache.encoder_outputs[key]
+    # Retry once headroom returns; connector addresses must remain fixed.
+    cache.free_encoder_cache([hashes[0]])
+    for key in hashes[1:]:
+        current = cache.encoder_outputs[key]
+        if operation == "connector":
+            assert current is expected[key]
+        else:
             torch.testing.assert_close(current, expected[key])
             assert current.untyped_storage().nbytes() == current.nbytes
 
