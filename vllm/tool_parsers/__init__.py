@@ -135,12 +135,12 @@ _TOOL_PARSERS_TO_REGISTER = {
         "K2HorizonToolParser",
     ),
     "llama3_json": (
-        "llama_tool_parser",
-        "Llama3JsonToolParser",
+        "llama_json_engine_tool_parser",
+        "LlamaJsonEngineToolParser",
     ),
     "llama4_json": (
-        "llama_tool_parser",
-        "Llama3JsonToolParser",
+        "llama_json_engine_tool_parser",
+        "LlamaJsonEngineToolParser",
     ),
     "llama4_pythonic": (
         "llama4_pythonic_tool_parser",
