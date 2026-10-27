@@ -643,6 +643,13 @@ class SpeculativeConfig:
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
 
+    dspark_fused_topk_walk: bool = False
+    """With ``dspark_draft_topk``, run the sequential Markov walk over the
+    top-k candidates in one kernel and cache only those candidates' draft
+    logits. Falls back to the per-step loop with a quantized Markov head, a
+    reduced draft vocabulary, draft watermarking or the online acceptance
+    estimator."""
+
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C
     base-logit candidates. 0 disables the narrowing and scores the full
@@ -1601,6 +1608,10 @@ class SpeculativeConfig:
 
                 if self.dspark_draft_topk is not None and self.method != "dspark":
                     raise ValueError("dspark_draft_topk is only supported by DSpark")
+                if self.dspark_fused_topk_walk and self.method != "dspark":
+                    raise ValueError(
+                        "dspark_fused_topk_walk is only supported by DSpark"
+                    )
 
                 dspark_draft_topk = None
                 if self.method == "dspark":
@@ -1631,6 +1642,10 @@ class SpeculativeConfig:
                                 "Qwen3DSparkModel and Qwen3OmniDSparkModel"
                             )
                         hf_config.dspark_draft_topk = dspark_draft_topk
+                    elif self.dspark_fused_topk_walk:
+                        raise ValueError(
+                            "dspark_fused_topk_walk requires dspark_draft_topk"
+                        )
 
                     assert self.target_model_config is not None
                     _validate_qwen3_omni_dspark(

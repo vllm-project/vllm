@@ -30,8 +30,10 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
+from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dspark.topk_walk import TopkMarkovWalk
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -78,8 +80,16 @@ class DSparkSpeculator(DFlashSpeculator):
         self._draft_topk: int | None = getattr(
             self.draft_model_config.hf_config, "dspark_draft_topk", None
         )
+        self._topk_walk: TopkMarkovWalk | None = None
 
         self.use_confidence_head: bool = False
+
+    def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
+        dtype, fill = super().draft_logits_spec(vllm_config)
+        if self.speculative_config.dspark_fused_topk_walk:
+            # The fused walk writes only the top-k candidates of each row.
+            fill = float("-inf")
+        return dtype, fill
 
     def load_draft_model(
         self,
@@ -111,11 +121,48 @@ class DSparkSpeculator(DFlashSpeculator):
             # The acceptance estimator is not needed when a trained confidence head
             # is available.
             self.use_acceptance_estimator = False
+        if self.speculative_config.dspark_fused_topk_walk:
+            self._init_topk_walk(model)
         return model
 
     def supports_batch_sharded_draft_logits(self) -> bool:
         # A model's own sample_sequential kernels write the full-size cache.
         return not hasattr(self.model, "sample_sequential")
+
+    def _init_topk_walk(self, model: torch.nn.Module) -> None:
+        assert self._draft_topk is not None
+        markov_head = getattr(model.model, "markov_head", None)
+        if isinstance(markov_head, DSparkMarkovHead):
+            markov_w1 = markov_head.markov_w1.weight
+            markov_w2 = getattr(markov_head.markov_w2, "weight", None)
+        if self._d2t_scatter_index is not None:
+            reason = "a reduced draft vocabulary"
+        elif self.draft_watermarker is not None:
+            reason = "draft watermarking"
+        elif self.use_acceptance_estimator:
+            reason = "the online acceptance estimator"
+        elif (
+            not isinstance(markov_head, DSparkMarkovHead)
+            or markov_w2 is None
+            or markov_w2.dtype != markov_w1.dtype
+        ):
+            reason = "a quantized Markov head"
+        else:
+            self._topk_walk = TopkMarkovWalk(
+                markov_w1,
+                markov_w2,
+                model.logits_processor.scale,
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                self._draft_topk,
+                self.device,
+            )
+            return
+        logger.warning(
+            "dspark_fused_topk_walk does not support %s; using the per-step "
+            "Markov loop.",
+            reason,
+        )
 
     def _sample_logits(
         self,
@@ -237,35 +284,61 @@ class DSparkSpeculator(DFlashSpeculator):
         base_logits = self.model.compute_draft_logits(sample_hidden)
         base_logits = base_logits.view(num_reqs, n_spec, -1)
         base_values, draft_indices = base_logits.topk(self._draft_topk, dim=-1)
-        # Reuse the dense backbone output as the normal sampler's input. Fill
-        # once for all positions, then scatter only the corrected candidates
-        # during the sequential loop.
-        base_logits.fill_(float("-inf"))
-        idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
-        sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
-        confidence_markov_embeds = []
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
 
-        for i in range(n_spec):
-            markov_embed = self.model.markov_embed(prev)
+        if self._topk_walk is not None:
+            self._topk_walk.sample(
+                base_values,
+                draft_indices,
+                prev,
+                self.sample_idx_mapping[:num_sample],
+                self.sample_pos[:num_sample],
+                self.temperature,
+                self.seeds,
+                self.draft_tokens,
+                self.draft_logits,
+                self.use_fp64_gumbel,
+                self.draft_logits_num_shards,
+                self.draft_logits_shard_idx,
+            )
             if self.use_confidence_head:
-                confidence_markov_embeds.append(markov_embed)
-            logits_i = self.model.apply_markov_bias_gathered(
-                markov_embed,
-                base_logits[:, i],
-                base_values[:, i],
-                draft_indices[:, i],
-            )
-            draft_sampled_i = self._sample_logits(
-                logits_i, idx_map[:, i], sample_pos[:, i], i
-            )
-            self.draft_tokens[:num_reqs, i] = draft_sampled_i
-            prev = draft_sampled_i
+                prev_tokens = torch.cat(
+                    [prev[:, None], self.draft_tokens[:num_reqs, :-1]], dim=1
+                )
+                confidence_markov_embeds = self.model.markov_embed(
+                    prev_tokens.flatten()
+                )
+        else:
+            # Reuse the dense backbone output as the normal sampler's input.
+            # Fill once for all positions, then scatter only the corrected
+            # candidates during the sequential loop.
+            base_logits.fill_(float("-inf"))
+            idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
+            sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
+            markov_embeds = []
+            for i in range(n_spec):
+                markov_embed = self.model.markov_embed(prev)
+                if self.use_confidence_head:
+                    markov_embeds.append(markov_embed)
+                logits_i = self.model.apply_markov_bias_gathered(
+                    markov_embed,
+                    base_logits[:, i],
+                    base_values[:, i],
+                    draft_indices[:, i],
+                )
+                draft_sampled_i = self._sample_logits(
+                    logits_i, idx_map[:, i], sample_pos[:, i], i
+                )
+                self.draft_tokens[:num_reqs, i] = draft_sampled_i
+                prev = draft_sampled_i
+            if self.use_confidence_head:
+                confidence_markov_embeds = torch.stack(markov_embeds, dim=1).flatten(
+                    0, 1
+                )
 
         if self.use_confidence_head:
             confidence = self.model.compute_confidence(
-                sample_hidden,
-                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+                sample_hidden, confidence_markov_embeds
             )
             self.draft_token_confidence_probs[:num_reqs] = confidence.view(
                 num_reqs, n_spec

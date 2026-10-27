@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -17,6 +19,7 @@ from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+from vllm.v1.worker.gpu.spec_decode.dspark.topk_walk import TopkMarkovWalk
 
 
 def _markov_head(weight: torch.Tensor) -> DSparkMarkovHead:
@@ -283,3 +286,154 @@ def test_nvfp4_gathered_markov_bias_kernel_matches_reference(batch_size: int):
         torch.testing.assert_close(
             logits.gather(1, index), expected, rtol=1e-2, atol=6.25e-2
         )
+
+
+class _TopkDraftModel:
+    def __init__(self, head: DSparkMarkovHead, base_logits: torch.Tensor, scale):
+        self.head = head
+        self.base_logits = base_logits
+        self.scale = scale
+
+    def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.base_logits.clone()
+
+    def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.head.markov_w1(token_ids)
+
+    def apply_markov_bias_gathered(self, markov_embed, logits, values, index):
+        return self.head.apply_bias_gathered(
+            markov_embed, logits, values, index, self.scale
+        )
+
+
+def _topk_speculator(
+    batch: int,
+    temperature: float,
+    use_fp64: bool,
+    fused: bool,
+    scale: float = 0.5,
+    num_shards: int = 1,
+) -> DSparkSpeculator:
+    """A top-k DSpark sampler whose Markov products and sums are exact in fp32,
+    so the fused walk and the per-step loop must agree bit for bit."""
+    device = torch.device("cuda")
+    n_spec, vocab_size, rank, topk = 4, 4096, 64, 12
+    max_num_reqs = batch + 2
+    gen = torch.Generator(device=device).manual_seed(0)
+
+    def small(*shape):
+        return (
+            torch.randint(-2, 3, shape, generator=gen, device=device).to(torch.bfloat16)
+            / 8
+        )
+
+    head = _markov_head(small(vocab_size, rank))
+    head.markov_w1 = nn.Embedding.from_pretrained(small(vocab_size, rank))
+    head.to(device)
+    base_logits = (
+        torch.randn(batch * n_spec, vocab_size, generator=gen, device=device) * 3
+    ).to(torch.bfloat16)
+
+    spec = DSparkSpeculator.__new__(DSparkSpeculator)
+    spec.model = _TopkDraftModel(head, base_logits, scale)
+    spec.num_speculative_steps = n_spec
+    spec._draft_topk = topk
+    spec.use_confidence_head = False
+    spec.acceptance_estimator = None
+    spec.draft_watermarker = None
+    spec._d2t_scatter_index = None
+    spec.use_fp64_gumbel = use_fp64
+    spec.draft_logits_num_shards = num_shards
+    spec.draft_logits_shard_idx = num_shards - 1
+    spec.draft_logits = torch.full(
+        ((max_num_reqs + num_shards - 1) // num_shards, n_spec, vocab_size),
+        float("-inf"),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    spec.temperature = torch.full((max_num_reqs,), temperature, device=device)
+    spec.seeds = torch.randint(0, 2**62, (max_num_reqs,), generator=gen, device=device)
+    spec._step_cols = torch.arange(n_spec, dtype=torch.int32, device=device)
+    spec.sample_indices = torch.arange(batch * n_spec, device=device)
+    # Request states in reverse order, and the last row is CUDA graph padding.
+    states = torch.arange(batch, dtype=torch.int32, device=device).flip(0) + 1
+    states[-1] = -1
+    spec.sample_idx_mapping = states.repeat_interleave(n_spec)
+    context = torch.randint(100, 8000, (batch,), generator=gen, device=device)
+    spec.sample_pos = (
+        context[:, None] + 1 + torch.arange(n_spec, device=device)
+    ).flatten()
+    spec.input_buffers = SimpleNamespace(
+        input_ids=torch.randint(
+            0, vocab_size, (batch * n_spec,), generator=gen, device=device
+        )
+    )
+    spec._anchor_idx = torch.arange(batch, device=device) * n_spec
+    spec.draft_tokens = torch.zeros(
+        max_num_reqs, n_spec, dtype=torch.int64, device=device
+    )
+    spec._topk_walk = None
+    if fused:
+        spec._topk_walk = TopkMarkovWalk(
+            head.markov_w1.weight,
+            head.markov_w2.weight,
+            scale,
+            max_num_reqs,
+            n_spec,
+            topk,
+            device,
+        )
+    return spec
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("temperature", [0.0, 0.7, 1.0])
+@pytest.mark.parametrize("use_fp64", [False, True])
+@pytest.mark.parametrize("num_shards", [1, 2])
+def test_fused_topk_walk_matches_per_step_loop(temperature, use_fp64, num_shards):
+    """Same draft tokens and the same cached proposal q as the per-step loop,
+    also when the cache holds only this rank's batch-sharded rows."""
+    batch = 5
+    reference = _topk_speculator(
+        batch, temperature, use_fp64, fused=False, num_shards=num_shards
+    )
+    fused = _topk_speculator(
+        batch, temperature, use_fp64, fused=True, num_shards=num_shards
+    )
+    hidden = torch.zeros(batch * reference.num_speculative_steps, 1, device="cuda")
+
+    reference._sample_sequential(batch, hidden)
+    fused._sample_sequential(batch, hidden)
+
+    torch.testing.assert_close(fused.draft_tokens, reference.draft_tokens)
+    torch.testing.assert_close(
+        fused.draft_logits, reference.draft_logits, atol=0, rtol=0
+    )
+    assert fused.draft_logits is not None
+    assert torch.isfinite(fused.draft_logits).any()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_fused_topk_walk_clears_previous_candidates():
+    """A slot's cached row holds only the current candidates, even when the
+    previous walk on that slot chose overlapping ones, also under replay."""
+    batch = 5
+    fused = _topk_speculator(batch, 1.0, False, fused=True)
+    reference = _topk_speculator(batch, 1.0, False, fused=False)
+    hidden = torch.zeros(batch * fused.num_speculative_steps, 1, device="cuda")
+    fused._sample_sequential(batch, hidden)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        fused._sample_sequential(batch, hidden)
+    for model in (fused.model, reference.model):
+        logits = model.base_logits
+        # Keep half of each row's candidates and move the rest.
+        logits[:, ::2] = logits[:, ::2].roll(1, dims=0)
+    graph.replay()
+    reference._sample_sequential(batch, hidden)
+
+    torch.testing.assert_close(fused.draft_tokens, reference.draft_tokens)
+    torch.testing.assert_close(
+        fused.draft_logits, reference.draft_logits, atol=0, rtol=0
+    )

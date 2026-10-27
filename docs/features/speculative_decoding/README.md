@@ -178,6 +178,13 @@ vllm serve <target-model> \
   )
 ```
 
+#### DSpark
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `dspark_draft_topk` | `integer >= 1` | `None` | Qwen3 DSpark only: apply the Markov head to the top-k base-logit candidates instead of the full vocabulary. Unset uses the draft checkpoint's value, if any. |
+| `dspark_fused_topk_walk` | `boolean` | `false` | Requires `dspark_draft_topk`. Runs the sequential Markov walk over the top-k candidates in one kernel and caches only those candidates. Falls back to the per-step loop with a quantized Markov head, a reduced draft vocabulary, draft watermarking or the online acceptance estimator. |
+
 ### Notes
 
 - `--speculative-config` expects a JSON object on the CLI. In YAML config

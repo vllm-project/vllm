@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -33,6 +33,8 @@ class DSparkCorrectnessConfig:
     enforce_eager: bool = False
     disable_flashinfer_sampler: bool = False
     language_model_only: bool = False
+    dspark_draft_topk: int | None = None
+    dspark_fused_topk_walk: bool = False
 
 
 # References from 12 full GSM8K runs at temperature 1.0: accuracy 0.782-0.814,
@@ -79,11 +81,20 @@ QWEN3_6_DSPARK_SPECULATORS = DSparkCorrectnessConfig(
     language_model_only=True,
 )
 
+# Top-64 truncation and the fused walk stayed within the full-vocabulary
+# references (accuracy 0.792, acceptance length 3.976 on one H100 run).
+QWEN3_DSPARK_DEEPSPEC_FUSED_TOPK_WALK = replace(
+    QWEN3_DSPARK_DEEPSPEC, dspark_draft_topk=64, dspark_fused_topk_walk=True
+)
+
 
 @pytest.mark.parametrize(
     "config",
     [
         pytest.param(QWEN3_DSPARK_DEEPSPEC, id="qwen3-deepspec"),
+        pytest.param(
+            QWEN3_DSPARK_DEEPSPEC_FUSED_TOPK_WALK, id="qwen3-deepspec-fused-topk-walk"
+        ),
         pytest.param(GEMMA4_DSPARK_DEEPSPEC, id="gemma4-deepspec"),
         pytest.param(QWEN3_6_DSPARK_SPECULATORS, id="qwen3.6-speculators"),
     ],
@@ -103,6 +114,10 @@ def test_dspark_correctness_and_acceptance_rate(
         "num_speculative_tokens": config.num_speculative_tokens,
         "draft_sample_method": "probabilistic",
     }
+    if config.dspark_draft_topk is not None:
+        speculative_config["dspark_draft_topk"] = config.dspark_draft_topk
+    if config.dspark_fused_topk_walk:
+        speculative_config["dspark_fused_topk_walk"] = True
     if config.attention_backend is not None and current_platform.is_cuda():
         speculative_config["attention_backend"] = config.attention_backend
 
