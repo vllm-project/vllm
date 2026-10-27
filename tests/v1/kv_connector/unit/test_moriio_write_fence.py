@@ -75,10 +75,11 @@ PRODUCER = WriteProducer(
 )
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def role():
-    """The wrapper's message handlers check the process-global role."""
+    """The connector checks the process-global role; tests start as consumer."""
     saved = moriio_common.get_role()
+    moriio_common.set_role(moriio_common.ROLE.CONSUMER)
     yield moriio_common.set_role
     moriio_common.set_role(saved)
 
@@ -512,12 +513,11 @@ def test_failure_without_writer_count_is_immediate(role):
     assert wrapper._write_done_counts == {}
 
 
-def test_fence_aborts_are_held_back_by_the_debug_delay(role):
+def test_fence_aborts_are_popped_once(role):
     role(moriio_common.ROLE.PRODUCER)
     wrapper = MoRIIOWrapper()
     wrapper._handle_structured_message({"type": "fence_abort", "transfer_id": "f1"})
 
-    assert wrapper.pop_fence_aborts(min_age=60) == []
     assert wrapper.pop_fence_aborts() == [{"type": "fence_abort", "transfer_id": "f1"}]
     assert wrapper.pop_fence_aborts() == []
 
@@ -696,35 +696,6 @@ def test_finalize_after_an_abort_sends_no_write_done():
     writer._finalize_if_complete("t1", info)
 
     assert wrapper.sent == []
-
-
-def test_debug_hold_holds_only_the_nth_transfer():
-    writer, _ = _producer_writer()
-    writer.ensure_worker_started = lambda: None
-    writer._debug_hold_nth = 2
-    writer._debug_hold_s = 30.0
-    writer._debug_hold_until = {}
-
-    def task(transfer_id, layer):
-        return WriteTask(
-            request_id=f"req-{transfer_id}",
-            transfer_id=transfer_id,
-            dst_engine_id="d",
-            local_block_ids=[[1]],
-            remote_block_ids_hint=None,
-            layer_name=layer,
-            event=None,
-            remote_notify_port=7100,
-            remote_ip="10.0.0.9",
-        )
-
-    for transfer_id in ("t1", "t2", "t3"):
-        for layer in ("layer0", "layer1"):
-            writer.schedule_write(task(transfer_id, layer))
-
-    assert list(writer._debug_hold_until) == ["t2"]
-    assert writer._is_held(task("t2", "layer0"))
-    assert not writer._is_held(task("t1", "layer0"))
 
 
 # --- through the real scheduler -----------------------------------------------

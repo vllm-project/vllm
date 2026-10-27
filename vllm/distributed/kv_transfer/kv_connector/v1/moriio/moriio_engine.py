@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -103,15 +102,6 @@ class MoRIIOWriter:
     writes complete.
     """
 
-    # Debug fault injection for the decode fence: hold the writes of the N-th
-    # transfer (1-based) for some seconds, and delay acting on a fence abort,
-    # so held writes reach a decode that has already fenced this producer.
-    _debug_hold_nth = 0
-    _debug_hold_s = 0.0
-    _debug_abort_delay_s = 0.0
-    _debug_transfers_seen = 0
-    _debug_hold_until: dict[TransferId, float] = {}
-
     def __init__(self, worker: "MoRIIOConnectorWorker"):
         """Initialize the writer.
 
@@ -132,24 +122,6 @@ class MoRIIOWriter:
         # (fence_id, consumer_key) of handled aborts; decode re-sends an abort
         # until its ack arrives, and a repeat must not reset the new connection.
         self._handled_fences: OrderedDict[tuple[str, str], None] = OrderedDict()
-        self._debug_hold_nth = int(
-            os.environ.get("VLLM_MORIIO_DEBUG_HOLD_TRANSFER_NTH", "0")
-        )
-        self._debug_hold_s = float(
-            os.environ.get("VLLM_MORIIO_DEBUG_HOLD_TRANSFER_S", "0")
-        )
-        self._debug_abort_delay_s = float(
-            os.environ.get("VLLM_MORIIO_DEBUG_ABORT_DELAY_S", "0")
-        )
-        self._debug_hold_until = {}
-        if self._debug_hold_nth > 0 or self._debug_abort_delay_s > 0:
-            logger.warning(
-                "MoRI-IO debug fault injection on: hold transfer #%d for %.1fs, "
-                "delay fence aborts by %.1fs",
-                self._debug_hold_nth,
-                self._debug_hold_s,
-                self._debug_abort_delay_s,
-            )
 
     @property
     def worker(self) -> "MoRIIOConnectorWorker":
@@ -195,22 +167,6 @@ class MoRIIOWriter:
                 return False
             if task.layer_name in self._scheduled_layers[task.transfer_id]:
                 return False
-            if (
-                self._debug_hold_nth > 0
-                and not self._scheduled_layers[task.transfer_id]
-            ):
-                self._debug_transfers_seen += 1
-                if self._debug_transfers_seen == self._debug_hold_nth:
-                    self._debug_hold_until[task.transfer_id] = (
-                        time.monotonic() + self._debug_hold_s
-                    )
-                    logger.warning(
-                        "MoRI-IO debug: holding the writes of transfer %s "
-                        "(request %s) for %.1fs",
-                        task.transfer_id,
-                        task.request_id,
-                        self._debug_hold_s,
-                    )
             self._scheduled_layers[task.transfer_id].add(task.layer_name)
             self._scheduled_writes[task.transfer_id] += 1
         self._write_task_q.put(task)
@@ -265,7 +221,7 @@ class MoRIIOWriter:
                 continue
 
             # Check if remote blocks are ready
-            if not self._is_remote_ready(task) or self._is_held(task):
+            if not self._is_remote_ready(task):
                 # task.retry_count += 1
                 self._deferred_tasks.append(task)
                 # logger.debug(
@@ -296,9 +252,7 @@ class MoRIIOWriter:
         for task in self._deferred_tasks:
             if self._is_transfer_terminal(task.transfer_id):
                 continue
-            if self._is_held(task):
-                still_deferred.append(task)
-            elif self._is_remote_ready(task):
+            if self._is_remote_ready(task):
                 try:
                     self._execute_write_task(task)
                 except Exception:
@@ -424,7 +378,7 @@ class MoRIIOWriter:
         pop_fence_aborts = getattr(wrapper, "pop_fence_aborts", None)
         if pop_fence_aborts is None:
             return
-        for abort in pop_fence_aborts(self._debug_abort_delay_s):
+        for abort in pop_fence_aborts():
             fence_id = abort["transfer_id"]
             consumer_key = abort.get("consumer_key", "")
             handled = (fence_id, consumer_key)
@@ -469,11 +423,6 @@ class MoRIIOWriter:
         result = engine.fence_remote_engine(consumer_key)
         engine.unfence_remote_engine(consumer_key)
         return result.endpoints_fenced
-
-    def _is_held(self, task: WriteTask) -> bool:
-        """Debug fault injection: hold one transfer's writes back."""
-        hold_until = self._debug_hold_until.get(task.transfer_id)
-        return hold_until is not None and time.monotonic() < hold_until
 
     def _is_remote_ready(self, task: WriteTask) -> bool:
         """Check if remote blocks are allocated for this task.
@@ -946,9 +895,9 @@ class MoRIIOWrapper:
         # are not all in, and those of them where some writer failed.
         self._write_done_counts: dict[TransferId, int] = {}
         self._write_failed_partial: set[TransferId] = set()
-        # Fence aborts from decode (prefill) with their arrival time, and fence
-        # acks from prefill (decode) as (fence_id, producer engine key).
-        self._fence_aborts: list[tuple[float, dict]] = []
+        # Fence aborts from decode (prefill), and fence acks from prefill
+        # (decode) as (fence_id, producer engine key).
+        self._fence_aborts: list[dict] = []
         self._fence_acks: list[tuple[str, str]] = []
         self._terminal_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
         self._transfer_timeout = transfer_timeout
@@ -1249,7 +1198,7 @@ class MoRIIOWrapper:
         elif message_type == "fence_abort":
             assert get_role() == ROLE.PRODUCER, "Only prefill can get fence aborts"
             with self.lock:
-                self._fence_aborts.append((time.monotonic(), data))
+                self._fence_aborts.append(data)
         elif message_type == "fence_ack":
             assert get_role() != ROLE.PRODUCER, "Only decode can get fence acks"
             with self.lock:
@@ -1437,17 +1386,11 @@ class MoRIIOWrapper:
             self.failed_write_cache_req_ids = []
         return failed_write_cache
 
-    def pop_fence_aborts(self, min_age: float = 0.0) -> list[dict]:
-        """Fence aborts received at least min_age seconds ago."""
-        cutoff = time.monotonic() - min_age
+    def pop_fence_aborts(self) -> list[dict]:
         with self.lock:
-            ready = [
-                data for received, data in self._fence_aborts if received <= cutoff
-            ]
-            self._fence_aborts = [
-                entry for entry in self._fence_aborts if entry[0] > cutoff
-            ]
-        return ready
+            aborts = self._fence_aborts
+            self._fence_aborts = []
+        return aborts
 
     def pop_fence_acks(self) -> list[tuple[str, str]]:
         with self.lock:
