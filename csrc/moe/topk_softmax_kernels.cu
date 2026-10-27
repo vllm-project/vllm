@@ -887,9 +887,9 @@ void topk_softmax(
 {
     STD_TORCH_CHECK(gating_output.dim() == 2,
                     "gating_output must be a 2D tensor");
-    STD_TORCH_CHECK(gating_output.stride(1) == 1,
-                    "gating_output's last dimension must be contiguous");
     const int num_experts = gating_output.size(-1);
+    STD_TORCH_CHECK(num_experts == 1 || gating_output.stride(1) == 1,
+                    "gating_output's last dimension must be contiguous");
     const auto num_tokens = gating_output.numel() / num_experts;
     const int topk = topk_weights.size(-1);
 
@@ -933,9 +933,9 @@ void topk_sigmoid(
 {
     STD_TORCH_CHECK(gating_output.dim() == 2,
                     "gating_output must be a 2D tensor");
-    STD_TORCH_CHECK(gating_output.stride(1) == 1,
-                    "gating_output's last dimension must be contiguous");
     const int num_experts = gating_output.size(-1);
+    STD_TORCH_CHECK(num_experts == 1 || gating_output.stride(1) == 1,
+                    "gating_output's last dimension must be contiguous");
     const auto num_tokens = gating_output.numel() / num_experts;
     const int topk = topk_weights.size(-1);
 
