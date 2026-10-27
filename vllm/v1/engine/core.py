@@ -54,7 +54,10 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-from vllm.v1.core.kv_cache_planning import get_kv_cache_configs
+from vllm.v1.core.kv_cache_planning import (
+    get_global_kv_cache_groups,
+    get_kv_cache_configs,
+)
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -286,7 +289,12 @@ class EngineCore:
             self.model_executor.get_supported_kv_cache_layouts(),
             [s for specs in kv_cache_specs for s in specs.values()],
         )
-        self.model_executor.set_kv_cache_layout(layout.name)
+
+        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
+        vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
+        self.model_executor.set_kv_cache_layout(
+            layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
@@ -312,7 +320,7 @@ class EngineCore:
         max_model_len_before = vllm_config.model_config.max_model_len
 
         kv_cache_configs = get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_gpu_memory
+            vllm_config, kv_cache_specs, available_gpu_memory, global_kv_cache_groups
         )
         for kv_cache_config in kv_cache_configs:
             kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
