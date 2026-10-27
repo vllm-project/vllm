@@ -1993,6 +1993,64 @@ def test_flashinfer_nvfp4_sink_prefill_correctness(default_vllm_config, use_cuda
 
 @pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
+    or not current_platform.is_device_capability_family(120),
+    reason="The NVFP4+sink XQA gate only exists on SM12x.",
+)
+def test_flashinfer_nvfp4_sink_prefill_rejected_without_xqa(default_vllm_config):
+    """NVFP4+sinks is rejected when XQA decode cannot serve the model.
+
+    The fa2 NVFP4 sink route needs XQA to apply sinks at decode; with a GQA
+    shape XQA rejects (qo heads not divisible by kv heads), decode would fall
+    back to the plain fa2 wrapper, which silently ignores sinks in flashinfer
+    0.7.2, so the builder must raise instead of routing there.
+    """
+    import unittest.mock
+
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B", max_model_len=64, block_size=16
+    )
+    # GQA qo/kv = 6/4 is not divisible, so XQA decode is unavailable while
+    # head_dim 256 stays on the fa2 NVFP4 route.
+    config.model_config.model_arch_config = replace(
+        config.model_config.model_arch_config,
+        total_num_attention_heads=6,
+        total_num_kv_heads=4,
+        head_size=256,
+    )
+    config.cache_config.cache_dtype = "nvfp4"
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=256,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.NVFP4,
+    )
+    params = {
+        "placeholder": PerLayerParameters(
+            window_left=-1,
+            logits_soft_cap=0.0,
+            sm_scale=256**-0.5,
+            has_sinks=True,
+        )
+    }
+    with (
+        set_current_vllm_config(config),
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+            lambda *args, **kwargs: params,
+        ),
+        pytest.raises(NotImplementedError, match="does not support attention"),
+    ):
+        FlashInferMetadataBuilder(
+            spec, ["placeholder"], config, torch.device(f"{DEVICE_TYPE}:0")
+        )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
     or current_platform.has_device_capability(90),
     reason="FlashInfer fa2 spec decode runs before SM90.",
 )

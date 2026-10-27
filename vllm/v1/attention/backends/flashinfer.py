@@ -1097,14 +1097,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.use_trtllm_dcp_prefill:
             logger.info_once("Using the trtllm-gen context kernel for DCP prefill.")
         self.has_sinks = self.global_hyperparameters.has_sinks
-        # The fa2 NVFP4 sink route is SM12x-only: on SM8x/SM90 decode falls
-        # back to the plain fa2 wrapper, which ignores sinks in flashinfer
-        # 0.7.2 (see supports_combination).
-        nvfp4_fa2_off_sm12x = self.nvfp4_fa2 and not (
-            current_platform.is_device_capability_family(120)
+        # The fa2 NVFP4 sink route requires XQA decode: the plain fa2 decode
+        # wrapper reached otherwise (SM8x/90, or on SM12x when XQA is
+        # unavailable here — non-divisible GQA, unsupported head_dim, DCP)
+        # silently ignores sinks in flashinfer 0.7.2 (see
+        # supports_combination). use_trtllm_decode_attention is already False
+        # for nvfp4_fa2 off SM12x.
+        nvfp4_fa2_without_xqa = self.nvfp4_fa2 and not (
+            self.use_trtllm_decode_attention
         )
         if self.has_sinks and (
-            nvfp4_fa2_off_sm12x or not FlashInferBackend.supports_sink()
+            nvfp4_fa2_without_xqa or not FlashInferBackend.supports_sink()
         ):
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
@@ -2459,8 +2462,10 @@ class FlashInferImpl(AttentionImpl):
                         )
                     ):
                         # The plain fa2 JIT kernel reads the NVFP4 KV cache and
-                        # returns row-wise LSE in the log2 domain; apply the
-                        # attention sink exactly as an epilogue rescale:
+                        # returns row-wise LSE in the log2 domain as
+                        # [prefill_tokens, qo_heads], with the [qo_heads] sinks
+                        # broadcasting per row; apply the attention sink
+                        # exactly as an epilogue rescale:
                         # out / (1 + exp(sink - ln2 * lse)). The correction is
                         # fp32; mul_ promotes, so the result rounds once.
                         assert self.sinks is not None
