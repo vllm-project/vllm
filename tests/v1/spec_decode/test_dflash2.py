@@ -652,6 +652,7 @@ def test_dflash_fc_runs_fp32_target_hidden_states_in_draft_dtype(monkeypatch):
     fc = model.model.fc
     torch.manual_seed(0)
     torch.nn.init.normal_(fc.weight)
+    fc.quant_method.process_weights_after_loading(fc)
     aux_hidden_states = torch.randn(3, 2 * hidden, dtype=torch.float32)
 
     combined = model.combine_hidden_states(aux_hidden_states)
