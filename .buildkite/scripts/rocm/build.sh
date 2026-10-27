@@ -20,10 +20,14 @@
 # Trust: ROCM_CI_REPO is set by ci-infra (CI) or release-pipeline.yaml (release).
 #   Trusted main builds: rocm/vllm-ci
 #   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it)
-#   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags and caches: nightlies, branch builds)
+#   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags: nightlies, branch builds; they
+#                                          reuse only rocm/vllm-ci images and cache, and write none)
 #   Release pipeline:    its ECR repo     (never reads rocm/vllm-ci or its cache: it builds the
 #                                          stack and runtime from source, with only its own ECR cache;
 #                                          csrc objects come from the shared S3 sccache, as in CUDA)
+# Every untrusted build has the same rocm/vllm-dev credentials, so the prefixes keep names apart but
+# isolate nothing: any PR can overwrite another PR's tags and caches. Isolating PRs from each other
+# would take per-namespace credentials (ci-infra).
 # ROCM_CI_TRUSTED_REPO / ROCM_CI_CACHE_REPO only point a local run at a sandbox registry.
 set -euo pipefail
 
@@ -43,17 +47,17 @@ export BUILDKIT_PROGRESS=${BUILDKIT_PROGRESS:-plain}  # TTY progress redraws blo
 # PR builds write to a per-PR cache and prefix their image tags. The release pipeline's agents
 # cannot write rocm/vllm-ci or its cache: release writes its images and its own cache to $REPO,
 # so the next release reuses this one's all-arch compile.
-PFX=""
+PFX="" OWN=true
 if [[ $MODE == release* ]]; then
   CACHE="" CACHE_TO=$REPO:cache-   # and reads only that cache: CI agents also run PR code
 elif [[ $REPO != "$TRUSTED" ]]; then
   if [[ ${BUILDKITE_PULL_REQUEST:-false} != false ]]; then
-    PFX="pr$BUILDKITE_PULL_REQUEST-"
+    PFX="pr$BUILDKITE_PULL_REQUEST-" CACHE_TO=$REPO:cache-$PFX
   else   # not a PR (AITER nightly, branch or manual builds): one namespace per branch
     br=${BUILDKITE_BRANCH:-local}   # the hash keeps e.g. feat/x and feat-x apart
     PFX="br-$(printf %s "$br" | tr -c 'A-Za-z0-9.-' - | cut -c1-40)-$(printf %s "$br" | sha256sum | cut -c1-8)-"
+    CACHE_TO="" OWN=false   # any PR can write rocm/vllm-dev: never read back from it
   fi
-  CACHE_TO=$REPO:cache-$PFX
   # Only the compile stages' cache: everything else is cheap or in the trusted cache.
   export CACHE_CI=false
 fi
@@ -191,14 +195,16 @@ echo "build.sh $STACK $MODE: repo=$REPO trusted=$TRUSTED Ks=$Ks Kr=$Kr"
 #   1. Trusted registry (rocm/vllm-ci:<tag>) — safe for any CI build to reuse. Not for release:
 #      CI agents also run PR code, so release never ships an image it did not build itself.
 #   2. This repo's own tag ($REPO:$PFX<tag>) — PR builds and the release pipeline write here.
+#      Not for other untrusted builds (OWN=false): a PR could have pushed it.
 #   3. Neither found: build via bake and push.
 # A <sibling-suffix> means the image only counts as present when the sibling
 # tag also exists (used by stack: must have both the image and -wheels); then
 # both pinned refs are printed, space-separated.
 ensure() {
   local target=$1 tag=$2 sibling=${3:-} ref d ds refs rc mf
-  refs=("$REPO:$PFX$tag")
-  [[ $MODE == release* || $REPO == "$TRUSTED" ]] || refs=("$TRUSTED:$tag" "${refs[@]}")
+  refs=()
+  [[ $MODE == release* || $REPO == "$TRUSTED" ]] || refs=("$TRUSTED:$tag")
+  [[ $OWN == false ]] || refs+=("$REPO:$PFX$tag")
 
   for ref in "${refs[@]}"; do
     if d=$(digest "$ref") && { [[ -z $sibling ]] || ds=$(digest "$ref$sibling"); }; then

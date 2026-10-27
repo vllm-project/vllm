@@ -424,14 +424,43 @@ RUN CARGO_BUILD_JOBS="$(nproc)" SETUPTOOLS_SCM_PRETEND_VERSION="$(cat /tmp/vllm-
     bash tools/build_rust.sh \
     && test -x vllm/vllm-rs
 
+# What setup.py reads of pyproject.toml and vllm/envs.py: the project and setuptools tables, and the
+# variables setup.py names with the definitions they use (ast.unparse drops comments); vllm/__init__.py
+# only has to exist. COPY --from keys on content, so a new env var or lint rule no longer recompiles
+# all HIP code.
+FROM dev AS csrc-inputs
+COPY setup.py pyproject.toml vllm/envs.py /in/
+RUN cd /in && mkdir -p /out/vllm && : > /out/vllm/__init__.py \
+    && awk '/^\[/ { keep = /^\[(project|tool\.setuptools)/ } keep' pyproject.toml > /out/pyproject.toml \
+    && python3 - <<'EOF'
+import ast, re
+setup, body = open("setup.py").read(), ast.parse(open("envs.py").read()).body
+def names(n):
+    targets = getattr(n, "targets", [getattr(n, "target", None)])
+    return {n.name} if isinstance(n, ast.FunctionDef) else {t.id for t in targets if isinstance(t, ast.Name)}
+defs = {name: n for n in body for name in names(n)}
+table, words = defs["environment_variables"].value, set(re.findall(r"\w+", setup))
+table.keys, table.values = map(list, zip(*[kv for kv in zip(table.keys, table.values) if kv[0].value in words]))
+need, todo = set(), ["__getattr__", *re.findall(r"\benvs\.(\w+)", setup)]
+while todo:  # the module-level definitions those use, transitively
+    if (name := todo.pop()) in defs and name not in need:
+        need.add(name)
+        todo += [x.id for x in ast.walk(defs[name]) if isinstance(x, ast.Name)]
+keep = [n for n in body if isinstance(n, (ast.Import, ast.ImportFrom)) or names(n) & need]
+for n in keep:  # docstring edits must not recompile either
+    if isinstance(n, ast.FunctionDef) and ast.get_docstring(n):
+        n.body = n.body[1:] or [ast.Pass()]
+open("/out/vllm/envs.py", "w").write(ast.unparse(ast.Module(keep, [])))
+EOF
+
 # Native extensions only: copies just the files that affect the HIP/C++ build (and the map tool).
 FROM triton-kernels AS csrc
 WORKDIR /app/vllm
-COPY setup.py CMakeLists.txt pyproject.toml ./
+COPY setup.py CMakeLists.txt ./
+COPY --from=csrc-inputs /out/ ./
 COPY tools/build_rust.py tools/build_rust.py
 COPY cmake cmake/
 COPY csrc csrc/
-COPY vllm/envs.py vllm/__init__.py vllm/
 # Empty: the stack's full PYTORCH_ROCM_ARCH (release); CI passes the arches it can test.
 ARG ARCH
 # setup.py reads requirements/rocm.txt for install_requires. This wheel only carries the .so files

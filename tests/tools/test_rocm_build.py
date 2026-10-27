@@ -97,7 +97,7 @@ case $2 in
     fi ;;
   bake)
     echo "bake ${*:5}" >> "$CALLS"
-    echo "cache: ${CACHE:-own only}" >&2
+    echo "cache: ${CACHE:-own only}, to: ${CACHE_TO:-none}" >&2
     [[ $5 == --metadata-file ]] && for t in stack-rocm stack-wheels runtime test-deps
     do
       printf '  "%s": {\\n    "containerimage.digest": "sha256:%064d"\\n  },\\n' "$t" 1
@@ -220,6 +220,25 @@ def test_untrusted_builds_get_their_own_namespace(
     assert status == 0, stderr
     tags = built_tags(calls, stderr)
     assert tags and all(t.startswith(f"rocm/vllm-dev:{prefix}") for t in tags)
+
+
+@pytest.mark.parametrize(("pull_request", "prefix"), [("7", "pr7-"), ("false", "br-")])
+def test_only_pr_builds_read_back_their_rocm_vllm_dev_namespace(
+    tmp_path, pull_request, prefix
+):
+    # Any PR can push to rocm/vllm-dev, e.g. the br-main- tags a nightly would reuse.
+    status, stderr, calls = run_build(
+        tmp_path,
+        "base",
+        ROCM_CI_REPO="rocm/vllm-dev",
+        existing=(f"rocm/vllm-dev:{prefix}",),
+        BUILDKITE_PULL_REQUEST=pull_request,
+    )
+    assert status == 0, stderr
+    is_pr = pull_request != "false"
+    assert (stderr.count("Reusing rocm/vllm-dev:") == 3) == is_pr
+    assert (len(built_tags(calls, stderr)) == 3) != is_pr
+    assert ("to: none" in stderr) != is_pr
 
 
 def test_ci_build_uploads_the_kernel_symbol_map_when_asked(tmp_path):
