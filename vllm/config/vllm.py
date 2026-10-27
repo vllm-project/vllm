@@ -3128,6 +3128,9 @@ class VllmConfig:
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
 
+        if self.parallel_config.enable_eplb:
+            unsupported.append("expert parallel load balancing")
+
         return unsupported
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
