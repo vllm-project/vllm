@@ -249,6 +249,9 @@ def test_gate_linear_bf16x3_tier_traces_fullgraph(monkeypatch):
         (16, (32, 128, 3, 16)),
         (24, (32, 128, 3, 16)),
         (32, (32, 128, 3, 16)),
+        (2049, (64, 64, 3, 2)),
+        (2112, (64, 64, 3, 2)),
+        (2113, (96, 128, 2, 1)),
     ],
 )
 def test_sm90_split16_config_boundary(num_tokens: int, expected: tuple):

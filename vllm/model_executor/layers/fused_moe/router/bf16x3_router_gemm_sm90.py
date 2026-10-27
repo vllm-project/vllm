@@ -518,6 +518,15 @@ _SPLIT16_TILE_COST = {
 }
 
 
+def _is_exact_wave_boundary(
+    num_tokens: int,
+    e_tiles: int,
+    num_sms: int,
+    block_t: int,
+) -> bool:
+    return e_tiles == 4 and e_tiles * math.ceil(num_tokens / block_t) == num_sms
+
+
 def _config_cost(
     num_tokens: int,
     e_tiles: int,
@@ -566,6 +575,16 @@ def _pick_config(num_tokens: int, K: int, E: int, num_sms: int) -> tuple:
             if best is None or cost[0] < best[0]:
                 best = cost
     assert best is not None
+    if _is_exact_wave_boundary(num_tokens, e_tiles, num_sms, 64):
+        best = _config_cost(
+            num_tokens,
+            e_tiles,
+            num_sms,
+            (64, 64, 3),
+            2,
+            math.ceil(K / 64),
+            (4.35, 0.465),
+        )
     for tile, tile_cost in _SPLIT16_TILE_COST.items():
         block_t, block_k, _ = tile
         if block_t == 8 and num_tokens > 24:
