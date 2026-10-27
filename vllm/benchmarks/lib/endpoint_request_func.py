@@ -260,13 +260,9 @@ async def async_request_openai_completions(
 
                     messages = handler.add_chunk(chunk_bytes)
                     for message in messages:
-                        # NOTE: SSE comments (often used as pings) start with
-                        # a colon. These are not JSON data payload and should
-                        # be skipped.
-                        if message.startswith(":"):
+                        chunk = _extract_sse_data(message)
+                        if not chunk:
                             continue
-
-                        chunk = message.removeprefix("data: ")
 
                         if chunk != "[DONE]":
                             data = json.loads(chunk)
@@ -454,13 +450,9 @@ async def async_request_openai_chat_completions(
 
                     message_strings = handler.add_chunk(chunk_bytes)
                     for message in message_strings:
-                        # NOTE: SSE comments (often used as pings) start with
-                        # a colon. These are not JSON data payload and should
-                        # be skipped.
-                        if message.startswith(":"):
+                        chunk = _extract_sse_data(message)
+                        if not chunk:
                             continue
-
-                        chunk = message.removeprefix("data: ")
 
                         if chunk != "[DONE]":
                             timestamp = time.perf_counter()
@@ -515,10 +507,8 @@ async def async_request_openai_chat_completions(
 def _extract_sse_data(message: str) -> str | None:
     """Extract the ``data`` payload of a single SSE message.
 
-    The Responses API stream labels every message with an ``event:`` line
-    before its ``data:`` line, so the payload cannot be recovered by
-    stripping a leading ``data: `` the way the Completions and Chat
-    Completions streams allow.
+    SSE messages may contain comments and metadata fields alongside one or
+    more ``data:`` lines, so stripping a leading ``data: `` is not sufficient.
 
     Args:
         message: One complete SSE message, without its trailing blank line.
@@ -759,7 +749,9 @@ async def async_request_openai_audio(
                         for message in messages:
                             if type(message) is bytes:
                                 message = message.decode("utf-8")
-                            chunk = message.removeprefix("data: ")
+                            chunk = _extract_sse_data(message)
+                            if not chunk:
+                                continue
                             if chunk != "[DONE]":
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)

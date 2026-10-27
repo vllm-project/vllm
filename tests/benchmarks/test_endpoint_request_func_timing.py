@@ -9,7 +9,8 @@ the measured end of the request, and pin that chat chunks carrying no token
 (the opening role chunk, an empty delta) are skipped for TTFT and ITL while a
 token that renders as an empty string is still counted.
 
-Driven against a fake session and a scripted clock: no GPU, model, or socket.
+Timing tests use a fake session and a scripted clock. SSE payload tests use
+a local HTTP server. Neither requires a GPU or model.
 """
 
 import asyncio
@@ -17,10 +18,13 @@ import importlib.util
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 import numpy as np
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 import vllm.benchmarks.lib.endpoint_request_func as request_func_module
 from vllm.benchmarks.lib.endpoint_request_func import (
@@ -215,6 +219,66 @@ def _make_input(api_url: str, n_tokens: int, endpoint_id: str) -> RequestFuncInp
         model="test-model",
         multi_modal_content=multi_modal_content,
     )
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,request_func,api_url,chat",
+    STREAMING_ENDPOINTS,
+    ids=[e[0] for e in STREAMING_ENDPOINTS],
+)
+@pytest.mark.parametrize(
+    "event_template",
+    [
+        pytest.param("data: {data}\n\n", id="plain"),
+        pytest.param(
+            "event: message\nid: 7\nretry: 1000\ndata: {data}\n\n", id="metadata"
+        ),
+        pytest.param(": ping\ndata: {data}\n\n", id="comment-with-data"),
+        pytest.param(": ping\n\nid: 7\n\ndata:\n\ndata: {data}\n\n", id="keepalives"),
+        pytest.param("data:{data}\n\n", id="no-space"),
+        pytest.param("data: {{\ndata: {fields}\n\n", id="multiline"),
+        pytest.param("data: invalid\n\n", id="malformed-json"),
+    ],
+)
+def test_streaming_endpoints_extract_sse_payload(
+    endpoint_id: str, request_func, api_url: str, chat: bool, event_template: str
+) -> None:
+    """SSE fields must not corrupt or discard tokens, or hide invalid JSON."""
+    text = " leading \u2028\u2029\u0085 trailing "
+    choice = {"delta": {"content": text}} if chat else {"text": text}
+    data = json.dumps({"choices": [choice]}, ensure_ascii=False)
+    stream = event_template.format(data=data, fields=data[1:]).encode()
+    stream += _usage_chunk(1) + b"data: [DONE]\n\n"
+
+    async def run() -> RequestFuncOutput:
+        async def handler(request: web.Request) -> web.StreamResponse:
+            await request.read()
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(stream)
+            await response.write_eof()
+            return response
+
+        path = urlsplit(api_url).path
+        app = web.Application()
+        app.router.add_post(path, handler)
+        async with TestServer(app) as server, aiohttp.ClientSession() as session:
+            request = _make_input(str(server.make_url(path)), 1, endpoint_id)
+            return await request_func(request, session)
+
+    output = asyncio.run(run())
+    if event_template == "data: invalid\n\n":
+        assert not output.success
+        assert "JSONDecodeError" in output.error
+    else:
+        assert output.success, output.error
+        assert output.error == ""
+        assert output.generated_text == text
+        assert output.output_tokens == 1
+        assert output.prompt_len == 7
+        assert output.ttft > 0
+        assert output.latency == output.ttft
+        assert output.itl == []
 
 
 def _run(
