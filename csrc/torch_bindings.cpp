@@ -1132,7 +1132,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
 
   ops.def(
       "cp_gather_and_upconvert_nvfp4_kv_cache(Tensor src_cache, Tensor! dst, "
-      "Tensor block_table, Tensor workspace_starts, int batch_size) -> ()");
+      "Tensor block_table, Tensor workspace_starts, int batch_size, Tensor? "
+      "seq_starts=None) -> ()");
 
   ops.def(
       "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "
