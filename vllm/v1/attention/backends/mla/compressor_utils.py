@@ -147,7 +147,6 @@ class CompressedSlotMappingKernel(
             cp_interleave=compile_key.cp_interleave,
             num_tokens=1,
             out_len=1,
-            num_rows=1,
         )
 
     @kernel_launcher
