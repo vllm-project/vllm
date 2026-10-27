@@ -4881,13 +4881,14 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
             )
 
 
-@pytest.mark.parametrize("num_shared_tokens", [32, 40])
-def test_dflash_drafter_hit_needs_cached_drafter_kv_only_in_its_tail(
-    num_shared_tokens,
+@pytest.mark.parametrize(("num_shared_tokens", "num_held_blocks"), [(32, 3), (40, 2)])
+def test_dflash_drafter_hit_needs_cached_drafter_kv_only_in_its_window(
+    num_shared_tokens, num_held_blocks
 ):
     """A DFlash drafter group backs only each prefill's tail, and a later
-    request's hit needs cached drafter blocks only in that request's own tail
-    (here tokens 34..43, blocks 8 and 9), not below the hit like plain SWA."""
+    request's hit needs cached drafter blocks only in the window before that
+    request's end (here tokens 37..43, block 9), not below the hit like plain
+    SWA."""
     block_size = 4
     kv_cache_config = KVCacheConfig(
         num_blocks=64,
@@ -4937,15 +4938,16 @@ def test_dflash_drafter_hit_needs_cached_drafter_kv_only_in_its_tail(
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == num_shared_tokens
     _, draft_hit_ids = computed_blocks.get_block_ids()
-    assert draft_hit_ids == [0] * 8 + draft_ids[8 : num_shared_tokens // block_size]
+    num_hit_blocks = num_shared_tokens // block_size
+    assert draft_hit_ids == [0] * min(9, num_hit_blocks) + draft_ids[9:num_hit_blocks]
 
     blocks = manager.allocate_slots(
         req1, 44 - num_computed_tokens, num_computed_tokens, computed_blocks
     )
     assert blocks is not None
     held = [b for b in manager.coordinator.get_blocks("1")[1] if not b.is_null]
-    # Blocks 8..10: the 44-token request's tail.
-    assert len(held) == 3
+    # The 44-token request's tail from block 8, except blocks the hit left null.
+    assert len(held) == num_held_blocks
 
 
 def test_hybrid_cache_blocks_clamped_to_lcm():

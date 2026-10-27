@@ -972,7 +972,7 @@ class DFlashSlidingWindowSpec(SlidingWindowSpec):
     hidden states, and draft attention runs only past the last target token.
     An allocation whose target tokens end at ``T`` therefore backs only blocks
     from ``T - tail_tokens`` on (earlier ones stay null), and a prefix hit only
-    needs cached drafter blocks in the tail before the request end.
+    needs cached drafter blocks in the window before the request end.
     """
 
     num_speculative_tokens: int = 0
@@ -992,11 +992,9 @@ class DFlashSlidingWindowSpec(SlidingWindowSpec):
     def max_admission_blocks_per_request(
         self, max_in_flight_tokens: int, max_model_len: int
     ) -> int:
-        # The processed prefix's tail plus one tail per in-flight step: steps
+        # The processed prefix's window plus one tail per in-flight step: steps
         # back only their own trailing tail, however long their chunk. Both
         # bounds cover the lookahead slots past the last allocation's tokens.
-        # The processed prefix keeps its whole tail, which reaches
-        # tail_tokens - sliding_window + 1 tokens below the window.
         tail_blocks = (
             cdiv(
                 self.tail_tokens
@@ -1008,12 +1006,7 @@ class DFlashSlidingWindowSpec(SlidingWindowSpec):
         )
         return min(
             super().max_admission_blocks_per_request(
-                max_in_flight_tokens
-                + self.num_lookahead_tokens
-                + self.tail_tokens
-                - self.sliding_window
-                + 1,
-                max_model_len,
+                max_in_flight_tokens + self.num_lookahead_tokens, max_model_len
             ),
             (self.max_in_flight_steps + 1) * tail_blocks,
         )

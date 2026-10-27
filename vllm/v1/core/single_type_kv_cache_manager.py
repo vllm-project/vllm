@@ -1189,10 +1189,14 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
 
     An allocation backs only the blocks a draft step can read, those from
     ``num_tokens_main_model - tail_tokens`` on; lower blocks are null, so a
-    long prefill chunk holds one tail rather than the whole chunk. A prefix hit
-    at ``h`` for a request of ``L`` tokens needs cached blocks only in
-    ``[L - tail_tokens, h)``: lower blocks are never read and everything from
-    ``h`` on is recomputed.
+    long prefill chunk holds one tail rather than the whole chunk. The tail's
+    margin over the window covers in-flight drafts that may be rejected.
+
+    Frees, first allocations (prefix hits and KV-connector loads) and hits see
+    no drafts in flight, so they use the window like plain sliding window. A
+    prefix hit at ``h`` for a request of ``L`` tokens needs cached blocks only
+    in ``[L - sliding_window + 1, h)``: the drafter reads only past the last
+    target token, and everything from ``h`` on is recomputed.
     """
 
     def __init__(self, kv_cache_spec: DFlashSlidingWindowSpec, **kwargs) -> None:
@@ -1227,14 +1231,6 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         self._num_null_prefix_blocks.pop(request_id, None)
         return super().pop_blocks_for_free(request_id)
-
-    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
-        # Keep the whole tail a prefix hit at this length needs, not only the
-        # window, so local hits, loads and frees leave what
-        # find_longest_cache_hit asks for.
-        return max(
-            0, num_computed_tokens - self.tail_tokens - self.extra_retained_tokens
-        )
 
     @staticmethod
     def _first_resident_block(
@@ -1320,7 +1316,7 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        """Longest hit whose blocks in ``[L - tail_tokens, hit)`` are cached.
+        """Longest hit whose blocks in ``[L - sliding_window + 1, hit)`` are cached.
 
         ``num_request_tokens`` (``L``) defaults to ``max_length``, which asks
         for the tail before the hit itself, like plain sliding window.
@@ -1341,8 +1337,15 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         if num_request_tokens is None:
             num_request_tokens = max_length
         max_num_blocks = max_length // block_size
-        first_block = cls._first_resident_block(
-            num_request_tokens, kv_cache_spec.tail_tokens, block_size
+        first_block = (
+            max(
+                num_request_tokens
+                - kv_cache_spec.sliding_window
+                + 1
+                - kv_cache_spec.extra_retained_tokens,
+                0,
+            )
+            // block_size
         )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [block_pool.null_block] * max_num_blocks for _ in kv_cache_group_ids
