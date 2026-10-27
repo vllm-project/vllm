@@ -210,6 +210,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.pp_send_buffer import packed_nbytes
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -522,7 +523,7 @@ class GPUModelRunner(
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
-        # Bytes a non-last PP rank sends for the largest batch (profile run).
+        # PP send buffer bytes for the largest batch (profile run).
         self.profile_pp_send_bytes = 0
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -6125,9 +6126,7 @@ class GPUModelRunner(
             self.max_num_tokens, is_profile=True, randomize_inputs=randomize_inputs
         )
         if isinstance(hidden_states, IntermediateTensors):
-            self.profile_pp_send_bytes = sum(
-                t.nbytes for t in hidden_states.tensors.values()
-            )
+            self.profile_pp_send_bytes = packed_nbytes(hidden_states.tensors)
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
                 output = self._dummy_pooler_run(hidden_states)

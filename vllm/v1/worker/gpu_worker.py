@@ -103,6 +103,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.pp_send_buffer import PPSendBuffer
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -248,6 +249,11 @@ class Worker(WorkerBase):
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
         validate_worker_profiler_config(self.profiler_config)
+
+        # Device handles of the previous step's PP intermediate-tensor send.
+        self._pp_send_work: list[Handle] = []
+        # Non-last PP ranks send from here once the profile run sized it.
+        self._pp_send_buffer: PPSendBuffer | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -647,14 +653,17 @@ class Worker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(*args, **kwargs)
 
-    def _pp_send_copy_bytes(self) -> int:
-        """Upper bound on the copies of PP outputs alive at once (see
-        `execute_model`), each sized like the profile run's: one per batch in
-        flight, plus the next copy, made before finished sends are released.
-        They outlive the forward pass, so the profile run does not see them."""
-        return (
-            self.vllm_config.max_concurrent_batches + 1
-        ) * self.model_runner.profile_pp_send_bytes
+    def _init_pp_send_buffer(self) -> int:
+        """Allocate the PP send buffer sized by the profile run, after its peak,
+        and return the device memory it took."""
+        nbytes = self.model_runner.profile_pp_send_bytes
+        if nbytes == 0 or self._pp_send_buffer is not None:
+            return 0
+        free_before, _ = torch.accelerator.get_memory_info(self.device)
+        with self._maybe_get_memory_pool_context("workspace"):
+            self._pp_send_buffer = PPSendBuffer(nbytes, self.device)
+        free_after, _ = torch.accelerator.get_memory_info(self.device)
+        return free_before - free_after
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -679,6 +688,7 @@ class Worker(WorkerBase):
                 self.model_runner.profile_run(
                     randomize_inputs=self.randomize_dummy_inputs
                 )
+            self._init_pp_send_buffer()
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -718,7 +728,7 @@ class Worker(WorkerBase):
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
-        pp_send_bytes = self._pp_send_copy_bytes()
+        pp_send_bytes = self._init_pp_send_buffer()
         profile_result.transient_peak_headroom += pp_send_bytes
         profile_result.non_kv_cache_memory += pp_send_bytes
 
@@ -1353,6 +1363,13 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        # Wait for the previous step's sends so this forward pass cannot
+        # overwrite buffers they are still reading.
+        if self._pp_send_work:
+            for handle in self._pp_send_work:
+                handle.wait()
+            self._pp_send_work = []
+
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
@@ -1390,13 +1407,17 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        # Send copies: the next forward may overwrite the outputs (CUDA graph
-        # outputs are static), and the group coordinator keeps the copies
-        # alive until their sends complete, so nothing waits here.
-        get_pp_group().isend_tensor_dict(
-            {k: v.clone() for k, v in output.tensors.items()},
-            all_gather_group=get_tp_group(),
-        )
+        if self._pp_send_buffer is not None:
+            self._pp_send_buffer.send(output.tensors, get_pp_group(), get_tp_group())
+        else:
+            # Non-blocking send of the intermediate tensors. The metadata
+            # handle is reaped lazily by the GroupCoordinator; the device
+            # handles are waited at the top of the next step.
+            handles = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+            )
+            self._pp_send_work = handles[1:]
 
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore

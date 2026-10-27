@@ -405,18 +405,37 @@ def test_profiling_fallback_declines_off_rocm(rocm):
     assert maybe_rocm_profiling_fallback(result) is None
 
 
-def test_execute_model_sends_copies_of_pp_outputs(
+class _OrderedHandle:
+    """Send handle that logs when it is waited."""
+
+    def __init__(self, log: list[str], name: str):
+        self.log = log
+        self.name = name
+
+    def is_completed(self) -> bool:
+        return True
+
+    def wait(self) -> None:
+        self.log.append(f"wait:{self.name}")
+
+
+def test_execute_model_waits_previous_pp_send_before_forward(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The next forward may overwrite this step's outputs (CUDA graph outputs
-    are static) while their send is in flight, so the worker sends copies."""
+    """Previous device handles are waited before the forward pass; the
+    metadata handle is left to the GroupCoordinator's reaper."""
+    import torch
+
     from vllm.sequence import IntermediateTensors
 
-    sent: list[dict[str, torch.Tensor]] = []
+    log: list[str] = []
+    previous_tensor_send = _OrderedHandle(log, "prev-tensor")
+    metadata_handle = _OrderedHandle(log, "meta")
+    tensor_handle = _OrderedHandle(log, "tensor")
 
     def isend_tensor_dict(tensors, all_gather_group=None, all_gather_tensors=None):
-        sent.append(tensors)
-        return []
+        log.append("isend")
+        return [metadata_handle, tensor_handle]
 
     pp_group = SimpleNamespace(
         is_first_rank=True,
@@ -426,7 +445,10 @@ def test_execute_model_sends_copies_of_pp_outputs(
     monkeypatch.setattr(gpu_worker, "get_pp_group", lambda: pp_group)
     monkeypatch.setattr(gpu_worker, "get_tp_group", lambda: SimpleNamespace())
 
-    output = torch.ones(4)
+    def run_model(scheduler_output, intermediate_tensors):
+        log.append("forward")
+        return IntermediateTensors({"hidden_states": torch.zeros(1)})
+
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(
             parallel_config=SimpleNamespace(
@@ -434,22 +456,19 @@ def test_execute_model_sends_copies_of_pp_outputs(
             ),
         ),
         use_v2_model_runner=True,
-        model_runner=SimpleNamespace(
-            execute_model=lambda scheduler_output, intermediate_tensors: (
-                IntermediateTensors({"hidden_states": output})
-            ),
-            is_pooling_model=False,
-        ),
+        model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
+        _pp_send_work=[previous_tensor_send],
+        _pp_send_buffer=None,
     )
     scheduler_output = SimpleNamespace(
         total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
     )
 
     assert gpu_worker.Worker.execute_model(worker, scheduler_output) is None
-    output.fill_(2)
 
-    assert torch.equal(sent[0]["hidden_states"], torch.ones(4))
+    assert log == ["wait:prev-tensor", "forward", "isend"]
+    assert worker._pp_send_work == [tensor_handle]
 
 
 def test_jit_monitor_activation_follows_enable_jit_warmup(
