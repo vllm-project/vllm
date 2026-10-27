@@ -7,7 +7,10 @@ MegaMoE reads linear scales, not ``scaled_fp4_quant``'s swizzled 128x4 layout.
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.triton_utils import tl, triton
 
 
@@ -68,10 +71,8 @@ def _prepare_megamoe_nvfp4_kernel(
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_TOPK: tl.constexpr,
-    USE_PDL: tl.constexpr,
 ) -> None:
-    if USE_PDL:
-        tl.extra.cuda.gdc_wait()
+    tl.extra.cuda.gdc_wait()
 
     token_id = tl.program_id(0)
     k_block_id = tl.program_id(1)
@@ -165,7 +166,6 @@ def prepare_megamoe_nvfp4_inputs(
     while hidden_size % block_k != 0:
         block_k //= 2
 
-    enable_pdl = current_platform.is_cuda() and current_platform.is_arch_support_pdl()
     _prepare_megamoe_nvfp4_kernel[(num_tokens, hidden_size // block_k)](
         hidden_states,
         x_packed,
@@ -187,12 +187,37 @@ def prepare_megamoe_nvfp4_inputs(
         top_k=top_k,
         BLOCK_K=block_k,
         BLOCK_TOPK=triton.next_power_of_2(top_k),
-        USE_PDL=enable_pdl,
         num_warps=num_warps,
-        **({"launch_pdl": True} if enable_pdl else {}),
+        launch_pdl=True,
     )
 
 
+def _norm_quant_megamoe_nvfp4_warmup_inputs(
+    *, weight_dtype: torch.dtype, eps: float, gain_center: float
+) -> dict[str, object]:
+    # Token count changes only the launch grid, not the compiled kernel.
+    return dict(
+        grid=(1, 4),
+        x=TritonWarmupTensor(torch.bfloat16),
+        weight=TritonWarmupTensor(weight_dtype),
+        packed_out=TritonWarmupTensor(torch.uint8),
+        sf_out=TritonWarmupTensor(torch.uint8),
+        x_stride=4096,
+        packed_stride=2048,
+        sf_stride=256,
+        eps=eps,
+        gain_center=gain_center,
+        HIDDEN=4096,
+        BLOCK_K=1024,
+        num_warps=8,
+        enable_fp_fusion=False,
+        launch_pdl=True,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_norm_quant_megamoe_nvfp4_warmup_inputs,
+)
 @triton.jit
 def _norm_quant_megamoe_nvfp4_kernel(
     x,
@@ -206,10 +231,8 @@ def _norm_quant_megamoe_nvfp4_kernel(
     gain_center,
     HIDDEN: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    USE_PDL: tl.constexpr,
 ):
-    if USE_PDL:
-        tl.extra.cuda.gdc_wait()
+    tl.extra.cuda.gdc_wait()
 
     token = tl.program_id(0)
     block = tl.program_id(1)
@@ -256,7 +279,6 @@ def prepare_megamoe_nvfp4_with_norm(
     assert norm_weight.shape == (hidden_size,) and norm_weight.is_contiguous()
     if num_tokens == 0:
         return
-    enable_pdl = current_platform.is_cuda() and current_platform.is_arch_support_pdl()
     _norm_quant_megamoe_nvfp4_kernel[(num_tokens, hidden_size // 1024)](
         hidden_states,
         norm_weight,
@@ -271,6 +293,5 @@ def prepare_megamoe_nvfp4_with_norm(
         1024,
         num_warps=8,
         enable_fp_fusion=False,
-        USE_PDL=enable_pdl,
-        **({"launch_pdl": True} if enable_pdl else {}),
+        launch_pdl=True,
     )
