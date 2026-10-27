@@ -93,14 +93,10 @@ def _capture(fn):
     return graph, out
 
 
-def _bf16_ulps(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Distance in BF16 ulps between two BF16 tensors."""
-
-    def ordered(x):
-        bits = x.contiguous().view(torch.int16).to(torch.int32)
-        return torch.where(bits < 0, -32768 - bits, bits)
-
-    return (ordered(a) - ordered(b)).abs()
+def _bf16_ulp(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """One BF16 ulp at the larger magnitude of two BF16 tensors, in FP64."""
+    _, exponent = torch.frexp(torch.maximum(a.abs(), b.abs()).double())
+    return torch.ldexp(torch.ones_like(exponent, dtype=torch.float64), exponent - 8)
 
 
 # --------------------------------------------------------- routed experts
@@ -258,8 +254,8 @@ def _fma_finalize(rows: torch.Tensor, permuted: torch.Tensor, weights: torch.Ten
 )
 def test_routed_experts_match_flashinfer(experts, rows, pool_size, graph):
     """Route + GEMM pair: the routed rows bitwise those of FlashInfer's
-    TRT-LLM-gen MoE, and their top-k reduction within one BF16 ulp of its
-    finalized output."""
+    TRT-LLM-gen MoE, and their top-k reduction within one BF16 ulp (plus FP32
+    summation-order error) of its finalized output."""
     generator = torch.Generator().manual_seed(rows)
     gemm = _gemm(experts)
 
@@ -290,7 +286,12 @@ def test_routed_experts_match_flashinfer(experts, rows, pool_size, graph):
     ours = _fma_finalize(
         out.gemm2_permuted, out.expanded_idx_to_permuted_idx, out.expert_weights
     )
-    assert _bf16_ulps(ours, finalized.cpu()).max() <= 1
+    # FlashInfer may add the k products in another order (newer releases split
+    # them into groups), so allow FP32's reordering error on top of the ulp.
+    magnitude = (out.expert_weights.cpu().double()[..., None] * routed.cpu()).abs()
+    slack = 2 * (TOP_K + 1) * 2**-24 * magnitude.sum(1)
+    distance = (ours.double() - finalized.cpu().double()).abs()
+    assert (distance <= _bf16_ulp(ours, finalized.cpu()) + slack).all()
 
 
 @pytest.mark.parametrize("rows", [6, 12, 48, 192])
