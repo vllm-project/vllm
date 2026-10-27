@@ -401,6 +401,7 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
     ("num_rows", "num_requests", "interleave"),
     [
         pytest.param(64, 1, False, id="one_request"),
+        pytest.param(128, 1, False, id="page_not_tile_aligned"),
         pytest.param(300, 2, False, id="two_requests"),
         pytest.param(96, 3, True, id="mixed_blocks"),
     ],
@@ -417,7 +418,8 @@ def test_qsa_index_scores_hip_matches_triton(
     if not on_gfx1100():
         pytest.skip("gfx1100 only")
     torch.manual_seed(3)
-    page_size, compress_ratio, pages = 1600, 4, 4
+    page_size = 400 if num_rows == 128 else 1600
+    compress_ratio, pages = 4, 4
     k_cache = (
         torch.randn(num_requests * pages, page_size, 1, 128, device="cuda") * 0.3
     ).half()

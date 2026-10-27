@@ -611,7 +611,6 @@ def _use_hip_scores(
         and q.stride(2) == 1
         and q.stride(1) == 128
         and k_cache.stride(3) == 1
-        and k_cache.shape[1] % 32 == 0
         and page_table.dtype == torch.int32
         and page_table.stride(1) == 1
         and token_to_req.dtype == torch.int32

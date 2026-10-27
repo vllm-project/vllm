@@ -14,10 +14,10 @@
 //
 // A block takes 64 query rows: each of its 16 waves holds 4 rows x 4 heads
 // as one 16-row WMMA M tile, its Q fragments kept in registers. The block
-// walks BN-column K tiles through double-buffered LDS. Every tile lies inside
-// one cache page (page_size % BN == 0, tiles BN-aligned), so the page-table
-// lookup is a single load per tile. Rows of different requests in one block
-// (decode batches) are handled in one pass per request.
+// walks 32-column K tiles through double-buffered LDS; each thread loads one
+// 16-byte chunk of one column per tile and looks up that column's page.
+// Rows of different requests in one block (decode batches) are handled in
+// one pass per request.
 
 #include <cstdint>
 
@@ -153,13 +153,14 @@ __global__ void __launch_bounds__(kThreads)
     const int req = s_reqs[pass];
     const int32_t* table = page_table + (int64_t)req * stride_table_req;
     auto load_k = [&](int c0) {
-      const int lp = c0 / page_size;
+      const int col = c0 + k_row;
+      const int lp = col / page_size;
       const int pp = lp < table_width ? table[lp] : -1;
       uint4 v = make_uint4(0, 0, 0, 0);
-      if (c0 < num_columns && pp >= 0 && pp < num_pages)
+      if (col < num_columns && pp >= 0 && pp < num_pages)
         v = *reinterpret_cast<const uint4*>(
             k_cache + (int64_t)pp * stride_cache_block +
-            (int64_t)(c0 - lp * page_size + k_row) * stride_cache_token + k_ch);
+            (int64_t)(col - lp * page_size) * stride_cache_token + k_ch);
       return v;
     };
 
@@ -231,8 +232,8 @@ __global__ void scores_kernel(const half*, const half*, const int32_t*,
 }  // namespace qsa_index_rdna3
 }  // namespace vllm
 
-// q [rows, 4, 128] half; k_cache [pages, page_size, 1, 128] half with
-// page_size % 32 == 0; page_table [requests, width] int32; token_to_req
+// q [rows, 4, 128] half; k_cache [pages, page_size, 1, 128] half;
+// page_table [requests, width] int32; token_to_req
 // [rows] int32; query_positions [rows] int64; sequence_lengths [requests]
 // int32. Writes visible [rows] int32 and logits [rows, columns] float32.
 void qsa_index_scores_rdna3(torch::Tensor q, torch::Tensor k_cache,
@@ -249,11 +250,9 @@ void qsa_index_scores_rdna3(torch::Tensor q, torch::Tensor k_cache,
   TORCH_CHECK(q.dim() == 3 && q.size(1) == kHeads && q.size(2) == kHeadDim &&
                   q.stride(2) == 1 && q.stride(1) == kHeadDim,
               "q must be [rows, 4, 128] with contiguous heads");
-  TORCH_CHECK(
-      k_cache.dim() == 4 && k_cache.size(2) == 1 &&
-          k_cache.size(3) == kHeadDim && k_cache.stride(3) == 1 &&
-          k_cache.size(1) % kTileN == 0,
-      "k_cache must be [pages, page_size, 1, 128], page_size % 32 == 0");
+  TORCH_CHECK(k_cache.dim() == 4 && k_cache.size(2) == 1 &&
+                  k_cache.size(3) == kHeadDim && k_cache.stride(3) == 1,
+              "k_cache must be [pages, page_size, 1, 128]");
   TORCH_CHECK(page_table.scalar_type() == torch::kInt32 &&
                   token_to_req.scalar_type() == torch::kInt32 &&
                   query_positions.scalar_type() == torch::kInt64 &&
