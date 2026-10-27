@@ -13,6 +13,7 @@ from vllm.config import (
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -34,7 +35,10 @@ from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, next_power_of_2
-from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadata,
+    Glm5NextIndexerBackend,
+)
 from vllm.v1.kv_cache_interface import CircularBufferSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
@@ -293,17 +297,68 @@ class Indexer(nn.Module):
             self.topk_indices_buffer,
             tail_cache=self.tail_cache,
         )
+        # When every context fits index_topk, the kpool op fills each decode row
+        # with its causal indices without reading q, so a FULL graph captured for
+        # such batches skips the q side. The V2 runner captures them for this bound.
+        self.cudagraph_seq_len_bound = (
+            self.topk_tokens
+            if self.rope_dim == 0
+            and self.index_kpool > 1
+            and current_platform.is_cuda_alike()
+            else None
+        )
+
+    def _skips_scoring(self) -> bool:
+        # Only a FULL graph capture skips. Eager steps, including the warm-up run
+        # before each capture, score as before, so the warm-up compiles and
+        # autotunes everything a capture runs: a piecewise capture scores (its
+        # eager-break op re-decides on each replay's metadata) even when its
+        # warm-up batch fits the bound.
+        if (
+            self.cudagraph_seq_len_bound is None
+            or in_piecewise_cudagraph()
+            or not torch.cuda.is_current_stream_capturing()
+        ):
+            return False
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return False
+        metadata = attn_metadata[self.k_cache.prefix]
+        assert isinstance(metadata, DeepseekV32IndexerMetadata)
+        return metadata.num_prefills == 0 and metadata.max_seq_len <= self.topk_tokens
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
     ) -> torch.Tensor:
+        kw, _ = self.wk_weights_proj(hidden_states)
+        k = _fused_indexer_k_norm(
+            kw[:, : self.head_dim],
+            self.k_norm.weight,
+            self.k_norm.bias,
+            self.head_dim,
+            self.k_norm.eps,
+        )
+        # kpool: per-token gate score driving the softmax-weighted pool. Computed
+        # from the same hidden_states that produced `k`, so it stays token-aligned.
+        # F.linear(x, gate) = x @ gate.T  with gate [head_dim, hidden_size].
+        gate_score = F.linear(hidden_states, self.index_kpool_compress_gate)
+        if self._skips_scoring():
+            return self.indexer_op(
+                hidden_states,
+                None,
+                k,
+                None,
+                gate_score=gate_score,
+                compress_ape=self.index_kpool_compress_ape,
+                index_kpool=self.index_kpool,
+                positions=positions,
+            )
+
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
         # Compute the head gate in fp32; bf16 error can change near-tie pool
         # rankings on long-context tasks. Cache it after weights are loaded.
-        kw, _ = self.wk_weights_proj(hidden_states)
-        k = kw[:, : self.head_dim]
         if self._wp_fp32 is None:
             self._wp_fp32 = (
                 self.wk_weights_proj.weight.data[self.head_dim :, :]
@@ -312,10 +367,6 @@ class Indexer(nn.Module):
                 .float()
             )
         weights = torch.mm(hidden_states.float(), self._wp_fp32)
-
-        k = _fused_indexer_k_norm(
-            k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps
-        )
 
         if self.rope_dim > 0:
             q_pe, q_nope = torch.split(
@@ -354,11 +405,6 @@ class Indexer(nn.Module):
         weights = _fused_indexer_weight_scale(
             weights, q_scale, self.softmax_scale * self.n_head**-0.5
         )
-
-        # kpool: per-token gate score driving the softmax-weighted pool. Computed
-        # from the same hidden_states that produced `k`, so it stays token-aligned.
-        # F.linear(x, gate) = x @ gate.T  with gate [head_dim, hidden_size].
-        gate_score = F.linear(hidden_states, self.index_kpool_compress_gate)
 
         # DeepGEMM's MQA-logits kernels (fp8_mqa_logits /
         # fp8_fp4_paged_mqa_logits) require num_heads in {32, 64}; this

@@ -110,6 +110,7 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
+    get_cudagraph_seq_len_bounds,
     has_compiled_submodule,
     make_cudagraph_stats,
 )
@@ -793,6 +794,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             lora_capture_cases=self.lora_capture_cases,
             varlen_decode=self.adaptive_verification is not None,
             ubatch_runner=self.ubatch_runner,
+            seq_len_bounds=get_cudagraph_seq_len_bounds(self.model, self.vllm_config),
         )
         if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:
             self.fast_prefill = FastPrefillHelper(
@@ -1827,12 +1829,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         batch_req_state, uniform_tok_count = self.gather_batch_req_state(
             scheduler_output, dummy_run
         )
+        max_seq_len: int | None = None
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
             if batch_req_state.has_prefill:
                 # Varlen decode graphs replay decodes only, and their bound
                 # alone would admit a short prefill.
                 max_query_len = None
+            if (
+                self.cudagraph_manager is not None
+                and self.cudagraph_manager.seq_len_bounds
+                and batch_req_state.decode_graph_eligible
+            ):
+                # The CPU upper bound prepare_inputs gives the attention metadata.
+                max_seq_len = int(
+                    (
+                        self.req_states.num_computed_tokens_np[
+                            batch_req_state.idx_mapping_np
+                        ]
+                        + batch_req_state.num_scheduled_tokens
+                    ).max()
+                )
             if self.pcp_manager is not None:
                 num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
                     batch_req_state.num_scheduled_tokens,
@@ -1869,6 +1886,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ),
             uniform_decode=uniform_tok_count == self.decode_query_len,
             allow_skip_drafts=scheduler_output.skip_drafts,
+            max_seq_len=max_seq_len,
         )
 
         if batch_desc.num_tokens == 0:

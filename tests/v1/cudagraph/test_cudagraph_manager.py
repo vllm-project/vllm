@@ -3,6 +3,7 @@
 
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -259,6 +260,98 @@ def test_capture_query_length_covers_replay_batches(
     assert batch.max_query_len == expected_max_query_len
 
 
+def test_full_capture_metadata_max_seq_len_is_the_graph_bound(monkeypatch):
+    """A FULL graph is captured with the longest context it replays for."""
+    from vllm.v1.worker.gpu.model_states import default as default_model_state
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform, "get_global_graph_pool", lambda: object()
+    )
+    build_attn_metadata = MagicMock(return_value={})
+    monkeypatch.setattr(default_model_state, "build_attn_metadata", build_attn_metadata)
+
+    def capture(manager, create_forward_fn, progress_bar_desc):
+        for desc in manager._capture_descs[CUDAGraphMode.FULL]:
+            create_forward_fn(desc, warmup=False)
+
+    monkeypatch.setattr(gpu_cudagraph_utils.CudaGraphManager, "capture", capture)
+
+    num_tokens = 4
+    manager = gpu_cudagraph_utils.ModelCudaGraphManager(
+        _create_decode_vllm_config(capture_sizes=[num_tokens]),
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        decode_query_len=1,
+        seq_len_bounds=(64,),
+    )
+    model_state = default_model_state.DefaultModelState.__new__(
+        default_model_state.DefaultModelState
+    )
+    model_state.model_config = SimpleNamespace(max_model_len=1024)
+    model_state.supports_mm_inputs = False
+    model_state.prompt_embeds_state = None
+    model_state.rope_state = None
+    block_tables = MagicMock()
+    block_tables.cp_size = 1
+    block_tables.get_dummy_block_tables.return_value = ()
+    block_tables.get_dummy_slot_mappings.return_value = torch.empty(
+        0, num_tokens, dtype=torch.int64
+    )
+    manager.capture(
+        MagicMock(),
+        model_state,
+        InputBuffers(num_tokens, num_tokens, torch.device("cpu")),
+        None,
+        block_tables,
+        [],
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+
+    captured = [
+        (desc.max_seq_len, call.kwargs["max_seq_len"])
+        for desc, call in zip(
+            manager._capture_descs[CUDAGraphMode.FULL],
+            build_attn_metadata.call_args_list,
+            strict=True,
+        )
+    ]
+    assert captured == [(None, 1024), (64, 64)]
+
+
+@pytest.mark.parametrize(
+    ("capturing", "skips"), [(False, False), (True, True)], ids=["eager", "capture"]
+)
+def test_indexer_skips_scoring_only_while_capturing_a_full_graph(
+    monkeypatch, capturing, skips
+):
+    """A batch within the bound skips the q side only in a FULL graph capture. An
+    eager step, such as the warm-up run before each capture, scores, so it compiles
+    and autotunes what a later capture runs."""
+    from vllm.models.glm5next.common import attention
+
+    indexer = attention.Indexer.__new__(attention.Indexer)
+    torch.nn.Module.__init__(indexer)
+    indexer.cudagraph_seq_len_bound = indexer.topk_tokens = 2048
+    indexer.k_cache = SimpleNamespace(prefix="indexer.k_cache")
+    metadata = MagicMock(
+        spec=attention.DeepseekV32IndexerMetadata, num_prefills=0, max_seq_len=2048
+    )
+    monkeypatch.setattr(
+        attention,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"indexer.k_cache": metadata}),
+    )
+    monkeypatch.setattr(attention, "in_piecewise_cudagraph", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+
+    assert indexer._skips_scoring() is skips
+
+
 @pytest.mark.parametrize(
     "uniform_token_count,max_query_len,expected_max_query_len",
     [(1, None, 1), (None, 3, 3), (None, None, 8)],
@@ -352,6 +445,7 @@ def _make_spec_decode_manager(
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
     varlen_decode: bool = False,
+    seq_len_bounds: tuple[int, ...] = (),
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -375,6 +469,7 @@ def _make_spec_decode_manager(
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         decode_query_len=decode_query_len,
         varlen_decode=varlen_decode,
+        seq_len_bounds=seq_len_bounds,
     )
     manager._graphs_captured = True
     return manager
@@ -452,6 +547,33 @@ def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
     assert desc.max_query_len == _DECODE_QUERY_LEN
     assert dispatch(None).cg_mode == CUDAGraphMode.PIECEWISE
     assert dispatch(_DECODE_QUERY_LEN + 1).cg_mode == CUDAGraphMode.PIECEWISE
+
+
+def test_seq_len_bounded_decode_graph_replays_only_within_its_bound(monkeypatch):
+    """A decode graph captured with max_seq_len = bound keeps host-side choices
+    made for short contexts, so it must replay only for batches within it."""
+    bound = 64
+    manager = _make_spec_decode_manager(monkeypatch, seq_len_bounds=(bound,))
+
+    full = manager._capture_descs[CUDAGraphMode.FULL]
+    bounded = [replace(d, max_seq_len=None) for d in full if d.max_seq_len == bound]
+    assert bounded == [d for d in full if d.max_seq_len is None]
+
+    def dispatch(max_seq_len, uniform_token_count=_DECODE_QUERY_LEN):
+        return manager.dispatch(
+            num_reqs=3,
+            num_tokens=9,
+            uniform_token_count=uniform_token_count,
+            num_active_loras=0,
+            max_seq_len=max_seq_len,
+        )
+
+    for max_seq_len, expected in ((1, bound), (bound, bound), (bound + 1, None)):
+        desc = dispatch(max_seq_len)
+        assert (desc.cg_mode, desc.num_tokens) == (CUDAGraphMode.FULL, 9)
+        assert desc.max_seq_len == expected, max_seq_len
+    assert dispatch(None).max_seq_len is None
+    assert dispatch(1, uniform_token_count=None).cg_mode == CUDAGraphMode.PIECEWISE
 
 
 def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):

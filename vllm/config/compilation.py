@@ -668,6 +668,13 @@ class CompilationConfig:
     cost of increased startup time and slightly higher memory usage.
     When `enable_lora` is False, this option has no effect.
     """
+    cudagraph_specialize_seq_len: bool = True
+    """Whether to capture separate FULL decode cuda graphs for batches whose
+    context lengths all fit a bound the model declares, e.g. GLM-5-Next's
+    sparse indexer, which skips its scoring when every context fits
+    `index_topk`. Costs one more FULL decode graph per capture size and bound.
+    Model runner V2 only, without context parallelism; microbatched (DBO) graphs
+    get no copies. Has no effect for models that declare no bound."""
 
     use_inductor_graph_partition: bool = None  # type: ignore[assignment]
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
