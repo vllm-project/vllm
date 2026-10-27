@@ -101,6 +101,7 @@ steps:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
       dind: false
+      automatic_shard: true
       device: mi355_1
       timeout_in_minutes: 65
       depends_on:
