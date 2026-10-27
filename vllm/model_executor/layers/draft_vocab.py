@@ -1,6 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Draft lm_heads that cover a subset of the target vocabulary."""
+"""Draft lm_heads that cover a subset of the target vocabulary.
+
+`DraftVocab` serves two kinds of drafters:
+
+- Checkpoints with a pruned draft lm_head and `draft_id_to_target_id` offsets
+  (EAGLE3, DFlash, DSpark). This used to live in each model file.
+- MTP drafters that share the target's full lm_head, restricted at load time
+  by `speculative_config.draft_token_map`. On bandwidth-bound GPUs the full
+  head dominates the draft step, so each draft token computes exact logits
+  only for:
+  1. the listed rows, a fixed list of frequent tokens, and
+  2. optionally `draft_token_map_dynamic_rows` more rows per draft token,
+     picked by a rank-256 projection of the lm_head (built from its weights
+     at load time), which recovers what the list misses, e.g. other languages.
+
+Either way `compute_logits` returns target-vocabulary logits that are `-inf`
+outside the subset, so speculators need no special handling. The target still
+verifies with its full head, so only the acceptance length can change.
+"""
 
 import json
 from typing import TYPE_CHECKING
@@ -9,7 +27,6 @@ import torch
 import torch.nn as nn
 
 from vllm import _custom_ops as ops
-from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -38,6 +55,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _UNQUANTIZED = (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+# Rank of the lm_head projection that scores the dynamic rows. On Qwen3.8
+# MTP, rank 256 alone puts 97.5% of the greedy draft tokens in its top 16k.
+_DYNAMIC_RANK = 256
 
 
 def load_draft_token_ids(path: str, extra_ids: list[int]) -> torch.Tensor:
@@ -165,6 +185,9 @@ class _Rows(ReplicatedLinear):
         return self.kernel.apply_weights(self, x)
 
 
+# The two kernels below compute `x[n] @ weight[ids[n, j]]` for the dynamic
+# rows, reading only the picked rows instead of gathering them into a copy.
+# One program handles BLOCK_ROWS picked rows of one token.
 @triton.jit
 def _gather_rows_gemv_kernel(
     x_ptr,
@@ -229,6 +252,8 @@ def _gather_rows_gemv_nvfp4_kernel(
         bcols = start + tl.arange(0, BLOCK_BYTES)
         bmask = bcols < num_bytes
         mask = row_mask[:, None] & bmask[None, :]
+        # Each byte packs two E2M1 values (low nibble first) and every 8 bytes
+        # (16 values) share one E4M3 block scale.
         b = tl.load(
             packed_ptr + ids[:, None] * packed_stride + bcols[None, :],
             mask=mask,
@@ -305,6 +330,9 @@ def gather_rows_gemv(
     return out
 
 
+# Writes the listed and the picked logits into the `-inf` target-vocabulary
+# logits in one launch; columns `[0, num_listed)` of the grid are listed rows,
+# the next `num_picked` are picked rows.
 @triton.jit
 def _scatter_draft_logits_kernel(
     out_ptr,
@@ -375,13 +403,6 @@ def scatter_draft_logits(
 class DraftVocab:
     """Draft logits over a subset of the target vocabulary.
 
-    The subset is either a pruned draft lm_head with `draft_id_to_target_id`
-    offsets (EAGLE3 and DFlash checkpoints), or the rows of the drafter's full
-    lm_head listed in `speculative_config.draft_token_map` (see
-    `load_token_map`). `compute_logits` always returns target-vocabulary
-    logits that are `-inf` outside the subset, so speculators need no special
-    handling.
-
     Args:
         logits_processor: Logits processor of the draft lm_head.
         vocab_size: Target vocabulary size. A smaller draft vocabulary gets a
@@ -402,8 +423,6 @@ class DraftVocab:
         # Set by load_token_map.
         self.token_ids: torch.Tensor | None = None
         self.rows: _Rows | None = None
-        self.tp_size = 1
-        self.valid_cols: torch.Tensor | None = None
         self.num_dynamic_rows = 0
 
     def compute_logits(
@@ -459,7 +478,6 @@ class DraftVocab:
         lm_head: VocabParallelEmbedding,
         token_ids: torch.Tensor,
         dynamic_rows: int = 0,
-        dynamic_rank: int = 256,
         quantization: str | None = None,
     ) -> None:
         """Restrict drafting to the `token_ids` rows of `lm_head`.
@@ -471,8 +489,8 @@ class DraftVocab:
             lm_head: The drafter's full-vocabulary lm_head.
             token_ids: Sorted, unique target ids of the listed rows.
             dynamic_rows: Rows outside the list picked per draft token.
-            dynamic_rank: Rank of the projection that scores those rows.
-            quantization: "fp8" or "nvfp4" for weight-only quantized rows.
+            quantization: `draft_lm_head_quantization`, applied to the copied
+                rows only ("fp8" or "nvfp4", weight-only).
 
         """
         head = getattr(lm_head, "base_layer", lm_head)
@@ -491,6 +509,8 @@ class DraftVocab:
                 "without bias, logit scaling or soft capping, run in its weight "
                 "dtype."
             )
+        if head.tp_size > 1:
+            raise ValueError("draft_token_map does not support tensor parallelism.")
 
         vocab_size = head.org_vocab_size
         bad = token_ids[(token_ids < 0) | (token_ids >= vocab_size)]
@@ -500,48 +520,12 @@ class DraftVocab:
                 f"e.g. {bad[:5].tolist()}."
             )
 
-        # Each TP rank keeps the listed rows of its own vocab shard, padded to
-        # a common count. The gathered logits drop the padding columns.
-        tp_size, tp_rank = head.tp_size, head.tp_rank
-        rank_ids = []
-        for rank in range(tp_size):
-            shard = type(head)._get_indices(
-                head.num_embeddings_padded,
-                head.org_vocab_size_padded,
-                head.num_embeddings,
-                head.org_vocab_size,
-                rank,
-                tp_size,
-            )
-            in_shard = (token_ids >= shard.org_vocab_start_index) & (
-                token_ids < shard.org_vocab_end_index
-            )
-            rank_ids.append(token_ids[in_shard] - shard.org_vocab_start_index)
-        rows_per_rank = max(ids.numel() for ids in rank_ids)
-        valid = torch.zeros(tp_size, rows_per_rank, dtype=torch.bool)
-        for rank, ids in enumerate(rank_ids):
-            valid[rank, : ids.numel()] = True
-
-        weight = head.weight
-        device = weight.device
-        rows = weight.index_select(0, rank_ids[tp_rank].to(device))
-        pad = rows.new_zeros(rows_per_rank - rows.shape[0], rows.shape[1])
-        rows = torch.cat([rows, pad])
-        self.rows = _Rows(rows, quantization)
-        del rows
-        self.token_ids = token_ids.to(device)
-        self.tp_size = tp_size
-        if not valid.all():
-            self.valid_cols = valid.flatten().nonzero()[:, 0].to(device)
-
+        weight = head.weight[:vocab_size]
+        self.token_ids = token_ids.to(weight.device)
+        self.rows = _Rows(weight[self.token_ids], quantization)
         self.num_dynamic_rows = dynamic_rows
         if dynamic_rows > 0:
-            if tp_size > 1:
-                raise ValueError(
-                    "draft_token_map_dynamic_rows does not support tensor "
-                    "parallelism yet."
-                )
-            self._init_dynamic_rows(weight[:vocab_size], dynamic_rank, quantization)
+            self._init_dynamic_rows(weight, quantization)
         logger.info(
             "Draft vocabulary: %d of %d tokens plus %d dynamic rows per draft "
             "token, %s rows.",
@@ -551,43 +535,36 @@ class DraftVocab:
             quantization or weight.dtype,
         )
 
-    def _init_dynamic_rows(
-        self, weight: torch.Tensor, rank: int, quantization: str | None
-    ) -> None:
-        """Score the rows outside the list with a rank-`rank` lm_head factor.
+    def _init_dynamic_rows(self, weight: torch.Tensor, quantization: str | None):
+        """Score the rows outside the list with a rank-256 lm_head factor.
 
-        The basis is the top right singular vectors of the lm_head, so
+        The basis is the top right singular vectors of the lm_head (the top
+        eigenvectors of `W^T W`), so
         `(x @ basis) @ (weight[i] @ basis)` approximates the logit of row `i`.
         The best `num_dynamic_rows` per token then get exact logits.
         """
         vocab_size, hidden_size = weight.shape
-        if not 0 < rank <= hidden_size:
-            raise ValueError(
-                f"draft_token_map_dynamic_rank must be in [1, {hidden_size}], "
-                f"got {rank}."
-            )
         assert self.token_ids is not None
-        is_static = torch.zeros(vocab_size, dtype=torch.bool, device=weight.device)
-        is_static[self.token_ids] = True
-        self.candidate_ids = (~is_static).nonzero()[:, 0]
+        is_listed = torch.zeros(vocab_size, dtype=torch.bool, device=weight.device)
+        is_listed[self.token_ids] = True
+        self.candidate_ids = (~is_listed).nonzero()[:, 0]
         if self.num_dynamic_rows > self.candidate_ids.numel():
             raise ValueError(
                 "draft_token_map_dynamic_rows must be at most "
                 f"{self.candidate_ids.numel()}, got {self.num_dynamic_rows}."
             )
 
-        chunk = _CHUNK
         gram = weight.new_zeros(hidden_size, hidden_size, dtype=torch.float32)
-        for start in range(0, vocab_size, chunk):
-            block = weight[start : start + chunk].float()
+        for start in range(0, vocab_size, _CHUNK):
+            block = weight[start : start + _CHUNK].float()
             gram.addmm_(block.t(), block)
-        basis = torch.linalg.eigh(gram).eigenvectors[:, -rank:].flip(-1)
+        basis = torch.linalg.eigh(gram).eigenvectors[:, -_DYNAMIC_RANK:].flip(-1)
         del gram
         self.basis = basis.to(weight.dtype).contiguous()
         scores = torch.cat(
             [
                 (weight[ids].float() @ basis).to(weight.dtype)
-                for ids in self.candidate_ids.split(chunk)
+                for ids in self.candidate_ids.split(_CHUNK)
             ]
         )
         # The scorer only ranks rows, which FP8 preserves far better than NVFP4.
@@ -606,10 +583,6 @@ class DraftVocab:
         positions in `candidate_ids`."""
         assert self.rows is not None
         logits = self.rows(hidden_states)
-        if self.tp_size > 1:
-            logits = tensor_model_parallel_all_gather(logits)
-        if self.valid_cols is not None:
-            logits = logits.index_select(-1, self.valid_cols)
         if self.num_dynamic_rows == 0:
             return logits, None
         scores = self.scorer(hidden_states @ self.basis)
@@ -641,6 +614,5 @@ def load_draft_token_map(model: nn.Module, vllm_config: "VllmConfig") -> None:
         model.lm_head,
         load_draft_token_ids(spec.draft_token_map, eos_ids),
         spec.draft_token_map_dynamic_rows,
-        spec.draft_token_map_dynamic_rank,
-        spec.draft_token_map_quantization,
+        spec.draft_lm_head_quantization,
     )

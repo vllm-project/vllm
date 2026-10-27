@@ -90,19 +90,20 @@ vllm serve <mtp-model> \
   stays exact.
 - The file is SGLang's `--speculative-token-map` format (a `.pt` list of ids)
   or a JSON list. EOS ids are always added.
-- The drafter's lm_head must be unquantized. Drafters whose model code builds
-  a `DraftVocab` support it (Qwen3.5 and Qwen4Exp MTP); others raise an error.
+- The drafter must share the target's unquantized lm_head, at tensor parallel
+  size 1. Drafters whose model code builds a `DraftVocab` support it (Qwen3.5
+  and Qwen4Exp MTP); others raise an error.
 - Acceptance drops when the list misses tokens your traffic uses, so build it
   from representative text, ideally the model's own outputs, and include all
   special tokens. [`build_draft_token_map.py`](../../../examples/features/speculative_decoding/build_draft_token_map.py)
-  ranks token ids by frequency over a corpus and reports held-out coverage.
+  ranks token ids by frequency over a corpus.
   Measure the real acceptance length (see
   [acceptance metrics](acceptance_metrics.md)) with and without the list.
 
 A static list loses acceptance on traffic it was not built from (for example
 other languages). `draft_token_map_dynamic_rows` adds that many tokens per
 draft step on top of the list: the rows outside the list are scored with a
-rank-`draft_token_map_dynamic_rank` (default 256) projection of the lm_head and
+rank-256 projection of the lm_head, built from its weights at load time, and
 the best ones get exact logits.
 
 ```bash
@@ -113,13 +114,11 @@ vllm serve <mtp-model> \
 ```
 
 It costs more per draft token than the list alone, and that cost grows with
-batch size, so measure decode speed at your concurrency. Tensor parallel size 1
-only.
+batch size, so measure decode speed at your concurrency.
 
-`draft_token_map_quantization` (`"fp8"` or `"nvfp4"`) stores the listed and
-dynamic rows weight-only quantized, which cuts the bytes read per draft token
-further; the dynamic rows' scorer is then stored in FP8. Only the acceptance
-length can change.
+With `draft_lm_head_quantization` (see the notes below) only the listed and
+dynamic rows are quantized (weight-only), not a full copy of the head; the
+dynamic rows' scorer is then stored in FP8.
 
 ## Notes
 

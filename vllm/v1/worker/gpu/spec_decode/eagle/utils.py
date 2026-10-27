@@ -116,7 +116,12 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
         eagle_model, "has_own_lm_head", draft_lm_head, target_lm_head
     ):
         draft_head = target_lm_head
-        if speculative_config.draft_lm_head_quantization is not None:
+        # With a draft token map only its rows are quantized, in
+        # load_draft_token_map below.
+        if (
+            speculative_config.draft_lm_head_quantization is not None
+            and speculative_config.draft_token_map is None
+        ):
             draft_head = quantized_lm_head_copy(
                 target_lm_head, speculative_config.draft_lm_head_quantization
             )
