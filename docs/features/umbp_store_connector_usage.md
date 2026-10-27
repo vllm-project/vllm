@@ -157,6 +157,12 @@ approximation; the compressed and sparse top-k context stays exact. Startup
 logs `DeepSeek-V4 SWA bounded replay: enabled`, or `disabled (...)` with the
 reason.
 
+DSpark speculative decoding (`"method": "dspark"`) works with the replay: its
+draft layers derive their window KV from the target's hidden states, so the
+recomputed window rebuilds the draft's cache too. EAGLE-style MTP
+(`"method": "mtp"`) draft groups are not rebuilt by the replay and are rejected
+at startup; set `"rebuild_sliding_window": false` to store them instead.
+
 ## Limitations
 
 - Pipeline parallelism is rejected.
