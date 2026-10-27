@@ -13,6 +13,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::iter;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use minijinja::{Environment, Error as MinijinjaError, ErrorKind, Value};
 use serde::{Deserialize, Serialize};
@@ -22,11 +23,12 @@ use vllm_text::backend::hf::HfSpecialTokens;
 
 use super::error::TemplateError;
 use super::format::{
-    ChatTemplateContentFormat, ChatTemplateContentFormatOption, detect_chat_template_content_format,
+    ChatTemplateContentFormat, ChatTemplateContentFormatOption, ContentCapabilities, ProbeContext,
 };
 use super::generation::{render_generation, rewrite_generation_blocks};
 use super::tojson::hf_tojson_filter;
 use crate::renderer::hf::{TemplateMessage, TemplateTool};
+use crate::request::ChatMessage;
 
 type Result<T> = std::result::Result<T, TemplateError>;
 
@@ -158,12 +160,22 @@ pub fn resolve_chat_template(chat_template: &str) -> Result<String> {
     Err(TemplateError::MissingTemplatePath)
 }
 
-/// One compiled chat template with its Jinja environment and detected content
-/// format.
+/// One compiled chat template with its Jinja environment and content format
+/// selection.
 pub(super) struct CompiledChatTemplate {
     /// Cached, fully-configured environment for one compiled template.
     env: Environment<'static>,
-    content_format: ChatTemplateContentFormat,
+    content_format: ContentFormatSelection,
+}
+
+/// How a template's content format is chosen.
+enum ContentFormatSelection {
+    /// Configured with `--chat-template-content-format`.
+    Configured(ChatTemplateContentFormat),
+    /// Chosen per request from the template's capabilities, probed on first
+    /// use: probes need the renderer's special tokens and default template
+    /// kwargs.
+    Auto(OnceLock<ContentCapabilities>),
 }
 
 impl CompiledChatTemplate {
@@ -171,9 +183,13 @@ impl CompiledChatTemplate {
     pub fn new(template: String, content_format: ChatTemplateContentFormatOption) -> Result<Self> {
         let template = rewrite_generation_blocks(template)?;
         let content_format = match content_format {
-            ChatTemplateContentFormatOption::Auto => detect_chat_template_content_format(&template),
-            ChatTemplateContentFormatOption::String => ChatTemplateContentFormat::String,
-            ChatTemplateContentFormatOption::OpenAi => ChatTemplateContentFormat::OpenAi,
+            ChatTemplateContentFormatOption::Auto => ContentFormatSelection::Auto(OnceLock::new()),
+            ChatTemplateContentFormatOption::String => {
+                ContentFormatSelection::Configured(ChatTemplateContentFormat::String)
+            }
+            ChatTemplateContentFormatOption::OpenAi => {
+                ContentFormatSelection::Configured(ChatTemplateContentFormat::OpenAi)
+            }
         };
         let env = build_environment(template)?;
         Ok(Self {
@@ -199,8 +215,18 @@ impl CompiledChatTemplate {
         })
     }
 
-    pub fn content_format(&self) -> ChatTemplateContentFormat {
-        self.content_format
+    /// The content format to render `messages` with.
+    pub fn content_format_for(
+        &self,
+        messages: &[ChatMessage],
+        probe: &ProbeContext<'_>,
+    ) -> ChatTemplateContentFormat {
+        match &self.content_format {
+            ContentFormatSelection::Configured(content_format) => *content_format,
+            ContentFormatSelection::Auto(capabilities) => capabilities
+                .get_or_init(|| ContentCapabilities::probe(self, probe))
+                .content_format_for(messages),
+        }
     }
 }
 
@@ -215,6 +241,18 @@ mod tests {
 
     use super::*;
 
+    fn content_format_for_user_message(
+        template: &CompiledChatTemplate,
+    ) -> ChatTemplateContentFormat {
+        template.content_format_for(
+            &[ChatMessage::user("hello")],
+            &ProbeContext {
+                special_tokens: None,
+                template_kwargs: &HashMap::new(),
+            },
+        )
+    }
+
     #[test]
     fn test_chat_template_state_valid_template() {
         let template = CompiledChatTemplate::new(
@@ -222,7 +260,10 @@ mod tests {
             ChatTemplateContentFormatOption::Auto,
         )
         .unwrap();
-        assert_eq!(template.content_format(), ChatTemplateContentFormat::String);
+        assert_eq!(
+            content_format_for_user_message(&template),
+            ChatTemplateContentFormat::String
+        );
         let result = template.apply(TemplateContext::default()).unwrap();
         assert_eq!(result, "[]");
     }
@@ -342,7 +383,7 @@ mod tests {
             "{% for turn in turns %}{% for _ in range(10) %}{{ turn }}{% endfor %}{% endfor %}";
         let template = CompiledChatTemplate {
             env: build_environment(template.to_string())?,
-            content_format: ChatTemplateContentFormat::String,
+            content_format: ContentFormatSelection::Configured(ChatTemplateContentFormat::String),
         }
         .with_fuel(fuel);
         let mut kwargs = HashMap::new();
@@ -503,7 +544,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(template.content_format(), ChatTemplateContentFormat::String);
+        assert_eq!(
+            content_format_for_user_message(&template),
+            ChatTemplateContentFormat::String
+        );
     }
 
     #[test]

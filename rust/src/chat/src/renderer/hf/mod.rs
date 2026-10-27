@@ -13,7 +13,7 @@ use vllm_text::backend::hf::{
 };
 
 use self::format::{
-    ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
+    ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption, ProbeContext,
 };
 use self::template::{CompiledChatTemplate, TemplateContext, request_template_fuel};
 use super::{ChatRenderer, RenderedPrompt};
@@ -247,11 +247,15 @@ impl HfChatRenderer {
         effective_template: &CompiledChatTemplate,
         request: &ChatRequest,
     ) -> Result<RenderedPrompt> {
-        let mut messages = to_template_messages(
+        let content_format = effective_template.content_format_for(
             &request.messages,
-            effective_template.content_format(),
-            self.multimodal.as_ref(),
-        )?;
+            &ProbeContext {
+                special_tokens: self.special_tokens.as_ref(),
+                template_kwargs: &self.default_template_kwargs,
+            },
+        );
+        let mut messages =
+            to_template_messages(&request.messages, content_format, self.multimodal.as_ref())?;
 
         // Handling of `continue_final_message`:
         // Append a sentinel tag to the final message content, render as usual, then
@@ -267,7 +271,7 @@ impl HfChatRenderer {
         let tools = (!request.tools().is_empty()).then(|| to_template_tools(request.tools()));
         trace!(
             message_count = messages.len(),
-            content_format = ?effective_template.content_format(),
+            ?content_format,
             ?messages,
             ?tools,
             "applying chat template"
@@ -1148,6 +1152,110 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "hello|world|");
+    }
+
+    #[test]
+    fn chat_template_renders_roles_without_part_support_as_strings() {
+        // Text and image parts are rendered in user messages only; other roles
+        // concatenate their content as a string.
+        let template = "{%- for message in messages %}<{{ message.role }}>{%- if message.role == 'user' and message.content is not string %}{%- for part in message.content %}{%- if part.type == 'text' %}{{ part.text }}{%- elif part.type == 'image' %}[IMG]{%- endif %}{%- endfor %}{%- else %}{{ message.content }}{%- endif %}{%- endfor %}";
+        let mut with_system = image_request();
+        with_system.messages.insert(0, ChatMessage::system("policy"));
+
+        let render = |request: &ChatRequest| {
+            render_mm(template, request, ChatTemplateContentFormatOption::Auto)
+                .unwrap()
+                .prompt
+                .into_text()
+                .unwrap()
+        };
+        expect![[r#"
+            (
+                "<user>a[IMG]b",
+                "<system>policy<user>a<image>b",
+            )
+        "#]]
+        .assert_debug_eq(&(render(&image_request()), render(&with_system)));
+    }
+
+    #[test]
+    fn chat_template_passes_media_parts_to_media_only_templates() {
+        // Like an ASR model's template: audio parts become audio tokens and
+        // text is dropped, whether it comes as a string or as parts.
+        let template = "{%- for message in messages %}<{{ message.role }}>{%- if message.content is not string %}{%- for part in message.content %}{%- if part.type == 'audio' %}<|AUDIO|>{%- endif %}{%- endfor %}{%- endif %}{%- endfor %}";
+        let rendered = render_mm(
+            template,
+            &audio_request(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap()
+        .prompt
+        .into_text()
+        .unwrap();
+
+        assert_eq!(rendered, "<user><|AUDIO|><|AUDIO|>");
+    }
+
+    #[test]
+    fn chat_template_passes_strings_to_templates_with_unused_part_macros() {
+        // A part-rendering macro that no message reaches does not make the
+        // template render parts.
+        let template = "{%- macro render(content) %}{%- for item in content %}{{ item.text }}{%- endfor %}{%- endmacro %}{%- for message in messages %}{{ message.role + ': ' + message.content }}{%- endfor %}";
+        let request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("hello"),
+            ChatContentPart::text("world"),
+        ])]);
+
+        assert_eq!(
+            render(Some(template), &request).unwrap(),
+            "user: helloworld"
+        );
+    }
+
+    #[test]
+    fn chat_template_falls_back_to_strings_when_no_probe_renders() {
+        // The template accepts only its own input format, which no probe
+        // conversation follows.
+        let template = "{%- if messages[0].content is not string or not messages[0].content.startswith('<<<') %}{{ raise_exception('expected <<<input') }}{%- endif %}{{ messages[0].content }}";
+        let request = sample_request(vec![ChatMessage::user("<<<hello")]);
+
+        assert_eq!(render(Some(template), &request).unwrap(), "<<<hello");
+    }
+
+    #[test]
+    fn chat_templates_that_require_tools_are_probed_with_a_tool() {
+        // The `tool_use` template renders only with tools, and only parts.
+        let tool_use_template = "{%- if not tools %}{{ raise_exception('tools required') }}{%- endif %}{%- for message in messages %}{%- for part in message.content %}{{ part.text }}|{%- endfor %}{%- endfor %}";
+        let mut request = sample_request(vec![ChatMessage::user("hello")]);
+        request.tool_context = ResolvedToolContext::new(
+            &request.messages,
+            vec![ChatTool {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                defer_loading: None,
+            }],
+            None,
+            true,
+        )
+        .unwrap();
+
+        let rendered = HfChatRenderer::new(
+            Some("{{ messages[0].content }}".to_string()),
+            HashMap::new(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap()
+        .with_tool_use_template(Some(tool_use_template.to_string()))
+        .unwrap()
+        .render(&request)
+        .unwrap()
+        .prompt
+        .into_text()
+        .unwrap();
+
+        assert_eq!(rendered, "hello|");
     }
 
     #[test]
