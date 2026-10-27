@@ -58,7 +58,9 @@ class FakeEplbState:
 def _make_runner(**overrides: Any) -> Any:
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.device = torch.device("cpu")
-    runner.model_config = SimpleNamespace(model="test-model", logits_processors=None)
+    runner.model_config = SimpleNamespace(
+        model="test-model", logits_processors=None, enable_sleep_mode=False
+    )
     runner.req_states = SimpleNamespace(
         device=runner.device,
         max_num_reqs=8,
