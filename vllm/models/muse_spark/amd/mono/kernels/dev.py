@@ -86,7 +86,7 @@ def fresh(v):
     return fx.Int32(
         llvm.inline_asm(
             T.i32, [fx.Int32(v).ir_value()], "v_mov_b32 $0, $1", "=v,v",
-            has_side_effects=True,
+            has_side_effects=True
         )
     )  # fmt: skip
 

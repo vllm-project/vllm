@@ -466,8 +466,7 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
                     if g == 0:
                         bo.buffer_store(
                             fx.Vector.from_elements(
-                                [mm.bitcast(fx.Int32), lf.bitcast(fx.Int32)],
-                                fx.Int32,
+                                [mm.bitcast(fx.Int32), lf.bitcast(fx.Int32)], fx.Int32
                             ),
                             rsrc(d.part + fx.Int64(P_ML)),
                             (seg * 64 + m_row) * 2,

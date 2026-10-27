@@ -1553,10 +1553,7 @@ def build(key: Build):
             wis.append(ld_vec(w_in, cq // 2, 4))
             for h2 in range_constexpr(2):
                 v4 = ld_vec(
-                    scratch + fx.Int64(lay["smid"][0]),
-                    j * HID + cq + 4 * h2,
-                    4,
-                    CM_DEV,
+                    scratch + fx.Int64(lay["smid"][0]), j * HID + cq + 4 * h2, 4, CM_DEV
                 )
                 a4 = ld_vec(alpha, cq + 4 * h2, 4)
                 b4 = ld_vec(beta, cq + 4 * h2, 4)
@@ -1664,18 +1661,7 @@ def build(key: Build):
 
     @traced
     def stage_qkv(
-        q_ops,
-        own_peer,
-        scratch,
-        g_out,
-        tag,
-        health,
-        tid,
-        bid,
-        lane,
-        wave,
-        red,
-        own,
+        q_ops, own_peer, scratch, g_out, tag, health, tid, bid, lane, wave, red, own
     ):
         tid = fresh(tid)
         lane = fresh(lane)
@@ -2053,19 +2039,7 @@ def build(key: Build):
             ao = (ao_t, health)
             o_ops = o_loads(w_o, bid, lane, wave)
         stage_ng(attn_o, attn_g, g_stride, scratch, tag, tid, bid, nrows, ao)
-        stage_o(
-            o_ops,
-            scratch,
-            pl,
-            tag,
-            health,
-            tid,
-            bid,
-            lane,
-            wave,
-            rank,
-            so.red.ptr,
-        )
+        stage_o(o_ops, scratch, pl, tag, health, tid, bid, lane, wave, rank, so.red.ptr)
         wr, wp = a_loads(w_r, w_pre, bid, tid, lane, wave)
         if const_expr(BND):  # all 256 CTAs, column groups
             stage_ab_c(

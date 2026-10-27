@@ -361,14 +361,7 @@ def build(key: BuildM):
         acc = fx.Vector.filled(4, 0.0, fx.Float32)
         for i in range_constexpr(4):
             acc = fp4_mma(
-                ops,
-                3 * i,
-                hl,
-                HROW,
-                lane,
-                acc,
-                4 * (wave % 4) + i,
-                jpar=(task & 1),
+                ops, 3 * i, hl, HROW, lane, acc, 4 * (wave % 4) + i, jpar=(task & 1)
             )
         par = (it & 1) * (WAVES * 64 * 4)
         fx.ptr_store(acc, red + (par + (wave * 64 + lane) * 4))
@@ -460,14 +453,7 @@ def build(key: BuildM):
         acc = fx.Vector.filled(4, 0.0, fx.Float32)
         for i in range_constexpr(2):
             acc = fp4_mma(
-                ops,
-                3 * i,
-                al,
-                AROW,
-                lane,
-                acc,
-                2 * wave + i,
-                jpar=(task & 1),
+                ops, 3 * i, al, AROW, lane, acc, 2 * wave + i, jpar=(task & 1)
             )
         par = (it & 1) * (WAVES * 64 * 4)
         fx.ptr_store(acc, red + (par + (wave * 64 + lane) * 4))

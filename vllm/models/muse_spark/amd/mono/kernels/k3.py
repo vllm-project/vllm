@@ -304,15 +304,7 @@ def task_ring(load, compute, q, task, it, end, unr, *args):
 
 REGION_IDS.update({"orr": 24, "mrr": 25, "ssa4p": 26})
 REGION_IDS.update(
-    {
-        "op": 13,
-        "xf": 16,
-        "xnf": 17,
-        "qx": 18,
-        "qkv": 19,
-        "ssa4": 20,
-        "ssg4": 21,
-    }
+    {"op": 13, "xf": 16, "xnf": 17, "qx": 18, "qkv": 19, "ssa4": 20, "ssg4": 21}
 )
 
 
@@ -706,10 +698,7 @@ def build(key: Build):
             idx = (par * S * DM + tt * DM + col) // 2
             for pb in pl:
                 bo.buffer_store(
-                    hw,
-                    rsrc(pb + fx.Int64(play["hraw"][0])),
-                    idx,
-                    cache_modifier=CM_SYS,
+                    hw, rsrc(pb + fx.Int64(play["hraw"][0])), idx, cache_modifier=CM_SYS
                 )
         rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
         gpu.barrier()
@@ -792,18 +781,7 @@ def build(key: Build):
         return hv, wv
 
     @traced
-    def stage_route(
-        scratch,
-        bias_v,
-        lgs_r,
-        tag,
-        health,
-        rank,
-        tid,
-        lane,
-        wave,
-        rt,
-    ):
+    def stage_route(scratch, bias_v, lgs_r, tag, health, rank, tid, lane, wave, rt):
         """Every token's routing (wave w: tokens w, w + 8, ...), then the local union."""
         if const_expr(S <= WAVES):
             if wave < S:
@@ -1016,26 +994,10 @@ def build(key: Build):
             acc_u = fx.Vector.filled(4, 0.0, fx.Float32)
             for i in range_constexpr(2):
                 acc_g = fp4_mma(
-                    ops,
-                    3 * i,
-                    hl,
-                    HROW,
-                    lane,
-                    wave,
-                    acc_g,
-                    i,
-                    jpar=(task & 1),
+                    ops, 3 * i, hl, HROW, lane, wave, acc_g, i, jpar=(task & 1)
                 )
                 acc_u = fp4_mma(
-                    ops,
-                    6 + 3 * i,
-                    hl,
-                    HROW,
-                    lane,
-                    wave,
-                    acc_u,
-                    i,
-                    jpar=(task & 1),
+                    ops, 6 + 3 * i, hl, HROW, lane, wave, acc_u, i, jpar=(task & 1)
                 )
             par = (it & 1) * (2 * WAVES * 64 * 4)
             fx.ptr_store(acc_g, red + (par + (wave * 64 + lane) * 4))
@@ -1853,12 +1815,7 @@ def build(key: Build):
                     base = pb + fx.Int64(play["ssa4p"][0])
                     bo.buffer_store(
                         fx.Vector.from_elements(
-                            [
-                                p1.bitcast(fx.Int32),
-                                tag,
-                                p2.bitcast(fx.Int32),
-                                tag,
-                            ],
+                            [p1.bitcast(fx.Int32), tag, p2.bitcast(fx.Int32), tag],
                             fx.Int32,
                         ),
                         rsrc(base),
@@ -1867,12 +1824,7 @@ def build(key: Build):
                     )
                     bo.buffer_store(
                         fx.Vector.from_elements(
-                            [
-                                p3.bitcast(fx.Int32),
-                                tag,
-                                p4.bitcast(fx.Int32),
-                                tag,
-                            ],
+                            [p3.bitcast(fx.Int32), tag, p4.bitcast(fx.Int32), tag],
                             fx.Int32,
                         ),
                         rsrc(base),
@@ -2286,14 +2238,7 @@ def build(key: Build):
         if const_expr(FA is not None):
             # attn_o is the fragment's descriptor; stage O polls the merged rows (tagged pairs)
             attn_o, ao_t = FA.run(
-                attn_o,
-                tag,
-                health,
-                tid,
-                bid,
-                lane,
-                wave,
-                sl.fa_.peek(),
+                attn_o, tag, health, tid, bid, lane, wave, sl.fa_.peek()
             )
             ao = (ao_t, health)
         o_ops = o_loads(w_o, bid, lane, wave)
