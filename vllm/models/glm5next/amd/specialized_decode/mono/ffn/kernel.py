@@ -171,6 +171,8 @@ TRACE_MARKS = (
     "uk",
     "iscore",
     "iselect",
+    "is_hist",
+    "is_wide",
     "split",
     "sp_keys",
     "sp_rows",
@@ -2527,7 +2529,9 @@ def build_flash_ffn_kernel(
                                     syncscope="workgroup",
                                 )
                     gpu.barrier()
+                    tmark("is_hist")
                     p12, r12, c12 = select_wide(20, fx.Uint32(0), count)
+                    tmark("is_wide")
                     if c12 <= SEL_CAP:
                         candidates(20, p12, r12, c12)
                     if c12 > SEL_CAP:
