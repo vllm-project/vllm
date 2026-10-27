@@ -1436,8 +1436,10 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "mla_dual_rms_norm_fusion_pass")
 
+        qkv_a_proj_fusion = rocm_aiter_ops.triton_preshuffle_gemm_supports_skip_reduce()
         for epsilon in [1e-5, 1e-6]:
             self.register(MLADualRMSNormPattern(epsilon))
-            self.register(MLAQkvAProjDualRMSPerTokenQuantPattern(epsilon))
+            if qkv_a_proj_fusion:
+                self.register(MLAQkvAProjDualRMSPerTokenQuantPattern(epsilon))
             self.register(MLADualRMSPerTokenQuantPattern(epsilon))
             self.register(MLADualRMSGroupQuantPattern(epsilon))
