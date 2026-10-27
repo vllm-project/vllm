@@ -546,9 +546,12 @@ class Worker(WorkerBase):
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
-            self.requested_memory = request_memory(
-                init_snapshot, self.cache_config, external_weight_memory
-            )
+            if self.cache_config.kv_cache_memory_bytes:
+                self.requested_memory = init_snapshot.free_memory
+            else:
+                self.requested_memory = request_memory(
+                    init_snapshot, self.cache_config, external_weight_memory
+                )
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)
