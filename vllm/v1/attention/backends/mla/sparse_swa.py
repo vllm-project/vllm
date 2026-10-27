@@ -670,9 +670,18 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         non_causal = not common_attn_metadata.causal
         if non_causal:
             # DSpark's non-causal kernel reads the mapping inside this build,
-            # before the prologue batch's flush would fill a staged one.
-            token_to_req_indices = common_attn_metadata.token_to_req_indices(
-                self.token_to_req_indices
+            # before the prologue batch's flush would fill a staged one. The
+            # metadata cache may already hold that unwritten staged view, so
+            # build into this builder's own buffer, bypassing the cache.
+            num_tokens = common_attn_metadata.num_actual_tokens
+            num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
+            num_output_tokens = max(num_mapped_tokens, num_tokens)
+            assert self.token_to_req_indices.shape[0] >= num_output_tokens
+            token_to_req_indices = compute_token_to_req_indices(
+                common_attn_metadata.query_start_loc,
+                self.token_to_req_indices,
+                num_mapped_tokens,
+                num_output_tokens,
             )
         else:
             token_to_req_indices = self._prologue_batch.token_to_req_indices(
