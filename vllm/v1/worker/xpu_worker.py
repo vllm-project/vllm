@@ -12,7 +12,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_random_seed, xpu_forward_debug
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.xpu_model_runner import (
     XPUMMEncoderModelRunner,
@@ -245,7 +245,9 @@ class XPUWorker(Worker):
             "worker requested memory: %sGiB", format_gib(self.requested_memory)
         )
 
-        self._init_workspace_and_model_runner()
+        faulthandler.dump_traceback_later(30, repeat=True)
+        with xpu_forward_debug("xpu_worker.init_workspace_and_model_runner"):
+            self._init_workspace_and_model_runner()
 
     def _make_model_runner(self):
         if self.use_v2_model_runner:
@@ -274,3 +276,4 @@ class XPUWorker(Worker):
             self.rank,
             self.local_rank,
         )
+        faulthandler.cancel_dump_traceback_later()
