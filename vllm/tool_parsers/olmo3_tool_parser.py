@@ -95,7 +95,9 @@ class Olmo3PythonicToolParser(ToolParser):
             try:
                 ast.parse(cls._to_call_list(body))
                 return body.strip()
-            except (SyntaxError, ValueError):
+            # Not only SyntaxError: deeply nested input can raise
+            # MemoryError or RecursionError from ast.parse.
+            except Exception:
                 end = model_output.find("</function_calls>", end + 1)
         return model_output[body_start:first_end].strip()
 

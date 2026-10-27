@@ -255,6 +255,45 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
     assert reconstructor.tool_calls[2].function == EMPTY_LIST_FUNCTION_CALL
 
 
+def test_streaming_closing_tag_in_string_split_after_tag(
+    default_tokenizer: TokenizerLike,
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    # The first delta ends with a "</function_calls>" that is inside a string.
+    model_output_deltas = [
+        "<function_calls>write_file(path='README.md', "
+        "content='Calls are wrapped in <function_calls>...</function_calls>",
+        ".')</function_calls>",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        tool_parser, model_output_deltas, assert_one_tool_per_delta=False
+    )
+
+    assert reconstructor.other_content == ""
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == CLOSING_TAG_IN_STRING_FUNCTION_CALL
+
+
+def test_deeply_nested_tool_call_falls_back_to_content(
+    default_tokenizer: TokenizerLike,
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    # Too deep for ast.parse, which raises MemoryError instead of SyntaxError.
+    model_output = "<function_calls>f(a=" + "-" * 7000 + "1)</function_calls>"
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=False
+    )
+
+    assert content == model_output
+    assert len(tool_calls) == 0
+
+
 @pytest.mark.parametrize("streaming", [False])
 def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLike):
     """Test regex timeout is handled gracefully."""
