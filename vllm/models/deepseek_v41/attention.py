@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
 from vllm.config import (
     CacheConfig,
+    CUDAGraphMode,
     VllmConfig,
     get_current_vllm_config,
 )
@@ -1554,11 +1555,13 @@ class DeepseekV4Indexer(nn.Module):
             cache_latent = latent
         if cache_positions is None:
             cache_positions = positions
-        attn_metadata = get_forward_context().attn_metadata
+        context = get_forward_context()
+        attn_metadata = context.attn_metadata
         if isinstance(attn_metadata, dict):
             indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
             if (
                 indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
+                and context.cudagraph_runtime_mode != CUDAGraphMode.FULL
                 and not torch.cuda.is_current_stream_capturing()
             ):
                 # candidates num smaller than topk, every candidate is selected

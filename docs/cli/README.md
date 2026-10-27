@@ -138,6 +138,10 @@ vllm bench {forward, latency, serve, throughput}
 
 Benchmark the model forward of exact batches: each case lists its requests as `[N*]Q[@K][c][:D]` (query length Q, KV length K including the query, D draft tokens). A prefill's prefix is a prefix-cache hit unless `c` marks a chunked prefill; they differ only on models with SWA bounded replay, which recompute the last window of a hit. Each request's prefix length varies by ±50% by default (`--kv-len-jitter`), identically on every DP rank. Each forward is captured as a one-shot CUDA graph; target sampling, rejection sampling, and CPU overhead aren't measured. Use `torchrun`, one process per GPU, for DP/TP/EP/PCP/PP. CUDA only for now. Add `--profile-dir DIR` to write a Perfetto trace and a per-kernel GPU time summary of each case; `python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]` prints a summary or compares two. Under Nsight Systems, `nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat --cuda-graph-trace=node` records just those replays, one report per case.
 
+Warmup and CUDA graph capture use the same graph execution paths, including
+DeepSeek V4.1's sparse indexer for short contexts. Eager-only shortcuts are not
+included in the reported graph latency.
+
 ```bash
 vllm bench forward \
     --model meta-llama/Llama-3.2-1B-Instruct \

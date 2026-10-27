@@ -6,7 +6,12 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    override_forward_context,
+)
 from vllm.models.deepseek_v41 import attention as attention_module
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
@@ -132,11 +137,13 @@ def test_pcp_gathers_routing_ids_once_after_local_input_preparation(
 
 
 @pytest.mark.parametrize("rows", [[], [0, 3]])
-def test_pcp_replay_pads_inputs_and_scatters_only_real_rows(rows):
+@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+def test_pcp_replay_pads_inputs_and_scatters_only_real_rows(rows, runtime_mode):
     """Empty peers still run padded layers without overwriting real outputs."""
     hidden = torch.arange(4, dtype=torch.float32)[:, None]
 
     def run_layers(values):
+        assert get_forward_context().cudagraph_runtime_mode == runtime_mode
         assert values.shape == (4, 1)
         torch.testing.assert_close(values[: len(rows)], hidden[rows])
         assert not values[len(rows) :].count_nonzero()
@@ -148,7 +155,14 @@ def test_pcp_replay_pads_inputs_and_scatters_only_real_rows(rows):
         ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={}),
         num_padded=4,
     )
-    (output,) = layers(hidden)
+    context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+        cudagraph_runtime_mode=runtime_mode,
+    )
+    with override_forward_context(context):
+        (output,) = layers(hidden)
     expected = torch.zeros_like(hidden)
     expected[rows] = hidden[rows] + 1
     torch.testing.assert_close(output, expected)

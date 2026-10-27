@@ -24,6 +24,105 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
 @pytest.mark.benchmark
 @pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepSeek sparse MXFP4 indexer requires Blackwell.",
+)
+def test_bench_forward_deepseek_sparse_indexer(tmp_path):
+    """Short-context warmup must prepare the indexer used by graph capture."""
+    from vllm.transformers_utils.repo_utils import hf_api
+
+    config = json.loads(
+        Path(
+            hf_api().hf_hub_download(
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+                "config.json",
+                revision="1bae0e1088993b9b82de08f59de5be5a34e42170",
+            )
+        ).read_text()
+    )
+    config["text_config"].update(
+        num_hidden_layers=4,
+        compress_ratios=[0, 0, 1, 1],
+        kv_source_layer_ids=[2],
+        index_source_layer_ids=[2, 3],
+        candidate_source_layer_id=2,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        hidden_size=512,
+        moe_intermediate_size=512,
+        num_attention_heads=8,
+        o_groups=1,
+        o_lora_rank=512,
+        q_lora_rank=512,
+        vocab_size=1024,
+        engram_layer_ids=[],
+        num_nextn_predict_layers=0,
+    )
+    config["vision_config"]["num_hidden_layers"] = 0
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    output = tmp_path / "results.json"
+    command = [
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.cli.main",
+        "bench",
+        "forward",
+        "--model",
+        str(tmp_path),
+        "--skip-tokenizer-init",
+        "--language-model-only",
+        "--load-format",
+        "dummy",
+        "--attention-backend",
+        "FLASHMLA_MEGA_ATTN_DSV41",
+        "--kv-cache-dtype",
+        "fp8_ds_mla",
+        "--moe-backend",
+        "flashinfer_trtllm",
+        "--disable-flashinfer-autotune",
+        "--kernel-config.enable_jit_warmup",
+        "false",
+        "--kernel-config.enable_cutedsl_warmup",
+        "false",
+        "--kv-cache-memory-bytes",
+        str(1 << 30),
+        "--attention-config.indexer_kv_dtype",
+        "mxfp4",
+        "--attention-config.indexer_sparse_logits",
+        "true",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "5",
+        "--max-num-batched-tokens",
+        "1024",
+        "--routing",
+        "balanced",
+        "--kv-len-jitter",
+        "0",
+        "--case",
+        "short=512",
+        "--case",
+        "mixed=256,1@128",
+        "--iters",
+        "3",
+        "--samples",
+        "2",
+        "--output-json",
+        str(output),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "DeepGEMM sparse MQA logits" in result.stdout + result.stderr
+    for row in json.loads(output.read_text()):
+        assert row["median_us"] > 0
+        (rank,) = row["ranks"]
+        assert rank["finite"]
+        assert rank["graph_vs_eager"]["relative_rms"] == 0
+
+
+@pytest.mark.benchmark
+@pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Forward graph timing requires CUDA."
 )
 @pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark", "dflash"])

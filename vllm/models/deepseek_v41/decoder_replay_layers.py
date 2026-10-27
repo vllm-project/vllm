@@ -14,11 +14,12 @@ break out to the replay batch, which may run in a graph of its own
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import CUDAGraphMode
 from vllm.forward_context import (
     ForwardContext,
     get_forward_context,
@@ -116,7 +117,13 @@ class DecoderReplayLayers:
         assert isinstance(hidden_states, torch.Tensor)
         rows = replay_batch.rows
         inputs = (hidden_states, *states)
-        with override_forward_context(replay_batch.forward_context):
+        context = replay_batch.forward_context
+        if (
+            replay_batch.run_graph is None
+            and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
+        ):
+            context = replace(context, cudagraph_runtime_mode=CUDAGraphMode.FULL)
+        with override_forward_context(context):
             if replay_batch.run_graph is not None:
                 row_outputs = replay_batch.run_graph(rows, inputs)
             else:
