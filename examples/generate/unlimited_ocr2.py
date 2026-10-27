@@ -19,11 +19,21 @@ def main():
         choices=["FLASH_ATTN", "FLASHINFER"],
         default="FLASH_ATTN",
     )
+    parser.add_argument(
+        "--page-count-guard",
+        action="store_true",
+        help="Force exactly one <PAGE> section per input page.",
+    )
     args = parser.parse_args()
     images = []
     for path in args.images:
         with Image.open(path) as image:
             images.append(image.convert("RGB"))
+    logits_processors = (
+        [("vllm.model_executor.models.unlimited_ocr2:PageCountGuardLogitsProcessor")]
+        if args.page_count_guard
+        else None
+    )
     llm = LLM(
         model="baidu/Unlimited-OCR-2",
         attention_config={"backend": args.attention_backend},
@@ -33,6 +43,7 @@ def main():
         max_num_batched_tokens=args.max_model_len,
         limit_mm_per_prompt={"image": len(images)},
         mm_encoder_attn_backend="TORCH_SDPA",
+        logits_processors=logits_processors,
     )
     output = llm.generate(
         {

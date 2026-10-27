@@ -20,8 +20,15 @@ for one 1024-pixel global view per page.
 
 Prefill requires the entire prompt: disable chunked prefill and set
 `max_num_batched_tokens` to at least `max_model_len`. Input and generated tokens
-must fit within `max_model_len`. There is no automatic page-count stopping guard;
-generation can repeat pages up to `max_tokens`.
+must fit within `max_model_len`. By default there is no page-count stopping
+guard; generation can repeat pages up to `max_tokens`. Pass
+`--page-count-guard` (or register
+`vllm.model_executor.models.unlimited_ocr2:PageCountGuardLogitsProcessor`
+via `--logits-processors`) to force exactly one `<PAGE>` section per prompt
+page: EOS is masked until all pages are done, extra page markers force EOS,
+and `max_page_tokens` (default 20000) caps each page. The guard reads
+`page_token_id` / `eos_token_id` / `max_page_tokens` from
+`SamplingParams.extra_args` when given.
 
 ## Attention and KV cache
 
