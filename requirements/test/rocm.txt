@@ -1287,7 +1287,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.20.2
+transformers==5.21.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
