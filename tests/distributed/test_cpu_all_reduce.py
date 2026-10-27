@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for cpu_all_reduce_ (gloo, CPU only)."""
 
+import time
+from datetime import timedelta
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -82,3 +85,23 @@ def test_cpu_all_reduce(world_size: int):
         nprocs=world_size,
         join=True,
     )
+
+
+def _timeout_worker(rank: int, world_size: int, port: int):
+    pg = stateless_init_torch_distributed_process_group(
+        "127.0.0.1", port, rank, world_size, backend="gloo"
+    )
+    if rank != 0:
+        # Never joins the all-reduce; rank 0's p2p wait must time out
+        # well before this peer goes away.
+        time.sleep(5)
+        return
+    t = _make_input(rank, world_size, 0)
+    start = time.monotonic()
+    with pytest.raises(RuntimeError, match="Timed out"):
+        cpu_all_reduce_(t, pg, timeout=timedelta(seconds=1))
+    assert time.monotonic() - start < 3
+
+
+def test_cpu_all_reduce_timeout():
+    mp.spawn(_timeout_worker, args=(2, get_open_port()), nprocs=2, join=True)
