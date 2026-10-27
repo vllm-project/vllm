@@ -390,6 +390,7 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch, backpressure):
     assert list(blocks) == [key]
     (descriptor,) = blocks[key]
     assert descriptor == MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=2)
+    assert type(descriptor.element_index) is int
     assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
 
     # Here we verify that request cleanup discards the request-scoped hint in
@@ -479,13 +480,24 @@ def test_kvcr_tier_maps_query_status(monkeypatch, status, expected):
     assert tier.lookup(OffloadKey(b"k0"), ReqContext(req_id="req")) is expected
 
 
-def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
-    """Hold primary-tier hits until KVCR releases the corresponding pin."""
+@pytest.mark.parametrize(
+    ("job_keys", "chunk_ids", "success"),
+    [
+        (None, [1, 3], True),
+        ((b"k2", b"k0"), [3, 1], True),
+        (None, [1], False),
+        ((b"k0", b"other"), [1, 3], False),
+    ],
+    ids=["original-keys", "reordered-keys", "short-chunks", "unexpected-key"],
+)
+def test_kvcr_tier_serves_primary_pin_request(
+    monkeypatch, job_keys, chunk_ids, success
+):
+    """Validate pin jobs and hold accepted hits until KVCR releases the pin."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
     keys = (BlockKey(b"k0"), BlockKey(b"k1"), BlockKey(b"k2"))
     hit_keys = (keys[0], keys[2])
-    chunk_ids = {keys[0]: 1, keys[2]: 3}
     lifecycle: list[str] = []
 
     class Parent:
@@ -499,8 +511,8 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
         def create_store_job(self, requested_keys, req_context):
             return TransferJob(
                 job_id=11,
-                keys=requested_keys,
-                chunk_ids=np.array([chunk_ids[key] for key in requested_keys]),
+                keys=requested_keys if job_keys is None else job_keys,
+                chunk_ids=np.array(chunk_ids, dtype=np.int32),
                 is_promotion=True,
                 req_context=req_context,
             )
@@ -516,6 +528,11 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
 
     [(queued_request, result)] = bindings.poll_pin_results()
     assert queued_request == request
+    assert lifecycle == ["new", "finished"]
+    if not success:
+        assert result is None
+        assert list(tier.get_finished_jobs()) == [JobResult(11, False)]
+        return
     assert result is not None
     pin_handle, descriptors = result
     assert descriptors[keys[1]] is None
@@ -523,7 +540,7 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
     assert block_descriptors is not None
     (descriptor,) = block_descriptors
     assert descriptor == MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=3)
-    assert lifecycle == ["new", "finished"]
+    assert type(descriptor.element_index) is int
 
     polls = 0
 
@@ -626,6 +643,7 @@ def test_kvcr_tier_stores_and_emits_inventory(monkeypatch):
     assert blocks[key] == [
         MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=2)
     ]
+    assert type(blocks[key][0].element_index) is int
     assert list(tier.get_finished_jobs()) == [JobResult(11, True)]
 
     assert kvcr.inventory_sink is not None
@@ -655,7 +673,16 @@ def test_kvcr_tier_requires_self_describing_inventory_events(monkeypatch):
         )
 
 
-def test_kvcr_tier_accumulates_block_results(monkeypatch):
+@pytest.mark.parametrize(
+    ("successes", "expected"),
+    [
+        ((True, False), JobResult(13, False, {OffloadKey(b"k0")})),
+        ((False, True), JobResult(13, False, {OffloadKey(b"k1")})),
+        ((True, True), JobResult(13, True)),
+    ],
+    ids=["success-then-failure", "failure-then-success", "all-success"],
+)
+def test_kvcr_tier_accumulates_block_results(monkeypatch, successes, expected):
     """Wait for every block result and preserve partial success while draining."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
@@ -672,13 +699,10 @@ def test_kvcr_tier_accumulates_block_results(monkeypatch):
 
     op_handle, _, _ = kvcr.deliver_calls[0]
     kvcr.completed.clear()
-    kvcr.complete(op_handle, {keys[0]: True})
+    kvcr.complete(op_handle, {keys[0]: successes[0]})
     assert list(tier.get_finished_jobs()) == []
 
-    kvcr.complete(op_handle, {keys[1]: False})
+    kvcr.complete(op_handle, {keys[1]: successes[1]})
     tier.drain_jobs()
 
-    [result] = tier.get_finished_jobs()
-    assert result.job_id == 13
-    assert not result.success
-    assert result.successful_keys == {keys[0]}
+    assert list(tier.get_finished_jobs()) == [expected]
