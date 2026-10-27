@@ -520,32 +520,6 @@ class TokenizeParams:
 
         return slice(0, max_length)
 
-    @staticmethod
-    def _truncation_indices(
-        truncation: slice, special_tokens_mask: list[int]
-    ) -> list[int] | None:
-        """The indices of the prompt tokens to keep so that `truncation` spares
-        the special tokens.
-
-        `special_tokens_mask` flags the tokens that the tokenizer added, such as
-        `[CLS]` and `[SEP]`. These are all kept and only the text is truncated,
-        as the tokenizer's own truncation does.
-
-        `None` means `truncation` applies as it is: there are no special tokens
-        to keep, or no room for them.
-        """
-        length = len(special_tokens_mask)
-        special = [i for i in range(length) if special_tokens_mask[i]]
-        text = [i for i in range(length) if not special_tokens_mask[i]]
-        start, stop, _ = truncation.indices(length)
-        num_text = stop - start - len(special)
-        if not special or num_text < 0:
-            return None
-
-        # Only the text is truncated, from the same side as `truncation`.
-        text = text[:num_text] if start == 0 else text[len(text) - num_text :]
-        return sorted(special + text)
-
     def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply truncation to prompt tokens if necessary."""
         truncation = self._truncation_slice(tokenizer, len(tokens))

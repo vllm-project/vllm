@@ -56,6 +56,7 @@ from vllm.utils.func_utils import supports_kw
 
 from .base import BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
+from .inputs.tokenize import get_truncation_indices
 
 if TYPE_CHECKING:
     from collections.abc import Set
@@ -1138,9 +1139,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         offset_mapping = encoding["offset_mapping"] if want_offsets else None
         truncation = params._truncation_slice(tokenizer, len(token_ids))
         if truncation is not None:
-            kept = params._truncation_indices(
-                truncation, encoding["special_tokens_mask"]
-            )
+            kept = get_truncation_indices(truncation, encoding["special_tokens_mask"])
             if kept is not None:
                 token_ids = [token_ids[i] for i in kept]
                 if offset_mapping is not None:

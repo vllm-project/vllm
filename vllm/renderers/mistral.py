@@ -20,6 +20,7 @@ from vllm.utils.async_utils import make_async
 from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
+from .inputs.tokenize import get_truncation_indices
 from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
@@ -154,7 +155,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         truncation = params._truncation_slice(tokenizer, len(token_ids))
         if truncation is not None and token_ids[:1] == [tokenizer.bos_token_id]:
             special_tokens_mask = [1] + [0] * (len(token_ids) - 1)
-            kept = params._truncation_indices(truncation, special_tokens_mask)
+            kept = get_truncation_indices(truncation, special_tokens_mask)
             if kept is not None:
                 tokens_prompt["prompt_token_ids"] = [token_ids[i] for i in kept]
 
