@@ -238,6 +238,9 @@ class RequestState:
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
+        # Trailing output tokens held back with their text by stop strings
+        self.num_held_tokens = 0
+        self.held_sampling_mask_positions: list[list[int]] = []
         # (weight version, first output-token index) for each span.
         self.weight_version_starts: list[tuple[str, int]] = []
 
@@ -484,30 +487,44 @@ class RequestState:
         delta = self.output_kind == RequestOutputKind.DELTA
 
         # Prepare text and token_ids, based on delta mode
-        text = self.detokenizer.get_next_output_text(finished, delta)
+        text, num_held_tokens = self.detokenizer.get_next_output(finished, delta)
+        num_held_before = self.num_held_tokens
+        self.num_held_tokens = num_held_tokens
+        num_sent = len(token_ids) + num_held_before - num_held_tokens
+
+        def sent(items):
+            end = len(items) - num_held_tokens
+            return items[max(end - num_sent, 0) if delta else 0 : end]
+
         if not delta:
             token_ids = self.detokenizer.output_token_ids
+            if num_held_tokens:
+                token_ids = sent(token_ids)
+        elif num_held_before or num_held_tokens:
+            token_ids = sent(self.detokenizer.output_token_ids)
 
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
-        if delta and logprobs:
-            num_new_tokens = len(token_ids)
-            # Avoid [-0:], which returns the full accumulated history when a
-            # delta contains no new token IDs. [:0] preserves the concrete
-            # list or FlatLogprobs representation while returning no entries.
-            logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
+        if logprobs and (delta or num_held_tokens):
+            logprobs = sent(logprobs)
 
         sampling_mask = None
-        if (delta or finished) and self.sampling_mask_chunks:
-            sampling_mask = SamplingMask(
-                [
-                    position
-                    for chunk in self.sampling_mask_chunks
-                    for position in chunk.to_nested_list()
-                ]
-            )
+        if (delta or finished) and (
+            self.sampling_mask_chunks or self.held_sampling_mask_positions
+        ):
+            positions = [
+                position
+                for chunk in self.sampling_mask_chunks
+                for position in chunk.to_nested_list()
+            ]
             if delta:
+                positions = self.held_sampling_mask_positions + positions
+                num_sent_positions = max(len(positions) - num_held_tokens, 0)
+                self.held_sampling_mask_positions = positions[num_sent_positions:]
+                positions = positions[:num_sent_positions]
                 self.sampling_mask_chunks.clear()
+            if positions:
+                sampling_mask = SamplingMask(positions)
 
         # Concatenate routed experts on finish
         routed_experts = None
