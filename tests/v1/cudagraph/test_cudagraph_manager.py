@@ -19,6 +19,7 @@ from vllm.config import (
 from vllm.distributed.device_communicators import pynccl_allocator
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
@@ -458,17 +459,25 @@ def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "adaptive,num_tokens,has_prefill,decode_eligible",
+    "adaptive,num_tokens,has_prefill,decode_eligible,dp_size,peer_query_len",
     [
-        (False, 16, False, True),
-        (True, 16, False, True),
-        (True, 8, False, True),
-        (True, 16, True, False),
-        pytest.param(True, 16, True, True, id="decode-eligible-prefill-tail"),
+        (False, 16, False, True, 1, None),
+        (True, 16, False, True, 1, None),
+        (True, 8, False, True, 1, None),
+        (True, 16, True, False, 1, None),
+        pytest.param(True, 16, True, True, 1, None, id="decode-eligible-prefill-tail"),
+        pytest.param(True, 16, False, True, 2, None, id="dp-peer-prefill"),
+        pytest.param(True, 8, False, True, 2, 4, id="dp-peer-longer-decode"),
     ],
 )
 def test_draft_prefill_matches_shared_target_metadata_shape(
-    monkeypatch, adaptive, num_tokens, has_prefill, decode_eligible
+    monkeypatch,
+    adaptive,
+    num_tokens,
+    has_prefill,
+    decode_eligible,
+    dp_size,
+    peer_query_len,
 ):
     """Draft prefill must reuse the target's padded request layout, even after AV."""
     target = _make_spec_decode_manager(
@@ -477,12 +486,38 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
         capture_sizes=[1, 2, 4, 8, 16, 32],
         varlen_decode=adaptive,
     )
-    target_desc = target.dispatch(
+    collective_calls = 0
+
+    def all_reduce(tensor):
+        nonlocal collective_calls
+        collective_calls += 1
+        assert collective_calls == 1, "Draft prefill must reuse the target's DP sync"
+        tensor[:, 1] = torch.tensor(
+            [
+                16,
+                CUDAGraphMode.PIECEWISE.value
+                if peer_query_len is None
+                else CUDAGraphMode.FULL.value,
+                peer_query_len or 0,
+                peer_query_len or -1,
+                0,
+                4,
+                0,
+            ]
+        )
+
+    monkeypatch.setattr(
+        dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_all_reduce_=all_reduce)
+    )
+    max_query_len = num_tokens // 4
+    target_desc, target_sync = dispatch_cg_and_sync_dp(
+        target,
         4,
         num_tokens,
-        4 if num_tokens == 16 and decode_eligible else None,
-        0,
-        max_query_len=None if has_prefill else 4,
+        max_query_len if decode_eligible else None,
+        dp_size=dp_size,
+        dp_rank=0,
+        max_query_len=None if has_prefill else max_query_len,
     )
     hidden_states = torch.zeros(target_desc.num_tokens, 1)
     speculator = SimpleNamespace(
@@ -492,7 +527,7 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
         enable_adaptive_verification=adaptive,
         max_model_len=4096,
         max_num_reqs=8,
-        dp_size=1,
+        dp_size=dp_size,
         dp_rank=0,
         pcp_manager=None,
         hidden_states=torch.empty_like(hidden_states),
@@ -509,7 +544,7 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
         num_reqs=4,
         num_tokens=num_tokens,
         num_tokens_after_padding=target_desc.num_tokens,
-        num_scheduled_tokens=torch.full((4,), 4).numpy(),
+        num_scheduled_tokens=torch.full((4,), max_query_len).numpy(),
         seq_lens_cpu_upper_bound=torch.full((8,), 128),
         idx_mapping=None,
         has_prefill=has_prefill,
@@ -539,9 +574,14 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
             next_prefill_tokens=None,
             temperature=None,
             seeds=None,
+            dp_sync_state=target_sync,
         )
 
     assert result.value.args[0] == target_desc
+    if dp_size > 1:
+        assert collective_calls == 1
+        assert target_sync is not None
+        assert target_sync.max_query_len == peer_query_len
 
 
 def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):

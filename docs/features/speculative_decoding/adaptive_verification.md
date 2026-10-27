@@ -54,6 +54,7 @@ Set `enable_adaptive_verification: false` to verify the full block for every req
 
 - The attention backend must tolerate device-decided query lengths, since the CPU lengths only bound them from above. Backends that plan off the CPU lengths are excluded by the attention selector, and rejected at startup for models that hard-wire their backend.
 - Full cudagraphs are required: step costs are profiled from captured graphs, so `--enforce-eager` is rejected at startup.
+- When CUDA graph dispatch is coordinated across data-parallel ranks, a prefill on any rank prevents the target and its shared-metadata draft prefill from using decode-only FULL graphs for that step, including on ranks that are only decoding.
 - Not supported with LoRA (the per-token LoRA mapping is built from CPU-side boundaries) or pipeline parallelism (cost curves and confidences exist only on the last rank).
 - Without a confidence head, `use_local_argmax_reduction` is rejected. The estimator needs the full draft logits, which local argmax reduction never materializes.
 
