@@ -427,13 +427,15 @@ def stage_route(c, t):
             for p in range_constexpr(ROUTER_PARTS):
                 tot = tot + parts[p].bitcast(fx.Float32)
             logits.append(tot)
+        neg = fx.Float32(float("-inf"))
         vals, orig, idxs = [], [], []
         for i in range_constexpr(ept):
             e = lane + 64 * i
             sc = _score(logits[i])
             # aiter's NaN guards: a NaN score weighs 0 and never wins
             orig.append(fx.Float32(fx.isnan(sc).select(fx.Float32(0.0), sc)))
-            vals.append(fx.max(sc + ld_f32(a["bias"], e), fx.Float32(float("-inf"))))
+            val = fx.max(sc + ld_f32(a["bias"], e), neg)
+            vals.append(fx.isnan(val).select(neg, val))
             idxs.append(fx.Int32(e))
         for p, q in c["rs"].sort_net:
             sw = vals[p] < vals[q]
@@ -453,7 +455,7 @@ def stage_route(c, t):
                     at.select(orig[i], co),
                 )
             best = butterfly(cv, (32, 16, 8, 4, 2, 1), fx.max)
-            ball = ballot(cv == best)
+            ball = ballot((cv == best) & (cursor < ept))
             win = fx.Int32(
                 (ball == fx.Int64(0)).select(fx.Int32(0), fx.Int32(fmath.cttz(ball)))
             )
