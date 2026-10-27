@@ -1957,14 +1957,18 @@ class EngineArgs:
             choices=["auto", "triton", "flashkda", "flashinfer", "fused"],
             default=None,
             help="Select KDA prefill backend. 'flashkda' is CUDA-only and "
-            "'fused' is ROCm-only; 'auto' picks a supported backend.",
+            "'fused' is ROCm-only; 'flashinfer' (FlashInfer's CuTe DSL kernel) "
+            "is opt-in; 'auto' picks a supported backend.",
         )
         parser.add_argument(
             "--kda-decode-backend",
             dest="kda_decode_backend",
             choices=["auto", "native", "flashinfer", "triton"],
             default=None,
-            help="Select KDA decode backend.",
+            help="Select KDA decode backend. 'auto' picks the fastest supported "
+            "backend for the model and GPU (for GLM-5.3: FlashInfer's fused "
+            "kernels on SM10x when the installed FlashInfer supports the layer, "
+            "otherwise Triton); 'native' is Kimi K3 only.",
         )
         return parser
 
