@@ -61,6 +61,23 @@ class AttentionConfig:
     flash_attn_max_num_splits_for_cuda_graph: int = 32
     """Flash Attention max number splits for cuda graph decode."""
 
+    flash_attn_split_cap_for_uniform_decode: bool = False
+    """Lower the FA3 split-KV budget to one wave of resident CTAs for decode graphs.
+
+    On devices where the FA3 head-dim-256 decode kernel occupies most of an SM's
+    shared memory (e.g. H20), only one CTA is resident per SM, so each
+    (request, kv-head, split) triple is a work item that must fit in one wave.
+    The FA3 heuristic rounds both of its ceilings up and can overshoot the SM
+    count, issuing a second, mostly-idle wave.
+
+    Only enable this when the served decode batch is known to have *similar*
+    request lengths. The cap is a function of the request count, while FA3 sizes
+    each request's splits from its own block count, so a skewed batch (one long
+    request next to many short ones) can be starved: measured 18 -> 2 splits and
+    a 7.4x slower attention kernel for 1 x 64k + 7 x 128 tokens on H20. With
+    uniform lengths the same kernel was 1.3x faster.
+    """
+
     tokenspeed_mla_min_split_kv: int = Field(default=1, ge=1, le=256)
     """Minimum KV splits for TokenSpeed MLA decode. The default of 1 preserves
     automatic scheduling. Larger values request a split floor and may increase
