@@ -8,6 +8,7 @@ from copy import deepcopy
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode
@@ -47,7 +48,15 @@ from vllm.v1.worker.cpu.attn_utils import (
 from vllm.v1.worker.cpu.block_table import CPUBlockTables
 from vllm.v1.worker.cpu.ec_connector import get_ec_connector
 from vllm.v1.worker.cpu.encoder_cache import EncoderCache
-from vllm.v1.worker.cpu.input_batch import InputBuffers, post_update
+from vllm.v1.worker.cpu.input_batch import (
+    BatchReqState,
+    InputBatch,
+    InputBuffers,
+    combine_sampled_and_draft_tokens,
+    post_update,
+    prepare_pos_seq_lens,
+    prepare_prefill_inputs,
+)
 from vllm.v1.worker.cpu.kv_connector import (
     NO_OP_KV_CONNECTOR,
     KVConnector,
@@ -63,9 +72,23 @@ from vllm.v1.worker.cpu.states import CPURequestState
 from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
 from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer, free_before_shutdown
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import clear_layer_kv_caches, copy_kv_cache_blocks_inplace
+from vllm.v1.worker.utils import (
+    clear_layer_kv_caches,
+    copy_kv_cache_blocks_inplace,
+    get_uniform_decode_token_count,
+)
 
 logger = init_logger(__name__)
+
+
+def sort_batch_req_ids(
+    num_tokens_per_req: dict[str, int], decode_query_len: int
+) -> list[str]:
+    key = lambda r: (
+        (num := num_tokens_per_req[r]) != decode_query_len,
+        num,
+    )
+    return sorted(num_tokens_per_req, key=key)
 
 
 class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
@@ -535,6 +558,201 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config.num_blocks,
                 scheduler_output.kv_cache_block_copies,
             )
+
+    def gather_batch_req_state(
+        self, scheduler_output: SchedulerOutput, dummy_run: bool
+    ) -> tuple[BatchReqState | None, int | None]:
+        """Gather CPU request state for the scheduled batch, in batch order.
+        Returns (batch_state, uniform_decode_token_count)
+        """
+        num_tokens_per_req = scheduler_output.num_scheduled_tokens
+        num_reqs = len(num_tokens_per_req)
+        num_toks = scheduler_output.total_num_scheduled_tokens
+        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+
+        if dummy_run:
+            # Dummy batches are uniform by construction.
+            return None, get_uniform_decode_token_count(
+                num_reqs, num_toks, max_query_len, decode_graph_eligible=True
+            )
+
+        # batch_idx -> req_id
+        req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
+
+        numtoks_iter = map(num_tokens_per_req.__getitem__, req_ids)
+        num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
+
+        idx_mapping_iter = map(self.req_states.req_id_to_index.__getitem__, req_ids)
+        idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.intp, count=num_reqs)
+        prefill_len_np = self.req_states.prefill_len_np[idx_mapping_np]
+        num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[
+            idx_mapping_np
+        ]
+        is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
+        has_prefill = bool(is_prefilling_np.any())
+        max_seq_len_np = None
+        if self.use_pp and has_prefill:
+            # consumed by the PP `compute_need_sampled_mask` for batches with prefill.
+            max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
+
+        prefill_runs_as_decode_np = None
+        decode_graph_eligible = not has_prefill
+        if has_prefill:
+            # One new prompt token over existing context runs as a decode.
+            num_new_tokens = num_scheduled_tokens
+            one_token_ext = (num_new_tokens == 1) & (num_computed_prefill_tokens_np > 0)
+            prefill_runs_as_decode_np = is_prefilling_np & one_token_ext
+            decode_graph_eligible = bool(
+                (prefill_runs_as_decode_np | ~is_prefilling_np).all()
+            )
+
+        batch_state = BatchReqState(
+            req_ids=req_ids,
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_tokens=num_toks,
+            idx_mapping_np=idx_mapping_np,
+            prefill_len_np=prefill_len_np,
+            num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
+            is_prefilling_np=is_prefilling_np,
+            has_prefill=has_prefill,
+            prefill_runs_as_decode_np=prefill_runs_as_decode_np,
+            decode_graph_eligible=decode_graph_eligible,
+            max_seq_len_np=max_seq_len_np,
+        )
+        return batch_state, get_uniform_decode_token_count(
+            num_reqs, num_toks, max_query_len, decode_graph_eligible
+        )
+
+    def prepare_inputs(
+        self,
+        scheduler_output: SchedulerOutput,
+        batch_req_state: BatchReqState,
+    ) -> InputBatch:
+        num_tokens = batch_req_state.num_tokens
+        assert num_tokens > 0
+        req_ids = batch_req_state.req_ids
+        num_reqs = len(req_ids)
+
+        is_padding = self.input_buffers.is_padding[:num_tokens]
+        if envs.VLLM_MOE_SKIP_PADDING:
+            is_padding.fill_(False)
+
+        num_scheduled_tokens = batch_req_state.num_scheduled_tokens
+        idx_mapping_np = batch_req_state.idx_mapping_np
+        idx_mapping = torch.from_numpy(idx_mapping_np)
+        expanded_idx_mapping = idx_mapping
+        expanded_local_pos = torch.zeros(
+            num_reqs, dtype=torch.int32, device=self.device
+        )
+
+        cu_num_logits = torch.arange(
+            num_reqs + 1, dtype=torch.int32, device=self.device
+        )
+        cu_num_logits_np = cu_num_logits.numpy()
+
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        query_start_loc_np = query_start_loc.numpy()
+        query_start_loc_np[0] = 0
+        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
+
+        if batch_req_state.has_prefill:
+            prepare_prefill_inputs(
+                self.input_buffers.input_ids,
+                self.req_states.next_prefill_tokens,
+                idx_mapping,
+                query_start_loc,
+                self.req_states.all_token_ids,
+                self.req_states.prefill_len,
+                self.req_states.num_computed_tokens,
+            )
+
+        prepare_pos_seq_lens(
+            idx_mapping,
+            query_start_loc,
+            self.req_states.num_computed_tokens,
+            self.input_buffers.positions,
+            self.input_buffers.seq_lens,
+        )
+        seq_lens = self.input_buffers.seq_lens[:num_reqs]
+        logits_indices = combine_sampled_and_draft_tokens(
+            self.input_buffers.input_ids,
+            idx_mapping,
+            self.req_states.last_sampled_tokens,
+            query_start_loc,
+            seq_lens,
+            self.req_states.prefill_len,
+            self.req_states.last_sampled_tokens[:, :0],
+            cu_num_logits,
+            num_reqs,
+            self.model_state.num_new_sampled_tokens_per_step,
+        )
+
+        fast_prefill = None
+        if self.fast_prefill is not None:
+            fast_prefill = self.fast_prefill.prepare(
+                logits_indices,
+                cu_num_logits_np,
+                batch_req_state.has_prefill,
+            )
+
+        num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
+        prompt_lens = None
+        if self.model_config.rswa_window is not None:
+            prompt_lens = self.req_states.prompt_len[idx_mapping]
+
+        return InputBatch(
+            req_ids=req_ids,
+            num_reqs=num_reqs,
+            num_reqs_after_padding=num_reqs,
+            idx_mapping=idx_mapping,
+            idx_mapping_np=idx_mapping_np,
+            expanded_idx_mapping=expanded_idx_mapping,
+            expanded_local_pos=expanded_local_pos,
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_tokens=num_tokens,
+            num_tokens_after_padding=num_tokens,
+            query_start_loc=query_start_loc,
+            query_start_loc_np=query_start_loc_np,
+            seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens,
+            num_computed_tokens_np=num_computed_tokens_np,
+            prefill_len_np=batch_req_state.prefill_len_np,
+            num_computed_prefill_tokens_np=(
+                batch_req_state.num_computed_prefill_tokens_np
+            ),
+            is_prefilling_np=batch_req_state.is_prefilling_np,
+            has_prefill=batch_req_state.has_prefill,
+            prefill_runs_as_decode_np=batch_req_state.prefill_runs_as_decode_np,
+            decode_graph_eligible=batch_req_state.decode_graph_eligible,
+            max_seq_len_np=batch_req_state.max_seq_len_np,
+            input_ids=self.input_buffers.input_ids[:num_tokens],
+            positions=self.input_buffers.positions[:num_tokens],
+            is_padding=is_padding,
+            logits_indices=logits_indices,
+            cu_num_logits=cu_num_logits,
+            cu_num_logits_np=cu_num_logits_np,
+            has_structured_output_reqs=(
+                scheduler_output.has_structured_output_requests
+            ),
+            prompt_lens=prompt_lens,
+            fast_prefill=fast_prefill,
+        )
+
+    def prepare_attn(
+        self, input_batch: InputBatch
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        block_tables = self.block_tables.gather_block_tables(
+            input_batch.idx_mapping,
+            num_reqs_padded=input_batch.num_reqs_after_padding,
+            num_computed_tokens=self.req_states.num_computed_tokens,
+        )
+        slot_mappings = self.block_tables.compute_slot_mappings(
+            input_batch.idx_mapping,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            num_tokens_padded=input_batch.num_tokens_after_padding,
+        )
+        return block_tables, slot_mappings
 
     def postprocess_sampled(
         self,
