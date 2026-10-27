@@ -821,8 +821,8 @@ async fn unary_generate_with_token_ids_prompt() {
     server_task.abort();
 }
 
-/// `output_text=false` without stop strings needs no text, so neither RPC may
-/// detokenize. Token IDs and finish info stay the same.
+/// `output_text=false` turns detokenization off, so neither RPC may decode.
+/// Token IDs and finish info stay the same.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn generate_without_output_text_skips_detokenization() {
@@ -1462,6 +1462,39 @@ async fn unary_generate_empty_stop_string_returns_invalid_argument() {
 
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
     assert!(status.message().contains("stop strings cannot be empty"));
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_stop_strings_without_output_text_returns_invalid_argument() {
+    let (mut client, server_task, _engine_task) = grpc_test_server(
+        b"engine-grpc-stop-without-text",
+        default_stream_output_specs(),
+    )
+    .await;
+
+    let status = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-stop-without-text".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                stop_strings: vec!["\n".to_string()],
+                ..Default::default()
+            }),
+            response: Some(pb::ResponseOptions {
+                output_text: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect_err("stop strings need detokenized output");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("stop strings require detokenized output"));
 
     server_task.abort();
 }

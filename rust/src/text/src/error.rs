@@ -17,6 +17,8 @@ pub enum Error {
     EmptyPromptTokenIds { request_id: String },
     #[error("text request `{request_id}` stop strings cannot be empty")]
     EmptyStopString { request_id: String },
+    #[error("text request `{request_id}` stop strings require detokenized output")]
+    StopStringsRequireDetokenize { request_id: String },
     #[error(
         "Parameter 'cache_salt' must be a non-empty string of at most 128 characters \
          and must not contain '@', '/', '\\', or NUL."
@@ -76,6 +78,7 @@ impl Error {
             | Self::PromptFillsContext { .. }
             | Self::EmptyPromptTokenIds { .. }
             | Self::EmptyStopString { .. }
+            | Self::StopStringsRequireDetokenize { .. }
             | Self::InvalidCacheSalt
             | Self::Logprobs(_)
             | Self::TokenIds(_)

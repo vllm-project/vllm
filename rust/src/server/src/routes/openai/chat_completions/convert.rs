@@ -203,7 +203,7 @@ pub(super) fn prepare_chat_request(
             include_stop_str_in_output: request.include_stop_str_in_output,
             stop_strings: request.stop.map(|stop| stop.into_vec()),
             min_tokens: request.min_tokens.unwrap_or(0),
-            output_text: true,
+            detokenize: true,
         },
         intermediate: request.stream,
         prompt_truncation,
@@ -959,7 +959,7 @@ mod tests {
                 include_stop_str_in_output: false,
                 stop_strings: None,
                 min_tokens: 0,
-                output_text: true,
+                detokenize: true,
             }
         );
         assert!(prepared.chat_request.initial_tools().is_empty());
@@ -1035,7 +1035,7 @@ mod tests {
                 include_stop_str_in_output: false,
                 stop_strings: None,
                 min_tokens: 0,
-                output_text: true,
+                detokenize: true,
             }
         );
         assert!(prepared.chat_request.initial_tools().is_empty());

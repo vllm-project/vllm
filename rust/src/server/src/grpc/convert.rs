@@ -124,7 +124,7 @@ pub fn to_text_request(
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
-        output_text: ResponseOpts::from_proto(response).output_text,
+        detokenize: ResponseOpts::from_proto(response).output_text,
     };
 
     Ok(TextRequest {

@@ -28,10 +28,10 @@ pub struct TextDecodeOptions {
     /// in. Stop strings found within the first `min_tokens` tokens are
     /// ignored.
     pub min_tokens: u32,
-    /// Whether the caller reads decoded text. When false, logprob token
-    /// strings stay empty, and unless stop strings need matching, no text is
-    /// decoded at all.
-    pub output_text: bool,
+    /// Whether to detokenize the output. When false, text and logprob token
+    /// strings stay empty, the tokenizer is never called, and stop strings are
+    /// rejected.
+    pub detokenize: bool,
 }
 
 impl Default for TextDecodeOptions {
@@ -41,7 +41,7 @@ impl Default for TextDecodeOptions {
             include_stop_str_in_output: false,
             stop_strings: None,
             min_tokens: 0,
-            output_text: true,
+            detokenize: true,
         }
     }
 }
@@ -114,8 +114,8 @@ pub enum DecodedTextEvent {
     },
 }
 
-/// Decoder for requests that read no text and match no stop strings. Like
-/// Python's base `IncrementalDetokenizer`, it never calls the tokenizer.
+/// Decoder for requests with detokenization disabled. Like Python's base
+/// `IncrementalDetokenizer`, it never calls the tokenizer.
 struct TokenOnlyDecoder;
 
 impl IncrementalDecoder for TokenOnlyDecoder {
@@ -157,7 +157,7 @@ pub async fn decoded_text_event_stream(
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
     let mut sampling_mask: Option<SamplingMask> = None;
-    let logprob_tokenizer = decode_options.output_text.then_some(tokenizer.as_ref());
+    let logprob_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
@@ -169,7 +169,7 @@ pub async fn decoded_text_event_stream(
                 output.prompt_token_ids().expect("first llm output must carry prompt token ids");
             prompt_token_count = prompt_token_ids.len();
 
-            let dec = if decode_options.output_text || decode_options.stop_strings.is_some() {
+            let dec = if decode_options.detokenize {
                 tokenizer.create_decode_stream(
                     prompt_token_ids,
                     decode_options.skip_special_tokens,
@@ -666,10 +666,10 @@ mod tests {
         }
     }
 
-    /// A caller that reads no text gets token IDs, logprob values, usage and
-    /// finish info without any tokenizer call.
+    /// Without detokenization, a request gets token IDs, logprob values, usage
+    /// and finish info without any tokenizer call.
     #[tokio::test]
-    async fn output_text_false_keeps_sampled_metadata_without_tokenizer() {
+    async fn detokenize_false_keeps_sampled_metadata_without_tokenizer() {
         let logprobs = |token_ids: &[u32]| Logprobs {
             positions: token_ids
                 .iter()
@@ -696,7 +696,7 @@ mod tests {
             Arc::new(PanickingTokenizer),
             stream::iter([Ok(output)]),
             TextDecodeOptions {
-                output_text: false,
+                detokenize: false,
                 ..Default::default()
             },
             false,
@@ -784,26 +784,6 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&collected);
-    }
-
-    /// Stop strings are matched on decoded text, so they keep the decoder even
-    /// when the caller reads no text.
-    #[tokio::test]
-    async fn output_text_false_still_matches_stop_strings() {
-        let output = run_to_completion(
-            ascii_tokens("hello"),
-            TextDecodeOptions {
-                output_text: false,
-                ..opts(&["ll"], 0)
-            },
-        )
-        .await;
-
-        assert_eq!(output.token_ids, ascii_tokens("hell"));
-        assert_eq!(
-            output.finish_reason,
-            FinishReason::Stop(Some(StopReason::Text("ll".to_string())))
-        );
     }
 
     struct DropRecordingStream {
