@@ -204,4 +204,4 @@ def test_aiter_mxfp8_not_supported_when_batch_invariant():
         envs.VLLM_BATCH_INVARIANT = True
         is_supported, reason = AiterMxfp8LinearKernel.is_supported()
     assert not is_supported
-    assert "batch invariant" in reason
+    assert reason is not None and "batch invariant" in reason
