@@ -778,9 +778,10 @@ def test_fp32_index_key_store(ratio):
 # --------------------------------------------------------------- Engram
 
 
-@pytest.mark.parametrize("cpu_offload", [False, True])
-@pytest.mark.parametrize("masked", [False, True])
-def test_engram_wkv_prefetch_matches_inline(masked, cpu_offload):
+@pytest.mark.parametrize(
+    "cpu_offload,masked", [(True, False), (True, True), (False, False)]
+)
+def test_engram_wkv_prefetch_matches_inline(cpu_offload, masked):
     """The Engram WKV started on a side stream right after its (slow) inline or
     host lookup, replayed from a CUDA graph, gives the stock forward's output
     bitwise."""

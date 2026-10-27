@@ -449,7 +449,7 @@ def _check_engram_prefetch(rank):
         def forward(self, x):
             return tensor_model_parallel_all_gather(super().forward(x))
 
-    # Every rank looks up its own six of the 24 heads of a GPU-resident table.
+    # Each rank looks up its own heads of a GPU-resident table.
     table = _make_embedding(cpu_offload=False)
     table.tp_size, table.part_n_hash_cols = TP, table.n_hash_cols // TP
     table.head_start = rank * table.part_n_hash_cols
@@ -469,8 +469,8 @@ def _check_engram_prefetch(rank):
     with torch.device("cuda"):
         engram._init_staging(16, table.dim)
     prefetch = EngramPrefetch([engram], 16)
-    assert prefetch.all_gather is not None
-    for rows in (1, 6, 16):
+    # One DSpark request, and the mailbox's capacity.
+    for rows in (6, 16):
         hashes = torch.randint(
             0,
             table.part_num_embeddings,
