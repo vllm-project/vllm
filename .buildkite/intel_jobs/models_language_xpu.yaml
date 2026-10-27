@@ -54,7 +54,9 @@ steps:
   - tests/models/language/pooling/test_classification.py
   commands:
   - >-
-    VLLM_TEST_COMMANDS="$$(printf %s Y2QgdGVzdHMgJiYgcHl0ZXN0IC0tY29udGludWUtb24tY29sbGVjdGlvbi1lcnJvcnMgLXYgLXMgbW9kZWxzL2xhbmd1YWdlIC1tICJjb3JlX21vZGVsIGFuZCBzbG93X3Rlc3QiIC0tZGVzZWxlY3Q9InRlc3RzL21vZGVscy9sYW5ndWFnZS9nZW5lcmF0aW9uL3Rlc3RfY29tbW9uLnB5Ojp0ZXN0X21vZGVsc1tUcnVlLUZhbHNlLTUtMzItYmlnc2NpZW5jZS9ibG9vbS01NjBtXSIgLS1kZXNlbGVjdD0idGVzdHMvbW9kZWxzL2xhbmd1YWdlL2dlbmVyYXRpb24vdGVzdF9jb21tb24ucHk6OnRlc3RfbW9kZWxzW0ZhbHNlLUZhbHNlLTUtMzItYmlnc2NpZW5jZS9ibG9vbS01NjBtXSIgLS1udW0tc2hhcmRzPSRCVUlMREtJVEVfUEFSQUxMRUxfSk9CX0NPVU5UIC0tc2hhcmQtaWQ9JEJVSUxES0lURV9QQVJBTExFTF9KT0IgfHwgdHJ1ZQ== | base64 --decode)" bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/language -m 'core_model and slow_test' --deselect="tests/models/language/generation/test_common.py::test_models[True-False-5-32-bigscience/bloom-560m]" --deselect="tests/models/language/generation/test_common.py::test_models[False-False-5-32-bigscience/bloom-560m]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Hybrid) Shard %N'
   key: language-models-tests-hybrid
   device: intel_gpu
@@ -81,7 +83,9 @@ steps:
   - tests/models/language/generation
   commands:
   - >-
-    VLLM_TEST_COMMANDS="$$(printf %s Y2QgdGVzdHMgJiYgcHl0ZXN0IC0tY29udGludWUtb24tY29sbGVjdGlvbi1lcnJvcnMgLXYgLXMgbW9kZWxzL2xhbmd1YWdlL2dlbmVyYXRpb24gLW0gaHlicmlkX21vZGVsIC1rICdub3QgZ3Jhbml0ZS00LjAtdGlueS1wcmV2aWV3JyAtLW51bS1zaGFyZHM9JEJVSUxES0lURV9QQVJBTExFTF9KT0JfQ09VTlQgLS1zaGFyZC1pZD0kQlVJTERLSVRFX1BBUkFMTEVMX0pPQiB8fCB0cnVl | base64 --decode)" bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/language/generation -m hybrid_model -k not granite-4.0-tiny-preview --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (L4) Granite Language Model Compatibility'
   key: language-models-tests-granite-l4-compatibility
   device: intel_gpu
@@ -108,7 +112,9 @@ steps:
   - tests/models/language/generation
   commands:
   - >-
-    VLLM_TEST_COMMANDS="$$(printf %s Y2QgdGVzdHMgJiYgcHl0ZXN0IC0tY29udGludWUtb24tY29sbGVjdGlvbi1lcnJvcnMgLXYgLXMgbW9kZWxzL2xhbmd1YWdlL2dlbmVyYXRpb24gLW0gaHlicmlkX21vZGVsIC1rIGdyYW5pdGUtNC4wLXRpbnktcHJldmlldyB8fCB0cnVl | base64 --decode)" bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/language/generation -m hybrid_model -k granite-4.0-tiny-preview || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Generation) %N'
   key: language-models-test-extended-generation
   device: intel_gpu
@@ -135,7 +141,13 @@ steps:
   - tests/models/language/generation
   commands:
   - >-
-    VLLM_TEST_COMMANDS="$$(printf %s Y2QgdGVzdHMgJiYgcm0gLXJmIC90bXAvbWFtYmEtc3JjICYmIGdpdCBjbG9uZSAtLWRlcHRoIDEgLS1icmFuY2ggdjIuMy4wIGh0dHBzOi8vZ2l0aHViLmNvbS9zdGF0ZS1zcGFjZXMvbWFtYmEgL3RtcC9tYW1iYS1zcmMgfHwgdHJ1ZSAmJiBzZWQgLWkgJ3MvLXN0ZD1jKysxNy8tc3RkPWMrKzIwL2cnIC90bXAvbWFtYmEtc3JjL3NldHVwLnB5IHx8IHRydWUgJiYgTUFNQkFfRk9SQ0VfQlVJTEQ9VFJVRSB1diBwaXAgaW5zdGFsbCAtLXN5c3RlbSAtLW5vLWJ1aWxkLWlzb2xhdGlvbiAvdG1wL21hbWJhLXNyYyB8fCB0cnVlICYmIENBVVNBTF9DT05WMURfRk9SQ0VfQlVJTEQ9VFJVRSB1diBwaXAgaW5zdGFsbCAtLXN5c3RlbSAtLW5vLWJ1aWxkLWlzb2xhdGlvbiAnZ2l0K2h0dHBzOi8vZ2l0aHViLmNvbS9EYW8tQUlMYWIvY2F1c2FsLWNvbnYxZEB2MS42LjAnIHx8IHRydWUgJiYgcHl0ZXN0IC0tY29udGludWUtb24tY29sbGVjdGlvbi1lcnJvcnMgLXYgLXMgbW9kZWxzL2xhbmd1YWdlL2dlbmVyYXRpb24gLW0gJyhub3QgY29yZV9tb2RlbCkgYW5kIChub3QgaHlicmlkX21vZGVsKScgLS1udW0tc2hhcmRzPSRCVUlMREtJVEVfUEFSQUxMRUxfSk9CX0NPVU5UIC0tc2hhcmQtaWQ9JEJVSUxES0lURV9QQVJBTExFTF9KT0IgfHwgdHJ1ZQ== | base64 --decode)" bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src || true &&
+    sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py || true &&
+    MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src || true &&
+    CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0' || true &&
+    pytest --continue-on-collection-errors -v -s models/language/generation -m (not core_model) and (not hybrid_model) --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 18GB) [Nightly] Language Models (PPL)'
   key: language-models-test-ppl
   device: intel_gpu
@@ -159,7 +171,9 @@ steps:
   - tests/models/language/generation_ppl_test
   commands:
   - >-
-    VLLM_TEST_COMMANDS="$$(printf %s Y2QgdGVzdHMgJiYgcHl0ZXN0IC0tY29udGludWUtb24tY29sbGVjdGlvbi1lcnJvcnMgLXYgLXMgbW9kZWxzL2xhbmd1YWdlL2dlbmVyYXRpb25fcHBsX3Rlc3QgfHwgdHJ1ZQ== | base64 --decode)" bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/language/generation_ppl_test || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Pooling) %N'
   key: language-models-test-extended-pooling
   device: intel_gpu
@@ -185,7 +199,9 @@ steps:
   - tests/models/language/pooling
   commands:
   - >-
-    VLLM_TEST_COMMANDS="$$(printf %s Y2QgdGVzdHMgJiYgcHl0ZXN0IC0tY29udGludWUtb24tY29sbGVjdGlvbi1lcnJvcnMgLXYgLXMgbW9kZWxzL2xhbmd1YWdlL3Bvb2xpbmcgLW0gJ25vdCBjb3JlX21vZGVsJyAtLW51bS1zaGFyZHM9JEJVSUxES0lURV9QQVJBTExFTF9KT0JfQ09VTlQgLS1zaGFyZC1pZD0kQlVJTERLSVRFX1BBUkFMTEVMX0pPQiB8fCB0cnVl | base64 --decode)" bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/language/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (MTEB) %N'
   key: language-models-test-mteb
   device: intel_gpu
@@ -211,4 +227,7 @@ steps:
   - tests/models/language/pooling_mteb_test
   commands:
   - >-
-    VLLM_TEST_COMMANDS="$$(printf %s cGlwIGluc3RhbGwgcGVmdCAmJiBjZCB0ZXN0cyAmJiBweXRlc3QgLS1jb250aW51ZS1vbi1jb2xsZWN0aW9uLWVycm9ycyAtdiAtcyBtb2RlbHMvbGFuZ3VhZ2UvcG9vbGluZ19tdGViX3Rlc3QgLS1udW0tc2hhcmRzPSRCVUlMREtJVEVfUEFSQUxMRUxfSk9CX0NPVU5UIC0tc2hhcmQtaWQ9JEJVSUxES0lURV9QQVJBTExFTF9KT0IgfHwgdHJ1ZQ== | base64 --decode)" bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pip install peft &&
+    cd tests &&
+    pytest --continue-on-collection-errors -v -s models/language/pooling_mteb_test --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
