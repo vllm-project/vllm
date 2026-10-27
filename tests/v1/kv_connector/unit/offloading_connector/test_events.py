@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -773,10 +774,12 @@ def test_reoffload_preserves_secondary_residency(record_method, position):
 
     getattr(tracker, record_method)(req, group_config, position, key)
 
-    assert tracker._pending_event_metadata[key].active_residencies == {
-        (Medium.CPU, None),
-        (Medium.STORAGE, "custom"),
-    }
+    meta = tracker._pending_event_metadata[key]
+    assert not gc.is_tracked(meta)
+    assert meta.active_residencies == (
+        tracker._residency_bits[(Medium.CPU, None)]
+        | tracker._residency_bits[(Medium.STORAGE, "custom")]
+    )
     [removed] = tracker.take_events(
         [_removed_event([key], Medium.STORAGE, ownership="custom")]
     )
