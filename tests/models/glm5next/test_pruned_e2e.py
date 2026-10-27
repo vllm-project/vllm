@@ -84,13 +84,19 @@ def _kv_layout(worker):
             else [type(spec).__name__]
         )
         groups.append((kinds, sorted(g.layer_names), spec.block_size))
-    tensors = {tuple(t.layers): t.offset for t in cfg.kv_cache_tensors}
+    tensors = {
+        name: (t.size, t.block_stride, t.offset, t.layer_stride)
+        for t in cfg.kv_cache_tensors
+        for name in t.layers
+    }
     return groups, tensors
 
 
 def test_kv_cache_layout(monkeypatch: pytest.MonkeyPatch):
-    """One MLA+indexer group, one kpool-tail ring group and 3 Mamba groups that
-    alias the MLA tensor, as with the full model."""
+    """One MLA+indexer group, one kpool-tail ring group and 3 Mamba groups
+    packed into one buffer, as with the full model: every group pages the same
+    blocks, and a KDA state fills the slot of the MLA latent behind the
+    indexer keys."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     llm = _make_llm()
     groups, tensors = llm.collective_rpc(_kv_layout)[0]
@@ -114,13 +120,21 @@ def test_kv_cache_layout(monkeypatch: pytest.MonkeyPatch):
         # other group uses the auto block size.
         assert bs == (4 if kinds == ["CircularBufferSpec"] else block_size), kinds
 
-    attn = next(k for k in tensors if k[0].endswith("self_attn.attn"))
-    mamba = [k for k in tensors if k[0].endswith("self_attn")]
+    # (size, block_stride, offset, layer_stride); lists after the RPC.
+    tensors = {name: tuple(t) for name, t in tensors.items()}
+    assert len({(size, stride) for size, stride, _, _ in tensors.values()}) == 1
+
+    def by_suffix(suffix: str) -> list[tuple[int, ...]]:
+        return [v for k, v in tensors.items() if k.endswith(suffix)]
+
+    (attn,) = by_suffix("self_attn.attn")
+    (idx,) = by_suffix("indexer.k_cache")
+    (tail,) = by_suffix("indexer.tail_cache")
+    mamba = by_suffix("self_attn")
     assert len(mamba) == 3
-    assert all(tensors[m] == tensors[attn] for m in mamba)
-    idx = next(k for k in tensors if k[0].endswith("indexer.k_cache"))
-    tail = next(k for k in tensors if k[0].endswith("indexer.tail_cache"))
-    assert tensors[idx] == tensors[tail]
+    assert all(m[2:] == (0, attn[3]) for m in mamba)
+    assert attn[2] == idx[3]
+    assert idx[2] == tail[2] == 0
 
 
 def test_greedy_is_reproducible_across_block_boundary():
