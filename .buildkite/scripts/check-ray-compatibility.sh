@@ -117,7 +117,7 @@ if [[ -n "${LOCAL_BUILDS:-}" ]]; then
     # sources) and triton is the stack's own, which its torch is repacked to require.
     echo ">>> Pinning local builds to their public release:"
     grep -E '==[^ ;]*\+|\[device-' "${WORK_DIR}/vllm-constraints.txt" || true
-    sed -i -E -e '/^(amdsmi|triton)\b|\[device-/d' -e 's/(==[^ ;+]+)\+[^ ;]*/\1/' "${WORK_DIR}/vllm-constraints.txt"
+    sed -i -E -e '/^(amdsmi|triton)([=<>!~ ;[]|$)|\[device-/d' -e 's/(==[^ ;+]+)\+[^ ;]*/\1/' "${WORK_DIR}/vllm-constraints.txt"
 fi
 
 echo ">>> Installed vllm deps (first 20 lines):"

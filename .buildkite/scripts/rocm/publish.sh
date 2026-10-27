@@ -15,9 +15,9 @@
 #
 # Required environment variables:
 #   BUILDKITE_COMMIT   — the commit being released
+#   ECR            — ECR repository prefix (release-pipeline.yaml's ROCM_CI_REPO)
 #
 # Optional:
-#   ECR            — ECR repository prefix (default: public.ecr.aws/q9t5s3a7/vllm-release-repo)
 #   HUB            — Docker Hub repo for nightly images (default: vllm/vllm-openai-rocm)
 #   NIGHTLY        — set to 1 to push nightly Hub tags (default: 0)
 #   DOCKERHUB_USERNAME — Hub username for cleanup script (default: vllmbot)
@@ -30,7 +30,7 @@ STACK=$1
 MODE=$2
 COMMIT=${BUILDKITE_COMMIT:?BUILDKITE_COMMIT must be set}
 
-ECR=${ECR:-public.ecr.aws/q9t5s3a7/vllm-release-repo}
+ECR=${ECR:?ECR must be set (by release-pipeline.yaml)}
 SRC=$ECR:${STACK}-${COMMIT}   # build.sh release, in the same build
 HUB=${HUB:-vllm/vllm-openai-rocm}
 
@@ -38,24 +38,30 @@ HUB=${HUB:-vllm/vllm-openai-rocm}
 # Helper functions
 # ---------------------------------------------------------------------------
 
+# retry <cmd...>  — registry lookups: these steps have no retry rules
+retry() { "$@" || { sleep 5; "$@"; } || { sleep 5; "$@"; }; }
+
 # pin <ref>  — resolve <ref> to a pinned ref@digest (resolves once, stable for the rest of the script).
 #   Parses the validated "Digest:" line, as build.sh does.
 pin() {
   local d
-  d=$(docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" { print $2; exit }')
+  d=$(retry docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" { print $2; exit }')
   [[ $d =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "cannot resolve the digest of $1" >&2; return 1; }
   echo "$1@$d"
 }
 
 # variant <ref>  — read the ai.vllm.rocm.variant image label
 variant() {
-  docker buildx imagetools inspect "$1" \
+  retry docker buildx imagetools inspect "$1" \
     --format '{{index .Image.Config.Labels "ai.vllm.rocm.variant"}}'
 }
 
 # ---------------------------------------------------------------------------
 # Resolve source image refs (done once; images step uses them too)
 # ---------------------------------------------------------------------------
+# Logged in, the ECR lookups below are not subject to the anonymous rate limits.
+aws ecr-public get-login-password --region us-east-1 \
+  | docker login -u AWS --password-stdin "${ECR%%/*}"
 IMG=$(pin "$SRC")
 V=$(variant "$IMG")      # e.g. rocm100 — used in S3 paths, ECR tags and Hub tags
 [[ $V =~ ^rocm[0-9]+$ ]] || { echo "$IMG has no valid ai.vllm.rocm.variant label: '$V'" >&2; exit 1; }
@@ -70,7 +76,7 @@ case $MODE in
   # -------------------------------------------------------------------------
   wheels)
   # -------------------------------------------------------------------------
-  # Extract the vLLM wheel from the content-keyed -wheels image and upload it
+  # Extract the vLLM wheel from this commit's -wheels image and upload it
   # to S3 so users can pip-install it directly.
   # -------------------------------------------------------------------------
 
@@ -127,9 +133,6 @@ EOF
     RT=$(pin "$SRC-base")    # runtime base alias (published as base-nightly*)
 
     # --- ECR -----------------------------------------------------------------
-    aws ecr-public get-login-password --region us-east-1 \
-      | docker login -u AWS --password-stdin "${ECR%%/*}"
-
     docker buildx imagetools create -t "$ECR:$COMMIT-$V"       "$IMG"
     docker buildx imagetools create -t "$ECR:$COMMIT-$V-base"  "$RT"
 

@@ -59,7 +59,8 @@ def run_build(
 ) -> tuple[int, str, list[str]]:
     """build.sh <mode> against fake git, docker and buildkite-agent; returns (status,
     stderr, calls). `existing` are the image refs the registry already has.
-    FAILURE=bake|missing|upload breaks the kernel symbol map."""
+    FAILURE=bake|missing|upload breaks the kernel symbol map; FAILURE=registry
+    makes every registry lookup fail, FAILURE=pushed only lookups of pushed refs."""
     (tmp_path / "docker").symlink_to(ROOT / "docker")
     fake = tmp_path / "bin"
     fake.mkdir()
@@ -71,7 +72,9 @@ def run_build(
         """#!/bin/bash
 case $1 in
   describe) echo v0.0.0-0-g0 ;;
-  rev-parse|log) echo 0 ;;
+  rev-parse) [[ $2 == HEAD ]] && echo "${HEAD_REV:-c1}" || echo "${2%%^*}" ;;
+  log) echo 0 ;;
+  archive) tar -ch docker ;;
 esac
 """
     )
@@ -79,10 +82,14 @@ esac
         """#!/bin/bash
 [[ $1 == buildx ]] || exit 0
 case $2 in
+  inspect) [[ -z $NO_BUILDER ]] || exit 1 ;;
+  create) echo "builder ${*:3}" >> "$CALLS" ;;
   imagetools)
     if [[ $3 == inspect ]]; then
+      [[ $FAILURE == registry ]] && { echo "503 Service Unavailable" >&2; exit 1; }
       found=0
       while read -r ref; do [[ $4 == "$ref"* ]] && found=1; done < "$REGISTRY"
+      [[ $FAILURE == pushed ]] && ((found)) && { echo "503" >&2; exit 1; }
       ((found)) || { echo "$4: not found" >&2; exit 1; }
       echo "Digest: sha256:$(printf '0%.0s' {1..64})"
     else
@@ -90,6 +97,11 @@ case $2 in
     fi ;;
   bake)
     echo "bake ${*:5}" >> "$CALLS"
+    echo "cache: ${CACHE:-own only}" >&2
+    [[ $5 == --metadata-file ]] && for t in stack-rocm stack-wheels runtime test-deps
+    do
+      printf '  "%s": {\\n    "containerimage.digest": "sha256:%064d"\\n  },\\n' "$t" 1
+    done > "$6"
     case ${@: -1} in
       base|runtime|test-deps) printf '%s\n' "$TAG" "$TAG-wheels" >> "$REGISTRY" ;;
       version) mkdir -p .rocm-version && echo 1.0 > .rocm-version/vllm-version.txt ;;
@@ -105,12 +117,13 @@ exit 0
     )
     (fake / "buildkite-agent").write_text(
         """#!/bin/bash
-[[ $1 == meta-data ]] && { echo "ref@sha256:0"; exit 0; }
+[[ $1 == meta-data ]] && { echo "ref@sha256:$(printf '0%.0s' {1..64})"; exit 0; }
 echo "upload ${PWD##*/}/$3" >> "$CALLS"
 [[ $FAILURE == upload && $3 == kernel_symbol_map.rocm.json.gz ]] && exit 1
 exit 0
 """
     )
+    (fake / "sleep").write_text("#!/bin/bash\n")  # skip the registry retry delays
     for tool in fake.iterdir():
         tool.chmod(0o755)
     # A map left by an earlier build in this checkout must never be uploaded.
@@ -148,11 +161,12 @@ TRUSTED_KEYED = tuple(
 )
 
 
-def test_release_never_ships_images_from_the_ci_repo(tmp_path):
+@pytest.mark.parametrize("mode", ["release", "release-base"])
+def test_release_never_ships_images_from_the_ci_repo(tmp_path, mode):
     # The trusted CI repo has every key; release must still build its own into ECR.
     status, stderr, calls = run_build(
         tmp_path,
-        "release",
+        mode,
         ROCM_CI_REPO="ecr/release",
         existing=TRUSTED_KEYED,
     )
@@ -167,6 +181,9 @@ def test_release_never_ships_images_from_the_ci_repo(tmp_path):
         "runtime-rocm",
     ]
     assert all(t.startswith("ecr/release:") for t in built_tags(calls, stderr))
+    assert ("bake vllm-openai" in calls) == (mode == "release")
+    # Nor builds from the CI cache: CI agents also run PR code.
+    assert "vllm-ci-cache" not in stderr and "cache: own only" in stderr
 
 
 def test_ci_builds_reuse_the_trusted_images(tmp_path):
@@ -231,3 +248,42 @@ def test_a_kernel_symbol_map_failure_never_fails_the_image_build(tmp_path, failu
     assert "continuing without it" in stderr
     uploaded = "upload .rocm-kernel-map/kernel_symbol_map.rocm.json.gz" in calls
     assert uploaded == (failure == "upload")  # the stale map is never uploaded
+
+
+@pytest.mark.parametrize("mode", ["base", "release", "release-base", "keys"])
+def test_a_registry_error_fails_the_step_without_building(tmp_path, mode):
+    # Not a miss: no bake, and nothing left running (run() waits for stderr's EOF).
+    status, stderr, calls = run_build(
+        tmp_path, mode, ROCM_CI_REPO="rocm/vllm-dev", FAILURE="registry"
+    )
+    assert status == 75, stderr
+    assert "registry error" in stderr
+    assert not any(call.startswith("bake") for call in calls)
+
+
+def test_pushed_images_are_pinned_by_the_bake_digest_not_by_tag(tmp_path):
+    # A tag lookup after the push could see a concurrent build's push of that key.
+    status, stderr, _ = run_build(
+        tmp_path, "base", ROCM_CI_REPO="rocm/vllm-dev", FAILURE="pushed"
+    )
+    assert status == 0, stderr
+
+
+def test_build_refuses_a_checkout_that_is_not_the_commit(tmp_path):
+    # The context and the keys come from HEAD: it must be the commit under test.
+    status, stderr, calls = run_build(tmp_path, "base", HEAD_REV="c0")
+    assert status == 1 and "HEAD is not BUILDKITE_COMMIT" in stderr
+    assert not calls
+
+
+@pytest.mark.skipif(
+    Path("/run/buildkit/buildkitd.sock").exists(), reason="uses the host buildkitd"
+)
+@pytest.mark.parametrize("mode", ["base", "release"])
+def test_only_release_builders_share_the_host_network(tmp_path, mode):
+    # Release needs EC2 IMDS (sccache); CI builders also run PR code.
+    _, stderr, calls = run_build(tmp_path, mode, NO_BUILDER="1")
+    (builder,) = [call for call in calls if call.startswith("builder")]
+    name = "vllm-rocm-release" if mode == "release" else "vllm-rocm"
+    assert builder.startswith(f"builder --name {name} ")
+    assert ("network=host" in builder) == (mode == "release"), stderr

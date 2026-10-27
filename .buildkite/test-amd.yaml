@@ -14,12 +14,9 @@
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for the test. incompatible with command.
 # mirror_hardwares(list): selector tags for AMD pipelines that should include the test.
-# dind(bool): when false, run the job directly in the AMD Kubernetes pod.
-#     When true or omitted, use the legacy Docker-in-Docker path.
+# dind(bool): must be false: the job runs directly in the AMD Kubernetes pod (no Docker-in-Docker).
 # num_gpus(int): override the number of GPUs for the test. defaults to 1 GPU. currently supports 2,4.
-# num_nodes(int): whether to simulate multi-node setup by launching multiple containers on one host,
-#     in this case, commands must be specified. the first command runs on the first host, the second
-#     command runs on the second host.
+# num_nodes(int): not supported on AMD (num_nodes >= 2 fails).
 # timeout_in_minutes(int): sets a timeout for the step in minutes. if not specified, uses the default timeout.
 # parallelism(int): number of parallel jobs to run for this step. enables test sharding using $$BUILDKITE_PARALLEL_JOB
 #     and $$BUILDKITE_PARALLEL_JOB_COUNT environment variables.
@@ -129,6 +126,8 @@ steps:
   - docker/docker-bake.hcl
   - docker/docker-bake-rocm.hcl
   - .buildkite/scripts/rocm/build.sh
+  - .buildkite/scripts/rocm/publish.sh
+  - tools/vllm-rocm/therock_wheels.py
   - tests/tools/test_docker_build_metadata_args.py
   - tests/tools/test_rocm_build.py
   - tests/tools/test_amd_ci_fast_exit.py

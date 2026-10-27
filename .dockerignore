@@ -3,6 +3,7 @@
 /.rocm-version/
 /.rocm-wheel/
 /.rocm-kernel-map/
+/.rocm-src/
 dist
 vllm/*.so
 vllm/vllm-rs

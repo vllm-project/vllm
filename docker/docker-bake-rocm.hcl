@@ -4,24 +4,27 @@
 #     docker buildx bake -f docker/docker-bake-rocm.hcl vllm-openai        # compile only vLLM
 variable "STACK"        { default = "rocm" }   # rocm: TheRock ROCm 10
 variable "STACK_IMAGE"  { default = "" }       # prebuilt stack ref@digest; empty: build it in this graph
-variable "STACK_WHEELS" { default = "" }       # that stack's -wheels image
+variable "STACK_WHEELS" { default = "" }       # that stack's -wheels image; empty: build it in this graph
 variable "RUNTIME"      { default = "" }       # prebuilt runtime ref@digest; empty: build it in this graph
 variable "TEST_DEPS"    { default = "" }       # prebuilt test-deps ref@digest; empty: build it in this graph
 variable "CI_ARCH"      { default = "gfx90a;gfx942;gfx950" }  # MI250, MI300/325, MI355: what CI can test
 variable "TAG"          { default = "vllm-rocm:dev" }
 variable "PUSH"         { default = false }
-variable "CACHE"        { default = "" }       # trusted cache repo (rocm/vllm-ci-cache): every build reads it
+variable "CACHE"        { default = "" }       # trusted cache repo (rocm/vllm-ci-cache): every CI build reads it
 variable "CACHE_TO"     { default = "" }       # ref prefix this build writes ("" = none); build.sh sets it per repo
 variable "AITER_SPEC"   { default = "" }       # pins the AITER nightly wheel (pip spec)
 variable "AITER_NIGHTLY" { default = "" }      # "1": test the newest AITER nightly wheel
 variable "VLLM_VERSION" { default = "" }       # release: image version label (build.sh reuse check)
 variable "CACHE_CI"     { default = true }     # false (PR builds): skip the full ci cache; compile-cache still exports
 variable "BUILDKITE_COMMIT" { default = "" }   # the commit the kernel symbol map is stamped with
+variable "CONTEXT"      { default = "." }      # build.sh: .rocm-src, an export of HEAD
+variable "SCCACHE_BUCKET_NAME" { default = "" } # release: S3 sccache for the csrc compile (release-pipeline.yaml)
 
-function "cfrom" {   # trusted cache, plus this PR's own cache when CACHE_TO points elsewhere
+function "cfrom" {   # trusted cache (CI only), plus this build's own cache when CACHE_TO points elsewhere
+                     # (without its "ci" when CACHE_CI is false: nothing writes that)
   params = [names]
   result = flatten([for p in distinct(compact([CACHE == "" ? "" : "${CACHE}:", CACHE_TO])) :
-                    [for n in names : "type=registry,ref=${p}${STACK}-${n}"]])
+                    [for n in names : "type=registry,ref=${p}${STACK}-${n}" if CACHE_CI || n != "ci" || p != CACHE_TO]])
 }
 function "cto" {
   params = [name]
@@ -30,11 +33,11 @@ function "cto" {
 # Images and cache layers are zstd: on the CI fleet, unpacking dominates pull time (vllm#60258,
 # vllm#28656). Pulling needs Docker >= 23 or containerd >= 1.5. force-compression keeps every layer
 # zstd: without it, a builder exports whichever copy of a layer it holds, e.g. a gzip one imported
-# from an older cache. Images built once per key (stack, runtime) also get reproducible timestamps.
+# from an older cache. File mtimes stay as built: clamping them would leave every timestamp-based
+# .pyc (pip's, and those written by imports during the build) stale in each new container.
 function "out" {
-  params = [rewrite]
-  result = PUSH ? join(",", concat(["type=registry", "compression=zstd", "compression-level=3", "force-compression=true", "oci-mediatypes=true"],
-                                   rewrite ? ["rewrite-timestamp=true"] : [])) : "type=docker"
+  params = []
+  result = PUSH ? "type=registry,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true" : "type=docker"
 }
 function "ctx" {   # named contexts: prebuilt refs when given, else in-graph targets
   params = []
@@ -45,10 +48,10 @@ function "ctx" {   # named contexts: prebuilt refs when given, else in-graph tar
 }
 
 target "_rocm" {
-  context = "."
+  context = CONTEXT
   args    = { SOURCE_DATE_EPOCH = "0", STACK = STACK }
   attest  = ["type=provenance,disabled=true"]   # provenance would change the pushed digest on every build
-  output  = [out(true)]
+  output  = [out()]
 }
 target "_stack" {
   inherits   = ["_rocm"]
@@ -83,7 +86,6 @@ target "test-deps" {   # content-keyed like the runtime (build.sh base mode)
   target     = "test-deps"
   contexts   = ctx()
   tags       = [TAG]
-  output     = [out(false)]   # rewriting would hand it a second copy of the runtime's base layer
   cache-from = cfrom(["test-deps", "runtime", "ci"])
   cache-to   = cto("test-deps")
 }
@@ -91,9 +93,10 @@ target "_app" {
   inherits   = ["_rocm"]
   dockerfile = "docker/Dockerfile.rocm"
   contexts   = ctx()
-  args       = { ARCH = "", AITER_SPEC = AITER_SPEC, AITER_NIGHTLY = AITER_NIGHTLY, VLLM_VERSION = VLLM_VERSION }
-  output     = [out(false)]   # per-commit images: rewriting would hand them second copies of inherited layers
-  cache-from = cfrom(["runtime", "ci", "compile", "release"])   # dev/csrc records are shared
+  args       = { ARCH = "", AITER_SPEC = AITER_SPEC, AITER_NIGHTLY = AITER_NIGHTLY, VLLM_VERSION = VLLM_VERSION,
+                 SCCACHE_BUCKET_NAME = SCCACHE_BUCKET_NAME, CI_ARCH = CI_ARCH }
+  # dev/csrc records are shared. Only release (CACHE = "") writes "release"; only CI "ci" and "compile".
+  cache-from = cfrom(CACHE == "" ? ["runtime", "release"] : ["runtime", "ci", "compile"])
 }
 target "test" {
   inherits = ["_app"]
@@ -141,12 +144,11 @@ target "openai-smoke" {
   target   = "openai-smoke"
   output   = ["type=cacheonly"]
 }
-# STACK_WHEELS must be set (a full ref@digest); build.sh release mode resolves it before invoking this target.
 target "wheels" {
   inherits = ["_app"]
   target   = "wheels"
   tags     = ["${TAG}-wheels"]
-  contexts = merge(ctx(), { stack-wheels = "docker-image://${STACK_WHEELS}" })
+  contexts = merge(ctx(), { stack-wheels = STACK_WHEELS == "" ? "target:stack-wheels" : "docker-image://${STACK_WHEELS}" })
   cache-to = cto("release")   # the all-arch compile, for the next release
 }
 target "version" {

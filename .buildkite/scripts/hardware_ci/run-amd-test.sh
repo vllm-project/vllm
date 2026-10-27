@@ -4,7 +4,7 @@
 # The container image ($ROCM_CI_REPO:build-<build-id>) already contains vLLM,
 # all test dependencies, and /vllm-workspace. This script:
 #   1. Sets up per-job local caches and validates the HF mount.
-#   2. Optionally reinstalls a fresher wheel from a Buildkite artifact.
+#   2. Fetches this build's wheel artifact for python_only_compile.sh.
 #   3. Acquires the DPX GPU partition lock when running on a DPX agent.
 #   4. Runs a preflight check (imports + GPU count).
 #   5. Executes $VLLM_TEST_COMMANDS under a wall-clock timeout.
@@ -16,7 +16,9 @@ set -o pipefail
 # ---------------------------------------------------------------------------
 commands=${VLLM_TEST_COMMANDS:?VLLM_TEST_COMMANDS must be set by the pipeline}
 gpus=${VLLM_CI_EXPECTED_GPU_COUNT:-1}
+[[ $gpus =~ ^(0|[1-9][0-9]*)$ ]] || { echo "Invalid VLLM_CI_EXPECTED_GPU_COUNT=$gpus" >&2; exit 1; }
 job=${BUILDKITE_JOB_ID:-local}
+job=${job//[^A-Za-z0-9_.-]/_}
 # Short: Ray puts AF_UNIX sockets under $TMPDIR, whose paths may not exceed 107 bytes.
 root=/tmp/vllm-${job##*-}
 root=${root:0:22}
@@ -91,9 +93,16 @@ export PYTEST_ADDOPTS="$PYTEST_ADDOPTS -p amd_ci_fast_exit"
 # artifact of the image build step (kept out of the image: only this test needs it).
 if [[ $commands == *python_only_compile.sh* ]]; then
   wheel_dir=$(mktemp -d)
-  buildkite-agent artifact download ".rocm-wheel/vllm-*.whl" "$wheel_dir" --step image-build-amd \
-    || exit 1
-  VLLM_PRECOMPILED_WHEEL_LOCATION=$(echo "$wheel_dir"/.rocm-wheel/vllm-*.whl)
+  for try in 1 2 3; do
+    buildkite-agent artifact download ".rocm-wheel/vllm-*.whl" "$wheel_dir" --step image-build-amd \
+      && break
+    ((try == 3)) && exit 1
+    sleep $((try * 5))
+  done
+  wheels=("$wheel_dir"/.rocm-wheel/vllm-*.whl)
+  [[ ${#wheels[@]} == 1 && -f ${wheels[0]} ]] \
+    || { echo "Expected exactly one wheel artifact, found: ${wheels[*]}" >&2; exit 1; }
+  VLLM_PRECOMPILED_WHEEL_LOCATION=${wheels[0]}
   VLLM_VERSION_OVERRIDE=$(python3 -P -c \
     'import importlib.metadata as m; print(m.version("vllm"))') || exit 1
   export VLLM_TARGET_DEVICE=rocm VLLM_VERSION_OVERRIDE VLLM_PRECOMPILED_WHEEL_LOCATION
@@ -161,11 +170,12 @@ diagnostics() {
 python3 -P -c "import vllm, torch, transformers, ray" || exit 1
 
 if [[ $gpus != 0 ]]; then
-  rocminfo >/dev/null || { diagnostics; exit 1; }
+  echo "--- ROCm info"
+  rocminfo || { diagnostics; exit 1; }
   python3 - <<EOF || { diagnostics; exit 1; }
 import torch
 n = torch.cuda.device_count()
-assert torch.version.hip and n == $gpus, \
+assert torch.version.hip and torch.cuda.is_available() and n == $gpus, \
     f"preflight: expected $gpus ROCm GPU(s), found {n}"
 EOF
 fi
@@ -177,6 +187,8 @@ fi
 # (VLLM_CI_* that are test knobs are intentionally left — see tests/ci_envs.py)
 unset VLLM_TEST_COMMANDS VLLM_CI_EXPECTED_GPU_COUNT VLLM_CI_DIAGNOSTICS_DIR
 
+echo "Test commands: $commands"
+echo "--- Test log"
 _teardown_log workload_started "timeout_s=${CONTAINER_TIMEOUT_S:-0}"
 
 rc=0

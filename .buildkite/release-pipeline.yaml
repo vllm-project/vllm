@@ -597,9 +597,9 @@ steps:
   # =============================================================================
   # ROCm Release Pipelines (x86_64 only)
   # =============================================================================
-  # One group per ROCm stack, on this pipeline's own agents. The build step builds the stack and
-  # runtime from source into ECR (once per content key, with the CI cache as a build cache; it never
-  # ships images from rocm/vllm-ci), compiles csrc for all release arches and pushes
+  # One group per ROCm stack, on this pipeline's own agents. A serialized step builds the stack and
+  # runtime from source into ECR (once per content key, with only its own ECR build cache; it never
+  # reads rocm/vllm-ci); the build step compiles csrc for all release arches and pushes
   # <ecr>:<stack>-<commit>{,-wheels,-base} (.buildkite/scripts/rocm/build.sh release); the steps
   # after it only copy those (.buildkite/scripts/rocm/publish.sh).
   # - ROCm 10.0 (TheRock, stack `rocm`) is the default: it owns the :nightly / :latest images and
@@ -610,26 +610,41 @@ steps:
     key: build-rocm100
     depends_on: ~
     steps:
-      - label: ":rocm: Build ROCm 10.0 release image + wheels"
-        key: build-rocm100-release
+      - label: ":rocm: Ensure ROCm 10.0 release stack + runtime"
+        key: build-rocm100-release-base
         depends_on: ~
         agents: {queue: cpu_queue_release}
-        timeout_in_minutes: 720   # a csrc change since the last release recompiles all release arches (~3h); a stack key CI has not built, hours more
-        env: {ROCM_CI_REPO: public.ecr.aws/q9t5s3a7/vllm-release-repo}
+        timeout_in_minutes: 720   # a new stack key (release never uses the CI cache) takes hours
+        concurrency_group: vllm/rocm/release/stack-rocm   # one run builds a new key; the others then reuse it
+        concurrency: 1
+        env: &rocm_release_env {ROCM_CI_REPO: &rocm_ecr public.ecr.aws/q9t5s3a7/vllm-release-repo, SCCACHE_BUCKET_NAME: vllm-build-sccache}
         commands:
-          - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin public.ecr.aws/q9t5s3a7
-          - bash .buildkite/scripts/rocm/build.sh rocm release
+          - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin $${ROCM_CI_REPO%/*}
+          - bash .buildkite/scripts/rocm/build.sh rocm release-base
+        retry: &rocm_release_retry {automatic: [{exit_status: 75, limit: 1}]}   # registry error (build.sh)
         plugins: &rocm_hub_login   # authenticated Docker Hub pulls and pushes
           - docker-login#v3.0.0:
               username: vllmbot
               password-env: DOCKERHUB_TOKEN
+
+      - label: ":rocm: Build ROCm 10.0 release image + wheels"
+        key: build-rocm100-release
+        depends_on: build-rocm100-release-base
+        agents: {queue: cpu_queue_release}
+        timeout_in_minutes: 720   # an all-arch csrc compile without sccache hits takes ~3h
+        env: *rocm_release_env
+        commands:
+          - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin $${ROCM_CI_REPO%/*}
+          - bash .buildkite/scripts/rocm/build.sh rocm release
+        retry: *rocm_release_retry
+        plugins: *rocm_hub_login
 
       - label: ":s3: Upload ROCm 10.0 wheels"
         key: upload-rocm100-wheels
         depends_on: build-rocm100-release
         agents: {queue: cpu_queue_release}
         timeout_in_minutes: 60
-        env: {S3_BUCKET: vllm-wheels}
+        env: {S3_BUCKET: vllm-wheels, ECR: *rocm_ecr}
         command: bash .buildkite/scripts/rocm/publish.sh rocm wheels
         plugins: *rocm_hub_login
 
@@ -640,6 +655,7 @@ steps:
             allow_failure: true
           - build-rocm100-release
         agents: {queue: small_cpu_queue_release}
+        env: {ECR: *rocm_ecr}
         command: bash .buildkite/scripts/rocm/publish.sh rocm images
         plugins: *rocm_hub_login
 
