@@ -2045,7 +2045,7 @@ def test_nccl_trainer_send_weights_drives_client_in_order():
         packed=False,
     )
     # Bypass the real NCCL rendezvous; broadcast is a no-op.
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
 
     engine.send_weights()
 
@@ -2069,7 +2069,7 @@ def test_nccl_trainer_sends_metadata_only_when_changed():
         source=ModuleSource(_module_with(("w", torch.zeros(4, device="cuda")))),
         packed=False,
     )
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
 
     engine.send_weights()
     assert client.last_update_info is not None
@@ -2082,8 +2082,9 @@ def test_nccl_trainer_sends_metadata_only_when_changed():
 
 
 def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
-    """Empty update info reuses the previous call's metadata for the same model;
-    target and draft keep separate copies, and re-init clears them."""
+    """Empty update info reuses the previous call's metadata for the same
+    (model, src) and receives from that src; re-init clears every entry, and
+    src must be a trainer rank."""
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
 
     monkeypatch.setattr(
@@ -2092,7 +2093,9 @@ def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
     target, draft = MagicMock(spec=torch.nn.Module), MagicMock(spec=torch.nn.Module)
     received: list = []
     for model in (target, draft):
-        model.load_weights = lambda w, m=model: received.append((m, w[0][0]))
+        model.load_weights = lambda w, m=model: received.append(
+            (m, w[0][0], tuple(w[0][1].shape))
+        )
     engine = NCCLWeightTransferEngine(
         WeightTransferConfig(backend="nccl"),
         create_mock_vllm_config(),
@@ -2100,76 +2103,53 @@ def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
         target,
     )
     init_info = NCCLWeightTransferInitInfo(
-        master_address="127.0.0.1", master_port=29500, rank_offset=1, world_size=2
+        master_address="127.0.0.1", master_port=29500, rank_offset=2, world_size=3
     )
     engine.init_transfer_engine(init_info)
     monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
 
-    def update(model, *names):
+    def update(model, src, name=None, shape=None):
         engine.set_weight_update_target(model, None)
         engine.receive_weights(
             NCCLWeightTransferUpdateInfo(
-                names=list(names),
-                dtype_names=["float32"] * len(names),
-                shapes=[[2]] * len(names),
-            )
-        )
-
-    update(target, "t")
-    update(draft, "d")
-    update(target)
-    update(draft)
-    engine.init_transfer_engine(init_info)
-    update(target)
-
-    assert received == [(target, "t"), (draft, "d"), (target, "t"), (draft, "d")]
-
-
-def test_nccl_worker_receives_from_each_src(monkeypatch):
-    """Each update is broadcast from its `src`, which must be a trainer rank,
-    and empty update info reuses that src's previous metadata."""
-    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
-
-    monkeypatch.setattr(
-        nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
-    )
-    model = MagicMock(spec=torch.nn.Module)
-    received: list = []
-    model.load_weights = lambda w: received.append(w[0][0])
-    engine = NCCLWeightTransferEngine(
-        WeightTransferConfig(backend="nccl"),
-        create_mock_vllm_config(),
-        torch.device("cpu"),
-        model,
-    )
-    engine.init_transfer_engine(
-        NCCLWeightTransferInitInfo(
-            master_address="127.0.0.1", master_port=29500, rank_offset=2, world_size=3
-        )
-    )
-    monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
-
-    def update(src, *names):
-        engine.receive_weights(
-            NCCLWeightTransferUpdateInfo(
-                names=list(names),
-                dtype_names=["float32"] * len(names),
-                shapes=[[2]] * len(names),
+                names=[name] if name else [],
+                dtype_names=["float32"] if name else [],
+                shapes=[shape] if name else [],
                 src=src,
             )
         )
 
-    update(0, "a")
-    update(1, "b")
-    update(0)
-    update(1)
-    assert received == ["a", "b", "a", "b"]
-    srcs = [c.kwargs["src"] for c in engine.model_update_group.broadcast.call_args_list]
-    assert srcs == [0, 1, 0, 1]
+    seeded = {
+        (target, 0): ("t0", [2]),
+        (target, 1): ("t1", [3]),
+        (draft, 0): ("d0", [4]),
+        (draft, 1): ("d1", [5]),
+    }
+    for (model, src), (name, shape) in seeded.items():
+        update(model, src, name, shape)
+    reused = [(draft, 1), (target, 0), (draft, 0), (target, 1)]
+    for model, src in reused:
+        update(model, src)
+
+    order = [*seeded, *reused]
+    assert received == [
+        (model, seeded[model, src][0], tuple(seeded[model, src][1]))
+        for model, src in order
+    ]
+    group = engine.model_update_group
+    assert [c.kwargs["src"] for c in group.broadcast.call_args_list] == [
+        src for _, src in order
+    ]
+
+    engine.init_transfer_engine(init_info)
+    for model, src in seeded:
+        update(model, src)
+    assert len(received) == len(order)
+    engine.model_update_group.broadcast.assert_not_called()
 
     for bad in (-1, 2):
         with pytest.raises(ValueError, match=r"sender rank in \[0, 2\)"):
-            update(bad, "c")
+            update(target, bad, "c", [2])
 
 
 class _ScriptedSource(WeightSource):
@@ -2193,7 +2173,7 @@ def _mock_group_engine(source, monkeypatch, **kwargs):
     engine = NCCLTrainerWeightTransferEngine(
         client=RecordingClient(), source=source, packed=False, **kwargs
     )
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
     monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
     return engine
 
@@ -2266,6 +2246,14 @@ _TWO_STAGES = [
         (
             [*_TWO_STAGES, ParamMeta("x", torch.float32, (2,), owners=(1, 2))],
             "rank 1 owns parameters broadcast by ranks 0 and 1",
+        ),
+        (
+            [ParamMeta("w", torch.float32, (4,), owners=(1, 0))],
+            r"'w' has owners \(1, 0\)",
+        ),
+        (
+            [ParamMeta("w", torch.float32, (4,), owners=(1, 0)), _TWO_STAGES[1]],
+            r"'w' has owners \(1, 0\)",
         ),
     ],
 )
@@ -2366,7 +2354,7 @@ def test_nccl_trainer_send_weights_raises_instead_of_hanging(monkeypatch):
     engine = NCCLTrainerWeightTransferEngine(
         client=_BlockingClient(), source=_FailingSource(), packed=False
     )
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
     monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
 
     started = time.perf_counter()

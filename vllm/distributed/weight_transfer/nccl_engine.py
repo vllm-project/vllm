@@ -55,9 +55,7 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     """Trainer-side init info for the dense NCCL weight transfer backend.
 
     The sender opens its endpoint as NCCL rank 0, so it needs no `rank_offset`.
-    `world_size` is the transfer NCCL group size: the broadcasting trainer
-    ranks plus the inference workers. `rank` (from `TrainerInitInfo`)
-    identifies this trainer process; rank 0 is the sender.
+    `rank` (from `TrainerInitInfo`) identifies this trainer process.
 
     The trainer joins over a TCPStore rendezvous (`master_address` +
     `master_port`). Torch-free trainers (e.g. JAX) that cannot join a TCPStore
@@ -77,10 +75,8 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     master_address: str
     master_port: int
     world_size: int
-    """Size of the transfer NCCL group: the broadcasting trainer ranks plus the
-    inference workers. The broadcasters are rank 0 and every distinct
-    `ParamMeta.owners[0]`; other trainer ranks are not counted. A single-sender
-    source has `1 + num_workers`."""
+    """Transfer group size: rank 0 and each distinct `ParamMeta.owners[0]`, plus
+    the inference workers (`1 + num_workers` for a single sender)."""
     packed: bool = True
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
@@ -90,15 +86,10 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
 class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     """Per-round update info for the dense NCCL weight transfer backend.
 
-    Whether the transfer is packed (and the buffer geometry) is a must-agree
-    wire param carried on the init info (`NCCLTrainerInitInfo` /
-    `NCCLWeightTransferInitInfo`), not here; this carries the per-round
-    parameter metadata and `src`, the group rank that broadcasts it.
+    Carries the parameter metadata and `src`, the broadcasting group rank; the
+    packed wire params live on the init info.
 
-    Leave all three lists empty to reuse the metadata of the previous
-    `update_weights` call on the same model from the same `src`, so a trainer
-    that sends the same parameters every round ships the names, dtypes and
-    shapes only once.
+    Empty lists reuse the previous update's metadata for the same model and `src`.
     """
 
     names: list[str] = field(default_factory=list)
@@ -126,11 +117,8 @@ class NCCLWeightTransferEngine(
 ):
     """Weight transfer engine using NCCL for communication between trainer and workers.
 
-    This implementation uses NCCL broadcast operations to transfer dense
-    checkpoint-format weights from the trainer's senders (group ranks below
-    `rank_offset`) to all inference workers in a process group. Received weights
-    are loaded via the model's `load_weights` using the layerwise reload
-    lifecycle.
+    Receives dense checkpoint-format weights broadcast from the trainer ranks
+    below `rank_offset` and loads them with the layerwise reload lifecycle.
     """
 
     # Define backend-specific dataclass types
@@ -201,9 +189,8 @@ class NCCLWeightTransferEngine(
         encoded.
 
         Args:
-            update_info: NCCL update info containing parameter names, dtypes,
-                        shapes and the sending group rank; empty lists to reuse
-                        the previous call's from the same sender
+            update_info: Parameter names, dtypes, shapes and `src`; empty lists
+                        reuse the previous call's from the same `src`
 
         """
         if self.model_update_group is None:
@@ -268,23 +255,11 @@ class NCCLWeightTransferEngine(
 class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerInitInfo]):
     """Trainer-side NCCL weight transfer engine.
 
-    The sender (rank 0) drives the full update round trip: it runs the
-    inference-side `update_weights` concurrently with the trainer-side broadcast
-    (both rendezvous inside the same NCCL calls), then finishes the update.
+    Each parameter is broadcast by its first owner (rank 0 when unset); rank 0
+    also drives the client RPCs. See "Broadcasting ranks" in `nccl.md`.
 
-    Each parameter is broadcast by its first owner (rank 0 when unset), so a
-    partitioned source (pipeline stages) has several broadcasting ranks. They
-    hold group ranks `[0, num_broadcasters)` in trainer-rank order (rank 0
-    always included) and workers start after them. Every rank derives this plan
-    from `metadata`, which is identical everywhere, so no extra coordination is
-    needed: rank 0 sends one `update_weights` per broadcaster, in order, and
-    each broadcaster sends its parameters during its turn while the other
-    broadcasters receive and discard them to stay in the collective.
-
-    Every other trainer rank holds no communicator; it only drives `iter_full()`
-    over the names it owns, to stay in the trainer-side gathers (e.g. FSDP
-    `full_tensor()`). So that gathers and turns line up, all parameters a rank
-    owns must share their first owner.
+    Other trainer ranks hold no communicator and only drive `iter_full()` to
+    stay in the trainer-side gathers (e.g. FSDP `full_tensor()`).
 
     `packed` / buffer sizes come from `NCCLTrainerInitInfo`; the sender
     propagates them to the worker at `trainer_init` (on the worker-side init
@@ -355,6 +330,13 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             )
         # Identical on every rank, so every rank raises alike.
         group_ranks, slices = cls._broadcast_plan(source.metadata)
+        for m in source.metadata:
+            if m.owners is not None and 0 in m.owners[1:]:
+                raise ValueError(
+                    f"parameter {m.name!r} has owners {m.owners}: rank 0 only "
+                    "gathers in its own turn, so it must be the first owner of "
+                    "every parameter it owns."
+                )
         if len(slices) > 1:
             broadcaster_of: dict[int, int] = {}
             for broadcaster, metas in slices:
@@ -390,9 +372,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             packed_num_buffers=init_info.packed_num_buffers,
         )
         if engine.rank not in group_ranks:
-            # Ranks that broadcast nothing aren't part of the transfer NCCL
-            # group and don't drive the inference side; they only participate
-            # in the trainer-side gather during send_weights.
+            # Ranks that broadcast nothing stay out of the transfer group; they
+            # only join the trainer-side gathers in send_weights.
             return engine
         engine._group_rank = group_ranks.index(engine.rank)
         if not engine.is_sender:
@@ -430,22 +411,18 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             self.client.start_weight_update()
         for broadcaster, metas in slices:
             src = group_ranks.index(broadcaster)
-            is_broadcaster = broadcaster == self.rank
             if self.is_sender:
-                self._send_update(metas, src, is_broadcaster, reuse)
+                self._send_update(metas, src, reuse)
             else:
-                self._broadcast(metas, src, is_broadcaster)
+                self._broadcast(metas, src)
         if self.is_sender:
             self.client.finish_weight_update()
             self._sent_meta = meta
         self._post_send_sync()
 
-    def _send_update(
-        self, meta: list[ParamMeta], src: int, is_broadcaster: bool, reuse: bool
-    ) -> None:
-        """One broadcaster's turn on rank 0: run its `update_weights` while
-        sending `meta` (if rank 0 is the broadcaster) or receiving and
-        discarding it (to stay in the collective)."""
+    def _send_update(self, meta: list[ParamMeta], src: int, reuse: bool) -> None:
+        """Rank 0's part of one broadcaster's turn: run its `update_weights`
+        concurrently with `_broadcast`."""
         if reuse:
             update_info = NCCLWeightTransferUpdateInfo(src=src)
         else:
@@ -469,7 +446,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             # hanging in broadcast waiting for a peer that will never arrive.
             if future.done():
                 future.result()
-            self._broadcast(meta, src, is_broadcaster)
+            self._broadcast(meta, src)
             future.result()  # surface inference-side errors
         finally:
             # Never wait for the RPC thread here. If the broadcast raised, the
@@ -481,14 +458,13 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             # to exit cleanly after such a failure must not wait on it.)
             exe.shutdown(wait=False)
 
-    def _broadcast(self, meta: list[ParamMeta], src: int, is_broadcaster: bool) -> None:
-        """Broadcast `meta` from group rank `src`, packed or one-by-one. The
-        broadcaster drives `iter_full()` (gathering among each parameter's
-        owners) and sends; other group members receive and discard."""
+    def _broadcast(self, meta: list[ParamMeta], src: int) -> None:
+        """Broadcast `meta` from group rank `src`: that rank sends from
+        `iter_full()`, every other group member receives and discards."""
         assert self.model_update_group is not None, (
             "trainer_init() must be called before _broadcast()."
         )
-        if not is_broadcaster:
+        if src != self.model_update_group.rank:
             self._discard(meta, src)
             return
         assert self.source is not None
@@ -544,8 +520,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         iteration disagrees with it, the two sides split the stream differently
         and the transfer hangs in NCCL or loads garbage. Checking here costs one
         comparison per parameter and turns that into an error naming the first
-        divergent parameter. A broadcaster owns exactly the parameters it
-        broadcasts, so it yields all of `meta`.
+        divergent parameter.
         """
         sent = 0
         for name, tensor in source.iter_full():

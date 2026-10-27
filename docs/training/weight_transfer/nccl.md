@@ -145,7 +145,9 @@ concurrently.
 
 Every parameter a rank owns must share its first owner, since each broadcaster
 gathers and sends in its own turn. So with several broadcasters every parameter
-must declare `owners`. `trainer_init` raises on every rank otherwise.
+must declare `owners`. Rank 0 is always in the transfer group and only gathers
+in its own turn, so if it owns a parameter it must be that parameter's first
+owner. `trainer_init` raises on every rank otherwise.
 
 A failure on any broadcaster during an update is fatal for the transfer. That
 rank raises immediately, but the other trainer ranks and the inference workers
