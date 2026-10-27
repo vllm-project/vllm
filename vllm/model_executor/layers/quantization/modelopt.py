@@ -1028,6 +1028,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
+        # Keep dummy scales positive and gate/up global scales identical.
+        for param, value in (
+            (w13_weight_scale, 1.0),
+            (w2_weight_scale, 1.0),
+            (w13_weight_scale_2, 1e-3),
+            (w2_weight_scale_2, 1e-3),
+            (w13_input_scale, 1e-2),
+            (w2_input_scale, 1e-2),
+        ):
+            set_weight_attrs(param, {"dummy_weight_value": value})
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         if is_weights_pre_processed():

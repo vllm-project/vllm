@@ -1169,6 +1169,7 @@ def _make_mock_worker_for_desc_ids(
     worker._conv_decomp = None
     worker._is_csa_linear = False
     worker._ssm_region_indices = [0] if has_mamba else []
+    worker._group_region_indices = []
     worker._ple_group_index = None
     worker._ple_region_index = None
     if has_mamba:
