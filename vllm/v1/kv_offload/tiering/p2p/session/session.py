@@ -11,16 +11,22 @@ dispatch — each parsed message is forwarded to the corresponding role.
 
 Wire protocol is unchanged. Both sides advertise their NIXL metadata
 via ConnectMsg when their session is connected; the peer's ConnectMsg
-triggers transport.add_remote_peer; ConnectAckMsg confirms the peer
-received our ConnectMsg, after which queued outgoing messages are flushed.
+starts transport.add_remote_peer_async off the scheduler thread, and
+ConnectAckMsg is sent only once that registration lands. ConnectAckMsg
+confirms the peer received our ConnectMsg, after which queued outgoing
+messages are flushed — so a peer that may send is a peer we have already
+registered.
 """
 
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Sequence
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, NamedTuple
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.kv_offload.tiering.p2p.control.base import ControlConnection
@@ -55,6 +61,11 @@ logger = init_logger(__name__)
 # bugs that may indicate a peer-induced bad state. Reset on any
 # successful dispatch.
 _MAX_CONSECUTIVE_DISPATCH_ERRORS = 5
+
+# Cap on how long a data-plane fault waits for inflight WRITEs to drain
+# before disconnecting: the peer frees their destination blocks on
+# DisconnectMsg, but a stuck transfer must not hold the session open.
+_PEER_FAULT_DRAIN_S = 10.0
 
 
 class SessionPollResult(NamedTuple):
@@ -98,9 +109,11 @@ class P2PSession:
         the decoder connects).
       - Constructor with conn != None ⇒ connected. Sends our own ConnectMsg
         immediately; the peer's ConnectMsg arrives in poll() and is
-        dispatched to _on_connect (which calls transport.add_remote_peer
-        and replies with ConnectAckMsg). Outgoing sends are queued until
-        ConnectAckMsg confirms our metadata reached the peer.
+        dispatched to _on_connect, which starts
+        transport.add_remote_peer_async. A later poll() sees the
+        registration land and replies with ConnectAckMsg; a failed
+        registration marks the connection dead instead. Outgoing sends are
+        queued until ConnectAckMsg confirms our metadata reached the peer.
       - attach_connection(conn) on a pending session ⇒ same as above,
         starting from pending.
     """
@@ -128,11 +141,26 @@ class P2PSession:
         # Consecutive non-protocol dispatch errors. Reset on success.
         self._dispatch_error_count: int = 0
 
+        # First cause recorded by _mark_dead; see death_reason.
+        self._death_reason: str | None = None
+        self._peer_fault_at: float | None = None
+
+        now = time.monotonic()
+        self._connected_at: float | None = None
+        self._last_activity_at: float = now
+
         # kv_request_ids whose FetchMsg arrived during the current poll
         # tick. Drained and returned in the next poll() result so the
         # manager can bind kv_request_id → session and replay any
         # submit_store batches parked before the binding existed.
         self._new_fetch_ids: list[str] = []
+
+        # In-flight peer registration started by _on_connect. Registration
+        # is O(num_blocks) and runs off this thread, so ConnectAckMsg is
+        # held back until the future resolves — the ack is what tells the
+        # peer it may start sending, and nothing may be served before the
+        # peer's blocks are registered here.
+        self._pending_registration: Future[None] | None = None
 
         self._client = ClientRole(peer_id=peer_id, send=self._send)
         self._server = ServerRole(
@@ -166,7 +194,30 @@ class P2PSession:
     @property
     def has_pending_work(self) -> bool:
         """True while inbound loads or outbound transfers are outstanding."""
-        return self._client.has_active_loads or self._server.has_inflight_transfers
+        return (
+            self._pending_registration is not None
+            or self._client.has_active_loads
+            or self._server.has_inflight_transfers
+        )
+
+    @property
+    def death_reason(self) -> str:
+        """Why the connection died, for the manager's peer-down log.
+
+        A connection the control transport marked dead itself (heartbeat
+        timeout, socket closed) has no recorded cause.
+        """
+        return self._death_reason or "control connection lost"
+
+    @property
+    def data_plane_fault(self) -> str | None:
+        """The transport's peer fault, if one was reported (see server role)."""
+        return self._server.peer_fault
+
+    @property
+    def last_activity_at(self) -> float:
+        """Monotonic timestamp of the last meaningful session activity."""
+        return self._last_activity_at
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -181,6 +232,9 @@ class P2PSession:
         if self._conn is not None:
             raise ValueError(f"P2PSession {self.peer_id}: already connected")
         self._conn = conn
+        now = time.monotonic()
+        self._connected_at = now
+        self._last_activity_at = now
         self._send_connect()
 
     # ------------------------------------------------------------------
@@ -233,10 +287,9 @@ class P2PSession:
         """Flush any aggregated symmetric-P2P lookups for this peer.
 
         Called once per scheduler step from the manager's
-        ``on_schedule_end()``. Send-gating is handled inside the
-        client's ``_send`` callback (queues until ConnectAckMsg).
+        ``on_schedule_end()``. Probes wait for ConnectAckMsg before sending.
         """
-        self._client.flush_pending_lookups()
+        self._client.flush_pending_lookups(send_ready=self._send_ready)
 
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Resolve inbound peer lookups against the tiering manager.
@@ -249,20 +302,68 @@ class P2PSession:
     def poll(self) -> SessionPollResult:
         """Process incoming messages, drive transfers, apply timeouts."""
         if self._conn is None:
-            # Pending session — store-job timeouts still apply so buffered
-            # jobs that never get picked up are surfaced as failures.
             return SessionPollResult(
                 loads=[],
                 stores=self._server.collect_idle_timeouts(),
                 new_fetch_ids=[],
             )
 
-        for msg in self._conn.recv():
+        # Drain the inbox first so a ConnectAck already buffered at the
+        # deadline (e.g. after a scheduler stall) can complete the
+        # handshake instead of being discarded by mark_dead.
+        messages = self._conn.recv()
+        if messages:
+            self._last_activity_at = time.monotonic()
+        for msg in messages:
             self._on_message(msg)
+
+        # After dispatch: a ConnectMsg handled just above may already have a
+        # resolved registration (transports that register inline ack in the
+        # same tick), and a registration started on an earlier tick may have
+        # landed while the engine was busy elsewhere. This runs before the
+        # handshake deadline below so a registration that just resolved gets
+        # its ConnectAckMsg out rather than being judged as timed out, and so
+        # a failed registration's mark_dead() short-circuits that check.
+        self._poll_registration()
+
+        # Handshake deadline: a peer that never completes the handshake
+        # is stuck in connected-but-not-ready state. Mark it dead so the
+        # manager reaps it instead of accumulating sockets indefinitely.
+        # Note this also covers the peer registering *our* region before it
+        # acks, so the deadline must exceed remote registration time; the
+        # 30s default leaves ample room for the descriptor build.
+        if (
+            not self._send_ready
+            and self._conn.alive
+            and self._connected_at is not None
+            and time.monotonic() - self._connected_at
+            > envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S
+        ):
+            logger.warning(
+                "P2PSession %s: handshake timed out after %ds "
+                "— marking connection dead",
+                self.peer_id,
+                envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S,
+            )
+            self._mark_dead("handshake timed out")
 
         loads = self._client.collect_results()
         stores = self._server.collect_results()
         self._server.drain_pending_aborts()
+        self._escalate_peer_fault()
+
+        # Drain buffered replies and completed transfers before expiring a peer.
+        expired_lookup = self._client.get_expired_lookup()
+        if expired_lookup is not None:
+            req_id, elapsed = expired_lookup
+            logger.warning(
+                "P2PSession %s: lookup response timed out for kv_request_id=%s "
+                "after %.1fs without progress; disconnecting peer session",
+                self.peer_id,
+                req_id,
+                elapsed,
+            )
+            self._disconnect("lookup response timed out")
 
         new_fetch_ids = self._new_fetch_ids
         self._new_fetch_ids = []
@@ -284,6 +385,14 @@ class P2PSession:
             ``parent.on_request_finished`` (the manager flushes these on
             its next ``serve_external_requests``).
         """
+        # Abandon any in-flight registration: nothing will ack this peer
+        # now. The manager's remove_remote_peer bumps the transport's
+        # generation for this peer, so a worker already past cancellation
+        # releases its handles instead of publishing them.
+        if self._pending_registration is not None:
+            self._pending_registration.cancel()
+            self._pending_registration = None
+
         client_result = self._client.close()
         failed_stores, failed_serves = self._server.close()
 
@@ -348,10 +457,47 @@ class P2PSession:
             self.peer_id,
             reason,
         )
+        self._disconnect(f"protocol error: {reason}")
+
+    def _escalate_peer_fault(self) -> None:
+        """Disconnect once a data-plane peer fault's inflight WRITEs drain.
+
+        See "Failure model" in data/base.py: the fault ends the session
+        through the same reap as a control-plane failure.
+        """
+        fault = self._server.peer_fault
+        if fault is None or self._conn is None or not self._conn.alive:
+            return
+        now = time.monotonic()
+        if self._peer_fault_at is None:
+            self._peer_fault_at = now
+            logger.warning(
+                "P2PSession %s: data plane faulted (%s); disconnecting once "
+                "inflight transfers drain",
+                self.peer_id,
+                fault,
+            )
+        if (
+            self._server.has_inflight_transfers
+            and now - self._peer_fault_at < _PEER_FAULT_DRAIN_S
+        ):
+            return
+        self._disconnect(f"data plane: {fault}")
+
+    def _disconnect(self, reason: str) -> None:
+        """Best-effort DisconnectMsg, then mark the connection dead."""
         if self._conn is not None:
             with contextlib.suppress(Exception):
                 self._conn.send({TYPE_KEY: DisconnectMsg.TYPE})
-            self._conn.mark_dead()
+        self._mark_dead(reason)
+
+    def _mark_dead(self, reason: str) -> None:
+        """Mark the connection dead, recording the first cause."""
+        if self._conn is None:
+            return
+        if self._death_reason is None:
+            self._death_reason = reason
+        self._conn.mark_dead()
 
     def _dispatch_message(self, msg: dict) -> None:
         # Drop messages buffered before disconnect: a poll batch can
@@ -419,8 +565,7 @@ class P2PSession:
             hits = msg[LookupRespMsg.HITS]
             self._client.on_lookup_resp(kv_request_id, keys, hits)
         elif msg_type == DisconnectMsg.TYPE:
-            if self._conn is not None:
-                self._conn.mark_dead()
+            self._mark_dead("peer disconnected")
         else:
             logger.warning(
                 "P2PSession %s: unknown message type %r", self.peer_id, msg_type
@@ -434,10 +579,11 @@ class P2PSession:
         # Validation failures here mean an incompatible or malicious peer.
         # Mark the connection dead so the manager reaps the session;
         # don't call add_remote_peer or send connect_ack.
-        if self._send_ready:
-            # We've already received connect_ack, so the handshake is
-            # complete. A second connect from the peer is a protocol
-            # violation — re-registering would corrupt transport state.
+        if self._send_ready or self._pending_registration is not None:
+            # Either the handshake completed (we hold the peer's ack) or a
+            # registration for this peer is already in flight. A second
+            # connect either way is a protocol violation — re-registering
+            # would corrupt transport state.
             self._protocol_error("duplicate connect after handshake")
             return
         try:
@@ -462,7 +608,7 @@ class P2PSession:
                     f"local={self._local_hash_seed!r}. Ensure PYTHONHASHSEED "
                     "(if set) matches on all P2P peers."
                 )
-            self._transport.add_remote_peer(
+            registration = self._transport.add_remote_peer_async(
                 self.peer_id,
                 agent_metadata=msg[ConnectMsg.AGENT_METADATA],
                 base_addr=msg[ConnectMsg.BASE_ADDR],
@@ -471,12 +617,38 @@ class P2PSession:
             )
         except ValueError as exc:
             logger.error("P2PSession %s: rejecting peer connect: %s", self.peer_id, exc)
-            if self._conn is not None:
-                self._conn.mark_dead()
+            self._mark_dead(f"rejected peer connect: {exc}")
             return
 
-        if self._conn is not None:
-            self._conn.send(
+        # ConnectAckMsg is deferred to _poll_registration once the
+        # registration lands; sending it now would let the peer fetch
+        # against blocks this side has not registered yet.
+        self._pending_registration = registration
+
+    def _poll_registration(self) -> None:
+        """Ack or reject the peer once its registration resolves.
+
+        Called from poll() after message dispatch. A successful
+        registration releases ConnectAckMsg — the peer treats that as
+        permission to send, so it must not go out earlier. A failed one
+        marks the connection dead so the manager reaps the session.
+        """
+        registration = self._pending_registration
+        if registration is None or not registration.done():
+            return
+        self._pending_registration = None
+        try:
+            registration.result()
+        except Exception as exc:
+            logger.error(
+                "P2PSession %s: peer registration failed, rejecting peer: %s",
+                self.peer_id,
+                exc,
+            )
+            self._mark_dead(f"peer registration failed: {exc}")
+            return
+        if self._conn is not None and self._conn.alive:
+            self._do_send(
                 {
                     TYPE_KEY: ConnectAckMsg.TYPE,
                     ConnectAckMsg.PEER_ID: self._local_id,
@@ -533,6 +705,7 @@ class P2PSession:
             return
         try:
             self._conn.send(msg)
+            self._last_activity_at = time.monotonic()
             logger.debug("P2PSession %s: sent %s", self.peer_id, msg.get(TYPE_KEY))
         except Exception:
             # A send failure means the connection is broken. Swallowing it
@@ -546,4 +719,4 @@ class P2PSession:
                 self.peer_id,
                 msg.get(TYPE_KEY),
             )
-            self._conn.mark_dead()
+            self._mark_dead(f"send of {msg.get(TYPE_KEY)} failed")

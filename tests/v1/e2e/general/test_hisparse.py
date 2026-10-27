@@ -22,6 +22,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 
 MODEL = "deepseek-ai/DeepSeek-V3.2"
@@ -48,9 +50,10 @@ def _shrink_config(config):
 
 def _num_hisparse_spills(runner: VllmRunner) -> int:
     client = runner.llm.llm_engine.engine_core
-    coordinator = get_hisparse_coordinator(
-        client.engine_core.scheduler.kv_cache_manager
-    )
+    assert isinstance(client, InprocClient)
+    scheduler = client.engine_core.scheduler
+    assert isinstance(scheduler, Scheduler)
+    coordinator = get_hisparse_coordinator(scheduler.kv_cache_manager)
     return coordinator.next_spill_id
 
 
@@ -65,7 +68,9 @@ def _offload_load_bytes() -> float:
 
 
 def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
-    engine_core = runner.llm.llm_engine.engine_core.engine_core
+    client = runner.llm.llm_engine.engine_core
+    assert isinstance(client, InprocClient)
+    engine_core = client.engine_core
     model_runner = engine_core.model_executor.driver_worker.worker.model_runner
     connector = model_runner.kv_connector.kv_connector
     if isinstance(connector, MultiConnector):
@@ -83,22 +88,33 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
     not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
 )
 @pytest.mark.parametrize(
-    "with_offloading", [False, True], ids=["standalone", "offload"]
+    "with_offloading,attention_backend",
+    [
+        pytest.param(False, None, id="standalone"),
+        pytest.param(True, None, id="offload"),
+        # Offloading does not touch the attention kernels: FA4 runs standalone.
+        pytest.param(False, "FLASH_ATTN_MLA_SPARSE_FA4", id="standalone-fa4"),
+    ],
 )
 @fork_new_process_for_each_test
 def test_hisparse_spill_and_prefix_restore(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
     with_offloading: bool,
+    attention_backend: str | None,
 ):
     """Spilled prefixes restore and FULL-graph decode writes reach host KV.
 
     A regression omitted attention metadata before FULL graph replay, so decode
     completed normally while its newly written KV rows were never copied to host.
+    MTP layers write after the target forward; their rows used to be mirrored
+    before the drafter wrote them, so the drafter later read stale host rows.
     """
     capability = current_platform.get_device_capability()
     if capability is None or capability.major < 9:
         pytest.skip("Sparse MLA requires Hopper or newer")
+    if attention_backend and not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
 
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
@@ -140,6 +156,7 @@ def test_hisparse_spill_and_prefix_restore(
             )
         ),
         kv_transfer_config=kv_transfer_config,
+        attention_backend=attention_backend,
         block_size=64,
         max_model_len=320,
         max_num_batched_tokens=1024,
@@ -171,49 +188,70 @@ def test_hisparse_spill_and_prefix_restore(
             model_runner.cudagraph_manager, "run_fullgraph", record_fullgraph
         )
 
+        # The MTP layer writes its rows after the target forward, so it is
+        # mirrored at the start of the next step instead of in finish_forward.
+        draft_layers = set(worker._draft_layers)
+        assert draft_layers
         original_finish_forward = worker.finish_forward
-        verified_full_replay_rows = 0
+        original_finish_previous_step = worker._finish_previous_step
+        verified_rows = {"target": 0, "draft": 0}
         copied_nonzero_kv = False
+        draft_check_pending = False
+
+        def check_host_rows(layer_indices: set[int], kind: str) -> None:
+            nonlocal copied_nonzero_kv
+            # Synchronize only the test's inspection, not the worker itself.
+            with gpu_sync_allowed():
+                torch.accelerator.synchronize()
+            assert worker._row_mirrors
+            for layer_index in layer_indices:
+                cache = worker.cache_handles[layer_index]
+                source_index = cache.runtime.resident_source_index
+                for mirror in worker._row_mirrors:
+                    source_row = mirror.source_starts[source_index]
+                    destination_row = mirror.destination_start
+                    num_rows = mirror.num_rows
+                    source_block, source_offset = divmod(
+                        source_row, worker.kernel_block_size
+                    )
+                    with gpu_sync_allowed():
+                        gpu_rows = worker.resident_caches[layer_index][
+                            source_block, source_offset : source_offset + num_rows
+                        ].cpu()
+                    host_rows = worker.host_caches[layer_index][
+                        destination_row : destination_row + num_rows
+                    ]
+                    assert torch.equal(host_rows, gpu_rows)
+                    copied_nonzero_kv |= bool(torch.count_nonzero(gpu_rows).item())
+                    verified_rows[kind] += num_rows
 
         def finish_forward():
-            nonlocal full_replay_pending, verified_full_replay_rows
-            nonlocal copied_nonzero_kv
+            nonlocal full_replay_pending, draft_check_pending
             try:
                 original_finish_forward()
                 if not full_replay_pending:
                     return
-                # Synchronize only the test's inspection, not finish_forward itself.
-                with gpu_sync_allowed():
-                    torch.accelerator.synchronize()
-                assert worker._row_mirrors
-                for layer_index, cache in enumerate(worker.cache_handles):
-                    source_index = cache.runtime.resident_source_index
-                    for mirror in worker._row_mirrors:
-                        source_row = mirror.source_starts[source_index]
-                        destination_row = mirror.destination_start
-                        num_rows = mirror.num_rows
-                        source_block, source_offset = divmod(
-                            source_row, worker.kernel_block_size
-                        )
-                        with gpu_sync_allowed():
-                            gpu_rows = worker.resident_caches[layer_index][
-                                source_block, source_offset : source_offset + num_rows
-                            ].cpu()
-                        host_rows = worker.host_caches[layer_index][
-                            destination_row : destination_row + num_rows
-                        ]
-                        assert torch.equal(host_rows, gpu_rows)
-                        copied_nonzero_kv |= bool(torch.count_nonzero(gpu_rows).item())
-                        verified_full_replay_rows += num_rows
+                target_layers = set(range(len(worker.cache_handles))) - draft_layers
+                check_host_rows(target_layers, "target")
+                draft_check_pending = True
             finally:
                 full_replay_pending = False
 
+        def finish_previous_step():
+            nonlocal draft_check_pending
+            original_finish_previous_step()
+            if draft_check_pending:
+                draft_check_pending = False
+                check_host_rows(draft_layers, "draft")
+
         monkeypatch.setattr(worker, "finish_forward", finish_forward)
+        monkeypatch.setattr(worker, "_finish_previous_step", finish_previous_step)
 
         expected = runner.generate_greedy([target], max_tokens=8)
 
         assert full_graph_calls > 0
-        assert verified_full_replay_rows > 0
+        assert verified_rows["target"] > 0
+        assert verified_rows["draft"] > 0
         assert copied_nonzero_kv
 
         runner.generate_greedy(pressure, max_tokens=8)

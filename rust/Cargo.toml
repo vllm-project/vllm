@@ -11,7 +11,6 @@ members = [
     "src/metrics",
     "src/mock-engine",
     "src/parser",
-    "src/parser/python",
     "src/server",
     "src/text",
     "src/tokenizer",
@@ -58,11 +57,11 @@ hyper-util = { version = "0.1.20", features = [
     "tokio",
 ] }
 image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
-indexmap = "2.13.0"
+indexmap = { version = "2.13.0", features = ["serde"] }
 indicatif = "0.18.4"
 itertools = "0.14.0"
 libc = "0.2.177"
-llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "f0985ef65967615db2c79279aa07818499301bfd", default-features = false, features = ["native-tls"] }
+llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "1b6197354e498b1dfb6e2647b2c68e4d11eaf5b5", default-features = false }
 mimalloc = "0.1.52"
 minijinja = { version = "2.24", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order", "fuel"] }
 minijinja-contrib = { version = "2.24", features = ["pycompat"] }
@@ -79,8 +78,6 @@ prometheus-client-derive-encode = "0.5.0"
 prost = "0.14.3"
 prost-types = "0.14.3"
 protox = "0.9.1"
-pyo3 = "0.29.0"
-pythonize = "0.29.0"
 rand = "0.9.3"
 rand_distr = "0.5.1"
 rayon = "1.11.0"
@@ -158,7 +155,7 @@ vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tracing = { path = "src/tracing" }
 winnow = { version = "1.0.2", features = ["simd"] }
 xgrammar-structural-tag = "0.4.1"
-zeromq = { version = "0.6.0", default-features = false, features = [
+zeromq = { git = "https://github.com/zeromq/zmq.rs", rev = "67dcba97559ebe8e8206dab753710d8b9cb07591", default-features = false, features = [
     "tokio-runtime",
     "all-transport",
 ] }

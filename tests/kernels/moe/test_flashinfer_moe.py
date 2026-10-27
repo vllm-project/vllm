@@ -219,6 +219,10 @@ def test_flashinfer_fp4_moe_no_graph(
         )
         w2_d = torch.empty((e, k, n), device="cuda", dtype=dtype)
 
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
+        assert quant_config.g1_alphas is not None
+        assert quant_config.g2_alphas is not None
         for idx in range(0, e):
             w1_d[idx] = dequantize_nvfp4_to_dtype(
                 w1_q[idx],

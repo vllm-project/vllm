@@ -68,6 +68,7 @@ from vllm.config import (
     StructuredOutputsConfig,
     UVAOffloadConfig,
     VllmConfig,
+    WatchdogConfig,
     WeightTransferConfig,
     get_attr_docs,
 )
@@ -80,6 +81,7 @@ from vllm.config.cache import (
 )
 from vllm.config.device import Device
 from vllm.config.kernel import (
+    PASSTHROUGH_ALL2ALL_BACKEND,
     IrOpPriorityConfig,
     LinearBackend,
     MoEBackend,
@@ -181,6 +183,11 @@ def union_dict_and_str(val: str) -> str | dict[str, str] | None:
     if not re.match(r"(?s)^\s*{.*}\s*$", val):
         return str(val)
     return optional_type(json.loads)(val)
+
+
+def parse_reasoning_parser(val: str) -> str:
+    """Map `none` (any case) to the unset default, as `vllm-rs serve` does."""
+    return "" if val.lower() == "none" else val
 
 
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
@@ -452,6 +459,24 @@ _LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
 )
 
 
+_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
+    "--mamba-cache-mode is deprecated and will be removed in v0.33.0. "
+    "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
+)
+
+
+_IR_OP_PRIORITY_DEPRECATION_MESSAGE = (
+    "ir_op_priority (--ir-op-priority) is deprecated because vLLM IR is being "
+    "removed. It will be removed in v0.34.0."
+)
+
+
+_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
+    "--disable-cascade-attn is deprecated and has no effect since cascade "
+    "attention has been removed. It will be removed in v0.33.0."
+)
+
+
 class DeprecatedLogConfigFileAction(argparse.Action):
     """Warn when the legacy ``--log-config-file`` option is used."""
 
@@ -490,7 +515,7 @@ class EngineArgs:
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
-    kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
+    kv_cache_dtype: CacheDType | str = CacheConfig.cache_dtype
     seed: int = ModelConfig.seed
     max_model_len: int = ModelConfig.max_model_len
     cudagraph_capture_sizes: list[int] | None = (
@@ -537,6 +562,7 @@ class EngineArgs:
     data_parallel_external_lb: bool = False
     data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
+    enable_hc_sp: bool = ParallelConfig.enable_hc_sp
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_batch_sharded_sampling: bool | None = (
         ParallelConfig.enable_batch_sharded_sampling
@@ -577,7 +603,7 @@ class EngineArgs:
         CacheConfig, "prefix_cache_retention_interval"
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
-    disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
+    disable_cascade_attn: bool | None = None
     offload_backend: str = OffloadConfig.offload_backend
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
@@ -621,6 +647,7 @@ class EngineArgs:
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
+    enable_shm_tensor_arena: bool = ParallelConfig.enable_shm_tensor_arena
     language_model_only: bool = MultiModalConfig.language_model_only
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
         MultiModalConfig, "limit_per_prompt"
@@ -749,6 +776,7 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    monokernel: bool = get_field(KernelConfig, "monokernel")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -769,11 +797,14 @@ class EngineArgs:
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    sleep_mode_backend: str = ModelConfig.sleep_mode_backend
+    sleep_mode_offload_cudagraph: bool = ModelConfig.sleep_mode_offload_cudagraph
     sleep_preserve_parameter_names: list[str] = get_field(
         ModelConfig, "sleep_preserve_parameter_names"
     )
     enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
     enable_nccl_comm_suspend: bool = ModelConfig.enable_nccl_comm_suspend
+    checkpoint_prepare_on_startup: bool = ModelConfig.checkpoint_prepare_on_startup
     override_generation_config: dict[str, Any] = get_field(
         ModelConfig, "override_generation_config"
     )
@@ -787,7 +818,7 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
-    mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    mamba_cache_mode: MambaCacheMode | None = None
     enable_mamba_shared_prefix_checkpoint: bool = (
         CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
@@ -831,13 +862,17 @@ class EngineArgs:
 
     shutdown_timeout: int = 0
 
+    watchdog_config: WatchdogConfig = get_field(VllmConfig, "watchdog_config")
+
     weight_transfer_config: WeightTransferConfig | None = get_field(
         VllmConfig,
         "weight_transfer_config",
     )
 
     fail_on_environ_validation: bool = False
-    gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
+    gdn_prefill_backend: (
+        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"] | None
+    ) = None
     kda_prefill_backend: (
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
     ) = None
@@ -881,6 +916,9 @@ class EngineArgs:
             )
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
+
+        if isinstance(self.watchdog_config, dict):
+            self.watchdog_config = WatchdogConfig(**self.watchdog_config)
 
         from vllm.config.quantization import resolve_quantization_config
 
@@ -979,7 +1017,10 @@ class EngineArgs:
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
         )
         model_group.add_argument(
-            "--disable-cascade-attn", **model_kwargs["disable_cascade_attn"]
+            "--disable-cascade-attn",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help=_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE,
         )
         model_group.add_argument(
             "--skip-tokenizer-init", **model_kwargs["skip_tokenizer_init"]
@@ -1007,6 +1048,13 @@ class EngineArgs:
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
         )
         model_group.add_argument(
+            "--sleep-mode-backend", **model_kwargs["sleep_mode_backend"]
+        )
+        model_group.add_argument(
+            "--sleep-mode-offload-cudagraph",
+            **model_kwargs["sleep_mode_offload_cudagraph"],
+        )
+        model_group.add_argument(
             "--sleep-preserve-parameter-names",
             **model_kwargs["sleep_preserve_parameter_names"],
         )
@@ -1016,6 +1064,10 @@ class EngineArgs:
         model_group.add_argument(
             "--enable-nccl-comm-suspend",
             **model_kwargs["enable_nccl_comm_suspend"],
+        )
+        model_group.add_argument(
+            "--checkpoint-prepare-on-startup",
+            **model_kwargs["checkpoint_prepare_on_startup"],
         )
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(
@@ -1088,6 +1140,10 @@ class EngineArgs:
 
         # Structured outputs arguments
         structured_outputs_kwargs = get_kwargs(StructuredOutputsConfig)
+        structured_outputs_kwargs["reasoning_parser"]["type"] = parse_reasoning_parser
+        structured_outputs_kwargs["reasoning_parser"]["help"] += (
+            "\n\n`none` disables reasoning parsing, the same as leaving it unset."
+        )
         structured_outputs_group = parser.add_argument_group(
             title="StructuredOutputsConfig",
             description=StructuredOutputsConfig.__doc__,
@@ -1104,6 +1160,10 @@ class EngineArgs:
 
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
+        # Bound from --moe-backend in KernelConfig.set_platform_defaults().
+        parallel_kwargs["all2all_backend"]["choices"].remove(
+            PASSTHROUGH_ALL2ALL_BACKEND
+        )
         parallel_group = parser.add_argument_group(
             title="ParallelConfig",
             description=ParallelConfig.__doc__,
@@ -1245,6 +1305,7 @@ class EngineArgs:
             "server per local data parallel rank and exposes aggregated health on "
             "a supervisor port.",
         )
+        parallel_group.add_argument("--enable-hc-sp", **parallel_kwargs["enable_hc_sp"])
         parallel_group.add_argument(
             "--enable-expert-parallel",
             "-ep",
@@ -1262,6 +1323,10 @@ class EngineArgs:
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
         )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
+        parallel_group.add_argument(
+            "--enable-shm-tensor-arena",
+            **parallel_kwargs["enable_shm_tensor_arena"],
+        )
         parallel_group.add_argument(
             "--ubatch-size",
             **parallel_kwargs["ubatch_size"],
@@ -1374,7 +1439,12 @@ class EngineArgs:
             "--prefix-match-unit", **cache_kwargs["prefix_match_unit"]
         )
         cache_group.add_argument(
-            "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
+            "--mamba-cache-mode",
+            **{
+                **cache_kwargs["mamba_cache_mode"],
+                "default": None,
+                "help": _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE,
+            },
         )
         cache_group.add_argument(
             "--enable-mamba-shared-prefix-checkpoint",
@@ -1774,6 +1844,7 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
+        kernel_group.add_argument("--monokernel", **kernel_kwargs["monokernel"])
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
@@ -1840,6 +1911,7 @@ class EngineArgs:
             "--aux-output-config", **vllm_kwargs["aux_output_config"]
         )
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
+        vllm_group.add_argument("--watchdog-config", **vllm_kwargs["watchdog_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
@@ -1880,7 +1952,7 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton", "cutedsl"],
+            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"],
             default=None,
             help="Select GDN prefill backend.",
         )
@@ -1921,6 +1993,8 @@ class EngineArgs:
                 "launched vLLM.",
                 self.seed,
             )
+        if self.disable_cascade_attn is not None:
+            warnings.warn(_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE, stacklevel=1)
 
         return ModelConfig(
             model=self.model,
@@ -1952,7 +2026,6 @@ class EngineArgs:
             use_fp64_gumbel=self.use_fp64_gumbel,
             enable_trace_replay=self.enable_trace_replay,
             disable_sliding_window=self.disable_sliding_window,
-            disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
@@ -1979,9 +2052,12 @@ class EngineArgs:
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            sleep_mode_backend=self.sleep_mode_backend,
+            sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
             enable_cumem_allocator=self.enable_cumem_allocator,
             enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
+            checkpoint_prepare_on_startup=self.checkpoint_prepare_on_startup,
             model_impl=self.model_impl,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
@@ -2100,7 +2176,7 @@ class EngineArgs:
                 for x in cvd.split(",")
             ]
             for i in int_ids:
-                if i >= len(cvd_ids):
+                if not 0 <= i < len(cvd_ids):
                     raise ValueError(
                         f"--device-ids index {i} is out of range for "
                         f"{current_platform.device_control_env_var}"
@@ -2124,6 +2200,25 @@ class EngineArgs:
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
         return WatermarkConfig(**cfg)
+
+    def create_structured_outputs_config(self) -> StructuredOutputsConfig:
+        """Merge frontend parser flags into the structured outputs config.
+
+        Mutates `self.structured_outputs_config` in place and returns it
+        (not a copy). Model-specific defaults (e.g. gpt_oss ->
+        "openai_gptoss") are applied later by `verify_and_update_config`
+        only when the resolved value is still empty, so explicit CLI flags
+        take precedence.
+        """
+        if self.reasoning_parser:
+            self.structured_outputs_config.reasoning_parser = self.reasoning_parser
+
+        if self.reasoning_parser_plugin:
+            self.structured_outputs_config.reasoning_parser_plugin = (
+                self.reasoning_parser_plugin
+            )
+
+        return self.structured_outputs_config
 
     def create_observability_config(self) -> ObservabilityConfig:
         return ObservabilityConfig(
@@ -2212,6 +2307,8 @@ class EngineArgs:
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
         )
+        if self.mamba_cache_mode is not None:
+            logger.warning_once(_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE)
 
         cache_config = CacheConfig(
             block_size=self.block_size,  # type: ignore[arg-type]
@@ -2231,7 +2328,6 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
-            mamba_cache_mode=self.mamba_cache_mode,
             enable_mamba_shared_prefix_checkpoint=(
                 self.enable_mamba_shared_prefix_checkpoint
             ),
@@ -2241,15 +2337,23 @@ class EngineArgs:
             kv_offloading_backend=self.kv_offloading_backend,
         )
 
-        if resolved_cache_dtype.startswith("turboquant_"):
+        # TurboQuant and UltraQuant both keep boundary attention layers at the
+        # native dtype, and compute those layers the same way.
+        uses_packed_kv_backend = (
+            resolved_cache_dtype.startswith("turboquant_")
+            or resolved_cache_dtype == "ultraquant_4bit"
+        )
+        if uses_packed_kv_backend:
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
 
             boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
-            existing = set(cache_config.kv_cache_dtype_skip_layers)
+            # Sorted so the order does not depend on set iteration: the list is
+            # a CacheConfig hash factor. Entries can also be attention type
+            # names (e.g. "sliding_window"), so sort them as strings.
             cache_config.kv_cache_dtype_skip_layers = sorted(
-                existing | set(boundary), key=int
+                set(cache_config.kv_cache_dtype_skip_layers) | set(boundary)
             )
 
         ray_runtime_env = None
@@ -2487,6 +2591,7 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
+            enable_hc_sp=self.enable_hc_sp,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
@@ -2494,6 +2599,7 @@ class EngineArgs:
             enable_elastic_ep=self.enable_elastic_ep,
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
             enable_dbo=self.enable_dbo,
+            enable_shm_tensor_arena=self.enable_shm_tensor_arena,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dp_sync_interval=self.dp_sync_interval,
@@ -2651,14 +2757,18 @@ class EngineArgs:
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
         # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
-        if resolved_cache_dtype.startswith("turboquant_") and (
+        # UltraQuant subclasses that impl, so it inherits the same limit.
+        if uses_packed_kv_backend and (
             attention_config.flash_attn_version is None
             or attention_config.flash_attn_version >= 3
         ):
             logger.warning(
-                "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "%s is not yet compatible with FlashAttention >= 3. "
                 "Overriding flash_attn_version to 2. To silence this "
-                "warning, pass --attention-config.flash_attn_version=2"
+                "warning, pass --attention-config.flash_attn_version=2",
+                "TurboQuant"
+                if resolved_cache_dtype.startswith("turboquant_")
+                else "UltraQuant",
             )
             attention_config.flash_attn_version = 2
 
@@ -2691,6 +2801,8 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.monokernel:
+            kernel_config.monokernel = True
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":
@@ -2713,17 +2825,13 @@ class EngineArgs:
 
             # Set the attribute
             setattr(kernel_config.ir_op_priority, op_name, op_priority)
+        if any(asdict(kernel_config.ir_op_priority).values()):
+            logger.warning_once(_IR_OP_PRIORITY_DEPRECATION_MESSAGE)
 
         load_config = self.create_load_config()
 
         # Pass reasoning_parser into StructuredOutputsConfig
-        if self.reasoning_parser:
-            self.structured_outputs_config.reasoning_parser = self.reasoning_parser
-
-        if self.reasoning_parser_plugin:
-            self.structured_outputs_config.reasoning_parser_plugin = (
-                self.reasoning_parser_plugin
-            )
+        self.create_structured_outputs_config()
 
         observability_config = self.create_observability_config()
 
@@ -2809,6 +2917,7 @@ class EngineArgs:
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
+            watchdog_config=self.watchdog_config,
             shutdown_timeout=self.shutdown_timeout,
         )
 
@@ -2855,10 +2964,14 @@ class EngineArgs:
         try:
             device_memory = current_platform.get_device_total_memory()
             device_name = current_platform.get_device_name().lower()
+            # GB10 (DGX Spark, cc 12.1) has the memory but not the compute of
+            # a large discrete GPU, keep it on the small tier.
+            is_gb10 = current_platform.is_device_capability((12, 1))
         except Exception:
             # This is only used to set default_max_num_batched_tokens
             device_memory = 0
             device_name = ""
+            is_gb10 = False
 
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
@@ -2873,7 +2986,11 @@ class EngineArgs:
                 UsageContext.LLM_CLASS: 1024,
                 UsageContext.OPENAI_API_SERVER: 1024,
             }
-        elif device_memory >= 70 * GiB_bytes and "a100" not in device_name:
+        elif (
+            device_memory >= 70 * GiB_bytes
+            and "a100" not in device_name
+            and not is_gb10
+        ):
             # For GPUs like H100 and H200, use larger offline defaults.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
@@ -3152,7 +3269,9 @@ class AsyncEngineArgs(EngineArgs):
             help="Enable logging request information, dependent on log level:\n"
             "- INFO: Request ID, parameters and LoRA request.\n"
             "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
-            "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.",
+            "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.\n"
+            "You can also set a separate log level for request JSON body "
+            "via `VLLM_REQUEST_BODY_LOG_LEVEL` (default: DEBUG).",
         )
         current_platform.pre_register_and_update(parser)
         return parser
