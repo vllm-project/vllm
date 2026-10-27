@@ -76,7 +76,8 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::json;
-    use vllm_tokenizer::{DecodedText, Tokenizer, test_utils::TestTokenizer};
+    use vllm_tokenizer::Tokenizer;
+    use vllm_tokenizer::test_utils::{TestTokenizer, decode_chunks};
     use xgrammar_structural_tag::{StructuralTag, ToolChoice};
 
     use super::{HyV3UnifiedParser, UnifiedParser};
@@ -122,7 +123,7 @@ mod tests {
     fn parses_suffixed_reasoning_and_tool_call_as_one_stream() {
         let tokenizer = Arc::new(tokenizer());
         let think_start_id = tokenizer.token_to_id("<think:opensource>").unwrap();
-        let mut parser = HyV3UnifiedParser::new(&tools(), tokenizer).unwrap();
+        let mut parser = HyV3UnifiedParser::new(&tools(), tokenizer.clone()).unwrap();
         parser.initialize(&[think_start_id]).unwrap();
 
         let chunks = [
@@ -133,15 +134,17 @@ mod tests {
             "</tool_call:opensource></tool_calls:opensource>",
         ];
         let mut output = UnifiedParserOutput::default();
-        for chunk in chunks {
-            parser.parse_into(DecodedText::unattributed(chunk), &mut output).unwrap();
+        for chunk in decode_chunks(tokenizer.as_ref(), &chunks) {
+            parser.parse_into(chunk, &mut output).unwrap();
         }
         output.append(parser.finish().unwrap());
 
         assert_eq!(
             output.events,
             vec![
-                UnifiedParserEvent::Reasoning(DecodedText::unattributed("reasoning")),
+                UnifiedParserEvent::Reasoning(
+                    decode_chunks(tokenizer.as_ref(), &["reasoning"]).remove(0),
+                ),
                 UnifiedParserEvent::Text("answer".to_string()),
                 UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
                     tool_index: 0,
@@ -164,6 +167,7 @@ mod tests {
                 tools: &tools,
                 tool_strict_level: Default::default(),
                 parallel_tool_calls: true,
+                answer: None,
                 tool_choice: &ToolChoice::required(),
             })
             .unwrap()
@@ -194,6 +198,7 @@ mod tests {
                     tool_choice: &ToolChoice::required(),
                     tool_strict_level: Default::default(),
                     parallel_tool_calls: true,
+                    answer: None,
                 })
                 .unwrap()
                 .unwrap();

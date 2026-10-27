@@ -15,8 +15,7 @@ use crate::error::{ApiError, bail_invalid_request};
 /// - `previous_response_id` cannot be resolved without a store, and is
 ///   rejected with a 404 like an unknown response ID would be.
 ///
-/// HTTP status and `param` match Python; the body retains the Rust frontend's
-/// string error codes rather than Python's numeric HTTP codes.
+/// Errors use the shared frontend envelope with numeric HTTP codes.
 pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), ApiError> {
     if request.background.unwrap_or(false) {
         bail_invalid_request!(

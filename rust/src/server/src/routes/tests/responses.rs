@@ -16,7 +16,7 @@ use super::*;
 
 fn reasoning_answer_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
     vec![
-        (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
+        (token_ids("<think>Need tool.</think>"), None),
         (bytes_to_token_ids(b"answer"), None),
         // '!' is the fake tokenizer's stop token; it is suppressed from the
         // visible text but carries the finish reason.
@@ -323,12 +323,17 @@ async fn responses_auto_truncation_reaches_engine() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn responses_watermarking_defaults_and_opt_out_reach_engine_core() {
-    for watermarking in [None, Some(true), Some(false)] {
+    for (watermarking, expected) in [
+        (None, true),
+        (Some(json!(null)), true),
+        (Some(json!(true)), true),
+        (Some(json!(false)), false),
+    ] {
         let (app, engine_task) = test_app_with_backend_and_engine_request_check(
             Arc::new(FakeChatBackend::new()),
             move |request| {
                 let params = request.sampling_params.as_ref().expect("sampling params");
-                assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+                assert_eq!(params.watermarking, expected);
             },
         )
         .await;
@@ -338,7 +343,7 @@ async fn responses_watermarking_defaults_and_opt_out_reach_engine_core() {
             "input": "hello",
         });
         if let Some(watermarking) = watermarking {
-            body["watermarking"] = json!(watermarking);
+            body["watermarking"] = watermarking;
         }
         let response = responses_call(&app, body).await;
 
@@ -434,7 +439,48 @@ async fn responses_non_streaming_length_finish_is_incomplete() {
         .iter()
         .find(|item| item["type"] == "message")
         .expect("message item");
-    assert_eq!(message["status"], "completed");
+    assert_eq!(message["status"], "incomplete");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_length_finish_only_marks_the_last_tool_incomplete() {
+    for stream in [false, true] {
+        let mut outputs = weather_tool_call_output_specs();
+        outputs.last_mut().unwrap().1 = Some(EngineCoreFinishReason::Length);
+        let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+            Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+            outputs,
+        )
+        .await;
+        let response = responses_call(
+            &app,
+            json!({"input": "weather?", "tools": [weather_function_tool()], "stream": stream}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        engine_task.await.unwrap();
+        let response: serde_json::Value = if stream {
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            let payloads = sse_json_payloads(&text);
+            let terminal = payloads.last().unwrap();
+            let done = payloads
+                .iter()
+                .filter(|event| event["type"] == "response.output_item.done")
+                .map(|event| event["item"].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(json!(done), terminal["response"]["output"]);
+            terminal["response"].clone()
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        };
+        assert_eq!(response["status"], "incomplete");
+        assert_eq!(response["output"][0]["type"], "reasoning");
+        assert_eq!(response["output"][0]["status"], "completed");
+        assert_eq!(response["output"][1]["type"], "function_call");
+        assert_eq!(response["output"][1]["status"], "incomplete");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -473,6 +519,12 @@ async fn responses_streaming_length_finish_emits_incomplete_event() {
         terminal["response"]["incomplete_details"]["reason"],
         "max_output_tokens"
     );
+    let item_done = payloads
+        .iter()
+        .find(|event| event["type"] == "response.output_item.done")
+        .expect("output item done");
+    assert_eq!(item_done["item"]["status"], "incomplete");
+    assert_eq!(item_done["item"], terminal["response"]["output"][0]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -979,6 +1031,8 @@ async fn responses_store_dependent_features_are_rejected() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["error"]["param"], "response_id");
+    assert_eq!(json["error"]["type"], "NotFoundError");
+    assert_eq!(json["error"]["code"], 404);
 
     // Retrieval and cancellation of never-stored responses are 404.
     for (method, uri) in [

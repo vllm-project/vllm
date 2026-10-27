@@ -36,7 +36,7 @@ use self::convert::{ResponseMeta, build_response, build_usage, prepare_responses
 use self::streaming::{OutputItemStreamer, ResponseStreamEvent, response_lifecycle_event};
 use self::types::{ResponseError, ResponseItemStatus, ResponsesRequest, ResponsesResponse};
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, chat_submit_error, server_error, text_submit_error};
+use crate::error::{ApiError, chat_submit_error, engine_error, server_error, text_submit_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
@@ -146,10 +146,8 @@ async fn collect_responses(
         ..
     } = collected;
 
-    if matches!(finish_reason, FinishReason::Error) {
-        return Err(server_error!(
-            "responses generation failed with a retryable internal error"
-        ));
+    if let FinishReason::Error(error) = &finish_reason {
+        return Err(engine_error(error.as_deref()));
     }
     let status = response_status(&finish_reason);
 
@@ -167,7 +165,7 @@ async fn collect_responses(
         meta,
         request_id,
         created_at,
-        convert::build_output_items(&message, meta.include_reasoning),
+        convert::build_output_items(&message, meta.include_reasoning, &finish_reason),
         status,
         Some(build_usage(&usage)),
         kv_transfer_params,
@@ -180,7 +178,7 @@ fn response_status(finish_reason: &FinishReason) -> ResponseItemStatus {
     match finish_reason {
         FinishReason::Length => ResponseItemStatus::Incomplete,
         FinishReason::Abort => ResponseItemStatus::Cancelled,
-        FinishReason::Error => ResponseItemStatus::Failed,
+        FinishReason::Error(_) => ResponseItemStatus::Failed,
         FinishReason::Stop(_) | FinishReason::Repetition(_) => ResponseItemStatus::Completed,
     }
 }
@@ -235,13 +233,14 @@ async fn responses_event_stream(
                 finish_reason,
                 kv_transfer_params,
                 ec_transfer_params,
+                ..
             }) => {
                 terminal = Some(TerminalOutput {
                     message,
                     usage,
                     finish_reason,
-                    kv_transfer_params,
-                    ec_transfer_params,
+                    kv_transfer_params: kv_transfer_params.map(|params| *params),
+                    ec_transfer_params: ec_transfer_params.map(|params| *params),
                 });
                 break;
             }
@@ -252,7 +251,7 @@ async fn responses_event_stream(
             }
             Err(error) => {
                 error!(error = %error.as_report(), "responses stream failed");
-                for event in items.on_stream_end() {
+                for event in items.on_stream_end(None) {
                     y.yield_ok(event).await;
                 }
                 emit_failed(
@@ -270,7 +269,7 @@ async fn responses_event_stream(
         }
     }
 
-    for event in items.on_stream_end() {
+    for event in items.on_stream_end(terminal.as_ref().map(|output| &output.finish_reason)) {
         y.yield_ok(event).await;
     }
 
@@ -296,13 +295,13 @@ async fn responses_event_stream(
         ec_transfer_params,
     } = terminal;
 
-    if matches!(finish_reason, FinishReason::Error) {
+    if matches!(finish_reason, FinishReason::Error(_)) {
         emit_failed(
             &mut y,
             &meta,
             &request_id,
             created_at,
-            items.final_output_items(&message),
+            items.final_output_items(&message, &finish_reason),
             "The model failed to generate a response.",
             Some(&usage),
         )
@@ -314,7 +313,7 @@ async fn responses_event_stream(
         &meta,
         &request_id,
         created_at,
-        items.final_output_items(&message),
+        items.final_output_items(&message, &finish_reason),
         response_status(&finish_reason),
         Some(build_usage(&usage)),
         kv_transfer_params,
@@ -338,7 +337,7 @@ fn terminal_event_type(finish_reason: &FinishReason) -> &'static str {
             "response.completed"
         }
         // Error finishes are emitted above with an error payload.
-        FinishReason::Error => "response.failed",
+        FinishReason::Error(_) => "response.failed",
     }
 }
 

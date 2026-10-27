@@ -31,20 +31,22 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
-# Per-token byte width of the two paged fp8 records. Both put a page's whole
-# data region ahead of its whole scale region, so ``k_cache.shape[-1]`` -- the
+# Per-token byte width of the paged records; ``k_cache.shape[-1]`` -- the
 # width the KV-cache spec publishes -- identifies the record:
 #   V4   (584 B): 448 fp8 e4m3 NoPE + 64 bf16 RoPE, then 7 UE8M0 scales of 64
-#                 dims each plus a pad byte.
+#                 dims each plus a pad byte. A page puts its whole data region
+#                 ahead of its whole scale region.
 #   V4.1 (528 B): all 512 dims as fp8 e4m3 (RoPE included), then 16 UE8M0
 #                 scales of 32 dims each. FlashMLA's ``ModelType::V41``.
 #   V4.1 NVFP4 (288 B): 512 e2m1 values packed two per byte (even element in
 #                 the low nibble), then 32 e4m3 scales of 16 dims each.
 #                 FlashMLA's ``ModelType::V41_FP4``, compressed cache only.
+# The V4.1 records are interleaved: each token's scales follow its own data.
 V4_BYTES_PER_TOKEN = 584
 V41_BYTES_PER_TOKEN = 528
 V41_QUANT_BLOCK = 32
@@ -211,10 +213,8 @@ def _quantize_and_insert_k_mxfp8_kernel(
 
     # int64: block_idx * block_stride can exceed 2^31 with many KV-cache blocks.
     cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride
-    token_data_ptr = cache_block_ptr + pos_in_block * head_dim
-    token_scale_ptr = (
-        cache_block_ptr + cache_block_size * head_dim + pos_in_block * scale_dim
-    )
+    token_data_ptr = cache_block_ptr + pos_in_block * (head_dim + scale_dim)
+    token_scale_ptr = token_data_ptr + head_dim
 
     d = tl.arange(0, head_dim)
     x = tl.load(k_ptr + pid.to(tl.int64) * head_dim + d).to(tl.float32)
@@ -567,10 +567,8 @@ def _dequantize_and_gather_k_mxfp8_kernel(
 
         # int64: physical_block_idx * block_stride can exceed 2^31.
         cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
-        token_data_ptr = cache_block_ptr + pos_in_block * head_dim
-        token_scale_ptr = (
-            cache_block_ptr + cache_block_size * head_dim + pos_in_block * scale_dim
-        )
+        token_data_ptr = cache_block_ptr + pos_in_block * (head_dim + scale_dim)
+        token_scale_ptr = token_data_ptr + head_dim
 
         x_uint8 = tl.load(token_data_ptr + d)
         if use_fnuz:
@@ -628,10 +626,9 @@ def _dequantize_and_gather_k_nvfp4_kernel(
             block_table_ptr + batch_idx * max_blocks_per_seq + block_in_seq
         )
         page = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+        token_ptr = page + pos_in_block * (packed_bytes + scale_dim)
 
-        packed = tl.load(
-            page + pos_in_block * packed_bytes + tl.arange(0, packed_bytes)
-        )
+        packed = tl.load(token_ptr + tl.arange(0, packed_bytes))
         # Even element in the low nibble, odd in the high nibble.
         codes = tl.interleave((packed & 0xF).to(tl.int32), (packed >> 4).to(tl.int32))
         # e2m1 magnitudes: 0, 0.5, 1, 1.5, 2, 3, 4, 6.
@@ -641,12 +638,7 @@ def _dequantize_and_gather_k_nvfp4_kernel(
         mag = tl.where(mag_code < 2, m * 0.5, (1.0 + m * 0.5) * tl.exp2(e - 1.0))
         vals = tl.where(codes >= 8, -mag, mag)
 
-        sf = tl.load(
-            page
-            + cache_block_size * packed_bytes
-            + pos_in_block * scale_dim
-            + tl.arange(0, scale_dim)
-        )
+        sf = tl.load(token_ptr + packed_bytes + tl.arange(0, scale_dim))
         scale = sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
         tiles = tl.reshape(vals, (scale_dim, quant_block))
         dequant = tl.reshape(tiles * tl.reshape(scale, (scale_dim, 1)), (head_dim,))
@@ -954,6 +946,7 @@ def combine_topk_swa_indices(
         )
     else:
         combined_indices, combined_lens = out
+        combined_indices.fill_(-1)
 
     _COMBINE_TOPK_SWA_INDICES_KERNEL(
         combined_indices,
@@ -1012,7 +1005,7 @@ def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     """
     model_config = getattr(vllm_config, "model_config", None)
     hf_config = getattr(model_config, "hf_config", None)
-    compress_ratios = getattr(hf_config, "compress_ratios", None) or [0]
+    compress_ratios = get_compress_ratios(hf_config) or [0]
     topk = _hf_config_int(vllm_config, "index_topk", 0)
     return zip_inputs(
         *(
@@ -1089,7 +1082,8 @@ class CombineTopkSwaIndicesKernel(
             token_idx_in_query = token_idx - query_start
             pos = start_pos + token_idx_in_query
             if COMPRESS_RATIO > 0:
-                topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
+                # Warmup batches can put pos below zero; keep the length >= 0.
+                topk_len = tl.maximum(tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K), 0)
             else:
                 # SWA-only layers pass TOP_K=0; skip the division entirely
                 # (integer div by constexpr 0 is UB and yields garbage, which
@@ -1100,7 +1094,7 @@ class CombineTopkSwaIndicesKernel(
             # start (SWA bounded replay), so the window cannot start before
             # the gathered buffer does.
             swa_start = tl.maximum(swa_start, gather_start)
-            swa_len = pos - swa_start + 1
+            swa_len = tl.maximum(pos - swa_start + 1, 0)
 
             offset = tl.arange(0, PADDED_TOP_K)
             mask = offset < topk_len
@@ -1108,9 +1102,12 @@ class CombineTopkSwaIndicesKernel(
                 topk_indices_ptr + token_idx * topk_indices_stride + offset,
                 mask=mask,
             )
+            # A failed (-1) or out-of-pool candidate stays -1 instead of landing
+            # in the previous request's rows or this request's SWA rows.
+            valid = (topk_indices >= 0) & (topk_indices < N)
             tl.store(
                 combined_indices_ptr + token_idx * combined_indices_stride + offset,
-                topk_indices + M * batch_idx,
+                tl.where(valid, topk_indices + M * batch_idx, -1),
                 mask=mask,
             )
             # Index into gathered buffer: N + (position - gather_start)

@@ -168,8 +168,9 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub temperature: Option<f32>,
     /// Whether to apply the engine's configured watermark to generated text.
-    #[serde(default = "default_true")]
-    pub watermarking: bool,
+    /// `None` requests it like `true`, matching Chat Completions.
+    #[serde(default)]
+    pub watermarking: Option<bool>,
     #[serde(default)]
     pub top_p: Option<f32>,
     #[serde(default, deserialize_with = "deserialize_request_top_k")]
@@ -441,6 +442,17 @@ pub enum ResponseOutputItem {
     },
 }
 
+impl ResponseOutputItem {
+    /// Mark truncated text or function output incomplete, matching Python.
+    pub(super) fn mark_incomplete(&mut self) {
+        match self {
+            Self::Message { status, .. } => *status = ResponseItemStatus::Incomplete,
+            Self::FunctionCall { status, .. } => *status = Some(ResponseItemStatus::Incomplete),
+            Self::Reasoning { .. } => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AssistantRole;
 
@@ -494,10 +506,8 @@ pub struct IncompleteDetails {
 /// The top-level response object returned by non-streaming requests and
 /// carried by lifecycle streaming events.
 ///
-/// Mirrors the Python vLLM `ResponsesResponse` class. Sampling fields are
-/// echoed from the request with OpenAI defaults (1.0) applied; note the
-/// Python frontend echoes engine-resolved values instead when the model
-/// provides generation defaults.
+/// Mirrors the Python vLLM `ResponsesResponse` class. Sampling fields use
+/// explicit request values or the model defaults resolved by the handler.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResponsesResponse {
@@ -589,7 +599,7 @@ mod tests {
         .unwrap();
         assert!(matches!(request.input, ResponsesInput::Text(text) if text == "hello"));
         assert!(request.include_reasoning);
-        assert!(request.watermarking);
+        assert_eq!(request.watermarking, None);
         assert_eq!(request.model.as_deref(), Some("test-model"));
     }
 

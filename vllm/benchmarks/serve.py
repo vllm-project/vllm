@@ -122,8 +122,22 @@ async def _align_prompts_to_server_tokenizer(
 
         try:
             first_tokens = await _tokenize(input_requests[0].prompt)
-        except Exception:
-            print("WARNING: /tokenize unavailable, skipping alignment.")
+        except aiohttp.ClientConnectionError as e:
+            print(f"WARNING: {base_url} unreachable ({e!r}), skipping alignment.")
+            return input_requests
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                hint = (
+                    "404 Not Found: either this server has no /tokenize route,"
+                    f" or it does not serve a model named `{model_id}`"
+                    " (its served names are listed by GET /v1/models)"
+                )
+            else:
+                hint = f"HTTP {e.status}"
+            print(f"WARNING: /tokenize unavailable ({hint}), skipping alignment.")
+            return input_requests
+        except Exception as e:
+            print(f"WARNING: /tokenize probe failed ({e!r}), skipping alignment.")
             return input_requests
 
         expected = input_requests[0].prompt_len
@@ -253,7 +267,7 @@ async def fetch_spec_decode_metrics(
                 num_accepted_tokens=num_accepted_tokens,
                 accepted_per_pos=accepted_per_pos,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         return None
 
 
@@ -315,7 +329,7 @@ async def fetch_diffusion_metrics(
                 num_canvas_positions=num_canvas_positions,
                 num_committed_tokens=num_committed_tokens,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         return None
 
 
@@ -372,6 +386,21 @@ class EmbedBenchmarkMetrics:
     std_e2el_ms: float
     median_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
+
+
+def _get_server_metrics_results(
+    outputs: list[RequestFuncOutput],
+) -> dict[str, list[float | None]]:
+    if not any(
+        output.server_queue_time is not None or output.server_ttft is not None
+        for output in outputs
+    ):
+        return {}
+
+    return {
+        "server_queue_times": [output.server_queue_time for output in outputs],
+        "server_ttfts": [output.server_ttft for output in outputs],
+    }
 
 
 def _get_current_request_rate(
@@ -823,22 +852,25 @@ async def benchmark(
     # Reuses connections across requests to reduce TLS handshake overhead.
     # Use ssl_context if provided, otherwise default to True for https URLs
     ssl_setting = ssl_context if ssl_context is not None else ("https://" in api_url)
-    connector = aiohttp.TCPConnector(
-        limit=max_concurrency or 0,
-        limit_per_host=max_concurrency or 0,
-        ttl_dns_cache=300,
-        use_dns_cache=True,
-        keepalive_timeout=60,
-        enable_cleanup_closed=True,
-        force_close=False,
-        ssl=ssl_setting,
-    )
 
-    session = aiohttp.ClientSession(
-        connector=connector,
-        trust_env=True,
-        timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
-    )
+    def make_session(limit: int) -> aiohttp.ClientSession:
+        connector = aiohttp.TCPConnector(
+            limit=limit,
+            limit_per_host=limit,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+            keepalive_timeout=60,
+            enable_cleanup_closed=True,
+            force_close=False,
+            ssl=ssl_setting,
+        )
+        return aiohttp.ClientSession(
+            connector=connector,
+            trust_env=True,
+            timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
+        )
+
+    session = make_session(max_concurrency or 0)
 
     print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
@@ -997,11 +1029,16 @@ async def benchmark(
             chat_messages=None,
         )
         interval = 1 / probe_request_rate
-        while not probe_stop.is_set():
-            probe_outputs.append(
-                await request_func(request_func_input=probe_input, session=session)
-            )
-            await asyncio.sleep(interval)
+        # The main session's pool is capped at max_concurrency, so probes use
+        # their own connection.
+        async with make_session(1) as probe_session:
+            while not probe_stop.is_set():
+                probe_outputs.append(
+                    await request_func(
+                        request_func_input=probe_input, session=probe_session
+                    )
+                )
+                await asyncio.sleep(interval)
 
     probe_task: asyncio.Task | None = None
     if probe_request_rate > 0:
@@ -1080,14 +1117,16 @@ async def benchmark(
         )
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if probe_task is not None:
-        probe_stop.set()
-        await probe_task
-
     if pbar is not None:
         pbar.close()
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
+
+    # Stop probes after measuring the duration, so the final probe interval
+    # is not counted toward the main workload's throughput.
+    if probe_task is not None:
+        probe_stop.set()
+        await probe_task
 
     spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
     spec_decode_stats: dict[str, Any] | None = None
@@ -1315,6 +1354,8 @@ async def benchmark(
             "errors": [output.error for output in outputs],
         }
 
+    result.update(_get_server_metrics_results(outputs))
+
     queue_times: list[float] | None = None
     e2els_including_queue: list[float] | None = None
     if max_concurrency is not None:
@@ -1527,7 +1568,14 @@ def save_to_pytorch_benchmark_format(
     ]
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
-    ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
+    ignored_metrics = [
+        "ttfts",
+        "itls",
+        "generated_texts",
+        "errors",
+        "server_queue_times",
+        "server_ttfts",
+    ]
     pt_records = convert_to_pytorch_benchmark_format(
         args=redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS),
         metrics={k: [results[k]] for k in metrics if k in results},
@@ -1653,8 +1701,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "--input-len",
         type=int,
         default=None,
-        help="General input length for datasets. Maps to dataset-specific "
-        "input length arguments (e.g., --random-input-len, --sonnet-input-len). "
+        help="General input length for datasets. Maps to --random-input-len. "
         "If not specified, uses dataset defaults.",
     )
     parser.add_argument(
@@ -1662,7 +1709,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
         type=int,
         default=None,
         help="General output length for datasets. Maps to dataset-specific "
-        "output length arguments (e.g., --random-output-len, --sonnet-output-len). "
+        "output length arguments (e.g., --random-output-len, --hf-output-len). "
         "If not specified, uses dataset defaults.",
     )
     parser.add_argument(
@@ -2115,18 +2162,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"Cannot use '{args.dataset_name}' dataset with --dataset-path. "
             "Please specify the appropriate --dataset-name (e.g., "
-            "'sharegpt', 'custom', 'sonnet') for your dataset file: "
+            "'sharegpt', 'custom', 'hf') for your dataset file: "
             f"{args.dataset_path}"
         )
 
-    # Map general --input-len and --output-len to all dataset-specific arguments
+    # Map general length options to dataset-specific arguments.
     if args.input_len is not None:
         args.random_input_len = args.input_len
-        args.sonnet_input_len = args.input_len
 
     if args.output_len is not None:
         args.random_output_len = args.output_len
-        args.sonnet_output_len = args.output_len
         args.sharegpt_output_len = args.output_len
         args.custom_output_len = args.output_len
         args.hf_output_len = args.output_len
@@ -2198,11 +2243,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "Sampling parameters are only supported by openai-compatible backends."
             )
-
-        # The Responses API accepts every sampling parameter above except
-        # min_p, which it would silently drop as an unknown field.
-        if args.backend == "openai-responses" and "min_p" in sampling_params:
-            raise ValueError("--min-p is not supported by the Responses API.")
 
         if "temperature" not in sampling_params:
             print(
@@ -2395,6 +2435,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "itls",
             "generated_texts",
             "errors",
+            "server_queue_times",
+            "server_ttfts",
         ]:
             if field in result_json:
                 del result_json[field]
