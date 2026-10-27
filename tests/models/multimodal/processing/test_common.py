@@ -325,13 +325,8 @@ def test_glm5_metadata_only_roundtrip(modality, monkeypatch):
     def unexpected_preprocessing(*args, **kwargs):
         pytest.fail("The EC consumer must not preprocess vision inputs")
 
-    # InputProcessingContext is frozen, so patch the method on the class.
-    # GLM-4V calls ctx.call_hf_processor directly rather than
-    # processor._call_hf_processor.
     monkeypatch.setattr(
-        type(processor.info.ctx),
-        "call_hf_processor",
-        unexpected_preprocessing,
+        processor.info.ctx, "call_hf_processor", unexpected_preprocessing
     )
     remote = processor(
         prompt,
