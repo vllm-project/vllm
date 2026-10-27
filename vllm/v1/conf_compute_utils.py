@@ -21,6 +21,14 @@ so that:
   is only awaited through the patched torch.cuda / torch.Event methods. D2H on
   any other stream keeps the original, host-blocking copy, since e.g. a
   ``torch.accelerator.current_stream().synchronize()`` can't be patched.
+  A registered stream is only ever ordered after a producer stream by
+  ``wait_stream()`` and then carries D2H copies, so the events that mark its
+  position (the copies' readiness, and events recorded on it such as the
+  caller's copy event) are recorded on that producer stream instead. Under CC
+  an event recorded on an otherwise idle stream behind a cross-stream wait was
+  observed to fire only once the compute stream's *next* graph had finished,
+  which delayed every sampled token by a full step; an event recorded on the
+  producer stream fires on time.
 
 Copies made while torch.compile is tracing or a CUDA graph is being captured
 are left alone, as are H2D copies into an existing tensor that would need a
@@ -45,6 +53,7 @@ _orig_event_cls = torch.Event
 _orig_cuda_event_record = torch.cuda.Event.record
 _orig_cuda_event_synchronize = torch.cuda.Event.synchronize
 _orig_stream_synchronize = torch.cuda.Stream.synchronize
+_orig_stream_wait_stream = torch.cuda.Stream.wait_stream
 _orig_stream_query = torch.cuda.Stream.query
 _orig_cuda_synchronize = torch.cuda.synchronize
 _orig_accel_synchronize = torch.accelerator.synchronize
@@ -55,6 +64,8 @@ _pending_lock = threading.Lock()
 _pending: list[Future] = []
 # Raw handles of the streams registered via register_d2h_stream().
 _d2h_streams: set[int] = set()
+# For each registered stream, the producer stream it last waited on.
+_producer_of: dict[int, torch.cuda.Stream] = {}
 # Upper bound on the staging buffer an H2D copy into an existing tensor may use.
 _MAX_STAGED_BYTES = 32 << 20
 
@@ -106,7 +117,7 @@ def _d2h(src: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor | N
     if out is None:
         out = torch.empty(src.shape, dtype=src.dtype, pin_memory=True)
     ready = torch.cuda.Event(blocking=True)
-    _orig_cuda_event_record(ready, cur)
+    _orig_cuda_event_record(ready, _producer_of.get(cur.cuda_stream, cur))
 
     def run() -> None:
         # Sleep until the producer is done, so the host-synchronous copy only
@@ -205,6 +216,7 @@ def _patch_event_methods(cls: Any) -> dict[str, Any]:
 
     def record(self, stream=None):
         self._cc_pending = _pending_snapshot()
+        stream = _record_target(stream)
         if stream is None:
             return orig_record(self)
         return orig_record(self, stream)
@@ -219,6 +231,21 @@ def _patch_event_methods(cls: Any) -> dict[str, Any]:
         return all(f.done() for f in pending) and orig_query(self)
 
     return {"record": record, "synchronize": synchronize, "query": query}
+
+
+def _stream_wait_stream(self, stream):
+    _orig_stream_wait_stream(self, stream)
+    if self.cuda_stream in _d2h_streams:
+        _producer_of[self.cuda_stream] = stream
+
+
+def _record_target(stream):
+    """Where an event recorded on ``stream`` (None: the current stream) goes:
+    the producer stream of a registered D2H stream, otherwise ``stream``."""
+    s = stream if stream is not None else torch.cuda.current_stream()
+    if s.cuda_stream in _d2h_streams:
+        return _producer_of.get(s.cuda_stream, stream)
+    return stream
 
 
 def _stream_synchronize(self):
@@ -267,6 +294,7 @@ def install() -> None:
         "Event", (_orig_event_cls,), _patch_event_methods(_orig_event_cls)
     )
     torch.cuda.Stream.synchronize = _stream_synchronize
+    torch.cuda.Stream.wait_stream = _stream_wait_stream
     torch.cuda.Stream.query = _stream_query
     torch.cuda.synchronize = _cuda_synchronize
     torch.accelerator.synchronize = _accel_synchronize
