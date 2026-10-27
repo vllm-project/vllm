@@ -3152,12 +3152,16 @@ class VllmConfig:
         receives the prompt KV produced from those embeddings, so it does not
         need the tensors either. On every other deployment a missing tensor is
         a client error and must keep failing fast in the frontend.
+
+        A text-only deployment (every modality limited to 0) is sent no
+        embeddings and stays text-only: enabling embedding inputs there would
+        have the multimodal budget build a dummy item the limits then reject.
         """
         model_config = self.model_config
         if model_config is None:
             return
         mm_config = model_config.multimodal_config
-        if mm_config is None:
+        if mm_config is None or not model_config.supports_multimodal_inputs:
             return
 
         ec_config = self.ec_transfer_config
