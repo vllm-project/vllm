@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.config import VllmConfig
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 from vllm.v1.attention.backends.mla.prefill.flashinfer import FlashInferPrefillBackend
 from vllm.v1.attention.backends.mla.prefill.registry import (
@@ -302,7 +303,7 @@ def test_prefill_construction_reserves_unwarmed_slots(monkeypatch, backend_cls):
             qk_nope_head_dim=16,
             qk_rope_head_dim=8,
             v_head_dim=32,
-            vllm_config=MagicMock(),
+            vllm_config=VllmConfig(),
         )
         manager = current_workspace_manager()
         manager.lock()
