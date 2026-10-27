@@ -690,7 +690,7 @@ def test_rebuilt_prefill_metadata_uses_target_batch_slots():
     assert speculator._build_drafter_attn_metadata(None, *target) == target
 
     speculator.can_reuse_target_attn_metadata = False
-    speculator.attn_groups = [[object()]]
+    speculator.attn_groups = [[Mock()]]
     speculator.model_state = Mock()
     speculator.model_state.prepare_attn.return_value = {"draft": "metadata"}
     speculator.kv_cache_config = SimpleNamespace(
