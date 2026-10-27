@@ -69,6 +69,9 @@ class AttentionBackend(ABC):
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
 
+    # Can forward() run with key/value omitted after a fused op wrote the cache?
+    supports_kv_cache_update_bypass: bool = False
+
     @staticmethod
     def get_supported_kernel_block_sizes(
         kv_cache_spec: "KVCacheSpec | None" = None,
@@ -1113,6 +1116,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        skip_scale: bool = False,
     ) -> None:
         if kv_cache.numel() == 0:
             return
@@ -1125,6 +1129,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             slot_mapping.flatten(),
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
+            skip_scale=skip_scale,
         )
 
 

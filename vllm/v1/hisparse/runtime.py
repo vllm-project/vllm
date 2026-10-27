@@ -164,9 +164,9 @@ def _check_residency_shared_memory(
     device: torch.device, config: ResolvedHiSparseConfig
 ) -> None:
     """Reject a config whose residency resolver exceeds per-block shared memory."""
-    # Mirrors hisparse_resolve_residency's layout: union hash keys and values
-    # (plus an empty slot), per-chunk offsets, five counters, done bits, and
-    # the int16 compacted LRU.
+    # Minimum resolver layout: union hash keys and values (plus an empty slot),
+    # per-chunk offsets, five counters, done bits, and the int16 compacted LRU.
+    # The kernel uses remaining shared memory to lower the hash-table load.
     hot_size = config.device_buffer_size
     num_chunks = cdiv(hot_size, 32)
     required = 4 * (2 * (config.max_union_rows + 1) + 3 * num_chunks + 7) + 2 * hot_size
