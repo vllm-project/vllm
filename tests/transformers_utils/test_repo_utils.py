@@ -8,8 +8,10 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 from huggingface_hub import _CACHED_NO_EXIST
+from huggingface_hub.utils import filter_repo_objects
 
 from vllm.transformers_utils.repo_utils import (
+    _WEIGHT_FILE_PATTERNS,
     any_pattern_in_repo_files,
     get_hf_file_to_dict,
     is_mistral_model_repo,
@@ -196,3 +198,44 @@ def test_with_retry_does_not_retry_fatal_errors():
         with_retry(func, "Error", fatal_errors=(FileNotFoundError,))
 
     func.assert_called_once()
+
+
+# File names from openai-community/gpt2 and google-bert/bert-base-uncased.
+@pytest.mark.parametrize(
+    "weight_file",
+    [
+        "model.safetensors",
+        "pytorch_model.bin",
+        "tf_model.h5",
+        "flax_model.msgpack",
+        "onnx/decoder_model.onnx",
+        "rust_model.ot",
+        "64.tflite",
+        "64-fp16.tflite",
+        "coreml/fill-mask/float32_model.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+        "coreml/fill-mask/float32_model.mlpackage/Manifest.json",
+    ],
+)
+def test_non_weight_snapshot_skips_weight_files(weight_file: str):
+    """Tokenizer and processor snapshots must not download model weights."""
+    assert not list(
+        filter_repo_objects([weight_file], ignore_patterns=_WEIGHT_FILE_PATTERNS)
+    )
+
+
+@pytest.mark.parametrize(
+    "tokenizer_file",
+    [
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json",
+        "vocab.txt",
+        "merges.txt",
+        "onnx/tokenizer.json",
+    ],
+)
+def test_non_weight_snapshot_keeps_tokenizer_files(tokenizer_file: str):
+    assert list(
+        filter_repo_objects([tokenizer_file], ignore_patterns=_WEIGHT_FILE_PATTERNS)
+    ) == [tokenizer_file]
