@@ -657,11 +657,9 @@ class FlashInferBackend(AttentionBackend):
             kv_cache_dtype is not None
             and kv_cache_dtype.startswith("nvfp4")
             and device_capability.major in (8, 9, 12)
+            and head_size == 64
         ):
-            if head_size == 64:
-                return "fa2 prefill misreads an NVFP4 KV cache at head_size 64"
-            if has_sink:
-                return "the sink prefill wrapper cannot read an NVFP4 KV cache"
+            return "fa2 prefill misreads an NVFP4 KV cache at head_size 64"
         return None
 
     @classmethod
@@ -1067,7 +1065,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.use_trtllm_dcp_prefill:
             logger.info_once("Using the trtllm-gen context kernel for DCP prefill.")
         self.has_sinks = self.global_hyperparameters.has_sinks
-        if self.has_sinks and (self.nvfp4_fa2 or not FlashInferBackend.supports_sink()):
+        if self.has_sinks and not FlashInferBackend.supports_sink():
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
                 "sinks, please use trtllm on blackwell or flash attention on "
@@ -1404,7 +1402,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
             else:
                 if self.has_sinks:
-                    assert not self.is_kvcache_nvfp4
                     self._prefill_wrapper = BatchAttentionWithAttentionSinkWrapper(
                         self._get_workspace_buffer(),
                         get_flashinfer_layout_string(self.kv_cache_layout),
@@ -2397,6 +2394,8 @@ class FlashInferImpl(AttentionImpl):
                     else:
                         out_prefill = output[num_decode_tokens:]
 
+                    # The fa2 NVFP4 query stays in the model dtype.
+                    q_scale = 1.0 if self.nvfp4_fa2 else layer._q_scale_float
                     if isinstance(
                         prefill_wrapper, BatchAttentionWithAttentionSinkWrapper
                     ):
@@ -2405,16 +2404,16 @@ class FlashInferImpl(AttentionImpl):
                             prefill_query,
                             kv_cache_for_fi,
                             self.sinks,
-                            self.scale * layer._q_scale_float * layer._k_scale_float,
+                            self.scale * q_scale * layer._k_scale_float,
                             v_scale=layer._v_scale_float,
                             out=out_prefill,
+                            kv_cache_sf=kv_cache_sf,
                         )
                     else:
                         prefill_wrapper.run(
                             prefill_query,
                             kv_cache_for_fi,
-                            # The fa2 NVFP4 query stays in the model dtype.
-                            q_scale=1.0 if self.nvfp4_fa2 else layer._q_scale_float,
+                            q_scale=q_scale,
                             k_scale=layer._k_scale_float,
                             v_scale=layer._v_scale_float,
                             out=out_prefill,
@@ -2563,6 +2562,8 @@ class FlashInferImpl(AttentionImpl):
                 else:
                     kv_cache_for_fi = kv_cache_tuple
                 kv_cache_sf = nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+                # The fa2 NVFP4 query stays in the model dtype.
+                q_scale = 1.0 if self.nvfp4_fa2 else layer._q_scale_float
 
                 # NVFP4 kernel only supports FP8 output.
                 # Use a pre-allocated FP8 buffer and dequantize afterwards.
@@ -2604,15 +2605,16 @@ class FlashInferImpl(AttentionImpl):
                         decode_query,
                         kv_cache_for_fi,
                         self.sinks,
-                        self.scale * layer._q_scale_float * layer._k_scale_float,
+                        self.scale * q_scale * layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=out_decode,
+                        kv_cache_sf=kv_cache_sf,
                     )
                 else:
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_for_fi,
-                        q_scale=1.0 if self.nvfp4_fa2 else layer._q_scale_float,
+                        q_scale=q_scale,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=out_decode,
