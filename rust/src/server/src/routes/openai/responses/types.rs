@@ -442,6 +442,17 @@ pub enum ResponseOutputItem {
     },
 }
 
+impl ResponseOutputItem {
+    /// Mark truncated text or function output incomplete, matching Python.
+    pub(super) fn mark_incomplete(&mut self) {
+        match self {
+            Self::Message { status, .. } => *status = ResponseItemStatus::Incomplete,
+            Self::FunctionCall { status, .. } => *status = Some(ResponseItemStatus::Incomplete),
+            Self::Reasoning { .. } => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AssistantRole;
 
@@ -495,10 +506,8 @@ pub struct IncompleteDetails {
 /// The top-level response object returned by non-streaming requests and
 /// carried by lifecycle streaming events.
 ///
-/// Mirrors the Python vLLM `ResponsesResponse` class. Sampling fields are
-/// echoed from the request with OpenAI defaults (1.0) applied; note the
-/// Python frontend echoes engine-resolved values instead when the model
-/// provides generation defaults.
+/// Mirrors the Python vLLM `ResponsesResponse` class. Sampling fields use
+/// explicit request values or the model defaults resolved by the handler.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResponsesResponse {

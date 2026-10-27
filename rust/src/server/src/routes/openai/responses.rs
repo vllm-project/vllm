@@ -161,7 +161,7 @@ async fn collect_responses(
         meta,
         request_id,
         created_at,
-        convert::build_output_items(&message, meta.include_reasoning),
+        convert::build_output_items(&message, meta.include_reasoning, &finish_reason),
         status,
         Some(build_usage(&usage)),
         kv_transfer_params,

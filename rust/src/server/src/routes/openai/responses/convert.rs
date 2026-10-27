@@ -796,8 +796,9 @@ impl ResponseMessageContent {
 pub(crate) fn build_output_items(
     message: &vllm_chat::AssistantMessage,
     include_reasoning: bool,
+    finish_reason: &vllm_chat::FinishReason,
 ) -> Vec<ResponseOutputItem> {
-    message
+    let mut items: Vec<_> = message
         .content
         .iter()
         .filter_map(|block| match block {
@@ -831,7 +832,13 @@ pub(crate) fn build_output_items(
                 status: Some(ResponseItemStatus::Completed),
             }),
         })
-        .collect()
+        .collect();
+    if matches!(finish_reason, vllm_chat::FinishReason::Length)
+        && let Some(last) = items.last_mut()
+    {
+        last.mark_incomplete();
+    }
+    items
 }
 
 /// Build the `usage` block of a completed response.

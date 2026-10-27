@@ -206,6 +206,8 @@ Code example: [examples/tool_calling/openai_responses_client_with_tools.py](../.
     and `function_call_output` items when continuing a tool interaction.
     `stream: true` is not supported yet; omitted or null `stream` selects a
     non-streaming response.
+    A token limit marks the response and its last message or function-call
+    output item as `incomplete`; earlier output items remain `completed`.
 
     Responses are never retained: `store: true` executes without storage,
     `background: true` is rejected, and `previous_response_id`, retrieval, and
