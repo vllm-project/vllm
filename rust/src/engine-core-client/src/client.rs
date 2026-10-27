@@ -473,11 +473,13 @@ impl EngineCoreClient {
         self.inner.pending_utility_call_count()
     }
 
-    /// Return the engine-side indices connected to this client.
+    /// Return the engine-side indices connected to this client, as stamped on
+    /// request output streams: an engine identity that does not encode an
+    /// index maps to 0, as in [`Self::call`].
     pub fn engine_indices(&self) -> Vec<u32> {
         self.engines
             .iter()
-            .map(|engine| engine.engine_id.engine_index().expect("engine id must encode as u16"))
+            .map(|engine| engine.engine_id.engine_index().unwrap_or(0))
             .collect()
     }
 
