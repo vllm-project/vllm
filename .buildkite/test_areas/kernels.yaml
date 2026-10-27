@@ -579,8 +579,10 @@ steps:
   - vllm/models/minimax_m3/nvidia/ops/sparse_prefill.py
   - tests/v1/attention/utils.py
   - tests/kernels/attention/test_minimax_m3.py
+  - tests/kernels/test_minimax_m3_sparse_attn_fp8_scale.py
   commands:
     - pytest -v -s tests/kernels/attention/test_minimax_m3.py -k prefill_sparse_attention_correctness
+    - pytest -v -s tests/kernels/test_minimax_m3_sparse_attn_fp8_scale.py
 
 - label: ":nvidia: (B200) Kernels Shard %N"
   key: kernels-b200
