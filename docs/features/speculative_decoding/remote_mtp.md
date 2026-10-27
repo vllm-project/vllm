@@ -28,6 +28,12 @@ or topology in each family. A target with hybrid attention or recurrent layers
 can have a conventional attention-only MTP head. The target's architecture name
 alone does not determine the draft's cache layout.
 
+The draft's effective `max_model_len`, derived from its own checkpoint position
+settings and any speculative context limit, must cover the target's configured
+`max_model_len`. Startup rejects shorter drafts before native execution. Reduce
+the target context limit to use such a checkpoint. Setting a round's K to zero
+does not bypass this requirement: MTP still updates draft context in that round.
+
 Exaone MTP modules use the draft checkpoint's module count, attention types and
 sliding windows, including when the draft checkpoint is published separately
 from the target.

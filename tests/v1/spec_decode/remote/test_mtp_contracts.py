@@ -90,6 +90,33 @@ def _config(model_type="ernie4_5_moe", architecture="Ernie4_5_MoeForCausalLM", k
     return copy.deepcopy(_template(model_type, architecture, k)[1])
 
 
+@pytest.mark.parametrize("draft_limit", [16, 64])
+def test_mtp_public_config_requires_draft_context_to_cover_target(draft_limit):
+    """A public draft config must cover every context admitted by the target."""
+    directory, _ = _template("ernie4_5_moe", "Ernie4_5_MoeForCausalLM", 1)
+    config = _config()
+    save_file(
+        {"identity_only": torch.zeros(1)}, Path(directory.name) / "model.safetensors"
+    )
+    hf_config = copy.deepcopy(config.model_config.hf_config)
+    hf_config.max_position_embeddings = draft_limit
+    draft = ModelConfig(
+        model=directory.name,
+        runner="draft",
+        dtype="bfloat16",
+        max_model_len=draft_limit,
+        skip_tokenizer_init=True,
+        hf_overrides=lambda _: SpeculativeConfig.hf_config_override(hf_config),
+    )
+    assert draft.max_model_len == draft_limit
+    config.speculative_config.draft_model_config = draft
+    if draft_limit < config.model_config.max_model_len:
+        with pytest.raises(ValueError, match="standalone MTP.*draft.*max_model_len"):
+            create_runtime_contract(config)
+    else:
+        assert create_runtime_contract(config).capabilities.state_dependency == "own_kv"
+
+
 @pytest.mark.parametrize("model_type,target_arch,draft_arch,k", MODELS)
 def test_native_mtp_config_override_resolves_own_kv_contract(
     model_type, target_arch, draft_arch, k
