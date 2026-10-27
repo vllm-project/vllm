@@ -70,6 +70,12 @@ class StandaloneARSpeculator(DraftModelSpeculator):
     def capture(self) -> None:
         pass  # CUDA graph not yet supported for standalone AR speculator.
 
+    @property
+    def attn_vllm_config(self) -> VllmConfig:
+        if self.speculative_config.kv_cache_dtype is not None:
+            return self._draft_vllm_config
+        return self.vllm_config
+
     def set_attn(
         self,
         model_state: ModelState,
@@ -99,15 +105,24 @@ class StandaloneARSpeculator(DraftModelSpeculator):
     ) -> nn.Module:
         spec = self.speculative_config
         assert spec is not None
+        cache_config = self.vllm_config.cache_config
+        if spec.kv_cache_dtype is not None:
+            cache_config = replace(cache_config, cache_dtype=spec.kv_cache_dtype)
+
         draft_vllm_config = replace(
             self.vllm_config,
             model_config=self.draft_model_config,
             quant_config=None,
+            cache_config=cache_config,
             parallel_config=replace(
                 spec.draft_parallel_config,
                 rank=self.vllm_config.parallel_config.rank,
             ),
         )
+        draft_vllm_config.parallel_config.data_parallel_index = (
+            self.vllm_config.parallel_config.data_parallel_index
+        )
+        self._draft_vllm_config = draft_vllm_config
         with set_model_tag("draft_model"):
             return get_model(
                 vllm_config=draft_vllm_config,
@@ -336,6 +351,10 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 self.draft_logits,
             )
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
+
     @torch.inference_mode()
     def propose(
         self,
@@ -350,7 +369,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -362,7 +381,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         num_reqs = input_batch.num_reqs
         skip_attn = dummy_run and skip_attn_for_dummy_run
         num_tokens_across_dp = (
-            dp_sync.num_tokens_across_dp if dp_sync is not None else None
+            dp_sync_state.num_tokens_across_dp if dp_sync_state is not None else None
         )
 
         # Copy per-request temperature/seeds/idx_mapping into pre-allocated
@@ -402,7 +421,7 @@ def _prepare_prefill_inputs_kernel(
     target_input_ids_ptr,  # [src_tokens] int32
     target_positions_ptr,  # [src_tokens] int64
     last_sampled_ptr,  # [max_num_reqs] int32
-    idx_mapping_ptr,  # [num_reqs] int32
+    idx_mapping_ptr,  # [num_reqs] int64
     out_input_ids_ptr,  # [src_tokens + num_reqs] int32
     out_positions_ptr,  # [src_tokens + num_reqs] int64
     last_token_indices_ptr,  # [max_num_reqs] int64
