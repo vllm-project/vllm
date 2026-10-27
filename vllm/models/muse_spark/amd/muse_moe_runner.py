@@ -37,10 +37,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    Mxfp4MoeBackend,
-    _interleave_gate_up_rows,
-)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
 )
@@ -571,14 +568,6 @@ def _use_w4a16_mxfp4_experts() -> bool:
     return on_gfx942() and rocm_aiter_ops.is_enabled()
 
 
-def interleave_w13_for_triton_swiglu(layer: torch.nn.Module) -> None:
-    """Repack w13 from [gate | up] rows to the gate/up row pairs that the
-    AITER Triton SwiGLU epilogue reads."""
-    for name in ("w13_weight", "w13_weight_scale"):
-        param = getattr(layer, name)
-        param.data = _interleave_gate_up_rows(param.data)
-
-
 class MuseSparkAiterW4A16Experts(_RouteOutputHandoff, mk.FusedMoEExpertsModular):
     """gfx942 MXFP4 experts: AITER Triton W4A16, one unweighted output per route.
 
@@ -600,6 +589,13 @@ class MuseSparkAiterW4A16Experts(_RouteOutputHandoff, mk.FusedMoEExpertsModular)
             )
         if quant_config.post_expert_norm_fn is None:
             raise ValueError("MuseSpark1x post-expert norm is not configured.")
+        from aiter.ops.triton.moe.moe_routing import routing
+
+        if getattr(routing, "_USE_HERD", False):
+            raise NotImplementedError(
+                "MuseSpark1x W4A16 MXFP4 experts route each expanded row top-1 "
+                "and are incompatible with AITER_TRITON_USE_HERD."
+            )
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -760,7 +756,8 @@ class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
 
 
 class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
-    """Quark W4A4 method using route-preserving stock AITER experts."""
+    """Quark W4A4 method using route-preserving AITER experts: CK W4A4 on gfx950,
+    Triton W4A16 on gfx942."""
 
     def __init__(
         self,
@@ -777,14 +774,18 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
             )
         if self.mxfp4_backend is Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
             self.experts_cls = MuseSparkAiterExperts
-        elif _use_w4a16_mxfp4_experts():
-            # Keep the MXFP4 weights; run BF16 activations through AITER Triton.
+        elif _use_w4a16_mxfp4_experts() and moe.moe_backend in (
+            "auto",
+            "aiter",
+            "aiter_triton_mxfp4_bf16",
+        ):
+            logger.info_once(
+                "MuseSpark1x MXFP4 on gfx942: replacing the %s backend with AITER "
+                "Triton W4A16 experts (MXFP4 weights, BF16 activations).",
+                self.mxfp4_backend.value,
+            )
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16
             self.experts_cls = MuseSparkAiterW4A16Experts
-            logger.info_once(
-                "MuseSpark1x MXFP4 on gfx942: using AITER Triton W4A16 experts "
-                "(BF16 activations)."
-            )
         else:
             raise NotImplementedError(
                 "MuseSpark1x MXFP4 on ROCm requires the AITER_MXFP4_MXFP4 backend "
@@ -818,7 +819,14 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
             )
             del layer._quark_expert_loaded_slots
         if self.mxfp4_backend is Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
-            interleave_w13_for_triton_swiglu(layer)
+            # The Triton SwiGLU epilogue reads gate/up as interleaved row pairs.
+            for param in (layer.w13_weight, layer.w13_weight_scale):
+                experts, rows, cols = param.shape
+                param.data = (
+                    param.data.view(experts, 2, rows // 2, cols)
+                    .transpose(1, 2)
+                    .reshape(experts, rows, cols)
+                )
         super().process_weights_after_loading(layer)
 
 
