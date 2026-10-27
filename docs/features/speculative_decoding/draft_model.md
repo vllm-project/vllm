@@ -109,4 +109,4 @@ for output in outputs:
     to speculative decoding. The previous method of specifying the model
     through `--speculative-model` and adding related parameters such as
     `--num-speculative-tokens` separately has been deprecated. For supported
-    keys, see [vllm.config.SpeculativeConfig][].
+    keys and examples, see the [`--speculative-config` schema](README.md#--speculative-config-schema).
