@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -622,6 +622,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
     def _fused_qnorm_rope_kv_insert(self, q, kv, positions, attn_metadata):
         if self._use_asm_sparse_mla and isinstance(attn_metadata, dict):
+            if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+                # The packed-query dispatch depends on this replay's metadata.
+                return q
             from .asm_sparse_mla import prepare_qk
 
             md = attn_metadata[self.swa_cache_layer.prefix]
@@ -812,6 +815,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             default_first=True,
         )
 
+        if self._use_asm_sparse_mla:
+            # Auxiliary outputs remain live until their consumer stream finishes.
+            stream = torch.cuda.current_stream()
+            if latent is not None:
+                latent.record_stream(stream)
+            indexer_weights.record_stream(stream)
+
         indexer._produce_k(latent, positions, self.indexer_rotary_emb)
         index_q, index_q_scale, index_weights_out = indexer.forward_q(
             qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
@@ -863,6 +873,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             enable=True,
             default_first=True,
         )
+        if self._use_asm_sparse_mla:
+            stream = torch.cuda.current_stream()
+            for tensor in aux_results[0]:
+                if tensor is not None:
+                    tensor.record_stream(stream)
         index_q, index_q_scale, index_weights_out = aux_results[0]
         return q, kv, index_q, index_q_scale, index_weights_out
 
@@ -1046,6 +1061,14 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             attn_metadata.get(self.swa_cache_layer.prefix),
         )
         assert swa_metadata is not None
+
+        if (
+            self._use_asm_sparse_mla
+            and forward_context.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        ):
+            from .asm_sparse_mla import prepare_qk
+
+            q = prepare_qk(self, q, kv, positions, swa_metadata)
 
         swa_only = self.compress_ratio == 0
         self_kv_cache = None if swa_only else self._compressed_kv_cache()
