@@ -38,7 +38,11 @@ from vllm.v1.core.encoder_cache_manager import (
     EncoderDecoderCacheManager,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
-from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_metrics import (
+    KV_CACHE_BLOCK_STATES_INTERVAL_S,
+    KVCacheMetricsCollector,
+    count_kv_cache_blocks_by_state,
+)
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
@@ -109,6 +113,8 @@ class Scheduler(SchedulerInterface):
             self.observability_config.per_request_spec_decode_metrics
         )
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
+        self._kv_cache_block_states_time: float | None = None
+        self._kv_cache_block_states_idle_key: tuple[int, int] | None = None
         if self.observability_config.kv_cache_metrics:
             self.kv_metrics_collector = KVCacheMetricsCollector(
                 self.observability_config.kv_cache_metrics_sample,
@@ -3166,8 +3172,10 @@ class Scheduler(SchedulerInterface):
         if reset_connector:
             reset_successful = self.reset_connector_cache() and reset_successful
 
-        if reset_successful and self.aux_output_connector is not None:
-            self.aux_output_connector.reset()
+        if reset_successful:
+            self._kv_cache_block_states_idle_key = None
+            if self.aux_output_connector is not None:
+                self.aux_output_connector.reset()
 
         return reset_successful
 
@@ -3222,6 +3230,7 @@ class Scheduler(SchedulerInterface):
             if self.kv_metrics_collector is not None
             else []
         )
+        kv_cache_blocks_by_state = self._maybe_count_kv_cache_blocks_by_state()
         spec_stats = spec_decoding_stats
         connector_stats_payload = (
             kv_connector_stats.to_dict() if kv_connector_stats else None
@@ -3245,6 +3254,40 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
             ec_connector_stats=ec_connector_stats_payload,
+            kv_cache_blocks_by_state=kv_cache_blocks_by_state,
+        )
+
+    def _maybe_count_kv_cache_blocks_by_state(self) -> dict[str, int] | None:
+        """Count KV cache blocks by state when due on the sampling cadence.
+
+        Counts at most every `KV_CACHE_BLOCK_STATES_INTERVAL_S` while busy,
+        and when idle if the pool state differs from the last idle count.
+        Returns `None` when disabled, within the busy interval, or unchanged
+        while idle.
+        """
+        if not self.observability_config.kv_cache_metrics:
+            return None
+        block_pool = self.kv_cache_manager.block_pool
+        if self.requests:
+            now = time.monotonic()
+            last = self._kv_cache_block_states_time
+            if last is not None and now - last < KV_CACHE_BLOCK_STATES_INTERVAL_S:
+                return None
+            self._kv_cache_block_states_time = now
+            # The gauge now shows a busy count; replace it once idle.
+            self._kv_cache_block_states_idle_key = None
+        else:
+            # A queued batch can still drain deferred frees after going idle.
+            idle_key = (block_pool.get_num_free_blocks(), len(self.deferred_frees))
+            if idle_key == self._kv_cache_block_states_idle_key:
+                return None
+            self._kv_cache_block_states_idle_key = idle_key
+        return count_kv_cache_blocks_by_state(
+            block_pool,
+            self.kv_cache_manager.coordinator.single_type_managers,
+            self.requests,
+            self.finished_recving_kv_req_ids,
+            self.deferred_frees,
         )
 
     def make_spec_decoding_stats(

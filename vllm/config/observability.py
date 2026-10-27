@@ -61,7 +61,9 @@ class ObservabilityConfig:
 
     kv_cache_metrics: bool = False
     """Enable KV cache residency metrics (lifetime, idle time, reuse gaps).
-    Uses sampling to minimize overhead.
+    Uses sampling to minimize overhead. Also enables the
+    `vllm:kv_cache_blocks_by_state` gauge, counted every 10 seconds and when
+    the engine goes idle.
     Requires log stats to be enabled (i.e., --disable-log-stats not set)."""
 
     kv_cache_metrics_sample: float = Field(default=0.01, gt=0, le=1)
