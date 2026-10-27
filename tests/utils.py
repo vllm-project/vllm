@@ -276,10 +276,6 @@ class RemoteVLLMServer:
             self._pre_download_model(model, args)
         self._shutdown_complete = False
 
-        # A just-exited process's VRAM may not be reclaimed yet on a
-        # shared host; wait for it to clear before a doomed engine start.
-        self._wait_for_gpu_memory_available(args.gpu_memory_utilization)
-
         # Record GPU memory before server start so we know what
         # "released" looks like.
         self._pre_server_gpu_memory = self._get_gpu_memory_used()
@@ -556,7 +552,8 @@ class RemoteVLLMServer:
                 continue
         return members
 
-    def _get_gpu_memory_per_device(self) -> list[tuple[float, float]] | None:
+    @staticmethod
+    def _get_gpu_memory_per_device() -> list[tuple[float, float]] | None:
         """Get (free_bytes, total_bytes) for each visible device.
 
         On ROCm this initializes HIP in the caller; subsequent multiprocessing
@@ -597,8 +594,8 @@ class RemoteVLLMServer:
             return None
         return sum(total - free for free, total in per_device)
 
-    def _wait_for_gpu_memory_available(
-        self,
+    @staticmethod
+    def wait_for_gpu_memory_available(
         gpu_memory_utilization: float,
         timeout: float = 60.0,
         poll_interval: float = 5.0,
@@ -607,15 +604,16 @@ class RemoteVLLMServer:
         ``free >= total * gpu_memory_utilization``
         (``vllm.v1.worker.utils.request_memory``).
 
-        A shared host can leave a just-exited process's VRAM unreclaimed
-        for a few seconds, transiently failing that check. This doesn't
-        replace vLLM's check -- it just avoids paying for a doomed engine
-        start. If memory is still short at ``timeout``, log the shortfall
-        and let vLLM raise its own error.
+        Opt-in preflight for suites that have hit transient startup
+        failures from a just-exited process's VRAM not yet reclaimed on a
+        shared host; not called automatically by every test using this
+        class. Doesn't replace vLLM's check -- it just avoids paying for
+        a doomed engine start. If memory is still short at ``timeout``,
+        log the shortfall and let vLLM raise its own error.
         """
         start = time.time()
         while True:
-            per_device = self._get_gpu_memory_per_device()
+            per_device = RemoteVLLMServer._get_gpu_memory_per_device()
             if per_device is None:
                 return  # Can't query, nothing to do
 
@@ -636,16 +634,16 @@ class RemoteVLLMServer:
                     for i, free, total, required in shortfalls
                 )
                 print(
-                    f"[{type(self).__name__}] GPU memory still insufficient "
-                    f"after {elapsed:.0f}s ({details}). This usually means "
-                    "a previous process on this host has not released its "
+                    f"[GPU memory preflight] still insufficient after "
+                    f"{elapsed:.0f}s ({details}). This usually means a "
+                    "previous process on this host has not released its "
                     "VRAM yet; proceeding and letting vLLM's own startup "
                     "check raise."
                 )
                 return
 
             print(
-                f"[{type(self).__name__}] Waiting for GPU memory to free up "
+                f"[GPU memory preflight] Waiting for GPU memory to free up "
                 f"before server start [{elapsed:.0f}s/{timeout:.0f}s]"
             )
             time.sleep(poll_interval)
