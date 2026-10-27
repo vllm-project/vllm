@@ -1177,6 +1177,21 @@ def test_validate_batch_rejects_malformed_request(tmp_path):
         validate_batch(f)
 
 
+@pytest.mark.parametrize("url_field", [{}, {"url": None}, {"url": 5}])
+def test_validate_batch_reports_a_bad_url_field(tmp_path, url_field):
+    """A missing or non-string url is reported on its line, not as a KeyError."""
+    request = json.loads(INPUT_BATCH.split("\n")[0])
+    request.pop("url")
+    request.update(url_field)
+    input_path = _write_batch(tmp_path, [json.dumps(request)])
+
+    with (
+        open(input_path, encoding="utf-8") as f,
+        pytest.raises(ValueError, match=r"(?s)line 1:.*url"),
+    ):
+        validate_batch(f)
+
+
 @pytest.mark.asyncio
 async def test_open_batch_input_keeps_a_carriage_return_inside_a_line(tmp_path):
     """A bare carriage return is JSON whitespace, not a line break."""
