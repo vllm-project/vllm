@@ -55,6 +55,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import xpu_forward_debug
 from vllm.v1.attention.backend import AttentionType
 
 from .adapters import as_embedding_model, as_seq_cls_model
@@ -116,9 +117,12 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        x, _ = self.gate_up_proj(x)
-        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
-        x, _ = self.down_proj(x)
+        with xpu_forward_debug("llama.mlp.gate_up_proj"):
+            x, _ = self.gate_up_proj(x)
+        with xpu_forward_debug("llama.mlp.activation"):
+            x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
+        with xpu_forward_debug("llama.mlp.down_proj"):
+            x, _ = self.down_proj(x)
         return x
 
 
@@ -226,11 +230,15 @@ class LlamaAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
+        with xpu_forward_debug("llama.attention.qkv_proj"):
+            qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
+        with xpu_forward_debug("llama.attention.rotary_emb"):
+            q, k = self.rotary_emb(positions, q, k)
+        with xpu_forward_debug("llama.attention.attn"):
+            attn_output = self.attn(q, k, v)
+        with xpu_forward_debug("llama.attention.o_proj"):
+            output, _ = self.o_proj(attn_output)
         return output
 
     def _init_rotary_emb(
@@ -317,15 +325,19 @@ class LlamaDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        with xpu_forward_debug("llama.decoder.input_layernorm"):
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        with xpu_forward_debug("llama.decoder.post_attention_layernorm"):
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -400,6 +412,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
             ["hidden_states", "residual"], config.hidden_size
         )
 
+    @xpu_forward_debug("llama.model.embed_input_ids")
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -433,9 +446,10 @@ class LlamaModel(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(
-                positions, hidden_states, residual, **extra_layer_kwargs
-            )
+            with xpu_forward_debug(f"llama.model.layer.{idx}"):
+                hidden_states, residual = layer(
+                    positions, hidden_states, residual, **extra_layer_kwargs
+                )
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
@@ -449,7 +463,8 @@ class LlamaModel(nn.Module, EagleModelMixin):
                 }
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        with xpu_forward_debug("llama.model.norm"):
+            hidden_states, _ = self.norm(hidden_states, residual)
 
         aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
