@@ -54,6 +54,7 @@ def _make_offloading_config(
     world_size: int | None = None,
     replicated_layout: bool = False,
     is_parallelism_agnostic: bool = False,
+    blocks_per_chunk: int = 1,
 ) -> OffloadingConfig:
     if world_size is None:
         world_size = tp_size
@@ -64,7 +65,9 @@ def _make_offloading_config(
         extra_config={},
         engine_id="test-engine",
         model=OffloadingModelConfig(name="test/model", dtype="float16"),
-        cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
+        cache=OffloadingCacheConfig(
+            tokens_per_hash=16, blocks_per_chunk=blocks_per_chunk
+        ),
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=world_size,
@@ -83,6 +86,7 @@ def _make_offloading_config(
 
 _OFFLOADING_SPEC = SimpleNamespace(
     config=_make_offloading_config(enable_kv_cache_events=False),
+    blocks_per_chunk=1,
 )
 
 _STORE_CONFIG = {
@@ -139,7 +143,8 @@ class MockNixlAgent:
     check_xfer_state: Callable
     query_memory: Callable
 
-    def __init__(self):
+    def __init__(self, agent_name, config):
+        self._capture_telemetry = config.capture_telemetry
         self._stored_obj_keys: set[str] = set()
         # handle_id -> (op, [obj_keys])
         self._pending: dict[int, tuple[str, list[str]]] = {}
@@ -203,6 +208,8 @@ class MockNixlAgent:
         pass
 
     def get_xfer_telemetry(self, handle):
+        if not self._capture_telemetry:
+            raise RuntimeError("Telemetry capture is disabled")
         return SimpleNamespace(xferDuration=1000)
 
     def _query_memory(self, queries, mem_type, agent_name):
@@ -218,6 +225,7 @@ def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:
     """Offloading spec stub with an explicit global KV events flag."""
     return SimpleNamespace(
         config=_make_offloading_config(enable_kv_cache_events),
+        blocks_per_chunk=1,
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=enable_kv_cache_events,
             self_describing_kv_events=False,
@@ -232,15 +240,19 @@ def _make_tier(
     **tier_kwargs,
 ) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
     """Create a tier backed by a fresh MockNixlAgent."""
-    mock_agent = MockNixlAgent()
     if primary_kv_view is None:
         tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
         primary_kv_view = memoryview(tensor.numpy())
     with (
-        patch("vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config"),
+        patch(
+            "vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config",
+            side_effect=lambda backends, capture_telemetry=False: SimpleNamespace(
+                capture_telemetry=capture_telemetry
+            ),
+        ),
         patch(
             "vllm.v1.kv_offload.tiering.obj.manager.nixl_agent",
-            return_value=mock_agent,
+            side_effect=MockNixlAgent,
         ),
     ):
         tier = ObjectStoreSecondaryTierManager(
@@ -251,7 +263,7 @@ def _make_tier(
             prefix=_RUN_PREFIX,
             **tier_kwargs,
         )
-    return tier, mock_agent
+    return tier, tier._agent
 
 
 def drain(
@@ -315,14 +327,16 @@ class TestMockObjTierBasic:
         assert lookup_and_wait(self.tier, [key(999)]) == [LookupResult.MISS]
 
     def test_store_then_load_roundtrip(self):
+        """Completed stores and loads report transfer timing without an env override."""
         self.tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
         results = drain(self.tier)
-        assert results[0].success
+        assert results == [JobResult(job_id=1, success=True, transfer_time=0.001)]
 
         self.tier.submit_load(make_job(2, [key(1), key(2)], [0, 1]))
         results = drain(self.tier)
-        assert len(results) == 1
-        assert results[0].success
+        assert results == [JobResult(job_id=2, success=True, transfer_time=0.001)]
+        assert not self.tier._transfers
+        assert list(self.tier.get_finished_jobs()) == []
 
     def test_multiple_jobs_tracked_independently(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
@@ -771,6 +785,7 @@ def test_obj_tier_replicated_layout_collapses_mapper_identity():
         config=_make_offloading_config(
             False, tp_size=2, world_size=2, rank=1, replicated_layout=True
         ),
+        blocks_per_chunk=1,
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=False,
             self_describing_kv_events=False,
@@ -780,6 +795,7 @@ def test_obj_tier_replicated_layout_collapses_mapper_identity():
         config=_make_offloading_config(
             False, tp_size=4, world_size=4, rank=3, replicated_layout=True
         ),
+        blocks_per_chunk=1,
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=False,
             self_describing_kv_events=False,
@@ -797,3 +813,22 @@ def test_obj_tier_replicated_layout_collapses_mapper_identity():
     finally:
         tp2_tier.shutdown()
         tp4_tier.shutdown()
+
+
+def test_obj_tier_namespace_includes_blocks_per_chunk():
+    """Chunks of different sizes have different layouts, so they must not share
+    object keys (the fs tier namespaces by chunk size the same way)."""
+    tiers = []
+    for blocks_per_chunk in (1, 4):
+        spec = SimpleNamespace(
+            config=_make_offloading_config(False, blocks_per_chunk=blocks_per_chunk),
+            blocks_per_chunk=blocks_per_chunk,
+        )
+        tiers.append(_make_tier(offloading_spec=spec)[0])
+    try:
+        assert tiers[0]._file_mapper.get_file_name(key(1)) != (
+            tiers[1]._file_mapper.get_file_name(key(1))
+        )
+    finally:
+        for tier in tiers:
+            tier.shutdown()

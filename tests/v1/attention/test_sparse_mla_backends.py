@@ -3,6 +3,9 @@
 """Unit tests for the sparse MLA backends and utilities."""
 
 import math
+import os
+import subprocess
+import sys
 from collections import deque
 from types import MethodType, SimpleNamespace
 from typing import Any
@@ -111,6 +114,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops import flashmla
 from vllm.v1.hisparse import runtime as hisparse_runtime
+from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseRuntime,
@@ -2011,6 +2015,27 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int, reuse_buffers
         assert torch.all(result[row, num_valid:] == -1)
 
 
+def test_hisparse_generic_stream_orders_ipc_event():
+    """Generic copy streams must record IPC events and restore the compute stream."""
+    from vllm.v1.hisparse.backend import CUDAHiSparseBackend
+
+    backend = CUDAHiSparseBackend()
+    compute_stream = torch.accelerator.current_stream()
+    copy_stream = torch.Stream(device=torch.device(DEVICE_TYPE))
+    values = torch.arange(8, dtype=torch.float32, device=DEVICE_TYPE)
+    input_ready = torch.Event()
+    input_ready.record(compute_stream)
+    copy_stream.wait_event(input_ready)
+    output_ready = backend.create_ipc_event()
+    with copy_stream:
+        values.add_(1)
+        output_ready.record(copy_stream)
+    assert torch.cuda.current_stream().stream_id == compute_stream.stream_id
+    compute_stream.wait_event(output_ready)
+
+    torch.testing.assert_close(values.cpu(), torch.arange(8, dtype=torch.float32) + 1)
+
+
 def test_sparse_mla_index_group_converts_decode_indices_once(monkeypatch):
     device = torch.device(DEVICE_TYPE)
     logical = torch.full((2, 128), -1, dtype=torch.int32, device=device)
@@ -2488,13 +2513,23 @@ def test_hisparse_resolver_reads_current_request_ids():
 
 
 @requires_hisparse_ops
-def test_hisparse_union_table_scales_with_union_bound():
+@pytest.mark.parametrize("top_k", [128, 8192])
+def test_hisparse_union_table_scales_with_union_bound(top_k):
     """Shared memory follows the per-request union bound, not the hot buffer.
 
     Sizing the table from device_buffer_size needs ~340 KB here and fails.
     """
     device = torch.device(DEVICE_TYPE)
-    block_size, row_width, top_k = 64, 64, 128
+    try:
+        hisparse_runtime._check_residency_shared_memory(
+            device,
+            ResolvedHiSparseConfig(
+                top_k=top_k, device_buffer_size=32768, max_union_rows=top_k
+            ),
+        )
+    except ValueError:
+        pytest.skip("union bound exceeds this device's shared memory")
+    block_size, row_width = 64, 64
     num_blocks = top_k // block_size
     kv_pool = torch.randn(
         (num_blocks + 1, block_size, row_width), dtype=torch.float32
@@ -2537,6 +2572,34 @@ def test_hisparse_union_table_scales_with_union_bound():
     torch.testing.assert_close(
         gathered, kv_pool.reshape(-1, row_width)[global_ref.cpu().to(torch.long)]
     )
+
+
+@requires_hisparse_ops
+def test_hisparse_expanded_hash_keeps_union_bound():
+    """Extra hash capacity must not admit more rows than the declared union."""
+    script = """
+import torch
+from vllm import _custom_ops
+host = torch.zeros((64, 16), dtype=torch.uint8).pin_memory()
+hot = torch.zeros((1, 64, 16), dtype=torch.uint8, device="cuda")
+table = torch.zeros((1, 1), dtype=torch.int32, device="cuda")
+indices = torch.arange(4, dtype=torch.int32, device="cuda").view(1, 4)
+output = torch.empty_like(indices)
+ownership = torch.full((1, 4), -1, dtype=torch.int32, device="cuda")
+lru = torch.arange(4, dtype=torch.int16, device="cuda").view(1, 4)
+torch.ops._C_cache_ops.hisparse_resolve_residency(
+    host, hot, table, indices, output, ownership, lru, None, 4, 3)
+torch.accelerator.synchronize()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "CUDA_ENABLE_COREDUMP_ON_EXCEPTION": "0"},
+    )
+    assert result.returncode != 0
+    assert "unspecified launch failure" in result.stderr
 
 
 @requires_hisparse_ops
@@ -2908,6 +2971,7 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
         for _ in resident_caches
     )
     worker = object.__new__(HiSparseConnectorWorker)
+    worker.backend = get_hisparse_backend()
     worker.is_host_writer = True
     worker.kernel_block_size = block_size
     worker.resident_caches = resident_caches
@@ -2919,7 +2983,7 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
         )
         for _ in resident_caches
     ]
-    worker.dma_stream = torch.cuda.Stream(device=device)
+    worker.dma_stream = torch.Stream(device=device)
     worker.host_write_event = torch.Event()
     worker._dma_free_descriptors = []
     worker._pending_dma_descriptors = deque()
@@ -3571,8 +3635,10 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
         .to(device)
     )
 
-    staged = HiSparseRuntime.gather_prefill_cache(
-        None, host_cache, plan, resident_cache=resident_cache
+    runtime = _make_hisparse_runtime(row_width=row_width, block_size=block_size)
+    runtime.bind_source_cache(host_cache)
+    staged = runtime.gather_prefill_cache(
+        host_cache, plan, resident_cache=resident_cache
     )
 
     staged_flat = staged.view(-1, row_width).cpu()
@@ -4731,7 +4797,7 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     compute_stream = object()
     prefill_stream = MagicMock()
     gather = MagicMock()
-    monkeypatch.setattr(index_group_module, "current_stream", lambda: compute_stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: compute_stream)
     monkeypatch.setattr(
         index_group_module.ops, "cp_gather_and_upconvert_fp8_kv_cache", gather
     )
@@ -4742,7 +4808,7 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
         view=SimpleNamespace(cache=resident_cache, block_size=4),
         block_table=torch.tensor([[2, 3]], dtype=torch.int32),
         runtime=SimpleNamespace(
-            request_state_indices=torch.tensor([0], dtype=torch.int32)
+            request_state_indices=torch.tensor([0], dtype=torch.int32),
         ),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
