@@ -1083,7 +1083,11 @@ def test_cpu_no_triton_v2_rejects_unsupported_features(monkeypatch):
     )
     config.model_config = cast(
         ModelConfig,
-        SimpleNamespace(enable_prompt_embeds=True, is_diffusion=True),
+        SimpleNamespace(
+            enable_prompt_embeds=True,
+            is_diffusion=True,
+            logits_processors=["a.b:C"],
+        ),
     )
     config.parallel_config.decode_context_parallel_size = 2
     config.parallel_config.prefill_context_parallel_size = 2
@@ -1098,6 +1102,7 @@ def test_cpu_no_triton_v2_rejects_unsupported_features(monkeypatch):
     assert str(exc_info.value) == (
         "CPU Model Runner V2 without Triton does not yet support: "
         "speculative decoding, prompt embeddings, diffusion models, "
+        "custom logits processors, "
         "decode context parallelism, prefill context parallelism, "
         "batch-sharded sampling, expert parallel load balancing, "
         "routed-expert auxiliary outputs"

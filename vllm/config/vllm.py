@@ -3118,6 +3118,8 @@ class VllmConfig:
                 unsupported.append("prompt embeddings")
             if self.model_config.is_diffusion:
                 unsupported.append("diffusion models")
+            if self.model_config.logits_processors:
+                unsupported.append("custom logits processors")
 
         if self.parallel_config.decode_context_parallel_size > 1:
             unsupported.append("decode context parallelism")
