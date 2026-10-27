@@ -387,8 +387,15 @@ def test_index_prefill_matches_reference(
         q_lens, seq_lens_list, num_heads, page_step=2 if num_heads == 2 else 1
     )
     width = (max(seq_lens_list) + BLOCK - 1) // BLOCK + 3
-    args = (table, cu, seq_lens, init_blocks, local_blocks)
-    args += (max(q_lens), max(seq_lens_list))
+    args = (
+        table,
+        cu,
+        seq_lens,
+        init_blocks,
+        local_blocks,
+        max(q_lens),
+        max(seq_lens_list),
+    )
 
     def run(shared, mq):
         monkeypatch.setattr(prefill_host, "PIN_SHARED", shared)
