@@ -505,8 +505,9 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     layer.kda_lower_bound = -5.0
     layer.kda_prefill_backend = "flashkda"
     layer._conv_state_dim_first = dim_first
-    layer._merged_conv_weight = torch.randn(width, 4, device=device) * 0.1
-    layer.q_conv1d = SimpleNamespace(bias=None)
+    layer.conv1d = SimpleNamespace(
+        weight=torch.randn(width, 1, 4, device=device) * 0.1, bias=None
+    )
     layer.A_log = torch.randn(1, 1, heads, 1, device=device) * 0.1
     layer.dt_bias = torch.randn(heads * D, device=device) * 0.1
     state_shape = (2, heads, D, D)
