@@ -514,8 +514,10 @@ class TestRenderPrompt:
         expected = _cls_sep_tokenizer(truncation_side=truncation_side)(
             text, truncation=True, max_length=5, return_offsets_mapping=True
         )
-        assert results[0]["prompt_token_ids"] == expected["input_ids"]
-        assert results[0]["prompt_token_offsets"] == expected["offset_mapping"]
+        # `.get`, as the result is typed as any `TokPrompt` and not every
+        # member of that union has these keys.
+        assert results[0].get("prompt_token_ids") == expected["input_ids"]
+        assert results[0].get("prompt_token_offsets") == expected["offset_mapping"]
 
     def test_padding_with_left_truncation_keeps_the_prompt(self):
         """Padding must not be truncated away.

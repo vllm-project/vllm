@@ -222,4 +222,6 @@ def test_explicit_truncation_side_keeps_bos(truncation_side):
     expected = MistralTokenizer.from_pretrained(
         MODEL_NAME, truncation_side=truncation_side
     )(text, truncation=True, max_length=4)
-    assert result["prompt_token_ids"] == expected["input_ids"]
+    # `.get`, as the result is typed as any `TokPrompt` and not every member of
+    # that union has this key.
+    assert result.get("prompt_token_ids") == expected["input_ids"]
