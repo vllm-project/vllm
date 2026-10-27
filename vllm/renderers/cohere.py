@@ -94,6 +94,7 @@ from enum import Enum
 from typing import Any
 
 from vllm.config import VllmConfig
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -107,7 +108,7 @@ from vllm.utils.async_utils import make_async
 from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams
+from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -768,6 +769,15 @@ class CohereRenderer(BaseRenderer[HfTokenizer]):
         # thread-pool wrapper once so the async path doesn't allocate a new
         # adapter on every request.
         self._render_async = make_async(self._render, executor=self._executor)
+
+    def _tokenize_prompt(
+        self, prompt: TextPrompt, params: TokenizeParams
+    ) -> TokensPrompt:
+        if isinstance(self.tokenizer, HfTokenizer):
+            tokenized = self._tokenize_prompt_with_special_tokens_mask(prompt, params)
+            if tokenized is not None:
+                return tokenized
+        return super()._tokenize_prompt(prompt, params)
 
     def _render(self, fmt: str, config_dict: dict[str, Any]) -> str:
         if fmt == "cmd3":

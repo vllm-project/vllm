@@ -61,7 +61,12 @@ if TYPE_CHECKING:
     from collections.abc import Set
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
+    from vllm.inputs import (
+        MultiModalDataDict,
+        MultiModalUUIDDict,
+        TextPrompt,
+        TokensPrompt,
+    )
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
@@ -75,7 +80,7 @@ if TYPE_CHECKING:
     )
 
     from .inputs import DictPrompt
-    from .params import ChatParams
+    from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -1100,6 +1105,15 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     def _can_produce_offsets(self) -> bool:
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
+
+    def _tokenize_prompt(
+        self, prompt: TextPrompt, params: TokenizeParams
+    ) -> TokensPrompt:
+        if isinstance(self.tokenizer, HfTokenizer):
+            tokenized = self._tokenize_prompt_with_special_tokens_mask(prompt, params)
+            if tokenized is not None:
+                return tokenized
+        return super()._tokenize_prompt(prompt, params)
 
     def render_messages(
         self,

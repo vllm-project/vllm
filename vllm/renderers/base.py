@@ -674,35 +674,50 @@ class BaseRenderer(ABC, Generic[_T]):
         kwargs = params.get_encode_kwargs()
         if want_offsets:
             kwargs = {**kwargs, "return_offsets_mapping": True}
-        want_special_tokens_mask = (
+        encoding = tokenizer(prompt["prompt"], **kwargs)
+        return self._build_tokens_prompt(
+            encoding["input_ids"],
+            prompt,
+            offset_mapping=encoding["offset_mapping"] if want_offsets else None,
+        )
+
+    def _tokenize_prompt_with_special_tokens_mask(
+        self,
+        prompt: TextPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt | None:
+        """Return masked tokenization, or None to use normal tokenization."""
+        if not (
             params.needs_detokenization
             and params.add_special_tokens
             and params.truncate_prompt_tokens is not None
             and params.truncation_side is not None
-        )
-        if want_special_tokens_mask:
-            kwargs = {**kwargs, "return_special_tokens_mask": True}
+        ):
+            return None
+
+        tokenizer = self.get_tokenizer()
+        want_offsets = self._wants_offsets(prompt, params)
+        kwargs = params.get_encode_kwargs()
+        kwargs["return_special_tokens_mask"] = True
+        if want_offsets:
+            kwargs["return_offsets_mapping"] = True
         try:
             encoding = tokenizer(prompt["prompt"], **kwargs)
         except (TypeError, NotImplementedError):
-            if not want_special_tokens_mask:
-                raise
-            # Custom tokenizers may not support this optional output.
-            kwargs.pop("return_special_tokens_mask")
-            encoding = tokenizer(prompt["prompt"], **kwargs)
+            return None
+
         tokenized = self._build_tokens_prompt(
             encoding["input_ids"],
             prompt,
             offset_mapping=encoding["offset_mapping"] if want_offsets else None,
         )
+        token_ids = tokenized["prompt_token_ids"]
         if (
-            want_special_tokens_mask
-            and (special_tokens_mask := encoding.get("special_tokens_mask")) is not None
-            and len(special_tokens_mask) == len(tokenized["prompt_token_ids"])
-            and params._truncation_slice(tokenizer, len(tokenized["prompt_token_ids"]))
-            is not None
+            (mask := encoding.get("special_tokens_mask")) is not None
+            and len(mask) == len(token_ids)
+            and params._truncation_slice(tokenizer, len(token_ids)) is not None
         ):
-            tokenized["prompt_special_tokens_mask"] = special_tokens_mask
+            tokenized["prompt_special_tokens_mask"] = mask
         return tokenized
 
     @staticmethod
