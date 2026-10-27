@@ -11,10 +11,12 @@ from unittest.mock import patch
 import pytest
 
 from vllm.model_executor.kernels.linear import (
+    AiterMxfp8LinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
     MarlinMxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
+    RocmDotScaledMxfp8LinearKernel,
     init_mxfp8_linear_kernel,
 )
 from vllm.platforms import PlatformEnum
@@ -133,3 +135,73 @@ def test_init_mxfp8_linear_kernel(capability, weight_shape, expected_kernel_cls)
 
     assert isinstance(kernel, expected_kernel_cls)
     assert kernel.config == Mxfp8LinearLayerConfig(weight_shape=weight_shape)
+
+
+# (N, K) that the patched AITER config lookup reports as tuned.
+_AITER_TUNED_SHAPE = (1536, 6144)
+
+
+@contextmanager
+def _patch_rocm_platform():
+    """Patch the platform so kernel selection runs as on a CDNA4 GPU. Both
+    native MXFP8 kernels report as supported; AITER has tuned configs only
+    for _AITER_TUNED_SHAPE."""
+    with (
+        patch("vllm.model_executor.kernels.linear.current_platform") as platform,
+        patch.object(AiterMxfp8LinearKernel, "is_supported", return_value=(True, None)),
+        patch.object(
+            RocmDotScaledMxfp8LinearKernel, "is_supported", return_value=(True, None)
+        ),
+        patch(
+            "vllm.model_executor.kernels.linear.mxfp8.aiter.rocm_aiter_ops."
+            "is_triton_gemm_afp8wfp8_tuned",
+            side_effect=lambda n, k: (n, k) == _AITER_TUNED_SHAPE,
+        ),
+    ):
+        platform._enum = PlatformEnum.ROCM
+        yield
+
+
+@pytest.mark.parametrize(
+    ("weight_shape", "expected_kernel_cls"),
+    [
+        (_AITER_TUNED_SHAPE, AiterMxfp8LinearKernel),
+        ((1056, 4128), RocmDotScaledMxfp8LinearKernel),
+    ],
+)
+def test_init_mxfp8_linear_kernel_rocm(weight_shape, expected_kernel_cls):
+    """AITER is preferred on ROCm only for the (N, K) it has tuned configs for;
+    every other shape falls through to the native dot_scaled kernel."""
+    with _patch_rocm_platform():
+        kernel = init_mxfp8_linear_kernel(weight_shape=weight_shape)
+
+    assert isinstance(kernel, expected_kernel_cls)
+
+
+@pytest.mark.parametrize(
+    ("weight_shape", "bmm_batch_size"),
+    [((1536, 6160), None), (_AITER_TUNED_SHAPE, 4)],
+)
+def test_aiter_mxfp8_rejects_unaligned_k_and_bmm(weight_shape, bmm_batch_size):
+    config = Mxfp8LinearLayerConfig(
+        weight_shape=weight_shape, bmm_batch_size=bmm_batch_size
+    )
+    with _patch_rocm_platform():
+        can_implement, reason = AiterMxfp8LinearKernel.can_implement(config)
+    assert not can_implement
+    assert reason
+
+
+def test_aiter_mxfp8_not_supported_when_batch_invariant():
+    """The tuned decode configs split K, so batch-invariant runs must use a
+    different kernel."""
+    with (
+        patch("vllm.model_executor.kernels.linear.mxfp8.aiter.current_platform") as p,
+        patch("vllm.model_executor.kernels.linear.mxfp8.aiter.envs") as envs,
+    ):
+        p.is_rocm.return_value = True
+        p.supports_mx.return_value = True
+        envs.VLLM_BATCH_INVARIANT = True
+        is_supported, reason = AiterMxfp8LinearKernel.is_supported()
+    assert not is_supported
+    assert "batch invariant" in reason

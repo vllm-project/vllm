@@ -4345,6 +4345,16 @@ class rocm_aiter_ops:
             return False
 
     @staticmethod
+    @functools.cache
+    def is_triton_gemm_afp8wfp8_tuned(n: int, k: int) -> bool:
+        if not current_platform.is_rocm():
+            return False
+        try:
+            return _triton_gemm_config_is_tuned("GEMM-AFP8WFP8_A32_W1X32", n, k)
+        except (AssertionError, ImportError, FileNotFoundError):
+            return False
+
+    @staticmethod
     @if_aiter_supported
     def is_triton_blockscale_bpreshuffle_gemm_tuned(n: int, k: int) -> bool:
         from aiter.ops.triton.utils.gemm_config_utils import (
