@@ -786,6 +786,7 @@ mod tests {
                         output_token_count: 2,
                         prompt_cache_usage: vllm_llm::PromptCacheUsage {
                             cached_token_count: 3,
+                            cache_creation_token_count: 0,
                         },
                     },
                     finish_reason: FinishReason::Repetition(Some(StopReason::Text(

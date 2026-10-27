@@ -873,6 +873,7 @@ mod tests {
             output_token_count: output_tokens,
             prompt_cache_usage: vllm_llm::PromptCacheUsage {
                 cached_token_count: cached_tokens,
+                cache_creation_token_count: 0,
             },
         }
         .into()

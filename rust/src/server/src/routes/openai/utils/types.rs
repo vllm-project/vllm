@@ -582,7 +582,11 @@ impl Usage {
                 TokenUsage {
                     prompt_token_count: prompt_tokens,
                     output_token_count: completion_tokens,
-                    prompt_cache_usage: PromptCacheUsage { cached_token_count },
+                    prompt_cache_usage:
+                        PromptCacheUsage {
+                            cached_token_count,
+                            cache_creation_token_count,
+                        },
                 },
             reasoning_tokens,
         } = usage.into();
@@ -592,6 +596,7 @@ impl Usage {
             completion_tokens: Some(completion_tokens),
             prompt_tokens_details: enable_prompt_tokens_details.then_some(PromptTokenUsageInfo {
                 cached_tokens: cached_token_count,
+                created_cache_tokens: cache_creation_token_count,
             }),
             completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
         }
@@ -602,6 +607,9 @@ impl Usage {
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptTokenUsageInfo {
     pub cached_tokens: usize,
+    /// Prompt tokens newly written to the prefix cache. Python reports it on
+    /// chat only; Rust reports it wherever `cached_tokens` is reported.
+    pub created_cache_tokens: usize,
 }
 
 /// Mirrors the Python vLLM `CompletionTokenUsageInfo` class.
@@ -625,6 +633,7 @@ mod usage_tests {
                 output_token_count: 2,
                 prompt_cache_usage: PromptCacheUsage {
                     cached_token_count: 3,
+                    cache_creation_token_count: 1,
                 },
             },
             false,
@@ -643,14 +652,16 @@ mod usage_tests {
                 output_token_count: 2,
                 prompt_cache_usage: PromptCacheUsage {
                     cached_token_count: 3,
+                    cache_creation_token_count: 1,
                 },
             },
             true,
         );
 
+        let json = serde_json::to_value(&usage).expect("usage serializes");
         assert_eq!(
-            usage.prompt_tokens_details.as_ref().map(|details| details.cached_tokens),
-            Some(3)
+            json["prompt_tokens_details"],
+            serde_json::json!({"cached_tokens": 3, "created_cache_tokens": 1})
         );
     }
 

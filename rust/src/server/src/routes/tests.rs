@@ -40,6 +40,7 @@ use vllm_engine_core_client::protocol::output::{
     StopReason, UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
@@ -4696,6 +4697,83 @@ async fn non_stream_completions_return_json_response() {
         assert!(
             object.contains_key(key) && object[key].is_null(),
             "expected explicit null `{key}`: {json}"
+        );
+    }
+}
+
+/// With `--enable-prompt-tokens-details`, chat and completions report the
+/// prompt tokens newly written to the prefix cache next to the cached ones.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn prompt_tokens_details_report_created_cache_tokens() {
+    let cases = [
+        (
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": "hello"}]}),
+        ),
+        ("/v1/completions", json!({"prompt": "hello"})),
+    ];
+    for (uri, mut request) in cases {
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+            b"engine-openai",
+            |request_id| {
+                RequestBatchOutputs {
+                    // Prefill stats ride only on the first output; the counts
+                    // must survive the later decode output.
+                    outputs: vec![
+                        EngineCoreOutput {
+                            prefill_stats: Some(Box::new(PrefillStats {
+                                num_prompt_tokens: 5,
+                                num_cached_tokens: 2,
+                                num_local_cached_tokens: 2,
+                                num_cache_creation_tokens: 3,
+                                ..Default::default()
+                            })),
+                            ..request_output(request_id, vec![b'h' as u32], None)
+                        },
+                        request_output(
+                            request_id,
+                            vec![b'i' as u32],
+                            Some(EngineCoreFinishReason::Stop),
+                        ),
+                    ],
+                    ..Default::default()
+                }
+                .into()
+            },
+            |_| {},
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let mut app = build_router(Arc::new(
+            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
+                ApiServerOptions {
+                    enable_prompt_tokens_details: true,
+                    ..Default::default()
+                },
+            ),
+        ));
+        request["model"] = json!("model");
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        assert_eq!(
+            json["usage"]["prompt_tokens_details"],
+            json!({"cached_tokens": 2, "created_cache_tokens": 3}),
+            "{uri}"
         );
     }
 }
