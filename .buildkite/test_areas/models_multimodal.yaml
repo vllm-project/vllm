@@ -74,7 +74,19 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal
   commands:
-    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
+    - >-
+      pytest -v -s
+      models/multimodal
+      -m core_model
+      --ignore models/multimodal/generation/test_common.py
+      --ignore models/multimodal/generation/test_ultravox.py
+      --ignore models/multimodal/generation/test_qwen2_5_vl.py
+      --ignore models/multimodal/generation/test_qwen2_vl.py
+      --ignore models/multimodal/generation/test_whisper.py
+      --ignore models/multimodal/generation/test_mm_prefix_lm.py
+      --ignore models/multimodal/generation/test_memory_leak.py
+      --ignore models/multimodal/generation/test_vit_cudagraph.py
+      --ignore models/multimodal/processing
     - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
     - pytest models/multimodal/generation/test_memory_leak.py -m core_model
     - pytest -v -s models/multimodal/generation/test_whisper.py -m core_model
@@ -100,7 +112,11 @@ steps:
   - tests/models/registry.py
   device: cpu-medium
   commands:
-    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - >-
+      pytest -v -s
+      models/multimodal/processing
+      --ignore models/multimodal/processing/test_tensor_schema.py
+      --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 4
 
 - label: ":nvidia: (H200 MIG 18GB) Multimodal Processor"
@@ -164,7 +180,11 @@ steps:
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+    - >-
+      pytest -v -s
+      models/multimodal/generation
+      -m 'not core_model'
+      --ignore models/multimodal/generation/test_common.py
     - pytest -v -s models/multimodal/test_mapping.py
   mirror:
     amd:
@@ -218,6 +238,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 3)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-3
+  automatic_shard: true
   optional: true
   source_file_dependencies:
   - vllm/
