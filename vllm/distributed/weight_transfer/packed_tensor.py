@@ -227,8 +227,9 @@ def packed_nccl_broadcast_consumer(
         [] for _ in range(num_buffers)
     ]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
-    caller_stream = torch.cuda.current_stream()
+    caller_stream = torch.accelerator.current_stream()
     prev_received: torch.Event | None = None
+    slot_done: list[torch.Event | None] = [None] * num_buffers
 
     def receive_and_load(buffer_idx: int) -> None:
         nonlocal prev_received
@@ -255,10 +256,17 @@ def packed_nccl_broadcast_consumer(
                 packed, list(names), list(shapes), list(dtypes), list(tensor_sizes)
             )
         )
+        event = torch.Event()
+        event.record(streams[buffer_idx])
+        slot_done[buffer_idx] = event
 
     while True:
-        # Synchronize the current stream
-        streams[buffer_idx].synchronize()
+        # Wait for this slot's previous pack. Not streams[buffer_idx].synchronize():
+        # on ROCm, streams can share a hardware queue, and synchronizing one
+        # stream then also waits for work queued later on the others.
+        done = slot_done[buffer_idx]
+        if done is not None:
+            done.synchronize()
         with torch.cuda.stream(streams[buffer_idx]):
             # Initialize the packing tensor meta data
             packing_tensor_meta_data[buffer_idx] = []
@@ -351,7 +359,7 @@ def packed_ipc_producer(
 
         if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
             # Drain queued copies so the consumer sees a fully-written buffer.
-            torch.cuda.current_stream().synchronize()
+            torch.accelerator.current_stream().synchronize()
             yield PackedIpcChunk(
                 names=names,
                 shapes=shapes,
@@ -372,7 +380,7 @@ def packed_ipc_producer(
         total_bytes += flat.numel()
 
     if total_bytes:
-        torch.cuda.current_stream().synchronize()
+        torch.accelerator.current_stream().synchronize()
         yield PackedIpcChunk(
             names=names,
             shapes=shapes,
