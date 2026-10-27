@@ -78,7 +78,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
-            self.model_config.dtype, self.cache_config.mamba_cache_dtype
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -95,7 +97,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         assert isinstance(spec, MambaSpec)
         # Only the fused path exports the checkpoint snapshots
         can_checkpoint = (
-            self.use_prefill_checkpoint and self.use_fused_chunk and self.use_safe_gate
+            self.use_prefill_checkpoint
+            and self.kda_prefill_backend == "fused"
+            and self.use_safe_gate
         )
         if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
             logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
@@ -131,6 +135,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         self.conv_size = kda_config["short_conv_kernel_size"]
         self.use_full_rank_gate = True
+
+        self._fused_qkv_conv_fn = None
+        if rocm_aiter_ops.is_enabled():
+            from aiter.ops.triton.gated_delta_net import (
+                causal_conv1d_split_qkv_triton_tile_fn,
+            )
+
+            self._fused_qkv_conv_fn = causal_conv1d_split_qkv_triton_tile_fn
 
         # Keep f_a before the narrow beta shard, then pad each TP-local row to
         # select the aligned BF16 GEMM path. The padding also avoids an Inductor
@@ -182,8 +194,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # ROCm can fuse the whole decode step (conv + recurrence + gated norm)
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
-        conv_state_dtype, _ = self.get_state_dtype()
-        self.use_aiter_decode = bool(rocm_aiter_ops.is_kda_gluon_decode_available())
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+        # AITER's Gluon kernels currently require FP32 recurrent states.
+        self.use_aiter_decode = recurrent_state_dtype == torch.float32 and bool(
+            rocm_aiter_ops.is_kda_gluon_decode_available()
+        )
         use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
@@ -191,6 +206,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.num_spec,
             vllm_config.model_config.dtype,
             conv_state_dtype,
+            recurrent_state_dtype,
         )
         if use_hip_decode:
             logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
@@ -242,13 +258,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 "The fused KDA chunk kernel requires gfx950 and a build that "
                 "includes it."
             )
-        self.use_fused_chunk = backend == "fused" or (
-            backend == "auto" and is_fused_kda_chunk_supported()
-        )
-        logger.info_once(
-            "Kimi-K3 KDA prefill backend: %s",
-            "fused" if self.use_fused_chunk else "triton",
-        )
+        self.kda_prefill_backend = backend
+        if backend == "auto":
+            if (
+                recurrent_state_dtype == torch.float32
+                and self.use_safe_gate
+                and rocm_aiter_ops.is_kda_gluon_prefill_available()
+            ):
+                self.kda_prefill_backend = "gluon"
+            elif is_fused_kda_chunk_supported():
+                self.kda_prefill_backend = "fused"
+            else:
+                self.kda_prefill_backend = "triton"
+        logger.info_once("Kimi-K3 KDA prefill backend: %s", self.kda_prefill_backend)
         # TODO: Remove the extra config arg once tested
         self.use_prefill_checkpoint = (
             additional_config.get("kda_prefill_checkpoint", True)
@@ -576,35 +598,48 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None
             if m.num_prefills > 0:
-                q_ns, k_ns, v_ns = mixed_qkv_ns.split(
-                    self.local_projection_size, dim=-1
-                )
-
-                # Packed prefill conv would require copying V solely to make
-                # it dense for KDA. Separate calls accept the strided inputs
-                # and produce dense Q/K/V without that extra traffic.
-                # TODO: Use packed conv once every KDA prefill backend accepts
-                # row-strided Q/K/V directly.
-                def _prefill_conv(
-                    x: torch.Tensor,
-                    state: torch.Tensor,
-                    weight: torch.Tensor,
-                ) -> torch.Tensor:
-                    return causal_conv1d_fn(
-                        x.transpose(0, 1),
-                        weight,
+                if self._fused_qkv_conv_fn is not None:
+                    # One launch (fused qkv) instead of 3
+                    q_ns, k_ns, v_ns = self._fused_qkv_conv_fn(
+                        mixed_qkv_ns.transpose(0, 1),
+                        conv_weights,
                         None,
-                        activation="silu",
-                        conv_states=state,
-                        has_initial_state=has_initial_state,
+                        conv_state,
+                        non_spec_query_start_loc,
+                        self.local_projection_size,
+                        self.local_projection_size,
                         cache_indices=non_spec_state_indices_tensor,
-                        query_start_loc=non_spec_query_start_loc,
+                        has_initial_state=has_initial_state,
+                        activation="silu",
+                        block_m=8,
                         metadata=m,
-                    ).transpose(0, 1)
+                        preserve_input_dtype=True,
+                    )
+                else:
+                    q_ns, k_ns, v_ns = mixed_qkv_ns.split(
+                        self.local_projection_size, dim=-1
+                    )
 
-                q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
-                k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
-                v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
+                    def _prefill_conv(
+                        x: torch.Tensor,
+                        state: torch.Tensor,
+                        weight: torch.Tensor,
+                    ) -> torch.Tensor:
+                        return causal_conv1d_fn(
+                            x.transpose(0, 1),
+                            weight,
+                            None,
+                            activation="silu",
+                            conv_states=state,
+                            has_initial_state=has_initial_state,
+                            cache_indices=non_spec_state_indices_tensor,
+                            query_start_loc=non_spec_query_start_loc,
+                            metadata=m,
+                        ).transpose(0, 1)
+
+                    q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
+                    k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
+                    v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
                 q_ns, k_ns, v_ns = (
                     rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                     for x in (q_ns, k_ns, v_ns)
@@ -694,7 +729,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     cu_seqlens=prefill_query_start_loc,
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
-                    use_fused_chunk=self.use_fused_chunk,
+                    backend=self.kda_prefill_backend,
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
                     checkpoint_state=checkpoint_state,
                     checkpoint_offsets=checkpoint_offsets,
@@ -748,15 +783,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # ---------- merge spec and non-spec outputs ----------
         if core_attn_out_spec is not None and core_attn_out_non_spec is not None:
-            # Mixed batches require indexed placement in the original order.
-            merged = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_spec.dtype,
-                device=core_attn_out_spec.device,
-            )
+            merged = core_attn_out[:, :num_actual_tokens]
             merged.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[0, :num_actual_tokens] = merged[0, :num_actual_tokens]
         elif core_attn_out_non_spec is not None:
             if core_attn_out_non_spec.data_ptr() != core_attn_out.data_ptr():
                 core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
