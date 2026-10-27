@@ -712,11 +712,17 @@ def sparse_attn_indexer(
             # DeepGEMM returns compressed logits: row i starts at K position
             # cu_seqlen_ks[i]. None means every row starts at column zero.
             row_starts: torch.Tensor | None = None
+            # Rows per dense logits call under the logits budget.
+            dense_rows = dense_logits_rows(chunk.max_seqlen_k)
             if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
             elif fused_mqa_topk and fused_mqa_topk_chunk(
-                chunk.max_seqlen_k, k_quant.shape[0], topk_tokens
+                chunk.max_seqlen_k,
+                k_quant.shape[0],
+                topk_tokens,
+                q_slice.shape[0],
+                dense_rows,
             ):
                 fused_mqa_topk_prefill(
                     q_slice,
@@ -745,7 +751,6 @@ def sparse_attn_indexer(
                 # budget: split their rows (budget-planned chunks, the only ones
                 # under DCP, are one window, so the merge below sees all the
                 # rows).
-                dense_rows = dense_logits_rows(chunk.max_seqlen_k)
                 for sub in range(0, q_slice.shape[0], dense_rows):
                     rows = slice(sub, min(sub + dense_rows, q_slice.shape[0]))
                     tokens = slice(row_start + rows.start, row_start + rows.stop)

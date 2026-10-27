@@ -386,11 +386,13 @@ def sparse_attn_indexer_kpool(
             else:
                 topk_dst = topk_indices_buffer[row_start:row_end, :topk_tokens]
 
+            # Rows per dense logits call under the logits budget.
+            dense_rows = dense_logits_rows(chunk.max_seqlen_k)
             if chunk.local_total_seq_lens == 0:
                 logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
                 topk_dst.fill_(-1)
             elif fused_mqa_topk and fused_mqa_topk_chunk(
-                chunk.max_seqlen_k, k_quant.shape[0], select_k
+                chunk.max_seqlen_k, k_quant.shape[0], select_k, num_rows, dense_rows
             ):
                 fused_mqa_topk_prefill(
                     q_slice,
@@ -408,7 +410,6 @@ def sparse_attn_indexer_kpool(
                 # under DCP, are one window, so the merge below sees all the
                 # rows).
                 # One pass also for 0 rows: the merge is collective.
-                dense_rows = dense_logits_rows(chunk.max_seqlen_k)
                 for sub in range(0, max(1, num_rows), dense_rows):
                     rows = slice(sub, min(sub + dense_rows, num_rows))
                     q_scale_rows, chunk_weights = mqa_logits_mx_inputs(

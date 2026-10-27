@@ -37,6 +37,7 @@ def fused_mqa_topk_min_keys(topk: int) -> int:
 _CANDIDATES_PER_ROW = 16384  # kCandidatesPerRow
 _RETAINED_PER_ROW = 4096  # kRetainedPerRow
 _SLOTS_PER_SM = 2  # candidate slots per persistent CTA
+_BLOCK_ROWS = 8  # kBlockRows: query rows per block, one block per CTA at a time
 
 
 @dataclass
@@ -64,6 +65,11 @@ class FusedMQATopKWorkspace:
 
 
 _WORKSPACES: dict[int, FusedMQATopKWorkspace] = {}
+
+
+@functools.cache
+def _sm_count(index: int) -> int:
+    return torch.cuda.get_device_properties(index).multi_processor_count
 
 
 @functools.cache
@@ -106,14 +112,25 @@ def use_fused_mqa_topk(
     )
 
 
-def fused_mqa_topk_chunk(max_seqlen_k: int, keys: int, topk: int) -> bool:
+def fused_mqa_topk_chunk(
+    max_seqlen_k: int, keys: int, topk: int, rows: int, dense_rows: int
+) -> bool:
     """Whether a prefill chunk of a fused_mqa_topk-eligible layer takes the
     fused_mqa_topk kernel: its longest row sees at least fused_mqa_topk_min_keys
-    keys (the dense path is as fast below) and its gathered keys fit the
-    kernel."""
+    keys (the dense path is as fast below), its gathered keys fit the kernel,
+    and its rows keep the SMs busy.
+
+    Each SM scans every key of one 8-row block at a time, so the blocks run in
+    waves of one per SM. A last wave that fills less than half the SMs costs a
+    whole wave and makes the kernel slower than dense, unless dense needs more
+    than one logits call (rows > dense_rows, its rows per call).
+    """
+    sms = _sm_count(torch.accelerator.current_device_index())
+    last_wave = (-(-rows // _BLOCK_ROWS) - 1) % sms + 1  # blocks, 1..sms
     return (
         max_seqlen_k >= fused_mqa_topk_min_keys(topk)
         and keys <= FUSED_MQA_TOPK_MAX_KEYS
+        and (rows > dense_rows or 2 * last_wave >= sms)
     )
 
 
@@ -138,8 +155,7 @@ def get_fused_mqa_topk_workspace(
     ws = _WORKSPACES.get(index)
     if ws is None:
         dev = torch.device("cuda", index)
-        num_sms = torch.cuda.get_device_properties(index).multi_processor_count
-        slots = _SLOTS_PER_SM * num_sms
+        slots = _SLOTS_PER_SM * _sm_count(index)
         ws = FusedMQATopKWorkspace(
             counter=torch.zeros(2, dtype=torch.int32, device=dev),
             values=torch.empty(

@@ -450,8 +450,10 @@ def test_kpool_indexer_fused_matches_dense(monkeypatch):
     """GLM-5.3-Flash kpool indexer: the fused_mqa_topk kernel ranks the top-512 pools of
     a packed multi-request chunk like the dense logits + top-k path."""
     inputs = _kpool_inputs()
+    # 192 rows take the kernel only when dense needs more than one logits
+    # call, so shrink the budget below one call.
     fused_mqa_topk_out, calls = _run_kpool_indexer(
-        monkeypatch, inputs, fused_mqa_topk=True
+        monkeypatch, inputs, fused_mqa_topk=True, budget_mb=16
     )
     assert calls == [torch.Size([inputs[0].shape[0], TOPK // KPOOL])]
     dense, calls = _run_kpool_indexer(monkeypatch, inputs, fused_mqa_topk=False)
