@@ -74,6 +74,7 @@ async def init_render_app_state(
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
     )
     state.online_renderer.warmup()
@@ -91,6 +92,7 @@ async def init_render_app_state(
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
     )
 
@@ -105,7 +107,11 @@ async def init_render_app_state(
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
-    init_render_state(state, request_logger)
+    init_render_state(
+        state,
+        request_logger,
+        disabled_thinking_effort=args.anthropic_disabled_thinking_effort,
+    )
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
