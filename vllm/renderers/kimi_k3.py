@@ -4,7 +4,6 @@ from typing import Any, cast
 
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -18,7 +17,7 @@ from vllm.utils.async_utils import make_async
 from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams, TokenizeParams
+from .params import ChatParams
 
 # Keep the original image mode (including the alpha channel) for K3 instead of
 # flattening images onto a background color. Server-level (--media-io-kwargs)
@@ -155,15 +154,6 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         self._apply_chat_template_async = make_async(
             self._apply_chat_template, executor=self._executor
         )
-
-    def _tokenize_prompt(
-        self, prompt: TextPrompt, params: TokenizeParams
-    ) -> TokensPrompt:
-        if isinstance(self.tokenizer, HfTokenizer):
-            tokenized = self._tokenize_prompt_with_special_tokens_mask(prompt, params)
-            if tokenized is not None:
-                return tokenized
-        return super()._tokenize_prompt(prompt, params)
 
     def _apply_chat_template(
         self,

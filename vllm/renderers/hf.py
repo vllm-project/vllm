@@ -1109,11 +1109,39 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     def _tokenize_prompt(
         self, prompt: TextPrompt, params: TokenizeParams
     ) -> TokensPrompt:
-        if isinstance(self.tokenizer, HfTokenizer):
-            tokenized = self._tokenize_prompt_with_special_tokens_mask(prompt, params)
-            if tokenized is not None:
-                return tokenized
-        return super()._tokenize_prompt(prompt, params)
+        if not (
+            isinstance(self.tokenizer, HfTokenizer)
+            and params.needs_detokenization
+            and params.add_special_tokens
+            and params.truncate_prompt_tokens is not None
+            and params.truncation_side is not None
+        ):
+            return super()._tokenize_prompt(prompt, params)
+
+        tokenizer = self.get_tokenizer()
+        want_offsets = self._wants_offsets(prompt, params)
+        kwargs = params.get_encode_kwargs()
+        kwargs["return_special_tokens_mask"] = True
+        if want_offsets:
+            kwargs["return_offsets_mapping"] = True
+        try:
+            encoding = tokenizer(prompt["prompt"], **kwargs)
+        except (TypeError, NotImplementedError):
+            return super()._tokenize_prompt(prompt, params)
+
+        tokenized = self._build_tokens_prompt(
+            encoding["input_ids"],
+            prompt,
+            offset_mapping=encoding["offset_mapping"] if want_offsets else None,
+        )
+        token_ids = tokenized["prompt_token_ids"]
+        if (
+            (mask := encoding.get("special_tokens_mask")) is not None
+            and len(mask) == len(token_ids)
+            and params._truncation_slice(tokenizer, len(token_ids)) is not None
+        ):
+            tokenized["prompt_special_tokens_mask"] = mask
+        return tokenized
 
     def render_messages(
         self,

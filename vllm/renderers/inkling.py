@@ -14,7 +14,6 @@ input-processing library (mistral-common style) later.
 """
 
 from vllm.config import VllmConfig
-from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -29,7 +28,7 @@ from .base import BaseRenderer
 from .inkling_encoding import SPECIAL_TOKEN_SPELLINGS, render_inkling_messages
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams, TokenizeParams
+from .params import ChatParams
 
 logger = init_logger(__name__)
 
@@ -99,15 +98,6 @@ class InklingRenderer(BaseRenderer[HfTokenizer]):
 
         self._inkling_tokenizer = _HfBackedTmlTokenizer(self.get_tokenizer())
         self._render_async = make_async(self._render, executor=self._executor)
-
-    def _tokenize_prompt(
-        self, prompt: TextPrompt, params: TokenizeParams
-    ) -> TokensPrompt:
-        if isinstance(self.tokenizer, HfTokenizer):
-            tokenized = self._tokenize_prompt_with_special_tokens_mask(prompt, params)
-            if tokenized is not None:
-                return tokenized
-        return super()._tokenize_prompt(prompt, params)
 
     def _render(
         self,
