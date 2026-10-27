@@ -8,6 +8,7 @@ use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use vllm_chat::ChatTokenUsage;
+use vllm_llm::{PromptCacheUsage, TokenUsage};
 
 // ============================================================================
 // Constants
@@ -567,32 +568,38 @@ pub struct Usage {
 
 impl Usage {
     /// Create a Usage with prompt-token cache and reasoning-token details.
-    pub fn from_counts(
-        prompt_tokens: usize,
-        completion_tokens: usize,
-        cached_tokens: Option<usize>,
-        reasoning_tokens: usize,
-    ) -> Self {
-        Self {
-            prompt_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
-            completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: cached_tokens.map(|c| PromptTokenUsageInfo { cached_tokens: c }),
-            completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
-        }
-    }
-
+    ///
+    /// The one mapping from token usage onto the wire: every field comes from
+    /// `usage`, and `enable_prompt_tokens_details` only decides whether
+    /// prompt-token details are reported. `usage` is destructured exhaustively,
+    /// so a new usage field fails to compile until it is mapped here.
     pub fn from_token_usage(
         usage: impl Into<ChatTokenUsage>,
         enable_prompt_tokens_details: bool,
     ) -> Self {
-        let usage = usage.into();
-        Self::from_counts(
-            usage.prompt_token_count,
-            usage.output_token_count,
-            enable_prompt_tokens_details.then_some(usage.cached_token_count),
-            usage.reasoning_tokens,
-        )
+        let ChatTokenUsage {
+            engine:
+                TokenUsage {
+                    prompt_token_count: prompt_tokens,
+                    output_token_count: completion_tokens,
+                    prompt_cache_usage:
+                        PromptCacheUsage {
+                            cached_token_count,
+                            cache_creation_token_count,
+                        },
+                },
+            reasoning_tokens,
+        } = usage.into();
+        Self {
+            prompt_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            completion_tokens: Some(completion_tokens),
+            prompt_tokens_details: enable_prompt_tokens_details.then_some(PromptTokenUsageInfo {
+                cached_tokens: cached_token_count,
+                created_cache_tokens: cache_creation_token_count,
+            }),
+            completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
+        }
     }
 }
 
@@ -600,6 +607,9 @@ impl Usage {
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptTokenUsageInfo {
     pub cached_tokens: usize,
+    /// Prompt tokens newly written to the prefix cache. Python reports it on
+    /// chat only; Rust reports it wherever `cached_tokens` is reported.
+    pub created_cache_tokens: usize,
 }
 
 /// Mirrors the Python vLLM `CompletionTokenUsageInfo` class.
@@ -611,7 +621,7 @@ pub struct CompletionTokenUsageInfo {
 #[cfg(test)]
 mod usage_tests {
     use vllm_chat::ChatTokenUsage;
-    use vllm_llm::TokenUsage;
+    use vllm_llm::{PromptCacheUsage, TokenUsage};
 
     use super::Usage;
 
@@ -621,7 +631,10 @@ mod usage_tests {
             TokenUsage {
                 prompt_token_count: 5,
                 output_token_count: 2,
-                cached_token_count: 3,
+                prompt_cache_usage: PromptCacheUsage {
+                    cached_token_count: 3,
+                    cache_creation_token_count: 1,
+                },
             },
             false,
         );
@@ -637,14 +650,18 @@ mod usage_tests {
             TokenUsage {
                 prompt_token_count: 5,
                 output_token_count: 2,
-                cached_token_count: 3,
+                prompt_cache_usage: PromptCacheUsage {
+                    cached_token_count: 3,
+                    cache_creation_token_count: 1,
+                },
             },
             true,
         );
 
+        let json = serde_json::to_value(&usage).expect("usage serializes");
         assert_eq!(
-            usage.prompt_tokens_details.as_ref().map(|details| details.cached_tokens),
-            Some(3)
+            json["prompt_tokens_details"],
+            serde_json::json!({"cached_tokens": 3, "created_cache_tokens": 1})
         );
     }
 
@@ -654,7 +671,7 @@ mod usage_tests {
             TokenUsage {
                 prompt_token_count: 8,
                 output_token_count: 2,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             true,
         );
@@ -669,7 +686,7 @@ mod usage_tests {
                 engine: TokenUsage {
                     prompt_token_count: 5,
                     output_token_count: 4,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 },
                 reasoning_tokens: 3,
             },
@@ -688,7 +705,7 @@ mod usage_tests {
                 engine: TokenUsage {
                     prompt_token_count: 5,
                     output_token_count: 0,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 },
                 reasoning_tokens: 0,
             },
@@ -705,7 +722,7 @@ mod usage_tests {
             TokenUsage {
                 prompt_token_count: 5,
                 output_token_count: 2,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             false,
         );
