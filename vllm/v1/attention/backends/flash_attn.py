@@ -284,6 +284,8 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
 
 
 class FlashAttentionBackend(AttentionBackend):
+    supports_kv_cache_update_bypass: bool = True
+
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -425,6 +427,9 @@ class FlashAttentionBackend(AttentionBackend):
             return False
         if head_size <= 256:
             return True
+        if current_platform.is_xpu():
+            # The XPU SYCL kernels support head sizes up to 512.
+            return head_size <= 512
         if is_fa_version_supported(4):
             return head_size <= 512
         return False
@@ -613,7 +618,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support = (
         AttentionCGSupport.ALWAYS
-        if get_flash_attn_version() in (3, 4)
+        if get_flash_attn_version() in (3, 4) or current_platform.is_xpu()
         else AttentionCGSupport.UNIFORM_BATCH
     )
     supports_update_block_table: bool = True
@@ -1121,20 +1126,16 @@ class FlashAttentionImpl(AttentionImpl):
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
 
-        if (
-            is_quantized_kv_cache(self.kv_cache_dtype)
-            and not getattr(self, "kv_reads_bypass_flash_attn", False)
-            and not (
-                flash_attn_supports_kv_cache_dtype(
-                    self.kv_cache_dtype,
-                    requires_alibi=alibi_slopes is not None,
-                    head_size=head_size,
-                    head_size_v=head_size,
-                    has_sinks=sinks is not None,
-                    requires_softcap=bool(self.logits_soft_cap),
-                    supports_fa4_hd256=True,
-                )
-            )
+        if is_quantized_kv_cache(
+            self.kv_cache_dtype
+        ) and not flash_attn_supports_kv_cache_dtype(
+            self.kv_cache_dtype,
+            requires_alibi=alibi_slopes is not None,
+            head_size=head_size,
+            head_size_v=head_size,
+            has_sinks=sinks is not None,
+            requires_softcap=bool(self.logits_soft_cap),
+            supports_fa4_hd256=True,
         ):
             raise NotImplementedError(
                 f"FlashAttention does not support {self.kv_cache_dtype}"

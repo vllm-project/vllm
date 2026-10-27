@@ -136,7 +136,7 @@ class QSAIndexer(nn.Module):
             default="bf16"
         )
         if self.indexer_kv_dtype == "fp8":
-            indexer_dtype = torch.float8_e4m3fn
+            indexer_dtype = current_platform.fp8_dtype()
         elif self.indexer_kv_dtype == "bf16":
             indexer_dtype = torch.bfloat16
         else:

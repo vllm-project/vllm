@@ -395,8 +395,9 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize(
-    ("num_rows", "num_query_heads", "num_kv_heads", "page_size"),
+    "num_rows,num_query_heads,num_kv_heads,page_size",
     [
         pytest.param(1, 24, 2, 1792, id="tp1_split64"),
         pytest.param(16, 12, 1, 1792, id="tp2_split32"),
@@ -410,6 +411,7 @@ def test_qsa_sparse_paged_attention_matches_reference(
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
+    use_fp8: bool,
 ) -> None:
     torch.manual_seed(2)
     head_dim = 256
@@ -431,7 +433,18 @@ def test_qsa_sparse_paged_attention_matches_reference(
         device="cuda",
         dtype=torch.bfloat16,
     )
-    k_cache, v_cache = kv_cache.split(head_dim, dim=-1)
+    if use_fp8:
+        fp8_dtype = current_platform.fp8_dtype()
+        # The kernel's contract is that the cache already holds values in
+        # the attention dtype's numeric space; quantize the stored cache and
+        # have the reference consume the stored (quantized) values upcast
+        # to float, not the original bf16 — the fp8 cast is lossy.
+        kv_stored = kv_cache.to(fp8_dtype)
+        k_cache, v_cache = kv_stored.split(head_dim, dim=-1)
+        ref_k, ref_v = k_cache.float(), v_cache.float()
+    else:
+        k_cache, v_cache = kv_cache.split(head_dim, dim=-1)
+        ref_k, ref_v = k_cache, v_cache
     block_table = (
         torch.randperm(num_cache_blocks, device="cuda")
         .reshape(num_requests, num_pages_per_request)
@@ -484,8 +497,8 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
     expected = _qsa_sparse_paged_attention_reference(
         q,
-        k_cache,
-        v_cache,
+        ref_k,
+        ref_v,
         logical_indices,
         block_table,
         token_to_req,
@@ -493,3 +506,29 @@ def test_qsa_sparse_paged_attention_matches_reference(
     )
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
+def test_qsa_impl_constructs_with_fp8_kv(kv_cache_dtype: str) -> None:
+    """The impl constructor must accept an FP8 KV cache dtype.
+
+    The QSA Triton kernel dequantizes fp8 itself and never runs flash-attn
+    over the cache, so the parent constructor's flash-attn quantized-KV
+    probe (which raises on ROCm) must not reject it: the impl hands the
+    parent "auto" for that probe and restores the real dtype afterwards,
+    mirroring the NVIDIA implementation. Guards both the construction
+    succeeding and the dtype surviving the parent round-trip.
+    """
+    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAFlashAttentionImpl
+
+    impl = Qwen4ExpQSAFlashAttentionImpl(
+        num_heads=24,
+        head_size=128,
+        scale=0.088,
+        num_kv_heads=2,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+    assert impl.kv_cache_dtype == kv_cache_dtype
