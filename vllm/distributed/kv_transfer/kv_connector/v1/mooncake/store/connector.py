@@ -203,12 +203,15 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         Closes the worker's MooncakeDistributedStore handle so its
         TransferEngine and RDMA registrations are released. Invoked from the
-        engine's explicit shutdown path and as a backstop from ``__del__``;
-        a no-op on the scheduler role, which holds no store handle.
+        engine's explicit shutdown path and as a backstop from ``__del__``.
+        The scheduler role closes its lookup client, including unadopted work.
         """
         worker = getattr(self, "connector_worker", None)
         if worker is not None:
             worker.close()
+        scheduler = getattr(self, "connector_scheduler", None)
+        if scheduler is not None:
+            scheduler.client.close()
 
     def __del__(self):
         self.shutdown()
@@ -220,6 +223,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def on_preschedule_request(self, request: Request) -> object | None:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.start_lookup_prefetch(request)
+
+    def cancel_preschedule_request(self, request: Request) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.cancel_lookup_prefetch(request)
 
     def get_num_new_matched_tokens(
         self,

@@ -3,7 +3,7 @@
 
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -884,6 +884,29 @@ def _lookup_states(request):
     )
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_dropped_preschedule_request_cancels_all_queued_children(nested):
+    with _multi_store_lookup(nested=nested) as (connector, stores, _, gates, started):
+        for gate in gates:
+            gate.clear()
+        running = create_request(num_tokens=48)
+        running.kv_preschedule_handle = connector.on_preschedule_request(running)
+        assert all(event.wait(timeout=5) for event in started)
+        dropped = create_request(num_tokens=48)
+        dropped.kv_preschedule_handle = connector.on_preschedule_request(dropped)
+        futures = [state.future for state in _lookup_states(dropped)]
+        connector.cancel_preschedule_request(dropped)
+        connector.cancel_preschedule_request(dropped)
+        assert dropped.kv_preschedule_handle is None
+        assert all(future.cancelled() for future in futures)
+        # Dropping this handle must not disturb another request's work.
+        for gate in gates:
+            gate.set()
+        assert [
+            s.future.result(timeout=5).hit_length for s in _lookup_states(running)
+        ] == [16, 32]
+
+
 @pytest.mark.parametrize(
     "nested,hits", [(False, (16, 32)), (True, (0, 32)), (False, (0, 0))]
 )
@@ -1037,6 +1060,35 @@ def _make_lookup_client(extra_config=None):
     ) as make_socket:
         client = worker.LookupKeyClient(vllm_config)
     return client, make_socket.return_value
+
+
+def test_lookup_close_stops_running_rpc_and_cancels_unadopted_work():
+    client, sock = _make_lookup_client({"lookup_prefetch_limit": 2})
+    sent, reply = threading.Event(), threading.Event()
+    sock.send_multipart.side_effect = lambda *a, **kw: sent.set()
+    sock.poll.side_effect = lambda timeout: reply.wait(timeout / 1000)
+    sock.recv.side_effect = _gated_recv(reply, 32)
+    try:
+        running = client.prefetch(48, [])
+        assert sent.wait(timeout=5)
+        queued = client.prefetch(48, [])
+        client.close()
+        assert running.future.done()
+        with pytest.raises(CancelledError):
+            running.future.result()
+        assert queued.future.cancelled()
+        assert client.prefetch(48, []) is None
+        client.close()
+    finally:
+        reply.set()
+        client.close()
+
+
+def test_multi_store_shutdown_closes_scheduler_clients():
+    with _multi_store_lookup() as (connector, stores, *_):
+        connector.shutdown()
+        for store in stores:
+            assert store.connector_scheduler.client.prefetch(48, []) is None
 
 
 @pytest.mark.parametrize("limit", [None, 0, 1])
@@ -1529,23 +1581,3 @@ def test_del_invokes_shutdown_and_closes_store():
     connector.__del__()
 
     worker.close.assert_called_once_with()
-
-
-def test_shutdown_scheduler_role_is_noop():
-    vllm_config = _make_vllm_config()
-    kv_cache_config = _make_kv_cache_config()
-
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
-        )
-
-    # Scheduler role holds no store handle, so shutdown must be a safe no-op.
-    assert connector.connector_worker is None
-    connector.shutdown()

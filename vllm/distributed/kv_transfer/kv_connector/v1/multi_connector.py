@@ -453,10 +453,21 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self, request: "Request"
     ) -> MultiKVConnectorPrescheduleHandle | None:
         """Start child work on the input thread without adopting its handles."""
-        handles = [c.on_preschedule_request(request) for c in self._connectors]
-        if not any(handle is not None for handle in handles):
-            return None
-        return MultiKVConnectorPrescheduleHandle(handles)
+        try:
+            for i, connector in enumerate(self._connectors):
+                with self._child_preschedule_handle(request, i):
+                    request.kv_preschedule_handle = connector.on_preschedule_request(
+                        request
+                    )
+        except Exception:
+            self.cancel_preschedule_request(request)
+            raise
+        return request.kv_preschedule_handle
+
+    def cancel_preschedule_request(self, request: "Request") -> None:
+        for i, connector in enumerate(self._connectors):
+            with self._child_preschedule_handle(request, i):
+                connector.cancel_preschedule_request(request)
 
     @contextmanager
     def _child_preschedule_handle(

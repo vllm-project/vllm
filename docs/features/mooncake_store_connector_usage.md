@@ -283,6 +283,9 @@ MultiConnector, including nested MultiConnector configurations. Set
 limits are not shared across children. The existing first-hit selection policy
 and GPU allocation/load path are unchanged. Earlier queries may do extra work
 for requests that later abort or hit fully in local GPU cache.
+Rejected requests and discarded streaming updates cancel lookup work that has
+not started. An RPC already in progress may finish; engine shutdown interrupts
+pending replies and closes the scheduler-side lookup client.
 
 ### kv_connector_extra_config
 

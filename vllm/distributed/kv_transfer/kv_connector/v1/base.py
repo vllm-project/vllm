@@ -632,6 +632,14 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def cancel_preschedule_request(self, request: "Request") -> None:
+        """Cancel unadopted work when preprocessing or admission drops a request.
+
+        May run on either the input or scheduler thread. Cancellation must be
+        idempotent; shutdown must also cover handles still in the input queue.
+        """
+        return
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
 

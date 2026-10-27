@@ -155,9 +155,15 @@ steps:
   source_file_dependencies:
     - vllm/distributed/kv_transfer/
     - vllm/v1/request.py
+    - vllm/v1/engine/core.py
+    - vllm/v1/core/sched/scheduler.py
     - tests/v1/kv_connector/unit/
   commands:
-    - pytest -v -s v1/kv_connector/unit/test_mooncake_store_connector.py v1/kv_connector/unit/test_mooncake_store_scheduler.py
+    - >-
+      pytest -v -s
+      v1/kv_connector/unit/test_mooncake_store_connector.py
+      v1/kv_connector/unit/test_mooncake_store_scheduler.py
+      v1/kv_connector/unit/test_multi_connector.py::test_child_handle_stored_without_a_prior_handle_stays_with_that_child
 
 # Disabled until the KV connectors installation is locked.
 # - label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"

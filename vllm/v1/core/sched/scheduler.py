@@ -2902,6 +2902,8 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:
+            if self.connector is not None:
+                self.connector.cancel_preschedule_request(request)
             update = StreamingUpdate.from_request(request)
             if existing.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
                 assert existing.streaming_queue is not None, "duplicate request id"

@@ -18,7 +18,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from typing import Any, TypeVar
 
@@ -2406,6 +2406,7 @@ class LookupKeyClient:
     """
 
     def __init__(self, vllm_config: VllmConfig):
+        self._closed = threading.Event()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
@@ -2441,8 +2442,14 @@ class LookupKeyClient:
             b"".join(block_hashes),
         )
         self.socket.send_multipart(all_frames, copy=False)
-        resp = self.socket.recv()
+        resp = self._recv()
         return decode_lookup_response(resp)
+
+    def _recv(self) -> bytes:
+        while not self._closed.is_set():
+            if self.socket.poll(timeout=100):
+                return self.socket.recv()
+        raise CancelledError("Mooncake lookup client closed")
 
     def lookup(
         self,
@@ -2538,7 +2545,7 @@ class LookupKeyClient:
         rollout drain. Returns True on ACK, False on NACK.
         """
         self.socket.send(RESET_MSG)
-        resp = self.socket.recv()
+        resp = self._recv()
         return bytes(resp) == RESP_OK
 
     def reset(self) -> bool:
@@ -2549,10 +2556,16 @@ class LookupKeyClient:
         return success
 
     def close(self):
+        if self._closed.is_set():
+            return
+        self._closed.set()
         for req_id in list(self._lookups):
             self.discard(req_id)
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        # Wake a blocked receive, cancel queued (including unadopted) lookups,
+        # then close the socket only after its sole user has exited.
+        self.executor.shutdown(wait=True, cancel_futures=True)
         self.socket.close(linger=0)
+        self.ctx.term()
 
 
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
