@@ -779,6 +779,11 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
     ```
 
+!!! note
+    If an image, video or audio URL cannot be fetched, the request fails with HTTP 422 (`UnprocessableEntityError`).
+    This covers 4xx responses from the media host, malformed URLs, and DNS failures, connection errors, timeouts
+    and 5xx responses that persist after `VLLM_MEDIA_FETCH_MAX_RETRIES` attempts (default `3`).
+
 ### Video Inputs
 
 Instead of `image_url`, you can pass a video file via `video_url`. Here is a simple example using [LLaVA-OneVision](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf).

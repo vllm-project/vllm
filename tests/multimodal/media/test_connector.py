@@ -17,6 +17,7 @@ import torch
 from PIL import Image, ImageChops
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
+from vllm.exceptions import VLLMUnprocessableEntityError
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector
@@ -441,12 +442,15 @@ async def test_ssrf_bypass_backslash_in_url(local_asset_server):
     # server) using the normalised URL.  The normalised path will be
     # /%5C@example.com/<asset> which won't match any file the server
     # knows about, so we expect an HTTP error — but crucially NOT a
-    # successful fetch from example.com.
-    with pytest.raises(requests.exceptions.HTTPError):
+    # successful fetch from example.com. The local server answers 5xx,
+    # which is reported as 422 once the fetch retries are exhausted.
+    with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
         connector.fetch_image(bypass_url)
+    assert isinstance(exc_info.value.__cause__, requests.exceptions.HTTPError)
 
-    with pytest.raises(aiohttp.ClientResponseError):
+    with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
         await connector.fetch_image_async(bypass_url)
+    assert isinstance(exc_info.value.__cause__, aiohttp.ClientResponseError)
 
 
 @pytest.mark.asyncio

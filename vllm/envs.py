@@ -982,7 +982,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MEDIA_CACHE_TTL_HOURS", "24")
     ),
     # Maximum number of retries for fetching media (images, audio, video)
-    # from URLs. Each retry quadruples the timeout. Default is 3.
+    # from URLs. Each retry quadruples the timeout. Default is 3. If the
+    # last attempt still fails, the request fails with HTTP 422.
     "VLLM_MEDIA_FETCH_MAX_RETRIES": lambda: int(
         os.getenv("VLLM_MEDIA_FETCH_MAX_RETRIES", "3")
     ),
