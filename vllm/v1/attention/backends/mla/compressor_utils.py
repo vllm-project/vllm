@@ -116,9 +116,15 @@ class CompressedSlotMappingKernel(
             pos_after_compress = local_pos // COMPRESS_RATIO
 
             block_ids = pos_after_compress // block_size
-            block_numbers = tl.load(
-                block_table_ptr + batch_idx * block_table_stride + block_ids,
-                mask=mask & is_valid,
+            # Padded or invalid table entries clamp to block 0, the null
+            # block, so a bogus write lands in scratch instead of an illegal
+            # slot; the load index itself can be negative for padding rows.
+            block_numbers = tl.maximum(
+                tl.load(
+                    block_table_ptr + batch_idx * block_table_stride + block_ids,
+                    mask=mask & is_valid,
+                ),
+                0,
             )
             slot_ids = block_numbers.to(tl.int64) * block_size + (
                 pos_after_compress % block_size

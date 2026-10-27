@@ -198,7 +198,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 cm.slot_mapping,
                 cm.query_start_loc,
                 cm.seq_lens,
-                cm.block_table_tensor.clamp_(min=0),
+                cm.block_table_tensor,
                 int(self.kv_cache_spec.num_states),
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
