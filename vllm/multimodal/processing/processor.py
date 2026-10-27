@@ -1850,6 +1850,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
     skip_decoder_start_token: bool = False
 
+    process_text_only_encoder_prompt: bool = False
+    """Whether encoder prompts without multi-modal data are still processed by
+    `apply`. Set this for models whose encoder consumes the prompt tokens, so
+    that text-only requests are turned into an encoder input as well."""
+
     @abstractmethod
     def create_encoder_prompt(
         self,
