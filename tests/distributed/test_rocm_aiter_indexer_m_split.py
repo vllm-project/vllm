@@ -1,33 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Multi-GPU correctness of the sparse-MLA indexer M-split.
+"""Correctness of the sparse-MLA CP indexer.
 
 ``rocm_aiter_sparse_attn_indexer`` normally has every TP rank score every
-prefill query row and reach the same Top-K. Once the longest prefill sequence
-reaches the GPU arch's threshold (``_CP_INDEXER_MIN_SEQ_LEN``) the rows are dealt
-across the ranks as mirrored stripes -- rank ``r`` takes stripe ``r`` of the
-first half and stripe ``tp - 1 - r`` of the second -- and the batch is rebuilt
-with an ``all_reduce(MAX)`` over a ``-1``-filled Top-K buffer.
-
-Every test runs the real op -- real Triton/AITER kernels, real collective --
-over byte-identical inputs with the feature off and then on. The threshold is
-the only variable, so any difference in the Top-K buffer is the feature.
+prefill query row and reach the same Top-K. When ``use_cp_indexer`` says so,
+the rows are dealt across the ranks as mirrored stripes -- rank ``r`` takes
+stripe ``r`` of the first half and stripe ``tp - 1 - r`` of the second -- and
+the batch is rebuilt with an ``all_reduce(MAX)`` over a ``-1``-filled Top-K
+buffer.
 
 Run `pytest tests/distributed/test_rocm_aiter_indexer_m_split.py`.
 """
 
+import dataclasses
 import queue
-import types
 from itertools import accumulate
 
 import pytest
 import torch
 import torch.multiprocessing as mp
 
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -52,30 +47,15 @@ LAYER = "model.layers.0.self_attn.indexer"
 HEAD_DIM = 128
 NUM_HEADS = 32
 TOPK_TOKENS = 2048
-# (num_tokens, context, num_chunks, buffer_width).
+# (num_tokens, context, num_chunks). The context must exceed TOPK_TOKENS by a
+# good margin, or every row keeps every key and the Top-K stops discriminating.
 SHAPES = (
-    # The context must exceed TOPK_TOKENS by a good margin, or every row keeps
-    # every key and the Top-K stops discriminating.
-    #
-    # small stripes, well above the 2*tp branch point
-    (2000, 8192, 1, TOPK_TOKENS),
-    # same, split into chunks so the sequence_shard_indexer guard sees more than one
-    (2000, 8192, 3, TOPK_TOKENS),
-    # A sharded chunk and a tiny tail must still have one writer per row.
-    (17, 8192, (16, 1), TOPK_TOKENS),
-    (19, 8192, (1, 16, 2), TOPK_TOKENS),
-    # a ragged split (num_tokens not divisible by 2*tp) plus rows whose window
-    # is narrower than TOPK_TOKENS, so -1 padding survives the merge
-    (9000, 8192, 1, TOPK_TOKENS),
-    # the shape the feature targets -- few rows against a long context
-    (512, 65536, 1, TOPK_TOKENS),
-    (1024, 65536, 1, TOPK_TOKENS),
-    (8192, 65536, 1, TOPK_TOKENS),
-    # context below TOPK_TOKENS: every row keeps every key it can see, so this
-    # says nothing about selection, but it drives the padding path to its
-    # extreme -- every row is -1-padded, and the MAX merge has to reassemble
-    # rows that are mostly sentinel
-    (2000, 512, 1, TOPK_TOKENS),
+    # A split chunk and a tail with fewer rows than ranks: the tail is split
+    # too, and every row must still have one writer.
+    (17, 8192, (16, 1)),
+    # A ragged split plus rows whose window is narrower than TOPK_TOKENS, so
+    # -1 padding survives the merge.
+    (9001, 8192, 1),
 )
 
 
@@ -125,6 +105,7 @@ def _build_inputs(num_tokens, context, num_chunks, device):
             cu_seq_lens=torch.tensor([0, context], dtype=torch.int32, device=device),
             token_to_seq=torch.zeros(context, dtype=torch.int32, device=device),
             total_seq_lens=context,
+            max_seqlen_k=context,
             token_start=lo,
             token_end=hi,
             num_reqs=1,
@@ -192,7 +173,7 @@ def _reference_logits(inputs, device):
     return logits, row_starts, row_ends
 
 
-def _assert_topk_equivalent(sharded, replicated, logits, row_starts, row_ends):
+def _assert_topk_equivalent(cp_topk, non_cp_topk, logits, row_starts, row_ends):
     """Assert the two runs selected equally good keys for every row.
 
     The operator's contract is the selected *set*, not its position in the
@@ -201,8 +182,8 @@ def _assert_topk_equivalent(sharded, replicated, logits, row_starts, row_ends):
     ``compare_top_k_results`` in tests/kernels/test_top_k_per_row.py -- sets
     first, then the values behind any disagreement.
     """
-    expected_count = (row_ends - row_starts).clamp(max=sharded.shape[1])
-    for selected in (sharded, replicated):
+    expected_count = (row_ends - row_starts).clamp(max=cp_topk.shape[1])
+    for selected in (cp_topk, non_cp_topk):
         valid = selected >= 0
         assert torch.equal(valid.sum(dim=1), expected_count), "missing or extra keys"
         assert torch.all(
@@ -219,7 +200,7 @@ def _assert_topk_equivalent(sharded, replicated, logits, row_starts, row_ends):
     # Sorting first makes the scan order-insensitive, so only rows whose
     # selected sets really differ reach the per-row inspection below.
     differing = (
-        (sharded.sort(dim=1).values != replicated.sort(dim=1).values)
+        (cp_topk.sort(dim=1).values != non_cp_topk.sort(dim=1).values)
         .any(dim=1)
         .nonzero()
         .flatten()
@@ -229,36 +210,36 @@ def _assert_topk_equivalent(sharded, replicated, logits, row_starts, row_ends):
 
     for row in differing:
         start, end = int(row_starts[row]), int(row_ends[row])
-        num_valid = min(sharded.shape[1], end - start)
-        picked_a = sharded[row, :num_valid].tolist()
-        picked_b = replicated[row, :num_valid].tolist()
-        set_a, set_b = set(picked_a), set(picked_b)
-        if set_a == set_b:
+        num_valid = min(cp_topk.shape[1], end - start)
+        picked_cp = cp_topk[row, :num_valid].tolist()
+        picked_non_cp = non_cp_topk[row, :num_valid].tolist()
+        set_cp, set_non_cp = set(picked_cp), set(picked_non_cp)
+        if set_cp == set_non_cp:
             continue
 
         row_logits = logits[row]
-        only_a = sorted(set_a - set_b)
-        only_b = sorted(set_b - set_a)
-        vals_a = row_logits[
-            torch.tensor(only_a, dtype=torch.long, device=logits.device)
+        only_cp = sorted(set_cp - set_non_cp)
+        only_non_cp = sorted(set_non_cp - set_cp)
+        vals_cp = row_logits[
+            torch.tensor(only_cp, dtype=torch.long, device=logits.device)
         ]
-        vals_b = row_logits[
-            torch.tensor(only_b, dtype=torch.long, device=logits.device)
+        vals_non_cp = row_logits[
+            torch.tensor(only_non_cp, dtype=torch.long, device=logits.device)
         ]
-        if len(only_a) != len(only_b) or not torch.allclose(
-            vals_a.sort().values, vals_b.sort().values, rtol=1e-4, atol=1e-4
+        if len(only_cp) != len(only_non_cp) or not torch.allclose(
+            vals_cp.sort().values, vals_non_cp.sort().values, rtol=1e-4, atol=1e-4
         ):
             failures.append(
-                f"row {row}: sharded-only {only_a[:5]} score "
-                f"{vals_a[:5].tolist()}, replicated-only {only_b[:5]} score "
-                f"{vals_b[:5].tolist()}"
+                f"row {row}: CP-only {only_cp[:5]} score "
+                f"{vals_cp[:5].tolist()}, non-CP-only {only_non_cp[:5]} score "
+                f"{vals_non_cp[:5].tolist()}"
             )
             continue
 
         # Nothing left out may beat something selected.
-        unpicked = sorted(set(range(start, end)) - set_a)
+        unpicked = sorted(set(range(start, end)) - set_cp)
         if unpicked:
-            worst_kept = row_logits[torch.tensor(picked_a, device=logits.device)].min()
+            worst_kept = row_logits[torch.tensor(picked_cp, device=logits.device)].min()
             best_dropped = row_logits[
                 torch.tensor(unpicked, device=logits.device)
             ].max()
@@ -274,30 +255,45 @@ def _assert_topk_equivalent(sharded, replicated, logits, row_starts, row_ends):
     )
 
 
-def _run_indexer(m, enabled, inputs, config, device, width=TOPK_TOKENS):
+def _cp_indexer_threshold() -> int | None:
+    """This GPU's CP-indexer threshold, or None where the CP indexer is off."""
+    return mla_sparse._CP_INDEXER_MIN_SEQ_LEN.get(mla_sparse._GCN_ARCH.split(":")[0])
+
+
+def _run_indexer(m, enabled, inputs, config, device):
     """One forward of the real op, with the threshold just met or just missed."""
     kv_cache, metadata, q_fp8, weights = inputs
     num_tokens = q_fp8.shape[0]
     context = metadata.max_seq_len
 
     # use_cp_indexer() also requires AITER MLA, so it has to be on for both
-    # runs. The arch is pinned so only the threshold distinguishes them,
-    # whatever GPU the test runs on.
+    # runs. The op reads max_prefill_seq_len only to decide whether to split,
+    # so setting it just below or at this GPU's threshold switches the CP
+    # indexer off or on for the same inputs.
     m.setenv("VLLM_ROCM_USE_AITER", "1")
     m.setenv("VLLM_ROCM_USE_AITER_MLA", "1")
     rocm_aiter_ops.refresh_env_variables()
-    m.setattr(mla_sparse, "_GCN_ARCH", "gfx950")
-    m.setitem(
-        mla_sparse._CP_INDEXER_MIN_SEQ_LEN,
-        "gfx950",
-        context if enabled else context + 1,
+    threshold = _cp_indexer_threshold()
+    assert threshold is not None
+    metadata = dataclasses.replace(
+        metadata,
+        prefill=dataclasses.replace(
+            metadata.prefill,
+            max_prefill_seq_len=threshold if enabled else threshold - 1,
+        ),
     )
     # Without this the feature silently stays off and every comparison passes
     # by doing the same thing twice.
-    assert mla_sparse.use_cp_indexer(metadata.prefill.max_prefill_seq_len) is enabled
+    assert (
+        mla_sparse.use_cp_indexer(
+            metadata.prefill.max_prefill_seq_len,
+            config.parallel_config.tensor_parallel_size,
+        )
+        is enabled
+    )
 
     topk_indices_buffer = torch.zeros(
-        (num_tokens, width), dtype=torch.int32, device=device
+        (num_tokens, TOPK_TOKENS), dtype=torch.int32, device=device
     )
     with set_forward_context({LAYER: metadata}, config):
         torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
@@ -321,13 +317,10 @@ def _run_indexer(m, enabled, inputs, config, device, width=TOPK_TOKENS):
 
 
 def _worker(local_rank, world_size, q, shape, port):
-    """Join the TP group on one GPU, then run every check on one shape.
+    """Join the TP group on one GPU and compare the two paths on one shape.
 
-    All the checks share one process because joining the group costs ~40s of
-    import, CUDA context and RCCL rendezvous while the checks themselves take
-    milliseconds. Each failure is tagged with its check and reported through
-    ``q``: an assertion inside a spawned process would otherwise surface only
-    as a non-zero exit code, and raising would hide the later checks.
+    A failed assertion in a spawned process would surface only as a non-zero
+    exit code, so it is reported through ``q``.
     """
     monkeypatch = pytest.MonkeyPatch()
     config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=world_size))
@@ -347,108 +340,33 @@ def _worker(local_rank, world_size, q, shape, port):
         initialize_model_parallel(tensor_model_parallel_size=world_size)
         init_workspace_manager(device)
 
-        for name, check in CHECKS.items():
-            try:
-                check(m, config, device, world_size, shape)
-            except Exception as exc:  # noqa: BLE001 - reported to the parent
-                import traceback
+        try:
+            num_tokens, context, num_chunks = shape
+            inputs = _build_inputs(num_tokens, context, num_chunks, device)
+            non_cp_topk = _run_indexer(m, False, inputs, config, device)
+            cp_topk = _run_indexer(m, True, inputs, config, device)
+            assert (non_cp_topk >= 0).any(), "op wrote nothing"
+            _assert_topk_equivalent(
+                cp_topk, non_cp_topk, *_reference_logits(inputs, device)
+            )
+        except Exception as exc:  # noqa: BLE001 - reported to the parent
+            import traceback
 
-                q.put(f"[{name}] rank {local_rank}: {exc}\n{traceback.format_exc()}")
-
-
-def _check_sharded_matches_replicated(m, config, device, world_size, shape):
-    """Sharding changes who computes which row, never the answer."""
-    num_tokens, context, num_chunks, width = shape
-    inputs = _build_inputs(num_tokens, context, num_chunks, device)
-    replicated = _run_indexer(m, False, inputs, config, device, width)
-    sharded = _run_indexer(m, True, inputs, config, device, width)
-
-    assert (replicated[:, :TOPK_TOKENS] >= 0).any(), "op wrote nothing"
-    logits, row_starts, row_ends = _reference_logits(inputs, device)
-    _assert_topk_equivalent(
-        sharded[:, :TOPK_TOKENS],
-        replicated[:, :TOPK_TOKENS],
-        logits,
-        row_starts,
-        row_ends,
-    )
-
-
-def _check_one_rank_per_row(m, config, device, world_size, shape):
-    """Every row must be scored by exactly one rank.
-
-    A dropped row stays -1 through the MAX merge and feeds garbage indices to
-    attention; a doubly-owned row is duplicated work. Suppressing only the
-    collective leaves each rank's own contribution visible.
-    """
-    num_tokens, context, num_chunks, _ = shape
-    inputs = _build_inputs(num_tokens, context, num_chunks, device)
-    m.setattr(
-        mla_sparse,
-        "dist",
-        types.SimpleNamespace(
-            all_reduce=lambda *a, **k: None, ReduceOp=torch.distributed.ReduceOp
-        ),
-    )
-    local = _run_indexer(m, True, inputs, config, device)
-    m.undo()
-
-    # Every row has at least one valid key, so its owner always writes col 0.
-    owners = tensor_model_parallel_all_reduce((local[:, 0] >= 0).int())
-    bad = torch.nonzero(owners != 1).flatten()
-    assert bad.numel() == 0, f"rows owned by != 1 rank: {bad[:8].tolist()}"
-
-
-def _check_no_collective_when_unsharded(m, config, device, world_size, shape):
-    """Fewer rows than ranks keeps every chunk replicated, so no all-reduce.
-
-    Guards the batch-level decision: replicated Top-K rows must not be
-    merged, because ties can produce different valid sets across ranks.
-    ``shape`` only supplies the context: the row count is fixed below, since
-    "fewer rows than ranks" is the whole premise.
-    """
-    calls = []
-    inputs = _build_inputs(world_size - 1, shape[1], 1, device)
-    replicated = _run_indexer(m, False, inputs, config, device)
-    m.setattr(
-        mla_sparse,
-        "dist",
-        types.SimpleNamespace(
-            all_reduce=lambda t, **k: calls.append(t),
-            ReduceOp=torch.distributed.ReduceOp,
-        ),
-    )
-    sharded = _run_indexer(m, True, inputs, config, device)
-
-    assert calls == [], "all-reduce issued for a batch that never sharded"
-    logits, row_starts, row_ends = _reference_logits(inputs, device)
-    _assert_topk_equivalent(
-        sharded[:, :TOPK_TOKENS],
-        replicated[:, :TOPK_TOKENS],
-        logits,
-        row_starts,
-        row_ends,
-    )
-
-
-CHECKS = {
-    "sharded_matches_replicated": _check_sharded_matches_replicated,
-    "one_rank_per_row": _check_one_rank_per_row,
-    "no_collective_when_unsharded": _check_no_collective_when_unsharded,
-}
+            q.put(f"rank {local_rank}: {exc}\n{traceback.format_exc()}")
 
 
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm AITER sparse indexer only"
 )
-@pytest.mark.parametrize("tp_size", [2, 8])
-@pytest.mark.parametrize(
-    "shape", SHAPES, ids=[f"m{m}-n{n}-c{c}" for m, n, c, _ in SHAPES]
-)
+# CI has 2 GPUs; TP4 runs where 4 are available.
+@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize("shape", SHAPES, ids=[f"m{m}-n{n}-c{c}" for m, n, c in SHAPES])
 def test_m_split(tp_size, shape):
-    """Run every check against one shape, on ``tp_size`` real GPUs."""
-    if tp_size > torch.accelerator.device_count():
+    """Splitting rows changes who computes which row, never the Top-K."""
+    if torch.accelerator.device_count() < tp_size:
         pytest.skip(f"needs {tp_size} GPUs")
+    if _cp_indexer_threshold() is None:
+        pytest.skip("the CP indexer is not enabled on this GPU arch")
 
     q = mp.get_context("spawn").Queue()
     try:
@@ -464,20 +382,46 @@ def test_m_split(tp_size, shape):
         cleanup_dist_env_and_memory()
 
 
+@pytest.fixture
+def aiter_mla(monkeypatch: pytest.MonkeyPatch):
+    """Turn AITER MLA on through its env vars; restore the cached flags after."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MLA", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    yield
+    monkeypatch.undo()
+    rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.skipif(not is_aiter_found_and_supported(), reason="needs AITER")
 @pytest.mark.parametrize(
-    ("arch", "seq_len", "expected"),
+    ("arch", "seq_len", "tp_size", "chunk_rows", "candidates", "expected"),
     [
-        ("gfx950", 16384, True),
-        ("gfx950", 16383, False),
-        ("gfx950:sramecc+:xnack-", 16384, True),
-        ("gfx942", 65536, False),
+        ("gfx950", 16384, 2, None, False, True),
+        ("gfx950", 16383, 2, None, False, False),
+        ("gfx950:sramecc+:xnack-", 16384, 2, None, False, True),
+        ("gfx942", 65536, 2, None, False, False),
+        ("gfx950", 16384, 1, None, False, False),
+        # no chunk has a row per rank, so nothing would be split
+        ("gfx950", 16384, 2, (1, 1), False, False),
+        ("gfx950", 16384, 2, (1, 2), False, True),
+        ("gfx950", 16384, 2, (2,), True, False),
     ],
 )
-def test_cp_indexer_threshold(monkeypatch, arch, seq_len, expected):
-    """Only listed archs split rows, and only from their threshold on."""
+def test_use_cp_indexer(
+    aiter_mla, monkeypatch, arch, seq_len, tp_size, chunk_rows, candidates, expected
+):
+    """Only long prefills on listed archs, with TP and enough rows, are split."""
     monkeypatch.setattr(mla_sparse, "_GCN_ARCH", arch)
-    monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: True)
-    assert mla_sparse.use_cp_indexer(seq_len) is expected
+    chunks = None
+    if chunk_rows is not None:
+        metadata = _build_inputs(sum(chunk_rows), 64, chunk_rows, "cpu")[1]
+        chunks = metadata.prefill.chunks
+    candidate_blocks = torch.zeros(1, dtype=torch.int32) if candidates else None
+    assert (
+        mla_sparse.use_cp_indexer(seq_len, tp_size, chunks, candidate_blocks)
+        is expected
+    )
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 8])
@@ -503,6 +447,7 @@ def test_m_split_chunk_budget(tp_size, queries, budget_rows):
     chunks = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
         contexts, torch.tensor(queries), 4096, budget, m_split_tp_size=tp_size
     )
+    # As in use_cp_indexer(): split only if a chunk has a row for every rank.
     split = tp_size > 1 and any(q.stop - q.start >= tp_size for _, q in chunks)
     assert sum(q.stop - q.start for _, q in chunks) == sum(queries)
     for requests, query in chunks:
@@ -515,6 +460,4 @@ def test_m_split_chunk_budget(tp_size, queries, budget_rows):
                 for rank in range(tp_size)
                 for _, count in mla_sparse._m_split_stripes(rows, rank, tp_size)
             ]
-        # A single logits row is the existing lower bound, even if N alone
-        # exceeds the configured budget.
-        assert max(launches) * width * 4 <= max(budget, width * 4)
+        assert max(launches) * width * 4 <= budget

@@ -20,7 +20,10 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerPrefillChunkMetadata,
+)
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -43,19 +46,35 @@ _CP_INDEXER_MIN_SEQ_LEN: dict[str, int] = {
 }
 
 
-def use_cp_indexer(max_prefill_seq_len: int) -> bool:
+def use_cp_indexer(
+    max_prefill_seq_len: int,
+    tp_world_size: int,
+    chunks: list[DeepseekV32IndexerPrefillChunkMetadata] | None = None,
+    candidate_blocks: torch.Tensor | None = None,
+) -> bool:
     """Whether to split the indexer prefill rows of a batch across TP ranks.
 
-    The metadata builder widens its logits budget on the same decision, so both
-    must pass the batch's ``max_prefill_seq_len``.
+    The metadata builder asks before the batch is chunked (``chunks=None``) to
+    widen its logits budget; the op asks again with the chunks. Candidate-block
+    batches stay replicated, since the auxiliary state they build is not
+    covered by the Top-K-only collective, and so do batches whose chunks all
+    have fewer rows than ranks.
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
     min_seq_len = _CP_INDEXER_MIN_SEQ_LEN.get(_GCN_ARCH.split(":")[0])
     return (
-        min_seq_len is not None
+        candidate_blocks is None
+        and tp_world_size > 1
+        and min_seq_len is not None
         and max_prefill_seq_len >= min_seq_len
         and bool(rocm_aiter_ops.is_mla_enabled())
+        and (
+            chunks is None
+            or any(
+                chunk.token_end - chunk.token_start >= tp_world_size for chunk in chunks
+            )
+        )
     )
 
 
@@ -1348,16 +1367,11 @@ def rocm_aiter_sparse_attn_indexer(
         tp_world_size = tp_group.world_size
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
-        # Candidate-block batches stay replicated: the auxiliary state they
-        # build is not covered by the Top-K-only collective below.
-        sequence_shard_indexer = (
-            candidate_blocks is None
-            and tp_world_size > 1
-            and use_cp_indexer(prefill_metadata.max_prefill_seq_len)
-            and any(
-                chunk.token_end - chunk.token_start >= tp_world_size
-                for chunk in prefill_metadata.chunks
-            )
+        cp_indexer_enabled = use_cp_indexer(
+            prefill_metadata.max_prefill_seq_len,
+            tp_world_size,
+            prefill_metadata.chunks,
+            candidate_blocks,
         )
 
         workspace_manager = current_workspace_manager()
@@ -1389,7 +1403,7 @@ def rocm_aiter_sparse_attn_indexer(
             # rank scores the whole chunk.
             local_rows = (
                 _m_split_stripes(chunk_m, tp_rank, tp_world_size)
-                if sequence_shard_indexer
+                if cp_indexer_enabled
                 else [(0, chunk_m)]
             )
             for local_off, local_m in local_rows:
@@ -1460,7 +1474,7 @@ def rocm_aiter_sparse_attn_indexer(
 
         # Every row in this collective has exactly one writer, including
         # short tail chunks. Other ranks retain the -1 sentinel.
-        if sequence_shard_indexer:
+        if cp_indexer_enabled:
             prefill_start = num_decode_tokens
             prefill_end = hidden_states.shape[0]
             buf_slice = topk_indices_buffer[prefill_start:prefill_end, :topk_tokens]
