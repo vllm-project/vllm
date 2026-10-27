@@ -46,6 +46,7 @@ use crate::routes::openai::utils::types::{
 };
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::routes::output_log::{LoggedOutput, chat_output_text, log_output};
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
@@ -129,6 +130,7 @@ async fn collect_chat_completion(
     created: u64,
     ApiServerOptions {
         enable_log_requests,
+        log_outputs,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
         enable_per_request_metrics,
@@ -223,6 +225,30 @@ async fn collect_chat_completion(
         );
     }
 
+    let content = match &echo {
+        Some(prefix) => Some(format!("{prefix}{}", message.text())),
+        None => Some(message.text()).filter(|t| !t.is_empty()),
+    };
+    if log_outputs.logs_complete() {
+        let output = chat_output_text(
+            content.as_deref().unwrap_or_default(),
+            tool_calls.iter().map(|call| {
+                (
+                    call.function.name.as_str(),
+                    call.function.arguments.as_deref().unwrap_or_default(),
+                )
+            }),
+        );
+        if !output.is_empty() {
+            log_output(
+                LoggedOutput::Response,
+                &output,
+                Some(&token_ids),
+                Some(&finish_reason),
+            );
+        }
+    }
+
     Ok(ChatCompletionResponse {
         id: request_id,
         object: "chat.completion".to_string(),
@@ -232,10 +258,7 @@ async fn collect_chat_completion(
             index: 0,
             message: ChatCompletionMessage {
                 role: AssistantRole,
-                content: match &echo {
-                    Some(prefix) => Some(format!("{prefix}{}", message.text())),
-                    None => Some(message.text()).filter(|t| !t.is_empty()),
-                },
+                content,
                 refusal: None,
                 annotations: None,
                 audio: None,
@@ -271,6 +294,7 @@ async fn chat_completion_chunk_stream(
     created: u64,
     ApiServerOptions {
         enable_log_requests,
+        log_outputs,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
         enable_per_request_metrics,
@@ -306,6 +330,7 @@ async fn chat_completion_chunk_stream(
     let mut inside_hidden_reasoning = false;
     let mut suppress_current_update_metadata = false;
     let mut continuous_usage = ContinuousUsage::default();
+    let mut delta_log = log_outputs.logs_deltas().then(StreamDeltaLog::default);
 
     /// Yield a chunk with optional continuous usage attached.
     macro_rules! yield_chunk {
@@ -364,6 +389,9 @@ async fn chat_completion_chunk_stream(
                 let include_delta =
                     include_reasoning || !matches!(kind, AssistantBlockKind::Reasoning);
                 if include_delta {
+                    if let Some(delta_log) = delta_log.as_mut() {
+                        delta_log.current.push_block_delta(kind, &delta);
+                    }
                     if let Some(pending_chunk) = pending_chunk.as_mut() {
                         pending_chunk.push_block_delta(kind, delta);
                     } else {
@@ -379,6 +407,9 @@ async fn chat_completion_chunk_stream(
             }) => {
                 let delta_token_count = token_ids.len();
                 continuous_usage.add_output_tokens(delta_token_count);
+                if let Some(delta_log) = delta_log.as_mut() {
+                    delta_log.end_update(&token_ids);
+                }
                 let include_metadata =
                     !suppress_current_update_metadata && !inside_hidden_reasoning;
                 suppress_current_update_metadata = false;
@@ -439,6 +470,9 @@ async fn chat_completion_chunk_stream(
                 }
             }
             Ok(ChatEvent::ToolCallArgumentsDelta { index, delta }) => {
+                if let Some(delta_log) = delta_log.as_mut() {
+                    delta_log.current.tool_arguments.push_str(&delta);
+                }
                 let tool_index = index as u32;
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_tool_call_arguments(tool_index, delta);
@@ -450,6 +484,7 @@ async fn chat_completion_chunk_stream(
                 debug!("ending current tool call");
             }
             Ok(ChatEvent::Done {
+                message,
                 usage: final_usage,
                 timestamps,
                 finish_reason,
@@ -487,7 +522,26 @@ async fn chat_completion_chunk_stream(
                     saw_tool_calls && !is_named_tool_choice,
                     kv_transfer_params.map(|value| *value),
                 ) {
-                    Ok(chunk) => yield_chunk!(chunk),
+                    Ok(chunk) => {
+                        let finish_reason = chunk.choices[0].finish_reason.as_deref();
+                        if let Some(delta_log) = delta_log.as_mut() {
+                            delta_log.finish(finish_reason);
+                        }
+                        if log_outputs.logs_complete() {
+                            log_output(
+                                LoggedOutput::StreamComplete,
+                                &chat_output_text(
+                                    &message.text(),
+                                    message
+                                        .tool_calls()
+                                        .map(|call| (call.name.as_str(), call.arguments.as_str())),
+                                ),
+                                None,
+                                finish_reason,
+                            );
+                        }
+                        yield_chunk!(chunk)
+                    }
                     Err(error) => {
                         error!(
                             error = %error.to_error_response().error.message,
@@ -535,6 +589,104 @@ fn usage_chunk(
     chunk.usage = Some(usage);
     chunk.metrics = metrics.map(Into::into);
     chunk
+}
+
+/// Visible output of one decoded chat update, logged as one delta line by
+/// `--enable-log-outputs`.
+#[derive(Debug, Default)]
+struct UpdateOutput {
+    content: String,
+    reasoning: String,
+    tool_arguments: String,
+}
+
+impl UpdateOutput {
+    /// Record one visible text or reasoning block delta.
+    fn push_block_delta(&mut self, kind: AssistantBlockKind, delta: &str) {
+        match kind {
+            AssistantBlockKind::Text => self.content.push_str(delta),
+            AssistantBlockKind::Reasoning => self.reasoning.push_str(delta),
+            AssistantBlockKind::ToolCall => {
+                unreachable!("tool calls must flow through dedicated tool-call events")
+            }
+        }
+    }
+
+    /// Append output released after this update ended.
+    fn append(&mut self, other: Self) {
+        self.content.push_str(&other.content);
+        self.reasoning.push_str(&other.reasoning);
+        self.tool_arguments.push_str(&other.tool_arguments);
+    }
+
+    /// Describe the update like Python: content, `[reasoning: ...]` and
+    /// `[tool_calls: <arguments>]` joined by spaces. `None` when nothing was
+    /// visible.
+    fn describe(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if !self.content.is_empty() {
+            parts.push(self.content.clone());
+        }
+        if !self.reasoning.is_empty() {
+            parts.push(format!("[reasoning: {}]", self.reasoning));
+        }
+        if !self.tool_arguments.is_empty() {
+            parts.push(format!("[tool_calls: {}]", self.tool_arguments));
+        }
+        (!parts.is_empty()).then(|| parts.join(" "))
+    }
+}
+
+/// Per-update delta logging of one chat stream (`--enable-log-deltas`).
+///
+/// Each update is held until the next one ends or the stream finishes, so the
+/// last delta line carries the finish reason: `vllm-chat` emits `Done` after
+/// the last update's `LogprobsDelta`, and a parser may release held-back output
+/// in between, which belongs to that last update.
+#[derive(Debug, Default)]
+struct StreamDeltaLog {
+    /// Output of the update in progress.
+    current: UpdateOutput,
+    /// The last ended update and its output token IDs.
+    ended: Option<(UpdateOutput, Vec<u32>)>,
+}
+
+impl StreamDeltaLog {
+    /// End the update in progress, whose output token IDs are `token_ids`,
+    /// and log the update before it.
+    fn end_update(&mut self, token_ids: &[u32]) {
+        if let Some((output, token_ids)) = self.ended.take()
+            && let Some(delta) = output.describe()
+        {
+            log_output(LoggedOutput::StreamDelta, &delta, Some(&token_ids), None);
+        }
+        self.ended = Some((std::mem::take(&mut self.current), token_ids.to_vec()));
+    }
+
+    /// Log the held update, with the stream's finish reason when it finished.
+    fn finish(&mut self, finish_reason: Option<&str>) {
+        let (mut output, token_ids) = match self.ended.take() {
+            Some((output, token_ids)) => (output, Some(token_ids)),
+            None => (UpdateOutput::default(), None),
+        };
+        output.append(std::mem::take(&mut self.current));
+        if let Some(delta) = output.describe() {
+            log_output(
+                LoggedOutput::StreamDelta,
+                &delta,
+                token_ids.as_deref(),
+                finish_reason,
+            );
+        }
+    }
+}
+
+impl Drop for StreamDeltaLog {
+    /// A stream that fails or is dropped before `Done` still logs the output
+    /// already sent to the client.
+    fn drop(&mut self) {
+        self.finish(None);
+    }
 }
 
 /// One in-flight chat-completions SSE chunk being assembled at the route layer.
@@ -866,7 +1018,7 @@ mod tests {
 
     use super::{
         ApiServerOptions, ChatCompletionStreamResponse, ResponseOptions, StreamResponseEnvelope,
-        block_delta_chunk, chat_completion_chunk_stream, final_chunk,
+        UpdateOutput, block_delta_chunk, chat_completion_chunk_stream, final_chunk,
     };
 
     /// Terminal usage with the given engine-level counts and zero reasoning tokens.
@@ -914,6 +1066,28 @@ mod tests {
         assert_eq!(
             chunk.choices[0].delta.reasoning.as_deref(),
             Some("thinking")
+        );
+    }
+
+    #[test]
+    fn update_output_describes_parts_and_appends_released_output() {
+        let mut update = UpdateOutput::default();
+        assert_eq!(update.describe(), None);
+        update.push_block_delta(AssistantBlockKind::Reasoning, "Need tool.");
+        update.push_block_delta(AssistantBlockKind::Text, "Hello");
+        update.tool_arguments.push_str("{\"city\": ");
+        assert_eq!(
+            update.describe().as_deref(),
+            Some("Hello [reasoning: Need tool.] [tool_calls: {\"city\": ]")
+        );
+
+        // Output a parser releases at finish continues the same parts.
+        let mut released = UpdateOutput::default();
+        released.push_block_delta(AssistantBlockKind::Text, "<tool_ca");
+        update.append(released);
+        assert_eq!(
+            update.describe().as_deref(),
+            Some("Hello<tool_ca [reasoning: Need tool.] [tool_calls: {\"city\": ]")
         );
     }
 
