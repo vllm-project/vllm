@@ -208,7 +208,7 @@ impl RenderArgs {
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
-            reasoning_effort_map: reasoning_effort_map(self.reasoning_effort_map),
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             chat_template_content_format: self.chat_template_content_format,
@@ -758,7 +758,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
-            reasoning_effort_map: reasoning_effort_map(self.reasoning_effort_map),
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
@@ -837,7 +837,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
-            reasoning_effort_map: reasoning_effort_map(self.reasoning_effort_map),
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
@@ -952,13 +952,6 @@ pub struct StructuredOutputsConfig {
 
 /// Keys are API effort names, so unknown efforts fail at startup.
 type ReasoningEffortMap = HashMap<ReasoningEffort, String>;
-
-fn reasoning_effort_map(map: Option<ReasoningEffortMap>) -> HashMap<String, String> {
-    map.unwrap_or_default()
-        .into_iter()
-        .map(|(effort, value)| (effort.as_str().to_string(), value))
-        .collect()
-}
 
 /// Parsed `VLLM_LOG_STATS_INTERVAL`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

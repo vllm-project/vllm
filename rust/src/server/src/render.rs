@@ -16,7 +16,7 @@ use vllm_text::TextRequestProcessor;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
 use crate::{
-    HttpListenerMode, TlsConfig,
+    HttpListenerMode, ReasoningEffort, TlsConfig,
     listener::{Listener, MaybeTlsListener},
     tls,
 };
@@ -40,7 +40,7 @@ pub struct RenderConfig {
     pub renderer: RendererSelection,
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
-    pub reasoning_effort_map: HashMap<String, String>,
+    pub reasoning_effort_map: HashMap<ReasoningEffort, String>,
     pub trust_request_chat_template: bool,
     pub exclude_tools_when_tool_choice_none: bool,
     pub chat_template_content_format: ChatTemplateContentFormatOption,
@@ -105,7 +105,13 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             config.reasoning_parser.clone(),
         )
         .with_tool_strict_level(config.tool_strict_level)
-        .with_reasoning_effort_map(config.reasoning_effort_map.clone())
+        .with_reasoning_effort_map(
+            config
+                .reasoning_effort_map
+                .iter()
+                .map(|(effort, value)| (effort.as_str().to_owned(), value.clone()))
+                .collect(),
+        )
         .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
     Ok(Arc::new(RenderState {
         model: config.model.clone(),

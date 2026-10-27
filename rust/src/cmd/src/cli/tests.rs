@@ -9,7 +9,7 @@ use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_server::{
     Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogging, ParserSelection,
-    RendererSelection,
+    ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
 
@@ -1261,8 +1261,8 @@ fn frontend_args_json_passes_reasoning_effort_map_into_config() {
     assert_eq!(
         args.into_config().reasoning_effort_map,
         [
-            ("medium".to_string(), "low".to_string()),
-            ("xhigh".to_string(), "max".to_string()),
+            (ReasoningEffort::Medium, "low".to_string()),
+            (ReasoningEffort::XHigh, "max".to_string()),
         ]
         .into()
     );
