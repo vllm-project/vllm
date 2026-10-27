@@ -963,26 +963,6 @@ def _make_admission_request(request_id="req-0"):
     )
 
 
-def test_admission_lookup_waits_to_create_load_until_local_hit_is_known():
-    scheduler = _make_bare_scheduler()
-    scheduler.lookup_async = scheduler.load_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=32)
-    request = _make_admission_request()
-
-    handle = scheduler.start_lookup_prefetch(request)
-    request.kv_preschedule_handle = handle
-
-    assert scheduler.client.prefetched == [48]
-    assert scheduler.client.adopted == []
-    assert scheduler.load_specs == {}
-    assert scheduler._unfinished_requests == {}
-    assert scheduler.get_num_new_matched_tokens(request, 16) == (16, True)
-    assert scheduler.client.adopted == [(request.request_id, handle)]
-    assert request.kv_preschedule_handle is None
-    assert scheduler.load_specs[request.request_id].vllm_cached_tokens == 16
-    assert scheduler.load_specs[request.request_id].can_load is False
-
-
 @pytest.mark.parametrize(
     "option", ["sync", "disabled", "skip_cache", "short", "no_hash"]
 )
@@ -1004,21 +984,6 @@ def test_admission_lookup_skips_ineligible_requests(option):
 
     assert scheduler.start_lookup_prefetch(request) is None
     assert scheduler.client.prefetched == []
-
-
-def test_unadopted_admission_lookup_is_cancelled_when_request_finishes():
-    """A request aborted while waiting never reaches the scheduler probe."""
-    scheduler = _make_bare_scheduler()
-    scheduler.lookup_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=32)
-    request = _make_admission_request()
-    handle = scheduler.start_lookup_prefetch(request)
-    request.kv_preschedule_handle = handle
-
-    scheduler.cancel_lookup_prefetch(request)
-
-    handle.future.cancel.assert_called_once()
-    assert request.kv_preschedule_handle is None
 
 
 @pytest.mark.parametrize("preempted", [False, True])

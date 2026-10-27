@@ -2383,6 +2383,7 @@ class LookupState:
     signature: tuple[int, int, bytes]
     submitted_at: float
     prefetched: bool
+    generation: int
     cached_at: float | None = None
 
 
@@ -2420,8 +2421,10 @@ class LookupKeyClient:
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="MooncakeLookupClient"
         )
+        self._submission_lock = threading.Lock()
+        self._generation = 0
         # Owned by the scheduler thread. prefetch() runs on the engine-core
-        # input thread and only touches the executor and the semaphore.
+        # input thread and submits under _submission_lock.
         self._lookups: dict[str, LookupState] = {}
         assert vllm_config.kv_transfer_config is not None
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
@@ -2451,6 +2454,21 @@ class LookupKeyClient:
                 return self.socket.recv()
         raise CancelledError("Mooncake lookup client closed")
 
+    def _submit_lookup(
+        self, num_tokens: int, block_hashes: list[BlockHash], *, prefetched: bool
+    ) -> LookupState:
+        # Capture the generation in the same order as lookup/reset RPCs.
+        with self._submission_lock:
+            return LookupState(
+                future=self.executor.submit(
+                    self._lookup, num_tokens, list(block_hashes)
+                ),
+                signature=_lookup_signature(num_tokens, block_hashes),
+                submitted_at=time.monotonic(),
+                prefetched=prefetched,
+                generation=self._generation,
+            )
+
     def lookup(
         self,
         req_id: str,
@@ -2464,7 +2482,8 @@ class LookupKeyClient:
         signature = _lookup_signature(num_tokens, block_hashes)
         state = self._lookups.get(req_id)
         if state is not None and (
-            state.signature != signature
+            state.generation != self._generation
+            or state.signature != signature
             or (state.prefetched and now - state.submitted_at > self._lookup_ttl_s)
             or (
                 state.cached_at is not None
@@ -2474,14 +2493,7 @@ class LookupKeyClient:
             self.discard(req_id)
             state = None
         if state is None:
-            state = LookupState(
-                future=self.executor.submit(
-                    self._lookup, num_tokens, list(block_hashes)
-                ),
-                signature=signature,
-                submitted_at=now,
-                prefetched=False,
-            )
+            state = self._submit_lookup(num_tokens, block_hashes, prefetched=False)
             self._lookups[req_id] = state
         # Submission-age expiry applies only until the first scheduler probe.
         state.prefetched = False
@@ -2511,21 +2523,16 @@ class LookupKeyClient:
         if slots is None or not slots.acquire(blocking=False):
             return None
         try:
-            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
+            state = self._submit_lookup(num_tokens, block_hashes, prefetched=True)
         except RuntimeError:  # executor shut down
             slots.release()
             return None
-        future.add_done_callback(lambda _: slots.release())
-        return LookupState(
-            future=future,
-            signature=_lookup_signature(num_tokens, block_hashes),
-            submitted_at=time.monotonic(),
-            prefetched=True,
-        )
+        state.future.add_done_callback(lambda _: slots.release())
+        return state
 
     def adopt(self, req_id: str, state: LookupState) -> None:
         """Register a prefetched lookup; a later lookup(req_id) reuses it."""
-        if req_id in self._lookups:
+        if state.generation != self._generation or req_id in self._lookups:
             state.future.cancel()
         else:
             self._lookups[req_id] = state
@@ -2549,7 +2556,12 @@ class LookupKeyClient:
         return bytes(resp) == RESP_OK
 
     def reset(self) -> bool:
-        success = self.executor.submit(self._reset).result()
+        with self._submission_lock:
+            future = self.executor.submit(self._reset)
+            # Invalidate unadopted handles too, even if the store reset fails
+            # after partially removing keys. Later lookups queue behind reset.
+            self._generation += 1
+        success = future.result()
         if success:
             for req_id in list(self._lookups):
                 self.discard(req_id)

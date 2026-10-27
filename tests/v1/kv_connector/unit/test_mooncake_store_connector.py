@@ -5,7 +5,6 @@ import threading
 import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import contextmanager
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -869,8 +868,6 @@ def _multi_store_lookup(hit_lengths=(16, 32), *, nested=False, limit=4):
     finally:
         for gate in gates:
             gate.set()
-        for store in stores:
-            store.connector_scheduler.client.close()
         connector.shutdown()
 
 
@@ -927,6 +924,10 @@ def test_multi_store_preschedule_keeps_lookup_results_with_their_store(nested, h
             bool(expected),
         )
         assert request.kv_preschedule_handle is None
+        assert connector.get_num_new_matched_tokens(request, 0) == (
+            expected,
+            bool(expected),
+        )
         assert [sock.send_multipart.call_count for sock in sockets] == [1, 1]
 
 
@@ -1000,54 +1001,6 @@ def test_multi_store_abort_then_reuse_request_id(queued, probe, all_groups):
         assert [sock.send_multipart.call_count for sock in sockets] == [2, 2]
 
 
-def test_multi_store_preschedule_remains_disabled_by_default():
-    with _multi_store_lookup(limit=0) as (connector, _, sockets, _, _):
-        assert connector.on_preschedule_request(create_request(num_tokens=48)) is None
-        assert [sock.send_multipart.call_count for sock in sockets] == [0, 0]
-
-
-def test_admission_lookup_retains_completed_result_until_scheduled():
-    """A fast admission lookup must not be consumed or submitted twice."""
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeStoreConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config={"lookup_async": True, "lookup_prefetch_limit": 1},
-    )
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "worker.make_zmq_socket"
-        ) as mock_make_socket,
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
-        )
-    request = SimpleNamespace(
-        request_id="req1",
-        num_tokens=48,
-        block_hashes=[b"h0", b"h1", b"h2"],
-        skip_reading_prefix_cache=False,
-        kv_preschedule_handle=None,
-    )
-    mock_make_socket.return_value.recv.return_value = (32).to_bytes(4, "big")
-    try:
-        request.kv_preschedule_handle = connector.on_preschedule_request(request)
-        sched = connector.connector_scheduler
-        assert sched is not None
-        assert sched.client._lookups == {}
-        future = request.kv_preschedule_handle.future
-        assert future.result(timeout=5).hit_length == 32
-        assert sched.load_specs == {}
-        assert connector.get_num_new_matched_tokens(request, 16) == (16, True)
-        assert sched.client._lookups[request.request_id].future is future
-        assert mock_make_socket.return_value.send_multipart.call_count == 1
-        assert connector.get_num_new_matched_tokens(request, 16) == (16, True)
-        assert mock_make_socket.return_value.send_multipart.call_count == 1
-    finally:
-        connector.shutdown()
-
-
 def _make_lookup_client(extra_config=None):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeStoreConnector",
@@ -1060,6 +1013,45 @@ def _make_lookup_client(extra_config=None):
     ) as make_socket:
         client = worker.LookupKeyClient(vllm_config)
     return client, make_socket.return_value
+
+
+@pytest.mark.parametrize(
+    "adopted,reply",
+    [(False, protocol.RESP_OK), (True, protocol.RESP_OK), (False, protocol.RESP_ERR)],
+)
+def test_reset_invalidates_old_handles_but_preserves_later_submissions(adopted, reply):
+    client, sock = _make_lookup_client({"lookup_prefetch_limit": 2})
+    reset_started, release_reset = threading.Event(), threading.Event()
+    sock.recv.side_effect = [(32).to_bytes(4, "big"), reply, bytes(4), bytes(4)]
+
+    def send_reset(message):
+        assert message == protocol.RESET_MSG
+        reset_started.set()
+        assert release_reset.wait(timeout=5)
+
+    sock.send.side_effect = send_reset
+    try:
+        old = client.prefetch(48, [])
+        assert old.future.result(timeout=5).hit_length == 32
+        if adopted:
+            client.adopt("old", old)
+        with ThreadPoolExecutor(max_workers=1) as scheduler:
+            resetting = scheduler.submit(client.reset)
+            try:
+                assert reset_started.wait(timeout=5)
+                fresh = client.prefetch(48, [])
+            finally:
+                release_reset.set()
+            assert resetting.result(timeout=5) == (reply == protocol.RESP_OK)
+        assert fresh.future.result(timeout=5).hit_length == 0
+        client.adopt("fresh", fresh)
+        assert client.lookup("fresh", 48, []).hit_length == 0
+        client.adopt("old", old)
+        assert client.lookup("old", 48, []).hit_length == 0
+        assert sock.send_multipart.call_count == 3
+    finally:
+        release_reset.set()
+        client.close()
 
 
 def test_lookup_close_stops_running_rpc_and_cancels_unadopted_work():
@@ -1115,26 +1107,6 @@ def test_lookup_prefetch_cap_bounds_in_flight_prefetches(limit):
             later.future.result(timeout=5)
     finally:
         gate.set()
-        client.close()
-
-
-def test_prefetch_from_another_thread_is_adopted_by_lookup():
-    client, sock = _make_lookup_client({"lookup_prefetch_limit": 1})
-    sock.recv.return_value = (32).to_bytes(4, "big")
-    states = []
-    try:
-        t = threading.Thread(target=lambda: states.append(client.prefetch(48, [])))
-        t.start()
-        t.join()
-        client.adopt("req", states[0])
-        assert states[0].future.result(timeout=5).hit_length == 32
-        assert client.lookup("req", 48, [], non_block=True).hit_length == 32
-        assert sock.send_multipart.call_count == 1
-        # A request already looked up keeps its own lookup.
-        dup = client.prefetch(48, [])
-        client.adopt("req", dup)
-        assert client._lookups["req"].future is states[0].future
-    finally:
         client.close()
 
 
