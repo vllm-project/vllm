@@ -460,3 +460,26 @@ def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
 
     config = model.get_encoder_cudagraph_config()
     assert config.capture_axes == ((70, 140, 280, 560),)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_gemma4_patch_embedder_preserves_dense_output(dtype):
+    from transformers.models.gemma4 import Gemma4VisionConfig
+    from transformers.models.gemma4.modeling_gemma4 import (
+        Gemma4VisionPatchEmbedder as HFPatchEmbedder,
+    )
+
+    from vllm.model_executor.models.gemma4_mm import Gemma4VisionPatchEmbedder
+
+    config = Gemma4VisionConfig(hidden_size=64, patch_size=2, position_embedding_size=8)
+    torch.manual_seed(0)
+    reference = HFPatchEmbedder(config).to(dtype)
+    candidate = Gemma4VisionPatchEmbedder(config).to(dtype)
+    candidate.load_state_dict(reference.state_dict(), strict=True)
+    pixels = torch.rand(1, 3, 12)
+    positions = torch.tensor([[[0, 0], [1, 0], [-1, -1]]])
+    padding = (positions == -1).all(dim=-1)
+    with torch.inference_mode():
+        expected = reference(pixels, positions, padding)
+        actual = candidate(pixels, positions, padding)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
