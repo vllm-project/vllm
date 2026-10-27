@@ -76,7 +76,13 @@ _MAX_STAGED_BYTES = 32 << 20
 
 def register_d2h_stream(stream: torch.cuda.Stream) -> None:
     """Route non_blocking D2H copies issued on ``stream`` through the worker
-    thread once ``install()`` has run (see the module docstring)."""
+    thread once ``install()`` has run (see the module docstring).
+
+    A registered stream must only carry copies: readiness is tracked on the
+    stream it last waited on via ``wait_stream()``, so a kernel launched on
+    the registered stream itself is not ordered before the copies of its
+    output. Compute such values on the producer stream first.
+    """
     _d2h_streams.add(stream.cuda_stream)
 
 
