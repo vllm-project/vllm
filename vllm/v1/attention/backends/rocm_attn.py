@@ -604,14 +604,23 @@ class RocmAttentionImpl(AttentionImpl):
             # With layer_name hoisted, one RoPE + KV-cache pattern serves every
             # layer, so a layer switched to the interleaved V cache is handled
             # here at run time rather than left out of the fusion.
-            ops.rotary_embedding(
-                positions,
-                query,
-                key,
-                layer.head_size,  # type: ignore[attr-defined]
-                cos_sin_cache,
-                is_neox,
-            )
+            head_size = layer.head_size  # type: ignore[attr-defined]
+            if query_out is None or key_out is None:
+                ops.rotary_embedding(
+                    positions, query, key, head_size, cos_sin_cache, is_neox
+                )
+            else:
+                ops.rotary_embedding_out(
+                    positions,
+                    query,
+                    key,
+                    query_out,
+                    key_out,
+                    head_size,
+                    cos_sin_cache,
+                    is_neox,
+                )
+                key = key_out
             self.do_kv_cache_update(layer, key, value, kv_cache, layer_slot_mapping)
             return
         key_cache, value_cache = PagedAttention.split_kv_cache(
