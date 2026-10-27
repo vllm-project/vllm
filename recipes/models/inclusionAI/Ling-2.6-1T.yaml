@@ -1,0 +1,105 @@
+meta:
+  title: "Ling-2.6-1T"
+  slug: "ling-2.6-1t"
+  provider: "inclusionAI"
+  description: "Ling-2.6-1T (BailingMoeV2_5) FP8 instruct model with 1T total / 50B active params, hybrid linear + MLA attention, 262K context"
+  date_added: 2026-04-29
+  date_updated: 2026-05-13
+  tasks:
+    - text
+  related_recipes:
+    - inclusionAI/Ling-2.6-flash
+    - inclusionAI/Ring-1T-FP8
+  hardware:
+    b300: verified
+    mi300x: verified
+
+model:
+  model_id: "inclusionAI/Ling-2.6-1T"
+  min_vllm_version: "0.20.2"
+  architecture: moe
+  parameter_count: "1T"
+  active_parameters: "50B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+    - "--tensor-parallel-size"
+    - "8"
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 1200
+    description: "FP8 weights with TP=8 on B300 or 8x MI300X/MI355X-class nodes"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+
+hardware_overrides:
+  amd:
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+
+strategy_overrides:
+  single_node_tp:
+    tp: 8
+
+guide: |
+  ## Overview
+
+  [Ling-2.6-1T](https://huggingface.co/inclusionAI/Ling-2.6-1T) is inclusionAI's
+  BailingMoeV2_5 FP8 flagship model with 1T total / 50B active parameters, hybrid
+  linear + MLA attention, and a 262K context window.
+
+  ## Deployment Configurations
+
+  ### Docker (AMD MI300X / MI325X / MI355X, TP=8)
+
+  TP=8 has been verified on an MI300X-class node at the model-derived 262K
+  context. MI325X and MI355X have larger per-GPU HBM.
+
+  ```bash
+  docker run --rm -it \
+    --cap-add=SYS_PTRACE \
+    --ipc=host \
+    --privileged=true \
+    --shm-size=128GB \
+    --network=host \
+    --device=/dev/kfd \
+    --device=/dev/dri \
+    --group-add video \
+    -e VLLM_ROCM_USE_AITER=1 \
+    vllm/vllm-openai-rocm:v0.28.0 \
+      inclusionAI/Ling-2.6-1T \
+      --tensor-parallel-size 8 \
+      --trust-remote-code
+  ```
+
+  ## Client Usage
+
+  ### Text Generation
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="inclusionAI/Ling-2.6-1T",
+      messages=[{"role": "user", "content": "Write a poem about the ocean."}],
+      max_tokens=512, temperature=0.7,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## References
+
+  - [Ling-2.6-1T on Hugging Face](https://huggingface.co/inclusionAI/Ling-2.6-1T)
+  - [vLLM ROCm GPU install docs](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/?device=rocm)
+  - [ROCm vLLM optimization guide](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html)
