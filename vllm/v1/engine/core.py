@@ -18,6 +18,7 @@ from multiprocessing.queues import Queue
 from typing import Any, TypeVar, cast, get_args
 
 import msgspec
+import pydantic
 import zmq
 
 import vllm.envs as envs
@@ -53,7 +54,10 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-from vllm.v1.core.kv_cache_planning import get_kv_cache_configs
+from vllm.v1.core.kv_cache_planning import (
+    get_global_kv_cache_groups,
+    get_kv_cache_configs,
+)
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -68,6 +72,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
+    CheckpointState,
     EEPNotificationType,
     EngineCoreOutput,
     EngineCoreOutputs,
@@ -117,6 +122,11 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
+
+    # Class-level defaults so tests can build an EngineCore with
+    # object.__new__.
+    _checkpoint_state = CheckpointState.RUNNING
+    _checkpoint_error: str | None = None
 
     def __init__(
         self,
@@ -221,7 +231,9 @@ class EngineCore:
             init_none_hash(caching_hash_fn)
 
             self.request_block_hasher = get_request_block_hasher(
-                hash_block_size, caching_hash_fn
+                hash_block_size,
+                caching_hash_fn,
+                vllm_config.num_hash_lookahead_tokens,
             )
 
         self.step_fn = (
@@ -283,7 +295,12 @@ class EngineCore:
             self.model_executor.get_supported_kv_cache_layouts(),
             [s for specs in kv_cache_specs for s in specs.values()],
         )
-        self.model_executor.set_kv_cache_layout(layout.name)
+
+        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
+        vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
+        self.model_executor.set_kv_cache_layout(
+            layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
@@ -309,7 +326,7 @@ class EngineCore:
         max_model_len_before = vllm_config.model_config.max_model_len
 
         kv_cache_configs = get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_gpu_memory
+            vllm_config, kv_cache_specs, available_gpu_memory, global_kv_cache_groups
         )
         for kv_cache_config in kv_cache_configs:
             kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
@@ -845,12 +862,14 @@ class EngineCore:
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
         self.model_executor.profile(
             is_start,
             profile_prefix,
             delay_iterations=delay_iterations,
             max_iterations=max_iterations,
+            profiler_kwargs=profiler_kwargs,
         )
 
     def reset_mm_cache(self):
@@ -934,11 +953,24 @@ class EngineCore:
         self.reset_encoder_cache()
 
     def _finish_pause(self, clear_cache: bool) -> None:
-        # A completed pause promises an idle device: nothing else waits on
-        # the last dummy batch an idle DP rank launches.
-        self.model_executor.collective_rpc("synchronize_device")
-        if clear_cache:
-            self._reset_caches()
+        # The drain of a checkpoint prepare is complete. A failure leaves the
+        # engine FAILED instead of serving, as nothing waits on this pause.
+        preparing = self._checkpoint_state == CheckpointState.PREPARING
+        try:
+            # A completed pause promises an idle device: nothing else waits on
+            # the last dummy batch an idle DP rank launches.
+            self.model_executor.collective_rpc("synchronize_device")
+            if clear_cache:
+                self._reset_caches()
+            if preparing:
+                self.release_kv_cache_memory()
+                self.collective_rpc("checkpoint_prepare")
+                self.collective_rpc("synchronize_device")
+                self._checkpoint_state = CheckpointState.PREPARED
+        except Exception as e:
+            if not preparing:
+                raise
+            self._fail_checkpoint(e)
 
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
@@ -972,7 +1004,14 @@ class EngineCore:
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
+        if not self._checkpoint_state.is_restored:
+            raise RuntimeError(
+                f"Cannot resume scheduling while the checkpoint state is "
+                f"{self._checkpoint_state}"
+            )
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
+        if self._checkpoint_state == CheckpointState.RESTORING:
+            self._checkpoint_state = CheckpointState.RUNNING
 
     def is_scheduler_paused(self) -> bool:
         """Return whether the scheduler is in any pause state."""
@@ -991,6 +1030,10 @@ class EngineCore:
                 documentation of pause_scheduler method.
 
         """
+        if self._checkpoint_state != CheckpointState.RUNNING:
+            raise RuntimeError(
+                f"Cannot sleep while the checkpoint state is {self._checkpoint_state}"
+            )
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
@@ -1026,6 +1069,10 @@ class EngineCore:
             Whether all executor memory is resident again (fully awake).
 
         """
+        if not self._checkpoint_state.is_restored:
+            raise RuntimeError(
+                f"Cannot wake up while the checkpoint state is {self._checkpoint_state}"
+            )
         if tags is not None and "scheduling" in tags:
             # Remove "scheduling" from tags if there are other tags to process.
             tags = [t for t in tags if t != "scheduling"]
@@ -1062,6 +1109,14 @@ class EngineCore:
             )
         self._reset_caches()
         self.model_executor.discard(("kv_cache",))
+
+    def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
+        return self._checkpoint_state, self._checkpoint_error
+
+    def _fail_checkpoint(self, error: Exception) -> None:
+        logger.exception("Process checkpoint lifecycle failed")
+        self._checkpoint_state = CheckpointState.FAILED
+        self._checkpoint_error = str(error)
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -1271,6 +1326,12 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
+
+            # Completes once the drain does, which for DP happens in the busy loop.
+            if vllm_config.model_config.checkpoint_prepare_on_startup and (
+                refusal := self.checkpoint_prepare()
+            ):
+                raise RuntimeError(refusal)
 
     @contextmanager
     def _perform_handshakes(
@@ -1916,6 +1977,15 @@ class EngineCoreProc(EngineCore):
             coord_store_port=parallel_config._coord_store_port,
             coordinator_input_address=self.addresses.coordinator_input,
             coordinator_output_address=self.addresses.coordinator_output,
+            vllm_config=(
+                # fallback=str is needed to handle e.g. torch.dtype, as in the
+                # Python `/server_info`.
+                pydantic.TypeAdapter(VllmConfig).dump_python(
+                    self.vllm_config, mode="json", fallback=str
+                )
+                if envs.VLLM_SERVER_DEV_MODE
+                else None
+            ),
         )
 
     def process_input_sockets(
@@ -2221,8 +2291,53 @@ class EngineCoreProc(EngineCore):
         return future
 
     def resume_scheduler(self) -> None:
-        self.reject_new_requests = False
+        # After the checkpoint guard, so a refused resume keeps rejecting.
         super().resume_scheduler()
+        self.reject_new_requests = False
+
+    def checkpoint_prepare(self, mode: PauseMode = "wait") -> str | None:
+        """Drain with `mode`, then release the KV cache and what a process
+        checkpoint must not contain, such as communicator state. The state
+        becomes PREPARED once the drain completes. Repeating is a no-op.
+
+        Returns:
+            Why the engine cannot prepare, with nothing changed, or None.
+
+        """
+        state = self._checkpoint_state
+        if state in (CheckpointState.PREPARING, CheckpointState.PREPARED):
+            return None
+        if state != CheckpointState.RUNNING:
+            return f"Cannot prepare while the checkpoint state is {state}"
+        if not self.vllm_config.model_config.enable_sleep_mode:
+            return "Preparing for a checkpoint requires --enable-sleep-mode"
+        if self.model_executor.is_sleeping:
+            return "Preparing for a checkpoint requires an awake engine"
+        self._checkpoint_state = CheckpointState.PREPARING
+        try:
+            self.pause_generation(mode=mode, clear_cache=False)
+        except Exception:
+            # Raised for an invalid mode, before anything is paused.
+            self._checkpoint_state = CheckpointState.RUNNING
+            raise
+        return None
+
+    def checkpoint_restore(self) -> None:
+        """Bring back what preparing released, wake the KV cache and resume
+        scheduling. Repeating is a no-op."""
+        state = self._checkpoint_state
+        if state.is_restored:
+            return
+        if state != CheckpointState.PREPARED:
+            raise RuntimeError(f"Cannot restore while the checkpoint state is {state}")
+        logger.info("Restoring from a process checkpoint")
+        self._checkpoint_state = CheckpointState.RESTORING
+        try:
+            self.collective_rpc("checkpoint_restore")
+            self.wake_up(["kv_cache"])
+        except Exception as e:
+            self._fail_checkpoint(e)
+            raise
 
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can
