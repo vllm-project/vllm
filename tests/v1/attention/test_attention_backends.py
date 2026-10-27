@@ -42,6 +42,7 @@ from vllm.v1.attention.backend import (
     max_decode_query_len,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.triton_attn import TritonAttentionImpl
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheLayout,
@@ -76,6 +77,7 @@ FP8_KV_CACHE_DTYPES = {
     "fp8": current_platform.fp8_dtype(),
     "fp8_e4m3": current_platform.fp8_dtype(),
 }
+
 
 # Remove flashinfer from the list if it's not available
 try:
@@ -750,6 +752,43 @@ def _test_backend_correctness(
             atol=atol,
             msg=partial(error_msg, backend_name=backend_name),
         )
+
+
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    ["int4_per_token_head", "int8_per_token_head", "fp8_per_token_head"],
+)
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBHNC, KVCacheLayout.LBNHC])
+def test_scale_cache_views_preserve_shared_pages(
+    kv_cache_dtype: str, layout: KVCacheLayout
+) -> None:
+    """Creating attention views must preserve other groups' cached state."""
+    head_size = 64
+    packed_head_size = (
+        head_size // 2 if kv_cache_dtype == "int4_per_token_head" else head_size
+    )
+    content = 2 * (packed_head_size + 4)
+    cache = torch.full(
+        (4, 2, 16, content // 4),
+        0.25,
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    ).view(STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype])
+    cache = _clone_kv_cache_in_layout(cache, layout)
+    before = cache.view(torch.uint8).clone()
+    impl = TritonAttentionImpl(
+        num_heads=4,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=2,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+
+    impl._pth_key_value_caches(cache)
+
+    torch.testing.assert_close(cache.view(torch.uint8), before, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("layout", ["BLHNC", "BHLNC"])

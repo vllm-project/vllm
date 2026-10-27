@@ -67,7 +67,11 @@ def _set_conv_state_layout(monkeypatch, layout: str) -> None:
     mamba_utils.get_conv_state_layout.cache_clear()
 
 
-@pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
+@pytest.mark.parametrize(
+    "model,kv_cache_dtype",
+    [(model, "auto") for model in SSM_MODELS + HYBRID_MODELS]
+    + [(HYBRID_MODELS[0], "int8_per_token_head")],
+)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
@@ -77,9 +81,15 @@ def test_models(
     example_prompts,
     monkeypatch,
     model: str,
+    kv_cache_dtype: str,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+    """Check first-request correctness, including per-token-head KV scales."""
+    quantized_kv = kv_cache_dtype != "auto"
+    if quantized_kv:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
     try:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
         model_info.check_available_online(on_fail="skip")
@@ -95,7 +105,9 @@ def test_models(
     with vllm_runner(
         model,
         max_num_seqs=MAX_NUM_SEQS,
-        attention_backend=ATTN_BACKEND,
+        attention_backend=("TRITON_ATTN" if quantized_kv else ATTN_BACKEND),
+        kv_cache_dtype=kv_cache_dtype,
+        enforce_eager=quantized_kv,
         enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
