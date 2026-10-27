@@ -1668,6 +1668,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/moe_octw3_rdna3.cu"
       "csrc/rocm/moe_octw3_wmma_rdna3.cu"
       "csrc/rocm/qwen4_hc_rdna3.cu"
+      "csrc/rocm/qsa_index_rdna3.cu"
       "csrc/rocm/skinny_wmma_rdna3.cu"
       "csrc/rocm/jart_ar.cu"
       "csrc/rocm/mxfp4_w4a8_gemv_rdna3.cu")

@@ -14,6 +14,9 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
+# From this many query rows on, the gfx1100 WMMA kernel beats the Triton one;
+# decode-sized batches stay on Triton.
+_HIP_SCORES_MIN_ROWS = 64
 
 
 @triton.jit
@@ -587,6 +590,39 @@ def _compress_qsa_groups_kernel(
     )
 
 
+def _use_hip_scores(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    page_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+) -> bool:
+    if q.shape[0] < _HIP_SCORES_MIN_ROWS or not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1100
+
+    return (
+        on_gfx1100()
+        and hasattr(torch.ops._rocm_C, "qsa_index_scores_rdna3")
+        and q.dtype == torch.float16
+        and k_cache.dtype == torch.float16
+        and q.shape[1:] == (4, 128)
+        and q.stride(2) == 1
+        and q.stride(1) == 128
+        and k_cache.stride(3) == 1
+        and k_cache.shape[1] % 32 == 0
+        and page_table.dtype == torch.int32
+        and page_table.stride(1) == 1
+        and token_to_req.dtype == torch.int32
+        and token_to_req.is_contiguous()
+        and query_positions.dtype == torch.int64
+        and query_positions.is_contiguous()
+        and sequence_lengths.dtype == torch.int32
+        and sequence_lengths.is_contiguous()
+    )
+
+
 def _validate_mqa(q: torch.Tensor) -> None:
     if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
         raise ValueError("QSA query must be [rows, heads, head_dim]")
@@ -634,6 +670,22 @@ def qsa_mqa_paged(
     logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
     visible_blocks = torch.empty(q.shape[0], dtype=torch.int32, device=q.device)
     if not q.shape[0] or not columns:
+        return logits, visible_blocks
+    if _use_hip_scores(
+        q, k_cache, page_table, token_to_req, query_positions, sequence_lengths
+    ):
+        torch.ops._rocm_C.qsa_index_scores_rdna3(
+            q,
+            k_cache,
+            page_table,
+            token_to_req,
+            query_positions,
+            sequence_lengths,
+            visible_blocks,
+            logits,
+            compress_ratio,
+            float(score_divisor),
+        )
         return logits, visible_blocks
     block_n = 32
     _qsa_mqa_paged_kernel[(q.shape[0], triton.cdiv(columns, block_n))](

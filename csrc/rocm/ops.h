@@ -61,6 +61,14 @@ void moe_octw3_wmma_gemm_rdna3(
     torch::Tensor expert_ids, torch::Tensor num_tokens_post_padded,
     int64_t a_div, int64_t output_topk, int64_t block_size_m);
 
+void qsa_index_scores_rdna3(torch::Tensor q, torch::Tensor k_cache,
+                            torch::Tensor page_table,
+                            torch::Tensor token_to_req,
+                            torch::Tensor query_positions,
+                            torch::Tensor sequence_lengths,
+                            torch::Tensor visible, torch::Tensor logits,
+                            int64_t compress_ratio, double divisor);
+
 std::vector<torch::Tensor> qwen4_hc_combine_mix(
     const torch::Tensor& h, const torch::Tensor& block_out,
     const torch::Tensor& inj, const torch::Tensor& norm_w,
