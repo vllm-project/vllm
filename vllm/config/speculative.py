@@ -1393,11 +1393,13 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
+                # Explicit methods take precedence over name-based inference.
                 if self.method in (
                     "eagle",
                     "eagle3",
                     "dflash",
                     "dspark",
+                    "mtp",
                 ):
                     pass
                 # examples:
