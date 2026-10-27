@@ -609,6 +609,14 @@ class DFlashSpeculator(DraftModelSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
+        else:
+            # The graph's metadata reads the kernel block tables, which only
+            # the skipped build maps from the current block tables.
+            for groups in self.attn_groups:
+                for group in groups:
+                    group.map_to_kernel_block_table(
+                        self.block_tables.input_block_tables[group.kv_cache_group_id]
+                    )
 
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
