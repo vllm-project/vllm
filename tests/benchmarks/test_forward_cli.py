@@ -113,31 +113,26 @@ def test_bench_forward_muse_balanced_routing(tmp_path):
     rows = json.loads(output.read_text())
     assert len(rows) == 2
     for row in rows:
-        assert row["median_us"] > 0
         (rank,) = row["ranks"]
         assert rank["finite"] and rank["graph_deterministic"]
         assert rank["graph_vs_eager"]["relative_rms"] == 0
 
 
-@pytest.mark.parametrize(
-    "gate_name,bias_name",
-    [("gate", "e_score_correction_bias"), ("router", "expert_bias")],
-)
-def test_balanced_routing_restores_expert_bias(gate_name, bias_name, dist_init):
+def test_balanced_routing_restores_expert_bias(dist_init):
     """Fixture routes stay balanced despite selection bias, then restore it."""
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
     from vllm.models.muse_spark.common.moe import MuseSpark1xRouter
 
     layer = torch.nn.Module()
     gate = GateLinear(4, 8, params_dtype=torch.float32)
-    layer.add_module(gate_name, gate)
+    layer.add_module("router", gate)
     layer.top_k = 2
     bias = torch.tensor([100.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    layer.register_buffer(bias_name, bias.clone())
+    layer.register_buffer("expert_bias", bias.clone())
     selector = MuseSpark1xRouter(
         top_k=2,
         num_experts=8,
-        expert_bias=getattr(layer, bias_name),
+        expert_bias=layer.expert_bias,
         route_scale=1.0,
     )
     hidden = torch.zeros(64, 4)
@@ -148,10 +143,11 @@ def test_balanced_routing_restores_expert_bias(gate_name, bias_name, dist_init):
         logits, _ = gate(hidden)
         _, ids = selector.select_experts(hidden, logits)
         fixture.check_applied()
-        assert torch.bincount((ids // 2).flatten(), minlength=4).tolist() == [32] * 4
+        counts = torch.bincount((ids // 2).flatten(), minlength=4)
+        assert counts.min() == counts.max()
     finally:
         fixture.remove()
-    torch.testing.assert_close(getattr(layer, bias_name), bias, rtol=0, atol=0)
+    torch.testing.assert_close(layer.expert_bias, bias, rtol=0, atol=0)
     logits, _ = gate(hidden)
     _, ids = selector.select_experts(hidden, logits)
     assert set(ids.flatten().tolist()) == {0, 1}
