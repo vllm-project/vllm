@@ -233,13 +233,14 @@ async fn responses_event_stream(
                 finish_reason,
                 kv_transfer_params,
                 ec_transfer_params,
+                ..
             }) => {
                 terminal = Some(TerminalOutput {
                     message,
                     usage,
                     finish_reason,
-                    kv_transfer_params,
-                    ec_transfer_params,
+                    kv_transfer_params: kv_transfer_params.map(|params| *params),
+                    ec_transfer_params: ec_transfer_params.map(|params| *params),
                 });
                 break;
             }
@@ -294,7 +295,7 @@ async fn responses_event_stream(
         ec_transfer_params,
     } = terminal;
 
-    if matches!(finish_reason, FinishReason::Error) {
+    if matches!(finish_reason, FinishReason::Error(_)) {
         emit_failed(
             &mut y,
             &meta,
@@ -336,7 +337,7 @@ fn terminal_event_type(finish_reason: &FinishReason) -> &'static str {
             "response.completed"
         }
         // Error finishes are emitted above with an error payload.
-        FinishReason::Error => "response.failed",
+        FinishReason::Error(_) => "response.failed",
     }
 }
 

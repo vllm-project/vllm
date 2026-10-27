@@ -200,12 +200,13 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 Code example: [examples/tool_calling/openai_responses_client_with_tools.py](../../../examples/tool_calling/openai_responses_client_with_tools.py)
 
 !!! note "Rust frontend"
-    The experimental Rust frontend supports stateless, non-streaming
+    The experimental Rust frontend supports stateless streaming and non-streaming
     `POST /v1/responses` through the same generation pipeline as Chat Completions.
     Send the complete conversation in `input`, including prior `function_call`
     and `function_call_output` items when continuing a tool interaction.
-    `stream: true` is not supported yet; omitted or null `stream` selects a
-    non-streaming response.
+    Set `stream: true` for SSE events; omitted or null `stream` selects a
+    non-streaming response. Token limits terminate with `response.incomplete`;
+    generation failures terminate with `response.failed` and retain partial output.
     A token limit marks the response and its last message or function-call
     output item as `incomplete`; earlier output items remain `completed`.
 
