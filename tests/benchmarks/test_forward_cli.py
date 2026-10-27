@@ -13,13 +13,103 @@ import torch
 
 from vllm.benchmarks.forward.batch import build_batch
 from vllm.benchmarks.forward.capture import write_input_ids
+from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
 from vllm.benchmarks.forward.main import run_case
 from vllm.benchmarks.forward.profile import summarize
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla.cpu_mla import CPUMLABackend
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, MLAAttentionSpec
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.utils import AttentionGroup
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+
+
+@pytest.mark.benchmark
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Forward graph timing requires CUDA."
+)
+def test_bench_forward_hybrid_verify(tmp_path):
+    """Repeated target verification starts from the same recurrent state."""
+    config = dict(
+        architectures=["Qwen3NextForCausalLM"],
+        model_type="qwen3_next",
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+        linear_conv_kernel_dim=4,
+        layer_types=["linear_attention", "full_attention"],
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+        vocab_size=1024,
+        max_position_embeddings=2048,
+        rms_norm_eps=1e-6,
+        rope_theta=10000,
+        hidden_act="silu",
+        tie_word_embeddings=False,
+        dtype="bfloat16",
+    )
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    output = tmp_path / "forward.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.cli.main",
+            "bench",
+            "forward",
+            "--model",
+            str(tmp_path),
+            "--skip-tokenizer-init",
+            "--exclude-drafter",
+            "--speculative-config",
+            '{"method":"ngram","num_speculative_tokens":5}',
+            "--max-model-len",
+            "2048",
+            "--block-size",
+            "128",
+            "--max-num-batched-tokens",
+            "256",
+            "--max-num-seqs",
+            "4",
+            "--gpu-memory-utilization",
+            "0.2",
+            "--kv-len-jitter",
+            "0",
+            "--case",
+            "verify=2*6@128:5",
+            "--case",
+            "mixed=32,2*6@128:5",
+            "--iters",
+            "3",
+            "--samples",
+            "2",
+            "--output-json",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = json.loads(output.read_text())
+    assert [row["case"] for row in rows] == ["verify", "mixed"]
+    for row in rows:
+        (rank,) = row["ranks"]
+        assert rank["finite"] and rank["graph_deterministic"]
+        assert rank["timing_scope"] == "target_only"
+        assert row["median_us"] > 0
 
 
 @pytest.mark.benchmark
@@ -293,6 +383,70 @@ def test_jitter_kv_lens():
     assert jitter_kv_lens(case, 0, 2048, 0) == case
     with pytest.raises(ValueError, match="KV length"):
         jitter_kv_lens(case, 0, 1000, 0)
+
+
+def test_bench_packed_kv_blocks():
+    """Zero allocated blocks without corrupting neighboring layers or blocks."""
+    spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
+        tokens_per_state=4,
+    )
+    group = AttentionGroup(CPUMLABackend, ["cache"], spec, 0, kernel_block_size=4)
+    storage = torch.ones(16, 2, 1, 4, 8)
+    manager_view = storage[:, 0]
+    kernel_view = group.map_kv_cache_to_kernel_blocks(manager_view)
+    batch = build_batch(
+        parse_case("decode=1@129"),
+        [KVCacheGroupSpec(["cache"], spec)],
+        16,
+        1000,
+        np.random.default_rng(0),
+    )
+    caches = {"cache": kernel_view}
+    zero_kv_blocks(caches, [group], batch, 16)
+    allocated = torch.zeros(storage.shape[0], dtype=torch.bool)
+    for begin, end in batch.group_block_ranges[0]:
+        allocated[begin:end] = True
+    assert not storage[allocated, 0].count_nonzero()
+    assert (storage[~allocated, 0] == 1).all()
+    assert (storage[:, 1] == 1).all()
+
+
+def test_bench_speculative_mamba_blocks():
+    """Verify requests own and restore every recurrent scratch state."""
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((4,), (2, 2)),
+        dtypes=(torch.float32, torch.float32),
+        num_speculative_blocks=5,
+    )
+    batch = build_batch(
+        parse_case("verify=2*6@128:5"),
+        [KVCacheGroupSpec(["state"], spec)],
+        13,
+        1000,
+        np.random.default_rng(0),
+    )
+    blocks = [req.block_ids[0] for req in batch.scheduler_output.scheduled_new_reqs]
+    assert all(len(ids) >= 1 + spec.num_speculative_blocks for ids in blocks)
+    assert set(blocks[0]).isdisjoint(blocks[1])
+    group = AttentionGroup(
+        MambaAttentionBackendEnum.MAMBA2.get_class(), ["state"], spec, 0
+    )
+    caches = {"state": [torch.ones(13, *shape) for shape in spec.shapes]}
+    zero_kv_blocks(caches, [group], batch, 13)
+    views = touched_kv_views(caches, [group], batch, 13, 1)
+    snapshots = [view.clone() for view in views]
+    for state in caches["state"]:
+        state[1:].fill_(7)
+    for view, saved in zip(views, snapshots):
+        view.copy_(saved)
+    for state in caches["state"]:
+        assert torch.equal(state[0], torch.ones_like(state[0]))
+        assert torch.count_nonzero(state[1:]) == 0
 
 
 @pytest.mark.parametrize("capacity", [0, 2])
