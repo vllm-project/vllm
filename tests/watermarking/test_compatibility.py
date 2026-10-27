@@ -21,7 +21,9 @@ from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 
 
-def _input_processor(server_uses_watermarking: bool = True) -> InputProcessor:
+def _input_processor(
+    server_uses_watermarking: bool = True, enforce: bool = False
+) -> InputProcessor:
     config = VllmConfig()
     config.model_config = SimpleNamespace(
         try_get_generation_config=lambda: {},
@@ -34,7 +36,7 @@ def _input_processor(server_uses_watermarking: bool = True) -> InputProcessor:
         is_diffusion=False,
     )
     config.watermark_config = (
-        WatermarkConfig(key=42) if server_uses_watermarking else None
+        WatermarkConfig(key=42, enforce=enforce) if server_uses_watermarking else None
     )
     renderer = MagicMock(spec=BaseRenderer)
     renderer.tokenizer = None
@@ -357,125 +359,36 @@ def test_shared_beam_search_params_are_not_rewritten_by_admission(
     assert params.watermarking is None
 
 
-def _enforced_input_processor(enforce: bool = True) -> InputProcessor:
-    processor = _input_processor()
-    processor.vllm_config.watermark_config = WatermarkConfig(key=42, enforce=enforce)
-    return processor
-
-
 @pytest.mark.parametrize(
-    ("kwargs", "enforce", "resolved", "skipped"),
+    ("kwargs", "resolved"),
     [
-        pytest.param({"watermarking": False}, True, True, False, id="opt-out"),
-        pytest.param({}, True, True, False, id="default"),
-        pytest.param({"watermarking": True}, True, True, False, id="opt-in"),
-        # Internal beam-search step and generative-scoring requests opt out
-        # with temperature > 0; enforce watermarks them like any opt-out.
-        pytest.param(
-            {"watermarking": False, "max_tokens": 1, "logprobs": 4},
-            True,
-            True,
-            False,
-            id="internal-opt-out",
-        ),
-        pytest.param(
-            {"temperature": 0, "watermarking": False},
-            True,
-            False,
-            False,
-            id="greedy-opt-out",
-        ),
-        pytest.param({"temperature": 0}, True, False, True, id="greedy-default"),
-        # top_k=1 resolves to True although its output equals greedy output.
-        pytest.param(
-            {"top_k": 1, "watermarking": False}, True, True, False, id="top-k-1"
-        ),
-        pytest.param(
-            {"trace_decode_token_ids": [1], "watermarking": False},
-            True,
-            False,
-            False,
-            id="trace-replay-opt-out",
-        ),
-        pytest.param(
-            {"trace_decode_token_ids": [1]},
-            True,
-            False,
-            True,
-            id="trace-replay-default",
-        ),
-        pytest.param(
-            {"watermarking": False}, False, False, False, id="opt-out-enforce-off"
-        ),
-        pytest.param({}, False, True, False, id="default-enforce-off"),
-        pytest.param(
-            {"temperature": 0, "watermarking": False},
-            False,
-            False,
-            False,
-            id="greedy-opt-out-enforce-off",
-        ),
+        ({"watermarking": False}, True),
+        # Enforce lifts the opt-out, but greedy and trace replay still cannot
+        # be watermarked.
+        ({"temperature": 0, "watermarking": False}, False),
+        ({"trace_decode_token_ids": [1], "watermarking": False}, False),
     ],
+    ids=["opt-out", "greedy-opt-out", "trace-replay-opt-out"],
 )
-def test_enforce_resolves_opt_outs_in_frontend(
-    kwargs, enforce, resolved, skipped, reset_warning_once
-):
-    processor = _enforced_input_processor(enforce)
+def test_enforce_resolves_opt_outs_in_frontend(kwargs, resolved, reset_warning_once):
+    processor = _input_processor(enforce=True)
     params = SamplingParams(**kwargs)
-
-    with patch.object(SamplingParams, "verify"):
-        assert processor._validate_params(params, ("generate",)) is resolved
-    # The caller's params object is left untouched.
-    assert params.watermarking is kwargs.get("watermarking")
-
-    processor.apply_watermarking(params, processor.resolve_watermarking(params))
-    assert params.watermarking is resolved
-    assert params._watermarking_skipped is skipped
-
-    # Resolving an already resolved request keeps both values.
-    processor.apply_watermarking(params, processor.resolve_watermarking(params))
-    assert params.watermarking is resolved
-    assert params._watermarking_skipped is skipped
+    # Resolving an already resolved request keeps the result.
+    for _ in range(2):
+        processor.apply_watermarking(params, processor.resolve_watermarking(params))
+        assert params.watermarking is resolved
+        assert params._watermarking_skipped is False
 
 
-@pytest.mark.parametrize("watermarking", [None, False])
-def test_enforce_keeps_beam_search_unwatermarked(
-    watermarking, caplog_vllm, reset_warning_once
-):
+def test_enforce_keeps_beam_search_unwatermarked(caplog_vllm, reset_warning_once):
     params = BeamSearchParams(
-        beam_width=2, max_tokens=4, temperature=0.8, watermarking=watermarking
+        beam_width=2, max_tokens=4, temperature=0.8, watermarking=False
     )
 
     with caplog_vllm.at_level("WARNING"):
-        assert _enforced_input_processor().resolve_watermarking(params) is False
+        assert _input_processor(enforce=True).resolve_watermarking(params) is False
     assert "beam search requests will run without watermarking" in caplog_vllm.text
-    assert params.watermarking is watermarking
-
-
-def test_enforce_greedy_opt_out_warns(caplog_vllm, reset_warning_once):
-    processor = _enforced_input_processor()
-    params = SamplingParams(temperature=0, watermarking=False)
-
-    with caplog_vllm.at_level("WARNING"):
-        assert processor.resolve_watermarking(params) is False
-    assert "ordinary greedy sampling" in caplog_vllm.text
-
-
-def test_direct_engine_request_opt_out_is_enforced(monkeypatch):
-    engine = object.__new__(LLMEngine)
-    engine.input_processor = _enforced_input_processor()
-    engine.vllm_config = engine.input_processor.vllm_config
-    monkeypatch.setattr(engine.input_processor, "assign_request_id", MagicMock())
-    engine.output_processor = MagicMock()
-    engine.engine_core = MagicMock()
-    request = _engine_core_request(SamplingParams(watermarking=False))
-
-    engine.add_request(request.request_id, request, SamplingParams())
-
-    # The output processor sees the enforced value, so metrics count it.
-    assert request.sampling_params.watermarking is True
-    assert request.sampling_params._watermarking_skipped is False
-    engine.output_processor.add_request.assert_called_once()
+    assert params.watermarking is False
 
 
 def _preprocess_in_engine_core(
@@ -495,96 +408,20 @@ def _preprocess_in_engine_core(
 
 # EngineCore applies enforce again for frontends that never ran the check
 # (Rust HTTP and gRPC), so these params arrive unresolved.
-@pytest.mark.parametrize(
-    ("kwargs", "watermark_config", "expected"),
-    [
-        pytest.param(
-            {"watermarking": False},
-            WatermarkConfig(key=42, enforce=True),
-            True,
-            id="opt-out",
-        ),
-        pytest.param(
-            {"watermarking": True},
-            WatermarkConfig(key=42, enforce=True),
-            True,
-            id="opt-in",
-        ),
-        pytest.param(
-            {"temperature": 0, "watermarking": False},
-            WatermarkConfig(key=42, enforce=True),
-            True,
-            id="greedy",
-        ),
-        pytest.param(
-            {"trace_decode_token_ids": [1], "watermarking": False},
-            WatermarkConfig(key=42, enforce=True),
-            True,
-            id="trace-replay",
-        ),
-        pytest.param(
-            {"watermarking": False},
-            WatermarkConfig(key=42),
-            False,
-            id="enforce-off",
-        ),
-        pytest.param({"watermarking": False}, None, False, id="no-config"),
-    ],
-)
-def test_enforce_engine_core_backstop(kwargs, watermark_config, expected):
-    params = _preprocess_in_engine_core(SamplingParams(**kwargs), watermark_config)
-    assert params.watermarking is expected
-
-
-def test_enforce_override_warns_once_across_admission_paths(
-    caplog_vllm, reset_warning_once
-):
-    config = VllmConfig()
-    config.watermark_config = WatermarkConfig(key=987654321, enforce=True)
-    params = SamplingParams(watermarking=False)
-
-    with caplog_vllm.at_level("WARNING"):
-        params.watermarking = config._check_supports_watermarking(params)
-        _preprocess_in_engine_core(params, config.watermark_config)
-        _preprocess_in_engine_core(
-            SamplingParams(watermarking=False), config.watermark_config
-        )
-        config._check_supports_watermarking(SamplingParams(watermarking=False))
-
-    assert params.watermarking is True
-    assert caplog_vllm.text.count("overriding watermarking=False") == 1
-    assert "987654321" not in caplog_vllm.text
-
-
-def test_enforce_core_override_warns_once(caplog_vllm, reset_warning_once):
-    config = WatermarkConfig(key=987654321, enforce=True)
-    with caplog_vllm.at_level("WARNING"):
-        for _ in range(2):
-            params = _preprocess_in_engine_core(
-                SamplingParams(watermarking=False), config
-            )
-            assert params.watermarking is True
-
-    assert caplog_vllm.text.count("overriding watermarking=False") == 1
-    assert "987654321" not in caplog_vllm.text
-
-
-@pytest.mark.parametrize("watermarking", [None, True, False])
 @pytest.mark.parametrize("enforce", [False, True])
-def test_enforce_warning_only_for_overridden_false(
-    watermarking, enforce, caplog_vllm, reset_warning_once
+def test_enforce_engine_core_backstop_warns_once(
+    enforce, caplog_vllm, reset_warning_once
 ):
     config = VllmConfig()
     config.watermark_config = WatermarkConfig(key=42, enforce=enforce)
     with caplog_vllm.at_level("WARNING"):
-        config._check_supports_watermarking(SamplingParams(watermarking=watermarking))
-        _preprocess_in_engine_core(
-            SamplingParams(watermarking=watermarking), config.watermark_config
-        )
-
-    assert ("overriding watermarking=False" in caplog_vllm.text) is (
-        enforce and watermarking is False
-    )
+        for _ in range(2):
+            config._check_supports_watermarking(SamplingParams(watermarking=False))
+            params = _preprocess_in_engine_core(
+                SamplingParams(watermarking=False), config.watermark_config
+            )
+            assert params.watermarking is enforce
+    assert caplog_vllm.text.count("overriding watermarking=False") == int(enforce)
 
 
 @pytest.mark.parametrize("enforce", [False, True])

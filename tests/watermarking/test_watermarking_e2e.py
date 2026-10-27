@@ -9,17 +9,18 @@ from vllm.v1.metrics.reader import Counter
 from vllm.v1.watermarking import GumbelWatermarkDetector
 
 
+@pytest.mark.parametrize("enforce", [False, True])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
-def test_llm_generated_sequence_is_watermarked(vllm_runner):
+def test_llm_generated_sequence_is_watermarked(vllm_runner, enforce):
     """Engine-level watermarking must produce tokens the detector recognizes."""
     watermark_config = {"key": 42, "context_width": 4}
     detector = GumbelWatermarkDetector(**watermark_config)
 
     runner = vllm_runner(
         "facebook/opt-125m",
-        watermark_config=watermark_config,
+        watermark_config={**watermark_config, "enforce": enforce},
         seed=0,
         enforce_eager=True,
         max_model_len=512,
@@ -37,14 +38,19 @@ def test_llm_generated_sequence_is_watermarked(vllm_runner):
         runner.llm.generate(request, params_greedy)
         metrics = runner.llm.get_metrics()
 
-    # The greedy request is skipped; the opt-out one is not watermarked.
+    # The greedy request is skipped. The opt-out is not watermarked unless
+    # enforce overrides it.
     counters = [m for m in metrics if isinstance(m, Counter)]
     status = {
         m.labels["status"]: m.value
         for m in counters
         if m.name == "vllm:watermark_requests"
     }
-    assert status == {"watermarked": 1, "skipped": 1, "not_watermarked": 1}
+    assert status == {
+        "watermarked": 1 + enforce,
+        "skipped": 1,
+        "not_watermarked": 1 - enforce,
+    }
     num_success = sum(m.value for m in counters if m.name == "vllm:request_success")
     assert sum(status.values()) == num_success
 
@@ -55,38 +61,4 @@ def test_llm_generated_sequence_is_watermarked(vllm_runner):
     recorded_p_value = 9.83e-20
     assert result_use_wm.p_value < recorded_p_value * 10  # tolerance
 
-    assert not result_no_wm.is_watermarked, result_no_wm
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
-)
-def test_enforce_watermarks_opted_out_request(vllm_runner):
-    watermark_config = {"key": 42, "context_width": 4}
-    detector = GumbelWatermarkDetector(**watermark_config)
-
-    with vllm_runner(
-        "facebook/opt-125m",
-        watermark_config={**watermark_config, "enforce": True},
-        seed=0,
-        enforce_eager=True,
-        max_model_len=512,
-        gpu_memory_utilization=0.2,
-        disable_log_stats=False,
-    ) as runner:
-        output = runner.llm.generate(
-            "Tell me a story about an explorer who discovers a mysterious island.",
-            SamplingParams(temperature=1.0, max_tokens=256, watermarking=False),
-        )
-        metrics = runner.llm.get_metrics()
-
-    result = detector.detect(list(output[0].outputs[0].token_ids))
-    assert result.is_watermarked, result
-
-    # The enforced opt-out is counted as watermarked.
-    status = {
-        m.labels["status"]: m.value
-        for m in metrics
-        if isinstance(m, Counter) and m.name == "vllm:watermark_requests"
-    }
-    assert status == {"watermarked": 1, "skipped": 0, "not_watermarked": 0}
+    assert result_no_wm.is_watermarked == enforce, result_no_wm
