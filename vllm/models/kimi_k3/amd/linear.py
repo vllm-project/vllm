@@ -810,8 +810,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         self, hidden_states: torch.Tensor, num_blocks: int
     ) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
-        # A non-last PP rank hands the bank to the PP send, so it must not be reused.
-        if not is_workspace_manager_initialized() or not get_pp_group().is_last_rank:
+        if not is_workspace_manager_initialized():
             return hidden_states.new_empty(num_tokens, num_blocks, hidden_size)
         bank = current_workspace_manager().get_persistent(
             "kimi_k3_attn_res_block_residual",
