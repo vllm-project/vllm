@@ -36,6 +36,8 @@ class StructuredOutputGrammar(ABC):
         """Determines whether the provided tokens are accepted for the
         given request.
 
+        A false result must leave the grammar state unchanged.
+
         Args:
             request_id (str): The unique identifier for the request.
             tokens (list[int]): A list of token IDs to evaluate.

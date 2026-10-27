@@ -807,14 +807,13 @@ class EngineCore:
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            # When draft tokens are used with structured output, validate them
-            # before computing the grammar bitmask for the deferred request.
+            # Update the deferred scheduler output before computing its grammar
+            # bitmask.
             if self.check_for_draft_tokens:
                 draft_token_ids = self.model_executor.take_draft_token_ids()
                 if draft_token_ids is not None:
-                    # Update the draft token ids in the scheduler output to
-                    # filter out the invalid spec tokens, which will be padded
-                    # with -1 and skipped by the grammar bitmask computation.
+                    # Update the draft token ids in the scheduler output while
+                    # preserving the worker-provided draft slots.
                     self.scheduler.update_draft_token_ids_in_output(
                         draft_token_ids, deferred_scheduler_output
                     )
