@@ -10,7 +10,7 @@ from vllm.platforms import current_platform
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-import vllm._C  # noqa: F401, E402
+current_platform.import_kernels()
 
 from vllm.utils.cpu_triton_utils import (  # noqa: E402
     _rejection_random_sample_kernel_impl,
