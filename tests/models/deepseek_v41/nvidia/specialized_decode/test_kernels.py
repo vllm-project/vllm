@@ -537,9 +537,13 @@ def _quantized(rows: int, k: int) -> QuantizedActivation:
 
 
 @pytest.mark.parametrize("rows", [1, 5, 6, 8])
-@pytest.mark.parametrize("shape", list(mxfp8_linear.PINNED_TACTICS), ids=str)
+@pytest.mark.parametrize(
+    "shape",
+    list(dict.fromkeys((n, k) for n, k, _ in mxfp8_linear.PINNED_TACTICS)),
+    ids=str,
+)
 def test_low_latency_mxfp8_mm(shape, rows):
-    """``fused_wqa_wkv``/``wq_b``/``wo_b`` at their TP4 shapes on
+    """``fused_wqa_wkv``/``wq_b``/``wo_b`` at their TP4 and TP8 shapes on
     ``cutedsl_low_latency``, eagerly and replayed, within BF16 tolerance of the
     stock ``cute-dsl`` layer; a BF16 input is left to the stock layer."""
     if not mxfp8_linear._backend_supported():
@@ -560,6 +564,17 @@ def test_low_latency_mxfp8_mm(shape, rows):
 
     x = torch.randn(rows, k, device=DEVICE).to(torch.bfloat16)
     assert mxfp8_linear.low_latency_mm(linear, x) is None
+
+
+def test_pinned_tactics_by_tensor_parallel_size():
+    """A runner problem (N, M, K, L) gets its shape's pinned tactic at the
+    tensor parallel size it belongs to, and only for 5-8 rows."""
+    pinned = mxfp8_linear._pinned
+    assert pinned((1792, 8, 5120, 1), 4) == (128, 10, 1, 4)
+    assert pinned((1792, 8, 5120, 1), 8) == (128, 10, 1, 2)
+    assert pinned((4096, 5, 1280, 1), 8) == (128, 10, 1, 2)
+    assert pinned((4096, 5, 1280, 1), 4) is None
+    assert pinned((8192, 4, 1280, 1), 4) is None
 
 
 @pytest.mark.parametrize("rows", [1, 5, 6, 8, 16, 17])
