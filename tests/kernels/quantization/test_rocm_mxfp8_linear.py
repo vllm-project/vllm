@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Native CDNA4 MXFP8 linear (``RocmDotScaledMxfp8LinearKernel``).
+"""Native CDNA4 MXFP8 linear (``RocmDotScaledMxfp8LinearKernel``), plus
+``AiterMxfp8LinearKernel`` on the same reference test for its tuned shapes.
 
 DeepSeek V4.1 routes every attention linear through this kernel. It used to
 carry two BF16-dequantize workarounds on ROCm (one for all ``.attn.`` linears,
@@ -46,10 +47,30 @@ def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
     return layer
 
 
+def _kernel_cls(backend: str, n: int, k: int) -> type:
+    """The MXFP8 linear kernel for ``backend``; skips when AITER can't run it."""
+    if backend == "rocm_native":
+        from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+            RocmDotScaledMxfp8LinearKernel,
+        )
+
+        return RocmDotScaledMxfp8LinearKernel
+
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp8.aiter import AiterMxfp8LinearKernel
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is not available")
+    if not rocm_aiter_ops.is_triton_gemm_afp8wfp8_tuned(n, k):
+        pytest.skip(f"AITER has no tuned MXFP8 config for N={n}, K={k}")
+    return AiterMxfp8LinearKernel
+
+
+@pytest.mark.parametrize("backend", ["rocm_native", "aiter"])
 @pytest.mark.parametrize("name,n,k", V41_ATTN_SHAPES, ids=lambda v: str(v))
 @pytest.mark.parametrize("num_tokens", [1, 2, 7, 16, 31, 32, 128, 1024])
 @torch.inference_mode()
-def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
+def test_rocm_mxfp8_linear_matches_dequant_reference(backend, name, n, k, num_tokens):
     """Output is finite and matches an exact MXFP8 GEMM of the same inputs.
 
     The reference quantizes the activation with the same quantizer and then
@@ -59,14 +80,12 @@ def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
         Mxfp8LinearLayerConfig,
     )
-    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
-        RocmDotScaledMxfp8LinearKernel,
-    )
 
+    kernel_cls = _kernel_cls(backend, n, k)
     torch.manual_seed(num_tokens)
     device = "cuda"
     layer = _make_layer(n, k, device)
-    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel = kernel_cls(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
     kernel.process_weights_after_loading(layer)
 
     x = torch.randn(num_tokens, k, device=device, dtype=torch.bfloat16) * 0.5
@@ -82,6 +101,29 @@ def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     )
     rel = (out.float() - expected).norm() / expected.norm()
     assert rel < 5e-3, f"{name}: relative error {rel:.4f}"
+
+
+@torch.inference_mode()
+def test_aiter_mxfp8_linear_3d_input_and_bias():
+    """A [batch, seq, K] input keeps its leading dims, and the bias is added."""
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
+
+    _, n, k = V41_ATTN_SHAPES[0]
+    kernel_cls = _kernel_cls("aiter", n, k)
+    torch.manual_seed(0)
+    layer = _make_layer(n, k, "cuda")
+    kernel = kernel_cls(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel.process_weights_after_loading(layer)
+
+    x = torch.randn(2, 5, k, device="cuda", dtype=torch.bfloat16) * 0.5
+    bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+    out = kernel.apply_weights(layer, x, bias)
+    flat = kernel.apply_weights(layer, x.reshape(-1, k))
+
+    assert out.shape == (2, 5, n)
+    torch.testing.assert_close(out.reshape(-1, n), flat + bias)
 
 
 @torch.inference_mode()
