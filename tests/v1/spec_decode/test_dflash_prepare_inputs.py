@@ -8,13 +8,15 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
 )
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="requires a CUDA device"
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires a CUDA or XPU device",
 )
 
 
@@ -27,7 +29,7 @@ def _run_prepare(
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
 ):
-    device = torch.device("cuda")
+    device = torch.device(current_platform.device_type)
     max_num_reqs = 4
     max_num_tokens = 16
     num_speculative_steps = 3
@@ -35,6 +37,7 @@ def _run_prepare(
     input_buffers = SimpleNamespace(
         input_ids=torch.full((max_num_tokens,), -1, dtype=torch.int32, device=device),
         positions=torch.full((max_num_tokens,), -1, dtype=torch.int64, device=device),
+        is_padding=torch.zeros(max_num_tokens, dtype=torch.bool, device=device),
         query_start_loc=torch.full(
             (max_num_reqs + 1,), -1, dtype=torch.int32, device=device
         ),
@@ -177,6 +180,11 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix(cp_rank, cp_size
     assert out.sample_idx_mapping[:3].tolist() == [2, 2, 2]
     assert out.temperature[2].item() == 1.0
     assert out.seeds[2].item() == 17
+    assert not out.input_buffers.is_padding[:3].any()
+    assert out.input_buffers.is_padding[3:].all()
+    assert (out.input_buffers.input_ids[3:] == 0).all()
+    assert (out.input_buffers.positions[3:] == 0).all()
+    assert (out.query_slot_mapping[3:] == PAD_SLOT_ID).all()
 
 
 def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():

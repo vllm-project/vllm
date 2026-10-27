@@ -5,7 +5,9 @@
 import gc
 import queue
 import threading
+from collections import defaultdict
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -37,8 +39,10 @@ from vllm.v1.kv_cache_interface import (
 from .utils import (
     create_request,
     create_vllm_config,
+    expand_strided_descs,
     make_kv_cache_config,
     make_nixl_scheduler,
+    maybe_update_block_size,
 )
 
 
@@ -62,6 +66,7 @@ def region_pull_worker():
     worker._recving_transfers = {}
     worker._failed_remote_engines = set()
     worker._invalid_remote_engines = set()
+    worker._remote_registration_generations = {}
     worker.use_mla, worker._has_mamba = True, False
     worker.dcp_size = 1
     worker.dcp_rank = 0
@@ -101,7 +106,7 @@ def region_pull_worker():
     worker.dst_region_num_blocks = {"P": [100, 100], "D": [100, 100]}
     worker._remote_agents = {"P": {(0, 0): "P-rank0"}}
     worker._engine_by_address = {("localhost", 1): "P"}
-    worker._read_blocks_mixed = MagicMock()
+    worker._read_blocks_mixed = MagicMock()  # type: ignore[method-assign]
     worker.nixl_wrapper = MagicMock()
     return worker
 
@@ -694,9 +699,10 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._invalid_remote_engines = set()
+    worker._remote_registration_generations = {}
     worker._remote_agents = {"remote-engine": {}}
     worker._engine_last_active = {}
-    worker._recving_transfers = {}
+    worker._recving_transfers = defaultdict(list)
     worker._bidirectional_kv_xfer_enabled = False
     worker.dcp_size = 1
     worker.dcp_rank = 0
@@ -745,6 +751,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     meta = metadata.reqs_to_recv["test-req"]
     worker._read_blocks_for_req("test-req", meta)
 
+    assert meta.remote is not None
     assert meta.remote.block_ids == expected_remote_block_ids, (
         f"Expected {expected_remote_block_ids}, got {meta.remote.block_ids}"
     )
@@ -1027,7 +1034,7 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
         kv_connector="NixlConnector",
         kv_role="kv_consumer",
     )
-    block_size = 16
+    block_size = maybe_update_block_size(16)
     llm_kwargs = {
         "model": model_name,
         "enforce_eager": True,
@@ -1057,7 +1064,9 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
             max_tokens=1,
             extra_args={"kv_transfer_params": remote_prefill_opts},
         )
-        scheduler = llm.llm_engine.engine_core.engine_core.scheduler
+        engine_core_client = cast(Any, llm.llm_engine.engine_core)
+        engine_core = engine_core_client.engine_core
+        scheduler = engine_core.scheduler
         kv_managers = scheduler.kv_cache_manager.coordinator.single_type_managers
         # HMA enabled with FA + SWA groups
         assert len(kv_managers) > 2
@@ -1069,6 +1078,7 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
         # Process some request with length exceeding the sliding window
         outputs = llm.generate(["hi" * 1401], sampling_params)
         kv_params = outputs[0].kv_transfer_params
+        assert kv_params is not None
 
         # +1 to account for overlapping window across blocks.
         expected_num_remote_blocks = sw_size // block_size + 1
@@ -1557,9 +1567,10 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
     scheduler = object.__new__(Scheduler)
     scheduler.connector = MagicMock()
+    scheduler.num_hash_lookahead_tokens = 0
     scheduler.needs_kv_cache_zeroing = True
     scheduler.kv_cache_manager = _make_fake_kv_cache_manager()
-    scheduler.kv_cache_manager.cache_blocks = MagicMock()
+    scheduler.kv_cache_manager.cache_blocks = MagicMock()  # type: ignore[method-assign]
     scheduler.failed_recving_kv_req_ids = {"req-1"}
     scheduler.finished_recving_kv_req_ids = {"req-1"}
     scheduler.prefix_replay_tokens = 0
@@ -1638,12 +1649,14 @@ def test_mamba_n1_p_side_truncation():
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     req = create_request(num_tokens=10, do_remote_decode=True)
     req.max_tokens = 128
+    assert req.prompt_token_ids is not None
     original_len = len(req.prompt_token_ids)
 
     sched.on_new_request(req)
     assert len(req.prompt_token_ids) == original_len - 1
     assert req.num_prompt_tokens == original_len - 1
     assert req.max_tokens == 1
+    assert req.kv_transfer_params is not None
     assert req.kv_transfer_params["_p_side_truncated"] is True
 
     count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
@@ -1659,6 +1672,7 @@ def test_mamba_n1_p_side_truncation():
     # Non-Mamba: truncation is skipped
     fa_sched = make_nixl_scheduler(has_mamba=False, is_hma_required=False)
     fa_req = create_request(num_tokens=10, do_remote_decode=True)
+    assert fa_req.prompt_token_ids is not None
     fa_original = len(fa_req.prompt_token_ids)
 
     fa_sched.on_new_request(fa_req)
@@ -1674,6 +1688,7 @@ def test_mamba_n1_p_side_truncation():
     # A request that skips reading the prefix cache (prompt logprobs) is not
     # cut: the decoder loads nothing and recomputes its whole prompt.
     logprobs_req = create_request(num_tokens=10, do_remote_decode=True)
+    assert logprobs_req.sampling_params is not None
     logprobs_req.sampling_params.skip_reading_prefix_cache = True
     swa_sched.on_new_request(logprobs_req)
     assert len(logprobs_req.prompt_token_ids) == 10
@@ -2153,6 +2168,7 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
         ],
     )
     vllm_config = create_vllm_config(block_size=16)
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [kernel_block_size]
@@ -2200,7 +2216,8 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
         )
         for block in range(count)
     ]
-    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs
+    local_descs = expand_strided_descs(worker.src_blocks_data)
+    assert local_descs[:, 0].tolist() == expected_addrs
 
 
 @pytest.mark.cpu_test
@@ -2227,6 +2244,7 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     # a CPU-only test host would make this a host-buffer worker: host xfer
     # buffers are per-layer, so the HMA shared tensors would not be
     # deduplicated. Pin it to the faked device type.
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
 
     fake_backend = MagicMock()
@@ -2283,20 +2301,23 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     assert worker.num_regions == 2 and worker.num_descs == 24
     # Kernel-granularity block lens; TP-independent for MLA hybrids.
     assert worker.block_len_per_layer == [unified_page // 3] * 2
-    # Split handles must replicate every FA descriptor (MLA isn't head-sharded).
-    assert worker._fa_desc_replicated(worker.num_descs) == [True] * 24
-    # FA descs: 2 regions x 12 kernel blocks, page stride = kernel page.
-    # Mamba descs: 2 regions x (3 conv sub-projections + 1 ssm) x 4 blocks.
-    assert worker.src_blocks_data.shape == (24 + 32, 3)
-    fa_descs = worker.src_blocks_data[:24]
+    # FA runs: one per region x 12 kernel blocks, page stride = block_stride.
+    # Mamba runs: 2 regions x (3 conv sub-projections + 1 ssm), 4 blocks each.
+    assert worker.src_blocks_data.shape == (2 + 8, 5)
+    fa_runs = worker.src_blocks_data[:2]
+    assert fa_runs[:, 1].tolist() == [unified_page // 3] * 2
+    assert fa_runs[:, 3].tolist() == [block_stride] * 2
+    assert fa_runs[:, 4].tolist() == [12] * 2
+    assert worker.src_blocks_data[2:, 4].tolist() == [4] * 8
     expected_addrs = [
         tensor.data_ptr() + block * block_stride
         for tensor in tensors
         for block in range(12)
     ]
+    fa_descs = expand_strided_descs(fa_runs)
     assert fa_descs[:, 0].tolist() == expected_addrs
-    assert all(size == unified_page // 3 for size in fa_descs[:, 1])
     worker.nixl_wrapper.register_memory.assert_called_once()
+    assert worker.xfer_handshake_metadata is not None
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
         type=NixlAgentMetadata,
@@ -2311,7 +2332,6 @@ def test_push_write_hybrid_mla_replicates_attention():
     written to every covered D rank (replicated MLA latent) while SSM state
     is written per-rank through the split handles."""
     import threading
-    from collections import defaultdict
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
@@ -2323,7 +2343,7 @@ def test_push_write_hybrid_mla_replicates_attention():
     from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 
     worker = object.__new__(NixlPushConnectorWorker)
-    worker.shutdown = lambda: None  # skeleton worker: silence __del__
+    worker.shutdown = lambda: None  # type: ignore[method-assign]  # silence __del__
     worker.use_mla = True
     worker._has_mamba = True
     worker._is_csa_linear = False
@@ -2346,7 +2366,7 @@ def test_push_write_hybrid_mla_replicates_attention():
             rank_offset_factor=0,
         )
     }
-    worker.dst_xfer_side_handles = {engine_id: {0: 100, 1: 101}}
+    worker.dst_xfer_side_handles = defaultdict(dict, {engine_id: {0: 100, 1: 101}})
     worker.src_xfer_handles_by_tp_ratio = {(-2, 4): [200, 201]}
     worker.src_xfer_handles_by_block_size = {4: 300}
     worker.region_group_ids = [0, 1]
@@ -2354,7 +2374,7 @@ def test_push_write_hybrid_mla_replicates_attention():
     worker._sending_transfers = defaultdict(list)
     worker._sending_transfers_lock = threading.Lock()
     worker.kv_cache_config = _make_hybrid_mla_kv_cache_config()
-    worker._xfer_blocks = MagicMock(return_value=1)
+    worker._xfer_blocks = MagicMock(return_value=1)  # type: ignore[method-assign]
 
     meta = MagicMock()
     meta.remote.engine_id = engine_id

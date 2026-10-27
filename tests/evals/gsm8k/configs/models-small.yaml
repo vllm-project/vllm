@@ -1,0 +1,18 @@
+# Every machine runs `common`, then the sections named after its
+# current_platform.device_name (cuda, rocm) and, on ROCm, its CDNA generation
+# (cdna3: gfx942/MI300, cdna4: gfx950/MI355).
+common:
+- Qwen3-0.6B-FP8.yaml
+- Llama-3.2-1B-Instruct-INT8-CT.yaml
+- Llama-3-8B-Instruct-nonuniform-CT.yaml
+- Qwen2.5-VL-3B-Instruct-FP8-dynamic.yaml
+- Qwen1.5-MoE-W4A16-CT.yaml
+- DeepSeek-V2-Lite-Instruct-FP8.yaml
+- DeepSeek-V2-Lite-Instruct-FP8-CT.yaml
+- Qwen3-30B-A3B-MXFP4A16.yaml
+- gemma-4-E4B-it-qat-mobile-ct.yaml
+cdna4:
+- Qwen3-1.7B-MXFP4.yaml
+- Qwen3-30B-A3B-NVFP4.yaml
+- Laguna-XS.2-NVFP4.yaml
+- Laguna-XS-2.1-INT4.yaml
