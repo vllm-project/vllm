@@ -76,8 +76,10 @@ def _extent(t: torch.Tensor) -> int:
 
 
 def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
-    """``new`` copied into the bytes ``old`` spans if it is smaller, so the loaded
-    storage is kept (with its ``data_ptr``); else ``new`` itself."""
+    """``new`` copied into the bytes ``old`` spans if it fits, so the loaded
+    storage is kept (with its ``data_ptr``); else ``new`` itself. An equal-size
+    result fits too: a repack to the same byte count (e.g. FP8 → Marlin int32)
+    then keeps the address captured CUDA graphs read."""
     storage = old.untyped_storage()
     offset, size = old.storage_offset() * old.element_size(), new.element_size()
     if (
@@ -86,7 +88,7 @@ def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
         or new.untyped_storage().data_ptr() == storage.data_ptr()
         or _extent(new) != new.numel()  # overlapping or with gaps
         or offset % size
-        or new.numel() * size >= _extent(old) * old.element_size()
+        or new.numel() * size > _extent(old) * old.element_size()
     ):
         return new
     view = new.new_empty(0).set_(storage, offset // size, new.shape, new.stride())
