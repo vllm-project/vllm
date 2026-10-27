@@ -160,6 +160,7 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 
 - Currently, vLLM CPU uses model default settings as `dtype`. However, due to unstable float16 support in torch CPU, it is recommended to explicitly set `dtype=bfloat16` if there are any performance or accuracy problem.  
 - On AMD Zen CPUs (`ZenCpuPlatform`), `float16` requires AVX512-FP16, available from Venice (6th Gen EPYC) onwards. On Turin (5th Gen EPYC) and earlier only `bfloat16` and `float32` are accepted, and models declared with `float16` are auto-downcast to `bfloat16` at model load time. See [AMD Zen optimizations](#amd-zen-optimizations).
+- On RISC-V, software conversion from `float32` to `bfloat16` uses round-to-nearest-even and preserves NaNs, including when native vector BF16 conversion is unavailable.
 
 ### How to launch a vLLM service on CPU?
 
