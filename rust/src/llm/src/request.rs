@@ -104,7 +104,7 @@ impl GenerateRequest {
         Ok(PreparedGenerateRequest {
             engine_request: EngineCoreRequest {
                 request_id: engine_request_id,
-                prompt_token_ids: Some(prompt_token_ids),
+                prompt_token_ids: Some(prompt_token_ids.into()),
                 mm_features,
                 sampling_params: Some(sampling_params),
                 pooling_params: None,
@@ -163,6 +163,7 @@ impl PreparedGenerateRequest {
             .prompt_token_ids
             .as_ref()
             .expect("prepared request must have prompt token ids")
+            .as_slice()
     }
 }
 
@@ -227,7 +228,10 @@ mod tests {
         assert_eq!(request.external_req_id.as_deref(), Some("req-1"));
         assert!(request.request_id.starts_with("req-1-"));
         assert_ne!(request.request_id, "req-1");
-        assert_eq!(request.prompt_token_ids.as_deref(), Some(&[11, 22, 33][..]));
+        assert_eq!(
+            request.prompt_token_ids.as_ref().map(|ids| ids.as_slice()),
+            Some(&[11, 22, 33][..])
+        );
         assert_eq!(request.arrival_time, 42.5);
         assert_eq!(request.cache_salt.as_deref(), Some("salt"));
         assert_eq!(request.data_parallel_rank, Some(2));

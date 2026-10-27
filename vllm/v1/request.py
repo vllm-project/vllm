@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -62,7 +63,7 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt_token_ids: list[int] | bytes | memoryview | None,
+        prompt_token_ids: list[int] | np.ndarray | None,
         sampling_params: SamplingParams | None,
         pooling_params: PoolingParams | None,
         client_index: int = 0,

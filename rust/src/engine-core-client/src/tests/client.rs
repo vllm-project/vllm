@@ -154,7 +154,7 @@ fn sample_request() -> EngineCoreRequest {
 fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: request_id.to_string(),
-        prompt_token_ids: Some(vec![11, 22]),
+        prompt_token_ids: Some(vec![11, 22].into()),
         sampling_params: Some(EngineCoreSamplingParams {
             temperature: 0.8,
             watermarking: false,
@@ -188,7 +188,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
 fn sample_multimodal_request() -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: "req-mm".to_string(),
-        prompt_token_ids: Some(vec![101, 102, 103, 104]),
+        prompt_token_ids: Some(vec![101, 102, 103, 104].into()),
         mm_features: Some(vec![MmFeatureSpec {
             data: Some(BTreeMap::from([(
                 "pixel_values".to_string(),

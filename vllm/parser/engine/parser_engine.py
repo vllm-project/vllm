@@ -253,7 +253,7 @@ class ParserEngine(Parser):
         self._prompt_closes_reasoning = (
             self.parser_engine_config.initial_state is ParserState.REASONING
             and bool(self._turn_boundary_token_ids)
-            and self.is_reasoning_end(list(prompt_token_ids))
+            and self.is_reasoning_end(prompt_token_ids)
         )
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:

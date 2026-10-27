@@ -69,7 +69,7 @@ async fn connect_with_mock(
 fn sample_request(request_id: &str, max_tokens: u32) -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: request_id.to_string(),
-        prompt_token_ids: Some(vec![1, 2, 3]),
+        prompt_token_ids: Some(vec![1, 2, 3].into()),
         sampling_params: Some(EngineCoreSamplingParams {
             max_tokens,
             ..EngineCoreSamplingParams::for_test()

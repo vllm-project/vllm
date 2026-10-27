@@ -18,6 +18,7 @@ from typing import Any, TypeAlias, TypeVar
 
 import msgspec
 import msgspec.msgpack
+import numpy as np
 import zmq
 import zmq.asyncio
 
@@ -83,11 +84,12 @@ EngineIdentity = bytes
 
 
 def _with_packed_prompt(request: EngineCoreRequest) -> EngineCoreRequest:
-    """Copy of request with its prompt token ids as int32 bytes, which the engine
-    decodes without a Python int per token. The frontend keeps the original."""
+    """Copy of request with its prompt token ids as an int32 ndarray, which is
+    sent out of band when long and decoded by the engine without a Python int
+    per token. The frontend keeps the original."""
     if not isinstance(request.prompt_token_ids, list):
         return request
-    packed = memoryview(array("i", request.prompt_token_ids)).cast("B")
+    packed = np.frombuffer(array("i", request.prompt_token_ids), dtype=np.int32)
     return msgspec.structs.replace(request, prompt_token_ids=packed)
 
 

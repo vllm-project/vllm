@@ -340,10 +340,10 @@ async fn chat_streams_text_events() {
                     String::from_utf8(
                         request
                             .prompt_token_ids
-                            .clone()
+                            .as_ref()
                             .unwrap()
-                            .into_iter()
-                            .map(|id| id as u8)
+                            .iter()
+                            .map(|&id| id as u8)
                             .collect()
                     )
                     .unwrap(),

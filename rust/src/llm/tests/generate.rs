@@ -245,7 +245,10 @@ async fn generate_streams_outputs() {
                 assert!(request.request_id.starts_with("req-delta-"));
                 assert_ne!(request.request_id, "req-delta");
                 assert_eq!(request.client_index, 7);
-                assert_eq!(request.prompt_token_ids, Some(vec![11, 22]));
+                assert_eq!(
+                    request.prompt_token_ids.as_ref().map(|ids| ids.as_slice()),
+                    Some(&[11, 22][..])
+                );
 
                 send_outputs(
                     push,

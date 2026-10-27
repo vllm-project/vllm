@@ -15,6 +15,7 @@ from vllm.model_executor.models.bert import (
 from vllm.pooling_params import PoolingParams
 from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
+from vllm.v1.token_buffer import TokenBuffer
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
@@ -130,7 +131,8 @@ def test_pooling_runner_gathers_required_token_ids() -> None:
     torch.testing.assert_close(metadata.prompt_token_ids_cpu, expected)
 
 
-def test_pooling_runner_stores_only_required_token_ids() -> None:
+@pytest.mark.parametrize("token_ids_type", [list, TokenBuffer])
+def test_pooling_runner_stores_only_required_token_ids(token_ids_type) -> None:
     runner = PoolingRunner.__new__(PoolingRunner)
     runner.model = MagicMock()
     runner.supported_tasks = frozenset({"embed"})
@@ -144,11 +146,13 @@ def test_pooling_runner_stores_only_required_token_ids() -> None:
         "req-2",
         2,
         PoolingParams(task="embed", requires_token_ids=True),
-        [101, 11, 102],
+        token_ids_type([101, 11, 102]),
     )
 
     assert 1 not in runner.prompt_token_ids
-    torch.testing.assert_close(runner.prompt_token_ids[2], torch.tensor([101, 11, 102]))
+    stored = runner.prompt_token_ids[2]
+    assert stored.dtype == torch.int64
+    torch.testing.assert_close(stored, torch.tensor([101, 11, 102]))
 
 
 def test_pooling_runner_releases_aborted_late_interaction_doc() -> None:

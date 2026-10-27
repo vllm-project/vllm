@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.v1.token_buffer import rfind_token_sequences
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -85,25 +86,17 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
     def _contains_token_sequence(
         token_ids: Sequence[int], marker_ids: Sequence[int]
     ) -> bool:
-        if not marker_ids or len(marker_ids) > len(token_ids):
-            return False
-        marker_len = len(marker_ids)
-        return any(
-            tuple(token_ids[i : i + marker_len]) == tuple(marker_ids)
-            for i in range(len(token_ids) - marker_len + 1)
+        return (
+            bool(marker_ids) and rfind_token_sequences(token_ids, (marker_ids,))[0] >= 0
         )
 
     @staticmethod
     def _rfind_token_sequence(
         token_ids: Sequence[int], marker_ids: Sequence[int]
     ) -> int:
-        if not marker_ids or len(marker_ids) > len(token_ids):
+        if not marker_ids:
             return -1
-        marker_len = len(marker_ids)
-        for i in range(len(token_ids) - marker_len, -1, -1):
-            if tuple(token_ids[i : i + marker_len]) == tuple(marker_ids):
-                return i
-        return -1
+        return rfind_token_sequences(token_ids, (marker_ids,))[0]
 
     @staticmethod
     def _ends_with_token_sequence_prefix(
@@ -311,10 +304,8 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         return count
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        start_index = self._rfind_token_sequence(input_ids, self._start_token_ids)
-        end_index = self._rfind_token_sequence(input_ids, self._end_token_ids)
-        if end_index < 0:
-            return False
-        if start_index < 0:
-            return True
-        return end_index > start_index
+        # Ended if the newest marker is an end marker (a start wins a tie).
+        _, k = rfind_token_sequences(
+            input_ids, (self._start_token_ids, self._end_token_ids)
+        )
+        return k == 1

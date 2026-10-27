@@ -5,6 +5,7 @@ import gc
 import pickle
 import struct
 
+import numpy as np
 import pytest
 
 from vllm import SamplingParams
@@ -16,16 +17,15 @@ from vllm.v1.token_buffer import (
     TokenBuffer,
     TokenIdsView,
     extend_from_slice,
+    rfind_token_sequences,
     rfind_tokens,
 )
 
 
-def test_request_decodes_int32_token_bytes_from_rust_frontend():
-    """vllm-rs sends prompt ids as little-endian int32 bytes."""
-    ids = [1, 70000, 129279]
-    engine_request = EngineCoreRequest(
+def _engine_core_request(prompt_token_ids) -> EngineCoreRequest:
+    return EngineCoreRequest(
         request_id="r",
-        prompt_token_ids=struct.pack(f"<{len(ids)}i", *ids),  # type: ignore[arg-type]
+        prompt_token_ids=prompt_token_ids,
         mm_features=None,
         sampling_params=SamplingParams(max_tokens=4),
         pooling_params=None,
@@ -34,40 +34,38 @@ def test_request_decodes_int32_token_bytes_from_rust_frontend():
         cache_salt=None,
         data_parallel_rank=None,
     )
-    frames = MsgpackEncoder().encode(engine_request)
+
+
+@pytest.mark.parametrize("dtype", ["=u4", "<i4"])
+@pytest.mark.parametrize("num_tokens", [3, 3000])
+def test_request_decodes_prompt_ndarray(dtype, num_tokens):
+    """Both frontends send the prompt as a 32-bit int ndarray: vllm-rs as uint32,
+    the Python frontend as int32. A long one is a separate frame."""
+    ids = [(i * 7919) % 129280 for i in range(num_tokens)]
+    frames = MsgpackEncoder().encode(_engine_core_request(np.array(ids, dtype=dtype)))
+    assert len(frames) == (2 if num_tokens == 3000 else 1)
     decoded = MsgpackDecoder(EngineCoreRequest).decode(frames)
-    # Decoded without a copy, as a view of the received frame.
-    assert isinstance(decoded.prompt_token_ids, memoryview)
-    assert decoded.prompt_token_ids.obj is frames[0]
+    assert isinstance(decoded.prompt_token_ids, np.ndarray)
     request = Request.from_engine_core_request(decoded, block_hasher=None)
-    assert request.prompt_token_ids == ids and request.num_prompt_tokens == 3
+    assert request.prompt_token_ids == ids and request.num_prompt_tokens == num_tokens
     assert type(request.prompt_token_ids[0]) is int
     request.append_output_token_ids([5, 6])
-    assert request.all_token_ids[-3:] == [129279, 5, 6]
+    assert request.all_token_ids[-3:] == [ids[-1], 5, 6]
     assert request.prompt_token_ids == ids
 
 
-def test_mp_client_sends_prompt_as_int32_bytes():
+def test_mp_client_sends_prompt_as_int32_array():
     """The Python frontend's engine-core client packs the prompt for the wire
     and leaves the request it keeps for output processing unchanged."""
     from vllm.v1.engine.core_client import _with_packed_prompt
 
-    ids = [1, 70000, 129279]
-    request = EngineCoreRequest(
-        request_id="r",
-        prompt_token_ids=ids,
-        mm_features=None,
-        sampling_params=SamplingParams(max_tokens=4),
-        pooling_params=None,
-        arrival_time=0.0,
-        lora_request=None,
-        cache_salt=None,
-        data_parallel_rank=None,
-    )
+    ids = list(range(1000, 2000))
+    request = _engine_core_request(ids)
     wire = _with_packed_prompt(request)
     assert request.prompt_token_ids is ids
-    decoded = MsgpackDecoder(EngineCoreRequest).decode(MsgpackEncoder().encode(wire))
-    assert isinstance(decoded.prompt_token_ids, memoryview)
+    frames = MsgpackEncoder().encode(wire)
+    assert len(frames) == 2  # the prompt goes out of band
+    decoded = MsgpackDecoder(EngineCoreRequest).decode(frames)
     engine_request = Request.from_engine_core_request(decoded, block_hasher=None)
     assert engine_request.prompt_token_ids == ids
 
@@ -117,6 +115,20 @@ def test_extend_from_slice():
         assert dst == [7, 2, 3, 4]
     extend_from_slice(dst, list(range(10)), 8, 8)
     assert dst == [7, 2, 3, 4]
+
+
+@pytest.mark.parametrize("wrap", [list, TokenBuffer])
+def test_rfind_token_sequences(wrap):
+    ids = wrap([5, 1, 2, 9, 1, 2, 3, 7, 1])
+    # The newest of the markers; the first listed wins a tie at one index.
+    assert rfind_token_sequences(ids, [(1, 2, 3), (9,)]) == (4, 0)
+    assert rfind_token_sequences(ids, [(1, 2), (1, 2, 3)]) == (4, 0)
+    assert rfind_token_sequences(ids, [(1, 2, 3), (1, 2)]) == (4, 0)
+    assert rfind_token_sequences(ids, [(9,), (5, 1)]) == (3, 0)
+    # A marker running past the end, or past stop, doesn't match.
+    assert rfind_token_sequences(ids, [(1, 2)]) == (4, 0)
+    assert rfind_token_sequences(ids, [(1, 2)], stop=5) == (1, 0)
+    assert rfind_token_sequences(ids, [(4,), (None,), ()]) == (-1, -1)
 
 
 def test_token_ids_view_searches_in_place():

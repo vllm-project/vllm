@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+from vllm.v1.token_buffer import token_slice
 from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
@@ -1021,8 +1022,10 @@ def get_request_block_hasher(
                     request, start_token_idx, end_token_idx, curr_mm_idx
                 )
 
-            # Compute the hash of the current block
-            block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
+            # Compute the hash of the current block.
+            block_tokens = token_slice(
+                request._all_token_ids, start_token_idx, end_token_idx
+            )
             block_hash = hash_block_tokens(
                 caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
             )

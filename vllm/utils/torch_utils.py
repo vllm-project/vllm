@@ -6,7 +6,7 @@ import os
 import random
 import sys
 import threading
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -87,6 +87,17 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
+
+
+def token_ids_to_tensor(
+    token_ids: Sequence[int], dtype: torch.dtype = torch.int64
+) -> torch.Tensor:
+    """CPU tensor of token ids. An int32 array (a TokenBuffer) is copied as one
+    block rather than read token by token; the copy keeps the buffer resizable."""
+    if isinstance(token_ids, array.array) and token_ids.typecode == "i":
+        ids = torch.from_numpy(np.frombuffer(token_ids, dtype=np.int32))
+        return ids.to(dtype, copy=True)
+    return torch.tensor(token_ids, dtype=dtype)
 
 
 def is_meta_module(module: torch.nn.Module) -> bool:

@@ -144,10 +144,10 @@ class EngineCoreRequest(
     if TYPE_CHECKING:
         prompt_token_ids: list[int] | None
     else:
-        # Also little-endian int32 bytes from vllm-rs, which only the engine core
-        # receives. They decode as a memoryview of the received frame, which
-        # Request copies into a TokenBuffer.
-        prompt_token_ids: list[int] | memoryview | None
+        # Both frontends send a 32-bit int ndarray, out of band when long, which
+        # decodes as a view of the received frame; Request copies it into a
+        # TokenBuffer. In-process clients pass the list.
+        prompt_token_ids: np.ndarray | None
     mm_features: list[MultiModalFeatureSpec] | None
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None

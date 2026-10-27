@@ -30,6 +30,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
+from vllm.v1.token_buffer import rfind_token_sequences
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -65,16 +66,7 @@ def _newest_marker(haystack: Sequence[int], a: Sequence[int], b: Sequence[int]) 
     Equivalent to comparing two ``_subseq_index`` results, but a single backward
     pass that stops at the first hit instead of walking to index 0 twice.
     """
-    if not a or not b:
-        return -1
-    a0, b0 = a[0], b[0]
-    for i in range(len(haystack) - min(len(a), len(b)), -1, -1):
-        head = haystack[i]
-        if head == a0 and i + len(a) <= len(haystack) and _match_at(haystack, i, a):
-            return 0
-        if head == b0 and i + len(b) <= len(haystack) and _match_at(haystack, i, b):
-            return 1
-    return -1
+    return -1 if not a or not b else rfind_token_sequences(haystack, (a, b))[1]
 
 
 class KimiK3ReasoningParser(ReasoningParser):

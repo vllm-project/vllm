@@ -29,6 +29,10 @@ else:
         __slots__ = ()
 
         def __new__(cls, tokens: Iterable[int] = ()):
+            if isinstance(tokens, np.ndarray):
+                # A 32-bit int array, as the frontends send.
+                assert tokens.dtype.kind in "iu" and tokens.dtype.itemsize == 4
+                tokens = memoryview(np.ascontiguousarray(tokens)).cast("B")
             if isinstance(tokens, (bytes, bytearray, memoryview)):
                 # Packed int32 ids. array("i", memoryview) would instead take
                 # each byte as a token.
@@ -125,6 +129,43 @@ def rfind_tokens(
         if token_ids[i] in targets:
             return i
     return -1
+
+
+def rfind_token_sequences(
+    token_ids: Sequence[int],
+    markers: Sequence[Sequence[int | None]],
+    start: int = 0,
+    stop: int | None = None,
+) -> tuple[int, int]:
+    """Return ``(index, k)`` for the newest occurrence in ``token_ids[start:stop]``
+    of any of the multi-token ``markers``, ``k`` being its position in
+    ``markers`` (the first listed wins at the same index), or ``(-1, -1)``.
+
+    Candidates are found with rfind_tokens on the markers' first tokens, so a
+    TokenBuffer is searched with numpy and only candidate positions are read.
+    """
+    if stop is None:
+        stop = len(token_ids)
+    marker_lists = [list(marker) for marker in markers]
+    first_ids = {marker[0] for marker in marker_lists if marker}
+    end = stop
+    while (i := rfind_tokens(token_ids, first_ids, start, end)) >= 0:
+        head = token_ids[i]
+        for k, marker in enumerate(marker_lists):
+            if (marker and marker[0] == head and i + len(marker) <= stop) and (
+                len(marker) == 1 or token_ids[i + 1 : i + len(marker)] == marker[1:]
+            ):
+                return i, k
+        end = i
+    return -1, -1
+
+
+def token_slice(tokens: Sequence[int], start: int, stop: int) -> Sequence[int]:
+    """``tokens[start:stop]``; for a TokenBuffer an int32 array, so that no
+    Python ints are made until it is read."""
+    if isinstance(tokens, array):
+        return array.__getitem__(tokens, slice(start, stop))
+    return tokens[start:stop]
 
 
 class TokenIdsView(Sequence[int]):
