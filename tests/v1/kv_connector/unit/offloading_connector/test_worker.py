@@ -523,14 +523,13 @@ def test_register_kv_caches(backend):
 
 
 @pytest.mark.parametrize("layout", list(KVCacheLayout))
-def test_register_kv_caches_covers_whole_page(layout):
-    """Each block's offloaded regions hold every layer's full page, or the
-    layout is rejected at registration. LHBNC spreads a block's page across
-    the layer (heads a whole layer of blocks apart), which the transfer paths
-    cannot express, so it must fail instead of offloading part of the page."""
-    spec = FullAttentionSpec(
+@pytest.mark.parametrize("use_mla", [False, True], ids=["attention", "mla"])
+def test_register_kv_caches_covers_whole_page(layout, use_mla):
+    """Registration covers every layer's page or rejects unsupported geometry."""
+    spec_cls = MLAAttentionSpec if use_mla else FullAttentionSpec
+    spec = spec_cls(
         block_size=BLOCK_SIZE,
-        num_kv_heads=NUM_KV_HEADS,
+        num_kv_heads=1 if use_mla else NUM_KV_HEADS,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
@@ -561,7 +560,7 @@ def test_register_kv_caches_covers_whole_page(layout):
     )
     worker, offloading_spec = _make_worker(kv_cache_config)
 
-    if layout == KVCacheLayout.LHBNC:
+    if layout == KVCacheLayout.LHBNC and not use_mla:
         with pytest.raises(ValueError, match="not contiguous within a block"):
             worker.register_kv_caches(kv_caches)
         return
