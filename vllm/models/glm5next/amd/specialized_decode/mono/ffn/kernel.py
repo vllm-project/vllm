@@ -172,6 +172,10 @@ TRACE_MARKS = (
     "iscore",
     "iselect",
     "split",
+    "sp_keys",
+    "sp_rows",
+    "sp_qk",
+    "sp_pq",
     "uv",
     "oproj",
     "seam",
@@ -2612,6 +2616,7 @@ def build_flash_ffn_kernel(
                 n_used = fx.max((nk + SPLIT_KEYS - 1) // SPLIT_KEYS, fx.Int32(1))
                 if t < n_used:
                     split_keys(tv, t32, s, t, pos, nk)
+                    tmark("sp_keys")
                     for jj in range_constexpr(KPW):
                         j = wave * KPW + jj
                         blk = _uniform(lds_ld(keys, j))
@@ -2687,6 +2692,7 @@ def build_flash_ffn_kernel(
                         lds_st(xs, qw, qv[i][0].bitcast(fx.Float32))
                         lds_st(xs, qw + 1, qv[i][1].bitcast(fx.Float32))
                     gpu.barrier()
+                    tmark("sp_rows")
                     # scores = K Q^T: wave (16-key row group wave % 4, K half wave / 4)
                     hn = fx.min(lane % 16, WAVES - 1)
                     rgk = wave % 4
@@ -2707,6 +2713,7 @@ def build_flash_ffn_kernel(
                         )
                     fx.ptr_store(c, red + (wave * 64 + lane) * 4)
                     gpu.barrier()
+                    tmark("sp_qk")
                     # split-local softmax: wave = head, lane = key
                     valid = (t * SPLIT_KEYS + lane) < nk
                     r16 = lane % 16
@@ -2725,6 +2732,7 @@ def build_flash_ffn_kernel(
                             pl, wave * (SPLIT_KEYS // 2) + lane // 2, bf16_pair(p, p_n)
                         )
                     gpu.barrier()
+                    tmark("sp_pq")
                     # O = P V: heads M, keys K, latent dim pairs N (even / odd MFMAs)
                     for gq in range_constexpr(KV_LORA // 32 // WAVES):
                         dw = (wave * (KV_LORA // 32 // WAVES) + gq) * 16 + lane % 16
@@ -2846,29 +2854,8 @@ def build_flash_ffn_kernel(
                 nk = fx.min(pos + 1, fx.Int32(TOPK_TOKENS))
                 n_used = fx.max((nk + SPLIT_KEYS - 1) // SPLIT_KEYS, fx.Int32(1))
                 if t < n_used:
-                    split_keys(tv, t32, s, t, pos, nk)
-                    # rows: codes (one dword a lane) and the 16 scale bytes
-                    for jj in range_constexpr(KPW):
-                        j = wave * KPW + jj
-                        blk = _uniform(lds_ld(keys, j))
-                        off = _uniform(lds_ld(keys, SPLIT_KEYS + j))
-                        r_row = _rsrc(
-                            tv["kv_cache"]
-                            + fx.Int64(blk) * KVE
-                            + fx.Int64(off * KV_ROW)
-                        )
-                        codes = fx.Int32(
-                            bo.buffer_load(r_row, lane, vec_width=1, dtype=T.i32)
-                        )
-                        sc = fx.Int32(
-                            bo.buffer_load(
-                                r_row, KV_LORA // 8 + lane % 4, vec_width=1, dtype=T.i32
-                            )
-                        )
-                        lds_st(xs, N_RAW + j * RS + lane, codes.bitcast(fx.Float32))
-                        if lane < 4:
-                            lds_st(xs, N_ET + j * 4 + lane, sc.bitcast(fx.Float32))
-                    # q_lat of the task's 8 heads -> hi + lo MXFP8 (E8M0 per 32 dims)
+                    # q_lat of the task's 8 heads -> hi + lo MXFP8 (E8M0 per 32 dims),
+                    # before the top-k wait: q doesn't depend on the selection
                     NQ = WAVES * KV_LORA // 4 // THREADS
                     qv = poll(
                         [
@@ -2931,7 +2918,31 @@ def build_flash_ffn_kernel(
                                     for k in range(2)
                                     for e in range(2)
                                 ]
+                    split_keys(tv, t32, s, t, pos, nk)
+                    tmark("sp_keys")
+                    # rows: codes (one dword a lane) and the 16 scale bytes
+                    for jj in range_constexpr(KPW):
+                        j = wave * KPW + jj
+                        blk = _uniform(lds_ld(keys, j))
+                        off = _uniform(lds_ld(keys, SPLIT_KEYS + j))
+                        r_row = _rsrc(
+                            tv["kv_cache"]
+                            + fx.Int64(blk) * KVE
+                            + fx.Int64(off * KV_ROW)
+                        )
+                        codes = fx.Int32(
+                            bo.buffer_load(r_row, lane, vec_width=1, dtype=T.i32)
+                        )
+                        sc = fx.Int32(
+                            bo.buffer_load(
+                                r_row, KV_LORA // 8 + lane % 4, vec_width=1, dtype=T.i32
+                            )
+                        )
+                        lds_st(xs, N_RAW + j * RS + lane, codes.bitcast(fx.Float32))
+                        if lane < 4:
+                            lds_st(xs, N_ET + j * 4 + lane, sc.bitcast(fx.Float32))
                     gpu.barrier()
+                    tmark("sp_rows")
                     # V^T: thread (keys 8 wave .., dims 8 lane ..) transposes 8 x 8 codes
                     vr = nib_transpose8(
                         [
@@ -2987,6 +2998,7 @@ def build_flash_ffn_kernel(
                             )
                     fx.ptr_store(c, red + (wave * 64 + lane) * 4)
                     gpu.barrier()
+                    tmark("sp_qk")
                     # split-local softmax: wave = head, lane = key
                     valid = (t * SPLIT_KEYS + lane) < nk
                     r16 = lane % 16
@@ -3033,6 +3045,7 @@ def build_flash_ffn_kernel(
                         xs + (N_PQ + (pg * WAVES + wave) * (SPLIT_KEYS // 4) + kq * 4),
                     )
                     gpu.barrier()
+                    tmark("sp_pq")
                     # O = P V: heads M, keys K, latent dims N (even / odd MFMAs)
                     live = lane < 32
                     kb = fx.min(lane // 16, 1)
