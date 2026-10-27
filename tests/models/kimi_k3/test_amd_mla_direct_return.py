@@ -91,6 +91,7 @@ def test_mla_forward_preserves_output_shape_with_fp8_input(
         dcp_q_replicate=False,
         _fused_qk_prep=fused_decode,
         _qkv_gate_fused=False,
+        _fold_qb_uk=False,
         _fused_decode=lambda q, kv, pe, shape, *args: attention_output("fused", shape),
         g_proj=None,
         o_proj=lambda value: (value, None),

@@ -40,8 +40,30 @@ pub struct TokenUsage {
     pub prompt_token_count: usize,
     /// Number of output tokens generated.
     pub output_token_count: usize,
+    /// Prompt-cache accounting reported by the engine.
+    pub prompt_cache_usage: PromptCacheUsage,
+}
+
+/// Prompt-cache accounting for one request, reported by the engine's prefill
+/// stats.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptCacheUsage {
     /// Number of prompt tokens served from cache.
     pub cached_token_count: usize,
+    /// Number of prompt tokens newly written to the local prefix cache.
+    pub cache_creation_token_count: usize,
+}
+
+impl PromptCacheUsage {
+    /// Fold in the accounting carried by a later output of the same request.
+    ///
+    /// Prefill stats arrive on one output only and the other outputs carry
+    /// zero, so each count keeps the largest value seen.
+    pub fn merge(&mut self, later: Self) {
+        self.cached_token_count = self.cached_token_count.max(later.cached_token_count);
+        self.cache_creation_token_count =
+            self.cache_creation_token_count.max(later.cache_creation_token_count);
+    }
 }
 
 /// Final raw token output plus terminal stream metadata.
@@ -175,8 +197,8 @@ pub struct GenerateOutput {
     pub logprobs: Option<Logprobs>,
     /// Terminal finish reason, when this is the final output for the request.
     pub finish_reason: Option<FinishReason>,
-    /// Number of prompt tokens served from cache, when reported by prefill stats.
-    pub cached_token_count: usize,
+    /// Prompt-cache accounting, when reported by prefill stats.
+    pub prompt_cache_usage: PromptCacheUsage,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<Box<serde_json::Value>>,
     /// Connector-specific encoder cache transfer parameters for disaggregated
@@ -244,7 +266,7 @@ impl GenerateOutput {
                 None => self.sampling_mask = Some(next_mask),
             }
         }
-        self.cached_token_count = self.cached_token_count.max(next.cached_token_count);
+        self.prompt_cache_usage.merge(next.prompt_cache_usage);
         self.finish_reason = next.finish_reason;
         self.kv_transfer_params = next.kv_transfer_params;
         self.ec_transfer_params = next.ec_transfer_params;
@@ -275,7 +297,7 @@ impl GenerateOutput {
             token_ids,
             logprobs: None,
             finish_reason,
-            cached_token_count: 0,
+            prompt_cache_usage: Default::default(),
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
@@ -400,10 +422,18 @@ impl GenerateOutputStream {
                 row_count: mask.rows.len(),
             });
         }
-        let cached_token_count = self
-            .remote_prefill_cached_tokens
-            .or_else(|| raw.prefill_stats.as_ref().map(|stats| stats.num_cached_tokens as usize))
-            .unwrap_or(0);
+        let prompt_cache_usage = PromptCacheUsage {
+            cached_token_count: self
+                .remote_prefill_cached_tokens
+                .or_else(|| {
+                    raw.prefill_stats.as_ref().map(|stats| stats.num_cached_tokens as usize)
+                })
+                .unwrap_or(0),
+            cache_creation_token_count: raw
+                .prefill_stats
+                .as_ref()
+                .map_or(0, |stats| stats.num_cache_creation_tokens as usize),
+        };
 
         // An engine error means the request was rejected before it ran.
         let rejected = raw.error.is_some();
@@ -431,7 +461,7 @@ impl GenerateOutputStream {
             token_ids: raw.new_token_ids,
             logprobs,
             finish_reason,
-            cached_token_count,
+            prompt_cache_usage,
             kv_transfer_params: raw.kv_transfer_params,
             ec_transfer_params: raw.ec_transfer_params,
             sampling_mask,
@@ -546,11 +576,11 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
             let mut prompt_token_ids = None;
             let mut prompt_logprobs = None;
             let mut prompt_token_id_logprobs = None;
-            let mut cached_token_count = 0;
+            let mut prompt_cache_usage = PromptCacheUsage::default();
             let mut collected: Option<CollectedGenerateOutput> = None;
 
             while let Some(output) = stream.next().await.transpose()? {
-                cached_token_count = cached_token_count.max(output.cached_token_count);
+                prompt_cache_usage.merge(output.prompt_cache_usage);
                 let sampling_mask = output.sampling_mask;
                 if let Some(info) = output.prompt_info {
                     if prompt_token_ids.is_none() {
@@ -588,7 +618,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         usage: TokenUsage {
                             prompt_token_count: prompt_token_ids.as_ref().map_or(0, Vec::len),
                             output_token_count: 0,
-                            cached_token_count,
+                            prompt_cache_usage,
                         },
                         kv_transfer_params: None,
                         ec_transfer_params: None,
@@ -605,7 +635,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     collected.usage = TokenUsage {
                         prompt_token_count: collected.prompt_token_ids.len(),
                         output_token_count: collected.token_ids.len(),
-                        cached_token_count,
+                        prompt_cache_usage,
                     };
                     collected.kv_transfer_params = output.kv_transfer_params.map(|value| *value);
                     collected.ec_transfer_params = output.ec_transfer_params.map(|value| *value);
