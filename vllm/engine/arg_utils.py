@@ -465,6 +465,12 @@ _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
 )
 
 
+_IR_OP_PRIORITY_DEPRECATION_MESSAGE = (
+    "ir_op_priority (--ir-op-priority) is deprecated because vLLM IR is being "
+    "removed. It will be removed in v0.34.0."
+)
+
+
 _DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
     "--disable-cascade-attn is deprecated and has no effect since cascade "
     "attention has been removed. It will be removed in v0.33.0."
@@ -572,6 +578,7 @@ class EngineArgs:
     elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
     elastic_ep_auto_bootstrap: bool = False
     elastic_ep_initial_dp_size: int | None = None
+    elastic_ep_allocation_index: int | None = None
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -793,6 +800,7 @@ class EngineArgs:
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    sleep_mode_backend: str = ModelConfig.sleep_mode_backend
     sleep_mode_offload_cudagraph: bool = ModelConfig.sleep_mode_offload_cudagraph
     sleep_preserve_parameter_names: list[str] = get_field(
         ModelConfig, "sleep_preserve_parameter_names"
@@ -873,6 +881,26 @@ class EngineArgs:
     kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
+        if self.elastic_ep_allocation_index is not None:
+            if (
+                type(self.elastic_ep_allocation_index) is not int
+                or self.elastic_ep_allocation_index < 0
+            ):
+                raise ValueError(
+                    "--elastic-ep-allocation-index must be a nonnegative integer."
+                )
+            if (
+                not self.elastic_ep_auto_bootstrap
+                or self.data_parallel_rank is not None
+                or self.data_parallel_start_rank is not None
+                or self.data_parallel_external_lb
+                or self.data_parallel_hybrid_lb
+                or self.data_parallel_multi_port_external_lb
+            ):
+                raise ValueError(
+                    "--elastic-ep-allocation-index requires automatic bootstrap "
+                    "and cannot be combined with rank or load-balancer flags."
+                )
         if self.elastic_ep_auto_bootstrap:
             if self.elastic_ep_initial_dp_size is None:
                 raise ValueError(
@@ -1055,6 +1083,9 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
+        )
+        model_group.add_argument(
+            "--sleep-mode-backend", **model_kwargs["sleep_mode_backend"]
         )
         model_group.add_argument(
             "--sleep-mode-offload-cudagraph",
@@ -1356,6 +1387,16 @@ class EngineArgs:
         parallel_group.add_argument(
             "--elastic-ep-max-dp-size",
             **parallel_kwargs["elastic_ep_max_dp_size"],
+        )
+        parallel_group.add_argument(
+            "--elastic-ep-allocation-index",
+            type=int,
+            default=None,
+            help="Zero-based allocation index for automatic Elastic EP bootstrap. "
+            "The first DP rank is this index times --data-parallel-size-local "
+            "(default local size: 1). Initial and maximum DP sizes must be "
+            "multiples of the local size. Cannot be combined with explicit "
+            "rank or load-balancer flags. Unset by default.",
         )
         parallel_group.add_argument(
             "--elastic-ep-auto-bootstrap",
@@ -2079,6 +2120,7 @@ class EngineArgs:
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            sleep_mode_backend=self.sleep_mode_backend,
             sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
             enable_cumem_allocator=self.enable_cumem_allocator,
@@ -2303,6 +2345,9 @@ class EngineArgs:
 
             launch = prepare_external_elastic_ep_launch(self)
             self.data_parallel_size = launch.data_parallel_size
+            self.data_parallel_size_local = launch.local_size
+            if launch.first_rank is not None:
+                self.data_parallel_rank = launch.first_rank
             bootstrap_identity = launch.identity
             os.environ["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = str(int(launch.scale_up))
 
@@ -2877,6 +2922,8 @@ class EngineArgs:
 
             # Set the attribute
             setattr(kernel_config.ir_op_priority, op_name, op_priority)
+        if any(asdict(kernel_config.ir_op_priority).values()):
+            logger.warning_once(_IR_OP_PRIORITY_DEPRECATION_MESSAGE)
 
         load_config = self.create_load_config()
 

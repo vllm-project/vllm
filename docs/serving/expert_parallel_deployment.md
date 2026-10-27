@@ -184,7 +184,9 @@ not membership commit or serving readiness, and does not trigger a resize. The
 external load balancer must still follow each endpoint's serving health.
 
 This mode supports external MP DP with one API server/core client per process.
-The default local rank count is one; see [Local Rank Ranges](#local-rank-ranges)
+The default local rank count is one and is retained through engine configuration,
+including with `--nnodes`; node geometry does not infer a different local range
+after bootstrap. See [Local Rank Ranges](#local-rank-ranges)
 for multi-rank startup. Local routing is inferred automatically for multi-rank
 clients; do not add explicit hybrid-LB or start-rank options. Headless startup
 does not use this discovery path. Fault tolerance may be enabled with an FT-capable all-to-all backend, as
@@ -205,13 +207,26 @@ Manual external Elastic EP launch arguments remain supported without this flag.
 ### Local Rank Ranges
 
 One client can bootstrap several local engines together. Set
-`--data-parallel-rank` to its first global rank and
-`--data-parallel-size-local` to its local count. Do not enable
+`--data-parallel-size-local` to its local count. For uniform fixed-width
+allocations, use `--elastic-ep-allocation-index` instead of an explicit first
+rank: `first_rank = allocation_index × local_count`. The index is zero-based;
+with four local engines, indices 0, 1 and 2 start at ranks 0, 4 and 8.
+
+This option is unset by default and requires automatic bootstrap. Use a
+nonnegative index and `1 < initial DP size <= maximum DP size`. Local count
+defaults to one; keep it fixed across allocations. The initial and maximum DP
+sizes still count native ranks and must be multiples of the local count. Do not
+combine the index with explicit rank, start-rank or load-balancer flags. It does
+not create capacity or specify the live target; native discovery resolves that
+target before engine configuration.
+
+Explicit `--data-parallel-rank` remains supported as the alternative first-rank
+input, with its existing behavior. Do not enable
 `--data-parallel-multi-port-external-lb`: that option starts separate clients.
 
 For an initial DP8 world with four local ranks per client and a maximum of DP12,
-use the same template for each client, varying only `FIRST_DP_RANK` (0 or 4
-initially, then 8 for an append joiner):
+use the same template for each client, varying only `ALLOCATION_INDEX` (0 or 1
+initially, then 2 for an append joiner):
 
 The same template is used for the native resize workflow below; only the first
 rank varies between clients.
@@ -222,7 +237,7 @@ vllm serve Qwen/Qwen3-30B-A3B \
     --eplb-config '{"communicator":"pynccl","use_async":false}' \
     --enable-elastic-ep --elastic-ep-auto-bootstrap \
     --elastic-ep-initial-dp-size 8 --elastic-ep-max-dp-size 12 \
-    --data-parallel-rank "${FIRST_DP_RANK}" \
+    --elastic-ep-allocation-index "${ALLOCATION_INDEX}" \
     --data-parallel-size-local 4 \
     --data-parallel-address "${DP_MASTER_ADDRESS}" \
     --data-parallel-rpc-port 29550 --tensor-parallel-size 1
@@ -282,6 +297,11 @@ World sizes must retain or retire whole existing client ranges. For example,
 DP12→DP10 would split the rank-8 client's range and is rejected before existing
 engines start reconfiguration. The maximum DP size is still a bound, not the
 live target, and bootstrap discovery alone does not commit membership.
+
+Operation correlation is a separate prerequisite proposed in
+[#62082](https://github.com/vllm-project/vllm/pull/62082), not part of local-range
+resizing. Without that API, a lost HTTP response does not prove whether this
+client finished participating. Do not stop a Pod from the target size alone.
 
 To drain requests before the collective pause, set
 `VLLM_ELASTIC_EP_DRAIN_REQUESTS=1` on every client. A prepare/drain failure is

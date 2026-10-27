@@ -4,6 +4,7 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from typing import Annotated, Literal
 
 import pytest
@@ -124,6 +125,86 @@ def test_data_parallel_size_cli_defaults_are_unchanged(options, expected):
     args = EngineArgs.from_cli_args(parser.parse_args(options))
 
     assert args.data_parallel_size == expected
+
+
+@pytest.mark.parametrize("allocation_index", [0, 2])
+def test_external_elastic_ep_allocation_index_cli(allocation_index):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(
+        parser.parse_args(
+            [
+                "--elastic-ep-auto-bootstrap",
+                "--elastic-ep-initial-dp-size",
+                "8",
+                "--elastic-ep-max-dp-size",
+                "12",
+                "--data-parallel-size-local",
+                "4",
+                "--elastic-ep-allocation-index",
+                str(allocation_index),
+            ]
+        )
+    )
+    assert args.elastic_ep_allocation_index == allocation_index
+    assert args.data_parallel_rank is None
+    assert args.data_parallel_size_local == 4
+    assert args.elastic_ep_initial_dp_size == 8
+    assert args.data_parallel_size == 1
+
+
+def test_external_elastic_ep_allocation_index_config(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "elastic-ep-auto-bootstrap: true\nelastic-ep-initial-dp-size: 8\n"
+        "elastic-ep-max-dp-size: 12\ndata-parallel-size-local: 4\n"
+        "elastic-ep-allocation-index: 2\n"
+    )
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    parser.add_argument("--config")
+    args = EngineArgs.from_cli_args(parser.parse_args(["--config", str(config_file)]))
+    assert args.elastic_ep_allocation_index == 2
+    assert args.data_parallel_rank is None
+    assert args.data_parallel_size_local == 4
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--data-parallel-rank", "0"],
+        ["--data-parallel-start-rank", "0"],
+        ["--data-parallel-external-lb"],
+        ["--data-parallel-hybrid-lb"],
+        ["--data-parallel-multi-port-external-lb"],
+        ["--no-elastic-ep-auto-bootstrap"],
+    ],
+)
+def test_external_elastic_ep_allocation_index_rejects_conflicting_cli(options):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    with pytest.raises(ValueError, match="--elastic-ep-allocation-index"):
+        EngineArgs.from_cli_args(
+            parser.parse_args(
+                [
+                    "--elastic-ep-auto-bootstrap",
+                    "--elastic-ep-initial-dp-size",
+                    "8",
+                    "--elastic-ep-allocation-index",
+                    "0",
+                    *options,
+                ]
+            )
+        )
+
+
+@pytest.mark.parametrize("allocation_index", [-1, True, 1.0, "1"])
+def test_external_elastic_ep_allocation_index_requires_nonnegative_integer(
+    allocation_index,
+):
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        EngineArgs(
+            elastic_ep_auto_bootstrap=True,
+            elastic_ep_initial_dp_size=8,
+            elastic_ep_allocation_index=allocation_index,
+        )
 
 
 def test_watermark_config_cli():
@@ -429,6 +510,22 @@ def test_jit_monitor_mode_arg(mode):
     engine_args = EngineArgs(model="test", jit_monitor_mode=mode)
     assert engine_args.jit_monitor_mode == mode
     assert engine_args.create_observability_config().jit_monitor_mode == mode
+
+
+def test_sleep_mode_backend_arg():
+    """A plugin-registered sleep-mode backend can be selected from the CLI."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    engine_args = EngineArgs.from_cli_args(
+        parser.parse_args(["--model", "facebook/opt-125m"])
+    )
+    assert engine_args.sleep_mode_backend == "cumem"
+
+    args = parser.parse_args(
+        ["--model", "facebook/opt-125m", "--sleep-mode-backend", "my_backend"]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.sleep_mode_backend == "my_backend"
+    assert engine_args.create_model_config().sleep_mode_backend == "my_backend"
 
 
 def test_hf_token_get_kwargs():
@@ -877,6 +974,27 @@ def test_ir_op_priority():
             ir_op_priority=ir_op_priority,
             kernel_config=KernelConfig(ir_op_priority=ir_op_priority),
         ).create_engine_config()
+
+
+def test_ir_op_priority_deprecation_warning(caplog_vllm, disable_log_dedup):
+    """Setting ir_op_priority warns users because vLLM IR is being removed."""
+    from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
+
+    msg = "ir_op_priority (--ir-op-priority) is deprecated"
+
+    # Platform defaults fill ir_op_priority; copying the config must not warn.
+    cfg = EngineArgs().create_engine_config()
+    replace(cfg.kernel_config, moe_backend="triton")
+    assert msg not in caplog_vllm.text
+
+    ir_op_priority = IrOpPriorityConfig(rms_norm=["vllm_c"])
+    EngineArgs(ir_op_priority=ir_op_priority).create_engine_config()
+    assert msg in caplog_vllm.text
+
+    caplog_vllm.clear()
+    kernel_config = KernelConfig(ir_op_priority=ir_op_priority)
+    EngineArgs(kernel_config=kernel_config).create_engine_config()
+    assert msg in caplog_vllm.text
 
 
 @pytest.mark.parametrize(
