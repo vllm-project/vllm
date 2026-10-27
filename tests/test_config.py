@@ -2019,6 +2019,43 @@ def test_draft_model_enables_async_scheduling_by_default():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("model_name", ["mtp-dflash2", "mtp-eagle3", "mtp-dspark"])
+def test_explicit_mtp_method_ignores_model_name(tmp_path: Path, model_name: str):
+    """A checkpoint's name must not override explicitly configured MTP."""
+    from transformers import DeepseekV4Config
+
+    target_path = tmp_path / model_name
+    _write_json(
+        target_path / "config.json",
+        DeepseekV4Config(
+            architectures=["DeepseekV4ForCausalLM"],
+            hidden_size=128,
+            intermediate_size=256,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            vocab_size=128,
+            max_position_embeddings=2048,
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            num_nextn_predict_layers=1,
+            layer_types=["sliding_attention"] * 2,
+            head_dim=32,
+        ).to_dict(),
+    )
+    target_config = ModelConfig(
+        model=str(target_path), tokenizer_mode="skip", max_model_len=2048
+    )
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        target_model_config=target_config,
+        target_parallel_config=ParallelConfig(distributed_executor_backend="uni"),
+    )
+    assert speculative_config.method == "mtp"
+
+
 def test_dflash_allows_async_scheduling(tmp_path: Path):
     """DFlash must stay async-schedulable: it was the only parallel-drafting
     method excluded from the allowlist."""
