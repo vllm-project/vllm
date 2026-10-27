@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Any, get_args
+from typing import Any, Literal, get_args
 
 import jinja2
 from fastapi import Request
@@ -31,9 +31,11 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicOutputConfig,
     AnthropicStreamEvent,
     AnthropicThinkingConfig,
+    AnthropicTool,
+    AnthropicToolChangeDefinition,
     AnthropicUsage,
+    translate_error_type,
 )
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
     ResponseFormat,
@@ -48,14 +50,26 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
+from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = init_logger(__name__)
+
+
+class _StreamError(Exception):
+    """Carries the ErrorInfo from an upstream ErrorResponse through the stream
+    converter so the SSE ``error`` event can reuse its status code to pick the
+    Anthropic error type."""
+
+    def __init__(self, error_info: ErrorInfo) -> None:
+        super().__init__(error_info.message)
+        self.error_info = error_info
 
 
 def _build_anthropic_usage(
@@ -97,73 +111,77 @@ def _build_anthropic_usage(
     return AnthropicUsage(**kwargs)
 
 
+def _to_anthropic_stop_reason(
+    finish_reason: str | None,
+    stop_reason: int | str | None,
+    tool_used: bool,
+    tool_complete: bool,
+) -> tuple[
+    Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None,
+    str | None,
+]:
+    """Map an OpenAI finish reason to Anthropic ``(stop_reason, stop_sequence)``.
+
+    Anthropic reports ``tool_use`` whenever the model invoked a tool. The chat
+    layer reports ``finish_reason="stop"`` for a named (forced) tool call, so
+    ``tool_used`` records whether a ``tool_use`` block was produced.
+    ``max_tokens`` always wins. A matched stop string wins unless the tool
+    calls are complete (``tool_complete``): a call it cut short must not run.
+    """
+    if finish_reason == "length":
+        return "max_tokens", None
+    if finish_reason not in ("stop", "tool_calls"):
+        return None, None
+    if tool_complete:
+        return "tool_use", None
+    # vLLM reports the matched stop string in stop_reason (a str);
+    # an int stop-token-id or None (natural EOS) is not a stop sequence.
+    if isinstance(stop_reason, str):
+        return "stop_sequence", stop_reason
+    if finish_reason == "tool_calls" or tool_used:
+        return "tool_use", None
+    return "end_turn", None
+
+
+def _is_json(text: str) -> bool:
+    try:
+        json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
 def wrap_data_with_event(data: str, event: str):
     return f"event: {event}\ndata: {data}\n\n"
 
 
-class AnthropicServingMessages(OpenAIServingChat):
-    """Handler for Anthropic Messages API requests."""
+class DisabledThinkingEffortResolver:
+    """Resolve and cache the effort used for Anthropic disabled thinking."""
 
     def __init__(
         self,
-        engine_client: EngineClient,
-        models: OpenAIServingModels,
-        response_role: str,
-        *,
-        online_renderer: "OnlineRenderer",
-        request_logger: RequestLogger | None,
-        chat_template: str | None,
-        chat_template_content_format: ChatTemplateContentFormatOption,
-        return_tokens_as_token_ids: bool = False,
-        reasoning_parser: str = "",
-        enable_auto_tools: bool = False,
-        tool_parser: str | None = None,
-        tool_strict_level: str = "auto",
-        enable_prompt_tokens_details: bool = False,
-        enable_force_include_usage: bool = False,
-        default_chat_template_kwargs: dict[str, Any] | None = None,
-        disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
+        renderer: OnlineRenderer,
+        effort: AnthropicDisabledThinkingEffortOption = "auto",
     ):
-        super().__init__(
-            engine_client=engine_client,
-            models=models,
-            response_role=response_role,
-            online_renderer=online_renderer,
-            request_logger=request_logger,
-            chat_template=chat_template,
-            chat_template_content_format=chat_template_content_format,
-            return_tokens_as_token_ids=return_tokens_as_token_ids,
-            reasoning_parser=reasoning_parser,
-            enable_auto_tools=enable_auto_tools,
-            tool_strict_level=tool_strict_level,
-            tool_parser=tool_parser,
-            enable_prompt_tokens_details=enable_prompt_tokens_details,
-            enable_force_include_usage=enable_force_include_usage,
-            default_chat_template_kwargs=default_chat_template_kwargs,
-        )
-        self.stop_reason_map = {
-            "stop": "end_turn",
-            "length": "max_tokens",
-            "tool_calls": "tool_use",
-        }
-        self._merge_inline_system = self._should_merge_inline_system(online_renderer)
-        # Resolved lazily from the renderer when "auto".
-        self._disabled_thinking_effort: AnthropicDisabledThinkingEffort | None = (
-            None if disabled_thinking_effort == "auto" else disabled_thinking_effort
+        self._renderer = renderer
+        self._effort: AnthropicDisabledThinkingEffort | None = (
+            None if effort == "auto" else effort
         )
 
-    async def _get_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
-        if self._disabled_thinking_effort is None:
-            self._disabled_thinking_effort = (
-                await self._probe_disabled_thinking_effort()
-            )
+    async def resolve_for(
+        self, request: AnthropicMessagesRequest | AnthropicCountTokensRequest
+    ) -> AnthropicDisabledThinkingEffort:
+        if request.thinking is None or request.thinking.type != "disabled":
+            return "none"
+        if self._effort is None:
+            self._effort = await self._probe()
             logger.info(
                 "Anthropic thinking.type=disabled maps to reasoning_effort=%r",
-                self._disabled_thinking_effort,
+                self._effort,
             )
-        return self._disabled_thinking_effort
+        return self._effort
 
-    async def _probe_disabled_thinking_effort(self) -> AnthropicDisabledThinkingEffort:
+    async def _probe(self) -> AnthropicDisabledThinkingEffort:
         """Use ``low`` if the renderer rejects or ignores ``none``.
 
         ``none`` is ignored when it renders the same prompt as a thinking
@@ -185,15 +203,67 @@ class AnthropicServingMessages(OpenAIServingChat):
             reasoning_effort=effort,
         )
         try:
-            result = await self.online_renderer.render_chat(request)
+            result = await self._renderer.render_chat(request)
         except Exception:
             logger.debug("Rendering reasoning_effort=%r failed", effort, exc_info=True)
             return None
         if isinstance(result, ErrorResponse):
             return None
         _, (engine_input,) = result
-        components = self._extract_prompt_components(engine_input)
+        components = extract_prompt_components(
+            self._renderer.model_config, engine_input
+        )
         return components.token_ids, components.text
+
+
+class AnthropicServingMessages(OpenAIServingChat):
+    """Handler for Anthropic Messages API requests."""
+
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        models: OpenAIServingModels,
+        response_role: str,
+        *,
+        online_renderer: "OnlineRenderer",
+        request_logger: RequestLogger | None,
+        chat_template: str | None,
+        chat_template_content_format: ChatTemplateContentFormatOption,
+        return_tokens_as_token_ids: bool = False,
+        reasoning_parser: str = "",
+        enable_auto_tools: bool = False,
+        tool_parser: str | None = None,
+        tool_strict_level: str | None = None,
+        enable_prompt_tokens_details: bool = False,
+        enable_force_include_usage: bool = False,
+        enable_log_outputs: bool = False,
+        enable_log_deltas: bool = True,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
+        disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
+    ):
+        super().__init__(
+            engine_client=engine_client,
+            models=models,
+            response_role=response_role,
+            online_renderer=online_renderer,
+            request_logger=request_logger,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
+            reasoning_parser=reasoning_parser,
+            enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
+            tool_parser=tool_parser,
+            enable_prompt_tokens_details=enable_prompt_tokens_details,
+            enable_force_include_usage=enable_force_include_usage,
+            enable_log_outputs=enable_log_outputs,
+            enable_log_deltas=enable_log_deltas,
+            default_chat_template_kwargs=default_chat_template_kwargs,
+        )
+        self._merge_inline_system = self._should_merge_inline_system(online_renderer)
+        self.disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
+            online_renderer, disabled_thinking_effort
+        )
 
     @classmethod
     def _should_merge_inline_system(cls, online_renderer: OnlineRenderer) -> bool:
@@ -576,6 +646,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            watermarking=anthropic_request.watermarking,
             cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
             ec_transfer_params=anthropic_request.ec_transfer_params,
@@ -595,8 +666,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         ``display`` is intentionally ignored: suppressing reasoning would mark
         it ended for structured outputs and drop it from multi-turn history.
         """
-        if isinstance(anthropic_request, AnthropicCountTokensRequest):
-            return
         thinking: AnthropicThinkingConfig | None = anthropic_request.thinking
         if thinking is None:
             return
@@ -617,8 +686,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> None:
         """Handle output configuration such as output format and effort."""
-        if isinstance(anthropic_request, AnthropicCountTokensRequest):
-            return
         output_config: AnthropicOutputConfig | None = anthropic_request.output_config
         if output_config and output_config.format and output_config.format.json_schema:
             req.response_format = ResponseFormat(
@@ -676,17 +743,63 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
 
     @classmethod
+    def _resolve_tools(
+        cls,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+    ) -> list[AnthropicTool] | None:
+        """Apply tool_addition/tool_removal blocks in ``messages`` to ``tools``.
+
+        Chat templates see a single tool list, so this resolves the tools in
+        effect at the end of the conversation: a tool added by reference is no
+        longer deferred, a tool added by value is declared, and a removed tool
+        is dropped.
+        """
+        changes = [
+            block
+            for msg in anthropic_request.messages
+            if not isinstance(msg.content, str)
+            for block in msg.content
+            if block.type in ("tool_addition", "tool_removal")
+        ]
+        if not changes:
+            return anthropic_request.tools
+
+        tools = {tool.name: tool for tool in anthropic_request.tools or []}
+        removed: set[str] = set()
+        for block in changes:
+            change = block.tool
+            assert change is not None
+            if isinstance(change, AnthropicToolChangeDefinition):
+                name = change.definition.name
+                tools[name] = change.definition
+            else:
+                name = change.name
+                if name not in tools:
+                    raise ValueError(
+                        f"{block.type} references tool {name!r}, "
+                        "which is not declared in tools"
+                    )
+                if block.type == "tool_addition":
+                    tools[name] = tools[name].model_copy(update={"defer_loading": None})
+            if block.type == "tool_removal":
+                removed.add(name)
+            else:
+                removed.discard(name)
+        return [tool for name, tool in tools.items() if name not in removed]
+
+    @classmethod
     def _convert_tools(
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
         """Convert Anthropic tools to OpenAI format."""
-        if anthropic_request.tools is None:
+        anthropic_tools = cls._resolve_tools(anthropic_request)
+        if anthropic_tools is None:
             return
 
         tools = []
-        for tool in anthropic_request.tools:
+        for tool in anthropic_tools:
             tools.append(
                 ChatCompletionToolsParam.model_validate(
                     {
@@ -718,9 +831,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
-        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
-        if request.thinking is not None and request.thinking.type == "disabled":
-            disabled_thinking_effort = await self._get_disabled_thinking_effort()
+        disabled_thinking_effort = (
+            await self.disabled_thinking_effort_resolver.resolve_for(request)
+        )
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
@@ -736,7 +849,14 @@ class AnthropicServingMessages(OpenAIServingChat):
         elif isinstance(generator, ChatCompletionResponse):
             return self.messages_full_converter(generator)
 
-        return self.message_stream_converter(generator)
+        return generator
+
+    def chat_completion_stream_generator(
+        self, *args: Any, **kwargs: Any
+    ) -> AsyncGenerator[str, None]:
+        return self.message_stream_converter(
+            self.chat_completion_stream_generator_raw(*args, **kwargs)
+        )
 
     def messages_full_converter(
         self,
@@ -751,18 +871,13 @@ class AnthropicServingMessages(OpenAIServingChat):
             ec_transfer_params=generator.ec_transfer_params,
         )
         choice = generator.choices[0]
-        if choice.finish_reason == "stop":
-            # vLLM reports the matched stop string in stop_reason (a str);
-            # an int stop-token-id or None (natural EOS) maps to end_turn.
-            if isinstance(choice.stop_reason, str):
-                result.stop_reason = "stop_sequence"
-                result.stop_sequence = choice.stop_reason
-            else:
-                result.stop_reason = "end_turn"
-        elif choice.finish_reason == "length":
-            result.stop_reason = "max_tokens"
-        elif choice.finish_reason == "tool_calls":
-            result.stop_reason = "tool_use"
+        result.stop_reason, result.stop_sequence = _to_anthropic_stop_reason(
+            choice.finish_reason,
+            choice.stop_reason,
+            tool_used=bool(choice.message.tool_calls),
+            # Their arguments are json-decoded below, so parsed calls are complete.
+            tool_complete=bool(choice.message.tool_calls),
+        )
 
         content: list[AnthropicContentBlock] = []
         if choice.message.reasoning:
@@ -802,7 +917,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     async def message_stream_converter(
         self,
-        generator: AsyncGenerator[str, None],
+        generator: AsyncGenerator[ChatCompletionStreamResponse | ErrorResponse, None],
     ) -> AsyncGenerator[str, None]:
         try:
 
@@ -845,6 +960,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             # Matched stop string, when generation stopped on one (a str);
             # int stop-token-id / None are not stop sequences.
             stop_sequence: int | str | None = None
+            tool_used = False
+            # Arguments of the latest tool_use block; only the last call can be
+            # cut short by a stop string.
+            last_tool_args: list[str] = []
             state = _ActiveBlockState()
             # Map from tool call index to tool_use_id
             tool_index_to_id: dict[int, str] = {}
@@ -908,233 +1027,221 @@ class AnthropicServingMessages(OpenAIServingChat):
                 events.extend(stop_active_block())
                 return events
 
-            async for item in generator:
-                if item.startswith("data:"):
-                    data_str = item[5:].strip().rstrip("\n")
-                    if data_str == "[DONE]":
-                        for event in stop_and_flush():
-                            yield event
-                        stop_message = AnthropicStreamEvent(
-                            type="message_stop",
-                        )
-                        data = stop_message.model_dump_json(
-                            exclude_unset=True, exclude_none=True
-                        )
-                        yield wrap_data_with_event(data, "message_stop")
-                    else:
-                        origin_chunk = ChatCompletionStreamResponse.model_validate_json(
-                            data_str
-                        )
-
-                        if first_item:
-                            chunk = AnthropicStreamEvent(
-                                type="message_start",
-                                message=AnthropicMessagesResponse(
-                                    id=origin_chunk.id,
-                                    # Set explicitly: this event is serialized
-                                    # with exclude_unset=True, which drops
-                                    # default-valued fields, while strict
-                                    # Anthropic SDK clients require
-                                    # message.type/role (issue #45367).
-                                    type="message",
-                                    role="assistant",
-                                    content=[],
-                                    model=origin_chunk.model,
-                                    stop_reason=None,
-                                    stop_sequence=None,
-                                    usage=_build_anthropic_usage(origin_chunk.usage),
-                                ),
-                            )
-                            first_item = False
-                            data = chunk.model_dump_json(exclude_unset=True)
-                            yield wrap_data_with_event(data, "message_start")
-                            continue
-
-                        # last chunk including usage info
-                        if len(origin_chunk.choices) == 0:
-                            for event in stop_and_flush():
-                                yield event
-                            if isinstance(stop_sequence, str):
-                                stop_delta = AnthropicDelta(
-                                    stop_reason="stop_sequence",
-                                    stop_sequence=stop_sequence,
-                                )
-                            else:
-                                stop_delta = AnthropicDelta(
-                                    stop_reason=self.stop_reason_map.get(
-                                        finish_reason or "stop"
-                                    ),
-                                    # Set explicitly so exclude_unset=True keeps it.
-                                    stop_sequence=None,
-                                )
-                            chunk = AnthropicStreamEvent(
-                                type="message_delta",
-                                delta=stop_delta,
-                                usage=_build_anthropic_usage(origin_chunk.usage),
-                            )
-                            data = chunk.model_dump_json(exclude_unset=True)
-                            yield wrap_data_with_event(data, "message_delta")
-                            continue
-
-                        if origin_chunk.choices[0].finish_reason is not None:
-                            finish_reason = origin_chunk.choices[0].finish_reason
-                            stop_sequence = origin_chunk.choices[0].stop_reason
-                            # continue
-
-                        # thinking / text content
-                        reasoning_delta = origin_chunk.choices[0].delta.reasoning
-                        if reasoning_delta is not None:
-                            if reasoning_delta == "":
-                                pass
-                            else:
-                                if state.block_type != "thinking":
-                                    for event in stop_and_flush():
-                                        yield event
-                                    start_event = start_block(
-                                        AnthropicContentBlock(
-                                            type="thinking", thinking=""
-                                        )
-                                    )
-                                    yield start_event
-                                chunk = AnthropicStreamEvent(
-                                    index=(
-                                        state.block_index
-                                        if state.block_index is not None
-                                        else state.content_block_index
-                                    ),
-                                    type="content_block_delta",
-                                    delta=AnthropicDelta(
-                                        type="thinking_delta",
-                                        thinking=reasoning_delta,
-                                    ),
-                                )
-                                data = chunk.model_dump_json(exclude_unset=True)
-                                yield wrap_data_with_event(data, "content_block_delta")
-
-                        if origin_chunk.choices[0].delta.content is not None:
-                            if origin_chunk.choices[0].delta.content == "":
-                                pass
-                            elif state.block_type == "tool_use":
-                                state.pending_content.append(
-                                    origin_chunk.choices[0].delta.content
-                                )
-                            else:
-                                if state.block_type != "text":
-                                    for event in stop_and_flush():
-                                        yield event
-                                    start_event = start_block(
-                                        AnthropicContentBlock(type="text", text="")
-                                    )
-                                    yield start_event
-                                chunk = AnthropicStreamEvent(
-                                    index=(
-                                        state.block_index
-                                        if state.block_index is not None
-                                        else state.content_block_index
-                                    ),
-                                    type="content_block_delta",
-                                    delta=AnthropicDelta(
-                                        type="text_delta",
-                                        text=origin_chunk.choices[0].delta.content,
-                                    ),
-                                )
-                                data = chunk.model_dump_json(exclude_unset=True)
-                                yield wrap_data_with_event(data, "content_block_delta")
-
-                        # tool calls - process all tool calls in the delta
-                        if len(origin_chunk.choices[0].delta.tool_calls) > 0:
-                            for tool_call in origin_chunk.choices[0].delta.tool_calls:
-                                if tool_call.id is not None:
-                                    # Update mapping for incremental updates
-                                    tool_index_to_id[tool_call.index] = tool_call.id
-                                    # Only create new block if different tool call
-                                    # AND has a name
-                                    tool_name = (
-                                        tool_call.function.name
-                                        if tool_call.function
-                                        else None
-                                    )
-                                    if (
-                                        state.tool_use_id != tool_call.id
-                                        and tool_name is not None
-                                    ):
-                                        for event in stop_and_flush():
-                                            yield event
-                                        start_event = start_block(
-                                            AnthropicContentBlock(
-                                                type="tool_use",
-                                                id=tool_call.id,
-                                                name=tool_name,
-                                                input={},
-                                            )
-                                        )
-                                        yield start_event
-                                    # Handle initial arguments if present
-                                    if (
-                                        tool_call.function
-                                        and tool_call.function.arguments
-                                        and state.tool_use_id == tool_call.id
-                                    ):
-                                        chunk = AnthropicStreamEvent(
-                                            index=(
-                                                state.block_index
-                                                if state.block_index is not None
-                                                else state.content_block_index
-                                            ),
-                                            type="content_block_delta",
-                                            delta=AnthropicDelta(
-                                                type="input_json_delta",
-                                                partial_json=tool_call.function.arguments,
-                                            ),
-                                        )
-                                        data = chunk.model_dump_json(exclude_unset=True)
-                                        yield wrap_data_with_event(
-                                            data, "content_block_delta"
-                                        )
-                                else:
-                                    # Incremental update - use index to find tool_use_id
-                                    tool_use_id = tool_index_to_id.get(tool_call.index)
-                                    if (
-                                        tool_use_id is not None
-                                        and tool_call.function
-                                        and tool_call.function.arguments
-                                        and state.tool_use_id == tool_use_id
-                                    ):
-                                        chunk = AnthropicStreamEvent(
-                                            index=(
-                                                state.block_index
-                                                if state.block_index is not None
-                                                else state.content_block_index
-                                            ),
-                                            type="content_block_delta",
-                                            delta=AnthropicDelta(
-                                                type="input_json_delta",
-                                                partial_json=tool_call.function.arguments,
-                                            ),
-                                        )
-                                        data = chunk.model_dump_json(exclude_unset=True)
-                                        yield wrap_data_with_event(
-                                            data, "content_block_delta"
-                                        )
-                            continue
-                else:
-                    error_response = AnthropicStreamEvent(
-                        type="error",
-                        error=AnthropicError(
-                            type="internal_error",
-                            message="Invalid data format received",
+            async for origin_chunk in generator:
+                if isinstance(origin_chunk, ErrorResponse):
+                    raise _StreamError(origin_chunk.error)
+                if first_item:
+                    chunk = AnthropicStreamEvent(
+                        type="message_start",
+                        message=AnthropicMessagesResponse(
+                            id=origin_chunk.id,
+                            # Set explicitly: this event is serialized
+                            # with exclude_unset=True, which drops
+                            # default-valued fields, while strict
+                            # Anthropic SDK clients require
+                            # message.type/role (issue #45367).
+                            type="message",
+                            role="assistant",
+                            content=[],
+                            model=origin_chunk.model,
+                            stop_reason=None,
+                            stop_sequence=None,
+                            usage=_build_anthropic_usage(origin_chunk.usage),
                         ),
                     )
-                    data = error_response.model_dump_json(exclude_unset=True)
-                    yield wrap_data_with_event(data, "error")
+                    first_item = False
+                    data = chunk.model_dump_json(exclude_unset=True)
+                    yield wrap_data_with_event(data, "message_start")
+                    continue
+
+                # last chunk including usage info
+                if len(origin_chunk.choices) == 0:
+                    for event in stop_and_flush():
+                        yield event
+                    anthropic_stop_reason, anthropic_stop_sequence = (
+                        _to_anthropic_stop_reason(
+                            finish_reason or "stop",
+                            stop_sequence,
+                            tool_used=tool_used,
+                            tool_complete=(
+                                tool_used and _is_json("".join(last_tool_args))
+                            ),
+                        )
+                    )
+                    stop_delta = AnthropicDelta(
+                        stop_reason=anthropic_stop_reason,
+                        # Set explicitly so exclude_unset=True keeps it.
+                        stop_sequence=anthropic_stop_sequence,
+                    )
+                    chunk = AnthropicStreamEvent(
+                        type="message_delta",
+                        delta=stop_delta,
+                        usage=_build_anthropic_usage(origin_chunk.usage),
+                    )
+                    data = chunk.model_dump_json(exclude_unset=True)
+                    yield wrap_data_with_event(data, "message_delta")
+                    continue
+
+                if origin_chunk.choices[0].finish_reason is not None:
+                    finish_reason = origin_chunk.choices[0].finish_reason
+                    stop_sequence = origin_chunk.choices[0].stop_reason
+                    # continue
+
+                # thinking / text content
+                reasoning_delta = origin_chunk.choices[0].delta.reasoning
+                if reasoning_delta is not None:
+                    if reasoning_delta == "":
+                        pass
+                    else:
+                        if state.block_type != "thinking":
+                            for event in stop_and_flush():
+                                yield event
+                            start_event = start_block(
+                                AnthropicContentBlock(type="thinking", thinking="")
+                            )
+                            yield start_event
+                        chunk = AnthropicStreamEvent(
+                            index=(
+                                state.block_index
+                                if state.block_index is not None
+                                else state.content_block_index
+                            ),
+                            type="content_block_delta",
+                            delta=AnthropicDelta(
+                                type="thinking_delta",
+                                thinking=reasoning_delta,
+                            ),
+                        )
+                        data = chunk.model_dump_json(exclude_unset=True)
+                        yield wrap_data_with_event(data, "content_block_delta")
+
+                if origin_chunk.choices[0].delta.content is not None:
+                    if origin_chunk.choices[0].delta.content == "":
+                        pass
+                    elif state.block_type == "tool_use":
+                        state.pending_content.append(
+                            origin_chunk.choices[0].delta.content
+                        )
+                    else:
+                        if state.block_type != "text":
+                            for event in stop_and_flush():
+                                yield event
+                            start_event = start_block(
+                                AnthropicContentBlock(type="text", text="")
+                            )
+                            yield start_event
+                        chunk = AnthropicStreamEvent(
+                            index=(
+                                state.block_index
+                                if state.block_index is not None
+                                else state.content_block_index
+                            ),
+                            type="content_block_delta",
+                            delta=AnthropicDelta(
+                                type="text_delta",
+                                text=origin_chunk.choices[0].delta.content,
+                            ),
+                        )
+                        data = chunk.model_dump_json(exclude_unset=True)
+                        yield wrap_data_with_event(data, "content_block_delta")
+
+                # tool calls - process all tool calls in the delta
+                if len(origin_chunk.choices[0].delta.tool_calls) > 0:
+                    for tool_call in origin_chunk.choices[0].delta.tool_calls:
+                        if tool_call.id is not None:
+                            # Update mapping for incremental updates
+                            tool_index_to_id[tool_call.index] = tool_call.id
+                            # Only create new block if different tool call
+                            # AND has a name
+                            tool_name = (
+                                tool_call.function.name if tool_call.function else None
+                            )
+                            if (
+                                state.tool_use_id != tool_call.id
+                                and tool_name is not None
+                            ):
+                                for event in stop_and_flush():
+                                    yield event
+                                tool_used = True
+                                last_tool_args = []
+                                start_event = start_block(
+                                    AnthropicContentBlock(
+                                        type="tool_use",
+                                        id=tool_call.id,
+                                        name=tool_name,
+                                        input={},
+                                    )
+                                )
+                                yield start_event
+                            # Handle initial arguments if present
+                            if (
+                                tool_call.function
+                                and tool_call.function.arguments
+                                and state.tool_use_id == tool_call.id
+                            ):
+                                last_tool_args.append(tool_call.function.arguments)
+                                chunk = AnthropicStreamEvent(
+                                    index=(
+                                        state.block_index
+                                        if state.block_index is not None
+                                        else state.content_block_index
+                                    ),
+                                    type="content_block_delta",
+                                    delta=AnthropicDelta(
+                                        type="input_json_delta",
+                                        partial_json=tool_call.function.arguments,
+                                    ),
+                                )
+                                data = chunk.model_dump_json(exclude_unset=True)
+                                yield wrap_data_with_event(data, "content_block_delta")
+                        else:
+                            # Incremental update - use index to find tool_use_id
+                            tool_use_id = tool_index_to_id.get(tool_call.index)
+                            if (
+                                tool_use_id is not None
+                                and tool_call.function
+                                and tool_call.function.arguments
+                                and state.tool_use_id == tool_use_id
+                            ):
+                                last_tool_args.append(tool_call.function.arguments)
+                                chunk = AnthropicStreamEvent(
+                                    index=(
+                                        state.block_index
+                                        if state.block_index is not None
+                                        else state.content_block_index
+                                    ),
+                                    type="content_block_delta",
+                                    delta=AnthropicDelta(
+                                        type="input_json_delta",
+                                        partial_json=tool_call.function.arguments,
+                                    ),
+                                )
+                                data = chunk.model_dump_json(exclude_unset=True)
+                                yield wrap_data_with_event(data, "content_block_delta")
+                    continue
+            for event in stop_and_flush():
+                yield event
+            stop_message = AnthropicStreamEvent(type="message_stop")
+            data = stop_message.model_dump_json(exclude_unset=True, exclude_none=True)
+            yield wrap_data_with_event(data, "message_stop")
 
         except Exception as e:
             logger.exception("Error in message stream converter.")
+            for event in stop_active_block():
+                yield event
+            if isinstance(e, _StreamError):
+                # Reuse the ErrorResponse status code so the SSE error event
+                # uses the same Anthropic vocabulary as the non-streaming
+                # path (e.g. overloaded_error, not_found_error). The message
+                # was already sanitized by create_error_response upstream.
+                error_type = translate_error_type(e.error_info.code)
+                message = e.error_info.message
+            else:
+                error_type = "api_error"
+                message = sanitize_message(str(e))
             error_response = AnthropicStreamEvent(
                 type="error",
-                error=AnthropicError(
-                    type="internal_error", message=sanitize_message(str(e))
-                ),
+                error=AnthropicError(type=error_type, message=message),
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
@@ -1145,9 +1252,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
+        disabled_thinking_effort = (
+            await self.disabled_thinking_effort_resolver.resolve_for(request)
+        )
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
+            disabled_thinking_effort=disabled_thinking_effort,
         )
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):

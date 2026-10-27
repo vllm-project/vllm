@@ -3,6 +3,7 @@
 
 from .interfaces import (
     HasInnerState,
+    SupportsHCSP,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -10,6 +11,7 @@ from .interfaces import (
     SupportsPP,
     SupportsTranscription,
     has_inner_state,
+    supports_hc_sp,
     supports_lora,
     supports_mrope,
     supports_multimodal,
@@ -33,6 +35,8 @@ __all__ = [
     "is_text_generation_model",
     "HasInnerState",
     "has_inner_state",
+    "SupportsHCSP",
+    "supports_hc_sp",
     "SupportsLoRA",
     "supports_lora",
     "SupportsMultiModal",
