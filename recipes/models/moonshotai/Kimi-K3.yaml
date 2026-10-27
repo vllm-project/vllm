@@ -1881,6 +1881,22 @@ guide: |
   grows in 32-NPU groups; the default is one prefill group plus one decode group
   (eight nodes, 64 NPUs total). Additional groups are independent replicas.
 
+  The A5 PD builder presents five launch steps:
+
+  1. **Scripts** starts the matching A5 container and stages its launcher and proxy.
+  2. **Prefill** saves the prefill `run_dp_template.sh` with TP8/PP4.
+  3. **Decode** saves the decode `run_dp_template.sh` with DP4/TP8.
+  4. **Start_Server** launches this host's selected role and node. Set
+     `ASCEND_PD_ROLE=prefill` or `decode` and the host's `IFACE_NAME`, then repeat
+     for all four nodes in each group, using that group's master and ranks 0-3.
+  5. **Start_Proxy** starts the client-facing proxy after both pools are ready.
+
+  Run the template and launcher steps inside the prepared container on each node.
+  Start each prefill group's rank 0 before its headless ranks 1-3. Every decode
+  node keeps its HTTP endpoint. The transfer connector remains MooncakeConnectorV2.
+  The launcher runs in the foreground; open another shell in the prepared
+  container for Start_Proxy.
+
   The [official basic PD reference](https://docs.vllm.ai/projects/vllm-ascend-cn/zh-cn/latest/tutorials/models/Kimi-K3.html#52-basic-eight-node-pd-separation-deployment) documents the fixed eight-node
   topology. Group replication and the private MXFP4 checkpoint have not been
   validated on NPU hardware here. The guide's pooled PD section adds a MemCache
