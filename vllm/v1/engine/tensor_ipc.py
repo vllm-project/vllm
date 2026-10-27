@@ -54,13 +54,6 @@ class TensorIpcSender(OOBTensorConsumer):
         self._message_counter = 0
         self._sender_id = uuid.uuid4().hex[:8]
 
-    def set_target_engine(self, target_engine: int) -> None:
-        if target_engine != 0:
-            raise IndexError(
-                "TensorIpcSender only supports a single queue; "
-                f"got target engine {target_engine}"
-            )
-
     def new_message(self) -> None:
         self._message_counter += 1
         self._tensor_id_counter = 0

@@ -2043,7 +2043,6 @@ class FlashInferImpl(AttentionImpl):
         self.nvfp4_fa2 = self.is_kvcache_nvfp4 and _nvfp4_kv_on_fa2()
         self.nvfp4_trtllm = self.is_kvcache_nvfp4 and not self.nvfp4_fa2
         self.kv_cache_dtype = "nvfp4" if self.is_kvcache_nvfp4 else kv_cache_dtype
-        self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 

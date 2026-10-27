@@ -346,7 +346,6 @@ class OnlineAcceptanceEstimator:
         self.num_speculative_steps = num_speculative_steps
         self.device = device
         self._steps_since_refit = 0
-        self._refits = 0
 
         # The learned coefficients used for predicting acceptance.
         self.slope = torch.full((1,), _INIT_SLOPE, dtype=torch.float32, device=device)
@@ -446,7 +445,6 @@ class OnlineAcceptanceEstimator:
             DAMPING=self.DAMPING_OBSERVATIONS,
             BLOCK=triton.next_power_of_2(self.num_speculative_steps),
         )
-        self._refits += 1
 
     def predict(
         self,

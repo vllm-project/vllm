@@ -697,11 +697,6 @@ class KVCacheManager:
             self.prefix_cache_stats.reset = True
         return True
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        """Deprecated: cascade attention has been removed. Always returns 0
-        for each KV cache group. Kept for out-of-tree schedulers."""
-        return [0] * self.num_kv_cache_groups
-
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.
 
