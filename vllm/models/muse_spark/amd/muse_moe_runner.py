@@ -18,10 +18,15 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
+    aiter_triton_kernel_w4a16_moe_forward,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterMxfp4Experts,
@@ -32,7 +37,10 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    _interleave_gate_up_rows,
+)
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
 )
@@ -52,7 +60,10 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _WEIGHT_QUANT_KEY_MAP,
     OCP_MX_BLOCK_SIZE,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp4Static,
+)
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.muse_spark.amd.ops.fused_norm_expand import take_expanded
@@ -65,6 +76,8 @@ from vllm.models.muse_spark.common.moe import (
 from vllm.models.muse_spark.common.ops.fused_finalize import (
     fused_post_expert_finalize,
 )
+
+logger = init_logger(__name__)
 
 _FINALIZE_CHUNK_ELEMS = 32 * 1024 * 1024
 # Below this, one custom all-reduce beats the two-RCCL-kernel RS + AG pair.
@@ -551,6 +564,157 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         )
 
 
+def _use_w4a16_mxfp4_experts() -> bool:
+    """gfx942 has no FP4 matrix cores, so the W4A4 CK experts cannot run there."""
+    from vllm.platforms.rocm import on_gfx942
+
+    return on_gfx942() and rocm_aiter_ops.is_enabled()
+
+
+def interleave_w13_for_triton_swiglu(layer: torch.nn.Module) -> None:
+    """Repack w13 from [gate | up] rows to the gate/up row pairs that the
+    AITER Triton SwiGLU epilogue reads."""
+    for name in ("w13_weight", "w13_weight_scale"):
+        param = getattr(layer, name)
+        param.data = _interleave_gate_up_rows(param.data)
+
+
+class MuseSparkAiterW4A16Experts(_RouteOutputHandoff, mk.FusedMoEExpertsModular):
+    """gfx942 MXFP4 experts: AITER Triton W4A16, one unweighted output per route.
+
+    Keeps the checkpoint's MXFP4 weights and runs BF16 activations. Each
+    (token, route) pair is expanded to its own row and routed top-1 to its
+    expert with a unit gate, so GEMM2 writes the unweighted per-route output
+    that the MuseSpark post-expert norm consumes.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ) -> None:
+        super().__init__(moe_config, quant_config)
+        if not isinstance(quant_config, MuseSparkQuarkOCPMXMoEQuantConfig):
+            raise TypeError(
+                "MuseSparkAiterW4A16Experts requires MuseSparkQuarkOCPMXMoEQuantConfig."
+            )
+        if quant_config.post_expert_norm_fn is None:
+            raise ValueError("MuseSpark1x post-expert norm is not configured.")
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return _use_w4a16_mxfp4_experts()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kMxfp4Static, None)
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        return not moe_parallel_config.use_ep and moe_parallel_config.dp_size == 1
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # The AITER Triton GEMMs allocate their own intermediates.
+        return (0,), (0,), (M, topk, K)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        if apply_router_weight_on_input:
+            raise NotImplementedError(
+                "MuseSpark1x requires router weights after the post-expert norm."
+            )
+        if expert_map is not None:
+            raise NotImplementedError(
+                "MuseSpark1x W4A16 MXFP4 experts do not support expert parallelism."
+            )
+
+        num_tokens, top_k = topk_ids.shape
+        hidden_dim = hidden_states.shape[-1]
+        num_routes = num_tokens * top_k
+        expanded_hidden_states = take_expanded(hidden_states, top_k)
+        if expanded_hidden_states is None:
+            expanded_hidden_states = hidden_states.repeat_interleave(top_k, dim=0)
+
+        # One-hot logits route each expanded row to exactly its own expert, and
+        # the top-1 softmax gate is exactly 1, so GEMM2's output stays unweighted.
+        route_logits = torch.zeros(
+            (num_routes, global_num_experts),
+            dtype=expanded_hidden_states.dtype,
+            device=expanded_hidden_states.device,
+        )
+        route_logits.scatter_(1, topk_ids.reshape(num_routes, 1).long(), 1.0)
+
+        route_output = aiter_triton_kernel_w4a16_moe_forward(
+            hidden_states=expanded_hidden_states,
+            w1=w1,
+            w2=w2,
+            gating_output=route_logits,
+            topk=1,
+            renormalize=True,
+            activation=activation,
+            quant_config=self.quant_config,
+            global_num_experts=global_num_experts,
+        )
+        self._park_route_output(route_output.view(num_tokens, top_k, hidden_dim))
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        quant_config = self.quant_config
+        assert isinstance(quant_config, MuseSparkQuarkOCPMXMoEQuantConfig)
+        assert quant_config.post_expert_norm_fn is not None
+        return MuseSparkTopKWeightAndReduce(
+            quant_config.post_expert_norm_fn,
+            pre_norm_all_reduce=self.moe_config.moe_parallel_config.tp_size > 1,
+            take_route_output=self._take_route_output,
+        )
+
+
 class MuseSparkQuarkW8A8Fp8FusedMoE(QuarkW8A8Fp8MoEMethod):
     """Quark W8A8 FP8 method using route-preserving Triton experts."""
 
@@ -611,13 +775,22 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
                 "MuseSpark1x MXFP4 on ROCm requires Quark OCP W4A4 with "
                 f"dynamic MXFP4 activations; got {self.ocp_mx_scheme!r}."
             )
-        if self.mxfp4_backend is not Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        if self.mxfp4_backend is Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+            self.experts_cls = MuseSparkAiterExperts
+        elif _use_w4a16_mxfp4_experts():
+            # Keep the MXFP4 weights; run BF16 activations through AITER Triton.
+            self.mxfp4_backend = Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16
+            self.experts_cls = MuseSparkAiterW4A16Experts
+            logger.info_once(
+                "MuseSpark1x MXFP4 on gfx942: using AITER Triton W4A16 experts "
+                "(BF16 activations)."
+            )
+        else:
             raise NotImplementedError(
-                "MuseSpark1x MXFP4 on ROCm requires the "
-                "AITER_MXFP4_MXFP4 backend; got "
+                "MuseSpark1x MXFP4 on ROCm requires the AITER_MXFP4_MXFP4 backend "
+                "(gfx950) or AITER Triton W4A16 (gfx942); got "
                 f"{self.mxfp4_backend.value}."
             )
-        self.experts_cls = MuseSparkAiterExperts
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
@@ -644,6 +817,8 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
                 loaded_slots, layer.moe_config.num_logical_experts
             )
             del layer._quark_expert_loaded_slots
+        if self.mxfp4_backend is Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
+            interleave_w13_for_triton_swiglu(layer)
         super().process_weights_after_loading(layer)
 
 
@@ -914,6 +1089,7 @@ __all__ = [
     "MuseMoERunner",
     "MuseSpark1xRouter",
     "MuseSparkAiterExperts",
+    "MuseSparkAiterW4A16Experts",
     "MuseSparkQuarkFp8MoEQuantConfig",
     "MuseSparkQuarkOCPMXFusedMoE",
     "MuseSparkQuarkW8A8Fp8FusedMoE",
