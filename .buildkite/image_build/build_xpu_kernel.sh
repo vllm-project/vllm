@@ -34,9 +34,11 @@ kernel_sha="$(git -C "$kernel_source" rev-parse HEAD)"
 printf '%s\n' "$kernel_sha" > "$output_dir/kernel-commit.txt"
 
 if [[ -z "$build_image" ]]; then
+    export PATH="$HOME/.local/bin:$PATH"
     if ! command -v uv >/dev/null; then
-        echo "Dynamic kernel build image resolution requires uv on the agent" >&2
-        exit 1
+        export UV_INSTALL_DIR="$HOME/.local/bin"
+        curl --fail --show-error --silent --location --retry 3 \
+            https://astral.sh/uv/0.11.1/install.sh | sh
     fi
     workflow="${kernel_source}/.github/workflows/wheel-per-commit.yaml"
     build_image="$(uv run --isolated --no-project --python 3.12 --with pyyaml==6.0.3 python - "$workflow" <<'PY'

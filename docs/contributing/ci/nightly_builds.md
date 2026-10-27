@@ -44,8 +44,9 @@ Set build-level `VLLM_XPU_KERNEL_NIGHTLY=1`, `RUN_ALL=1` and `NIGHTLY=1`
 in the Intel pipeline to build the kernel before its test image. The switch
 defaults to `0`. The kernel ref defaults to `main` (`VLLM_XPU_KERNEL_REF`
 overrides it); the builder image is read from that checkout's wheel workflow
-unless `VLLM_XPU_KERNEL_BUILD_IMAGE` is set. The agent needs `uv` and Docker
-BuildKit. Wheels and checksums are saved as `build/xpu-kernel-wheel/*` artifacts
+unless `VLLM_XPU_KERNEL_BUILD_IMAGE` is set. The agent needs Docker BuildKit;
+`uv` is installed automatically if missing. Wheels and checksums are saved as
+`build/xpu-kernel-wheel/*` artifacts
 before image building; retention follows Buildkite settings, not public hosting.
 All Intel tests use the published image metadata and fail if it is unavailable.
 The oneAPI script defaults to `/opt/intel/oneapi/2026.1/oneapi-vars.sh`
