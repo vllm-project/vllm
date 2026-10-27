@@ -245,9 +245,11 @@ class EncoderCudaGraphManager:
 
     def capture(self, graph_pool: Any):
         """Capture CUDA graphs for every configured path and token budget."""
-        self.graph_pool = graph_pool
-
         num_graphs = self.get_num_graphs_to_capture()
+        if num_graphs == 0:
+            return
+
+        self.graph_pool = graph_pool
         if num_graphs > _CAPTURE_GRAPH_COUNT_WARNING_THRESHOLD:
             logger.warning(
                 "Capturing %d encoder CUDA graphs; capture axes multiply the "
@@ -277,6 +279,8 @@ class EncoderCudaGraphManager:
         return num_budgets * math.prod(len(axis) for axis in self._capture_axes)
 
     def get_num_graphs_to_capture(self) -> int:
+        if not self.config.modalities:
+            return 0
         return sum(
             self._num_graphs_for_budgets(budgets)
             for budgets in self.path_token_budgets.values()

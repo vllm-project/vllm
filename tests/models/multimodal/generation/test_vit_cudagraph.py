@@ -10,7 +10,7 @@ from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, VIDEO_ASSETS
-from ...utils import dummy_hf_overrides
+from ...utils import check_logprobs_close, dummy_hf_overrides
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 
@@ -557,6 +557,64 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
 
         # Ensure the output is a string
         assert isinstance(output_text, str)
+
+
+def _check_pruned_encoder_cudagraphs(worker):
+    manager = worker.model_runner.model_state.encoder_runner.cudagraph_manager
+    assert manager is not None
+    assert manager.config.modalities == []
+    assert manager.get_num_graphs_to_capture() == 0
+    assert not manager.is_captured()
+    assert manager.budget_graphs == {}
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("pruning_method", ["evs", "vidcom2"])
+def test_qwen3_vl_pruning_disables_encoder_cudagraphs(
+    pruning_method, vllm_runner, image_assets, monkeypatch
+):
+    """Pruning keeps image outputs eager even when encoder CG is enabled."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    config = MODEL_CONFIGS["qwen3_vl"]
+    outputs = []
+    for encoder_cudagraph in (False, True):
+        with vllm_runner(
+            config.model,
+            dtype=config.dtype,
+            max_model_len=config.max_model_len,
+            max_num_seqs=1,
+            enable_prefix_caching=False,
+            video_pruning_rate=0.5,
+            video_pruning_method=pruning_method,
+            limit_mm_per_prompt={"image": 1, "video": 1},
+            compilation_config={
+                **get_compilation_config(config),
+                "mode": 0,
+                "cudagraph_mode": "NONE",
+                "cudagraph_mm_encoder": encoder_cudagraph,
+                "encoder_cudagraph_token_budgets": [64],
+            },
+        ) as model:
+            if encoder_cudagraph:
+                model.llm.collective_rpc(_check_pruned_encoder_cudagraphs)
+            outputs.append(
+                model.generate_greedy_logprobs(
+                    [config.image_prompt],
+                    max_tokens=16,
+                    num_logprobs=5,
+                    images=[[image_assets[0].pil_image]],
+                )
+            )
+            assert len(outputs[-1]) == 1
+            assert all(output_ids for output_ids, _, _ in outputs[-1])
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="encoder_cudagraph_disabled",
+        name_1="encoder_cudagraph_enabled",
+        always_check_logprobs=True,
+    )
 
 
 def _check_eonly_encoder_outputs(worker, batches):
