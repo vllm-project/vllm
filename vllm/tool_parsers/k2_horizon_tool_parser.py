@@ -33,7 +33,7 @@ from vllm.tool_parsers.utils import (
     find_tool_properties,
     partial_tag_overlap,
     sanitize_non_finite,
-    schema_admits_any_value,
+    schema_coercion_types,
 )
 
 logger = init_logger(__name__)
@@ -165,7 +165,7 @@ class K2HorizonToolParser(ToolParser):
         explicit_type: str | None,
     ) -> Any:
         explicit_base = cls._base_arg_type(explicit_type)
-        untyped = not isinstance(schema, dict) or schema_admits_any_value(schema)
+        untyped = not schema_coercion_types(schema)
         if untyped and explicit_base == "any":
             return value
         if untyped and explicit_base:

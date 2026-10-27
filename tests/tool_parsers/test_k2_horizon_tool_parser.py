@@ -272,6 +272,46 @@ def test_xml_untyped_param_keeps_emitted_type(tokenizer):
     }
 
 
+def test_xml_ref_param_keeps_emitted_type(tokenizer):
+    # A property whose only constraint is an unresolved ``$ref`` resolves no
+    # type, so the model's explicit ``<arg_type>`` tag must decide, as it
+    # does for an untyped property.
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"$ref": "#/$defs/Int"},
+                    },
+                    "$defs": {"Int": {"type": "integer"}},
+                },
+            },
+        }
+    ]
+    request = ChatCompletionRequest(
+        model="k2-horizon",
+        messages=[{"role": "user", "content": "test"}],
+        tools=tools,
+        chat_template_kwargs={"tool_call_format": "xml_typed"},
+    )
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    result = parser.extract_tool_calls(
+        _group(_xml_call("lookup", [("query", "x"), ("limit", "5")], typed=True)),
+        request,
+    )
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "x",
+        "limit": 5,
+    }
+
+
 def test_xml_untyped_param_alias_type_keeps_whitespace(tokenizer):
     # ``str`` aliases ``string``; the whitespace rule must canonicalise the
     # explicit ``<arg_type>``, or an untyped property loses its spaces.
