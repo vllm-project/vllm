@@ -1171,12 +1171,7 @@ def _fused_moe_lora_kernel(
         else:
             tl.store(c_ptrs, accumulator, mask=c_mask)
     else:
-        tl.atomic_add(
-            c_ptrs,
-            accumulator.to(c_ptr.dtype.element_ty),
-            mask=c_mask,
-            sem="relaxed",
-        )
+        tl.atomic_add(c_ptrs, accumulator, mask=c_mask, sem="relaxed")
 
 
 @torch.inference_mode()
