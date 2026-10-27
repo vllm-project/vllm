@@ -16,10 +16,16 @@ import uvloop
 
 from vllm.entrypoints.common.cli_args import init_parser_plugin
 from vllm.logger import configure_logging_from_args, init_logger
-from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.utils.system_utils import decorate_logs, set_pdeathsig, set_process_title
 from vllm.v1.utils import shutdown
 
 from ..launcher import _NOT_ACCEPTING, setup_server
+from ..utils import graceful_shutdown
+from ..utils.graceful_shutdown import (
+    set_signal_handler,
+    set_timeout,
+    to_timeout,
+)
 from .entry import build_and_serve_renderer, build_vllm_config
 
 logger = init_logger(__name__)
@@ -37,6 +43,7 @@ def run_worker_proc(
     api_server_loads,
 ) -> None:
     """Entrypoint for an individual API server worker process."""
+    set_pdeathsig(signal.SIGTERM)
     configure_logging_from_args(args)
     init_parser_plugin(args)
 
@@ -109,8 +116,7 @@ def _wait_for_first_exit(processes: list[BaseProcess]) -> BaseProcess:
 
 
 def _run_multi_launch(
-    args: argparse.Namespace,
-    exit_stack: contextlib.ExitStack,
+    args: argparse.Namespace, exit_stack: contextlib.ExitStack
 ) -> None:
     """Spawn ``args.api_server_count`` workers on one shared listening socket."""
     num_api_servers: int = args.api_server_count
@@ -136,7 +142,12 @@ def _run_multi_launch(
     )
 
     processes: list[BaseProcess] = []
-    exit_stack.callback(shutdown, processes)
+    exit_stack.callback(
+        lambda: shutdown(
+            processes,
+            timeout=to_timeout(graceful_shutdown.shutdown_by),
+        )
+    )
 
     for i in range(num_api_servers):
         proc = spawn_context.Process(
@@ -160,17 +171,19 @@ def _run_multi_launch(
 
 def run_multi_launch(args: argparse.Namespace) -> None:
     """Run the render server with multiple API workers."""
-
-    def _interrupt_launcher(*_) -> None:
-        raise KeyboardInterrupt("terminated")
-
-    signal.signal(signal.SIGTERM, _interrupt_launcher)
+    set_signal_handler()
+    shutdown_timeout: float | None = getattr(args, "shutdown_timeout", None)
 
     with contextlib.ExitStack() as exit_stack:
         try:
             _run_multi_launch(args, exit_stack)
+        except SystemExit:
+            logger.info_once("[shutdown] API server: interrupted by signal.")
+            raise
         except KeyboardInterrupt:
             logger.info_once("[shutdown] API server: interrupted by user.")
         except Exception:
             logger.exception("[shutdown] API server: unexpected error during shutdown")
             raise
+        finally:
+            exit_stack.callback(set_timeout, shutdown_timeout)

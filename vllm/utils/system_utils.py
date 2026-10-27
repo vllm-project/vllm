@@ -257,6 +257,23 @@ def kill_process_tree(pid: int):
         os.kill(pid, signal.SIGKILL)
 
 
+def set_pdeathsig(sig: int = signal.SIGTERM) -> None:
+    """Linux: deliver ``sig`` to this process when its parent dies.
+
+    Keeps spawned children from outliving a SIGKILLed/OOM-killed parent,
+    where Python-level cleanup never runs. No-op on non-Linux.
+    """
+    if sys.platform != "linux":
+        return
+    PR_SET_PDEATHSIG = 1
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_PDEATHSIG, int(sig), 0, 0, 0) != 0:
+        errno = ctypes.get_errno()
+        raise OSError(
+            errno, f"prctl(PR_SET_PDEATHSIG) failed: {os.strerror(errno)}"
+        )
+
+
 # Resource utilities
 
 
