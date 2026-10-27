@@ -178,6 +178,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Small Models Distributed"
   key: lm-eval-small-models-distributed-2xb200
+  automatic_shard: true
   timeout_in_minutes: 120
   device: b200-k8s
   num_devices: 2
@@ -191,6 +192,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval Small Models Distributed"
+      automatic_shard: true
       dind: false
       device: mi355_2
       timeout_in_minutes: 145
@@ -899,6 +901,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] LM Eval Humming Activation FP8/INT8 TEMPORARY"
   key: lm-eval-humming-h100-act
+  automatic_shard: true
   optional: true
   timeout_in_minutes: 90
   device: h100

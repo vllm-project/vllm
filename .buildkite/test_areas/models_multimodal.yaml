@@ -38,6 +38,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Multimodal Models (Standard) 2: qwen3 + gemma"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 55
