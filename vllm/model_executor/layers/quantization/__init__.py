@@ -179,13 +179,11 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
 
-    if quantization == "deepseek_v4_fp8" and quantization not in method_to_config:
-        return _get_deepseek_v4_quant_config()
-    return method_to_config[quantization]
+    if quantization in method_to_config:
+        return method_to_config[quantization]
 
-
-def _get_deepseek_v4_quant_config() -> type[QuantizationConfig]:
     # Owned by the model package: import it only when this method is requested.
+    assert quantization == "deepseek_v4_fp8", quantization
     if current_platform.is_cuda() or current_platform.is_rocm():
         # The v4.1 class is the v4 one extended to accept model_type
         # "deepseek_v41" and its 32x32 MXFP8 linear layout. V4.1 has
