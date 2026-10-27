@@ -53,30 +53,60 @@ def assemble_chat_message_fields(
     if not request.include_reasoning:
         reasoning = None
 
-    tool_choice = request.tool_choice
-    if (
-        type(tool_choice) is ChatCompletionNamedToolChoiceParam
-        or tool_choice == "required"
+    if not keeps_tool_calls(
+        request, enable_auto_tools=enable_auto_tools, parser_cls=parser_cls
     ):
-        return ChatMessageFields(
-            reasoning, content or "", _to_tool_calls(tool_calls, request)
-        )
+        return ChatMessageFields(reasoning, content, [])
+    if _forces_tool_calls(request):
+        content = content or ""
+    return ChatMessageFields(reasoning, content, _to_tool_calls(tool_calls, request))
 
+
+def keeps_tool_calls(
+    request: ChatCompletionRequest,
+    *,
+    enable_auto_tools: bool,
+    parser_cls: type[Parser] | None,
+) -> bool:
+    """Whether a chat choice returns the tool calls its parser extracts.
+
+    Shared by the non-streaming and streaming chat paths so both apply
+    `tool_choice` the same way. Parsers don't all gate on it themselves:
+    `HarmonyParser` ignores `"none"` and `null` is parsed like `"auto"`.
+
+    Args:
+        request: Supplies `tools` and `tool_choice`.
+        enable_auto_tools: The server's `--enable-auto-tool-choice`.
+        parser_cls: The server's parser class, if any.
+
+    Returns:
+        True for `"required"`, a named tool, or `"auto"` with tools and auto
+        tool choice enabled.
+
+    """
+    if _forces_tool_calls(request):
+        return True
     auto_tools = (
         enable_auto_tools
         and parser_cls is not None
         and parser_cls.tool_parser_cls is not None
     )
-    if auto_tools and tool_choice == "auto":
-        if request.tools:
-            return ChatMessageFields(
-                reasoning, content, _to_tool_calls(tool_calls, request)
-            )
+    if not auto_tools or request.tool_choice != "auto":
+        return False
+    if not request.tools:
         logger.error(
             "Cannot determine if tools should be extracted. "
             "Returning a standard chat completion."
         )
-    return ChatMessageFields(reasoning, content, [])
+        return False
+    return True
+
+
+def _forces_tool_calls(request: ChatCompletionRequest) -> bool:
+    return (
+        type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
+        or request.tool_choice == "required"
+    )
 
 
 def _to_tool_calls(
