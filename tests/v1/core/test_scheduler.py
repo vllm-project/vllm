@@ -89,7 +89,7 @@ from vllm.v1.metrics.iteration_workload import (
     QueuedWorkload,
     ScheduledWorkload,
 )
-from vllm.v1.metrics.stats import SchedulerIterationDetails
+from vllm.v1.metrics.stats import KVTokenSlots, SchedulerIterationDetails
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     DraftTokenIds,
@@ -4073,6 +4073,71 @@ def test_pause_new_drains_async_kv_loads(load_done_before_pause: bool):
     scheduler.set_pause_state(PauseState.UNPAUSED)
     scheduler.schedule()
     assert queued.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_stats_report_kv_token_slots():
+    """SchedulerStats report the token slots in the blocks of running and
+    loading requests: filled, tail slack in the last block, and reserved
+    slots allocated past the computed tokens."""
+    block_size = 16
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=2 * block_size, is_async=True),
+        block_size=block_size,
+    )
+    loading, running = create_requests(
+        num_requests=2, num_tokens=40, block_size=block_size
+    )
+    # The connector claims 32 tokens of `loading` and loads them async.
+    scheduler.add_request(loading)
+    scheduler.schedule()
+    assert loading.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    # No external tokens for `running`: its 40 tokens fill 3 blocks.
+    scheduler.connector.get_num_new_matched_tokens = lambda *args: (0, False)
+    scheduler.add_request(running)
+    scheduler.schedule()
+    assert running.status == RequestStatus.RUNNING
+
+    stats = scheduler.make_stats()
+    assert stats is not None
+    # loading: 32 tokens in 2 full blocks. running: 40 tokens in 3 blocks.
+    assert stats.kv_token_slots == [KVTokenSlots(0, 72, 8, 0)]
+
+    # A finished load not admitted yet (e.g. deferred by the token budget)
+    # stays in kv_holding_waiting and still holds its blocks.
+    loading.status = RequestStatus.WAITING
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.kv_token_slots == [KVTokenSlots(0, 72, 8, 0)]
+
+    # Blocks allocated past the computed tokens are reserved.
+    manager = scheduler.kv_cache_manager
+    assert manager.allocate_slots(running, 1, num_lookahead_tokens=16) is not None
+    assert manager.get_token_slots([running]) == [KVTokenSlots(0, 40, 8, 16)]
+
+
+def test_kv_token_slots_excludes_released_blocks():
+    """A block released by a sliding window (replaced by the null block) no
+    longer holds tokens, wherever it is in the block table."""
+    block_size = 16
+    scheduler = create_scheduler(
+        block_size=block_size,
+        kv_cache_layer_config=SlidingWindowManager.layer_config(
+            AttentionSpec(
+                block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+            ),
+            sliding_window=1024,
+        ),
+    )
+    (request,) = create_requests(num_requests=1, num_tokens=40, block_size=block_size)
+    scheduler.add_request(request)
+    scheduler.schedule()
+    manager = scheduler.kv_cache_manager
+    assert manager.get_token_slots([request]) == [KVTokenSlots(0, 40, 8, 0)]
+
+    (window_manager,) = manager.coordinator.single_type_managers
+    window_manager.req_to_blocks[request.request_id][1] = manager.block_pool.null_block
+    assert manager.get_token_slots([request]) == [KVTokenSlots(0, 24, 8, 0)]
 
 
 def test_pause_new_ignores_streaming_session_waiting_for_input():
