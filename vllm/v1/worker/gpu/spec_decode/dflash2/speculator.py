@@ -8,6 +8,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.batch_shard import shard_owner, shard_row
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
@@ -87,18 +88,25 @@ def _cache_draft_logits_kernel(
     num_steps: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    CACHE_NUM_SHARDS: tl.constexpr,
+    CACHE_SHARD_IDX: tl.constexpr,
 ):
     flat = tl.program_id(0)
     req_state = tl.load(req_state_ptr + flat)
     step = flat % num_steps
     offsets = tl.arange(0, BLOCK_K)
-    mask = (req_state >= 0) & (offsets < top_k)
+    mask = (
+        (req_state >= 0)
+        & (offsets < top_k)
+        # A batch-sharded cache holds only this rank's requests, packed by row.
+        & (shard_owner(req_state, CACHE_NUM_SHARDS) == CACHE_SHARD_IDX)
+    )
     candidate_base = flat * top_k
     cache_base = (req_state * num_steps + step) * top_k
     old_token_ids = tl.load(cached_candidate_ptr + cache_base + offsets, mask=mask)
     logits_base = (
         draft_logits_ptr
-        + req_state * draft_logits_stride_0
+        + shard_row(req_state, CACHE_NUM_SHARDS) * draft_logits_stride_0
         + step * draft_logits_stride_1
     )
     tl.store(logits_base + old_token_ids, -float("inf"), mask=mask)
@@ -135,6 +143,8 @@ class CandidateSampler:
         draft_tokens: torch.Tensor,
         draft_logits: torch.Tensor | None,
         use_fp64: bool,
+        draft_logits_num_shards: int = 1,
+        draft_logits_shard_idx: int = 0,
     ) -> None:
         candidate_ids = candidate_ids.contiguous()
         sample_pos = sample_pos.contiguous()
@@ -159,7 +169,12 @@ class CandidateSampler:
 
         if draft_logits is not None:
             self._cache_draft_logits(
-                candidate_ids, num_reqs * self.num_steps, idx_mapping, draft_logits
+                candidate_ids,
+                num_reqs * self.num_steps,
+                idx_mapping,
+                draft_logits,
+                draft_logits_num_shards,
+                draft_logits_shard_idx,
             )
 
     def _cache_draft_logits(
@@ -168,6 +183,8 @@ class CandidateSampler:
         num_sample: int,
         idx_mapping: torch.Tensor,
         draft_logits: torch.Tensor,
+        draft_logits_num_shards: int,
+        draft_logits_shard_idx: int,
     ) -> None:
         block_k = triton.next_power_of_2(self.top_k)
         _cache_draft_logits_kernel[(num_sample,)](
@@ -181,6 +198,8 @@ class CandidateSampler:
             num_steps=self.num_steps,
             top_k=self.top_k,
             BLOCK_K=block_k,
+            CACHE_NUM_SHARDS=draft_logits_num_shards,
+            CACHE_SHARD_IDX=draft_logits_shard_idx,
             num_warps=1,
         )
 
@@ -242,6 +261,8 @@ class DFlash2Speculator(DFlashSpeculator):
             self.draft_tokens,
             self.draft_logits,
             self.use_fp64_gumbel,
+            self.draft_logits_num_shards,
+            self.draft_logits_shard_idx,
         )
         if self.enable_adaptive_verification:
             self._maybe_predict_acceptance(

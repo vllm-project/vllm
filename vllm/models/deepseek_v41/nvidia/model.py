@@ -75,6 +75,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
@@ -710,7 +711,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             or self.parallel_config.data_parallel_size != 1
             or self.parallel_config.decode_context_parallel_size != 1
             or self.parallel_config.use_ubatching
-            or vllm_config.speculative_config is not None
+            or (
+                vllm_config.speculative_config is not None
+                and (
+                    not vllm_config.speculative_config.use_dspark()
+                    or vllm_config.speculative_config.enable_adaptive_verification
+                )
+            )
             or vllm_config.kv_transfer_config is not None
             or (
                 vllm_config.cache_config.enable_prefix_caching
@@ -720,7 +727,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         ):
             raise NotImplementedError(
                 "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
-                "microbatching, speculative decoding, KV transfer, or MegaMoE. "
+                "microbatching, KV transfer, or MegaMoE. "
+                "Speculative decoding requires fixed-length DSpark. "
                 "Prefix caching requires SWA bounded replay."
             )
         self.use_native_mega_moe = (
@@ -902,11 +910,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         self.engram_swa_prefix: str | None = None
         if self.engram_layout is not None:
-            local_engram = any(
-                isinstance(layer, DeepseekV4DecoderLayer) and layer.engram is not None
-                for layer in islice(self.layers, self.start_layer, self.end_layer)
+            engram = next(
+                (
+                    layer.engram
+                    for layer in islice(self.layers, self.start_layer, self.end_layer)
+                    if isinstance(layer, DeepseekV4DecoderLayer)
+                    and layer.engram is not None
+                ),
+                None,
             )
-            if local_engram:
+            if engram is not None:
+                # Shared host tables and GPU peer reads look up only local tokens.
+                self.engram_dp_shared_memory = engram.embed_tokens.dp_size == 1
                 first_layer = next(
                     iter(islice(self.layers, self.start_layer, self.end_layer))
                 )
@@ -922,10 +937,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
-        )
-        if get_pp_group().is_last_rank and needs_mtp_hidden_states:
+        if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
@@ -1059,6 +1071,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
 
+        local_input_ids = input_ids
         if (
             input_ids is not None
             and self.parallel_config.prefill_context_parallel_size > 1
@@ -1095,7 +1108,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                 hidden_states,
                 positions,
-                input_ids,
+                local_input_ids
+                if self.decoder_replay_layers.replay_batch is not None
+                else input_ids,
                 pre_mix,
                 post_mix,
                 res_mix,
@@ -1237,6 +1252,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     ) -> tuple[torch.Tensor, ...]:
         """Layers ``decoder_replay_start``.. on the given rows; returns their output,
         the last FFN's pre-mix and the aux hidden states they capture."""
+        assert self.decoder_replay_layers is not None
+        if (
+            input_ids is not None
+            and self.parallel_config.prefill_context_parallel_size > 1
+            and not self.parallel_config.enable_expert_parallel
+            and self.decoder_replay_layers.replay_batch is not None
+        ):
+            input_ids = get_pcp_group().all_gather(input_ids, dim=0)
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
         hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
             range(self.decoder_replay_start, self.end_layer),
@@ -1281,14 +1304,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 "the pipeline stage holding the last KV source layer must also "
                 "hold every layer after it"
             )
-        elif (
-            self.use_sequence_parallel
-            or parallel_config.prefill_context_parallel_size > 1
-            or parallel_config.use_ubatching
-        ):
+        elif self.use_sequence_parallel or parallel_config.use_ubatching:
             reason = (
                 "the replay-layer batch shrinks per rank, which sequence and "
-                "prefill-context parallelism and microbatching cannot follow"
+                "microbatching cannot follow"
             )
         elif any(i >= cut for i in getattr(self.config, "engram_layer_ids", ())):
             reason = "an Engram layer sits at or after the last KV source layer"
