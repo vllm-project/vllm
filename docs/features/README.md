@@ -1,5 +1,7 @@
 # Features
 
+Experimental MRv2 [dynamic pipeline parallelism](dynamic_pipeline_parallelism.md) supports buffered activations and movable prefill stage boundaries.
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.

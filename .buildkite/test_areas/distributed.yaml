@@ -143,6 +143,8 @@ steps:
   - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
+  - tests/v1/distributed/test_pp_runtime.py
+  - tests/v1/distributed/test_pp_buffer_e2e.py
   - tests/compile/test_wrapper.py
   - tests/entrypoints/llm/test_collective_rpc.py
   commands:
@@ -150,6 +152,7 @@ steps:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_wrapper.py
+  - VLLM_USE_V2_MODEL_RUNNER=1 pytest -v -s v1/distributed/test_pp_runtime.py v1/distributed/test_pp_buffer_e2e.py
   mirror:
     amd:
       label: ":amd: (MI355) Distributed Compile + RPC"

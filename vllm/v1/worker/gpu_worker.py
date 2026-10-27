@@ -103,6 +103,8 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.pp.config import get_pp_config
+from vllm.v1.worker.pp.runtime import PPRuntime
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -245,6 +247,8 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+        get_pp_config(vllm_config)
+        self._pp_runtime: PPRuntime | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -299,6 +303,8 @@ class Worker(WorkerBase):
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
+        if self._pp_runtime is not None:
+            self._pp_runtime.drain()
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
@@ -606,6 +612,17 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+
+        size, dynamic = get_pp_config(self.vllm_config)
+        if size or dynamic.enabled:
+            self._pp_runtime = PPRuntime(
+                self.vllm_config,
+                self.model_runner.model,
+                self.device,
+                torch.cuda,
+                get_pp_group(),
+                get_tp_group(),
+            )
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -1334,7 +1351,10 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        output = self.model_runner.sample_tokens(grammar_output)
+        if self._pp_runtime is not None:
+            self._pp_runtime.sampled()
+        return output
 
     @torch.inference_mode()
     @with_gpu_sync_check
@@ -1350,6 +1370,9 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        runtime = self._pp_runtime
+        if runtime is not None:
+            runtime.prepare(scheduler_output)
         if forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
@@ -1357,16 +1380,25 @@ class Worker(WorkerBase):
                 )
             )
             assert tensor_dict is not None
+            if runtime is not None:
+                runtime.receive_header(tensor_dict)
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
 
+        if runtime is not None:
+            runtime.before_forward(scheduler_output)
         with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
-            )
+            try:
+                output = self.model_runner.execute_model(
+                    scheduler_output, intermediate_tensors
+                )
+            except Exception:
+                if runtime is not None:
+                    runtime.cancel()
+                raise
             if (
                 self.use_v2_model_runner
                 and self.model_runner.is_pooling_model
@@ -1376,6 +1408,8 @@ class Worker(WorkerBase):
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
+                if runtime is not None:
+                    runtime.cancel()
                 return output
 
         assert isinstance(output, IntermediateTensors)
@@ -1388,11 +1422,14 @@ class Worker(WorkerBase):
         # Non-blocking send of the intermediate tensors. The metadata handle
         # is reaped lazily by the GroupCoordinator; the device handles are
         # waited at the top of the next step.
-        handles = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-        )
-        self._pp_send_work = handles[1:]
+        if runtime is not None and runtime.buffer is not None:
+            runtime.send(output.tensors)
+        else:
+            handles = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+            )
+            self._pp_send_work = handles[1:]
 
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore
@@ -1660,7 +1697,12 @@ class Worker(WorkerBase):
         if not self._weight_update_is_draft:
             self.model_runner.reset_lora_state()
 
+    def get_dynamic_pp_stats(self) -> dict[str, Any]:
+        return self._pp_runtime.stats() if self._pp_runtime is not None else {}
+
     def shutdown(self) -> None:
+        if self._pp_runtime is not None:
+            self._pp_runtime.drain()
         gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.

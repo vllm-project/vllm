@@ -887,6 +887,8 @@ def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
     prefix: str,
+    *,
+    redundant_layers: int = 0,
 ) -> tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
@@ -895,9 +897,10 @@ def make_layers(
         num_hidden_layers: Total number of hidden layers in the model.
         layer_fn: Function to create a layer given its index.
         prefix: Prefix for layer names.
+        redundant_layers: Extra layers to load on either side of the base stage.
 
     Returns:
-        Tuple of (start_layer, end_layer, modules).
+        Tuple of (base start_layer, base end_layer, modules).
 
     """
     from vllm.distributed.parallel_state import get_pp_group
@@ -908,12 +911,17 @@ def make_layers(
         num_hidden_layers, get_pp_group().rank_in_group, get_pp_group().world_size
     )
 
+    if redundant_layers < 0:
+        raise ValueError("redundant_layers must be non-negative")
+    loaded_start = max(0, start_layer - redundant_layers)
+    loaded_end = min(num_hidden_layers, end_layer + redundant_layers)
     modules = torch.nn.ModuleList(
-        [PPMissingLayer() for _ in range(start_layer)]
+        [PPMissingLayer() for _ in range(loaded_start)]
         + get_offloader().wrap_modules(
-            layer_fn(prefix=f"{prefix}.{idx}") for idx in range(start_layer, end_layer)
+            layer_fn(prefix=f"{prefix}.{idx}")
+            for idx in range(loaded_start, loaded_end)
         )
-        + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
+        + [PPMissingLayer() for _ in range(loaded_end, num_hidden_layers)]
     )
 
     return start_layer, end_layer, modules

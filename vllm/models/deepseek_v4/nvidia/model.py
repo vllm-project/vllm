@@ -86,6 +86,9 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.deep_gemm import bf16_mega_gate
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.pp.boundary import PPBoundaryController, select_pp_moe_layer_names
+from vllm.v1.worker.pp.config import get_pp_config
+from vllm.v1.worker.pp.interface import PPLayerSpec
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
@@ -814,6 +817,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
+        _, dynamic_pp = get_pp_config(vllm_config)
+        self.dynamic_pp_enabled = dynamic_pp.enabled
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
@@ -870,7 +875,22 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_stream_list=aux_stream_list,
             ),
             prefix=f"{prefix}.layers",
+            redundant_layers=dynamic_pp.redundant_layers if dynamic_pp.enabled else 0,
         )
+        self.pp_execution_range = self.start_layer, self.end_layer
+        self.pp_layer_prefix = f"{prefix}.layers"
+        self.pp_moe_layer_names = tuple(
+            vllm_config.compilation_config.static_all_moe_layers
+        )
+        self.pp_boundary_controller = None
+        if dynamic_pp.enabled:
+            pp = get_pp_group()
+            self.pp_boundary_controller = PPBoundaryController(
+                dynamic_pp,
+                self.end_layer if pp.is_first_rank else self.start_layer,
+                config.num_hidden_layers,
+                minimum_boundary=config.mlp_layer_types.count("hash_moe"),
+            )
         self.has_local_hash_moe = self.start_layer < min(
             self.end_layer, config.mlp_layer_types.count("hash_moe")
         )
@@ -986,13 +1006,24 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 else None,
             )
 
+        start_layer, end_layer = self.pp_execution_range
+        if self.dynamic_pp_enabled and is_forward_context_available():
+            context = get_forward_context()
+            if context.all_moe_layers is not None:
+                context.all_moe_layers = select_pp_moe_layer_names(
+                    self.pp_moe_layer_names,
+                    self.pp_layer_prefix,
+                    start_layer,
+                    end_layer,
+                )
+                context.moe_layer_index = 0
         residual, post_mix, res_mix = None, None, None
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
         for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer),
-            start=self.start_layer,
+            islice(self.layers, start_layer, end_layer),
+            start=start_layer,
         ):
             hidden_states, residual, post_mix, res_mix = layer(
                 hidden_states,
@@ -1015,7 +1046,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 final_aux_recon = aux_recon
         if layer is not None:
             # Reuse if the last layer was captured as an aux hidden state
-            if self.end_layer in self.aux_hidden_state_layers:
+            if end_layer in self.aux_hidden_state_layers:
                 hidden_states = final_aux_recon
             else:
                 hidden_states = mhc_post_tilelang(
@@ -1355,6 +1386,23 @@ class DeepseekV4ForCausalLM(
         )
 
         self.set_moe_parameters()
+
+    def get_dynamic_pp_layer_spec(self) -> PPLayerSpec:
+        pp = get_pp_group()
+        return PPLayerSpec(
+            self.model.end_layer if pp.is_first_rank else self.model.start_layer,
+            self.config.num_hidden_layers,
+            self.config.mlp_layer_types.count("hash_moe"),
+        )
+
+    def set_dynamic_pp_layer_range(self, start: int, end: int) -> None:
+        controller = self.model.pp_boundary_controller
+        if controller is None:
+            raise ValueError("Dynamic PP layer replicas were not loaded")
+        loaded_start, loaded_end = controller.loaded_range(get_pp_group().rank_in_group)
+        if not loaded_start <= start < end <= loaded_end:
+            raise ValueError("Dynamic PP execution range exceeds loaded replicas")
+        self.model.pp_execution_range = start, end
 
     def set_moe_parameters(self) -> None:
         collect_moe_layers(

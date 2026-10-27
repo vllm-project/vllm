@@ -115,3 +115,19 @@ steps:
             ;;
           *) exit 2 ;;
         esac
+
+- label: ":nvidia: (4xB200) [Nightly] Dynamic PP DSV4 Prefill"
+  key: dynamic-pp-dsv4-prefill-4xb200
+  optional: true
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/tests"
+  device: b200-k8s
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/v1/worker/pp/
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/model_executor/models/utils.py
+  - vllm/models/deepseek_v4/nvidia/model.py
+  - tests/v1/distributed/test_dynamic_pp_dsv4.py
+  commands:
+  - VLLM_USE_V2_MODEL_RUNNER=1 VLLM_GPU_SYNC_CHECK=error pytest -v -s v1/distributed/test_dynamic_pp_dsv4.py
