@@ -67,11 +67,8 @@ else:
             return self.tolist()
 
         def __reduce_ex__(self, protocol):
-            # array's own reduction copies the ids into a bytes object that is
-            # then copied into the pickle stream. With protocol 5 a PickleBuffer
-            # lets MessageQueue send large buffers out of band instead. It wraps
-            # a snapshot rather than self: zmq can still hold the buffer after
-            # enqueue returns, and a buffer that is exported cannot be resized.
+            # A PickleBuffer lets MessageQueue send large ids out of band. It wraps
+            # a copy since zmq may hold it past enqueue, blocking resizes of self.
             data = self.tobytes()
             return _rebuild_token_buffer, (
                 PickleBuffer(data) if protocol >= 5 else data,

@@ -58,14 +58,12 @@ class PoolsideV1ReasoningParser(DeepSeekV3ReasoningParser):
         # ended only on </think>. Tokens before the current assistant turn
         # belong to the prior conversation.
         end_token_id = self._parser.end_token_id
-        i = rfind_tokens(
-            input_ids,
-            (
-                self._parser.start_token_id,
-                end_token_id,
-                self._start_of_assistant_message_token_id,
-            ),
+        tokens = (
+            self._parser.start_token_id,
+            end_token_id,
+            self._start_of_assistant_message_token_id,
         )
+        i = rfind_tokens(input_ids, tokens)
         return i >= 0 and input_ids[i] == end_token_id
 
 

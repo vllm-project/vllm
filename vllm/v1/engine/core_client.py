@@ -7,6 +7,7 @@ import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
+from array import array
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
@@ -79,6 +80,15 @@ AnyFuture: TypeAlias = asyncio.Future[Any] | Future[Any]
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 EngineIdentity = bytes
+
+
+def _with_packed_prompt(request: EngineCoreRequest) -> EngineCoreRequest:
+    """Copy of request with its prompt token ids as int32 bytes, which the engine
+    decodes without a Python int per token. The frontend keeps the original."""
+    if not isinstance(request.prompt_token_ids, list):
+        return request
+    packed = memoryview(array("i", request.prompt_token_ids)).cast("B")
+    return msgspec.structs.replace(request, prompt_token_ids=packed)
 
 
 class EngineCoreClient(ABC):
@@ -1072,7 +1082,7 @@ class SyncMPClient(MPClient):
     def add_request(self, request: EngineCoreRequest) -> None:
         if self.is_dp:
             self.engines_running = True
-        self._send_input(EngineCoreRequestType.ADD, request)
+        self._send_input(EngineCoreRequestType.ADD, _with_packed_prompt(request))
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:
@@ -1348,7 +1358,7 @@ class AsyncMPClient(MPClient):
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
-        await self._send_input(EngineCoreRequestType.ADD, request)
+        await self._send_input(EngineCoreRequestType.ADD, _with_packed_prompt(request))
         self._ensure_output_queue_task()
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -1632,6 +1642,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         # The engine that receives it wakes the other ranks if they are idle.
         chosen_engine = self.get_core_engine_for_request(request)
+        request = _with_packed_prompt(request)
         await self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
 
         self._ensure_output_queue_task()

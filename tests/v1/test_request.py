@@ -47,6 +47,31 @@ def test_request_decodes_int32_token_bytes_from_rust_frontend():
     assert request.prompt_token_ids == ids
 
 
+def test_mp_client_sends_prompt_as_int32_bytes():
+    """The Python frontend's engine-core client packs the prompt for the wire
+    and leaves the request it keeps for output processing unchanged."""
+    from vllm.v1.engine.core_client import _with_packed_prompt
+
+    ids = [1, 70000, 129279]
+    request = EngineCoreRequest(
+        request_id="r",
+        prompt_token_ids=ids,
+        mm_features=None,
+        sampling_params=SamplingParams(max_tokens=4),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    wire = _with_packed_prompt(request)
+    assert request.prompt_token_ids is ids
+    decoded = MsgpackDecoder(EngineCoreRequest).decode(MsgpackEncoder().encode(wire))
+    assert isinstance(decoded.prompt_token_ids, memoryview)
+    engine_request = Request.from_engine_core_request(decoded, block_hasher=None)
+    assert engine_request.prompt_token_ids == ids
+
+
 def test_request_token_ids_hold_no_int_references():
     """Long prompts must not add per-token objects for the cyclic GC to walk."""
     request = Request("r", list(range(1024)), SamplingParams(max_tokens=4), None)

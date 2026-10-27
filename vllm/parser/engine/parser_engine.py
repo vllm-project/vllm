@@ -193,6 +193,14 @@ class ParserEngine(Parser):
         self._reasoning_end_token_ids: frozenset[int] = (
             self._derive_reasoning_end_token_ids(parser_engine_config, vocab)
         )
+        # The tokens is_reasoning_end looks for, newest first.
+        self._reasoning_boundary_token_ids: frozenset[int | None] = frozenset(
+            {
+                *self._reasoning_end_token_ids,
+                self._reasoning_start_token_id,
+                *self._turn_boundary_token_ids,
+            }
+        )
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -732,17 +740,14 @@ class ParserEngine(Parser):
             start_transition is not None
             and start_transition.next_state is ParserState.REASONING
         )
-        end_ids = self._reasoning_end_token_ids
-        start_id = self._reasoning_start_token_id
-        boundary_ids = self._turn_boundary_token_ids
         # The newest end, start or turn-boundary token decides; a start that
         # doesn't open reasoning, or a boundary, leaves the default.
-        i = rfind_tokens(input_ids, {*end_ids, start_id, *boundary_ids})
+        i = rfind_tokens(input_ids, self._reasoning_boundary_token_ids)
         if i >= 0:
             token_id = input_ids[i]
-            if token_id in end_ids:
+            if token_id in self._reasoning_end_token_ids:
                 return True
-            if token_id == start_id and start_opens_reasoning:
+            if token_id == self._reasoning_start_token_id and start_opens_reasoning:
                 return False
         return not wait_for_reasoning
 

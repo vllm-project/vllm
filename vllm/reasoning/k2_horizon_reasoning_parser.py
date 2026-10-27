@@ -71,10 +71,8 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         return self._split_model_output(model_output)
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        i = rfind_tokens(
-            input_ids,
-            (self.start_token_id, self.end_token_id, self._tool_calls_start_id),
-        )
+        tokens = (self.start_token_id, self.end_token_id, self._tool_calls_start_id)
+        i = rfind_tokens(input_ids, tokens)
         return i >= 0 and input_ids[i] != self.start_token_id
 
     def is_reasoning_end_streaming(
