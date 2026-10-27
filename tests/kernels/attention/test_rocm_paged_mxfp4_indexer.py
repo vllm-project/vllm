@@ -445,6 +445,27 @@ def test_decode_layers_match_reference(monkeypatch, block, query_lens):
     )
 
 
+@BLOCKS
+def test_speculative_gather_grouping_preserves_per_row_candidates(monkeypatch, block):
+    """Six-query launch tuning retains causal bounds and handles padding."""
+    monkeypatch.setitem(globals(), "POOL_BLOCKS", 2048)
+    monkeypatch.setitem(globals(), "TOPK", 512)
+    set_random_seed(0)
+    query_lens = [6] * 23 + [0]
+    case = _Case([900, 333, 610] * 7 + [1200, 700, 0], block)
+    rows = [
+        (req, n - q + j if q else -1)
+        for req, (n, q) in enumerate(zip(case.seq_lens, query_lens))
+        for j in range(q or 6)
+    ]
+    _run_layers(
+        monkeypatch,
+        case,
+        rows,
+        lambda r, gather=False: _decode_metadata(case, rows, r, query_lens),
+    )
+
+
 @pytest.mark.parametrize(
     "seq_lens,new_tokens,chunks",
     [

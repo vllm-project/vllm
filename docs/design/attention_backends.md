@@ -241,3 +241,8 @@ default on NVIDIA is `FLASHINFER_MLA_SPARSE_DSV4` on SM12x and
 `FLASHMLA_SPARSE_DSV4` on other supported CUDA architectures.
 
 --8<-- "gen:table-mla-v4-decode"
+
+On gfx950, Flash's top-512 MXFP4 indexer preserves six-query speculative
+grouping for candidate-gather launches with at least 128 query rows and
+16K candidate tokens. Candidate slots and causal bounds remain per query;
+other shapes keep their existing launch grouping.

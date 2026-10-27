@@ -611,13 +611,27 @@ def _gather_decode(layer: _Layer, num_cols: int) -> None:
     (compact,) = current_workspace_manager().get_simultaneous(
         ((rows, num_cols), torch.float32)
     )
-    q, q_scale, weights = layer.decode_rows(rows)
+    native = metadata.decode_native
+    if (
+        native is not None
+        and layer.num_heads == 32
+        and num_cols == 16384
+        and rows >= 128
+        and rows == 6 * native.context_lens.shape[0]
+    ):
+        # Preserve the speculative query grouping for AITER's launch tuning.
+        # Gather slots and row ends remain per query, including causal bounds.
+        q, q_scale, weights = layer.rows(0, rows, native.context_lens.shape[0])
+        context_lens, block_table = native.context_lens, native.block_table
+    else:
+        q, q_scale, weights = layer.decode_rows(rows)
+        context_lens = lengths
     pa.paged_mxfp4_mqa_logits(
         q,
         q_scale,
         layer.kv,
         weights,
-        lengths,
+        context_lens,
         block_table,
         num_cols,
         out_logits=compact,
