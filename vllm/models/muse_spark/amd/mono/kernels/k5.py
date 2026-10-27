@@ -61,7 +61,6 @@ from dataclasses import dataclass
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
-from aiter.ops.flydsl.kernels.kernels_common import LOG2E
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64
 
@@ -78,9 +77,7 @@ from .dev import (
     bf_lo,
     butterfly,
     fresh,
-    hw_exp2,
     hw_rsq,
-    hw_sqrt,
     ld_f32,
     ld_i32,
     ld_vec,
@@ -97,7 +94,7 @@ from .dev import (
     wave_sum,
     xred,
 )
-from .k3 import _lay, bf_mma_operand, bf_tile_load, route_token, sel_peer
+from .k3 import _lay, bf_mma_operand, bf_tile_load, o_gate, route_token, sel_peer
 
 W = 8  # ranks in the TP = EP group
 HID = 8192
@@ -388,22 +385,7 @@ def build(key: Build):
                 )
                 xv = got[0] + got[1]
             gv = ld_vec(attn_g, (tl_ * g_stride + kk) // 2, 4)
-            ss = fx.Float32(0.0)
-            for d in range_constexpr(4):
-                ss = ss + bf_lo(xv[d]) * bf_lo(xv[d]) + bf_hi(xv[d]) * bf_hi(xv[d])
-            ss = butterfly(ss, (1, 2, 4))
-            rstd = fx.Float32(1.0) / hw_sqrt(
-                ss * fx.Float32(1.0 / HD) + fx.Float32(PRE_EPS)
-            )
-            ow = []
-            for d in range_constexpr(4):
-                s0 = fx.Float32(1.0) / (
-                    fx.Float32(1.0) + hw_exp2(bf_lo(gv[d]) * fx.Float32(-LOG2E))
-                )
-                s1 = fx.Float32(1.0) / (
-                    fx.Float32(1.0) + hw_exp2(bf_hi(gv[d]) * fx.Float32(-LOG2E))
-                )
-                ow.append(bf16_pair(bf_lo(xv[d]) * rstd * s0, bf_hi(xv[d]) * rstd * s1))
+            ow = o_gate(xv, gv)
             bo.buffer_store(
                 fx.Vector.from_elements(ow, fx.Int32),
                 rsrc(scratch + fx.Int64(lay["y"][0])),

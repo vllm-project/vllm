@@ -316,6 +316,24 @@ def fp4_mma(ops, base, bl, brow, lane, acc, c, jpar, rows, row0=0):
     return acc
 
 
+def o_gate(xv, gv):
+    """o-norm (over the head's 8 lanes) x sigmoid(gate) of 8 bf16 (4 pair words xv, gv) -> 4 words."""
+    ss = fx.Float32(0.0)
+    for d in range_constexpr(4):
+        ss = ss + bf_lo(xv[d]) * bf_lo(xv[d]) + bf_hi(xv[d]) * bf_hi(xv[d])
+    ss = butterfly(ss, (1, 2, 4))
+    rstd = fx.Float32(1.0) / hw_sqrt(ss * fx.Float32(1.0 / HD) + fx.Float32(PRE_EPS))
+    sig = lambda x: fx.Float32(1.0) / (
+        fx.Float32(1.0) + hw_exp2(x * fx.Float32(-LOG2E))
+    )
+    ow = []
+    for d in range_constexpr(4):
+        s0 = sig(bf_lo(gv[d]))
+        s1 = sig(bf_hi(gv[d]))
+        ow.append(bf16_pair(bf_lo(xv[d]) * rstd * s0, bf_hi(xv[d]) * rstd * s1))
+    return ow
+
+
 def mx_chunk(ok, w, ws, rbase, k, c, lane, g, r, nbytes, sbytes):
     """Rows rbase .. rbase + 16 x K chunk c (256) of a shuffled MXFP4 [*, k] weight w and its e8m0
     scales ws: 2 dwordx4 + 1 scale dword. vLLM shuffle_weight((16, 16)): lane L reads the 16 B at
@@ -1660,22 +1678,7 @@ def build(key: Build):
                 )
                 xv = got[0] + got[1]
             gv = ld_vec(attn_g, (t * g_stride + kk) // 2, 4)
-            ss = fx.Float32(0.0)
-            for d in range_constexpr(4):
-                ss = ss + bf_lo(xv[d]) * bf_lo(xv[d]) + bf_hi(xv[d]) * bf_hi(xv[d])
-            ss = butterfly(ss, (1, 2, 4))  # the head's 8 lanes
-            rstd = fx.Float32(1.0) / hw_sqrt(
-                ss * fx.Float32(1.0 / HD) + fx.Float32(PRE_EPS)
-            )
-            ow = []
-            for d in range_constexpr(4):
-                s0 = fx.Float32(1.0) / (
-                    fx.Float32(1.0) + hw_exp2(bf_lo(gv[d]) * fx.Float32(-LOG2E))
-                )
-                s1 = fx.Float32(1.0) / (
-                    fx.Float32(1.0) + hw_exp2(bf_hi(gv[d]) * fx.Float32(-LOG2E))
-                )
-                ow.append(bf16_pair(bf_lo(xv[d]) * rstd * s0, bf_hi(xv[d]) * rstd * s1))
+            ow = o_gate(xv, gv)
             if e < npc:
                 fx.ptr_store(
                     fx.Vector.from_elements(ow, fx.Int32), yl + (t * YROW + kk) // 2
