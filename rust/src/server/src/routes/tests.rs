@@ -60,7 +60,9 @@ use super::{
     build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
     build_router_with_scale_out_endpoints, render::build_router as build_render_router,
 };
-use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::config::{
+    ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
+};
 use crate::lora::LoadLoraError;
 use crate::render::RenderState;
 use crate::state::AppState;
@@ -5316,6 +5318,94 @@ async fn chat_completions_accepts_request_body_larger_than_axum_default() {
     )));
 
     let large_template_arg = "a".repeat(2 * 1024 * 1024);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"large": large_template_arg}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_reject_request_body_above_configured_limit() {
+    let (chat, _engine_task) = test_chat_with_engine_outputs(
+        b"engine-openai-chat-body-limit",
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                request_body_limit_bytes: Some(1024),
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let large_template_arg = "a".repeat(2 * 1024);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"large": large_template_arg}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("length limit exceeded"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_accept_request_body_above_default_limit_when_unlimited() {
+    let (chat, engine_task) = test_chat_with_engine_outputs(
+        b"engine-openai-chat-unlimited-body",
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                request_body_limit_bytes: None,
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let large_template_arg = "a".repeat(DEFAULT_REQUEST_BODY_LIMIT_BYTES + 1);
     let response = app
         .call(
             Request::builder()
