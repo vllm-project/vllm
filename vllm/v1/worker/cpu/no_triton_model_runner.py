@@ -35,7 +35,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
@@ -61,6 +61,7 @@ from vllm.v1.worker.cpu.input_batch import (
     InputBuffers,
     combine_sampled_and_draft_tokens,
     post_update,
+    post_update_num_computed_tokens,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
@@ -74,7 +75,11 @@ from vllm.v1.worker.cpu.lora_utils import LoraState
 from vllm.v1.worker.cpu.model_states import init_model_state
 from vllm.v1.worker.cpu.pooling_runner import PoolingRunner
 from vllm.v1.worker.cpu.pp_utils import PPHandler
-from vllm.v1.worker.cpu.sampler import CPUSampler, CPUWatermarkSampler
+from vllm.v1.worker.cpu.sampler import (
+    CPUSampler,
+    CPUWatermarkSampler,
+    SamplerOutput,
+)
 from vllm.v1.worker.cpu.states import CPURequestState
 from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
 from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer, free_before_shutdown
@@ -84,6 +89,7 @@ from vllm.v1.worker.utils import (
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
+    raise_if_nan_logits,
 )
 
 logger = init_logger(__name__)
@@ -912,6 +918,28 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
+    def sample(
+        self,
+        hidden_states: torch.Tensor,
+        input_batch: InputBatch,
+        grammar_output: GrammarOutput | None,
+    ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
+        sample_hidden_states = hidden_states[input_batch.logits_indices]
+        logits = self.model.compute_logits(sample_hidden_states)
+
+        if grammar_output is not None and logits.shape[0] > 0:
+            assert self.structured_outputs_worker is not None
+            self.structured_outputs_worker.apply_grammar_bitmask(
+                logits,
+                input_batch,
+                grammar_output.structured_output_request_ids,
+                grammar_output.grammar_bitmask,
+            )
+
+        assert self.sampler is not None
+        sampler_output = self.sampler(logits, input_batch)
+        return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
+
     def postprocess_sampled(
         self,
         idx_mapping: torch.Tensor,
@@ -937,8 +965,12 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.all_token_ids,
             self.req_states.total_len,
         )
-        self.model_state.postprocess_state(
-            idx_mapping, num_sampled, self.req_states.num_computed_tokens
+
+    def postprocess_num_computed_tokens(self, input_batch: InputBatch) -> None:
+        post_update_num_computed_tokens(
+            input_batch.idx_mapping,
+            self.req_states.num_computed_tokens,
+            input_batch.query_start_loc,
         )
 
     def _merge_ec_connector_no_forward(
@@ -1126,6 +1158,149 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
         )
 
         return output_intermediate_tensors
+
+    @torch.inference_mode()
+    def sample_tokens(
+        self, grammar_output: GrammarOutput | None
+    ) -> ModelRunnerOutput | None:
+        if self.execute_model_state is None:
+            return None
+
+        input_batch = self.execute_model_state.input_batch
+        hidden_states = self.execute_model_state.hidden_states
+        finished_req_ids = self.execute_model_state.finished_req_ids
+        ec_connector_output = self.execute_model_state.ec_connector_output
+        self.execute_model_state = None
+
+        if not self.is_last_pp_rank:
+            assert self.pp_handler is not None
+            self.pp_handler.receive(input_batch)
+            self.postprocess_num_computed_tokens(input_batch)
+
+            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+            output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+
+        assert hidden_states is not None
+        sampler_output, num_sampled, num_rejected = self.sample(
+            hidden_states, input_batch, grammar_output
+        )
+
+        if self.pp_handler is not None:
+            self.pp_handler.broadcast(
+                sampler_output.sampled_token_ids,
+                num_sampled,
+                num_rejected,
+                input_batch,
+            )
+
+        assert self.prompt_logprobs_worker is not None
+        prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
+            self.model.compute_logits,
+            hidden_states,
+            input_batch,
+            self.req_states.all_token_ids,
+            self.req_states.num_computed_tokens,
+            self.req_states.prompt_len_np,
+        )
+        prompt_token_id_logprobs_dict = (
+            self.prompt_logprobs_worker.compute_prompt_token_id_logprobs(
+                self.model.compute_logits,
+                hidden_states,
+                input_batch,
+                self.req_states.prompt_len_np,
+            )
+        )
+
+        sampled_token_ids = sampler_output.sampled_token_ids.tolist()
+        num_sampled_list = num_sampled.tolist()
+        for token_ids, num_tokens in zip(
+            sampled_token_ids, num_sampled_list, strict=True
+        ):
+            del token_ids[num_tokens:]
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=input_batch.req_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
+            sampled_token_ids=sampled_token_ids,
+            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
+        )
+        if sampler_output.logprobs_tensors is not None:
+            model_runner_output.logprobs = sampler_output.logprobs_tensors.tolists()
+        if sampler_output.sampling_mask_tensors is not None:
+            model_runner_output.sampling_masks = (
+                sampler_output.sampling_mask_tensors.tolists(num_sampled.numpy())
+            )
+        if sampler_output.num_nans is not None:
+            model_runner_output.num_nans_in_logits = dict(
+                zip(
+                    input_batch.req_ids,
+                    sampler_output.num_nans.tolist(),
+                    strict=True,
+                )
+            )
+
+        model_runner_output.kv_connector_output = self.kv_connector.post_forward(
+            finished_req_ids
+        )
+
+        self.postprocess_sampled(
+            input_batch.idx_mapping,
+            sampler_output.sampled_token_ids,
+            num_sampled,
+            num_rejected,
+            input_batch.query_start_loc,
+        )
+
+        model_runner_output.ec_connector_output = ec_connector_output
+        if (
+            envs.VLLM_RAISE_ON_LOGIT_NANS
+            and model_runner_output.num_nans_in_logits is not None
+        ):
+            raise_if_nan_logits(model_runner_output.num_nans_in_logits)
+        return model_runner_output
+
+    @torch.inference_mode()
+    def pool(self) -> ModelRunnerOutput | None:
+        if self.execute_model_state is None:
+            return None
+
+        input_batch = self.execute_model_state.input_batch
+        hidden_states = self.execute_model_state.hidden_states
+        finished_req_ids = self.execute_model_state.finished_req_ids
+        ec_connector_output = self.execute_model_state.ec_connector_output
+        self.execute_model_state = None
+
+        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+        if not self.is_last_pp_rank:
+            self.postprocess_num_computed_tokens(input_batch)
+            output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
+
+        assert hidden_states is not None
+        assert self.pooling_runner is not None
+        pooler_output, finished_mask = self.pooling_runner.pool(
+            hidden_states, input_batch, self.req_states
+        )
+
+        outputs = (
+            pooler_output.unbind()
+            if isinstance(pooler_output, torch.Tensor)
+            else pooler_output
+        )
+        model_runner_output = ModelRunnerOutput(
+            req_ids=input_batch.req_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
+            pooler_output=[
+                None if output is None or not is_finished else output
+                for output, is_finished in zip(outputs, finished_mask, strict=True)
+            ],
+            kv_connector_output=kv_connector_output,
+            ec_connector_output=ec_connector_output,
+        )
+        self.postprocess_num_computed_tokens(input_batch)
+        return model_runner_output
 
     def shutdown(self) -> None:
         """Release CPU tensors (model weights, KV caches, workspace) so that

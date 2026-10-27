@@ -159,6 +159,61 @@ def compute_topk_scores(
     )
 
 
+def get_prompt_logprobs_token_ids(
+    num_tokens: int,
+    query_start_loc: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    all_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    return ops.get_prompt_logprobs_token_ids_cpu(
+        num_tokens,
+        query_start_loc,
+        idx_mapping,
+        num_computed_tokens,
+        all_token_ids,
+    )
+
+
+def compute_prompt_logprobs_with_chunking(
+    prompt_token_ids: torch.Tensor,
+    prompt_hidden_states: torch.Tensor,
+    logits_fn: Callable[[torch.Tensor], torch.Tensor],
+    num_prompt_logprobs: int,
+    logprobs_mode: LogprobsMode = "raw_logprobs",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Since materializing the full prompt logits can take too much memory,
+    # we compute it in chunks.
+    token_ids = []
+    scores = []
+    ranks = []
+    logits_mode = logprobs_mode in ("raw_logits", "processed_logits")
+    prompt_token_ids = prompt_token_ids.to(torch.int64)
+    for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
+        end_idx = start_idx + CHUNK_SIZE
+        # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
+        prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
+        requested_num = (
+            prompt_logits.shape[-1]
+            if num_prompt_logprobs == -1
+            else num_prompt_logprobs
+        )
+        result = compute_topk_scores(
+            prompt_logits,
+            requested_num,
+            prompt_token_ids[start_idx:end_idx],
+            logits_mode=logits_mode,
+        )
+        token_ids.append(result.logprob_token_ids)
+        scores.append(result.logprobs)
+        ranks.append(result.selected_token_ranks)
+
+    token_ids = torch.cat(token_ids, dim=0) if len(token_ids) > 1 else token_ids[0]
+    scores = torch.cat(scores, dim=0) if len(scores) > 1 else scores[0]
+    ranks = torch.cat(ranks, dim=0) if len(ranks) > 1 else ranks[0]
+    return token_ids, scores, ranks
+
+
 class CPUPromptLogprobsWorker:
     def __init__(
         self,
@@ -198,60 +253,6 @@ class CPUPromptLogprobsWorker:
     def remove_request(self, req_id: str) -> None:
         self.in_progress_prompt_logprobs.pop(req_id, None)
         self.token_id_scores.pop(req_id, None)
-
-    def get_prompt_logprobs_token_ids(
-        self,
-        num_tokens: int,
-        query_start_loc: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        num_computed_tokens: torch.Tensor,
-        all_token_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        return ops.get_prompt_logprobs_token_ids_cpu(
-            num_tokens,
-            query_start_loc,
-            idx_mapping,
-            num_computed_tokens,
-            all_token_ids,
-        )
-
-    def compute_prompt_logprobs_with_chunking(
-        self,
-        prompt_token_ids: torch.Tensor,
-        prompt_hidden_states: torch.Tensor,
-        logits_fn: Callable[[torch.Tensor], torch.Tensor],
-        num_prompt_logprobs: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Since materializing the full prompt logits can take too much memory,
-        # we compute it in chunks.
-        token_ids = []
-        scores = []
-        ranks = []
-        logits_mode = self.logprobs_mode in ("raw_logits", "processed_logits")
-        prompt_token_ids = prompt_token_ids.to(torch.int64)
-        for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
-            end_idx = start_idx + CHUNK_SIZE
-            # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-            prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
-            requested_num = (
-                prompt_logits.shape[-1]
-                if num_prompt_logprobs == -1
-                else num_prompt_logprobs
-            )
-            result = compute_topk_scores(
-                prompt_logits,
-                requested_num,
-                prompt_token_ids[start_idx:end_idx],
-                logits_mode=logits_mode,
-            )
-            token_ids.append(result.logprob_token_ids)
-            scores.append(result.logprobs)
-            ranks.append(result.selected_token_ranks)
-
-        token_ids = torch.cat(token_ids, dim=0) if len(token_ids) > 1 else token_ids[0]
-        scores = torch.cat(scores, dim=0) if len(scores) > 1 else scores[0]
-        ranks = torch.cat(ranks, dim=0) if len(ranks) > 1 else ranks[0]
-        return token_ids, scores, ranks
 
     def compute_prompt_token_id_logprobs(
         self,
@@ -342,7 +343,7 @@ class CPUPromptLogprobsWorker:
         )
 
         # Get the prompt logprobs token_ids.
-        prompt_logprobs_token_ids = self.get_prompt_logprobs_token_ids(
+        prompt_logprobs_token_ids = get_prompt_logprobs_token_ids(
             input_batch.num_tokens,
             input_batch.query_start_loc,
             input_batch.idx_mapping,
@@ -350,11 +351,12 @@ class CPUPromptLogprobsWorker:
             all_token_ids,
         )
         prompt_token_ids, prompt_logprobs, prompt_ranks = (
-            self.compute_prompt_logprobs_with_chunking(
+            compute_prompt_logprobs_with_chunking(
                 prompt_logprobs_token_ids,
                 hidden_states[: input_batch.num_tokens],
                 logits_fn,
                 max_num_prompt_logprobs,
+                self.logprobs_mode,
             )
         )
 

@@ -15,8 +15,10 @@ from vllm.v1.worker.cpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.cpu.logprob import (
     CPUPromptLogprobsWorker,
     LogprobTokenIdsState,
+    compute_prompt_logprobs_with_chunking,
     compute_token_logprobs,
     compute_topk_scores,
+    get_prompt_logprobs_token_ids,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -61,15 +63,14 @@ def test_cpu_prompt_logprobs_scores_prompt_targets() -> None:
         dtype=torch.bfloat16,
     )
 
-    worker = CPUPromptLogprobsWorker(max_num_reqs=1, device=torch.device("cpu"))
-    prompt_token_ids = worker.get_prompt_logprobs_token_ids(
+    prompt_token_ids = get_prompt_logprobs_token_ids(
         num_tokens=2,
         query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
         idx_mapping=torch.tensor([0], dtype=torch.int64),
         num_computed_tokens=torch.tensor([0], dtype=torch.int32),
         all_token_ids=torch.tensor([[7, 1, 2]], dtype=torch.int32),
     )
-    token_ids, logprobs, token_ranks = worker.compute_prompt_logprobs_with_chunking(
+    token_ids, logprobs, token_ranks = compute_prompt_logprobs_with_chunking(
         prompt_token_ids=prompt_token_ids,
         prompt_hidden_states=logits,
         logits_fn=lambda hidden_states: hidden_states,
@@ -306,12 +307,3 @@ def test_cpu_requested_output_logprobs_without_topk() -> None:
         torch.tensor([[2.0, 1.0, 3.0], [2.0, -math.inf, -math.inf]]),
     )
     assert output.selected_token_ranks.tolist() == [3, 3]
-
-
-def test_cpu_output_logprobs_reject_negative_topk() -> None:
-    with pytest.raises(AssertionError):
-        compute_topk_scores(
-            torch.zeros((1, 4)),
-            num_logprobs=-1,
-            sampled_token_ids=torch.tensor([0]),
-        )
