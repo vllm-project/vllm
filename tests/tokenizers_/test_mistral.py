@@ -2429,7 +2429,9 @@ def test_normalize_tool_call_ids_renders(
     maybe_serialize_tool_calls(request)
     normalize_tool_call_ids(request)
 
-    new_call_ids = [tc["id"] for tc in request.messages[1]["tool_calls"]]
+    tool_calls = request.messages[1]["tool_calls"]
+    assert tool_calls is not None
+    new_call_ids = [tc["id"] for tc in tool_calls]
     new_result_ids = [m["tool_call_id"] for m in request.messages[2:]]
     assert new_call_ids == new_result_ids
     assert len(set(new_call_ids)) == len(call_ids)
@@ -2443,5 +2445,7 @@ def test_normalize_tool_call_ids_keeps_valid_ids() -> None:
     maybe_serialize_tool_calls(request)
     normalize_tool_call_ids(request)
 
-    assert request.messages[1]["tool_calls"][0]["id"] == "abcDEF123"
+    tool_calls = request.messages[1]["tool_calls"]
+    assert tool_calls is not None
+    assert tool_calls[0]["id"] == "abcDEF123"
     assert request.messages[2]["tool_call_id"] == "abcDEF123"
