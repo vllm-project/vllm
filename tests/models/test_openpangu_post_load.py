@@ -31,3 +31,27 @@ def test_mtp_refreshes_nested_sink_tensors_after_load() -> None:
     model.process_weights_after_loading()
 
     torch.testing.assert_close(sink.sink_key, loaded)
+
+
+def test_sink_kv_update_follows_the_real_kv_cache(monkeypatch) -> None:
+    """``update_sink_kv`` on the real StaticSinkAttention: the KV cache is one
+    tensor (empty until bound, as ``Attention.__init__`` leaves it), so a
+    load before allocation defers the population to the first forward and a
+    reload writes the bound cache at once."""
+    from vllm.model_executor.layers.attention.static_sink_attention import (
+        StaticSinkAttention,
+    )
+
+    layer = object.__new__(StaticSinkAttention)
+    nn.Module.__init__(layer)
+    layer.kv_cache = torch.tensor([])  # as Attention.__init__ leaves it
+    populated: list[torch.Tensor] = []
+    monkeypatch.setattr(layer, "populate_sink_kv", populated.append)
+
+    layer.update_sink_kv(torch.ones(1), torch.ones(1))
+    assert layer.sink_populated is False and populated == []
+
+    cache = torch.zeros(2, 3)
+    StaticSinkAttention.bind_kv_cache(layer, cache)
+    layer.update_sink_kv(torch.ones(1), torch.ones(1))
+    assert populated == [cache]
