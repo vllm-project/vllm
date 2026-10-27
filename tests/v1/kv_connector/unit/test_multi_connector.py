@@ -1222,14 +1222,17 @@ def test_multi_connector_hma_support_detection():
     assert mc_mixed2._all_support_hma is False
 
 
-def test_divergent_local_hybrid_hit_capability_is_conservative():
+def test_divergent_local_hybrid_hit_capability_requires_a_capable_child():
     all_supported = _make_multi_connector(
         ["MockDivergentHMAConnector", "MockDivergentHMAConnector"]
     )
     assert all_supported.supports_divergent_local_hybrid_hits is True
 
     mixed = _make_multi_connector(["MockDivergentHMAConnector", "MockHMAConnector"])
-    assert mixed.supports_divergent_local_hybrid_hits is False
+    assert mixed.supports_divergent_local_hybrid_hits is True
+
+    unsupported = _make_multi_connector(["MockHMAConnector", "MockHMAConnector"])
+    assert unsupported.supports_divergent_local_hybrid_hits is False
 
 
 @pytest.mark.skipif(
