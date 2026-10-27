@@ -18,13 +18,7 @@ if TYPE_CHECKING:
 else:
 
     class TokenBuffer(array):
-        """Mutable int32 token ids with no per-token Python objects.
-
-        A 170K-token prompt held as a list makes every cyclic-GC pass walk 170K
-        references per live request; this buffer has none. Reads stay list-like:
-        indexing returns ``int``, slices and ``copy()`` return lists, and it compares
-        equal to a list or tuple holding the same tokens.
-        """
+        """Mutable int32 token ids with no per-token Python objects."""
 
         __slots__ = ()
 
