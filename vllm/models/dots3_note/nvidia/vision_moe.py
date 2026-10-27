@@ -109,6 +109,7 @@ def note_vision_fused_moe_fp8(
         False,
         False,
         _BLOCK_SHAPE,
+        per_out_ch_quant=False,
     )
 
     apply_moe_activation(
@@ -142,6 +143,7 @@ def note_vision_fused_moe_fp8(
         False,
         False,
         _BLOCK_SHAPE,
+        per_out_ch_quant=False,
     )
 
     output = torch.empty_like(hidden_states)
