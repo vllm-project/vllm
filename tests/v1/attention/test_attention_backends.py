@@ -1168,6 +1168,87 @@ def test_flashinfer_avoids_seq_lens_copy_without_spec_tokens(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer with CUDA is required.",
+)
+@pytest.mark.parametrize("query_len", [16, 1], ids=["prefill", "decode"])
+def test_flashinfer_plan_waits_for_previous_plan_copy(monkeypatch, tmp_path, query_len):
+    """plan() refills a page-locked buffer that the GPU copies asynchronously.
+
+    When the host runs ahead of the GPU (e.g. several pipeline-parallel steps
+    in flight), replanning before that copy has run hands the earlier step's
+    kernel the later step's plan, which faults (issue #63505).
+    """
+    from flashinfer import BatchPrefillWithPagedKVCacheWrapper
+
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "get_per_layer_parameters",
+        lambda *args: {
+            "layer.0": PerLayerParameters(
+                window_left=-1, logits_soft_cap=0.0, sm_scale=0.125
+            )
+        },
+    )
+    if query_len > 1:
+        owner, name = BatchPrefillWithPagedKVCacheWrapper, "plan"
+    else:
+        owner, name = flashinfer_backend, "fast_plan_decode"
+    plan = getattr(owner, name)
+    plan_copies: list[torch.cuda.Event] = []
+    copy_pending_at_plan: list[bool] = []
+
+    def observed_plan(*args, **kwargs):
+        copy_pending_at_plan.append(not all(e.query() for e in plan_copies))
+        plan(*args, **kwargs)
+        plan_copies.append(torch.cuda.Event())
+        plan_copies[-1].record()
+
+    monkeypatch.setattr(owner, name, observed_plan)
+
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=2048,
+        head_dim=128,
+        num_attention_heads=16,
+        num_key_value_heads=8,
+        num_hidden_layers=1,
+    ).save_pretrained(tmp_path)
+    config = create_vllm_config(
+        model_name=str(tmp_path),
+        max_model_len=64,
+        dtype=torch.bfloat16,
+        max_num_seqs=1,
+    )
+    config.attention_config.use_trtllm_attention = False
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    with set_current_vllm_config(config):
+        builder = flashinfer_backend.FlashInferMetadataBuilder(
+            create_standard_kv_cache_spec(config), ["layer.0"], config, device
+        )
+        # Created up front: creating them syncs with the GPU.
+        batches = [
+            create_common_attn_metadata(
+                BatchSpec(seq_lens=[seq_len], query_lens=[query_len]), 16, device
+            )
+            for seq_len in (32, 33, 48)
+        ]
+        builder.build(0, batches[0])
+        torch.accelerator.synchronize()
+        # Keep the GPU behind the host so the next plan copies stay queued.
+        torch.cuda._sleep(1_000_000_000)
+        for batch in batches[1:]:
+            builder.build(0, batch)
+    torch.accelerator.synchronize()
+
+    assert copy_pending_at_plan == [False, False, False]
+
+
+@pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
