@@ -28,13 +28,16 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
+use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
+use vllm_engine_core_client::protocol::lora::LoraRequest;
+use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue, MmModality};
 use vllm_engine_core_client::protocol::output::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, StopReason,
-    UtilityCallOutput,
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, RequestError,
+    StopReason, UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
@@ -47,7 +50,8 @@ use vllm_engine_core_client::{
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
+use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
+use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -56,7 +60,9 @@ use super::{
     build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
     build_router_with_scale_out_endpoints, render::build_router as build_render_router,
 };
-use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::config::{
+    ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
+};
 use crate::lora::LoadLoraError;
 use crate::render::RenderState;
 use crate::state::AppState;
@@ -130,6 +136,12 @@ fn bytes_to_token_ids(bytes: &[u8]) -> Vec<u32> {
     bytes.iter().map(|byte| u32::from(*byte)).collect()
 }
 
+/// Encode `text` with the fake chat tokenizer, so markers spelled in full are
+/// their dedicated tokens, as the model emits them.
+fn token_ids(text: &str) -> Vec<u32> {
+    fake_chat_tokenizer().encode(text, false).unwrap()
+}
+
 fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
     vec![
         (vec![b'h' as u32], None),
@@ -140,7 +152,7 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
 
 fn weather_tool_call_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
     vec![
-        (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
+        (token_ids("<think>Need tool.</think>"), None),
         (
             bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
             None,
@@ -612,9 +624,66 @@ fn qwen_multimodal_model_info_with_limits(
     info
 }
 
+/// Step5-VL reuses Step3-VL's six multimodal special tokens.
+const STEP3_IM_PATCH_ID: u32 = 151680;
+const STEP3_IM_START_ID: u32 = 151681;
+const STEP3_IM_END_ID: u32 = 151682;
+const STEP3_PATCH_START_ID: u32 = 151683;
+const STEP3_PATCH_END_ID: u32 = 151684;
+const STEP3_PATCH_NEWLINE_ID: u32 = 151685;
+
+fn step5_vl_chat_tokenizer() -> TestTokenizer {
+    fake_chat_tokenizer()
+        .with_regular_token("<im_patch>", STEP3_IM_PATCH_ID)
+        .with_regular_token("<im_start>", STEP3_IM_START_ID)
+        .with_regular_token("<im_end>", STEP3_IM_END_ID)
+        .with_regular_token("<patch_start>", STEP3_PATCH_START_ID)
+        .with_regular_token("<patch_end>", STEP3_PATCH_END_ID)
+        .with_regular_token("<patch_newline>", STEP3_PATCH_NEWLINE_ID)
+}
+
+fn step5_vl_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
+    step5_vl_multimodal_model_info_with_limits(std::collections::HashMap::new())
+}
+
+fn step5_vl_multimodal_model_info_with_limits(
+    limit_mm_per_prompt: vllm_chat::multimodal::MmLimitPerPrompt,
+) -> vllm_chat::multimodal::MultimodalModelInfo {
+    let config_path = std::env::temp_dir().join(format!(
+        "vllm-server-step5-vl-config-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    let preprocessor_config_path = std::env::temp_dir().join(format!(
+        "vllm-server-step5-vl-preprocessor-config-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    fs::write(&config_path, r#"{"model_type":"step5_vl"}"#).expect("write step5_vl test config");
+    fs::write(
+        &preprocessor_config_path,
+        r#"{"image_size":728,"patch_size":504}"#,
+    )
+    .expect("write step5_vl test preprocessor config");
+    let info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
+        "step5-vl-test".to_string(),
+        Some("step5_vl".to_string()),
+        vllm_chat::multimodal::MultimodalConfigFiles {
+            config: Some(&config_path),
+            preprocessor_config: Some(&preprocessor_config_path),
+            ..Default::default()
+        },
+        Arc::new(step5_vl_chat_tokenizer()),
+        limit_mm_per_prompt,
+    )
+    .expect("load multimodal info")
+    .expect("step5_vl multimodal info is registered");
+    let _ = fs::remove_file(config_path);
+    let _ = fs::remove_file(preprocessor_config_path);
+    info
+}
+
 async fn test_models_with_engine_outputs_and_backend_inner(
     engine_id: impl Into<EngineId>,
-    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    outputs: impl FnOnce(&str) -> EngineCoreOutputs + Send + 'static,
     check_request: impl FnOnce(&EngineCoreRequest) + Send + 'static,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
@@ -631,11 +700,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
                 check_request(&request);
-                send_outputs(
-                    push,
-                    engine_outputs_for_request(&request.request_id, output_specs),
-                )
-                .await;
+                send_outputs(push, outputs(&request.request_id)).await;
             })
         },
     ));
@@ -662,8 +727,13 @@ async fn test_models_with_engine_outputs_and_backend(
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
-    test_models_with_engine_outputs_and_backend_inner(engine_id, output_specs, |_| {}, backend)
-        .await
+    test_models_with_engine_outputs_and_backend_inner(
+        engine_id,
+        move |request_id| engine_outputs_for_request(request_id, output_specs),
+        |_| {},
+        backend,
+    )
+    .await
 }
 
 async fn test_chat_with_engine_outputs(
@@ -761,6 +831,60 @@ async fn scale_out_generate_route_follows_api_server_options() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+/// Assert that `method uri` hits the 501 placeholder for the Python route
+/// `route`.
+async fn assert_route_not_supported(app: &axum::Router, method: &str, uri: &str, route: &str) {
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "{method} {uri}"
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read response");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode error");
+    assert_eq!(
+        error["error"]["type"], "NotImplementedError",
+        "{method} {uri}"
+    );
+    assert_eq!(
+        error["error"]["message"],
+        format!(
+            "{method} {route} is not supported by the Rust frontend yet. \
+             Set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend."
+        ),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unimplemented_python_routes_return_not_implemented() {
+    let app = test_app().await;
+
+    for (method, uri) in [
+        ("POST", "/v1/messages"),
+        ("POST", "/v1/messages/count_tokens"),
+        ("POST", "/v1/chat/completions/batch"),
+        ("POST", "/v1/decisions"),
+        ("POST", "/v1/systemone"),
+        ("POST", "/scale_elastic_ep"),
+        ("POST", "/is_scaling_elastic_ep"),
+    ] {
+        assert_route_not_supported(&app, method, uri, uri).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn scale_out_generate_route_is_disabled_by_default() {
@@ -823,6 +947,86 @@ async fn scale_out_generate_route_can_be_enabled() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
+    const ROUTES: [&str; 7] = [
+        "/inference/v1/abort_requests",
+        "/v1/chat/completions/render",
+        "/v1/completions/render",
+        "/v1/messages/render",
+        "/v1/responses/render",
+        "/v1/chat/completions/derender",
+        "/v1/completions/derender",
+    ];
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-unimplemented",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
+
+    let enabled = build_router_with_scale_out_endpoints(state.clone(), true);
+    for uri in ROUTES {
+        assert_route_not_supported(&enabled, "POST", uri, uri).await;
+    }
+
+    let disabled = build_router_with_scale_out_endpoints(state, false);
+    for uri in ROUTES {
+        let response = disabled
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::from("not JSON"))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenizer_info_route_follows_api_server_options() {
+    for enabled in [false, true] {
+        let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+            b"engine-tokenizer-info",
+            default_stream_output_specs(),
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let app = build_router(Arc::new(
+            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
+                ApiServerOptions {
+                    enable_tokenizer_info_endpoint: enabled,
+                    ..Default::default()
+                },
+            ),
+        ));
+
+        if enabled {
+            assert_route_not_supported(&app, "GET", "/tokenizer_info", "/tokenizer_info").await;
+        } else {
+            let response = app
+                .clone()
+                .call(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/tokenizer_info")
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
 }
 
 /// Build a dev-mode router backed by a mock engine using a custom ready
@@ -1123,7 +1327,7 @@ async fn static_lora_module_fails_when_engine_rejects_it() {
         matches!(error, LoadLoraError::NotLoaded { .. }),
         "{error:?}"
     );
-    assert!(state.served_lora_requests().await.is_empty());
+    assert!(state.served_loras().await.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1202,6 +1406,20 @@ async fn test_app_with_backend_and_engine_request_check<F>(
 where
     F: FnOnce(&EngineCoreRequest) + Send + 'static,
 {
+    test_app_with_chat_and_engine_request_check(
+        |llm| ChatLlm::from_shared_backend(llm, backend),
+        check_request,
+    )
+    .await
+}
+
+async fn test_app_with_chat_and_engine_request_check<F>(
+    build_chat: impl FnOnce(Llm) -> ChatLlm,
+    check_request: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-check-request".to_vec();
@@ -1235,7 +1453,7 @@ where
     .await
     .expect("connect client");
 
-    let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
+    let chat = build_chat(test_llm(client));
     (
         build_router(Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
@@ -1455,7 +1673,8 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
                         "request_id": "body-req",
                         "model": "render-model",
                         "prompt": "hello",
-                        "max_tokens": 8
+                        "max_tokens": 8,
+                        "return_token_ids": true
                     })
                     .to_string(),
                 ))
@@ -1472,6 +1691,7 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert_eq!(json[0]["model"], "render-model");
     assert_eq!(json[0]["stream"], false);
     assert_eq!(json[0]["sampling_params"]["max_tokens"], 8);
+    assert_eq!(json[0]["return_token_ids"], true);
     assert!(!json[0]["token_ids"].as_array().unwrap().is_empty());
     assert!(json[0].get("stream_options").is_none());
     assert!(json[0].get("prompt_token_ids").is_none());
@@ -1518,7 +1738,10 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                         "max_completion_tokens": 8,
                         "bad_words": ["blocked"],
                         "vllm_xargs": {"custom": 1},
-                        "chat_template_kwargs": {"enable_thinking": false}
+                        "kv_transfer_params": {"do_remote_decode": true},
+                        "ec_transfer_params": {"do_remote_encode": true},
+                        "chat_template_kwargs": {"enable_thinking": false},
+                        "return_token_ids": true
                     })
                     .to_string(),
                 ))
@@ -1540,15 +1763,29 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         render_json["sampling_params"]["bad_words"],
         json!(["blocked"])
     );
-    assert_eq!(render_json["sampling_params"]["vllm_xargs"]["custom"], 1);
+    // Transfer params move to the top level, like Python render.
+    assert_eq!(
+        render_json["sampling_params"]["vllm_xargs"],
+        json!({"custom": 1})
+    );
+    assert_eq!(
+        render_json["kv_transfer_params"],
+        json!({"do_remote_decode": true})
+    );
+    assert_eq!(
+        render_json["ec_transfer_params"],
+        json!({"do_remote_encode": true})
+    );
     assert_eq!(
         render_json["reasoning_parser_kwargs"],
         json!({"chat_template_kwargs": {"enable_thinking": false}})
     );
+    assert_eq!(render_json["return_token_ids"], true);
 
+    let expected_prompt_token_ids = json!(token_ids);
     let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
         b"engine-render-generate-round-trip",
-        default_stream_output_specs(),
+        |request_id| engine_outputs_for_request(request_id, default_stream_output_specs()),
         move |request| {
             assert_eq!(
                 request.prompt_token_ids.as_deref(),
@@ -1560,6 +1797,20 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                     .as_ref()
                     .map(|kwargs| &kwargs.chat_template_kwargs["enable_thinking"]),
                 Some(&json!(false))
+            );
+            let extra_args = request
+                .sampling_params
+                .as_ref()
+                .and_then(|params| params.extra_args.as_ref())
+                .expect("extra args");
+            assert_eq!(extra_args["custom"], json!(1));
+            assert_eq!(
+                extra_args["kv_transfer_params"],
+                json!({"do_remote_decode": true})
+            );
+            assert_eq!(
+                extra_args["ec_transfer_params"],
+                json!({"do_remote_encode": true})
             );
         },
         Arc::new(FakeChatBackend::new()),
@@ -1582,9 +1833,14 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         .expect("call generate app");
 
     assert_eq!(generate_response.status(), StatusCode::OK);
-    let _ = to_bytes(generate_response.into_body(), usize::MAX)
+    let generate_body = to_bytes(generate_response.into_body(), usize::MAX)
         .await
         .expect("read generate response");
+    let generate_json: serde_json::Value =
+        serde_json::from_slice(&generate_body).expect("decode generate response");
+    // The request's `return_token_ids` survives render, so generate echoes
+    // the prompt as the chat route would.
+    assert_eq!(generate_json["prompt_token_ids"], expected_prompt_token_ids);
     engine_task.finish().await;
 }
 
@@ -2554,6 +2810,83 @@ async fn load_lora_adapter_rejects_engine_false_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn load_lora_adapter_inplace_does_not_reach_generate_requests() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            add_lora_script(true, |lora| {
+                let lora: LoraRequest =
+                    rmpv::ext::from_value(Value::Array(lora.to_vec())).expect("decode lora");
+                assert!(lora.load_inplace, "the reload itself carries load_inplace");
+            })(dealer, push)
+            .await;
+
+            let add = recv_engine_message(dealer).await;
+            assert_eq!(add[0].as_ref(), &[0x00]);
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode engine request");
+            // Reply before asserting, so a failure surfaces without waiting
+            // for the HTTP call to time out.
+            send_outputs(
+                push,
+                engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
+            )
+            .await;
+
+            assert_adapter_a_lora_request(&request);
+            assert!(
+                !request.lora_request.as_ref().expect("lora request").load_inplace,
+                "a generate request must not make the engine reload the adapter"
+            );
+        })
+    })
+    .await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/load_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_name": "adapter-a",
+                        "lora_path": "org/adapter-a",
+                        "load_inplace": true
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "adapter-a",
+                        "prompt": "hello",
+                        "max_tokens": 2
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    drop(app);
+    engine_task.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn load_lora_adapter_rejects_base_model_name_collision() {
     let (mut app, engine_task) =
         test_admin_app_with_engine_script(|_, _| boxed_test_future(async move {})).await;
@@ -2762,7 +3095,7 @@ async fn invalid_request_returns_openai_error() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2792,7 +3125,7 @@ async fn chat_completions_empty_allowed_token_ids_returns_openai_error() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
     assert!(
         json["error"]["message"]
             .as_str()
@@ -2852,12 +3185,20 @@ async fn non_stream_chat_returns_json_response() {
     let choice = json["choices"][0].as_object().expect("choice object");
     let message = choice["message"].as_object().expect("message object");
     for (object, key) in [
+        (response_object, "service_tier"),
         (response_object, "system_fingerprint"),
         (response_object, "prompt_token_ids"),
+        (response_object, "prompt_text"),
         (response_object, "kv_transfer_params"),
         (choice, "logprobs"),
         (choice, "stop_reason"),
         (choice, "token_ids"),
+        (choice, "routed_experts"),
+        (choice, "weight_versions"),
+        (message, "refusal"),
+        (message, "annotations"),
+        (message, "audio"),
+        (message, "function_call"),
         (message, "reasoning"),
     ] {
         assert!(
@@ -2874,12 +3215,18 @@ async fn non_stream_chat_returns_json_response() {
 async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
     for endpoint in ["/v1/chat/completions", "/v1/completions"] {
         for stream in [false, true] {
-            for watermarking in [None, Some(true), Some(false)] {
+            // `null` and omission both request watermarking, like `true`.
+            for (watermarking, expected) in [
+                (None, true),
+                (Some(json!(null)), true),
+                (Some(json!(true)), true),
+                (Some(json!(false)), false),
+            ] {
                 let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
                     Arc::new(FakeChatBackend::new()),
                     move |request| {
                         let params = request.sampling_params.as_ref().expect("sampling params");
-                        assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+                        assert_eq!(params.watermarking, expected);
                     },
                 )
                 .await;
@@ -2891,7 +3238,7 @@ async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
                     body["prompt"] = json!("hi");
                 }
                 if let Some(watermarking) = watermarking {
-                    body["watermarking"] = json!(watermarking);
+                    body["watermarking"] = watermarking;
                 }
                 let response = app
                     .call(
@@ -2909,6 +3256,77 @@ async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
                 engine_task.await.expect("mock engine task");
             }
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_structured_outputs_use_configured_backend() {
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
+
+    for backend in [
+        StructuredOutputBackend::Xgrammar,
+        StructuredOutputBackend::Guidance,
+    ] {
+        let chat_backend = Arc::new(FakeChatBackend::new());
+        let (app, engine_task) = test_app_with_chat_and_engine_request_check(
+            |llm| {
+                let text = TextLlm::new(llm, chat_backend.clone())
+                    .with_structured_outputs_backend(backend);
+                ChatLlm::new(text, chat_backend)
+                    .with_tool_call_parser(ParserSelection::Explicit("qwen3_coder".to_string()))
+            },
+            move |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                let structured_outputs =
+                    params.structured_outputs.as_ref().expect("structured outputs");
+                assert_eq!(structured_outputs.backend, backend);
+                // Only xgrammar compiles the parser's grammar of the answer or a
+                // call; other backends keep the request's own constraint.
+                let constraint = &structured_outputs.params.constraint;
+                match backend {
+                    StructuredOutputBackend::Xgrammar => {
+                        assert!(constraint.as_structural_tag().is_some(), "{constraint:?}");
+                    }
+                    _ => assert!(constraint.as_json().is_some(), "{constraint:?}"),
+                }
+            },
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 2,
+                            "tools": [{
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup",
+                                    "parameters": {"type": "object"},
+                                    "strict": true,
+                                },
+                            }],
+                            "response_format": {
+                                "type": "json_schema",
+                                "json_schema": {"name": "answer", "schema": {"type": "object"}},
+                            },
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{backend:?}");
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
     }
 }
 
@@ -3039,7 +3457,7 @@ async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
     assert_eq!(
         json["error"]["message"],
         "At most 1 image(s) may be provided in one prompt."
@@ -3086,6 +3504,125 @@ async fn selected_logprobs_invalid_requests_return_client_errors() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
     engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_image_url_reaches_engine_step5_vl_mm_features() {
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            step5_vl_multimodal_model_info(),
+        )),
+        |request| {
+            let prompt_token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
+            // The 1x1 input image yields no sliding-window patches, so the
+            // `<im_patch>` marker expands to the global-view span only:
+            // `<im_start>` + 169 `<im_patch>` embed tokens + `<im_end>`.
+            assert!(prompt_token_ids.contains(&STEP3_IM_PATCH_ID));
+            assert!(prompt_token_ids.contains(&STEP3_IM_START_ID));
+            assert!(prompt_token_ids.contains(&STEP3_IM_END_ID));
+            assert!(!prompt_token_ids.contains(&STEP3_PATCH_START_ID));
+            assert!(!prompt_token_ids.contains(&STEP3_PATCH_END_ID));
+            assert!(!prompt_token_ids.contains(&STEP3_PATCH_NEWLINE_ID));
+            assert_eq!(
+                prompt_token_ids.iter().filter(|&&id| id == STEP3_IM_PATCH_ID).count(),
+                169
+            );
+
+            let features = request.mm_features.as_ref().expect("multimodal features");
+            assert_eq!(features.len(), 1);
+            assert_eq!(features[0].modality, MmModality::Image);
+            assert_eq!(features[0].identifier, "image-1");
+            assert_eq!(features[0].mm_position.length, 169 + 2);
+
+            let is_embed = features[0].mm_position.is_embed.as_ref().expect("is_embed mask");
+            assert_eq!(is_embed.dtype, TensorDtype::Bool);
+            assert_eq!(is_embed.shape, vec![169 + 2]);
+            let mask = is_embed.data.as_raw_view().expect("inline is_embed mask");
+            assert_eq!(mask.first(), Some(&0));
+            assert_eq!(mask.last(), Some(&0));
+            assert_eq!(mask.iter().filter(|&&bit| bit != 0).count(), 169);
+
+            let data = features[0].data.as_ref().expect("feature data");
+            let tensor = |key: &str| match &data
+                .get(key)
+                .unwrap_or_else(|| panic!("missing `{key}` kwarg"))
+                .data
+            {
+                Some(MmKwargValue::Tensor(tensor)) => tensor,
+                other => panic!("`{key}` should be a tensor, got {other:?}"),
+            };
+
+            // Global view, resized to the configured 728x728 image size.
+            let pixel_values = tensor("pixel_values");
+            assert_eq!(pixel_values.dtype, TensorDtype::F32);
+            assert_eq!(pixel_values.shape, vec![3, 728, 728]);
+            assert!(matches!(data["pixel_values"].field, MmField::Batched(_)));
+
+            // No patches for a 1x1 image: the flat patch tensors are empty
+            // but still carry the step3_vl patch_size layout.
+            let patch_pixel_values = tensor("patch_pixel_values");
+            assert_eq!(patch_pixel_values.dtype, TensorDtype::F32);
+            assert_eq!(patch_pixel_values.shape, vec![0, 3, 504, 504]);
+            assert!(matches!(data["patch_pixel_values"].field, MmField::Flat(_)));
+
+            let patch_newline_mask = tensor("patch_newline_mask");
+            assert_eq!(patch_newline_mask.dtype, TensorDtype::U32);
+            assert_eq!(patch_newline_mask.shape, vec![0]);
+            assert!(matches!(data["patch_newline_mask"].field, MmField::Flat(_)));
+
+            // Batched fields drop the batch axis, leaving the scalar count.
+            let num_patches = tensor("num_patches");
+            assert_eq!(num_patches.dtype, TensorDtype::I64);
+            assert!(num_patches.shape.is_empty());
+            assert_eq!(
+                num_patches.data.as_raw_view().expect("inline num_patches").as_ref(),
+                0_i64.to_ne_bytes()
+            );
+            assert!(matches!(data["num_patches"].field, MmField::Batched(_)));
+        },
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe "},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    },
+                                    "uuid": "image-1"
+                                }
+                            ]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["object"], "chat.completion");
+    assert_eq!(json["choices"][0]["message"]["content"], "hi");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3215,6 +3752,68 @@ async fn selected_logprobs_reach_engine_and_both_openai_response_modes() {
             }
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_step5_vl_rejects_when_image_limit_is_zero() {
+    // The request is rejected by `--limit-mm-per-prompt` validation before
+    // ever reaching the engine, so the mock engine task is never awaited.
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-mm-limit-step5-vl",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            step5_vl_multimodal_model_info_with_limits(std::collections::HashMap::from([(
+                vllm_chat::multimodal::MmModality::Image,
+                vllm_chat::multimodal::MmLimitSpec::Count(0),
+            )])),
+        )),
+    )
+    .await;
+    let app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe "},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    }
+                                }
+                            ]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "BadRequestError");
+    assert_eq!(
+        json["error"]["message"],
+        "At most 0 image(s) may be provided in one prompt."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3684,7 +4283,7 @@ async fn stream_error_is_returned_as_openai_error_sse() {
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
-    assert!(text.contains("\"type\":\"server_error\""), "{text}");
+    assert!(text.contains("\"type\":\"InternalServerError\""), "{text}");
     assert!(
         text.contains(&format!(
             "test tokenizer cannot decode unknown token id {UNKNOWN_DECODE_TOKEN_ID}"
@@ -3729,10 +4328,105 @@ async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
-    assert!(text.contains("\"type\":\"server_error\""), "{text}");
+    assert!(text.contains("\"type\":\"InternalServerError\""), "{text}");
     assert!(text.contains("Internal server error"), "{text}");
     assert!(!text.contains("\"usage\":"), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn engine_request_errors_map_to_http_status() {
+    // A retryable engine error (e.g. a paused engine's rejection) is a 503 and
+    // a validation error (e.g. a constraint the structured-output backend
+    // cannot compile) a 400 on every route when it arrives before the response
+    // starts, an SSE error after.
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    let messages = json!([{"role": "user", "content": "hello"}]);
+    let raw = |stream: bool| {
+        json!({"model": model, "token_ids": [11, 22], "stream": stream,
+               "sampling_params": {"max_tokens": 2}})
+    };
+    let paused = RequestError {
+        code: "engine_paused".to_string(),
+        message: "Generation is paused.".to_string(),
+        retryable: true,
+    };
+    let invalid = RequestError {
+        code: RequestError::VALIDATION_ERROR.to_string(),
+        message: "Invalid structured outputs: Grammar error: bad".to_string(),
+        retryable: false,
+    };
+    for (error, status, error_type) in [
+        (
+            paused,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ServiceUnavailableError",
+        ),
+        (invalid, StatusCode::BAD_REQUEST, "BadRequestError"),
+    ] {
+        let cases = [
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": "hello"}),
+                status,
+            ),
+            (
+                "/v1/chat/completions",
+                json!({"model": model, "messages": messages}),
+                status,
+            ),
+            ("/inference/v1/generate", raw(false), status),
+            ("/inference/v1/generate", raw(true), StatusCode::OK),
+        ];
+        for (uri, request, expected_status) in cases {
+            let engine_error = error.clone();
+            let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+                b"engine-openai",
+                move |request_id| {
+                    RequestBatchOutputs {
+                        outputs: vec![EngineCoreOutput {
+                            request_id: request_id.to_string(),
+                            finish_reason: Some(EngineCoreFinishReason::Error),
+                            error: Some(Box::new(engine_error.clone())),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }
+                    .into()
+                },
+                |_| {},
+                Arc::new(FakeChatBackend::new()),
+            )
+            .await;
+            let mut app = build_router_with_scale_out_endpoints(
+                Arc::new(AppState::new(vec![model.to_string()], chat)),
+                true,
+            );
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(request.to_string()))
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+
+            assert_eq!(response.status(), expected_status, "{uri} {request}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            engine_task.await.expect("mock engine task");
+            let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+            assert!(
+                text.contains(&format!("\"type\":\"{error_type}\""))
+                    && text.contains(&format!("\"code\":{}", status.as_u16()))
+                    && text.contains(&error.message),
+                "{uri} {request}: {text}"
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3905,7 +4599,7 @@ async fn completions_invalid_request_returns_openai_error() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3935,7 +4629,7 @@ async fn completions_empty_allowed_token_ids_returns_openai_error() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
     assert!(
         json["error"]["message"]
             .as_str()
@@ -4243,6 +4937,176 @@ async fn non_stream_completions_include_logprobs() {
     );
 }
 
+/// Send one request with output logprobs to an app whose server-wide
+/// `--return-tokens-as-token-ids` is `server_flag`, and return every logprob
+/// token string it carries, sampled tokens and top candidates alike. Streaming
+/// responses are flattened across chunks.
+async fn logprob_tokens_with_server_flag(
+    server_flag: bool,
+    uri: &str,
+    body: serde_json::Value,
+) -> BTreeSet<String> {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-openai-return-tokens-as-token-ids".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output_with_logprobs(
+                            &request.request_id,
+                            vec![b'h' as u32],
+                            Some(EngineCoreFinishReason::Stop),
+                            None,
+                            Some(sample_logprobs_for_token(b'h' as u32, b'H' as u32)),
+                            None,
+                        )],
+                        finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                default_return_tokens_as_token_ids: server_flag,
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let stream = body["stream"].as_bool().unwrap_or(false);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let payloads = if stream {
+        sse_json_payloads(std::str::from_utf8(&body).expect("utf-8 body"))
+    } else {
+        vec![serde_json::from_slice(&body).expect("decode json")]
+    };
+
+    let mut tokens = BTreeSet::new();
+    for payload in &payloads {
+        let Some(logprobs) = payload["choices"][0].get("logprobs").filter(|v| !v.is_null()) else {
+            continue;
+        };
+        match logprobs.get("content") {
+            Some(content) => {
+                for entry in content.as_array().expect("chat logprob content") {
+                    tokens.insert(entry["token"].as_str().unwrap().to_string());
+                    for top in entry["top_logprobs"].as_array().expect("chat top logprobs") {
+                        tokens.insert(top["token"].as_str().unwrap().to_string());
+                    }
+                }
+            }
+            None => {
+                for token in logprobs["tokens"].as_array().expect("completion tokens") {
+                    tokens.insert(token.as_str().unwrap().to_string());
+                }
+                for top in logprobs["top_logprobs"].as_array().expect("completion top logprobs") {
+                    tokens.extend(top.as_object().expect("top logprob map").keys().cloned());
+                }
+            }
+        }
+    }
+    tokens
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn server_return_tokens_as_token_ids_is_the_request_default() {
+    let decoded = BTreeSet::from(["h".to_string(), "H".to_string()]);
+    let placeholder = BTreeSet::from([format!("token_id:{}", b'h'), format!("token_id:{}", b'H')]);
+    let chat = |extra: serde_json::Value, stream: bool| {
+        let mut body = json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": stream,
+            "logprobs": true,
+            "top_logprobs": 2,
+        });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+    let completion = |extra: serde_json::Value, stream: bool| {
+        let mut body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": stream,
+            "logprobs": 1,
+        });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+
+    // (server flag, request field, expected tokens): an omitted or `null`
+    // request field takes the server flag; an explicit value overrides it.
+    let cases = [
+        (true, json!({}), &placeholder),
+        (
+            true,
+            json!({"return_tokens_as_token_ids": null}),
+            &placeholder,
+        ),
+        (true, json!({"return_tokens_as_token_ids": false}), &decoded),
+        (false, json!({}), &decoded),
+        (
+            false,
+            json!({"return_tokens_as_token_ids": true}),
+            &placeholder,
+        ),
+    ];
+    for (server_flag, extra, expected) in cases {
+        for stream in [false, true] {
+            for (uri, body) in [
+                ("/v1/chat/completions", chat(extra.clone(), stream)),
+                ("/v1/completions", completion(extra.clone(), stream)),
+            ] {
+                assert_eq!(
+                    &logprob_tokens_with_server_flag(server_flag, uri, body).await,
+                    expected,
+                    "{uri} stream={stream} server_flag={server_flag} request={extra}",
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_completions_include_prompt_logprobs() {
@@ -4436,6 +5300,94 @@ async fn chat_completions_accepts_request_body_larger_than_axum_default() {
     )));
 
     let large_template_arg = "a".repeat(2 * 1024 * 1024);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"large": large_template_arg}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_reject_request_body_above_configured_limit() {
+    let (chat, _engine_task) = test_chat_with_engine_outputs(
+        b"engine-openai-chat-body-limit",
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                request_body_limit_bytes: Some(1024),
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let large_template_arg = "a".repeat(2 * 1024);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"large": large_template_arg}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("length limit exceeded"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_accept_request_body_above_default_limit_when_unlimited() {
+    let (chat, engine_task) = test_chat_with_engine_outputs(
+        b"engine-openai-chat-unlimited-body",
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                request_body_limit_bytes: None,
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let large_template_arg = "a".repeat(DEFAULT_REQUEST_BODY_LIMIT_BYTES + 1);
     let response = app
         .call(
             Request::builder()
@@ -5005,7 +5957,7 @@ async fn stream_raw_generate_error_finish_returns_sse_error() {
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
-    assert!(text.contains("\"type\":\"server_error\""), "{text}");
+    assert!(text.contains("\"type\":\"InternalServerError\""), "{text}");
     assert!(text.contains("Internal server error"), "{text}");
     assert!(!text.contains("\"finish_reason\":\"error\""), "{text}");
     assert!(!text.contains("\"usage\":"), "{text}");
@@ -5384,9 +6336,9 @@ async fn reasoning_blocks_are_mapped_to_reasoning_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
         vec![
-            (bytes_to_token_ids(b"<think>"), None),
+            (token_ids("<think>"), None),
             (bytes_to_token_ids(b"think "), None),
-            (bytes_to_token_ids(b"more</think>"), None),
+            (token_ids("more</think>"), None),
             (
                 bytes_to_token_ids(b"answer"),
                 Some(EngineCoreFinishReason::Length),
@@ -5431,7 +6383,7 @@ async fn include_reasoning_false_suppresses_reasoning_in_non_stream_chat() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
         vec![
-            (bytes_to_token_ids(b"<think>think</think>"), None),
+            (token_ids("<think>think</think>"), None),
             (
                 bytes_to_token_ids(b"answer"),
                 Some(EngineCoreFinishReason::Length),
@@ -5491,7 +6443,7 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
                 let add = recv_engine_message(dealer).await;
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
-                let reasoning_token_ids = bytes_to_token_ids(b"<think>think</think>");
+                let reasoning_token_ids = token_ids("<think>think</think>");
                 let answer_token_ids = bytes_to_token_ids(b"answer");
 
                 send_outputs(
@@ -5716,11 +6668,11 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                     RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
-                            bytes_to_token_ids(b"<think>Need tool.</think>"),
+                            token_ids("<think>Need tool.</think>"),
                             None,
                             None,
-                            Some(sample_logprobs_for_tokens(&bytes_to_token_ids(
-                                b"<think>Need tool.</think>",
+                            Some(sample_logprobs_for_tokens(&token_ids(
+                                "<think>Need tool.</think>",
                             ))),
                             None,
                         )],
@@ -5830,6 +6782,33 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
 
     assert!(text.contains("\"tool_calls\":"), "{text}");
     assert!(text.contains("\"logprobs\":{\"content\":"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_rejects_empty_tools_array() {
+    let (mut app, engine_task) = test_app_with_engine_handle().await;
+    let cases = [json!({}), json!({"tool_choice": "none"})];
+    for extra in cases {
+        let mut body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [],
+        });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let (status, error) = post_json(&mut app, "/v1/chat/completions", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
+        expect_test::expect![[r#"
+            {
+              "error": {
+                "message": "`tools` must not be an empty array. Either provide at least one tool or omit the field entirely.",
+                "type": "BadRequestError",
+                "param": "tools",
+                "code": 400
+              }
+            }"#]].assert_eq(&serde_json::to_string_pretty(&error).unwrap());
+    }
+    engine_task.abort_and_join().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6638,7 +7617,7 @@ async fn pause_route_uses_python_compatible_default_query_values() {
             let array = payload.as_array().expect("utility payload array");
             let call_id = array[1].as_u64().expect("call id");
 
-            assert_eq!(array[2], Value::from("pause_scheduler"));
+            assert_eq!(array[2], Value::from("pause_generation"));
             assert_eq!(
                 array[3],
                 Value::Array(vec![Value::from("abort"), Value::from(true)])
@@ -6692,7 +7671,7 @@ async fn pause_route_rejects_invalid_mode() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
     assert_eq!(json["error"]["param"], "mode");
     engine_task.abort_and_join().await;
 }
@@ -6857,7 +7836,7 @@ async fn abort_requests_route_rejects_malformed_json() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "Bad Request");
     engine_task.abort_and_join().await;
 }
 
@@ -7824,7 +8803,7 @@ async fn tokenize_chat_conflicting_generation_flags_returns_400() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7843,7 +8822,7 @@ async fn tokenize_chat_empty_messages_returns_400() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7862,7 +8841,7 @@ async fn tokenize_chat_empty_message_content_returns_400() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7881,8 +8860,8 @@ async fn tokenize_unknown_model_returns_404() {
     .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
-    assert_eq!(json["error"]["code"], "model_not_found");
+    assert_eq!(json["error"]["type"], "NotFoundError");
+    assert_eq!(json["error"]["code"], 404);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7901,8 +8880,8 @@ async fn detokenize_unknown_model_returns_404() {
     .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
-    assert_eq!(json["error"]["code"], "model_not_found");
+    assert_eq!(json["error"]["type"], "NotFoundError");
+    assert_eq!(json["error"]["code"], 404);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7965,7 +8944,7 @@ async fn tokenize_chat_continue_without_assistant_returns_400() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 /// `continue_final_message` must not append a new generation suffix vs `add_generation_prompt`.

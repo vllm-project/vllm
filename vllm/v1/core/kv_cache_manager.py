@@ -14,7 +14,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -117,7 +117,7 @@ class KVCacheBlocks:
         return [
             [
                 block.block_id
-                for block in group
+                for block in trim_null_head(group)
                 if block.block_hash is None and not block.is_null
             ]
             for group in self.blocks
@@ -138,6 +138,7 @@ class KVCacheManager:
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
+        num_hash_lookahead_tokens: int = 0,
         num_prefill_lookahead: int = 0,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
@@ -169,6 +170,7 @@ class KVCacheManager:
             max_model_len=self.max_model_len,
             max_in_flight_tokens=max_in_flight_tokens,
             use_eagle=self.use_eagle,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
@@ -261,12 +263,16 @@ class KVCacheManager:
             preempted=request.num_preemptions > 0,
         )
 
-    def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
+    def get_computed_blocks(
+        self, request: Request, max_cache_hit_length: int | None = None
+    ) -> tuple[KVCacheBlocks, int, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
         Args:
             request: The request to get the computed blocks.
+            max_cache_hit_length: Upper bound on the hit length. Defaults to
+                ``request.num_tokens - 1``.
 
         Returns:
             A tuple containing:
@@ -292,7 +298,8 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
-        max_cache_hit_length = request.num_tokens - 1
+        if max_cache_hit_length is None:
+            max_cache_hit_length = request.num_tokens - 1
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length
@@ -321,7 +328,7 @@ class KVCacheManager:
         return blocks, num_new_computed_tokens, shared_prefix_boundary
 
     def get_computed_blocks_for_connector(
-        self, request: Request
+        self, request: Request, max_cache_hit_length: int | None = None
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         """Local prefix-cache lookup for a request scheduled with a KV connector.
 
@@ -348,20 +355,22 @@ class KVCacheManager:
             and isinstance(coordinator, HybridKVCacheCoordinator)
             and coordinator.full_attention_group_id is not None
         ):
-            return *self.get_computed_blocks(request), False
+            return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0, False
 
+        if max_cache_hit_length is None:
+            max_cache_hit_length = request.num_tokens - 1
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-            request.block_hashes, request.num_tokens - 1
+            request.block_hashes, max_cache_hit_length
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
             # full-attention blocks were evicted; use the reconciled boundary
             # that every group agrees on.
-            return *self.get_computed_blocks(request), False
+            return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         num_local = per_group_hits[fa_group_id]
         blocks = self.create_kv_cache_blocks(computed)
