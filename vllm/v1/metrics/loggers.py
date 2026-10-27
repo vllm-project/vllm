@@ -626,6 +626,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
+        self.gauge_kv_token_slots = self._gauge_cls(
+            name="vllm:kv_token_slots",
+            documentation=(
+                "Token slots in the KV cache blocks of running and loading "
+                "requests, per KV cache group. Kind labels: 'filled' = computed "
+                "and scheduled tokens held; 'tail_slack' = unused slots in each "
+                "request's last computed block; 'reserved' = slots allocated "
+                "past them (lookahead and speculative tokens)."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["kv_group", "kind"],
+        )
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
@@ -1163,6 +1176,17 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.num_kv_fetch_reqs_by_stage.get(stage, 0)
                 )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            for slots in scheduler_stats.kv_token_slots:
+                for kind, num_slots in (
+                    ("filled", slots.filled),
+                    ("tail_slack", slots.tail_slack),
+                    ("reserved", slots.reserved),
+                ):
+                    self.gauge_kv_token_slots.labels(
+                        *self.per_engine_labelvalues[engine_idx],
+                        str(slots.kv_group),
+                        kind,
+                    ).set(num_slots)
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries

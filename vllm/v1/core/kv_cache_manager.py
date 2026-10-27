@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -15,7 +15,10 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
+    MambaManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -25,7 +28,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
-from vllm.v1.metrics.stats import PrefixCacheStats
+from vllm.v1.metrics.stats import KVTokenSlots, PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
@@ -234,6 +237,44 @@ class KVCacheManager:
 
         """
         return self.block_pool.get_usage()
+
+    def get_token_slots(self, requests: Iterable[Request]) -> list[KVTokenSlots]:
+        """Token slots in the blocks `requests` hold, per KV cache group.
+
+        - filled: computed tokens still held, including the tokens scheduled
+          this step (tokens in blocks that are no longer held, i.e. null
+          blocks a sliding window released, are excluded),
+        - tail_slack: unused slots in each request's last computed block,
+        - reserved: slots in blocks allocated past the computed tokens
+          (lookahead and speculative tokens).
+
+        Shared prefix blocks count once per request holding them. Mamba and
+        cross-attention groups have no token slots and are skipped.
+        """
+        requests = list(requests)
+        slots = []
+        for kv_group, manager in enumerate(self.coordinator.single_type_managers):
+            if isinstance(manager, (MambaManager, CrossAttentionManager)):
+                continue
+            block_size = manager.block_size
+            filled = tail_slack = reserved = 0
+            for request in requests:
+                blocks = manager.req_to_blocks.get(request.request_id)
+                if not blocks:
+                    continue
+                num_computed = request.num_computed_tokens
+                num_computed_blocks = cdiv(num_computed, block_size)
+                computed_blocks = blocks[:num_computed_blocks]
+                # Count the blocks actually released (nulled) rather than the
+                # manager's skip rule: blocks may still be held for in-flight
+                # tokens, and some managers null blocks in the middle.
+                num_null_blocks = sum(block.is_null for block in computed_blocks)
+                filled += max(num_computed - num_null_blocks * block_size, 0)
+                if computed_blocks and not computed_blocks[-1].is_null:
+                    tail_slack += num_computed_blocks * block_size - num_computed
+                reserved += max(len(blocks) - num_computed_blocks, 0) * block_size
+            slots.append(KVTokenSlots(kv_group, filled, tail_slack, reserved))
+        return slots
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
