@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -119,6 +121,121 @@ class TestParseArguments:
     def test_argument_with_spaces(self, parser):
         result = parser._parse_arguments("message:<escape>Hello World<escape>")
         assert result == {"message": "Hello World"}
+
+
+# Rendered by the model's chat template (``format_argument``): only strings are
+# ``<escape>``-delimited; booleans, numbers, arrays and objects are bare.
+TEMPLATE_CALL = (
+    "<start_function_call>call:set_alarm{"
+    "days:[<escape>mon<escape>,<escape>tue<escape>],enabled:true,hour:7,"
+    "label:<escape>Wake up<escape>,snooze:{minutes:5}}"
+    "<end_function_call>"
+)
+TEMPLATE_ARGS = {
+    "days": ["mon", "tue"],
+    "enabled": True,
+    "hour": 7,
+    "label": "Wake up",
+    "snooze": {"minutes": 5},
+}
+
+_TAG_RE = re.compile(r"(<start_function_call>|<end_function_call>)")
+
+
+def _chunks(text: str, size: int) -> list[str]:
+    """Split ``text`` into ``size``-character chunks, keeping the tags whole.
+
+    The tags are single special tokens, so a delta never splits them.
+    """
+    chunks = []
+    for part in _TAG_RE.split(text):
+        if _TAG_RE.fullmatch(part):
+            chunks.append(part)
+        else:
+            chunks.extend(part[i : i + size] for i in range(0, len(part), size))
+    return [chunk for chunk in chunks if chunk]
+
+
+def _stream(parser, request, text: str, size: int) -> list[tuple[str, dict]]:
+    """Reassemble streamed tool calls as a client would: by index."""
+    previous = ""
+    calls: dict[int, dict] = {}
+    for i, chunk in enumerate(_chunks(text, size), start=1):
+        current = previous + chunk
+        delta = parser.extract_tool_calls_streaming(
+            previous, current, chunk, [], [i], [i], request
+        )
+        previous = current
+        for call in (delta.tool_calls if delta else None) or []:
+            entry = calls.setdefault(call.index, {"name": None, "arguments": ""})
+            if call.function.name:
+                entry["name"] = call.function.name
+            entry["arguments"] += call.function.arguments or ""
+    return [
+        (entry["name"], json.loads(entry["arguments"]))
+        for _, entry in sorted(calls.items())
+    ]
+
+
+class TestTemplateArgumentTypes:
+    """Regression tests for #63983: bare (non-string) arguments were dropped."""
+
+    def test_non_streaming_keeps_every_argument(self, parser, mock_request):
+        result = parser.extract_tool_calls(TEMPLATE_CALL, mock_request)
+
+        assert result.tools_called is True
+        assert json.loads(result.tool_calls[0].function.arguments) == TEMPLATE_ARGS
+
+    @pytest.mark.parametrize("size", [1, 3, 1000])
+    def test_streaming_keeps_every_argument(self, parser, mock_request, size):
+        assert _stream(parser, mock_request, TEMPLATE_CALL, size) == [
+            ("set_alarm", TEMPLATE_ARGS)
+        ]
+
+    @pytest.mark.parametrize("size", [1, 1000])
+    def test_streaming_multiple_arguments_reassemble_to_json(
+        self, parser, mock_request, size
+    ):
+        """The closing brace is held back until the call ends, so the
+        concatenated deltas of a multi-argument call form one JSON object."""
+        text = (
+            "<start_function_call>call:get_weather{"
+            "location:<escape>San Francisco<escape>,unit:<escape>celsius<escape>}"
+            "<end_function_call>"
+            "<start_function_call>call:set_alarm{hour:7,snooze:{minutes:5}}"
+            "<end_function_call>"
+        )
+        assert _stream(parser, mock_request, text, size) == [
+            ("get_weather", {"location": "San Francisco", "unit": "celsius"}),
+            ("set_alarm", {"hour": 7, "snooze": {"minutes": 5}}),
+        ]
+
+    def test_escaped_strings_keep_delimiters(self, parser):
+        args = "note:<escape>a, b: {c} [d]<escape>,count:2"
+        assert parser._parse_arguments(args) == {"note": "a, b: {c} [d]", "count": 2}
+
+    def test_nested_containers_and_literals(self, parser):
+        args = "cfg:{on:false,ids:[1,[2,3],{k:<escape>v<escape>}],none:None},f:1.5"
+        assert parser._parse_arguments(args) == {
+            "cfg": {"on": False, "ids": [1, [2, 3], {"k": "v"}], "none": None},
+            "f": 1.5,
+        }
+
+    @pytest.mark.parametrize(
+        ("prefix", "expected"),
+        [
+            ("hour:7", {}),
+            ("hour:7,", {"hour": 7}),
+            ("hour:7,label:<escape>Wake", {"hour": 7}),
+            ("hour:7,days:[<escape>mon<escape>", {"hour": 7}),
+            ("hour:7,snooze:{minutes:5", {"hour": 7}),
+            ("hour:7,snooze:{minutes:5}", {"hour": 7, "snooze": {"minutes": 5}}),
+        ],
+    )
+    def test_partial_parsing_holds_back_incomplete_values(
+        self, parser, prefix, expected
+    ):
+        assert parser._parse_arguments(prefix, partial=True) == expected
 
 
 class TestAdjustRequest:
