@@ -20,7 +20,7 @@ import functools
 import gc
 import time
 from collections.abc import Iterable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, NamedTuple
@@ -36,6 +36,7 @@ from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
@@ -148,6 +149,7 @@ from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     all_to_all_logits,
+    batch_sharded_sampling_enabled,
     gather_sampler_output,
 )
 from vllm.v1.worker.gpu.sample.logits_processor import build_custom_logits_processors
@@ -435,10 +437,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             time_after_load - time_before_load,
         )
 
-        # Initialize the components that require the model.
-        self.model_state = init_model_state(
-            self.vllm_config, self.model, self.encoder_cache, self.device
+        # Keep the model state out of the weights pool, which level-2 sleep discards.
+        pool = (
+            get_mem_allocator_instance().use_memory_pool(tag="runtime")
+            if self.vllm_config.model_config.enable_sleep_mode
+            and current_platform.is_cuda_alike()
+            else nullcontext()
         )
+        with pool:
+            self.model_state = init_model_state(
+                self.vllm_config, self.model, self.encoder_cache, self.device
+            )
 
         self.decode_query_len = (
             self.num_speculative_steps
@@ -446,7 +455,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if self.parallel_config.enable_batch_sharded_sampling:
-            if hasattr(self.model, "compute_logits_local"):
+            if batch_sharded_sampling_enabled(self.vllm_config, self.model):
                 self.batch_sharder = BatchSharder(
                     max_num_reqs=self.max_num_reqs,
                     max_num_logits_per_req=self.decode_query_len,
@@ -512,7 +521,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
             custom = self.model_state.custom_sampler(self.sampler)
 
+            draft_logits_num_shards = (
+                self.speculator.draft_logits_num_shards
+                if isinstance(self.speculator, DraftModelSpeculator)
+                else 1
+            )
             if custom:
+                assert draft_logits_num_shards == 1, (
+                    "A custom rejection sampler cannot read batch-sharded draft logits"
+                )
                 self.vllm_config._check_supports_watermarking(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
@@ -523,6 +540,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     watermark_key=speculative_target_watermark_key(
                         self.vllm_config.watermark_config
                     ),
+                    draft_logits_num_shards=draft_logits_num_shards,
                 )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
@@ -1153,6 +1171,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         torch.accelerator.empty_cache()
                     self.kv_connector.reset_capture_state()
 
+            # Warmup activations stay cached on the capture streams, which
+            # nothing allocates from after capture; release them.
+            torch.accelerator.empty_cache()
             end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         if not profile_only:
