@@ -2424,8 +2424,8 @@ def test_redo_prompt_logprobs_recomputes_past_a_prefix_hit():
     hit_tokens = 16
     real_hit = scheduler._get_local_prefix_cache_hit
 
-    def patched_hit(req):
-        blocks, _num, boundary, diverged = real_hit(req)
+    def patched_hit(req, max_cache_hit_length=None):
+        blocks, _num, boundary, diverged = real_hit(req, max_cache_hit_length)
         return blocks, hit_tokens, boundary, diverged
 
     with patch.object(scheduler, "_get_local_prefix_cache_hit", patched_hit):
