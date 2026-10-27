@@ -1190,10 +1190,9 @@ class EngineCore:
                 request.mm_features
             )
 
+        frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
         req = Request.from_engine_core_request(
-            request,
-            self.request_block_hasher,
-            frontend_block_hashes(request, self.prefix_hash_config),
+            request, self.request_block_hasher, frontend_hashes
         )
         if req.use_structured_output:
             # Note on thread safety: no race condition.
