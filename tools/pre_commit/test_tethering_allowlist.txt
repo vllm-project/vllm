@@ -208,7 +208,6 @@ tests/v1/determinism/test_matmul_batch_invariant.py  # CI jobs disabled pending 
 tests/v1/determinism/test_mx_linear_batch_invariant.py  # CI jobs disabled pending locked pytest plugins installation
 tests/v1/determinism/test_nvfp4_batch_invariant.py  # CI jobs disabled pending locked pytest plugins installation
 tests/v1/determinism/test_rms_norm_batch_invariant.py  # CI jobs disabled pending locked pytest plugins installation
-tests/v1/determinism/test_short_conv_batch_invariant.py  # CI jobs disabled pending locked pytest plugins installation
 tests/v1/fault_tolerance/test_engine_core_sentinel.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/fault_tolerance/test_fault_tolerance_e2e.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/mooncake_integration/test_accuracy.py  # CI jobs disabled pending locked KV connectors installation
