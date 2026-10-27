@@ -282,7 +282,6 @@ class FfnLayer(_Layer):
     def _cprr_heads(self) -> int:
         """The head count AITER's cprr decode pads the gathered query to, 0 if
         it doesn't pad. The warm-up's guess; ``launch`` reads the step's."""
-        import vllm.envs as envs
         from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import NH
         from vllm.v1.attention.backends.mla import rocm_aiter_mla as am
 
@@ -290,11 +289,7 @@ class FfnLayer(_Layer):
         asm = am._asm_dcp_verify_configured(
             self.runner.dcp, self.runner.interleave, True
         )
-        if (
-            not asm
-            or self.runner.num_spec + 1 < am._MIN_CPRR_QLEN
-            or envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY.lower() == "segmented"
-        ):
+        if not asm or self.runner.num_spec + 1 < am._MIN_CPRR_QLEN:
             return 0
         heads = am._asm_dcp_verify_heads(n)
         return heads if heads > n else 0
