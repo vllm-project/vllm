@@ -766,6 +766,10 @@ class StageMissingLayer(nn.Module):
     def __getattr__(self, name: str):
         return getattr(self.__dict__["module"], name)
 
+    def tie_weights(self, embed_tokens: nn.Module) -> "StageMissingLayer":
+        """Omitted layers do not need to share embedding weights."""
+        return self
+
     def __call__(self, *args, **kwargs):
         raise RuntimeError(f"{self} should not be called")
 
