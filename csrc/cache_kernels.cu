@@ -1885,7 +1885,7 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
     torch::stable::Tensor const& dst,               // [TOT_TOKENS, 576]
     torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
-    int64_t batch_size) {
+    int64_t batch_size, std::optional<torch::stable::Tensor> seq_starts) {
   // The kernel lives in nvfp4_ds_mla_cache_kernels.cu, which is only built when
   // the target list contains an SM100 arch.
 #if !defined(USE_ROCM) && defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
@@ -1908,6 +1908,13 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
   STD_TORCH_CHECK(
       workspace_starts.scalar_type() == torch::headeronly::ScalarType::Int,
       "workspace_starts must be int32");
+  if (seq_starts.has_value()) {
+    STD_TORCH_CHECK(
+        seq_starts.value().scalar_type() == torch::headeronly::ScalarType::Int,
+        "seq_starts must be int32");
+    STD_TORCH_CHECK(src_cache.device() == seq_starts.value().device(),
+                    "src_cache and seq_starts must be on the same device");
+  }
   STD_TORCH_CHECK(src_cache.device() == dst.device(),
                   "src_cache and dst must be on the same device");
   STD_TORCH_CHECK(src_cache.device() == block_table.device(),
@@ -1935,6 +1942,8 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
       src_cache.const_data_ptr<uint8_t>(), dst.data_ptr(),
       block_table.const_data_ptr<int32_t>(),
       workspace_starts.const_data_ptr<int32_t>(),
+      seq_starts.has_value() ? seq_starts.value().const_data_ptr<int32_t>()
+                             : nullptr,
       static_cast<int32_t>(batch_size), block_size, total_tokens,
       block_table_stride, cache_block_stride, cache_entry_stride,
       dst_entry_stride, stream);
