@@ -233,7 +233,7 @@ class EngineCore:
             self.request_block_hasher = get_request_block_hasher(
                 hash_block_size,
                 caching_hash_fn,
-                vllm_config.get_num_hash_lookahead_tokens(kv_connector),
+                vllm_config.num_hash_lookahead_tokens,
             )
 
         self.step_fn = (

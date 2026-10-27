@@ -723,9 +723,10 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
 
-    @property
-    def supports_lookahead_block_hashes(self) -> bool:
-        # P/D transfers identify physical blocks rather than cache hashes.
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
         return True
 
     def __init__(
@@ -1039,6 +1040,10 @@ class MooncakeConnectorScheduler:
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1
             request.max_tokens = 1
+            # The removed tokens may be part of a block's lookahead hash.
+            request.block_hashes.clear()
+            request._prompt_embeds_per_block_hashes.clear()
+            request.update_block_hashes()
             params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:

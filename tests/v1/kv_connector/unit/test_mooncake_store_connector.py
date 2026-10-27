@@ -8,8 +8,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm.config import set_current_vllm_config
+from vllm import SamplingParams
+from vllm.config import SpeculativeConfig, set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
@@ -22,15 +24,27 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     scheduler,
     worker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
+    ExternalCachedBlockPool,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
+    MooncakeStoreWorkerMetadata,
     TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.utils.hashing import sha256
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.output import (
+    KVConnectorBlockState,
+    NewRequestData,
+    SchedulerOutput,
+)
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -41,6 +55,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import Request, RequestStatus
 
 from .utils import create_vllm_config
 
@@ -238,7 +253,12 @@ def test_capacity_only_scheduler_allows_mamba_none_mode(
         "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
         "scheduler.LookupKeyClient"
     ) as mock_client:
-        store_scheduler = scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
+        connector = KVConnectorFactory.create_connector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            kv_cache_config,
+        )
+        store_scheduler = connector.connector_scheduler
         assert store_scheduler.get_num_new_matched_tokens(MagicMock(), 0) == (0, False)
         meta = store_scheduler.build_connector_meta(SchedulerOutput.make_empty())
 
@@ -263,6 +283,9 @@ def _make_block_stored(
 
 def test_scheduler_role_initializes_store_scheduler_only():
     vllm_config = _make_vllm_config()
+    spec = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
+    spec.method = "mtp"
+    vllm_config.speculative_config = spec
     kv_cache_config = _make_kv_cache_config()
 
     with (
@@ -289,9 +312,12 @@ def test_scheduler_role_initializes_store_scheduler_only():
     connector.bind_gpu_block_pool(block_pool)
     mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
-    connector.set_lookahead_block_hashes(True)
-    assert connector.use_lookahead_block_hashes
-    assert connector.connector_scheduler.use_lookahead_block_hashes
+    connector.set_num_hash_lookahead_tokens(1)
+    assert connector.num_hash_lookahead_tokens == 1
+    assert connector.connector_scheduler._store_coord.num_hash_lookahead_tokens == 1
+    connector.set_num_hash_lookahead_tokens(0)
+    assert connector.num_hash_lookahead_tokens == 0
+    assert connector.connector_scheduler._store_coord.num_hash_lookahead_tokens == 0
 
 
 def test_scheduler_reports_mooncake_cache_source():
@@ -338,7 +364,7 @@ def test_worker_methods_delegate_to_store_worker():
     worker = mock_worker_cls.return_value
     worker.get_finished.return_value = ({"req-1"}, {"req-2"})
     worker.get_block_ids_with_load_errors.return_value = {3, 4}
-    connector.set_lookahead_block_hashes(True)
+    connector.set_num_hash_lookahead_tokens(5)
     connector.bind_connector_metadata(metadata)
 
     connector.register_kv_caches(kv_caches)
@@ -348,8 +374,8 @@ def test_worker_methods_delegate_to_store_worker():
     invalid_block_ids = connector.get_block_ids_with_load_errors()
 
     worker.register_kv_caches.assert_called_once_with(kv_caches)
-    assert connector.use_lookahead_block_hashes
-    assert worker.use_lookahead_block_hashes
+    assert connector.num_hash_lookahead_tokens == 5
+    assert worker.coord.num_hash_lookahead_tokens == 5
     worker.start_load_kv.assert_called_once_with(metadata)
     worker.wait_for_save.assert_called_once_with(metadata)
     worker.get_finished.assert_called_once_with(finished_req_ids, metadata)
@@ -1170,3 +1196,264 @@ def test_shutdown_scheduler_role_is_noop():
     # Scheduler role holds no store handle, so shutdown must be a safe no-op.
     assert connector.connector_worker is None
     connector.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("kv_role", "save_decode_cache"),
+    [("kv_both", False), ("kv_both", True), ("kv_consumer", True)],
+)
+@pytest.mark.parametrize("in_flight_tokens", [0, 12])
+def test_finish_during_prefill_saves_only_completed_kv(
+    kv_role, save_decode_cache, in_flight_tokens
+):
+    """Known prompt hashes must not publish uncomputed or in-flight KV."""
+    config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role=kv_role,
+        kv_connector_extra_config={"save_decode_cache": save_decode_cache},
+    )
+    spec = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
+    spec.method = "mtp"
+    config.speculative_config = spec
+    with patch.object(scheduler, "LookupKeyClient"):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+        )
+    connector.set_num_hash_lookahead_tokens(1)
+    pool = BlockPool(num_gpu_blocks=16, enable_caching=True, hash_block_size=16)
+    connector.bind_gpu_block_pool(pool)
+    owned = pool.get_new_blocks(2)
+    block_ids = ([b.block_id for b in owned],)
+    init_none_hash(sha256)
+    request = Request(
+        "abort-prefill",
+        list(range(64)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(16, sha256, 1),
+    )
+    connector.update_state_after_alloc(request, KVCacheBlocks((owned,)), 0)
+    out = SchedulerOutput.make_empty()
+    out.scheduled_new_reqs = [NewRequestData.from_request(request, block_ids)]
+    out.num_scheduled_tokens = {request.request_id: 20}
+    out.total_num_scheduled_tokens = 20
+    out.kv_connector_block_state = KVConnectorBlockState(
+        {request.request_id}, lambda _: block_ids, {}
+    )
+    jobs = connector.build_connector_meta(out).requests
+    request.num_computed_tokens = 20
+
+    if in_flight_tokens:
+        out = SchedulerOutput.make_empty()
+        cached = out.scheduled_cached_reqs
+        cached.req_ids = [request.request_id]
+        cached.new_block_ids = [None]
+        cached.num_computed_tokens = [20]
+        cached.num_output_tokens = [0]
+        out.num_scheduled_tokens = {request.request_id: in_flight_tokens}
+        out.total_num_scheduled_tokens = in_flight_tokens
+        out.kv_connector_block_state = KVConnectorBlockState(
+            {request.request_id}, lambda _: block_ids, {}
+        )
+        jobs.extend(connector.build_connector_meta(out).requests)
+        request.num_computed_tokens += in_flight_tokens
+        request.num_in_flight_tokens = in_flight_tokens
+
+    request.status = RequestStatus.FINISHED_ABORTED
+    connector.request_finished_all_groups(request, block_ids)
+    pool.free_blocks(owned)
+    out = SchedulerOutput.make_empty()
+    out.finished_req_ids = {request.request_id}
+    final = connector.build_connector_meta(out)
+    # The producer already scheduled this prefix; the consumer has not.
+    assert [m.token_len_chunk for m in final.requests] == (
+        [16] if kv_role == "kv_consumer" else []
+    )
+    assert all(m.completed_token_len == 20 for m in final.requests)
+    jobs.extend(final.requests)
+    connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                completed_saves={m.store_job_id: 1 for m in jobs},
+            ),
+        )
+    )
+    assert [b.ref_cnt for b in owned] == [0, 0]
+    assert connector.build_connector_meta(SchedulerOutput.make_empty()).requests == []
+
+
+@pytest.mark.parametrize("tail_first", [False, True])
+@pytest.mark.parametrize("tail_completes_first", [False, True])
+@pytest.mark.parametrize("stale_in_flight_tokens", [0, 2])
+def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
+    tail_first, tail_completes_first, stale_in_flight_tokens
+):
+    """One request can finish with both a checkpoint and newly hashed KV."""
+    config = _make_vllm_config()
+    config.cache_config.prefix_match_unit = 4
+    spec = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
+    spec.method = "mtp"
+    config.speculative_config = spec
+    kv_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        cache_hit_alignment_tokens=4,
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attn"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((1,),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    with patch.object(scheduler, "LookupKeyClient"):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            config,
+            KVConnectorRole.SCHEDULER,
+            kv_config,
+        )
+    connector.set_num_hash_lookahead_tokens(1)
+    pool = BlockPool(num_gpu_blocks=32, enable_caching=True, hash_block_size=4)
+    connector.bind_gpu_block_pool(pool)
+    owned = pool.get_new_blocks(3)
+    block_ids = ([b.block_id for b in owned[:2]], [owned[2].block_id])
+    init_none_hash(sha256)
+    request = Request(
+        "finish",
+        list(range(32)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(4, sha256, 1),
+        resumable=bool(stale_in_flight_tokens),
+    )
+    connector.update_state_after_alloc(
+        request,
+        KVCacheBlocks((owned[:2], owned[2:])),
+        0,
+    )
+    out = SchedulerOutput.make_empty()
+    out.scheduled_new_reqs = [NewRequestData.from_request(request, block_ids)]
+    out.num_scheduled_tokens = {request.request_id: 32}
+    out.total_num_scheduled_tokens = 32
+    out.kv_connector_block_state = KVConnectorBlockState(
+        {request.request_id},
+        lambda _: block_ids,
+        {},
+    )
+    initial = connector.build_connector_meta(out)
+    assert len(initial.requests) == 1
+    assert initial.requests[0].token_len_chunk == 16
+    connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                completed_saves={initial.requests[0].store_job_id: 1},
+            ),
+        )
+    )
+    request.num_computed_tokens = 32
+    request.append_output_token_ids(32)
+    assert len(request.block_hashes) == 8
+    # A streaming turn has already rolled back its stale in-flight work.
+    request.num_in_flight_tokens = stale_in_flight_tokens
+    request.num_stale_output_tokens = stale_in_flight_tokens
+
+    def finish_tail():
+        connector.register_finished_partial_tail(
+            request,
+            block_ids,
+            [(1, owned[2].block_id, 28)],
+        )
+
+    if tail_first:
+        finish_tail()
+    connector.request_finished_all_groups(request, block_ids)
+    if not tail_first:
+        finish_tail()
+    pool.free_blocks(owned)
+    assert [b.ref_cnt for b in owned] == [1, 2, 1]
+
+    out = SchedulerOutput.make_empty()
+    out.finished_req_ids = {request.request_id}
+    final = connector.build_connector_meta(out)
+    assert sorted(m.token_len_chunk for m in final.requests) == [0, 32]
+    assert len({m.store_job_id for m in final.requests}) == 2
+    tail_job = next(m for m in final.requests if m.token_len_chunk == 0)
+    full_job = next(m for m in final.requests if m.token_len_chunk == 32)
+    first_job, second_job = (
+        (tail_job, full_job) if tail_completes_first else (full_job, tail_job)
+    )
+    connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                completed_saves={first_job.store_job_id: 1},
+            ),
+        )
+    )
+    assert [b.ref_cnt for b in owned] == (
+        [1, 1, 0] if tail_completes_first else [0, 1, 1]
+    )
+    connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                completed_saves={second_job.store_job_id: 1},
+            ),
+        )
+    )
+    assert [b.ref_cnt for b in owned] == [0, 0, 0]
+    assert connector.build_connector_meta(SchedulerOutput.make_empty()).requests == []
+
+
+@pytest.mark.parametrize("num_lookahead", [1, 2, 5])
+@pytest.mark.parametrize("all_supported", [False, True])
+def test_store_uses_multi_connectors_final_hash_protocol(num_lookahead, all_supported):
+    config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        disable_hybrid_kv_cache_manager=True,
+        hf_overrides={"num_nextn_predict_layers": num_lookahead},
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"},
+                {
+                    "kv_connector": "MooncakeStoreConnector"
+                    if all_supported
+                    else "ExampleConnector",
+                    "kv_role": "kv_both",
+                },
+            ]
+        },
+    )
+    spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
+    spec.method = "mtp"
+    spec.draft_model_config = config.model_config
+    config.speculative_config = spec
+    kv_config = _make_kv_cache_config()
+    with patch.object(scheduler, "LookupKeyClient"):
+        connector = KVConnectorFactory.create_connector(
+            config,
+            KVConnectorRole.SCHEDULER,
+            kv_config,
+        )
+    store_connector = connector.sub_connectors[0]
+    coord = store_connector.connector_scheduler._store_coord
+    assert coord.num_hash_lookahead_tokens == (num_lookahead if all_supported else 0)
+    hashes = [bytes([i]) for i in range(4)]
+    cached = ExternalCachedBlockPool(16, {(0, h) for h in hashes})
+    _, hit = coord.find_longest_cache_hit(hashes, 64, cached)
+    assert hit == (64 if all_supported else 48)
+    # Even with the legacy protocol, applying the load mask must not drop again.
+    assert coord.load_mask(hashes, hit) == ([True] * (hit // 16),)

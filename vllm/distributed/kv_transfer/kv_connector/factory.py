@@ -73,9 +73,7 @@ class KVConnectorFactory:
         # - Should only be used inside the forward context & attention layer
         # We build separately to enforce strict separation
         connector = connector_cls(config, role, kv_cache_config)
-        connector.set_lookahead_block_hashes(
-            bool(config.get_num_hash_lookahead_tokens(connector))
-        )
+        connector.set_num_hash_lookahead_tokens(config.num_hash_lookahead_tokens)
         return connector
 
     @classmethod

@@ -16,7 +16,8 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
-from vllm.config import set_current_vllm_config
+from vllm import SamplingParams
+from vllm.config import SpeculativeConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
@@ -26,8 +27,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
+    NixlPushConnectorScheduler,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
+    NixlConnectorScheduler,
+)
+from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -35,6 +44,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     MambaSpec,
 )
+from vllm.v1.request import Request
 
 from .test_mooncake_connector import patch_worker_dependencies
 from .utils import create_request, create_vllm_config, maybe_update_block_size
@@ -156,7 +166,7 @@ def test_lookahead_hashing_still_truncates_remote_decode_prompt():
         KVConnectorRole.SCHEDULER,
         make_hybrid_gdn_kv_cache_config(vllm_config.cache_config.block_size),
     )
-    connector.set_lookahead_block_hashes(True)
+    connector.set_num_hash_lookahead_tokens(1)
     request = create_request(num_tokens=10, do_remote_decode=True)
     original_tokens = list(request.prompt_token_ids)
 
@@ -165,6 +175,75 @@ def test_lookahead_hashing_still_truncates_remote_decode_prompt():
     assert request.prompt_token_ids == original_tokens[:-1]
     assert request.num_prompt_tokens == len(original_tokens) - 1
     assert request.kv_transfer_params["_p_side_truncated"] is True
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("num_lookahead", [0, 1, 2, 5])
+@pytest.mark.parametrize("use_embeds", [False, True])
+@pytest.mark.parametrize(
+    "scheduler_cls, connector_name",
+    [
+        (MooncakeConnectorScheduler, "MooncakeConnector"),
+        (NixlConnectorScheduler, "NixlConnector"),
+        (NixlPushConnectorScheduler, "NixlPushConnector"),
+    ],
+)
+def test_lookahead_hashes_follow_truncated_prefill(
+    scheduler_cls, connector_name, num_lookahead, use_embeds
+):
+    """P-side hashes must describe the shortened prompt and actual sampled token."""
+    block_size = 16
+    config = create_vllm_config(
+        kv_connector=connector_name,
+        kv_role="kv_producer",
+        hf_overrides={"num_nextn_predict_layers": num_lookahead},
+    )
+    if num_lookahead:
+        spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
+        spec.method = "mtp"
+        spec.draft_model_config = config.model_config
+        config.speculative_config = spec
+    scheduler = scheduler_cls(
+        config, "test-engine", make_hybrid_gdn_kv_cache_config(block_size)
+    )
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(block_size, sha256, num_lookahead)
+    tokens = list(range(2 * block_size + num_lookahead))
+    request = Request(
+        request_id="prefill",
+        prompt_token_ids=None if use_embeds else tokens,
+        prompt_embeds=(
+            torch.arange(len(tokens) * 4).reshape(-1, 4).float() if use_embeds else None
+        ),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=hasher,
+    )
+    request.kv_transfer_params = {"do_remote_decode": True}
+    original_hashes = request.block_hashes.copy()
+    assert len(original_hashes) == 2
+
+    scheduler.on_new_request(request)
+
+    assert request.block_hashes == original_hashes[:1]
+    shortened_tokens = list(request.all_token_ids)
+    request.append_output_token_ids(999)
+    reference = Request(
+        request_id="reference",
+        prompt_token_ids=None if use_embeds else shortened_tokens,
+        prompt_embeds=request.prompt_embeds,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=hasher,
+    )
+    reference.append_output_token_ids(999)
+    assert request.block_hashes == reference.block_hashes
+    assert request.block_hashes != original_hashes
+    scheduler.on_new_request(request)
+    assert request.num_prompt_tokens == len(shortened_tokens)
+    assert request.block_hashes == reference.block_hashes
+    if isinstance(scheduler, (NixlConnectorScheduler, NixlPushConnectorScheduler)):
+        scheduler.shutdown()
 
 
 def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):

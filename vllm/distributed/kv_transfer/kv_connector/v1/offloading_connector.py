@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -70,14 +70,16 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler
 
-    @property
-    def supports_lookahead_block_hashes(self) -> bool:
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
         return True
 
-    def set_lookahead_block_hashes(self, enabled: bool) -> None:
-        super().set_lookahead_block_hashes(enabled)
+    def set_num_hash_lookahead_tokens(self, num_tokens: int) -> None:
+        super().set_num_hash_lookahead_tokens(num_tokens)
         if self.connector_scheduler is not None:
-            self.connector_scheduler.use_lookahead_block_hashes = enabled
+            self.connector_scheduler.use_lookahead_block_hashes = num_tokens > 0
 
     @property
     def requires_kv_delivery(self) -> bool:

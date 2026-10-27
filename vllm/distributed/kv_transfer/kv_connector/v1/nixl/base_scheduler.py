@@ -438,6 +438,10 @@ class NixlBaseConnectorScheduler:
             del request._all_token_ids[-backoff:]
             request.num_prompt_tokens -= backoff
             request.max_tokens = 1
+            # The removed tokens may be part of a block's lookahead hash.
+            request.block_hashes.clear()
+            request._prompt_embeds_per_block_hashes.clear()
+            request.update_block_hashes()
             params["_p_side_truncated"] = True
 
     def _build_save_meta(

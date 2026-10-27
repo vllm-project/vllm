@@ -332,9 +332,7 @@ class Scheduler(SchedulerInterface):
                     "acceptance rates."
                 )
 
-        self.num_hash_lookahead_tokens = vllm_config.get_num_hash_lookahead_tokens(
-            self.connector
-        )
+        self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         if self.num_hash_lookahead_tokens:
             # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
             self.use_eagle_block_drop = False

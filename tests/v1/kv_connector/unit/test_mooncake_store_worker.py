@@ -953,7 +953,6 @@ def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
         thread.coord,
         req,
         [db.block_size for db in thread.token_databases],
-        apply_eagle=True,
     )
     return req
 
@@ -970,6 +969,7 @@ def _make_partial_tail_send_thread(
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        num_hash_lookahead_tokens=0,
         use_eagle=False,
         eagle_proof_margin_by_group={},
     )
@@ -1431,6 +1431,7 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        num_hash_lookahead_tokens=0,
         use_eagle=False,
         eagle_proof_margin_by_group={},
     )
@@ -1487,6 +1488,7 @@ def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        num_hash_lookahead_tokens=0,
         use_eagle=True,
         eagle_proof_margin_by_group={0: 4},
     )
@@ -1638,9 +1640,7 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
 
     assert full_hashes == [b"a2".hex(), b"a3".hex()]
     assert masked_hashes == [b"a2".hex()]
-    coord.store_mask.assert_called_once_with(
-        64, 32, num_prompt_tokens=64, apply_eagle=True
-    )
+    coord.store_mask.assert_called_once_with(64, 32, num_prompt_tokens=64)
 
 
 def test_store_sending_thread_prepares_missing_chunks_once_per_group():
@@ -3716,7 +3716,6 @@ def _make_bare_worker(
     worker.kv_role = kv_role
     worker.can_put = kv_role in ("kv_producer", "kv_both") or save_decode_cache
     worker._capacity_only = False
-    worker.use_lookahead_block_hashes = False
     worker.block_size = block_size
     worker._is_hma_required = False
     worker.tp_rank = 0

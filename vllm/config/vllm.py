@@ -61,7 +61,6 @@ from .weight_transfer import WeightTransferConfig
 if TYPE_CHECKING:
     from transformers import PreTrainedConfig
 
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
     from vllm.sampling_params import BeamSearchParams, SamplingParams
     from vllm.v1.kv_cache_interface import KVCacheGroupSpec
@@ -678,12 +677,6 @@ class VllmConfig:
     @property
     def num_hash_lookahead_tokens(self) -> int:
         """Tokens after each block that its hash covers; 0 keeps the legacy hashes."""
-        return self.get_num_hash_lookahead_tokens()
-
-    def get_num_hash_lookahead_tokens(
-        self, kv_connector: "KVConnectorBase_V1 | None" = None
-    ) -> int:
-        """Resolve the hash protocol after the connector is constructed."""
         speculative_config = self.speculative_config
         if (
             speculative_config is None
@@ -691,14 +684,14 @@ class VllmConfig:
             or speculative_config.disable_lookahead_block_hashes
         ):
             return 0
-        if self.kv_transfer_config is not None:
-            # Connector support is validated for single-token lookahead only.
-            if (
-                kv_connector is None
-                or not kv_connector.supports_lookahead_block_hashes
-                or self.num_prefill_lookahead_tokens > 1
-                or self.attention_config.hisparse_config is not None
-            ):
+        kv_transfer_config = self.kv_transfer_config
+        if kv_transfer_config is not None:
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+            if not connector_cls.supports_lookahead_block_hashes(kv_transfer_config):
                 return 0
         elif not self.cache_config.enable_prefix_caching:
             return 0

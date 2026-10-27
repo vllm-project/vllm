@@ -127,8 +127,10 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
-    @property
-    def supports_lookahead_block_hashes(self) -> bool:
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
         return True
 
     @classmethod
@@ -202,12 +204,17 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
 
-    def set_lookahead_block_hashes(self, enabled: bool) -> None:
-        super().set_lookahead_block_hashes(enabled)
+    def set_num_hash_lookahead_tokens(self, num_tokens: int) -> None:
+        super().set_num_hash_lookahead_tokens(num_tokens)
+        if self._capacity_only:
+            return
         if self.connector_scheduler is not None:
-            self.connector_scheduler.use_lookahead_block_hashes = enabled
-        if self.connector_worker is not None:
-            self.connector_worker.use_lookahead_block_hashes = enabled
+            coord = self.connector_scheduler._store_coord
+        else:
+            assert self.connector_worker is not None
+            coord = self.connector_worker.coord
+        if coord is not None:
+            coord.num_hash_lookahead_tokens = num_tokens
 
     def shutdown(self):
         """Release connector resources on teardown.

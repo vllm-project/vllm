@@ -716,7 +716,8 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
     assert hit == 64
 
 
-def test_lookahead_hashes_skip_legacy_eagle_drop():
+@pytest.mark.parametrize("num_lookahead", [1, 2, 5])
+def test_lookahead_hashes_skip_legacy_eagle_drop(num_lookahead):
     groups = [
         KVCacheGroupSpec(
             ["mtp"],
@@ -732,15 +733,14 @@ def test_lookahead_hashes_skip_legacy_eagle_drop():
     )
 
     _, legacy_hit = coord.find_longest_cache_hit(hashes, 64, cached)
-    _, lookahead_hit = coord.find_longest_cache_hit(
-        hashes,
-        64,
-        cached,
-        apply_eagle=False,
-    )
+    coord.num_hash_lookahead_tokens = num_lookahead
+    _, lookahead_hit = coord.find_longest_cache_hit(hashes, 64, cached)
+    coord.num_hash_lookahead_tokens = 0
+    _, restored_hit = coord.find_longest_cache_hit(hashes, 64, cached)
 
     assert legacy_hit == 48
     assert lookahead_hit == 64
+    assert restored_hit == legacy_hit
 
 
 def test_lookahead_lookup_and_store_masks_match():
@@ -754,10 +754,18 @@ def test_lookahead_lookup_and_store_masks_match():
     ]
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
 
-    store_masks = coord.store_mask(128, apply_eagle=False)
-    lookup_masks = coord.lookup_mask(128, apply_eagle=False)
+    coord.num_hash_lookahead_tokens = 2
+    store_masks = coord.store_mask(128)
+    lookup_masks = coord.lookup_mask(128)
 
-    assert lookup_masks == store_masks
+    assert (
+        lookup_masks
+        == store_masks
+        == (
+            None,
+            [False, False, True, True] * 2,
+        )
+    )
 
 
 def test_dsv4_five_group_eagle_store_lookup_round_trip():

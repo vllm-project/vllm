@@ -24,7 +24,8 @@ from tests.v1.kv_connector.unit.utils import (
     create_scheduler,
     create_vllm_config,
 )
-from vllm.config import KVEventsConfig, KVTransferConfig
+from vllm import SamplingParams
+from vllm.config import KVEventsConfig, KVTransferConfig, SpeculativeConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
     scheduler as scheduler_module,
@@ -49,12 +50,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
+from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
     KVCacheBlockCopy,
+    get_request_block_hasher,
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.output import (
@@ -96,7 +99,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 
 def _as_mock(value: object) -> MagicMock:
@@ -4448,7 +4451,7 @@ class TestEagle:
             async_scheduling=False,
             kv_cache_groups=groups,
         )
-        runner.scheduler_connector.set_lookahead_block_hashes(True)
+        runner.scheduler_connector.set_num_hash_lookahead_tokens(1)
         runner.manager.lookup.return_value = LookupResult.HIT
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -4456,6 +4459,39 @@ class TestEagle:
         )
 
         assert sched._lookup(req_status) == 12
+
+    @pytest.mark.parametrize("num_lookahead", [1, 2, 5])
+    @pytest.mark.parametrize("num_tokens", [1, 16, 17, 20])
+    @pytest.mark.parametrize("blocks_per_chunk", [1, 2])
+    def test_lookahead_lookup_waits_for_full_window(
+        self, request_runner, num_lookahead, num_tokens, blocks_per_chunk
+    ):
+        """Only chunks whose entire lookahead window is known can hit."""
+        block_size = 4
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            blocks_per_chunk=blocks_per_chunk,
+        )
+        connector = runner.scheduler_connector
+        connector.set_num_hash_lookahead_tokens(num_lookahead)
+        request = Request(
+            request_id="lookahead",
+            prompt_token_ids=list(range(num_tokens)),
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(block_size, sha256, num_lookahead),
+        )
+        connector.on_new_request(request)
+        runner.manager.lookup.return_value = LookupResult.HIT
+        chunk_size = block_size * blocks_per_chunk
+        expected = max(0, num_tokens - num_lookahead) // chunk_size * chunk_size
+
+        assert connector.get_num_new_matched_tokens(request, 0) == (
+            expected,
+            bool(expected),
+        )
 
     def test_full_attn_lookup_single_block_returns_zero(self, request_runner):
         """Full-attn eagle group with 1 block hit → pop to 0 → returns 0."""
@@ -4947,22 +4983,30 @@ class TestEagle:
         runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=((0, 0),))
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
+    @pytest.mark.parametrize("num_lookahead", [1, 2, 5])
     def test_lookahead_store_includes_block_hashed_by_sampled_token(
-        self, request_runner, async_scheduling: bool
+        self, request_runner, async_scheduling: bool, num_lookahead: int
     ):
-        """The last prompt block is hashed only once the first token is
-        sampled; it must still be stored, leaving no hole."""
-        block_size = 4
+        """Final stores include newly proven chunks and exclude unproven tails."""
+        block_size = 8
         blocks_per_chunk = 2
+        spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
+        spec.method = "mtp"
+        spec.draft_model_config = create_vllm_config(
+            hf_overrides={"num_nextn_predict_layers": num_lookahead}
+        ).model_config
         runner = request_runner(
             block_size=block_size,
             num_gpu_blocks=100,
             async_scheduling=async_scheduling,
             blocks_per_chunk=blocks_per_chunk,
+            speculative_config=spec,
         )
         connector = runner.scheduler_connector
-        assert connector.supports_lookahead_block_hashes
-        connector.set_lookahead_block_hashes(True)
+        assert connector.supports_lookahead_block_hashes(
+            runner.scheduler.vllm_config.kv_transfer_config
+        )
+        assert runner.scheduler.num_hash_lookahead_tokens == num_lookahead
 
         runner.new_request(token_ids=[0] * block_size * 4)
         runner.manager.prepare_store.side_effect = lambda keys, req_context: (
@@ -4971,7 +5015,14 @@ class TestEagle:
 
         runner.run(
             decoded_tokens=[EOS_TOKEN_ID],
-            expected_stored=((0, 0), (0, 1), (0, 2), (0, 3)),
+            expected_stored=tuple(
+                (0, i)
+                for i in range(
+                    (block_size * 4 + 1 - num_lookahead)
+                    // (block_size * blocks_per_chunk)
+                    * blocks_per_chunk
+                )
+            ),
         )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])

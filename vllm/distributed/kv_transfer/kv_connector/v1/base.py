@@ -115,12 +115,7 @@ class SupportsHMA(ABC):
 
         NOTE(Kuntai): This function is only supported by connectors that support HMA.
 
-        ``block_ids`` contains every resident block covering the request's
-        computed prefix, including a partial physical tail. Content-addressed
-        connectors must store only blocks covered by ``request.block_hashes``;
-        lookahead hashes lag the computed tokens by up to one block.
-
-        The connector may assume responsibility for freeing the blocks
+        The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:
@@ -199,14 +194,16 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
-    @property
-    def supports_lookahead_block_hashes(self) -> bool:
-        """Whether the connector stays correct with lookahead block hashes.
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether the connector supports lookahead block hashes.
 
-        True when it either transfers a request's own blocks (P/D) or keys
-        stored KV by ``request.block_hashes``, so a hit carries the same
-        lookahead-token proof as a local prefix-cache hit. Engines sharing a
-        content-addressed cache must make the same choice.
+        A capable connector transfers request-local KV or limits cache stores
+        and lookups to blocks covered by ``request.block_hashes``. These hashes
+        include the required lookahead tokens, so no extra EAGLE trailing-block
+        drop is needed. Defaults to False.
         """
         return False
 
@@ -246,11 +243,10 @@ class KVConnectorBase_V1(ABC):
         self._kv_cache_config = kv_cache_config
         self._kv_cache_manager: KVCacheManager | None = None
         self._role = role
-        self.use_lookahead_block_hashes = False
+        self.num_hash_lookahead_tokens = 0
 
-    def set_lookahead_block_hashes(self, enabled: bool) -> None:
-        """Configure the engine-wide prefix-cache hash protocol."""
-        self.use_lookahead_block_hashes = enabled
+    def set_num_hash_lookahead_tokens(self, num_tokens: int) -> None:
+        self.num_hash_lookahead_tokens = num_tokens
 
     @property
     def role(self) -> KVConnectorRole:
@@ -656,11 +652,6 @@ class KVConnectorBase_V1(ABC):
     ) -> tuple[bool, dict[str, Any] | None]:
         """Called exactly once when a request has finished, before its blocks are
         freed.
-
-        ``block_ids`` contains every resident block covering the request's
-        computed prefix, including a partial physical tail. Content-addressed
-        connectors must store only blocks covered by ``request.block_hashes``;
-        lookahead hashes lag the computed tokens by up to one block.
 
         The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.

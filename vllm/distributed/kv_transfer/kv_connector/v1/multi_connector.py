@@ -216,16 +216,28 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.supports_divergent_local_hybrid_hits for c in self._connectors
         )
 
-    @property
-    def supports_lookahead_block_hashes(self) -> bool:
-        return bool(self._connectors) and all(
-            c.supports_lookahead_block_hashes for c in self._connectors
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
         )
+        if not connectors_config:
+            return False
+        for conn_config in connectors_config:
+            child_config = KVTransferConfig(
+                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+            )
+            connector_cls = KVConnectorFactory.get_connector_class(child_config)
+            if not connector_cls.supports_lookahead_block_hashes(child_config):
+                return False
+        return True
 
-    def set_lookahead_block_hashes(self, enabled: bool) -> None:
-        super().set_lookahead_block_hashes(enabled)
+    def set_num_hash_lookahead_tokens(self, num_tokens: int) -> None:
+        super().set_num_hash_lookahead_tokens(num_tokens)
         for connector in self._connectors:
-            connector.set_lookahead_block_hashes(enabled)
+            connector.set_num_hash_lookahead_tokens(num_tokens)
 
     @property
     def requires_kv_delivery(self) -> bool:

@@ -6,7 +6,6 @@ from dataclasses import dataclass, replace
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -104,14 +103,11 @@ class MambaPrefillCheckpointBuilder:
     def __init__(self, vllm_config: VllmConfig, kv_cache_spec: MambaSpec) -> None:
         self.vllm_config = vllm_config
         self.kv_cache_spec = kv_cache_spec
-        self.num_hash_lookahead_tokens = vllm_config.get_num_hash_lookahead_tokens(
-            get_kv_transfer_group() if has_kv_transfer_group() else None
-        )
         speculative_config = vllm_config.speculative_config
         self.drop_eagle_block = (
             speculative_config is not None
             and speculative_config.use_eagle_block_drop()
-            and not self.num_hash_lookahead_tokens
+            and not vllm_config.num_hash_lookahead_tokens
         )
 
     def build(
@@ -142,7 +138,7 @@ class MambaPrefillCheckpointBuilder:
             checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
             drop_eagle_block=self.drop_eagle_block,
             cache_hit_alignment_tokens=cache_hit_alignment_tokens,
-            num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+            num_hash_lookahead_tokens=self.vllm_config.num_hash_lookahead_tokens,
         )
         if not any(checkpoint_offsets):
             return None
