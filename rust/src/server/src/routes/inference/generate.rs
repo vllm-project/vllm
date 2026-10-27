@@ -322,7 +322,10 @@ fn collect_generate(
     };
     let prompt_logprobs = if include_prompt_logprobs {
         match collected.prompt_logprobs.as_ref() {
-            Some(prompt_logprobs) => Some(raw_prompt_logprobs_to_maps(prompt_logprobs)),
+            Some(prompt_logprobs) => Some(raw_prompt_logprobs_to_maps(
+                prompt_logprobs,
+                collected.prompt_token_ids.len(),
+            )),
             // A single-token prompt has no scored positions; same mapping
             // as /v1/completions.
             None if collected.prompt_token_ids.len() == 1 => Some(vec![None]),
@@ -418,10 +421,14 @@ fn raw_logprobs_to_generate(logprobs: &Logprobs) -> Result<GenerateLogProbs, Api
     })
 }
 
+/// Like Python, positions with no scored row (the first token and those up to
+/// `prompt_logprob_start`) are `None`, so the list spans the whole prompt.
 fn raw_prompt_logprobs_to_maps(
     prompt_logprobs: &Logprobs,
+    prompt_len: usize,
 ) -> Vec<Option<HashMap<u32, GenerateLogprob>>> {
-    std::iter::once(None)
+    let num_unscored = prompt_len.saturating_sub(prompt_logprobs.positions.len()).max(1);
+    std::iter::repeat_n(None, num_unscored)
         .chain(
             prompt_logprobs
                 .positions
@@ -1233,6 +1240,20 @@ mod tests {
             None,
         )
         .expect_err("multi-token prompt without payload is an engine failure");
+    }
+
+    #[test]
+    fn raw_prompt_logprobs_pad_positions_before_prompt_logprob_start() {
+        // A 5-token prompt with prompt_logprob_start=1 scores tokens 2..=4.
+        let prompt_logprobs = Logprobs {
+            positions: [33, 44, 55].map(|id| position(&[(id, -1.0, 1)])).to_vec(),
+        };
+        let maps = raw_prompt_logprobs_to_maps(&prompt_logprobs, 5);
+        assert_eq!(maps.len(), 5);
+        assert!(maps[..2].iter().all(Option::is_none));
+        for (map, id) in maps[2..].iter().zip([33, 44, 55]) {
+            assert!(map.as_ref().unwrap().contains_key(&id));
+        }
     }
 
     #[tokio::test]

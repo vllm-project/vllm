@@ -160,6 +160,15 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+            if (
+                params.prompt_logprob_start is not None
+                and not self.vllm_config.use_v2_model_runner
+            ):
+                raise VLLMValidationError(
+                    "prompt_logprob_start requires the V2 model runner "
+                    "(VLLM_USE_V2_MODEL_RUNNER=1).",
+                    parameter="prompt_logprob_start",
+                )
             if params.prompt_logprob_token_ids is not None:
                 if not self.vllm_config.use_v2_model_runner:
                     raise VLLMValidationError(
@@ -461,9 +470,16 @@ class InputProcessor:
                     parameter="routed_experts_prompt_start",
                     value=sampling_params.routed_experts_prompt_start,
                 )
+            start = sampling_params.prompt_logprob_start or 0
+            if start and start >= prompt_len - 1:
+                raise VLLMValidationError(
+                    f"prompt_logprob_start must be less than prompt_len - 1 "
+                    f"({prompt_len - 1}) so at least one prompt row is scored.",
+                    parameter="prompt_logprob_start",
+                    value=start,
+                )
             rows = sampling_params.prompt_logprob_token_ids
             if rows is not None:
-                start = sampling_params.prompt_logprob_start or 0
                 num_rows = max(prompt_len - 1 - start, 0)
                 if len(rows) != num_rows:
                     raise VLLMValidationError(
