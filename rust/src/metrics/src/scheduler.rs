@@ -91,6 +91,15 @@ pub struct WaitingReasonLabels {
     pub reason: &'static str,
 }
 
+/// Labels for `vllm:engine_sleep_state`: one series per engine and state,
+/// `awake`, `weights_offloaded` (sleep level 1) or `discard_all` (level 2).
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct EngineSleepStateLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub sleep_state: &'static str,
+}
+
 /// Labels for per-operation Mooncake store connector telemetry. `operation`
 /// and `status` are dynamic (not known ahead of time), unlike the other
 /// fixed-label families in this module.
@@ -218,6 +227,10 @@ pub struct SchedulerMetrics {
     pub scheduler_waiting_by_reason: Family<WaitingReasonLabels, U64Gauge>,
     pub kv_cache_usage: Family<EngineLabels, F64Gauge>,
 
+    /// `vllm:engine_sleep_state`, set by the engine client's sleep and wake
+    /// calls rather than from `SchedulerStats`.
+    pub engine_sleep_state: Family<EngineSleepStateLabels, U64Gauge>,
+
     /// `vllm:lora_requests_info`. Value is the emit-time unix timestamp in
     /// seconds.
     pub lora_info: Family<LoraInfoLabels, F64Gauge>,
@@ -307,6 +320,16 @@ impl SchedulerMetrics {
             "vllm:kv_cache_usage_perc",
             "KV-cache usage. 1 means 100 percent usage",
             kv_cache_usage.clone(),
+        );
+
+        let engine_sleep_state = Family::default();
+        registry.register(
+            "vllm:engine_sleep_state",
+            "Engine sleep state; awake = 0 means engine is sleeping; \
+             awake = 1 means engine is awake; \
+             weights_offloaded = 1 means sleep level 1; \
+             discard_all = 1 means sleep level 2.",
+            engine_sleep_state.clone(),
         );
 
         let lora_info = Family::default();
@@ -583,6 +606,7 @@ impl SchedulerMetrics {
             scheduler_waiting,
             scheduler_waiting_by_reason,
             kv_cache_usage,
+            engine_sleep_state,
             lora_info,
             prefix_cache_queries,
             prefix_cache_hits,
