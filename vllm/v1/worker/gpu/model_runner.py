@@ -143,8 +143,7 @@ from vllm.v1.worker.gpu.lora_utils import (
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
-from vllm.v1.worker.gpu.model_states import init_model_state, resolve_model_state_cls
-from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
@@ -440,11 +439,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         with pool:
             self.model_state = init_model_state(
-                self.vllm_config,
-                self.model,
-                self.encoder_cache,
-                self.device,
-                model_state_cls=self.model_state_cls,
+                self.vllm_config, self.model, self.encoder_cache, self.device
             )
 
         self.decode_query_len = (
@@ -509,13 +504,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "custom_logits_processors": custom_logits_processors,
             }
             if self.vllm_config.watermark_config is None:
-                self.sampler = self.sampler_cls(**sampler_kwargs)
+                self.sampler = Sampler(**sampler_kwargs)
             else:
                 wm_config = self.vllm_config.watermark_config
                 watermarker = create_watermarker(wm_config)
                 if self.speculative_config is not None:
                     watermarker = create_speculative_target_watermarker(watermarker)
-                self.sampler = self.watermark_sampler_cls(
+                self.sampler = GPUWatermarkSampler(
                     watermarker,
                     deduplicate_contexts=wm_config.deduplicate_contexts,
                     deduplicate_contexts_max_history=(
@@ -540,12 +535,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.vllm_config.watermark_config
                     ),
                 )
-            self.prompt_logprobs_worker = self.prompt_logprobs_worker_cls(
+            self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
                 logprobs_mode=self.model_config.logprobs_mode,
             )
-            self.structured_outputs_worker = self.structured_outputs_worker_cls(
+            self.structured_outputs_worker = StructuredOutputsWorker(
                 max_num_logits=self.max_num_reqs * self.decode_query_len,
                 vocab_size=self.vocab_size,
                 device=self.device,
@@ -735,7 +730,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_admitted_drafts_to_host=self.batch_sharder is not None,
         )
 
-        self.block_tables = self.block_tables_cls(
+        self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
@@ -848,7 +843,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
-        self.kv_block_zeroer = self.kv_block_zeroer_cls(
+        self.kv_block_zeroer = KVBlockZeroer(
             self.device,
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
             kernel_block_sizes=self.kernel_block_sizes,
@@ -2499,34 +2494,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @property
     def pcp_manager_cls(self) -> type[pcp.PCPManager]:
         return pcp.PCPManager
-
-    @property
-    def block_tables_cls(self) -> type[BlockTables]:
-        return BlockTables
-
-    @property
-    def sampler_cls(self) -> type[Sampler]:
-        return Sampler
-
-    @property
-    def prompt_logprobs_worker_cls(self) -> type[PromptLogprobsWorker]:
-        return PromptLogprobsWorker
-
-    @property
-    def watermark_sampler_cls(self) -> type[GPUWatermarkSampler]:
-        return GPUWatermarkSampler
-
-    @property
-    def structured_outputs_worker_cls(self) -> type[StructuredOutputsWorker]:
-        return StructuredOutputsWorker
-
-    @property
-    def model_state_cls(self) -> type[ModelState]:
-        return resolve_model_state_cls(self.vllm_config, self.model)
-
-    @property
-    def kv_block_zeroer_cls(self) -> type[KVBlockZeroer]:
-        return KVBlockZeroer
 
 
 class ExecuteModelState(NamedTuple):

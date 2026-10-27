@@ -347,27 +347,6 @@ class MambaHybridModelState(DefaultModelState):
             )
         return attn_metadata
 
-    def _update_num_accepted_tokens(
-        self,
-        idx_mapping: torch.Tensor,
-        num_sampled: torch.Tensor | int,
-    ) -> None:
-        num_reqs = idx_mapping.shape[0]
-        if not isinstance(num_sampled, int):
-            # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
-            # kernel skips them rather than scattering with a host-side gather.
-            _scatter_num_accepted_kernel[(num_reqs,)](
-                idx_mapping,
-                num_sampled,
-                self.num_accepted_tokens_gpu,
-            )
-        else:
-            _fill_num_accepted_kernel[(num_reqs,)](
-                idx_mapping,
-                self.num_accepted_tokens_gpu,
-                max(num_sampled, 1),
-            )
-
     def postprocess_state(
         self,
         idx_mapping: torch.Tensor,
@@ -378,7 +357,21 @@ class MambaHybridModelState(DefaultModelState):
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
         num_reqs = idx_mapping.shape[0]
         if num_reqs:
-            self._update_num_accepted_tokens(idx_mapping, num_sampled)
+            if not isinstance(num_sampled, int):
+                # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
+                # kernel skips them rather than scattering with a host-side gather.
+                _scatter_num_accepted_kernel[(num_reqs,)](
+                    idx_mapping,
+                    num_sampled,
+                    self.num_accepted_tokens_gpu,
+                )
+            else:
+                # Fill with single value.
+                _fill_num_accepted_kernel[(num_reqs,)](
+                    idx_mapping,
+                    self.num_accepted_tokens_gpu,
+                    max(num_sampled, 1),
+                )
 
         if self.recoverssm is not None:
             self.recoverssm.commit_step(

@@ -18,8 +18,6 @@ logger = init_logger(__name__)
 
 
 class GPUWatermarkSampler(Sampler):
-    random_sampler_cls = RandomSampler
-
     def __init__(
         self,
         watermarker: Watermarker,
@@ -99,7 +97,7 @@ class GPUWatermarkSampler(Sampler):
                 watermarking &= ~repeated_contexts
             skip_mask = ~watermarking
 
-        random_sampler = self.random_sampler_cls(
+        random_sampler = RandomSampler(
             expanded_idx_mapping=expanded_idx_mapping,
             temperatures=self.sampling_states.temperature.gpu,
             seeds=self.sampling_states.seeds.gpu,
