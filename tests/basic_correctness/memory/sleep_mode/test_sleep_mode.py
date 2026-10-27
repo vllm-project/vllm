@@ -80,15 +80,31 @@ def test_end_to_end(model: str):
     assert output[0].outputs[0].text == output3[0].outputs[0].text
 
 
+def _model_state(worker) -> dict[str, list]:
+    state = vars(worker.model_runner.model_state)
+    return {k: v.tolist() for k, v in state.items() if isinstance(v, torch.Tensor)}
+
+
 @create_new_process_for_each_test()
-def test_deep_sleep(gpu_memory_cleared):
-    model = "hmellor/tiny-random-LlamaForCausalLM"
+@pytest.mark.parametrize(
+    "model",
+    [
+        "hmellor/tiny-random-LlamaForCausalLM",
+        # Its MRV2 model state holds device tensors.
+        "yujiepan/mamba2-codestral-v0.1-tiny-random",
+    ],
+)
+def test_deep_sleep(model, monkeypatch, gpu_memory_cleared):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # Needed for collective_rpc to run a function on the worker.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     free, total = torch.accelerator.get_memory_info()
     used_bytes_baseline = total - free  # in case other process is running
-    llm = LLM(model, enable_sleep_mode=True)
+    llm = LLM(model, enable_sleep_mode=True, max_model_len=256)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
+    state = llm.collective_rpc(_model_state)
 
     # Put the engine to deep sleep
     llm.sleep(level=2)
@@ -105,6 +121,8 @@ def test_deep_sleep(gpu_memory_cleared):
 
     # now allocate kv cache and cuda graph memory
     llm.wake_up(tags=["kv_cache"])
+    # Sleep must not change any model state, not even values read only later.
+    assert llm.collective_rpc(_model_state) == state
     output2 = llm.generate(prompt, sampling_params)
 
     # cmp output
@@ -167,6 +185,10 @@ def _lora_logits_mapping_correct(model) -> bool:
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="LoRA state is kept in the runtime pool only on CUDA/ROCm",
+)
 def test_deep_sleep_lora_tp2(monkeypatch):
     """Level-2 sleep/wake/reload with enable_lora=True and TP=2.
 
