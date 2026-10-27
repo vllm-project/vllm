@@ -28,7 +28,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 # FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
 # 64-token chunk, so checkpoint offsets must be multiples of 64.
@@ -144,16 +144,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     def get_varlen_cudagraph_max_query_len(
         cls,
         vllm_config: VllmConfig,
-        kv_cache_spec: MambaSpec,
+        kv_cache_spec: KVCacheSpec,
     ) -> int | None:
         del kv_cache_spec
-        from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
-            MAX_FUSED_GDN_MTP_TOKENS,
-        )
-
-        return min(
-            max_decode_query_len(vllm_config), MAX_FUSED_GDN_MTP_TOKENS
-        )
+        return max_decode_query_len(vllm_config)
 
     reorder_batch_threshold: int = 1
 
@@ -422,10 +416,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_sequence_masks_cpu = ~spec_sequence_masks_cpu
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
-            if (
-                spec_query_lens_cpu.numel() > 0
-                and not self._adaptive_verification
-            ):
+            if spec_query_lens_cpu.numel() > 0 and not self._adaptive_verification:
                 first_spec_sequence_length = int(spec_query_lens_cpu[0])
                 if first_spec_sequence_length > 0 and bool(
                     torch.all(spec_query_lens_cpu == first_spec_sequence_length)
@@ -835,14 +826,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         num_accepted_tokens = torch.diff(m.query_start_loc)
-        if self._adaptive_verification:
-            # Replay may turn captured one-token requests into fewer multi-token requests,
-            # so adaptive verification must capture the speculative path.
-            num_decode_draft_tokens_cpu = torch.full_like(
-                torch.diff(m.query_start_loc_cpu), self.num_spec
-            )
-        else:
-            num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
+        num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
         assert num_decode_draft_tokens_cpu.shape == num_accepted_tokens.shape
 
         return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)

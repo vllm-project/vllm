@@ -108,9 +108,7 @@ def test_decode_scatter_cuda_graph_replays_with_smaller_live_budget():
     with torch.cuda.graph(graph):
         out = run_scatter()
 
-    decode_lens.copy_(
-        torch.tensor([3, 3, 0, 0], dtype=torch.int64, device="cuda")
-    )
+    decode_lens.copy_(torch.tensor([3, 3, 0, 0], dtype=torch.int64, device="cuda"))
     graph.replay()
 
     assert out.cpu().tolist() == [

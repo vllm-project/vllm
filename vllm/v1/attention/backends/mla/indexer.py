@@ -1025,7 +1025,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config
             else 0
         )
-        self.adaptive_verification = bool(
+        self.use_adaptive_verification = bool(
             self.vllm_config.speculative_config
             and self.vllm_config.speculative_config.enable_adaptive_verification
         )
@@ -1633,7 +1633,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             min_decode_len = int(decode_lens_cpu.min().item())
             write_is_uniform = min_decode_len == max_decode_len
             next_n = 1 + self.num_speculative_tokens
-            if self.adaptive_verification:
+            if self.use_adaptive_verification:
                 # Varlen FULL graphs are captured by distributing the graph's
                 # token bucket over as many one-token dummy requests as
                 # possible. Runtime adaptive budgets can put up to next_n

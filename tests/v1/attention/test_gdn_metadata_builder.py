@@ -305,10 +305,14 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
 
 
-def test_adaptive_verification_uses_device_query_boundaries():
+@pytest.mark.parametrize("num_speculative_tokens", [3, 15])
+def test_adaptive_verification_uses_device_query_boundaries(
+    num_speculative_tokens: int,
+):
     """GDN keeps the CPU batch plan while executing the GPU's ragged plan."""
     builder = _create_gdn_builder(
-        num_speculative_tokens=3, adaptive_verification=True
+        num_speculative_tokens=num_speculative_tokens,
+        adaptive_verification=True,
     )
     batch = BatchSpec(seq_lens=[80, 96, 112], query_lens=[3, 3, 3])
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
@@ -327,7 +331,7 @@ def test_adaptive_verification_uses_device_query_boundaries():
         builder.get_varlen_cudagraph_max_query_len(
             builder.vllm_config, builder.kv_cache_spec
         )
-        == 4
+        == num_speculative_tokens + 1
     )
     torch.testing.assert_close(meta.spec_query_start_loc, device_query_start_loc)
     assert meta.num_spec_decode_tokens == 9
