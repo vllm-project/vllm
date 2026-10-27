@@ -648,19 +648,13 @@ class Worker(WorkerBase):
             self.model_runner.reload_weights(*args, **kwargs)
 
     def _pp_send_copy_bytes(self) -> int:
-        """Upper bound on the copies of PP outputs that are in flight at once
-        (see `execute_model`): one per concurrent batch, each sized for the
-        largest batch. They outlive the forward pass, so the profile run
-        does not see them."""
-        if get_pp_group().is_last_rank:
-            return 0
-        tensors = self.model_runner.get_model().make_empty_intermediate_tensors(
-            batch_size=self.scheduler_config.max_num_batched_tokens,
-            dtype=self.model_config.dtype,
-            device=torch.device("meta"),
-        )
-        per_batch = sum(t.nbytes for t in tensors.tensors.values())
-        return self.vllm_config.max_concurrent_batches * per_batch
+        """Upper bound on the copies of PP outputs alive at once (see
+        `execute_model`), each sized like the profile run's: one per batch in
+        flight, plus the next copy, made before finished sends are released.
+        They outlive the forward pass, so the profile run does not see them."""
+        return (
+            self.vllm_config.max_concurrent_batches + 1
+        ) * self.model_runner.profile_pp_send_bytes
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
