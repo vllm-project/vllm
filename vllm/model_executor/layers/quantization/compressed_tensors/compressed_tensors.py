@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -136,12 +137,25 @@ class CompressedTensorsConfig(QuantizationConfig):
         compressed-tensors targets can be:
         - Layer paths: "layers.0.self_attn.q_proj" -> transformed
         - Module class names: "Linear" -> preserved (no ".")
-        - Regex patterns: "re:.*proj" -> preserved (starts with "re:")
+        - Regex patterns: "re:.*proj" -> preserved (starts with "re:"), except
+          a leading literal prefix the mapper renames, e.g. "re:model\\.visual\\..*"
+          -> "re:visual\\..*"
         """
 
+        def _map_regex(pattern: str) -> str:
+            prefixes = hf_to_vllm_mapper.orig_to_new_prefix
+            for old in sorted(prefixes, key=len, reverse=True):  # most specific first
+                if (new := prefixes[old]) is None:
+                    continue
+                for spelled in (re.escape(old), old):
+                    if pattern.startswith(spelled):
+                        return re.escape(new) + pattern[len(spelled) :]
+            return pattern
+
         def _map_target(target: str) -> str | None:
-            is_layer_path = "." in target and not target.startswith("re:")
-            if is_layer_path:
+            if target.startswith("re:"):
+                return "re:" + _map_regex(target[3:])
+            if "." in target:
                 return hf_to_vllm_mapper._map_name(target)
             return target
 
