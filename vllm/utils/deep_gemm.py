@@ -167,9 +167,11 @@ def is_deep_gemm_supported() -> bool:
     version = _nvcc_version(nvcc)
     if version is not None and version < (12, 9):
         logger.warning_once(
-            "DeepGEMM kernels are disabled: its JIT needs nvcc 12.9 or newer, "
-            "found %d.%d. Set CUDA_HOME to a newer CUDA toolkit to enable them.",
+            "DeepGEMM kernels are disabled: DeepGEMM's JIT needs nvcc 12.9 or "
+            "newer, found %d.%d at %s. Set CUDA_HOME to a newer CUDA toolkit "
+            "to enable them.",
             *version,
+            nvcc,
         )
         return False
     return True

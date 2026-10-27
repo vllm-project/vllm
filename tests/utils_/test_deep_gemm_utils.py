@@ -68,7 +68,6 @@ def test_deep_gemm_needs_nvcc_12_9(
 ):
     """DeepGEMM's JIT aborts the engine below nvcc 12.9."""
     nvcc = default_cuda_home / "bin" / "nvcc"
-    nvcc.parent.mkdir(parents=True)
+    _make_exe(nvcc)
     nvcc.write_text(f"#!/bin/sh\necho 'Cuda compilation tools, release {release}'\n")
-    nvcc.chmod(0o755)
     assert dg.is_deep_gemm_supported() is supported
