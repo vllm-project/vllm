@@ -393,6 +393,70 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
 
 
 @requires_qsa_kernels
+@pytest.mark.skipif(
+    not hasattr(torch.ops._rocm_C, "qsa_index_scores_rdna3"),
+    reason="Requires the gfx1100 QSA index kernel",
+)
+@pytest.mark.parametrize(
+    ("num_rows", "num_requests", "interleave"),
+    [
+        pytest.param(64, 1, False, id="one_request"),
+        pytest.param(300, 2, False, id="two_requests"),
+        pytest.param(96, 3, True, id="mixed_blocks"),
+    ],
+)
+def test_qsa_index_scores_hip_matches_triton(
+    monkeypatch: pytest.MonkeyPatch,
+    num_rows: int,
+    num_requests: int,
+    interleave: bool,
+) -> None:
+    """The gfx1100 WMMA scorer keeps the Triton kernel's logits contract."""
+    from vllm.platforms.rocm import on_gfx1100
+
+    if not on_gfx1100():
+        pytest.skip("gfx1100 only")
+    torch.manual_seed(3)
+    page_size, compress_ratio, pages = 1600, 4, 4
+    k_cache = (
+        torch.randn(num_requests * pages, page_size, 1, 128, device="cuda") * 0.3
+    ).half()
+    page_table = (
+        torch.randperm(num_requests * pages, device="cuda")
+        .view(num_requests, pages)
+        .to(torch.int32)
+    )
+    q = (torch.randn(num_rows, 4, 128, device="cuda") * 0.3).half()
+    rows = torch.arange(num_rows, device="cuda")
+    if interleave:
+        token_to_req = (rows % num_requests).to(torch.int32)
+    else:
+        token_to_req = (rows * num_requests // num_rows).to(torch.int32)
+    sequence_lengths = torch.tensor(
+        [pages * page_size * compress_ratio - 1 - 777 * i for i in range(num_requests)],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    query_positions = (
+        sequence_lengths[token_to_req.long()].long() - 1 - rows % 37 * 50
+    ).contiguous()
+    args = (q, k_cache, page_table, token_to_req, query_positions, sequence_lengths)
+
+    assert qsa_ops._use_hip_scores(*args)
+    logits, visible = qsa_ops.qsa_mqa_paged(*args, compress_ratio)
+    monkeypatch.setattr(qsa_ops, "_use_hip_scores", lambda *a: False)
+    ref_logits, ref_visible = qsa_ops.qsa_mqa_paged(*args, compress_ratio)
+
+    assert torch.equal(visible, ref_visible)
+    in_range = (
+        torch.arange(logits.shape[1], device="cuda")[None, :] < ref_visible[:, None]
+    )
+    torch.testing.assert_close(
+        logits[in_range], ref_logits[in_range], rtol=1e-4, atol=1e-5
+    )
+
+
+@requires_qsa_kernels
 @pytest.mark.parametrize(
     ("num_rows", "num_query_heads", "num_kv_heads", "page_size"),
     [
