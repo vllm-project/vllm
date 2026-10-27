@@ -12,8 +12,8 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode, get_current_vllm_config
-from vllm.forward_context import get_forward_context
+from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -1256,9 +1256,10 @@ def _max_decode_logits_rows(num_batched_tokens: int) -> int:
     smaller; the workspace is locked after profiling, so it must not be under-
     estimated.
     """
-    try:
-        vllm_config = get_current_vllm_config()
-    except Exception:
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None and is_forward_context_available():
+        vllm_config = get_forward_context().vllm_config
+    if vllm_config is None:
         return num_batched_tokens
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
     max_num_seqs = getattr(scheduler_config, "max_num_seqs", None)
