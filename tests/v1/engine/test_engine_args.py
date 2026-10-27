@@ -310,21 +310,29 @@ def test_extensible_kv_cache_rejects_manual_kv_cache_size(manual_size):
         engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
 
+def _fake_engine(executor, **attrs):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(model_executor=executor, **attrs)
+
+
 def _fake_executor(vllm_config, collective_rpc):
     from types import MethodType, SimpleNamespace
 
     from vllm.v1.executor.abstract import Executor
 
     fake = SimpleNamespace(vllm_config=vllm_config, collective_rpc=collective_rpc)
-    fake._extensible_kv_cache_unsupported_reason = MethodType(
-        Executor._extensible_kv_cache_unsupported_reason, fake
-    )
+    for name in (
+        "extensible_kv_cache_unsupported_reason",
+        "disable_extensible_kv_cache",
+    ):
+        setattr(fake, name, MethodType(getattr(Executor, name), fake))
     return fake
 
 
 @requires_cuda
 def test_extensible_kv_cache_falls_back_when_driver_unsupported():
-    from vllm.v1.executor.abstract import Executor
+    from vllm.v1.engine.core import EngineCore
 
     calls: list[str] = []
 
@@ -340,7 +348,7 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     assert vllm_config.cache_config.resolved_gpu_memory_utilization == 1.0
     specs = [{"layer": object()}]
     fake = _fake_executor(vllm_config, collective_rpc)
-    Executor.resolve_extensible_kv_cache(fake, specs)
+    EngineCore._resolve_extensible_kv_cache(_fake_engine(fake), specs)
     assert not vllm_config.cache_config.enable_extensible_kv_cache
     assert vllm_config.cache_config.resolved_gpu_memory_utilization == 0.92
     assert calls == [
@@ -350,11 +358,11 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
 
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
     fake = _fake_executor(vllm_config, lambda method: [None, None])
-    Executor.resolve_extensible_kv_cache(fake, specs)
+    EngineCore._resolve_extensible_kv_cache(_fake_engine(fake), specs)
     assert vllm_config.cache_config.enable_extensible_kv_cache
 
     # No KV cache at all: nothing to size, so the feature is turned off.
-    Executor.resolve_extensible_kv_cache(fake, [{}])
+    EngineCore._resolve_extensible_kv_cache(_fake_engine(fake), [{}])
     assert not vllm_config.cache_config.enable_extensible_kv_cache
 
 
@@ -365,6 +373,7 @@ def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
     the others in the block-count all-reduce."""
     import torch.distributed as dist
 
+    from vllm.v1.engine.core import EngineCore
     from vllm.v1.executor.uniproc_executor import ExecutorWithExternalLauncher
 
     class FakeExecutor(ExecutorWithExternalLauncher):
@@ -389,8 +398,9 @@ def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
     )
     engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
-    FakeExecutor(vllm_config, collective_rpc).resolve_extensible_kv_cache(
-        [{"layer": object()}]
+    EngineCore._resolve_extensible_kv_cache(
+        _fake_engine(FakeExecutor(vllm_config, collective_rpc)),
+        [{"layer": object()}],
     )
     assert reduced == [(0, dist.ReduceOp.MAX)]
     assert not vllm_config.cache_config.enable_extensible_kv_cache
@@ -398,6 +408,66 @@ def test_external_launcher_ranks_agree_on_extensible_kv_cache(monkeypatch):
         "extensible_kv_cache_unsupported_reason",
         "disable_extensible_kv_cache",
     ]
+
+
+@requires_cuda
+@pytest.mark.parametrize("local_reason", [None, "no VMM support"])
+def test_data_parallel_engines_agree_on_extensible_kv_cache(monkeypatch, local_reason):
+    """DP engines step in lockstep, warmup included, and the extensible cache
+    adds warmup steps: an engine that could keep it follows a peer that
+    cannot, and one that cannot reports its own reason."""
+    from vllm.config import ParallelConfig
+    from vllm.v1.engine.core import EngineCore
+
+    calls: list[str] = []
+
+    def collective_rpc(method: str):
+        calls.append(method)
+        if method == "extensible_kv_cache_unsupported_reason":
+            return [local_reason]
+        return [None]
+
+    dp_group = object()
+    reduced: list[tuple[object, int]] = []
+
+    def min_across_dp(group, value: int) -> int:
+        reduced.append((group, value))
+        return 0  # Some peer engine cannot use it.
+
+    monkeypatch.setattr(ParallelConfig, "min_across_dp", staticmethod(min_across_dp))
+    engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    engine = _fake_engine(
+        _fake_executor(vllm_config, collective_rpc), dp_group=dp_group
+    )
+    EngineCore._resolve_extensible_kv_cache(engine, [{"layer": object()}])
+    assert reduced == [(dp_group, int(local_reason is None))]
+    assert not vllm_config.cache_config.enable_extensible_kv_cache
+    assert calls == [
+        "extensible_kv_cache_unsupported_reason",
+        "disable_extensible_kv_cache",
+    ]
+
+
+def test_min_across_dp(monkeypatch):
+    """A MIN all-reduce over the DP group; without one (no DP, or dense models'
+    independent DP engines) the value stands."""
+    import torch.distributed as dist
+
+    from vllm.config import ParallelConfig
+
+    group = object()
+    seen: list[tuple[object, object]] = []
+
+    def all_reduce(tensor, op, group):
+        seen.append((op, group))
+        tensor.fill_(3)
+
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    assert ParallelConfig.min_across_dp(None, 7) == 7
+    assert seen == []
+    assert ParallelConfig.min_across_dp(group, 7) == 3
+    assert seen == [(dist.ReduceOp.MIN, group)]
 
 
 def test_executor_agrees_committable_blocks_across_workers():

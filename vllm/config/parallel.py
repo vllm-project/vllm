@@ -994,6 +994,15 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
         return tensor.item()
 
+    @staticmethod
+    def min_across_dp(dp_group: ProcessGroup | None, value: int) -> int:
+        """The minimum of `value` over the DP group; `value` without one."""
+        if dp_group is None or dp_group.size() == 1:
+            return value
+        tensor = torch.tensor([value], dtype=torch.int64, device="cpu")
+        torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
+        return int(tensor.item())
+
     def compute_hash(self):
         """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation

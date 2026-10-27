@@ -202,12 +202,12 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         memory = super().determine_available_memory()
         return [self._all_reduce_min(memory[0])]
 
-    def _extensible_kv_cache_unsupported_reason(
+    def extensible_kv_cache_unsupported_reason(
         self, kv_cache_specs: list[dict[str, KVCacheSpec]]
     ) -> str | None:
         # Every rank must reach the same decision: one that keeps the feature
         # would wait in the block-count all-reduce for one that dropped it.
-        reason = super()._extensible_kv_cache_unsupported_reason(kv_cache_specs)
+        reason = super().extensible_kv_cache_unsupported_reason(kv_cache_specs)
         if self._all_reduce(int(reason is not None), dist.ReduceOp.MAX):
             return reason or "another rank cannot use it"
         return None
