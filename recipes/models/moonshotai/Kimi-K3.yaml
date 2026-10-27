@@ -373,6 +373,13 @@ hardware_overrides:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+fused_rms_norm_gated"]}'
 
 strategy_overrides:
+  multi_node_tp_dp:
+    hardware_overrides:
+      ascend_910c:
+        worker_args: ["--headless"]
+      ascend_950dt:
+        worker_args: ["--headless"]
+
   # Use MegaMoE for DEP on GB200/GB300 NVL trays. B200/B300 leave
   # --moe-backend unset and use vLLM's default automatic selection.
   multi_node_dep:
@@ -1857,6 +1864,14 @@ guide: |
   ```
 
   Confirm that a final answer is returned, and inspect the prefill/decode logs for successful KV transfers and transfer errors. Health checks alone do not exercise RDMA. Preserve `reasoning_content` and tool calls when building multi-turn conversations, as described in the [model card](https://huggingface.co/moonshotai/Kimi-K3#6-model-usage).
+
+  ## Ascend mixed Prefill/Decode deployment
+
+  In the four-node A3/A5 mixed deployment, node 0 runs the API server and
+  Nodes 1-3 join with `--headless` and their respective
+  `--data-parallel-start-rank` values of 1, 2, and 3.
+  Follow the [official mixed deployment reference](https://docs.vllm.ai/projects/vllm-ascend-cn/zh-cn/latest/tutorials/models/Kimi-K3.html#51-prefilldecode)
+  for the per-node communication settings and startup order.
 
   ## Ascend 950DT PD separation
 
