@@ -19,7 +19,6 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -35,7 +34,8 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
     prepare_sparse_mla_safe_lengths,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -297,6 +297,11 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.supports_draft_decode_metadata_update = (
+            self.dcp_world_size == 1
+            and self.pcp_world_size == 1
+            and vllm_config.attention_config.hisparse_config is None
+        )
 
         # Under DCP the workspace must hold the trtllm-gen softmax-stats slab.
         # The buffer address is baked into CUDA graphs, so it has to reach its
@@ -312,6 +317,18 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
                     num_q_heads,
                     vllm_config.scheduler_config.max_num_batched_tokens,
                 ),
+            )
+
+    def update_draft_decode_metadata(
+        self, metadata: FlashInferMLASparseMetadata
+    ) -> None:
+        num_tokens = metadata.num_decode_tokens
+        if num_tokens:
+            compute_token_to_req_indices(
+                metadata.query_start_loc,
+                metadata.req_id_per_token,
+                num_tokens,
+                num_tokens,
             )
 
 

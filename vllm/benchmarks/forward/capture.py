@@ -11,7 +11,7 @@ forward mutates in place (e.g. compressor state) is the same on every replay.
 """
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -19,8 +19,12 @@ import torch
 from vllm.benchmarks.forward.batch import BenchBatch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_world_group, graph_capture
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, override_forward_context
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+if TYPE_CHECKING:
+    from vllm.benchmarks.forward.speculator import DraftBench
 
 
 def _first_tensor(output: Any) -> torch.Tensor:
@@ -39,6 +43,25 @@ def _compare(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
     }
 
 
+def write_input_ids(
+    batch: BenchBatch, input_batch: InputBatch, input_ids: torch.Tensor | None
+) -> None:
+    """Decode/verify inputs otherwise come from sampler state."""
+    if input_ids is None:
+        return
+    # PCP can split a request into two disjoint rows or replicate it.
+    segments = []
+    for i, req_id in enumerate(input_batch.req_ids):
+        start = int(input_batch.num_computed_tokens_np[i]) - batch.expected[req_id][1]
+        count = int(input_batch.num_scheduled_tokens[i])
+        tokens = batch.query_token_ids[req_id]
+        assert 0 <= start <= start + count <= len(tokens)
+        segments.append(tokens[start : start + count])
+    ids = np.concatenate(segments)
+    assert len(ids) == input_batch.num_tokens
+    input_ids[: len(ids)].copy_(torch.from_numpy(ids))
+
+
 class ForwardBench:
     """Runs one batch through the runner's `execute_model`, timing its forward.
 
@@ -55,6 +78,10 @@ class ForwardBench:
         iters: int,
         samples: int,
         state_views: list[torch.Tensor],
+        name: str,
+        profile_prefix: str | None = None,
+        *,
+        include_drafter: bool = True,
     ):
         self.runner = runner
         self.batch = batch
@@ -62,8 +89,12 @@ class ForwardBench:
         self.iters = iters
         self.samples = samples
         self.state_views = state_views
+        self.name = name
+        self.profile_prefix = profile_prefix
         self.phase = "warmup"
         self.result: dict[str, Any] = {}
+        self.include_drafter = include_drafter
+        self.drafter: DraftBench | None = None
 
     def run(self) -> dict[str, Any]:
         runner, model = self.runner, self.runner.model
@@ -75,7 +106,13 @@ class ForwardBench:
 
         def prepare_and_check(*args, **kwargs) -> InputBatch:
             self._input_batch = prepare_inputs(*args, **kwargs)
-            self._check_batch(self._input_batch)
+            pcp = runner.pcp_manager
+            self._check_batch(pcp.global_batch if pcp else self._input_batch)
+            self.result["num_local_tokens"] = self._input_batch.num_tokens
+            self.result["num_tokens_after_padding"] = (
+                self._input_batch.num_tokens_after_padding
+            )
+            self.result["batch_order"] = self._input_batch.req_ids
             return self._input_batch
 
         # Instance attributes shadow the methods for these two steps only.
@@ -91,22 +128,47 @@ class ForwardBench:
         return self.result
 
     def _forward(self, **inputs) -> Any:
-        self._write_input_ids(self._input_batch, inputs["input_ids"])
+        write_input_ids(self.batch, self._input_batch, inputs["input_ids"])
+        self._run_model = self._make_forward(inputs)
+        if self.phase == "warmup":
+            return self._run_model()
+        return self._capture_and_time()
+
+    def _make_forward(self, inputs):
         # Models may update the forward context in place (e.g. sequence
         # parallelism shards is_padding); every call must start from the
         # context the runner built.
         context = get_forward_context()
         saved = dict(vars(context))
+        if self.include_drafter and self.runner.speculator is not None:
+            from vllm.benchmarks.forward.speculator import DraftBench
+
+            if self.drafter is None:
+                self.drafter = DraftBench(self.runner)
+                # Drafting reuses the target's slot mappings and PCP block tables.
+                self.state_views.extend(
+                    [self.runner.block_tables.slot_mappings]
+                    + self.runner.block_tables.input_block_tables
+                )
+            self.drafter.prepare(self._input_batch, context)
+        self.result["timing_scope"] = (
+            "target_and_drafter" if self.drafter is not None else "target_only"
+        )
 
         def run_model() -> Any:
             for name, value in saved.items():
                 setattr(context, name, value)
-            return self._model_forward(**inputs)
+            with override_forward_context(context):
+                output = self._model_forward(**inputs)
+            if not self.runner.is_last_pp_rank:
+                output = self.runner.pp_handler.relay_aux_hidden_states(
+                    inputs["intermediate_tensors"], output
+                )
+            if self.drafter is not None:
+                self.drafter.propose(output)
+            return output
 
-        self._run_model = run_model
-        if self.phase == "warmup":
-            return run_model()
-        return self._capture_and_time()
+        return run_model
 
     def _check_batch(self, input_batch: InputBatch) -> None:
         """Fail unless the runner built exactly the requested batch."""
@@ -123,19 +185,6 @@ class ForwardBench:
                 f"wanted {expected[req_id]}"
             )
         assert input_batch.num_tokens == self.batch.num_tokens
-        self.result["num_tokens_after_padding"] = input_batch.num_tokens_after_padding
-        self.result["batch_order"] = input_batch.req_ids
-
-    def _write_input_ids(
-        self, input_batch: InputBatch, input_ids: torch.Tensor | None
-    ) -> None:
-        """Decode/verify inputs otherwise come from sampler state."""
-        if input_ids is None:
-            return
-        ids = np.concatenate(
-            [self.batch.query_token_ids[req_id] for req_id in input_batch.req_ids]
-        )
-        input_ids[: len(ids)].copy_(torch.from_numpy(ids))
 
     def _capture_and_time(self) -> Any:
         world = get_world_group()
@@ -151,9 +200,18 @@ class ForwardBench:
         # restore: neither rank skew, the restore nor host launch gaps reach
         # the timed interval.
         flag = torch.zeros(1, device=self.device)
+        # TODO(woosuk): Support ROCm. The bench hangs there, likely on these
+        # in-graph events.
+        # `external=True` lets the event be queried outside the graph without
+        # being captured itself; CUDA-only, XPU graphs don't need it.
+        event_kwargs = (
+            {"enable_timing": True, "external": True}
+            if current_platform.is_cuda_alike()
+            else {"enable_timing": True}
+        )
         self._events = (
-            torch.cuda.Event(enable_timing=True, external=True),
-            torch.cuda.Event(enable_timing=True, external=True),
+            torch.cuda.Event(**event_kwargs),
+            torch.cuda.Event(**event_kwargs),
         )
         if world.world_size > 1:
             # Initialize the communicator outside capture.
@@ -164,6 +222,7 @@ class ForwardBench:
             eager = _first_tensor(self._run_model()).clone()
             restore()
             reference = _first_tensor(self._run_model()).clone()
+            draft_reference = self.drafter.tokens.clone() if self.drafter else None
             stream.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
@@ -190,7 +249,23 @@ class ForwardBench:
                 v.numel() * v.element_size() for v in self.state_views
             ),
         )
+        if self.drafter is not None:
+            self.result["drafter"] = self.drafter.check(draft_reference)
         self.result["latency_us"] = self._time(graph)
+        from vllm.benchmarks.forward.profile import profile_graph
+
+        # Each replay restores the state views, then (multi-rank) rendezvouses,
+        # before the timed forward.
+        skip = len(self.state_views) + (world.world_size > 1)
+        summary = profile_graph(graph, self.name, self.profile_prefix, skip)
+        if summary is not None:
+            self.result["profile"] = {
+                "summary": f"{self.profile_prefix}.kernels.json",
+                "span_us": summary["span_us"],
+                "busy_us": summary["busy_us"],
+                "activities": summary["activities"],
+                "top_kernels": summary["kernels"][:10],
+            }
         del graph
         return output
 

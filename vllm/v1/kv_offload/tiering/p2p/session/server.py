@@ -286,6 +286,8 @@ class ServerRole:
         # Parked aborts already warned about for exceeding
         # _CANCEL_DRAIN_TIMEOUT_S.
         self._slow_aborts: set[tuple[str, int]] = set()
+        # PollResult.peer_fault, once reported; no new WRITE after that.
+        self.peer_fault: str | None = None
 
     # ------------------------------------------------------------------
     # State helpers
@@ -405,11 +407,14 @@ class ServerRole:
             self._finalize_outbound(kv_request_id, round_seq, success=False)
             return
         if result.local_idxs:
+            # _submit_transfer owns the round from here: on a failed
+            # submission it finalizes the round itself, so the finishing
+            # check below must not finalize it a second time.
             self._submit_transfer(kv_request_id, result, req, round_seq)
-        # Prefiller-first mode: finish_request may have run before
-        # fetch arrived. If so, finalize once we know what was
-        # demanded — fully satisfied → success, else early-fail.
-        if req.finishing and req.inflight == 0:
+        elif req.finishing and req.inflight == 0:
+            # Prefiller-first mode: finish_request may have run before
+            # fetch arrived. If so, finalize once we know what was
+            # demanded — fully satisfied → success, else early-fail.
             self._finalize_outbound(kv_request_id, round_seq)
 
     def on_abort_fetch(self, kv_request_id: str, round_seq: int = 0) -> None:
@@ -602,10 +607,13 @@ class ServerRole:
         """Pin primary slots for HIT keys and park them as the lookup's
         round supply via ``add_stored_blocks``.
 
-        Caller has already confirmed every key is HIT (single-threaded
-        scheduler ⇒ no eviction race), so the JobMetadata returned by
-        ``parent.create_store_job`` carries parallel ``keys``/``block_ids``
-        of length ``len(keys)``.
+        Caller has already confirmed every key is HIT, so the JobMetadata
+        returned by ``parent.create_store_job`` carries parallel
+        ``keys``/``block_ids`` of length ``len(keys)``. Nothing can evict
+        between that confirmation and the pin because the whole
+        ``serve_external_requests`` call runs inside one hold of the tiering
+        manager's lock -- which is why that call must never release it
+        partway through.
         """
         meta = parent.create_store_job(keys, lookup.ctx)
         self.add_stored_blocks(
@@ -718,7 +726,7 @@ class ServerRole:
         No more submit_store calls will arrive for this id. Any blocks
         the peer demanded but we never stored will never come; tell the
         peer to stop waiting (TransferDoneMsg success=False) instead of
-        letting it hit _LOAD_TIMEOUT_S.
+        letting it hit its load timeout.
 
         Also drops any in-flight lookups for this kv_request_id and
         queues their ctxs for ``parent.on_request_finished`` so the
@@ -755,15 +763,13 @@ class ServerRole:
         """
         results: list[StoreResult] = self._timeout_pending_store_jobs()
 
-        if self._pending_store_results:
-            results.extend(self._pending_store_results)
-            self._pending_store_results.clear()
-
         # Scope the poll to this peer: the transport is shared across all peer
         # sessions of the engine, and poll() drains completed handles. An
         # unscoped poll here would consume sibling sessions' completions and
         # report them as "unknown transfer_id", starving those sessions.
         poll_result = self._transport.poll(self._peer_id)
+        if poll_result.peer_fault is not None:
+            self.peer_fault = poll_result.peer_fault
 
         for tid in poll_result.done:
             xfer = self._inflight_pop(tid)
@@ -832,6 +838,11 @@ class ServerRole:
             if in_round and rnd.inflight == 0:
                 self._finalize_cancelled(xfer.kv_request_id, xfer.round_key)
             self._maybe_prune(xfer.kv_request_id)
+
+        # Finalizing transfers can queue results for supplied but unfetched blocks.
+        if self._pending_store_results:
+            results.extend(self._pending_store_results)
+            self._pending_store_results.clear()
 
         return results
 
@@ -1160,8 +1171,12 @@ class ServerRole:
             len(result.local_idxs),
             len(result.remote_idxs),
         )
-        transfer_id = self._transport.write_blocks(
-            self._peer_id, result.local_idxs, result.remote_idxs
+        transfer_id = (
+            self._transport.write_blocks(
+                self._peer_id, result.local_idxs, result.remote_idxs
+            )
+            if self.peer_fault is None
+            else None
         )
         if transfer_id is not None:
             logger.debug(
@@ -1199,7 +1214,7 @@ class ServerRole:
             # the elif branch in collect_results. If nothing else is in
             # flight, finalize now so the peer and the local store jobs
             # don't wait for finish_request or for _STORE_TIMEOUT_S /
-            # _LOAD_TIMEOUT_S.
+            # the consumer's load timeout.
             rnd.finishing = True
             st = self._requests.get(kv_request_id)
             if (

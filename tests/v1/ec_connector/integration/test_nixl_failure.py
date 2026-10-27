@@ -130,11 +130,14 @@ async def _encode(session, encoder):
     rewritten = rewrite_for_decode(
         body,
         {
-            0: {
-                **handle["metadata"],
-                "mm_hash": item_uuid,
-                "ec_mm_hash": mm_hash,
-            }
+            0: [
+                {
+                    "metadata": handle["metadata"],
+                    "modality": "image",
+                    "mm_hash": mm_hash,
+                    "transfer_id": None,
+                }
+            ]
         },
     )
     assert rewritten["messages"][0]["content"][0]["type"] == "image_embeds"
