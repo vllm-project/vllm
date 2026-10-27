@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from array import array
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from pickle import PickleBuffer
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
+
+import numpy as np
 
 from vllm.utils.collection_utils import as_list
 
@@ -81,3 +83,102 @@ else:
         tokens = TokenBuffer()
         tokens.frombytes(data)
         return tokens
+
+
+def extend_from_slice(
+    dst: list[int], src: Sequence[int], start: int, stop: int
+) -> None:
+    """``dst.extend(src[start:stop])``, copied without Python ints when both are
+    TokenBuffers."""
+    if isinstance(dst, array) and isinstance(src, array):
+        dst.extend(array.__getitem__(src, slice(start, stop)))
+    else:
+        dst.extend(src[start:stop])
+
+
+def rfind_tokens(
+    token_ids: Sequence[int],
+    targets: Collection[int | None],
+    start: int = 0,
+    stop: int | None = None,
+) -> int:
+    """Return the index of the last token in ``token_ids[start:stop]`` that is
+    one of ``targets`` (``None`` entries, for absent tokens, are ignored), or -1.
+
+    An int32 buffer (a TokenBuffer) is searched with numpy, in chunks growing
+    back from ``stop`` so a recent match is found quickly, without creating a
+    Python int per token. Other sequences are scanned backwards in Python.
+    """
+    if stop is None:
+        stop = len(token_ids)
+    if isinstance(token_ids, TokenIdsView):
+        return token_ids.rfind(targets, start, stop)
+    if isinstance(token_ids, array) and token_ids.typecode == "i":
+        ids = np.frombuffer(token_ids, dtype=np.int32)
+        wanted = np.array([t for t in targets if t is not None], dtype=np.int32)
+        chunk = 256
+        while stop > start:
+            lo = max(start, stop - chunk)
+            hits = np.flatnonzero(np.isin(ids[lo:stop], wanted))
+            if hits.size:
+                return lo + int(hits[-1])
+            stop, chunk = lo, chunk * 8
+        return -1
+    for i in range(stop - 1, start - 1, -1):
+        if token_ids[i] in targets:
+            return i
+    return -1
+
+
+class TokenIdsView(Sequence[int]):
+    """``tokens`` followed by ``suffix``, shortened from the end by pop().
+
+    Copied into a list only when read element-wise, so a caller that ignores
+    it, or searches it with rfind_tokens, doesn't copy ``tokens``.
+    """
+
+    def __init__(self, tokens: Sequence[int], suffix: Iterable[int] = ()) -> None:
+        self._tokens = tokens
+        self._suffix = list(suffix)
+        self._len = len(tokens) + len(self._suffix)
+        self._list: list[int] | None = None
+
+    def __len__(self) -> int:
+        return self._len
+
+    def _as_list(self) -> list[int]:
+        if self._list is None:
+            num_tokens = min(len(self._tokens), self._len)
+            self._list = list(self._tokens[:num_tokens])
+            self._list.extend(self._suffix[: self._len - num_tokens])
+        return self._list
+
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[int]: ...
+
+    def __getitem__(self, index: int | slice) -> int | list[int]:
+        return self._as_list()[index]
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._as_list())
+
+    def __contains__(self, value: object) -> bool:
+        return value in self._as_list()
+
+    def pop(self) -> None:
+        if self._list is not None:
+            self._list.pop()
+        self._len -= 1
+
+    def rfind(self, targets: Collection[int | None], start: int, stop: int) -> int:
+        if self._list is not None:
+            return rfind_tokens(self._list, targets, start, stop)
+        num_tokens = len(self._tokens)
+        stop = min(stop, self._len)
+        for i in range(stop - 1, max(start, num_tokens) - 1, -1):
+            if self._suffix[i - num_tokens] in targets:
+                return i
+        return rfind_tokens(self._tokens, targets, start, min(stop, num_tokens))

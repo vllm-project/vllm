@@ -12,7 +12,12 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-from vllm.v1.token_buffer import TokenBuffer
+from vllm.v1.token_buffer import (
+    TokenBuffer,
+    TokenIdsView,
+    extend_from_slice,
+    rfind_tokens,
+)
 
 
 def test_request_decodes_int32_token_bytes_from_rust_frontend():
@@ -64,6 +69,45 @@ def test_token_buffer_pickles(protocol):
     tokens = TokenBuffer([1, 70000, 129279])
     restored = pickle.loads(pickle.dumps(tokens, protocol=protocol))
     assert type(restored) is TokenBuffer and restored == [1, 70000, 129279]
+
+
+@pytest.mark.parametrize("length", [5, 3000])
+def test_rfind_tokens_buffer_matches_list(length):
+    """The numpy search of a TokenBuffer, over chunks growing back from the end,
+    finds the same index as the Python scan of a list."""
+    ids = [(i * 7) % 11 for i in range(length)]
+    tokens = TokenBuffer(ids)
+    for targets in [(3,), (3, 5), (99,), (None, 4)]:
+        for start, stop in [(0, None), (2, None), (0, length - 1), (length, None)]:
+            expected = rfind_tokens(ids, targets, start, stop)
+            assert rfind_tokens(tokens, targets, start, stop) == expected
+            hits = [i for i in range(start, stop or length) if ids[i] in targets]
+            assert expected == (hits[-1] if hits else -1)
+
+
+def test_extend_from_slice():
+    src = TokenBuffer(range(10))
+    for dst in (TokenBuffer([7]), [7]):
+        extend_from_slice(dst, src, 2, 5)
+        assert dst == [7, 2, 3, 4]
+    extend_from_slice(dst, list(range(10)), 8, 8)
+    assert dst == [7, 2, 3, 4]
+
+
+def test_token_ids_view_searches_in_place():
+    tokens = TokenBuffer([1, 2, 3, 4])
+    view = TokenIdsView(tokens, [5, 6])
+    assert len(view) == 6 and rfind_tokens(view, (2, 6)) == 5
+    view.pop()
+    view.pop()
+    view.pop()
+    # Now tokens[:3]: the search stops before the popped 4 and the suffix.
+    assert len(view) == 3 and rfind_tokens(view, (4, 6)) == -1
+    assert rfind_tokens(view, (2,)) == 1
+    assert view._list is None  # searching didn't copy the tokens
+    assert list(view) == [1, 2, 3] and view[-1] == 3
+    view.pop()
+    assert list(view) == [1, 2] and rfind_tokens(view, (3,)) == -1
 
 
 def test_token_buffer_pickles_out_of_band_snapshot():
