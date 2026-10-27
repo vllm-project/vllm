@@ -305,6 +305,8 @@ pub struct Config {
     pub chat_template: Option<String>,
     /// Server-default keyword arguments merged into every chat-template render.
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Server-side rewrites of the request's typed reasoning effort.
+    pub reasoning_effort_map: HashMap<String, String>,
     /// Whether requests may supply their own chat template.
     pub trust_request_chat_template: bool,
     /// Whether request-level tools are left out of the prompt when
