@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from __future__ import annotations
+
 from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -23,7 +26,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.worker.cpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
@@ -33,6 +35,9 @@ from vllm.v1.worker.utils import (
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.cpu.model_states.interface import ModelSpecificAttnMetadata
 
 
 @dataclass(frozen=True)
