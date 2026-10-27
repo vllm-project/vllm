@@ -148,7 +148,70 @@ _QWEN4_EXP_IGNORED_MISSING_SUFFIXES = [
     "_v_scale",
     "_weight_scale",
     "_input_scale",
+    ".nvfp4_csf_fixed",
+    ".nvfp4_csf_exceptions",
 ]
+
+
+def decode_nvfp4_csf(
+    fixed: torch.Tensor, exceptions: torch.Tensor | None = None
+) -> torch.Tensor:
+    num_slabs, slab_bytes = fixed.shape
+    num_rows = num_slabs * 16
+    packed_cols = (slab_bytes - 16) // 16
+    num_cols = packed_cols * 2
+
+    base = fixed[:, :16].reshape(-1, 1)
+    stream = fixed[:, 16:].reshape(num_rows, packed_cols)
+
+    low_nibble = stream & 0x0F
+    high_nibble = (stream >> 4) & 0x0F
+
+    nibbles = torch.stack([low_nibble, high_nibble], dim=-1).reshape(
+        num_rows, num_cols
+    )
+    scales = base + nibbles
+
+    if exceptions is not None and exceptions.numel() > 0:
+        flat = exceptions.to(torch.int64)
+        pos = flat & 0x00FFFFFF
+        exact_bytes = ((flat >> 24) & 0xFF).to(torch.uint8)
+        scales.view(-1).scatter_(0, pos, exact_bytes)
+
+    return scales.view(torch.float8_e4m3fn)
+
+
+def maybe_decode_nvfp4_csf_weights(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterable[tuple[str, torch.Tensor]]:
+    pending_fixed: dict[str, torch.Tensor] = {}
+    pending_exc: dict[str, torch.Tensor] = {}
+
+    for name, tensor in weights:
+        if name.endswith(".weight_scale.nvfp4_csf_fixed"):
+            prefix = name[:-len(".nvfp4_csf_fixed")]
+            if prefix in pending_exc:
+                exc = pending_exc.pop(prefix)
+                decoded = decode_nvfp4_csf(tensor, exc)
+                yield prefix, decoded
+            else:
+                pending_fixed[prefix] = tensor
+        elif name.endswith(".weight_scale.nvfp4_csf_exceptions"):
+            prefix = name[:-len(".nvfp4_csf_exceptions")]
+            if prefix in pending_fixed:
+                fixed = pending_fixed.pop(prefix)
+                decoded = decode_nvfp4_csf(fixed, tensor)
+                yield prefix, decoded
+            else:
+                pending_exc[prefix] = tensor
+        else:
+            yield name, tensor
+
+    for prefix in list(pending_fixed.keys()):
+        fixed = pending_fixed.pop(prefix)
+        exc = pending_exc.pop(prefix, None)
+        decoded = decode_nvfp4_csf(fixed, exc)
+        yield prefix, decoded
 
 # The checkpoint stores these projections separately; runtime packs each group
 # into adjacent logical shards of a MergedColumnParallelLinear.
@@ -640,6 +703,7 @@ class Qwen4ExpModel(nn.Module):
         return sample_hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = maybe_decode_nvfp4_csf_weights(weights)
         weights = (
             (
                 _remap_qsa_cache_scale_name(name, self._qsa_layer_ids),
@@ -914,6 +978,7 @@ class Qwen4ExpForCausalLM(
         return positions.unsqueeze(0).expand(3, -1), 0
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = maybe_decode_nvfp4_csf_weights(weights)
         mapper = self.hf_to_vllm_mapper | WeightsMapper(
             orig_to_new_substr={"mtp.": None}
         )
@@ -1119,6 +1184,7 @@ class Qwen4ExpForConditionalGeneration(
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = maybe_decode_nvfp4_csf_weights(weights)
         mapper = self.hf_to_vllm_mapper | WeightsMapper(
             orig_to_new_substr={"mtp.": None},
             orig_to_new_prefix={"visual.": None} if self.language_model_only else {},
