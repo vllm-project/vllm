@@ -501,12 +501,6 @@ def _gluon_fp8_decode_max_batch(
 ) -> int:
     """Largest single-token decode batch that runs mla_gluon instead of the asm
     kernel on an fp8 KV cache, 0 for none.
-
-    mla_gluon's fp8-KV regime reads a bf16 query, an e4m3 cache and the DeepSeek
-    MLA dims on gfx950. Its call here returns no LSE, which DCP needs, and
-    spec-decode verify runs the asm kernel on the fp8 query. The limits hold for
-    equal-length batches at 1k and 32k tokens and a per-layer cache past 2 GiB;
-    below it, asm is faster at 32 heads, batch 8, 32k tokens.
     """
     if (
         vllm_config.cache_config.cache_dtype not in ("fp8", "fp8_e4m3")
@@ -1629,7 +1623,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             int(max_qo_len),
             self._kv_cache_dtype_str,
             self._kv_cache_bytes,
-        ) or (max_qo_len == 1 and num_reqs <= self._gluon_fp8_decode_max_batch)
+            num_reqs=num_reqs,
+            max_batch=self._gluon_fp8_decode_max_batch,
+        )
         use_gluon_verify = AiterMLAHelper.use_gluon_verify(
             self._decode_num_heads,
             int(max_qo_len),
@@ -2225,17 +2221,17 @@ class AiterMLAHelper:
         max_qo_len: int,
         kv_cache_dtype: str,
         kv_cache_bytes: int | None = None,
+        num_reqs: int = 1,
+        max_batch: int = 0,
     ) -> bool:
+        # fp8 KV takes Gluon only for single-token batches
+        if is_quantized_kv_cache(kv_cache_dtype):
+            return max_qo_len == 1 and num_reqs <= max_batch
         # Small-head (<16) single-token decode takes either the Gluon kernel or
         # the padded asm persistent decode, selected by
         # VLLM_ROCM_AITER_MLA_ASM_PADDING and the arch (Gluon is gfx950 only).
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
         if num_heads >= m or max_qo_len != 1:
-            return False
-        # fp8 KV takes Gluon only through _gluon_fp8_decode_max_batch, which keeps
-        # the query bf16 for Gluon's fp8-KV regime. Checked before the mode knob,
-        # so an explicit "gluon" request under fp8 cannot bypass it.
-        if is_quantized_kv_cache(kv_cache_dtype):
             return False
         mode = _aiter_mla_small_head_mode()
         if mode == "asm":
@@ -2261,10 +2257,9 @@ class AiterMLAHelper:
         bf16 has no gqa<16, qseqlen>1 asm kernel, so verify goes through
         ``mla_gluon``'s 4-D MTP entry (``q`` shaped ``[batch, qlen, nhead, dim]``)
         with ``use_2d_view=False``. fp8 has one via the q-row fold and must not
-        come here: Gluon's fp8-KV regime reads a bf16 query, and verify keeps
-        the fp8 one (``_gluon_fp8_decode_max_batch`` is 0 under speculative
-        decoding). A predicate rather than inline in forward_mqa so the builder
-        sees the same answer the impl acts on.
+        come here: the MTP path hands Gluon the batch size its fp8 regime
+        asserts against. A predicate rather than inline in forward_mqa so the
+        builder sees the same answer the impl acts on.
 
         DCP verify is excluded: its per-row causal windows are served by the
         segmented path, which Gluon's MTP entry cannot express.
