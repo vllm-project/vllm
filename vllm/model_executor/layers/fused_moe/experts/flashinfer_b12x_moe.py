@@ -32,18 +32,12 @@ def _resolve_padded_intermediate_size(
     is_gated: bool,
     w13_rows: int,
 ) -> int:
-    """Return the intermediate size actually present in the prepared FC1
-    weights, which can be wider than ``configured_intermediate_size``.
+    """Return the intermediate size present in the prepared FC1 weights.
 
     For non-gated activations, ``prepare_nvfp4_moe_layer_for_fi_or_cutlass``
-    swizzles ``w13_scale`` (rounding its rows up to a multiple of 128) and
-    zero-pads ``w13`` rows and ``w2`` / ``w2_scale`` columns to match.
-    ``B12xMoEWrapper`` must be built with that padded width; otherwise
-    FlashInfer re-pads the already-padded scale tensors and the MMA-layout
-    reshape in ``_pad_intermediate_to_tile`` fails. The padded channels are
-    zero, so the result is numerically unchanged.
-
-    Gated layers are never padded on this path, so they are left untouched.
+    zero-pads ``w13`` rows (and ``w2`` / ``w2_scale`` columns) to the
+    128-row multiple produced by scale swizzling, and ``B12xMoEWrapper``
+    must be built with that padded width. Gated layers are not padded there.
     """
     if is_gated:
         return configured_intermediate_size

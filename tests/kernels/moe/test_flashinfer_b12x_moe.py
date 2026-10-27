@@ -373,8 +373,6 @@ def test_flashinfer_b12x_wrapper_uses_padded_intermediate_size(
     the prepared (possibly padded) weights, not the configured size."""
     import flashinfer.fused_moe
 
-    import vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe as b12x
-
     captured: dict = {}
 
     class FakeB12xMoEWrapper:
@@ -382,13 +380,10 @@ def test_flashinfer_b12x_wrapper_uses_padded_intermediate_size(
             captured.update(kwargs)
 
     monkeypatch.setattr(flashinfer.fused_moe, "B12xMoEWrapper", FakeB12xMoEWrapper)
-    monkeypatch.setattr(
-        b12x, "flashinfer_convert_sf_to_mma_layout", lambda sf, **kwargs: sf
-    )
 
     e, k = 2, 256
     w13_scale = torch.ones((e, w13_rows, k // 16), dtype=torch.float32)
-    w2_scale = torch.ones((e, k, w13_rows // 16), dtype=torch.float32)
+    w2_scale = torch.ones((e, k, expected_n // 16), dtype=torch.float32)
     ones_e = torch.ones(e, dtype=torch.float32)
 
     with set_current_vllm_config(
