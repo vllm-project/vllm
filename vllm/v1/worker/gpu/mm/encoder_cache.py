@@ -63,12 +63,10 @@ class EncoderCache:
             storage = output.untyped_storage()
             if storage.nbytes() > output.nbytes:
                 shared.setdefault(storage.data_ptr(), []).append(mm_hash)
-        for mm_hashes in shared.values():
-            # Cropped outputs or duplicate hashes can leave an allocation only
-            # partly represented in the cache even before the first eviction.
-            # Connectors receive the final addresses after insertion returns;
-            # either compact or original storage must then stay in place.
-            self._compact_encoder_outputs(mm_hashes)
+        # Cropped outputs and duplicate hashes can retain unused batch storage.
+        # Compact before connectors register the resulting addresses.
+        for group in shared.values():
+            self._compact_encoder_outputs(group)
 
     def _compact_encoder_outputs(self, mm_hashes: list[str]) -> None:
         if not mm_hashes:
@@ -82,14 +80,10 @@ class EncoderCache:
             # isolated at insertion instead: their addresses cannot move later.
             if live_bytes > storage_bytes - live_bytes:
                 return
-        replacements: dict[str, torch.Tensor] = {}
         try:
-            for mm_hash in mm_hashes:
-                replacements[mm_hash] = self.encoder_outputs[mm_hash].clone()
+            replacements = {h: self.encoder_outputs[h].clone() for h in mm_hashes}
         except torch.OutOfMemoryError:
-            # Compaction temporarily needs both allocations. Keep the complete
-            # original group if any optional copy cannot be allocated.
-            replacements.clear()
+            # Publish only complete groups; a failed comprehension drops its copies.
             logger.warning_once(
                 "Insufficient memory to compact encoder cache; retaining "
                 "shared storage."
