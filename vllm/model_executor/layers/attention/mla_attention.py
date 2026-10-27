@@ -1037,6 +1037,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         fused_v_up_proj_quant = (
             quant_key == kFp8DynamicTokenSym
+            and num_mha_tokens == 0
             and self.is_aiter_triton_fp8_bmm_enabled
             and not self.is_aiter_triton_fp4_bmm_enabled
         )
