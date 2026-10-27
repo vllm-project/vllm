@@ -508,13 +508,21 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 or current_platform.has_device_capability(89)
             )
         )
-        self.fuse_indexer_projection = vllm_config.lora_config is None
+        # Without a quant config here (BF16, or ModelOpt FP4, which keeps
+        # attention in BF16) the fused layer is unquantized. Otherwise the
+        # indexer shares the q/k/v GEMM only if it uses the same quant method.
+        fused_quant_config = model.without_modelopt_fp4(quant_config)
+        projection_method = type(self.qkv_proj.quant_method)
+        self.fuse_indexer_projection = vllm_config.lora_config is None and (
+            fused_quant_config is None
+            or projection_method is type(self.indexer.index_qk_proj.quant_method)
+        )
         if self.fuse_indexer_projection:
             self.index_qk_size = self.indexer.index_qk_proj.output_size
             self.qkv_proj = Qwen4ExpQSAQKVIndexerLinear(
                 self.qkv_proj,
                 self.index_qk_size,
-                model.without_modelopt_fp4(quant_config),
+                fused_quant_config,
             )
             del self.indexer.index_qk_proj
 
