@@ -57,7 +57,7 @@ hyper-util = { version = "0.1.20", features = [
     "tokio",
 ] }
 image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
-indexmap = "2.13.0"
+indexmap = { version = "2.13.0", features = ["serde"] }
 indicatif = "0.18.4"
 itertools = "0.14.0"
 libc = "0.2.177"
