@@ -366,10 +366,14 @@ if (warp_idx == 8) {
     }
     math_wg_sync();
     // ---- sample tiles ----
+    // The first tile's per-row max is the histogram reference (see
+    // SampleShared): tile 0 keeps its scores until the reference is known.
+    float ref[kWgRows] = {};
 #pragma unroll 1
     for (uint32_t t = 0; t < e.samples; ++t) {
       CUTE_TIE_DECL(kv_pipe.advance(), kv_stage, kv_phase);
       full_kv[kv_stage].wait(kv_phase);
+      uint32_t first_code[kWgRows] = {};
 #pragma unroll
       for (uint32_t kv_half = 0; kv_half < 2; ++kv_half) {
         const uint32_t kv_lane =
@@ -406,17 +410,38 @@ if (warp_idx == 8) {
                            (row_s[i] * scale_kv);
           const bool valid = in_view && kv_offset >= seq_k_start[i] &&
                              kv_offset < seq_k_end[i] && isfinite(bq);
-          if (valid) {
-            const uint32_t bin = half_bin<5>(bq);
-            atomicAdd(sample_smem.hist[query_base + i] + padded_bin(bin), 1u);
+          if (t == 0) {
+            sample_smem.first[kv_half][i][math_tid] =
+                valid ? bq : -CUDART_INF_F;
+            if (valid) first_code[i] = max(first_code[i], ordered_code(bq));
+          } else if (valid)
+            add_sample(sample_smem.hist[query_base + i], bq - ref[i]);
+        }
+      }
+      if (t == 0) {
+#pragma unroll
+        for (uint32_t i = 0; i < kWgRows; ++i) {
+          const uint32_t code = __reduce_max_sync(kFullMask, first_code[i]);
+          if (lane == 0) atomicMax(&sample_smem.ref_code[query_base + i], code);
+        }
+        math_wg_sync();
+#pragma unroll
+        for (uint32_t i = 0; i < kWgRows; ++i) {
+          ref[i] = sample_ref(sample_smem.ref_code[query_base + i]);
+#pragma unroll
+          for (uint32_t h = 0; h < 2; ++h) {
+            const float x = sample_smem.first[h][i][math_tid];
+            if (isfinite(x))
+              add_sample(sample_smem.hist[query_base + i], x - ref[i]);
           }
         }
       }
     }
     math_wg_sync();
-    finish_sample_histogram(sample_smem.hist[warp_idx], gate_s + warp_idx,
-                            e.ends[warp_idx] - e.starts[warp_idx],
-                            sample_target, lane);
+    finish_sample_histogram(
+        sample_smem.hist[warp_idx], sample_ref(sample_smem.ref_code[warp_idx]),
+        gate_s + warp_idx, e.ends[warp_idx] - e.starts[warp_idx], sample_target,
+        lane);
     math_wg_sync();
     // The block index is re-read from the claim entry (volatile) instead of
     // kept live across the sample loop.

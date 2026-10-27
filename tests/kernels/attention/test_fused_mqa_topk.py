@@ -277,6 +277,34 @@ def test_rescan_scores_only_its_block():
 
 
 @requires_fused_mqa_topk
+def test_gate_with_common_score_offset():
+    """Regression test: scores sharing a large common offset with a narrow top
+    tail (top ranks within ~1 of each other at ~+68) must still get a tight gate.
+    With absolute fp16 sample bins (~2 wide there) the gate fell a whole bin too
+    low, rows overflowed the candidate slab and most blocks took the exact
+    rescan (4.4x slower at 256K keys)."""
+    rows, keys, topk = 2048, 65536, TOPK
+    q, k, scales, weights = _inputs(rows, keys, seed=5)
+    # A shared component in dimension 0 adds 8 * 8 to every q.k.
+    q = q.float()
+    k = k.float()
+    q[:, :, 0] = 8.0
+    k[:, 0] = 8.0
+    q, k = q.to(torch.float8_e4m3fn), k.to(torch.float8_e4m3fn)
+    weights = torch.full_like(weights, 1.0 / 32)
+    starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
+    ends = torch.arange(keys - rows + 1, keys + 1, device="cuda", dtype=torch.int32)
+    out = torch.empty(rows, topk, device="cuda", dtype=torch.int32)
+    fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, out)
+    _check(out, q, k, scales, weights, starts, ends)
+    # Per-row candidate counts the kernel left in its workspace: about the gate
+    # target (3072 for top-2048 at <= 128K keys), not a multiple of it.
+    counts = get_fused_mqa_topk_workspace(q.device, rows).counts[:rows]
+    assert (counts >= topk).all() and (counts <= 16384).all(), "rows rescanned"
+    assert counts.float().median() < 2 * 3072
+
+
+@requires_fused_mqa_topk
 def test_cuda_graph_replay():
     rows, keys = 64, 65536
     q, k, scales, weights = _inputs(rows, keys)

@@ -181,33 +181,62 @@ __device__ __forceinline__ float reduce_heads_with_lin(const float* s,
 }
 
 // Gate sample state: each math warp histograms its row's sampled scores
-// (half_bin<5>: kSampleBins bins, padded) and finish_sample_histogram picks the
-// gate from them.
-constexpr uint32_t kSampleBins = 2048;
+// relative to the row's reference `ref` (its max over the first sample tile):
+// half_bin<5>(x - ref), kSampleBins bins, 32 per octave of the distance, so
+// the bins near the row's top stay fine whatever the scores' common offset
+// (absolute bins are ~2 wide at |x| ~ 100, too coarse for top tails that
+// narrow).
+constexpr uint32_t kSampleShift = 5, kSampleBins = 65536 >> kSampleShift;
 struct alignas(16) SampleShared {
   uint32_t hist[kBlockRows][padded_bins(kSampleBins)];
+  // Ordered code of each row's max over the first sample tile (0: none).
+  uint32_t ref_code[kBlockRows];
+  // The first tile's scores, held until the reference is known (in registers
+  // they cost the hot loops spills).
+  float first[2][kWgRows][kMathThreads];
 };
 
+__device__ __forceinline__ void add_sample(uint32_t* hist, float distance) {
+  atomicAdd(hist + padded_bin(half_bin<kSampleShift>(distance)), 1u);
+}
+__device__ __forceinline__ uint32_t sample_count(const uint32_t* hist,
+                                                 uint32_t bin) {
+  return hist[padded_bin(bin)];
+}
+// The row reference from its ordered code; 0 when the row had no valid sample
+// in the first tile (then the bins are absolute).
+__device__ __forceinline__ float sample_ref(uint32_t code) {
+  const float ref = ordered_float(code);
+  return isfinite(ref) ? ref : 0.0f;
+}
+
+// The gate aims kGateSlack16 / 16 above the target count, so that few rows fall
+// below the top-k (and into the exact rescan) when the sampled estimate runs
+// low. On the B300 captures 17/16 cuts the rescanned blocks by ~85% at about
+// the candidate counts of the coarser absolute bins.
+constexpr uint32_t kGateSlack16 = 17;
+
 // Gate: the k-th largest sample (k = count * target / visible, count = the
-// histogram total) of one row from its 2048-bin histogram; one warp per row.
-// -inf when the row sees at most `target` keys or has no samples.
+// histogram total) of one row from its histogram; one warp per row. -inf when
+// the row sees at most `target` keys or has no samples.
 __device__ __noinline__ inline void finish_sample_histogram(
-    const uint32_t* hist, float* gate, uint32_t visible, uint32_t target,
-    uint32_t lane) {
+    const uint32_t* hist, float ref, float* gate, uint32_t visible,
+    uint32_t target, uint32_t lane) {
   if (visible <= target) {
     if (lane == 0) *gate = -CUDART_INF_F;
     __syncwarp();
     return;
   }
-  // Lane l owns the 64 bins of 32-bin chunks kChunks-1-2l and kChunks-2-2l
-  // (bins descending with the lane).
-  constexpr uint32_t kChunks = kSampleBins / 32;
-  static_assert(kChunks == 2 * 32, "two 32-bin chunks per lane");
-  const uint32_t* const h0 = hist + padded_bin((kChunks - 1 - 2 * lane) * 32);
-  const uint32_t* const h1 = hist + padded_bin((kChunks - 2 - 2 * lane) * 32);
+  // Lane l owns kChunksPerLane 32-bin chunks, descending with the lane: chunk
+  // kChunks - 1 - kChunksPerLane * l - j for j < kChunksPerLane.
+  constexpr uint32_t kChunks = kSampleBins / 32, kChunksPerLane = kChunks / 32;
   uint32_t sum = 0;
+#pragma unroll
+  for (uint32_t j = 0; j < kChunksPerLane; ++j) {
+    const uint32_t c = kChunks - 1 - kChunksPerLane * lane - j;
 #pragma unroll 8
-  for (uint32_t j = 0; j < 32; ++j) sum += h0[j] + h1[j];
+    for (uint32_t b = 0; b < 32; ++b) sum += hist[padded_bin(c * 32 + b)];
+  }
   const uint32_t incl = warp_inclusive_scan(sum, lane);
   const uint32_t tot = __shfl_sync(kFullMask, incl, 31);
   if (tot == 0) {
@@ -215,16 +244,16 @@ __device__ __noinline__ inline void finish_sample_histogram(
     __syncwarp();
     return;
   }
-  const uint32_t rank =
-      max(1u, min(tot, (tot * target + visible - 1) / visible));
+  const uint32_t rank = max(
+      1u, min(tot, (tot * target * kGateSlack16 / 16 + visible - 1) / visible));
   const uint32_t w = __ffs(__ballot_sync(kFullMask, incl >= rank)) - 1;
   uint32_t above = __shfl_sync(kFullMask, incl - sum, w), chosen = 0;
 #pragma unroll 1
-  for (uint32_t cc = 0; cc < 2; ++cc) {
-    const uint32_t c = kChunks - 1 - 2 * w - cc;
+  for (uint32_t cc = 0; cc < kChunksPerLane; ++cc) {
+    const uint32_t c = kChunks - 1 - kChunksPerLane * w - cc;
     // Lane 0 = highest bin of the chunk.
     const uint32_t v =
-        warp_inclusive_scan(hist[padded_bin(c * 32 + 31 - lane)], lane);
+        warp_inclusive_scan(sample_count(hist, c * 32 + 31 - lane), lane);
     const uint32_t mask = __ballot_sync(kFullMask, above + v >= rank);
     if (mask) {
       chosen = c * 32 + 31 - (__ffs(mask) - 1);
@@ -232,7 +261,7 @@ __device__ __noinline__ inline void finish_sample_histogram(
     }
     above += __shfl_sync(kFullMask, v, 31);
   }
-  if (lane == 0) *gate = half_bin_floor<5>(chosen);
+  if (lane == 0) *gate = ref + half_bin_floor<kSampleShift>(chosen);
   __syncwarp();
 }
 
