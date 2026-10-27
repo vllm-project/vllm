@@ -190,8 +190,8 @@ class HiSparseCoordinator:
         self._owners: dict[int, set[tuple[str, int]]] = {}
         # TODO: Temporary workaround for a race in P/D: an RDMA transfer into a
         # reused indexer page can overwrite a resident page an in-flight step
-        # still reads. Drop such pages at once and unpin them after the steps
-        # already scheduled are processed.
+        # still reads. Once a P/D import arrives, drop such pages at once and
+        # unpin them after the steps already scheduled are processed.
         self.defer_unpins = False
         self.sched_step_seq = 0
         self.processed_step_seq = 0

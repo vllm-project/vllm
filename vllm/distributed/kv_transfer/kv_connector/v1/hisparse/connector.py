@@ -98,10 +98,8 @@ class HiSparseConnectorScheduler:
         *,
         async_speculative: bool,
         draft_kv_lookahead: int = 0,
-        defer_unpins: bool = False,
     ) -> None:
         self.coordinator: HiSparseCoordinator | None = None
-        self.defer_unpins = defer_unpins
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
         self.requests: dict[str, Request] = {}
@@ -109,7 +107,6 @@ class HiSparseConnectorScheduler:
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         assert self.coordinator is None
         self.coordinator = coordinator
-        coordinator.defer_unpins = self.defer_unpins
 
     def get_kv_connector_stats(self) -> HiSparseKVConnectorStats | None:
         if self.coordinator is None:
@@ -243,15 +240,12 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker: HiSparseConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
             speculative_config = vllm_config.speculative_config
-            kv_transfer_config = vllm_config.kv_transfer_config
-            assert kv_transfer_config is not None
             self.connector_scheduler = HiSparseConnectorScheduler(
                 async_speculative=bool(
                     vllm_config.scheduler_config.async_scheduling
                     and speculative_config is not None
                 ),
                 draft_kv_lookahead=vllm_config.num_lookahead_tokens,
-                defer_unpins=kv_transfer_config.has_connector("NixlConnector"),
             )
             max_model_len = vllm_config.model_config.max_model_len
             steady_concurrency = get_hisparse_steady_state_concurrency(
@@ -386,6 +380,14 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         return 0, False
+
+    def on_new_request(self, request: Request) -> None:
+        assert self.connector_scheduler is not None
+        coordinator = self.connector_scheduler.coordinator
+        assert coordinator is not None
+        params = request.kv_transfer_params
+        if params and params.get("do_remote_prefill"):
+            coordinator.defer_unpins = True
 
     def update_state_after_alloc(
         self,
