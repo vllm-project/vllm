@@ -200,8 +200,10 @@ def _flashinfer_fp8_blockscale_gemm_impl(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> torch.Tensor:
+    # The sm90 binding takes only a data pointer and assumes packed rows, so a
+    # strided input (e.g. a column slice) misreads every row after the first.
     return flashinfer_fp8_blockscale_gemm(
-        input=input,
+        input=input.contiguous(),
         weight=weight,
         weight_scale=weight_scale,
         out_dtype=torch.bfloat16,
@@ -264,8 +266,9 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
+        # Packed rows required, see _flashinfer_fp8_blockscale_gemm_impl.
         return flashinfer_fp8_blockscale_gemm(
-            input=input,
+            input=input.contiguous(),
             weight=weight,
             weight_scale=weight_scale,
             out_dtype=torch.bfloat16,
