@@ -20,6 +20,15 @@ following `quantization.quant_algo` values:
 - `W4A16_NVFP4`: weight-only ModelOpt NVFP4 checkpoints with 16-bit
   activations (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
+- `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
+  (use `quantization="modelopt_mixed"`).
+
+For per-tensor `FP8`, vLLM converts E4M3FN weights and scales to E4M3FNUZ
+when required by the GPU, for example on AMD MI300.
+
+For Qwen3-based DFlash and DSpark drafts, `quantized_layers` and exclusion lists
+use the exported checkpoint's module names. vLLM maps these names to the draft's
+module prefix and decoder layer indices before constructing quantized layers.
 
 !!! note
     For NVFP4 checkpoints, vLLM selects a GEMM kernel automatically at load
@@ -39,6 +48,15 @@ following `quantization.quant_algo` values:
     For models quantized to MXFP8 with BF16 activations on SM100-family GPUs,
     use `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
     GEMM backend.
+
+## Benchmarking with dummy weights
+
+For performance experiments with random weights, use `--load-format dummy`.
+ModelOpt NVFP4 MoE layers initialize positive quantization scales with matching
+gate/up global scales, including for FlashInfer MegaMoE
+(`--moe-backend flashinfer_moe_ep_cutedsl`).
+Dummy weights are for benchmarking, not model quality evaluation. Normal
+checkpoint loading uses the checkpoint's scales.
 
 ## Quantizing HuggingFace Models with PTQ
 

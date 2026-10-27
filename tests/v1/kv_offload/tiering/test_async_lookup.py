@@ -49,6 +49,38 @@ class InMemoryLookupManager(AsyncLookupManager):
 
 
 class TestAsyncLookupManager:
+    @pytest.mark.parametrize("fail_after", [0, 1])
+    def test_iterator_failure_returns_misses_and_preserves_progress(self, fail_after):
+        class FailingIteratorLookupManager(AsyncLookupManager):
+            def batch_lookup(
+                self, keys: list[OffloadKey], req_context: ReqContext
+            ) -> Iterable[bool]:
+                for index, _ in enumerate(keys):
+                    if req_context.req_id == "failing" and index == fail_after:
+                        raise OSError("storage lookup failed during iteration")
+                    yield True
+
+        mgr = FailingIteratorLookupManager(tier_type="test")
+        failing_ctx = _ctx("failing")
+        healthy_ctx = _ctx("healthy")
+        later_ctx = _ctx("later")
+        try:
+            assert mgr.lookup(_key(1), failing_ctx) is None
+            assert mgr.lookup(_key(2), failing_ctx) is None
+            assert mgr.lookup(_key(3), healthy_ctx) is None
+            mgr.flush()
+
+            assert mgr.lookup(_key(4), later_ctx) is None
+            mgr.flush()
+        finally:
+            # The FIFO shutdown sentinel waits for both batches and drains results.
+            mgr.shutdown()
+
+        assert mgr.lookup(_key(1), failing_ctx) is False
+        assert mgr.lookup(_key(2), failing_ctx) is False
+        assert mgr.lookup(_key(3), healthy_ctx) is True
+        assert mgr.lookup(_key(4), later_ctx) is True
+
     def test_new_key_returns_none(self):
         mgr = InMemoryLookupManager()
         assert mgr.lookup(_key(1), _ctx()) is None

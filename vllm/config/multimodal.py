@@ -452,7 +452,8 @@ class MultiModalConfig:
     placeholder range.
 
     Derived, not user-settable: `VllmConfig.__post_init__` sets this to True
-    on EC and KV consumers. Everywhere else it stays False so that a request
+    on EC consumers, and on KV consumers unless `language_model_only` is set
+    without `enable_mm_embeds`. Everywhere else it stays False so that a request
     which forgets its embeddings still fails fast in the frontend, with a clear
     error, rather than deep inside the model."""
 

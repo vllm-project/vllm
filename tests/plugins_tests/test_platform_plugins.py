@@ -62,3 +62,20 @@ def test_oot_custom_op(default_vllm_config, monkeypatch: pytest.MonkeyPatch):
         "Expected DummyRotaryEmbedding to have an 'addition_config' attribute, "
         "which is set by the custom op."
     )
+
+
+def test_oot_pluggable_layer(default_vllm_config):
+    load_general_plugins()
+    from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import (
+        VitMropeSetup,
+    )
+
+    layer = VitMropeSetup()
+    assert layer.__class__.__name__ == "DummyVitMropeSetup", (
+        f"Expected DummyVitMropeSetup, got {layer.__class__.__name__}, "
+        "possibly because the pluggable layer is not registered correctly."
+    )
+    assert hasattr(layer, "addition_config"), (
+        "Expected DummyVitMropeSetup to have an 'addition_config' attribute, "
+        "which is set by the OOT pluggable layer."
+    )

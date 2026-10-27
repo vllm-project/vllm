@@ -365,11 +365,13 @@ def test_fused_moe_lora_kernel(
 @pytest.mark.parametrize("max_lora_rank", [128, 256])
 @pytest.mark.parametrize("add_inputs", [True, False])
 @pytest.mark.parametrize("num_slices", [1, 2])
+@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 def test_fused_moe_lora_kernel_large_rank_fallback(
     max_lora_rank,
     add_inputs,
     num_slices,
+    dtype,
     device,
 ):
     """Ranks above the one-shot limit fall back to shrink/expand kernels."""
@@ -384,8 +386,6 @@ def test_fused_moe_lora_kernel_large_rank_fallback(
     N = 256
     K = 256
     block_size = 16
-    dtype = torch.bfloat16
-
     topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
         num_tokens, num_sequences, max_loras, num_experts, top_k_num
     )
@@ -424,19 +424,35 @@ def test_fused_moe_lora_kernel_large_rank_fallback(
         add_inputs=add_inputs,
     )
 
+    strict_fp16 = dtype == torch.float16 and max_lora_rank == 256
+    if strict_fp16:
+        # An fp32 oracle is needed to catch an unintended fp16 -> bf16 cast.
+        reference_hidden_states = hidden_states.float()
+        reference_lora_a = [lora_a.float() for lora_a in lora_a_stacked]
+        reference_lora_b = [lora_b.float() for lora_b in lora_b_stacked]
+    else:
+        reference_hidden_states = hidden_states
+        reference_lora_a = lora_a_stacked
+        reference_lora_b = lora_b_stacked
+
     expected = use_torch(
-        hidden_states,
+        reference_hidden_states,
         token_lora_mapping,
         topk_ids,
-        lora_a_stacked,
-        lora_b_stacked,
+        reference_lora_a,
+        reference_lora_b,
         top_k_num,
         num_slices,
     )
     if add_inputs:
-        expected += residual
+        expected += residual.to(expected.dtype)
 
-    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+    if strict_fp16:
+        # This separates the fp16 dot path from the old bf16-cast path while
+        # allowing normal fp16 accumulation and output-rounding error.
+        torch.testing.assert_close(output.float(), expected, atol=1e-2, rtol=8e-4)
+    else:
+        torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
 def use_fused_moe_lora_kernel_naive(

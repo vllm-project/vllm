@@ -136,6 +136,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             progress_bar_desc="Capturing multi-module MTP CUDA graphs",
         )
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
+
     @torch.inference_mode()
     def propose(
         self,

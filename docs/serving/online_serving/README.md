@@ -116,7 +116,7 @@ LoRA dynamic loading & unloading is enabled in the API server. This should ONLY 
 
 For further details on profiling vLLM, please refer to [this page](../../contributing/profiling.md).
 
-- `/start_profile` - Start PyTorch profiler
+- `/start_profile` - Start PyTorch profiler (accepts an optional JSON body with `profiler_kwargs` to pass keyword arguments to the underlying profiler)
 - `/stop_profile` - Stop PyTorch profiler
 
 ### SageMaker APIs
@@ -170,6 +170,14 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
+
+## Process Checkpoint APIs
+
+For external checkpoint/restore orchestrators, available with `--enable-sleep-mode`. Preparing drains the engine and releases its KV cache and other external state, any number of times. Until `/checkpoint/restore`, new requests get a retryable error and `/health` still returns 200, as while asleep. `--checkpoint-prepare-on-startup` prepares each engine once it starts.
+
+- `/checkpoint/prepare` - Start preparing, draining with `?mode=wait` (default), `abort` or `keep`; 200 once started or already preparing, 400 if the engine cannot prepare now
+- `/checkpoint/status` - Return the state: 200 once prepared, 503 until then, 500 after a failure
+- `/checkpoint/restore` - Bring back released state and serve; 200 if already restoring or serving, 400 while preparing or after a failure
 
 ## Server in development mode
 

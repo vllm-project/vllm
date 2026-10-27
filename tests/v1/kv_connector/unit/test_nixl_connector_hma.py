@@ -1567,6 +1567,7 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
     scheduler = object.__new__(Scheduler)
     scheduler.connector = MagicMock()
+    scheduler.num_hash_lookahead_tokens = 0
     scheduler.needs_kv_cache_zeroing = True
     scheduler.kv_cache_manager = _make_fake_kv_cache_manager()
     scheduler.kv_cache_manager.cache_blocks = MagicMock()  # type: ignore[method-assign]

@@ -458,6 +458,19 @@ class TestReasoningRenderParity:
             online_renderer._make_request_with_harmony(request)
         assert exc_info.value.parameter == "reasoning_effort"
 
+    async def test_effort_map_applies_to_harmony(self, online_renderer):
+        """Harmony renders the mapped effort instead of rejecting "none"."""
+        online_renderer.reasoning_effort_map = {"none": "low"}
+
+        def render(effort: str):
+            request = ChatCompletionRequest(
+                model=_MODEL, messages=_USER, reasoning_effort=effort
+            )
+            _, (engine_input,) = online_renderer._make_request_with_harmony(request)
+            return engine_input["prompt_token_ids"]
+
+        assert render("none") == render("low") != render("high")
+
     async def test_explicit_enable_thinking_not_overridden(
         self, online_renderer, serving_responses, monkeypatch
     ):

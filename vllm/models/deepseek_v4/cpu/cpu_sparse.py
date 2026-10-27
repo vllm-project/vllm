@@ -175,11 +175,6 @@ def _fused_indexer_q_rope_quant_cpu(
     return index_q_fp8, index_weights_out
 
 
-class _NoOpEvent:
-    """Stand-in for ``torch.cuda.Event`` on CPU: since CPU never sets an aux
-    stream list, these events are constructed but never actually used."""
-
-
 class DeepseekV4CPUIndexerCache(DeepseekV4IndexerCache):
     """CPU indexer K-cache descriptor: same fields as the shared base, just
     pointing ``get_attn_backend()`` at ``DeepseekV4CPUIndexerBackend``

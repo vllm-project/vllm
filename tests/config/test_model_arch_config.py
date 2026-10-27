@@ -269,6 +269,30 @@ def test_legacy_modelopt_config_without_producer_is_normalized():
     assert convertor.get_quantization_config()["quant_method"] == "modelopt_fp4"
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("quant_algo", ["MIXED_PRECISION", "mixed_precision"])
+def test_modelopt_mixed_precision_config_is_normalized(legacy, quant_algo):
+    quantized_layers = {"model.layers.0.mlp.down_proj": {"quant_algo": "FP8"}}
+    quantization = {
+        "quant_algo": quant_algo,
+        "quantized_layers": quantized_layers,
+    }
+    quantization_config = {"quantization": quantization}
+    if legacy:
+        quantization["modelopt_quant_config"] = {"quant_cfg": {}}
+    else:
+        quantization_config["producer"] = {"name": "modelopt"}
+    hf_config = PreTrainedConfig(quantization_config=quantization_config)
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    normalized = convertor.get_quantization_config()
+
+    assert normalized["quant_method"] == "modelopt_mixed"
+    assert normalized["quantization"]["quantized_layers"] == {
+        "model.layers.0.mlp.down_proj": {"quant_algo": "FP8"}
+    }
+
+
 def _layer(**overrides) -> ModelArchitectureConfig:
     fields = dict(
         architectures=["X"],

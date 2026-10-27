@@ -41,9 +41,6 @@ class Qwen3ASRForcedAlignerForTokenClassification(
         llm = LLM(
             model="Qwen/Qwen3-ForcedAligner-0.6B",
             runner="pooling",
-            hf_overrides={
-                "architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]
-            },
         )
         outputs = llm.encode(
             [{"prompt": prompt, "multi_modal_data": {"audio": audio}}],

@@ -462,6 +462,7 @@ class UBatchRunner:
             compute_stream=compute_stream,
             forward_contexts=ubatch_state.forward_contexts,
             ready_barrier=self.ready_barrier,
+            token_offsets=[s.token_slice.start for s in ubatch_slices],
         )
 
         outputs: dict[int, Any] = {}
@@ -520,7 +521,7 @@ class UBatchRunner:
                 stack.close()
 
             if errors:
-                failed = min(errors)
+                failed = next(iter(errors))
                 raise RuntimeError(
                     f"Microbatch {failed} of {self.num_ubatches} failed"
                 ) from errors[failed]

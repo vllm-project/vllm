@@ -88,7 +88,10 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
 
     speculator = object.__new__(_TestSpeculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
-    speculator.max_model_len = speculator.draft_max_seq_len = 32
+    speculator.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=32)
+    )
+    speculator.draft_max_seq_len = 32
     speculator.draft_is_prefilling = torch.zeros(4, dtype=torch.bool)
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(4, dtype=torch.int64),
@@ -229,6 +232,7 @@ def test_mm_support_configured_after_model_load(monkeypatch):
         speculator.draft_model_config = draft_model_config
         speculator.supports_mm_inputs = False
         speculator.use_acceptance_estimator = False
+        speculator.use_draft_logits = False
 
     monkeypatch.setattr(DraftModelSpeculator, "__init__", init_base)
     _mock_base_model_load(monkeypatch)
@@ -253,6 +257,7 @@ def test_load_model_keeps_mm_support_for_capable_drafter(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
+    speculator.use_draft_logits = False
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)
     )
@@ -275,6 +280,7 @@ def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
+    speculator.use_draft_logits = False
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)
     )
@@ -305,6 +311,7 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
+    speculator.use_draft_logits = False
     speculator.cached_draft_input_embeds = None
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)

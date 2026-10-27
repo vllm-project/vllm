@@ -36,7 +36,7 @@ For further details on pooling models, please refer to [this page](../models/poo
 
 For further details on profiling, please refer to [this page](../contributing/profiling.md).
 
-- `LLM.start_profile` - Starts profiling with an optional custom trace prefix.
+- `LLM.start_profile` - Starts profiling with an optional custom trace prefix (`profile_prefix`) and optional profiler keyword arguments (`profiler_kwargs`).
 - `LLM.stop_profile` - Stops the ongoing profiling session.
 
 ## Sleep Mode APIs

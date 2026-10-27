@@ -94,6 +94,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         num_new_sampled_tokens_per_step=1,
     )
     runner.speculator = None
+    runner.batch_sharder = None
     runner.req_states = []
     runner.input_buffers = SimpleNamespace(query_start_loc=None)
     runner.vocab_size = 1
@@ -361,6 +362,46 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     assert lock_calls == []
 
 
+@pytest.mark.parametrize("profile_only", [False, True])
+def test_capture_model_excludes_adaptive_verification_profiling_cache(
+    monkeypatch, profile_only
+):
+    """Adaptive verification's cost-profiling dummy runs execute inside
+    capture_model's free-memory window. The activations they leave in the
+    allocator cache must not be counted as CUDA graph memory, which is taken
+    from the KV cache. The memory-profiling pass skips them entirely: it runs
+    on a throwaway KV cache and the real capture recalibrates."""
+    runner = _make_capture_runner(monkeypatch, captured=True)
+    monkeypatch.setattr(
+        runner.cudagraph_manager, "captured_token_counts", lambda: [1, 2], raising=False
+    )
+    runner.step_timing = SimpleNamespace(collect=lambda: contextlib.nullcontext([]))
+    curves: list[list] = []
+    runner.adaptive_verification = SimpleNamespace(
+        batches_to_profile=lambda sizes: [{"num_tokens": n} for n in sizes],
+        set_initial_cost_curves=curves.append,
+    )
+    total, cached = 16 << 30, [0]
+
+    def _dummy_run(num_tokens):
+        cached[0] = 2 << 30
+
+    monkeypatch.setattr(runner, "_dummy_run", _dummy_run)
+    monkeypatch.setattr(
+        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
+    )
+    monkeypatch.setattr(
+        torch.accelerator, "empty_cache", lambda: cached.__setitem__(0, 0)
+    )
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (total - cached[0], total)
+    )
+    monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
+
+    assert runner.capture_model(profile_only=profile_only) == 0
+    assert curves == ([] if profile_only else [[]])
+
+
 @pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
 def test_get_drafter_hidden_states_tolerates_missing_target_buffer(target_buffer):
     """Targets allocate the MTP hidden buffer only for hidden-state drafters."""
@@ -393,7 +434,10 @@ def test_async_copy_to_np_does_not_alias_reused_buffer():
     ("draft_dtype", "expected_dtype"),
     [("auto", "auto"), ("bfloat16", "bfloat16"), (None, "fp8_e4m3")],
 )
-def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_dtype):
+@pytest.mark.parametrize("data_parallel_index", [0, 3])
+def test_standalone_draft_kv_dtype_override(
+    monkeypatch, draft_dtype, expected_dtype, data_parallel_index
+):
     @dataclass
     class Config:
         cache_config: CacheConfig
@@ -402,6 +446,7 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
         quant_config: object | None = None
 
     target = Config(CacheConfig(cache_dtype="fp8_e4m3"), ParallelConfig(), object())
+    target.parallel_config.data_parallel_index = data_parallel_index
     speculator = object.__new__(ar_module.StandaloneARSpeculator)
     speculator.vllm_config = target
     speculator.draft_model_config = object()
@@ -418,3 +463,5 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
     assert draft_config.cache_config.cache_dtype == expected_dtype
     assert speculator.attn_vllm_config.cache_config.cache_dtype == expected_dtype
     assert target.cache_config.cache_dtype == "fp8_e4m3"
+    assert draft_config.parallel_config.data_parallel_index == data_parallel_index
+    assert target.parallel_config.data_parallel_index == data_parallel_index

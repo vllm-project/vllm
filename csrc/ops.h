@@ -85,7 +85,8 @@ void get_cutlass_moe_mm_data(
     torch::stable::Tensor& output_permutation, const int64_t num_experts,
     const int64_t n, const int64_t k,
     const std::optional<torch::stable::Tensor>& blockscale_offsets,
-    const bool is_gated);
+    const bool is_gated,
+    const std::optional<torch::stable::Tensor>& sorted_expert_ids);
 
 void get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     const torch::stable::Tensor& expert_first_token_offset,
@@ -712,7 +713,7 @@ void concat_and_cache_mla(torch::stable::Tensor& kv_c,
                           torch::stable::Tensor& kv_cache,
                           torch::stable::Tensor& slot_mapping,
                           const std::string& kv_cache_dtype,
-                          torch::stable::Tensor& scale);
+                          torch::stable::Tensor& scale, bool skip_scale);
 
 void concat_and_cache_mla_grouped(
     torch::stable::Tensor& kv_c, torch::stable::Tensor& k_pe,

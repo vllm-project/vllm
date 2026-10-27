@@ -45,6 +45,7 @@ _BP_WARMUP = EMABackpressureDetector.DEFAULT_WARMUP_COMPLETIONS
 # Water marks in s/MiB, scaled for the test's tiny 16-byte blocks.
 _BP_HIGH_WATER_S = 1000.0
 _BP_LOW_WATER_S = 500.0
+_BP_FAILURE_THRESHOLD = EMABackpressureDetector.DEFAULT_FAILURE_THRESHOLD
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
@@ -90,14 +91,22 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
         self._held_jobs: list[JobResult] = []
         self._released_jobs: list[JobResult] = []
         self._request_policy: OffloadPolicy | None = None
+        # When True, stores complete with success=False, like a tier whose
+        # writes are rejected (e.g. ENOSPC on a full filesystem).
+        self.fail_stores = False
+        self.num_store_submissions = 0
 
     def lookup(self, key, req_context):
         return LookupResult.HIT if key in self.blocks else LookupResult.MISS
 
     def submit_store(self, job_metadata: TransferJob) -> None:
-        for key in job_metadata.keys:
-            self.blocks[key] = True
-        self._held_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
+        self.num_store_submissions += 1
+        if not self.fail_stores:
+            for key in job_metadata.keys:
+                self.blocks[key] = True
+        self._held_jobs.append(
+            JobResult(job_id=job_metadata.job_id, success=not self.fail_stores)
+        )
 
     def submit_load(self, job_metadata: TransferJob) -> None:
         self._released_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
@@ -151,6 +160,18 @@ class TestDefaultConfig:
         cfg = EMABackpressureDetector.default_config("fs", locality="LOCAL")
         assert cfg["high_water_s"] == EMABackpressureDetector.LOCAL_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.LOCAL_LOW_WATER_S
+
+    @pytest.mark.parametrize(
+        "tier_type, expected",
+        [
+            ("fs", EMABackpressureDetector.DEFAULT_FAILURE_THRESHOLD),
+            ("obj", EMABackpressureDetector.DEFAULT_FAILURE_THRESHOLD),
+            ("p2p", None),
+        ],
+    )
+    def test_failure_threshold_only_for_storage_tiers(self, tier_type, expected):
+        cfg = EMABackpressureDetector.default_config(tier_type)
+        assert cfg.get("failure_threshold") == expected
 
 
 class TestIdleDecay:
@@ -240,6 +261,7 @@ class TestBackpressure:
             backpressure_detector=EMABackpressureDetector(
                 high_water_s=_BP_HIGH_WATER_S,
                 low_water_s=_BP_LOW_WATER_S,
+                failure_threshold=_BP_FAILURE_THRESHOLD,
             ),
         )
         self.manager = TieringOffloadingManager(
@@ -555,6 +577,110 @@ class TestBackpressure:
         for b in blocks:
             result = self.manager.lookup(b, _CTX)
             assert result is LookupResult.HIT_PENDING
+
+    def _store_and_complete(self, keys):
+        self._store_blocks(keys)
+        self.manager._processed_jobs_this_step = False
+        self.tier.release_jobs()
+        self._simulate_on_schedule_end()
+
+    def test_failed_stores_activate_pressure(self, setup):
+        """A tier whose stores fail fast is put under pressure, so later
+        stores are dropped instead of being submitted to it."""
+        bp = self.tier.bp_detector
+        assert isinstance(bp, EMABackpressureDetector)
+        bp._decay_half_life_s = 0.0
+        # A healthy tier that starts failing must not keep bypassing the policy.
+        bp._completions = _BP_WARMUP
+        bp._healthy_streak = EMABackpressureDetector._HEALTHY_THRESHOLD
+        self.tier.fail_stores = True
+
+        for i in range(_BP_FAILURE_THRESHOLD):
+            assert bp.is_under_pressure() is False
+            self._store_and_complete(to_keys([900 + i]))
+        assert bp.is_under_pressure() is True
+        assert bp.is_healthy() is False
+
+        keys = to_keys(range(910, 913))
+        self._store_blocks(keys)
+        assert self.tier.num_store_submissions == _BP_FAILURE_THRESHOLD
+        statuses = [self.primary._policy.get(k) for k in keys]
+        assert all(s is not None and s.ref_cnt == 0 for s in statuses)
+
+
+class TestStoreFailures:
+    """Detector behaviour for failed stores."""
+
+    def _make_detector(self, **kwargs):
+        defaults = dict(
+            high_water_s=_BP_HIGH_WATER_S,
+            low_water_s=_BP_LOW_WATER_S,
+            cooldown_s=0.0,
+            failure_threshold=_BP_FAILURE_THRESHOLD,
+        )
+        defaults.update(kwargs)
+        return EMABackpressureDetector(**defaults)
+
+    def _complete_fast_store(self, bp):
+        block_bytes = 16
+        fast_s_per_mib = _BP_LOW_WATER_S * 0.5
+        bp.on_store_completed(
+            fast_s_per_mib * (block_bytes / EMABackpressureDetector._MIB),
+            block_bytes,
+        )
+
+    def test_failures_ignored_without_threshold(self):
+        bp = self._make_detector(failure_threshold=None)
+        bp._healthy_streak = EMABackpressureDetector._HEALTHY_THRESHOLD
+        for _ in range(10):
+            bp.on_store_failed()
+        assert bp.is_under_pressure() is False
+        assert bp.is_healthy() is True
+
+    def test_success_resets_failure_streak(self):
+        bp = self._make_detector()
+        bp._completions = _BP_WARMUP
+        bp._last_update = time.monotonic()
+        for _ in range(_BP_FAILURE_THRESHOLD - 1):
+            bp.on_store_failed()
+        self._complete_fast_store(bp)
+        for _ in range(_BP_FAILURE_THRESHOLD - 1):
+            bp.on_store_failed()
+        assert bp.is_under_pressure() is False
+
+    def test_failure_pressure_drops_all_stores(self):
+        bp = self._make_detector(failure_threshold=1, decay_half_life_s=0.0)
+        bp._completions = _BP_WARMUP
+        bp.on_store_failed()
+        assert isinstance(bp.policy, ThrottledDropPolicy)
+        assert not any(bp.should_store(1) for _ in range(20))
+
+    def test_failure_pressure_decays_before_warmup(self):
+        """A tier that never succeeds never finishes warmup; its pressure
+        must still decay so it gets probed again."""
+        bp = self._make_detector(failure_threshold=1)
+        bp.on_store_failed()
+        assert bp.is_under_pressure() is True
+        with patch("time.monotonic") as mock_time:
+            mock_time.return_value = bp._last_update + 60.0
+            assert bp.is_under_pressure() is False
+
+    @pytest.mark.parametrize("probe_succeeds", [False, True])
+    def test_probe_after_decay(self, probe_succeeds):
+        bp = self._make_detector()
+        bp._completions = _BP_WARMUP
+        for _ in range(_BP_FAILURE_THRESHOLD):
+            bp.on_store_failed()
+        with patch("time.monotonic") as mock_time:
+            mock_time.return_value = bp._last_update + 60.0
+            assert bp.is_under_pressure() is False
+            if probe_succeeds:
+                self._complete_fast_store(bp)
+                bp.on_store_failed()
+                assert bp.is_under_pressure() is False
+            else:
+                bp.on_store_failed()
+                assert bp.is_under_pressure() is True
 
 
 class TestThrottledDropPolicy:

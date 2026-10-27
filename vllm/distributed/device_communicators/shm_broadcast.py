@@ -69,6 +69,10 @@ VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 # written-flag. Bounds lost-notify recovery latency to ~5s while the periodic
 # wakeup stays negligible (one flag check per reader every 5s).
 SHM_READER_RECHECK_INTERVAL_MS = 5000
+# How often a busy reader polls its notify socket. CONFLATE keeps one message,
+# but libzmq still queues an internal command per notification until the socket
+# is polled, so a reader that never goes idle would grow without bound.
+SHM_NOTIFY_POLL_INTERVAL_S = 2.0
 
 
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
@@ -141,6 +145,8 @@ class SpinCondition:
         if is_reader:
             # Time of last shm buffer read
             self.last_read = time.monotonic()
+            # Time a busy reader last polled the notify socket
+            self.last_notify_poll = self.last_read
 
             # Time to keep busy-looping on the shm buffer before going idle
             self.busy_loop_s = busy_loop_s
@@ -183,6 +189,12 @@ class SpinCondition:
 
     def record_read(self):
         self.last_read = time.monotonic()
+        if self.last_read - self.last_notify_poll >= SHM_NOTIFY_POLL_INTERVAL_S:
+            self.last_notify_poll = self.last_read
+            # poll() makes libzmq process the queued commands; a bare recv()
+            # returns the pending message without doing so.
+            if self.local_notify_socket.poll(timeout=0):
+                self.local_notify_socket.recv(flags=zmq.NOBLOCK, copy=False)
 
     def cancel(self):
         # Sends cancellation ping that will cause the reader to wake up.

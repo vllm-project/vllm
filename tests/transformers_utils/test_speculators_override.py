@@ -235,3 +235,12 @@ def test_speculators_rejects_local_verifier_before_model_loading(
 
     with pytest.raises(ValueError, match="Speculators verifier must"):
         engine_args_cls(model=str(draft)).create_engine_config()
+
+
+def test_local_file_model_skips_speculators_detection(tmp_path):
+    """A single-file checkpoint (e.g. a .gguf) is not parsed as a config."""
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"GGUF")
+    assert maybe_override_with_speculators(
+        model=str(gguf), tokenizer="org/tok", trust_remote_code=False
+    ) == (str(gguf), "org/tok", None)

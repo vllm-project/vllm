@@ -130,14 +130,17 @@ def test_prepare_dcp_local_seq_lens_uses_shared_buffer(monkeypatch):
     assert batch.dcp_local_seq_lens.tolist() == [1, 2, 0, 0]
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="triton kernel needs CUDA")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="triton kernel needs CUDA or XPU",
+)
 @pytest.mark.parametrize("dcp_size", [2, 4])
 @pytest.mark.parametrize("cp_interleave", [1, 16])
 def test_prepare_dcp_local_seq_lens_matches_reference(
     dcp_size: int, cp_interleave: int
 ):
     """Every rank's local lengths must equal the reference torch formula."""
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
     seq_lens_np = np.array([7, 16, 33, 64, 512, 1023], dtype=np.int32)
     buffers = InputBuffers(max_num_reqs=8, max_num_tokens=32, device=device)
     batch = InputBatch.make_dummy(6, 12, buffers)

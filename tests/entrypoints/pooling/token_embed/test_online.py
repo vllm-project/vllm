@@ -131,8 +131,11 @@ def test_embeddings_without_chunking_match_pooling(server, inputs):
     for index, (actual, raw) in enumerate(zip(result["data"], reference["data"])):
         assert actual["index"] == index
         assert "late_chunking" not in actual
-        torch.testing.assert_close(
-            torch.tensor(actual["embedding"]), torch.tensor(raw["data"])
+        check_embeddings_close(
+            embeddings_0_lst=actual["embedding"],
+            embeddings_1_lst=raw["data"],
+            name_0="embeddings",
+            name_1="pooling",
         )
 
 

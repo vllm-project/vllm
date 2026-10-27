@@ -198,6 +198,9 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler-side methods
     # ==============================
 
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        return self._kv_cache_config.transfer_group_ids
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",

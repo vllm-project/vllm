@@ -668,6 +668,33 @@ def test_reader_rechecks_shm_after_idle_wait_timeout_without_notify():
             socket.close(linger=0)
 
 
+def test_busy_reader_consumes_write_notifications():
+    """A reader that never goes idle must still service its notify socket,
+    otherwise libzmq queues a command per notification and memory grows with
+    every message read.
+    """
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=1024,
+        max_chunks=1,
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    notify_socket = reader._spin_condition.local_notify_socket
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+
+        writer.enqueue("payload")
+        assert notify_socket.poll(timeout=5000)
+        with mock.patch.object(shm_broadcast, "SHM_NOTIFY_POLL_INTERVAL_S", 0):
+            assert reader.dequeue(timeout=5) == "payload"
+        assert not notify_socket.poll(timeout=0)
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
 def test_acquire_read_releases_slot_when_reader_raises():
     writer = MessageQueue(
         n_reader=1,

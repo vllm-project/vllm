@@ -86,7 +86,11 @@ steps:
       commands:
       - amd-smi
       # MLA static FP8 and distributed AR/RMS are owned by the existing ROCm jobs.
-      - pytest -v -s tests/compile/passes/test_fusion_attn.py tests/compile/passes/test_silu_mul_quant_fusion.py tests/compile/passes/test_silu_mul_quant_manual_fusion.py
+      - >-
+        pytest -v -s
+        tests/compile/passes/test_fusion_attn.py
+        tests/compile/passes/test_silu_mul_quant_fusion.py
+        tests/compile/passes/test_silu_mul_quant_manual_fusion.py
       - pytest -v -s tests/compile/correctness_e2e/test_attn_quant.py
 
 - label: ":nvidia: (H100) Fusion E2E Quick"

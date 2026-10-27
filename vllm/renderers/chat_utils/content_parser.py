@@ -40,6 +40,14 @@ position during chat template rendering.
 Registered as an additional special token when `--enable-prompt-embeds` is set.
 See `_ensure_prompt_embeds_placeholder_token` in `vllm/renderers/hf.py`.
 """
+PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX: Final[str] = (
+    f"{PROMPT_EMBEDS_PLACEHOLDER_TOKEN}__vllm_prompt_embed_"
+)
+
+
+def make_prompt_embeds_placeholder(index: int) -> str:
+    return f"{PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX}{index}__"
+
 
 _ENABLE_PROMPT_EMBEDS_ERROR: Final[str] = (
     "You must set `--enable-prompt-embeds` to input `prompt_embeds`"

@@ -10,6 +10,7 @@ import time
 import pytest
 import zmq
 
+from vllm.v1.kv_offload.tiering.p2p.control import zmq as zmq_module
 from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
     ZmqConnection,
     ZmqTransport,
@@ -229,6 +230,21 @@ class TestZmqTransportConnectivity:
         transport, _ = _make_transport()
         transport.close()
         transport.close()  # should not raise
+
+    def test_send_raises_instead_of_blocking_when_queue_full(self, monkeypatch):
+        """A peer that never reads fills the queue; send() raises, not blocks."""
+        monkeypatch.setattr(zmq_module, "_SNDHWM", 2)
+        transport, _ = _make_transport()
+        try:
+            # Nothing listens on this port, so queued messages never drain.
+            conn = transport.connect(f"127.0.0.1:{_free_port()}")
+            start = time.monotonic()
+            with pytest.raises(ConnectionError, match="send queue"):
+                for _ in range(10):
+                    conn.send({"type": "test"})
+            assert time.monotonic() - start < 1.0
+        finally:
+            transport.close()
 
 
 class TestZmqReconnect:

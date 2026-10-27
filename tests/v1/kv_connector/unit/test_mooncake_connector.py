@@ -40,6 +40,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
     _has_opaque_packed_row,
+    _normalize_paired_block_order,
     _pp_mismatch_hides_packed_layers,
     _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
@@ -2600,6 +2601,35 @@ def test_coalesce_keeps_a_run_inside_its_starting_row():
 
 def _layer_name(idx: int) -> str:
     return f"model.layers.{idx}.mla_attn"
+
+
+@pytest.mark.parametrize(
+    ("source", "destination", "expected_source", "expected_destination"),
+    [
+        ([2, 3, 4], [12, 13, 14], [2, 3, 4], [12, 13, 14]),
+        ([4, 3, 2], [14, 13, 12], [2, 3, 4], [12, 13, 14]),
+        (
+            [9, 8, 7, 20, 21, 30, 29],
+            [109, 108, 107, 120, 121, 130, 129],
+            [7, 8, 9, 20, 21, 29, 30],
+            [107, 108, 109, 120, 121, 129, 130],
+        ),
+        ([6, 4, 5], [106, 104, 105], [6, 4, 5], [106, 104, 105]),
+        ([3, 2, 1], [11, 12, 13], [3, 2, 1], [11, 12, 13]),
+        ([1, 2, 3], [13, 12, 11], [1, 2, 3], [13, 12, 11]),
+    ],
+)
+def test_normalize_paired_block_order(
+    source, destination, expected_source, expected_destination
+):
+    """Normalize joint descending runs without sorting or changing block pairs."""
+    original_source, original_destination = source.copy(), destination.copy()
+    src, dst = _normalize_paired_block_order(source, destination)
+    assert src == expected_source and dst == expected_destination
+    assert source == original_source and destination == original_destination
+    assert sorted(zip(src, dst)) == sorted(zip(source, destination))
+    if source == expected_source and destination == expected_destination:
+        assert src is source and dst is destination
 
 
 def _register_sliced_packed_mla(

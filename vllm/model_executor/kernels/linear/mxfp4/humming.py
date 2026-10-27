@@ -10,6 +10,10 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     prepare_humming_linear_layer_config,
     quant_key_to_input_schema,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp4Static,
+)
 from vllm.platforms import current_platform
 from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
@@ -34,6 +38,20 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
             return False, "Humming only supported on SM75+"
 
         return True, None
+
+    @classmethod
+    def _supports_quant_scheme(
+        cls,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        if weight_key != kMxfp4Static:
+            return False
+        try:
+            quant_key_to_input_schema(activation_key)
+        except ValueError:
+            return False
+        return True
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
