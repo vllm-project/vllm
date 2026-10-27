@@ -217,19 +217,17 @@ A zero-copy view over shared memory the reader process has never touched makes
 the subsequent `cudaMemcpyAsync` pay **first-touch page faults on ~50k pages plus
 pageable-copy staging** — the same tax the current oob path pays on its pageable
 ZMQ frame. Each reader lazily `cudaHostRegister`s the used prefix of each slot,
-rounded up to 8 MiB. Registration grows geometrically when a larger tensor
-reuses that slot, up to its capacity. Reuse requires every reader to have
-released its previous tensor and completed H2D, so the old registration can
-then be replaced safely. Subsequent transfers within the registered prefix
-use pinned-memory DMA without registering again.
+rounded to 8 MiB and grown geometrically up to the slot capacity. Slot reuse
+requires every reader to release its previous tensor and complete H2D, so
+growth can safely replace the registration. Transfers within the registered
+prefix reuse pinned-memory DMA.
 
-Registered prefixes retain their high-water size until the arena is destroyed;
-they do not shrink when later images are smaller. This avoids faulting in the
-entire default 2 GiB arena on the first tensor, but introduces registration
-work on later growth and can eventually pin the full capacity. Registration
-failures clear the pending runtime error and fall back to pageable transfers.
-If unregistering a smaller prefix fails, an owned pageable copy keeps H2D
-from spanning registered and unregistered memory.
+Prefixes retain their high-water size until arena destruction. This avoids
+faulting in the entire default 2 GiB arena on first use, but growth adds
+registration work and can eventually pin the full capacity. Failures clear
+the pending runtime error and fall back to pageable transfers; failed
+unregistration uses an owned copy to avoid H2D spanning registered and
+unregistered memory.
 
 ## 3. Configuration
 

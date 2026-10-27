@@ -1249,9 +1249,7 @@ def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
     cudart.cudaHostRegister.return_value = 0
     cudart.cudaHostUnregister.return_value = 0
     monkeypatch.setattr(
-        shm_tensor_arena,
-        "current_platform",
-        SimpleNamespace(is_cuda_alike=lambda: True, cudart=lambda: cudart),
+        shm_tensor_arena.current_platform, "is_cuda_alike", lambda: True
     )
     reader._ensure_pinned(0, 1)
     assert reader._pinned
@@ -1271,9 +1269,7 @@ def test_arena_growth_failure_keeps_h2d_source_safe(monkeypatch, unregister_erro
     cudart.cudaHostRegister.side_effect = [0, 2]
     cudart.cudaHostUnregister.return_value = unregister_error
     monkeypatch.setattr(
-        shm_tensor_arena,
-        "current_platform",
-        SimpleNamespace(is_cuda_alike=lambda: True, cudart=lambda: cudart),
+        shm_tensor_arena.current_platform, "is_cuda_alike", lambda: True
     )
     first = torch.ones(8 << 20, dtype=torch.uint8)
     idx = writer.write_tensor(first)

@@ -212,11 +212,12 @@ def _encoder_storage_sizes(worker) -> tuple[int, int, int]:
 )
 def test_batched_encoder_cache_bounds_retained_storage(llm) -> None:
     """Hot images must not retain unbounded backing from older encoder batches."""
+    params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
     anchors: list[int] = []
     for round_id in range(10):
         for kind, ids in (
             ("reuse", anchors),
-            ("new", list(range(round_id * 4, round_id * 4 + 4))),
+            ("new", range(round_id * 4, round_id * 4 + 4)),
         ):
             if not ids:
                 continue
@@ -231,11 +232,7 @@ def test_batched_encoder_cache_bounds_retained_storage(llm) -> None:
                 }
                 for i in ids
             ]
-            outputs = llm.generate(
-                prompts,
-                SamplingParams(temperature=0, max_tokens=8, ignore_eos=True),
-                use_tqdm=False,
-            )
+            outputs = llm.generate(prompts, params, use_tqdm=False)
             assert all(len(o.outputs[0].token_ids) == 8 for o in outputs)
         anchors.append(round_id * 4)
     snapshots = llm.collective_rpc(_encoder_storage_sizes)

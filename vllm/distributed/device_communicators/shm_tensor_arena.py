@@ -233,25 +233,24 @@ class ShmTensorArena:
                 self._cudart = CudaRTLibrary()
             cudart = self._cudart
             if registered:
-                # A larger payload means the writer reused this slot after all
-                # readers released their storage and completed H2D. One copy
-                # must stay within a single CUDA registration, so replace it.
+                # Readers finished H2D before slot reuse. Replace the registration
+                # so the larger transfer fits within a single pinned range.
                 ret = cudart.cudaHostUnregister(ptr)
-                if int(ret) != 0:
+                if ret != 0:
                     cudart.cudaGetLastError()
                     logger.info("ShmTensorArena: host-unregister failed: %s", ret)
                     self._pin_failed = True
                     return False
                 self._pinned_sizes[idx] = 0
             ret = cudart.cudaHostRegister(ptr, size, 0)
-            if int(ret) == 0:
+            if ret == 0:
                 self._pinned_sizes[idx] = size
                 return True
             cudart.cudaGetLastError()
             logger.info(
                 "ShmTensorArena: host-register failed for slot %d: error %d",
                 idx,
-                int(ret),
+                ret,
             )
         except Exception as e:
             logger.info("ShmTensorArena: host-register skipped: %s", e)
