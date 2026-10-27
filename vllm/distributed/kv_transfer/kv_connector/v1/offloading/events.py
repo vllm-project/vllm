@@ -61,8 +61,7 @@ _MEDIUM_TO_EVENT_STR: dict[Medium, str] = {
     Medium.STORAGE: MEDIUM_STORAGE,
 }
 
-# The tracker is CPU-primary by construction: the primary tier's residency key.
-_PRIMARY_RESIDENCY: tuple[Medium, str | None] = (Medium.CPU, None)
+# The tracker is CPU-primary by construction: the primary tier's residency bit.
 _PRIMARY_RESIDENCY_BIT = 1
 
 
@@ -89,9 +88,8 @@ class _OffloadEventMetadata(
     Request is available and kept until the final matching removal event.
     ``medium`` and ``ownership`` are forwarded from the OffloadingEvent.
 
-    One is kept per offloaded chunk, so it is untracked by the cyclic GC and
-    holds no tracked containers: ``active_residencies`` is a bitmask over the
-    tracker's residency bits."""
+    One is kept per offloaded chunk, so it is untracked by the cyclic GC: keep
+    fields free of tracked containers (``active_residencies`` is a bitmask)."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -132,7 +130,7 @@ class OffloadingEventsTracker:
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
         # (medium, ownership) -> its bit in active_residencies.
         self._residency_bits: dict[tuple[Medium, str | None], int] = {
-            _PRIMARY_RESIDENCY: _PRIMARY_RESIDENCY_BIT
+            (Medium.CPU, None): _PRIMARY_RESIDENCY_BIT
         }
 
     def record_store(
