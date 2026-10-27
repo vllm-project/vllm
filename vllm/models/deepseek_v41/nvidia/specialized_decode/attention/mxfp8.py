@@ -436,12 +436,10 @@ def compile_pinned(linear: nn.Module) -> None:
 @contextmanager
 def pinned_tactics() -> Iterator[None]:
     """Offer FlashInfer's tuner only the pinned tactic for pinned problems. The
-    tuner's tactic list is a FlashInfer internal: off the checked version,
-    every tactic is tuned."""
-    if not (
-        current_platform.is_device_capability(103)
-        and uses_checked_flashinfer("pinning the MXFP8 GEMM tactics")
-    ):
+    tuner's tactic list is a FlashInfer internal: when it has no
+    ``autotune_tactics`` or does not list a pinned tactic, every tactic is
+    tuned."""
+    if not current_platform.is_device_capability(103):
         yield
         return
     module = importlib.import_module(

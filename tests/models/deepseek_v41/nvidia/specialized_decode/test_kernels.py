@@ -515,7 +515,7 @@ def test_sparse_mla_persistent_kv_counters(dtype, query_lens):
     """The decode on the shared KV counters equals the decode on fresh ones
     bitwise, launch after launch, and leaves the counters zeroed."""
     if sparse_mla.kv_counter_buffer(1) is None:
-        pytest.skip("FlashInfer is not the version the persistent counters need")
+        pytest.skip("FlashInfer's sparse-MLA decode takes no KV counter buffer")
     torch.manual_seed(0)
     heads, head_dim, page, top_k = 64, 512, 64, 1024
     tokens = sum(query_lens)
@@ -658,7 +658,7 @@ def test_wide_low_latency_mxfp8_mm(shape, rows):
     replayed, within BF16 tolerance of the stock layer, for MXFP8 and BF16
     inputs; above ``WIDE_LOW_LATENCY_MAX_ROWS`` rows it does not run."""
     if not mxfp8_linear._wide_supported():
-        pytest.skip("the wide tactics are pinned on GB300 and the checked FlashInfer")
+        pytest.skip("the wide tactics are pinned on GB300, FlashInfer >= 0.7.2")
     n, k = shape
     linear = _Mxfp8Linear(n, k)
     qa = _quantized(rows, k)

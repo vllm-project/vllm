@@ -36,8 +36,8 @@ collectives and would hang. Which forward steps use the executor depends
 only on the batch, which every TP rank receives identically, so that needs no
 collective.
 
-Five features run only on flashinfer-python 0.7.2 (`FLASHINFER_VERSION`, the
-version `requirements/cuda.txt` pins). Four use FlashInfer internals:
+Four features use FlashInfer internals and run on flashinfer-python 0.7.2 or
+newer (`MIN_FLASHINFER_VERSION`):
 
 - the publishing `wo_b` GEMM: the CuTe DSL low-latency block-scaled GEMM
   kernel, and `mm_mxfp8`'s private runner and tuning config
@@ -45,18 +45,26 @@ version `requirements/cuda.txt` pins). Four use FlashInfer internals:
 - the fused kernel's MXFP8 layer input: the CuTe DSL MXFP8 quantize helpers
   (`flashinfer.quantization.quantization_cute_dsl_utils`,
   `flashinfer.cute_dsl.fp4_common`);
-- the pinned MXFP8 GEMM tactics: the low-latency GEMM's `autotune_tactics`,
-  and `mm_mxfp8`'s private `cute-dsl` runner and workspace
-  (`flashinfer.gemm.gemm_base`), called with the pinned tactic;
+- the pinned `cute-dsl` MXFP8 GEMM tactics above 8 rows: `mm_mxfp8`'s private
+  `cute-dsl` runner and workspace (`flashinfer.gemm.gemm_base`), called with
+  the pinned tactic;
 - the low-latency MXFP8 GEMM above 8 rows: the kernel class
   (`flashinfer.gemm.kernels.cute_dsl.low_latency_blockscaled_gemm`) built
   with a 16-, 32- or 48-row activation tile.
 
-The fifth, the sparse-MLA decode's persistent KV counters, passes the
-`multi_ctas_kv_counter_buffer` argument that 0.7.1 added.
+On an older version each logs a warning once and the executor goes without
+it. `test_numerics.py` compares the first two with FlashInfer's own GEMM and
+quantize bitwise, and `test_kernels.py` the last two with the stock layer; run
+them when `requirements/cuda.txt` moves to a new FlashInfer.
 
-On any other version each logs a warning once and the executor goes without
-it; the MXFP8 GEMMs then tune over every tactic.
+Two more depend on FlashInfer's interface, not its version:
+
+- the pinned low-latency MXFP8 GEMM tactics up to 8 rows (GB300) wrap that
+  GEMM's `autotune_tactics`; without it, or when it does not list a pinned tactic,
+  the GEMMs tune over every tactic;
+- the sparse-MLA decode's persistent KV counters need the
+  `multi_ctas_kv_counter_buffer` argument (0.7.1 added it); without it each
+  decode allocates its own.
 
 ## Structure
 
