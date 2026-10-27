@@ -66,6 +66,7 @@ def test_rocm_fp8_paged_mqa_logits_calls_aiter_op(monkeypatch, aiter_has_op):
     assert called["args"][0] is q
     assert called["args"][1] is kv_cache
     assert called["args"][3] is out
-    assert called["args"][4] is seq_lens
+    # The AITER op takes one length per sequence: the last column of the table.
+    assert torch.equal(called["args"][4], seq_lens[:, -1])
     assert called["args"][6] == max_model_len
     assert called["kwargs"] == {"Preshuffle": True, "KVBlockSize": 64}
