@@ -31,17 +31,22 @@ def test_synthid_config_and_factory():
     assert WatermarkConfig(key=42, algorithm="gumbel").depth == 32
 
 
-@pytest.mark.parametrize("depth", [0, 33])
-def test_synthid_config_rejects_invalid_depth(depth):
-    with pytest.raises(
-        ValidationError,
-        match="SynthID-Text depth must be between 1 and 32",
-    ):
+@pytest.mark.parametrize(
+    ("depth", "match"),
+    [(0, "greater than or equal to 1"), (33, "less than or equal to 32")],
+)
+def test_synthid_config_rejects_invalid_depth(depth, match):
+    with pytest.raises(ValidationError, match=match):
         WatermarkConfig(
             key=42,
             algorithm="synthid_text",
             depth=depth,
         )
+
+
+def test_synthid_config_rejects_bool_depth():
+    with pytest.raises(ValidationError, match="valid integer"):
+        WatermarkConfig(key=42, algorithm="synthid_text", depth=True)
 
 
 @pytest.mark.parametrize("depth", [1, 32])
@@ -60,6 +65,7 @@ def test_synthid_accepts_supported_depth(depth):
         ({"context_width": 0}, "context_width must be positive"),
         ({"depth": 0}, "SynthID-Text depth must be between 1 and 32"),
         ({"depth": 33}, "SynthID-Text depth must be between 1 and 32"),
+        ({"depth": True}, "SynthID-Text depth must be an integer, not a bool"),
         ({"key": -1}, "Philox keys must fit in 64 bits"),
     ],
 )

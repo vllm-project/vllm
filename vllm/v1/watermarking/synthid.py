@@ -22,6 +22,8 @@ _STREAM_DOMAIN = 0x53594E54 << 32
 
 
 def _validate_depth(depth: int) -> None:
+    if isinstance(depth, bool):
+        raise ValueError("SynthID-Text depth must be an integer, not a bool")
     if not 1 <= depth <= 32:
         raise ValueError("SynthID-Text depth must be between 1 and 32")
 
