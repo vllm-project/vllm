@@ -109,6 +109,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         softcap: float
         is_single_batch: bool
         num_splits: int
+        is_static_persistent: bool
 
     @staticmethod
     def kernel(*args: Any, **kwargs: Any) -> Any:
@@ -128,6 +129,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         softcap: float,
         is_single_batch: bool = True,
         num_splits: int = 1,
+        is_static_persistent: bool = True,
     ) -> CompileKey:
         return self.CompileKey(
             q_stage=q_stage,
@@ -140,6 +142,8 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             softcap=softcap,
             is_single_batch=is_single_batch,
             num_splits=num_splits,
+            # SplitKV is never statically persistent.
+            is_static_persistent=is_static_persistent and num_splits == 1,
         )
 
     def get_warmup_keys(
@@ -179,14 +183,19 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             q_stages = WarmupChoices(1, 2)
             single_batches = WarmupChoices(True, False)
             split_counts = WarmupChoices(1)
-        elif (
-            major == 9 and head_dim == 512 and window_size == (-1, -1) and softcap == 0
-        ):
-            # SM90 forward has split/non-split variants; its transitive
-            # combine specializes at 32/64/128/256 splits.
+            static_persistence = WarmupChoices(True)
+        elif major == 9 and softcap == 0:
+            # SM90 runs one Q stage; prefills longer than one packed tile drop
+            # static persistence.
             q_stages = WarmupChoices(1)
             single_batches = WarmupChoices(False)
-            split_counts = WarmupChoices(1, 32, 64, 128, 256)
+            static_persistence = WarmupChoices(True, False)
+            if head_dim == 512 and window_size == (-1, -1):
+                # SM90 forward has split/non-split variants; its transitive
+                # combine specializes at 32/64/128/256 splits.
+                split_counts = WarmupChoices(1, 32, 64, 128, 256)
+            else:
+                split_counts = WarmupChoices(1)
         else:
             return []
 
@@ -194,6 +203,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             q_stage=q_stages,
             is_single_batch=single_batches,
             num_splits=split_counts,
+            is_static_persistent=static_persistence,
             dtype=vllm_config.model_config.dtype,
             num_qo_heads=num_qo_heads,
             num_kv_heads=kv_cache_spec.num_kv_heads,
@@ -205,7 +215,13 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
 
     def compile(self, compile_key: CompileKey) -> None:
         assert compile_flash_attn_varlen_func_from_specs is not None
-        max_seqlen_q = FA4_DENSE_Q_TILE + 1 if compile_key.q_stage == 2 else 1
+        if compile_key.q_stage == 2:
+            max_seqlen_q = FA4_DENSE_Q_TILE + 1
+        elif not compile_key.is_static_persistent and compile_key.num_splits == 1:
+            # Packed past every SM90 Q tile (at most 192 rows).
+            max_seqlen_q = 2 * FA4_DENSE_Q_TILE + 1
+        else:
+            max_seqlen_q = 1
         batch_size = 1 if compile_key.is_single_batch else 2
         kv_shape = (
             FA4_DENSE_NUM_BLOCKS,
