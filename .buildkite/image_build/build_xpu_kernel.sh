@@ -80,7 +80,7 @@ docker run --rm --network host \
     --volume "${output_dir}:/output" \
     --workdir /workspace/kernel \
     --env "ONEAPI_VARS=${oneapi_vars}" \
-    --env "MAX_JOBS=${MAX_JOBS:-4}" \
+    --env "MAX_JOBS=${MAX_JOBS:-8}" \
     --env HOME=/tmp/kernel-home \
     --env http_proxy --env https_proxy --env no_proxy \
     --env HTTP_PROXY --env HTTPS_PROXY --env NO_PROXY \
