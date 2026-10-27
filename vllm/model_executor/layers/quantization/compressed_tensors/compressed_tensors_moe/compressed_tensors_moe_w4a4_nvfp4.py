@@ -26,6 +26,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_nvfp4_moe_weights,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
@@ -38,6 +41,7 @@ _EPLB_SUPPORTED_NVFP4_BACKENDS = frozenset(
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
     }
 )
 
@@ -61,7 +65,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             weight_key=kNvfp4Static,
             activation_key=None if use_a16 else kNvfp4Dynamic,
         )
-
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
@@ -155,7 +158,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
 
         w2_weight_scale_2 = torch.nn.Parameter(
-            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
+            torch.empty(num_experts, dtype=torch.float32),
+            requires_grad=False,
         )
         layer.register_parameter("w2_weight_global_scale", w2_weight_scale_2)
         extra_weight_attrs.update(
@@ -175,13 +179,30 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w13_input_scale, extra_weight_attrs)
 
         w2_input_scale = torch.nn.Parameter(
-            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
+            torch.empty(num_experts, dtype=torch.float32),
+            requires_grad=False,
         )
         layer.register_parameter("w2_input_global_scale", w2_input_scale)
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Materialize serialized NVFP4 expert weights for requantization."""
+        return dequantize_nvfp4_moe_weights(
+            layer.w13_weight_packed,
+            layer.w13_weight_scale,
+            layer.w13_weight_global_scale,
+            layer.w2_weight_packed,
+            layer.w2_weight_scale,
+            layer.w2_weight_global_scale,
+            layer.params_dtype,
+            group_size=self.group_size,
+            invert_global_scales=True,
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
