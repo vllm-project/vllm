@@ -3237,3 +3237,59 @@ depuis le disque. La checklist de reprise est déjà écrite (dashboard
 `workspace-vllm` + ligne MEMORY du 27/10 01:40Z) : re-armer le cron, vérifier
 les 3 conteneurs / health / `StartedAt` / **VRAM GPU 0 après boot** / `/dev/shm`,
 re-traiter Q41, et mesurer #198 sur le flux neuf.
+
+---
+
+## 27/10 02:35Z — Reprise après le reboot de la machine (boot 02:11:10Z) — moteur sain, **hotfix VBS confirmé survivant au reboot**, Q41 : le risque de boot-OOM **ne s'est pas matérialisé**
+
+**Redémarrage.** Boot hôte **02:11:10Z**, conteneurs relancés par l'autologon,
+moteur `StartedAt` **02:15:05Z** ⇒ **health 200 à 3,9 ms** (02:35Z), `RC=0`,
+OOM=false, **0** `out of memory|Traceback|AssertionError|not found in cache`,
+3 conteneurs up, `/dev/shm` **24G/63G (39 %)** = le tier RAM lui-même, **aucun
+orphelin** (la fuite par boot ne s'est pas produite cette fois).
+
+**Configuration au boot (inchangée, Q41 sans réponse).** Log de boot :
+`Desired GPU memory utilization is (0.73, 17.51 GiB)` ⇒ **gpu-util 0.73**,
+**GPU KV cache size: 831 723 tokens**, concurrency 3,17× à 262K ; tier fs chargé
+(`Loading out-of-tree secondary tier 'TouchOnHitFsTier' from 'lru_fs_tier'`) et
+**effectivement interrogé** (`lookup_sync_delay_seconds_count{tier="1:TouchOnHitFsTier"}` = 890).
+
+**★ Le critère d'échec de Q41 n'est PAS rempli.** Le crash-loop de boot
+redouté (historique 0.78/0.82) **ne s'est pas produit** : le moteur a démarré
+du premier coup à 0.73, avec 22,25 GiB libres au moment du démarrage et un
+calcul de KV conforme. Le risque « marge ~950 MiB en charge » reste **théorique
+à ce stade** : il ne se traduit pas au boot parce que la VRAM en charge n'est
+pas celle du boot (le pic vient des graphs sous trafic, après le calcul de KV).
+**Q41 est donc re-qualifiée : risque non démontré, mais non levé** (le pic en
+charge de 23 600 MiB reste 140 MiB au-dessus de la ligne d'alerte). À surveiller
+au prochain pic de trafic ; pas de rollback d'office.
+
+**VRAM après boot** : GPU 0 = **21 558 MiB**, GPU 1 = **20 724**, GPU 2 = 45
+(libre) à 24 min, trafic encore faible ⇒ à comparer au plafond en charge de
+**23 600** mesuré avant le reboot, pas à la bande ~22 200 de la spec (réfutée).
+
+**Compteurs remis à zéro au boot** : prompt **167 638** tokens, prefix hits
+**0**, `prompt_tokens_cached_by_source` tous à 0 (device/host/disk),
+**préemptions 0**, tier RAM `kv_offload_store_bytes` 4,74 Go. **Le hit rate à 0
+n'est pas une anomalie à ce stade** : le trafic post-boot est très faible
+(167 K tokens en 20 min ≈ 140 tok/s, contre ~5 200 tok/s de prefill soutenus
+avant le reboot) et les contextes sont neufs ; les deux tiers sont pourtant
+interrogés (890 lookups fs, 3 676 primaires). **À re-mesurer au prochain cycle
+sous trafic réel** — si le hit rate reste à 0 alors que les sessions ont repris,
+c'est une régression à instruire (clé de bloc dépendante de l'instance).
+
+**★ Hotfix des tâches planifiées : CONFIRMÉ SURVIVANT AU REBOOT.** Les deux
+tâches ont tourné **après** le boot et ont **produit un livrable** :
+`fstier-prune` état écrit **02:20:26Z** (`mode=apply`, tier à **268,4 Go** = cap,
+0 fichier supprimé ⇒ no-op attendu sous le plafond) ; `traffic-census-hourly`
+`last-result.json` **02:25:06Z `ok:true`, rc 0**. nbaudit `ok:true` 02:06Z.
+C'est la preuve que le défaut `0x80070002` (chemin d'exécutable non quoté dans
+le lanceur VBS) ne revient **pas** au redémarrage : les deux organes sont
+durablement réparés sur cette machine. **Reste à obtenir le correctif
+générateur côté roo-extensions** (sinon le prochain durcissement réintroduit le
+défaut) — escalade du 26/10 23:52Z toujours valable.
+
+**Cron de surveillance** : l'ancien job (`64a58306`) était **encore armé** après
+le reboot (la session a survécu) ; il a été **remplacé proprement** (supprimé puis
+recréé) pour garantir qu'il appartient à la session courante : **`d6ab14d5`,
+toutes les 2 h à :41**, vérifié par `CronList` ⇒ **un seul job**.
