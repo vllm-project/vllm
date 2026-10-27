@@ -11,14 +11,15 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, SerializeDisplay};
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_llm::WeightVersionSpan;
 use vllm_text::TruncationSide;
 
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, ReasoningEffort, StreamOptions,
-    StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, Usage,
-    default_true, deserialize_request_top_k, validate_messages, validate_stop,
+    ChatLogProbs, ChatMessage, FunctionCallResponse, Normalizable, PromptLogprobs, ReasoningEffort,
+    StreamOptions, StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta,
+    ToolChoice, Usage, default_true, deserialize_request_top_k, validate_messages, validate_stop,
     validate_top_p_value,
 };
 
@@ -378,11 +379,15 @@ pub(super) struct ChatCompletionResponse {
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChatCompletionChoice>,
+    /// Always `None`: the Rust frontend does not implement service tiers.
+    pub service_tier: Option<String>,
     pub usage: Option<Usage>,
     pub metrics: Option<PerRequestMetrics>,
     pub system_fingerprint: Option<String>,
     pub prompt_logprobs: Option<PromptLogprobs>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// Always `None` until `return_prompt_text` is supported.
+    pub prompt_text: Option<String>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
 }
@@ -396,6 +401,11 @@ pub(super) struct ChatCompletionChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
+    /// Always `None`.
+    /// TODO: return routed experts when `--enable-return-routed-experts` is set.
+    pub routed_experts: Option<String>,
+    /// Always `None` until `return_weight_versions` is supported.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// A literal type for the "assistant" role, since the API only allows that
@@ -414,6 +424,11 @@ impl fmt::Display for AssistantRole {
 pub(super) struct ChatCompletionMessage {
     pub role: AssistantRole,
     pub content: Option<String>,
+    // OpenAI fields the Rust frontend never produces; always `None`.
+    pub refusal: Option<String>,
+    pub annotations: Option<Value>,
+    pub audio: Option<Value>,
+    pub function_call: Option<FunctionCallResponse>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     pub reasoning: Option<String>,
@@ -428,7 +443,9 @@ pub(super) struct ChatCompletionStreamResponse {
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
-    pub prompt_token_ids: Option<Vec<u32>>,
+    /// Set only on the first chunk.
+    #[serde(flatten)]
+    pub prompt: Option<ChatCompletionStreamPrompt>,
 }
 
 impl ChatCompletionStreamResponse {
@@ -439,9 +456,19 @@ impl ChatCompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
-            prompt_token_ids: None,
+            prompt: None,
         }
     }
+}
+
+/// Prompt fields of the first stream chunk. Python sets both explicitly on
+/// that chunk, so unset values serialize as `null` there and are omitted from
+/// every later chunk.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ChatCompletionStreamPrompt {
+    pub prompt_token_ids: Option<Vec<u32>>,
+    /// Always `None` until `return_prompt_text` is supported.
+    pub prompt_text: Option<String>,
 }
 
 /// Mirrors the Python vLLM `ChatCompletionResponseStreamChoice` class.

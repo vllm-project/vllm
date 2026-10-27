@@ -398,6 +398,7 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
+            skip_scale=self._k_scale_float == 1.0,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
             kv_c_out=kv_c_out,
@@ -546,6 +547,8 @@ class DeepseekV32Attention(MLAAttention):
                 cache_slot_mapping,
                 self.kv_cache_dtype,
                 self._k_scale,
+                self._k_scale_float == 1.0
+                and self.kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"),
             )
 
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
