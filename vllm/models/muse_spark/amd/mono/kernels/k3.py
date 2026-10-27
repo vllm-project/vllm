@@ -1923,7 +1923,6 @@ def build(key: Build):
             mb_put(tag, scratch + fx.Int64(lay["xf"][0]), bid, fx.Int32(1))
 
     # ------------------------------------------------------------ stage QKV: next layer's qkv+gate
-    # ------------------------------------------------------------ stage QKV: next layer's qkv+gate
     # Head-aligned tile map: group gq < NH = HQ + 2 HKV holds the 4 tiles of head gq (q heads, then k,
     # then v) + gate tile NQKVT + gq; groups NH .. hold the other gate tiles (5 a group, the tail padded).
     # After the K-split partial sums, CTA k8 of the group owns the tokens t = k8 (mod 8) for all its rows,
@@ -2131,52 +2130,93 @@ def build(key: Build):
 
     # ------------------------------------------------------------ kernel
     @traced
-    def k3_body(
-        attn_o,
-        attn_g,
-        stream_pre,
-        w_o,
-        alpha_a,
-        beta_a,
-        w_pffn,
-        w_r,
-        bias,
-        w_pre,
-        w_pren,
+    def front2(
+        own_peer,
+        bias_v,
         w13,
         w13s,
-        w2,
-        w2s,
-        w_post,
-        w_pp,
-        w_pff,
-        alpha,
-        beta,
-        w_in,
-        w_qkvg,
-        stream_out,
-        xn_out,
-        part_out,
-        q_out,
-        g_out,
-        k_cache,
-        v_cache,
-        slots,
-        cos_sin,
-        pos,
+        w_pren,
         scratch,
-        epoch,
+        tag,
         health,
-        tl,
-        peers,
-        layer,
         rank,
-        g_stride,
-        w13r,
-        w13sr,
-        w2r,
-        w2sr,
-        eptab,
+        tid,
+        lane,
+        wave,
+        rt,
+        bid,
+    ):
+        lgs_r = route_poll(own_peer, tag, health, lane, wave)
+        stage_route(scratch, bias_v, lgs_r, tag, health, rank, tid, lane, wave, rt)
+        nu = uniform(fx.ptr_load(rt["nu"] + 0))
+        t0 = bid * nu
+        t1 = t0 + nu
+        last = t1 - 1
+        q = [gu_loads(w13, w13s, rt, t0, lane, wave, t0 < t1)]
+        hv, wv = h_wait_issue(own_peer, w_pren, tag, health, tid, rank)
+        q = q + [
+            gu_loads(w13, w13s, rt, t0 + d, lane, wave, (t0 + d) < t1)
+            for d in range(1, PF_GU)
+        ]
+        return q, hv, wv, t0, t1, last
+
+    # The kernel and its launcher. tl (a timeline buffer) and w13r .. eptab (expert replicas) are
+    # part of the launch signature the decoder passes; this build does not read them.
+
+    @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
+    def k3(
+        attn_o: Int64,
+        attn_g: Int64,
+        stream_pre: Int64,
+        w_o: Int64,
+        alpha_a: Int64,
+        beta_a: Int64,
+        w_pffn: Int64,
+        w_r: Int64,
+        bias: Int64,
+        w_pre: Int64,
+        w_pren: Int64,
+        w13: Int64,
+        w13s: Int64,
+        w2: Int64,
+        w2s: Int64,
+        w_post: Int64,
+        w_pp: Int64,
+        w_pff: Int64,
+        alpha: Int64,
+        beta: Int64,
+        w_in: Int64,
+        w_qkvg: Int64,
+        stream_out: Int64,
+        xn_out: Int64,
+        part_out: Int64,
+        q_out: Int64,
+        g_out: Int64,
+        k_cache: Int64,
+        v_cache: Int64,
+        slots: Int64,
+        cos_sin: Int64,
+        pos: Int64,
+        scratch: Int64,
+        epoch: Int64,
+        health: Int64,
+        tl: Int64,
+        peer0: Int64,
+        peer1: Int64,
+        peer2: Int64,
+        peer3: Int64,
+        peer4: Int64,
+        peer5: Int64,
+        peer6: Int64,
+        peer7: Int64,
+        layer: Int32,
+        rank: Int32,
+        g_stride: Int32,
+        w13r: Int64,
+        w13sr: Int64,
+        w2r: Int64,
+        w2sr: Int64,
+        eptab: Int64,
     ):
         tid = fx.thread_idx.x
         bid = fx.block_idx.x
@@ -2212,7 +2252,7 @@ def build(key: Build):
             "upn": rl.upn.ptr,
         }
         tok = rl.tok.ptr
-        pl = list(peers)[:W]
+        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7]
         own_peer = sel_peer(pl, rank)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
@@ -2626,143 +2666,6 @@ def build(key: Build):
                 rsrc(scratch + fx.Int64(lay["route"][0])),
                 P + tid,
             )
-
-    @traced
-    def front2(
-        own_peer,
-        bias_v,
-        w13,
-        w13s,
-        w_pren,
-        scratch,
-        tag,
-        health,
-        rank,
-        tid,
-        lane,
-        wave,
-        rt,
-        bid,
-    ):
-        lgs_r = route_poll(own_peer, tag, health, lane, wave)
-        stage_route(scratch, bias_v, lgs_r, tag, health, rank, tid, lane, wave, rt)
-        nu = uniform(fx.ptr_load(rt["nu"] + 0))
-        t0 = bid * nu
-        t1 = t0 + nu
-        last = t1 - 1
-        q = [gu_loads(w13, w13s, rt, t0, lane, wave, t0 < t1)]
-        hv, wv = h_wait_issue(own_peer, w_pren, tag, health, tid, rank)
-        q = q + [
-            gu_loads(w13, w13s, rt, t0 + d, lane, wave, (t0 + d) < t1)
-            for d in range(1, PF_GU)
-        ]
-        return q, hv, wv, t0, t1, last
-
-    # The kernel and its launcher. tl (a timeline buffer) and w13r .. eptab (expert replicas) are
-    # part of the launch signature the decoder passes; this build does not read them.
-
-    @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
-    def k3(
-        attn_o: Int64,
-        attn_g: Int64,
-        stream_pre: Int64,
-        w_o: Int64,
-        alpha_a: Int64,
-        beta_a: Int64,
-        w_pffn: Int64,
-        w_r: Int64,
-        bias: Int64,
-        w_pre: Int64,
-        w_pren: Int64,
-        w13: Int64,
-        w13s: Int64,
-        w2: Int64,
-        w2s: Int64,
-        w_post: Int64,
-        w_pp: Int64,
-        w_pff: Int64,
-        alpha: Int64,
-        beta: Int64,
-        w_in: Int64,
-        w_qkvg: Int64,
-        stream_out: Int64,
-        xn_out: Int64,
-        part_out: Int64,
-        q_out: Int64,
-        g_out: Int64,
-        k_cache: Int64,
-        v_cache: Int64,
-        slots: Int64,
-        cos_sin: Int64,
-        pos: Int64,
-        scratch: Int64,
-        epoch: Int64,
-        health: Int64,
-        tl: Int64,
-        peer0: Int64,
-        peer1: Int64,
-        peer2: Int64,
-        peer3: Int64,
-        peer4: Int64,
-        peer5: Int64,
-        peer6: Int64,
-        peer7: Int64,
-        layer: Int32,
-        rank: Int32,
-        g_stride: Int32,
-        w13r: Int64,
-        w13sr: Int64,
-        w2r: Int64,
-        w2sr: Int64,
-        eptab: Int64,
-    ):
-        k3_body(
-            attn_o,
-            attn_g,
-            stream_pre,
-            w_o,
-            alpha_a,
-            beta_a,
-            w_pffn,
-            w_r,
-            bias,
-            w_pre,
-            w_pren,
-            w13,
-            w13s,
-            w2,
-            w2s,
-            w_post,
-            w_pp,
-            w_pff,
-            alpha,
-            beta,
-            w_in,
-            w_qkvg,
-            stream_out,
-            xn_out,
-            part_out,
-            q_out,
-            g_out,
-            k_cache,
-            v_cache,
-            slots,
-            cos_sin,
-            pos,
-            scratch,
-            epoch,
-            health,
-            tl,
-            (peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7),
-            layer,
-            rank,
-            g_stride,
-            w13r,
-            w13sr,
-            w2r,
-            w2sr,
-            eptab,
-        )
 
     @flyc.jit
     def launch(

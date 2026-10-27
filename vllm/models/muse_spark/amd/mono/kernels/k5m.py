@@ -602,30 +602,40 @@ def build(key: BuildM):
                 fx.Int32(1),
             )
 
-    @traced
-    def hm_body(
-        h,
-        ids,
-        sc,
-        w13,
-        w13s,
-        w2,
-        w2s,
-        w_post,
-        part_out,
-        scratch,
-        epoch,
-        health,
-        tl,
-        peers,
-        layer,
-        rank,
-        nrows,
-        w13r,
-        w13sr,
-        w2r,
-        w2sr,
-        eptab,
+    # The kernel and its launcher. tl (a timeline buffer) and w13r .. eptab (expert replicas) are
+    # part of the launch signature the decoder passes; this build does not read them.
+
+    @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
+    def hm(
+        h: Int64,
+        ids: Int64,
+        sc: Int64,
+        w13: Int64,
+        w13s: Int64,
+        w2: Int64,
+        w2s: Int64,
+        w_post: Int64,
+        part_out: Int64,
+        scratch: Int64,
+        epoch: Int64,
+        health: Int64,
+        tl: Int64,
+        peer0: Int64,
+        peer1: Int64,
+        peer2: Int64,
+        peer3: Int64,
+        peer4: Int64,
+        peer5: Int64,
+        peer6: Int64,
+        peer7: Int64,
+        layer: Int32,
+        rank: Int32,
+        nrows: Int32,
+        w13r: Int64,
+        w13sr: Int64,
+        w2r: Int64,
+        w2sr: Int64,
+        eptab: Int64,
     ):
         tid = fx.thread_idx.x
         bid = fx.block_idx.x
@@ -647,7 +657,7 @@ def build(key: BuildM):
             "ssacc": rl.ssacc.ptr,
             "rsl": rl.rsl.ptr,
         }
-        pl = list(peers)
+        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7]
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
         setup(ids, rank, tid, lane, wave, rt, ms.lists.ptr, nrows)
@@ -897,75 +907,6 @@ def build(key: BuildM):
                 )
         stage_rstd(scratch, tag, health, rt, tid, bid)
         stage_final(scratch, sc, part_out, pl, tag, health, rt, tid, bid, rank)
-
-    # The kernel and its launcher. tl (a timeline buffer) and w13r .. eptab (expert replicas) are
-    # part of the launch signature the decoder passes; this build does not read them.
-
-    @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
-    def hm(
-        h: Int64,
-        ids: Int64,
-        sc: Int64,
-        w13: Int64,
-        w13s: Int64,
-        w2: Int64,
-        w2s: Int64,
-        w_post: Int64,
-        part_out: Int64,
-        scratch: Int64,
-        epoch: Int64,
-        health: Int64,
-        tl: Int64,
-        peer0: Int64,
-        peer1: Int64,
-        peer2: Int64,
-        peer3: Int64,
-        peer4: Int64,
-        peer5: Int64,
-        peer6: Int64,
-        peer7: Int64,
-        layer: Int32,
-        rank: Int32,
-        nrows: Int32,
-        w13r: Int64,
-        w13sr: Int64,
-        w2r: Int64,
-        w2sr: Int64,
-        eptab: Int64,
-    ):
-        hm_body(
-            h,
-            ids,
-            sc,
-            w13,
-            w13s,
-            w2,
-            w2s,
-            w_post,
-            part_out,
-            scratch,
-            epoch,
-            health,
-            tl,
-            (
-                peer0,
-                peer1,
-                peer2,
-                peer3,
-                peer4,
-                peer5,
-                peer6,
-                peer7,
-            ),
-            layer,
-            rank,
-            nrows,
-            w13r,
-            w13sr,
-            w2r,
-            w2sr,
-            eptab,
-        )
 
     @flyc.jit
     def launch(

@@ -1244,148 +1244,6 @@ def build(key: Build):
         if tid == 0:
             mb_put(tag, scratch + fx.Int64(lay["xnbf"][0]), bid, fx.Int32(1))
 
-    @traced
-    def ha_body(
-        attn_o,
-        attn_g,
-        stream_in,
-        w_o,
-        alpha_a,
-        beta_a,
-        w_pffn,
-        w_r,
-        bias,
-        w_pre,
-        w_pren,
-        h_out,
-        ids_out,
-        sc_out,
-        scratch,
-        epoch,
-        health,
-        tl,
-        peers,
-        layer,
-        rank,
-        g_stride,
-        s_full,
-        nrows,
-    ):
-        tid = fx.thread_idx.x
-        bid = fx.block_idx.x
-        lane = tid % 64
-        wave = tid // 64
-        alloc = fx.SharedAllocator()
-        misc = alloc.allocate(Misc).peek()
-        rl = alloc.allocate(RouteLds).peek()
-        sl = alloc.allocate(HaLds)
-        so, sa = sl.o_.peek(), sl.a_.peek()
-        rt = {"rid": rl.rid.ptr, "rw": rl.rw.ptr, "sel": rl.sel.ptr}
-        pl = list(peers)
-        own_peer = sel_peer(pl, rank)
-        ep = uniform(ld_i32(epoch, 0, CM_DEV))
-        tag = (ep & 0x1FFFFFF) * 64 + layer + 1
-        ao = None
-        if const_expr(FA is None):
-            o_ops = o_loads(w_o, bid, lane, wave)
-        else:
-            # attn_o is the fragment's descriptor; ng polls the merged rows (tagged pairs)
-            attn_o, ao_t = FA.run(
-                attn_o, tag, health, tid, bid, lane, wave, sl.fa_.peek()
-            )
-            ao = (ao_t, health)
-            o_ops = o_loads(w_o, bid, lane, wave)
-        stage_ng(attn_o, attn_g, g_stride, scratch, tag, tid, bid, nrows, ao)
-        stage_o(
-            o_ops,
-            scratch,
-            pl,
-            tag,
-            health,
-            tid,
-            bid,
-            lane,
-            wave,
-            rank,
-            so.red.ptr,
-        )
-        wr, wp = a_loads(w_r, w_pre, bid, tid, lane, wave)
-        if const_expr(BND):  # all 256 CTAs, column groups
-            stage_ab_c(
-                own_peer,
-                pl,
-                scratch,
-                stream_in,
-                nrows,
-                alpha_a,
-                beta_a,
-                w_pffn,
-                tag,
-                health,
-                tid,
-                bid,
-                lane,
-                wave,
-                rank,
-                misc.pr.ptr,
-            )
-        else:
-            if bid < TS:
-                stage_ab(
-                    own_peer,
-                    pl,
-                    scratch,
-                    stream_in,
-                    s_full,
-                    nrows,
-                    alpha_a,
-                    beta_a,
-                    w_pffn,
-                    tag,
-                    health,
-                    tid,
-                    bid,
-                    lane,
-                    wave,
-                    rank,
-                    misc.red4.ptr,
-                )
-        stage_a(
-            wr,
-            wp,
-            own_peer,
-            pl,
-            scratch,
-            tag,
-            health,
-            tid,
-            bid,
-            lane,
-            wave,
-            rank,
-            sa.red.ptr,
-            sa.tok.ptr,
-            sa.own.ptr,
-            sa.x.ptr,
-        )
-        if bid < S:
-            stage_route_h(
-                own_peer,
-                bias,
-                w_pren,
-                h_out,
-                ids_out,
-                sc_out,
-                tag,
-                health,
-                tid,
-                bid,
-                lane,
-                wave,
-                rt,
-                sa.tok.ptr,
-            )
-
     # ============================================================ HB
     def pp_loads(w_pp, bid, lane, wave):
         """post_expert_proj tile b / KSP (16 of this rank's QH rows), K part b % KSP."""
@@ -2133,35 +1991,194 @@ def build(key: Build):
             )
             bo.buffer_store(v, rsrc(sfull_out), t * HID + tid * 16 + 4 * h)
 
-    @traced
-    def hb_body(
-        part,
-        w_pp,
-        w_pff,
-        alpha,
-        beta,
-        w_in,
-        w_qkvg,
-        stream_out,
-        sfull_out,
-        q_out,
-        g_out,
-        k_cache,
-        v_cache,
-        slots,
-        cos_sin,
-        pos,
-        scratch,
-        epoch,
-        health,
-        tl,
-        peers,
-        layer,
-        rank,
-        so_stride,
-        so_off,
-        gather,
-        nrows,
+    # The kernels and their launchers. tl (a timeline buffer) is part of the launch signature the
+    # decoder passes; these builds do not read it.
+
+    @flyc.kernel(name=name_a, known_block_size=[THREADS, 1, 1])
+    def ha(
+        attn_o: Int64,
+        attn_g: Int64,
+        stream_in: Int64,
+        w_o: Int64,
+        alpha_a: Int64,
+        beta_a: Int64,
+        w_pffn: Int64,
+        w_r: Int64,
+        bias: Int64,
+        w_pre: Int64,
+        w_pren: Int64,
+        h_out: Int64,
+        ids_out: Int64,
+        sc_out: Int64,
+        scratch: Int64,
+        epoch: Int64,
+        health: Int64,
+        tl: Int64,
+        peer0: Int64,
+        peer1: Int64,
+        peer2: Int64,
+        peer3: Int64,
+        peer4: Int64,
+        peer5: Int64,
+        peer6: Int64,
+        peer7: Int64,
+        layer: Int32,
+        rank: Int32,
+        g_stride: Int32,
+        s_full: Int32,
+        nrows: Int32,
+    ):
+        tid = fx.thread_idx.x
+        bid = fx.block_idx.x
+        lane = tid % 64
+        wave = tid // 64
+        alloc = fx.SharedAllocator()
+        misc = alloc.allocate(Misc).peek()
+        rl = alloc.allocate(RouteLds).peek()
+        sl = alloc.allocate(HaLds)
+        so, sa = sl.o_.peek(), sl.a_.peek()
+        rt = {"rid": rl.rid.ptr, "rw": rl.rw.ptr, "sel": rl.sel.ptr}
+        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7]
+        own_peer = sel_peer(pl, rank)
+        ep = uniform(ld_i32(epoch, 0, CM_DEV))
+        tag = (ep & 0x1FFFFFF) * 64 + layer + 1
+        ao = None
+        if const_expr(FA is None):
+            o_ops = o_loads(w_o, bid, lane, wave)
+        else:
+            # attn_o is the fragment's descriptor; ng polls the merged rows (tagged pairs)
+            attn_o, ao_t = FA.run(
+                attn_o, tag, health, tid, bid, lane, wave, sl.fa_.peek()
+            )
+            ao = (ao_t, health)
+            o_ops = o_loads(w_o, bid, lane, wave)
+        stage_ng(attn_o, attn_g, g_stride, scratch, tag, tid, bid, nrows, ao)
+        stage_o(
+            o_ops,
+            scratch,
+            pl,
+            tag,
+            health,
+            tid,
+            bid,
+            lane,
+            wave,
+            rank,
+            so.red.ptr,
+        )
+        wr, wp = a_loads(w_r, w_pre, bid, tid, lane, wave)
+        if const_expr(BND):  # all 256 CTAs, column groups
+            stage_ab_c(
+                own_peer,
+                pl,
+                scratch,
+                stream_in,
+                nrows,
+                alpha_a,
+                beta_a,
+                w_pffn,
+                tag,
+                health,
+                tid,
+                bid,
+                lane,
+                wave,
+                rank,
+                misc.pr.ptr,
+            )
+        else:
+            if bid < TS:
+                stage_ab(
+                    own_peer,
+                    pl,
+                    scratch,
+                    stream_in,
+                    s_full,
+                    nrows,
+                    alpha_a,
+                    beta_a,
+                    w_pffn,
+                    tag,
+                    health,
+                    tid,
+                    bid,
+                    lane,
+                    wave,
+                    rank,
+                    misc.red4.ptr,
+                )
+        stage_a(
+            wr,
+            wp,
+            own_peer,
+            pl,
+            scratch,
+            tag,
+            health,
+            tid,
+            bid,
+            lane,
+            wave,
+            rank,
+            sa.red.ptr,
+            sa.tok.ptr,
+            sa.own.ptr,
+            sa.x.ptr,
+        )
+        if bid < S:
+            stage_route_h(
+                own_peer,
+                bias,
+                w_pren,
+                h_out,
+                ids_out,
+                sc_out,
+                tag,
+                health,
+                tid,
+                bid,
+                lane,
+                wave,
+                rt,
+                sa.tok.ptr,
+            )
+
+    @flyc.kernel(name=name_b, known_block_size=[THREADS, 1, 1])
+    def hb(
+        part: Int64,
+        w_pp: Int64,
+        w_pff: Int64,
+        alpha: Int64,
+        beta: Int64,
+        w_in: Int64,
+        w_qkvg: Int64,
+        stream_out: Int64,
+        sfull_out: Int64,
+        q_out: Int64,
+        g_out: Int64,
+        k_cache: Int64,
+        v_cache: Int64,
+        slots: Int64,
+        cos_sin: Int64,
+        pos: Int64,
+        scratch: Int64,
+        epoch: Int64,
+        health: Int64,
+        tl: Int64,
+        peer0: Int64,
+        peer1: Int64,
+        peer2: Int64,
+        peer3: Int64,
+        peer4: Int64,
+        peer5: Int64,
+        peer6: Int64,
+        peer7: Int64,
+        layer: Int32,
+        rank: Int32,
+        so_stride: Int32,
+        so_off: Int32,
+        gather: Int32,
+        nrows: Int32,
     ):
         tid = fx.thread_idx.x
         bid = fx.block_idx.x
@@ -2171,7 +2188,7 @@ def build(key: Build):
         misc = alloc.allocate(Misc).peek()
         sl = alloc.allocate(HbLds)
         sf, sq = sl.f_.peek(), sl.q_.peek()
-        pl = list(peers)
+        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7]
         own_peer = sel_peer(pl, rank)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
@@ -2258,155 +2275,6 @@ def build(key: Build):
         if const_expr(not BND):  # the column-block G wrote sfull_out itself
             if (gather != 0) & (bid < nrows):
                 stage_gather(own_peer, sfull_out, tag, health, tid, bid)
-
-    # The kernels and their launchers. tl (a timeline buffer) is part of the launch signature the
-    # decoder passes; these builds do not read it.
-
-    @flyc.kernel(name=name_a, known_block_size=[THREADS, 1, 1])
-    def ha(
-        attn_o: Int64,
-        attn_g: Int64,
-        stream_in: Int64,
-        w_o: Int64,
-        alpha_a: Int64,
-        beta_a: Int64,
-        w_pffn: Int64,
-        w_r: Int64,
-        bias: Int64,
-        w_pre: Int64,
-        w_pren: Int64,
-        h_out: Int64,
-        ids_out: Int64,
-        sc_out: Int64,
-        scratch: Int64,
-        epoch: Int64,
-        health: Int64,
-        tl: Int64,
-        peer0: Int64,
-        peer1: Int64,
-        peer2: Int64,
-        peer3: Int64,
-        peer4: Int64,
-        peer5: Int64,
-        peer6: Int64,
-        peer7: Int64,
-        layer: Int32,
-        rank: Int32,
-        g_stride: Int32,
-        s_full: Int32,
-        nrows: Int32,
-    ):
-        ha_body(
-            attn_o,
-            attn_g,
-            stream_in,
-            w_o,
-            alpha_a,
-            beta_a,
-            w_pffn,
-            w_r,
-            bias,
-            w_pre,
-            w_pren,
-            h_out,
-            ids_out,
-            sc_out,
-            scratch,
-            epoch,
-            health,
-            tl,
-            (
-                peer0,
-                peer1,
-                peer2,
-                peer3,
-                peer4,
-                peer5,
-                peer6,
-                peer7,
-            ),
-            layer,
-            rank,
-            g_stride,
-            s_full,
-            nrows,
-        )
-
-    @flyc.kernel(name=name_b, known_block_size=[THREADS, 1, 1])
-    def hb(
-        part: Int64,
-        w_pp: Int64,
-        w_pff: Int64,
-        alpha: Int64,
-        beta: Int64,
-        w_in: Int64,
-        w_qkvg: Int64,
-        stream_out: Int64,
-        sfull_out: Int64,
-        q_out: Int64,
-        g_out: Int64,
-        k_cache: Int64,
-        v_cache: Int64,
-        slots: Int64,
-        cos_sin: Int64,
-        pos: Int64,
-        scratch: Int64,
-        epoch: Int64,
-        health: Int64,
-        tl: Int64,
-        peer0: Int64,
-        peer1: Int64,
-        peer2: Int64,
-        peer3: Int64,
-        peer4: Int64,
-        peer5: Int64,
-        peer6: Int64,
-        peer7: Int64,
-        layer: Int32,
-        rank: Int32,
-        so_stride: Int32,
-        so_off: Int32,
-        gather: Int32,
-        nrows: Int32,
-    ):
-        hb_body(
-            part,
-            w_pp,
-            w_pff,
-            alpha,
-            beta,
-            w_in,
-            w_qkvg,
-            stream_out,
-            sfull_out,
-            q_out,
-            g_out,
-            k_cache,
-            v_cache,
-            slots,
-            cos_sin,
-            pos,
-            scratch,
-            epoch,
-            health,
-            tl,
-            (
-                peer0,
-                peer1,
-                peer2,
-                peer3,
-                peer4,
-                peer5,
-                peer6,
-                peer7,
-            ),
-            layer,
-            rank,
-            so_stride,
-            so_off,
-            gather,
-            nrows,
-        )
 
     @flyc.jit
     def launch_a(
