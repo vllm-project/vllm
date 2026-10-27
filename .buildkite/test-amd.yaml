@@ -472,7 +472,8 @@ steps:
     pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' &&
     pytest models/language -v -s -m 'distributed(num_gpus=2)' &&
     VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' &&
-    pytest -v -s models/test_mimo_v2_attention_backend.py ;;
+    pytest -v -s models/test_mimo_v2_attention_backend.py &&
+    pytest -v -s models/multimodal/test_mimo_v2_omni.py ;;
     2)
     pytest models/multimodal -v -s -m 'distributed(num_gpus=2)'
     --ignore models/multimodal/generation/test_whisper.py &&
