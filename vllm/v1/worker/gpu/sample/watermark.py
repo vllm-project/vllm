@@ -817,7 +817,6 @@ def philox_gumbel_sample(
     return local_argmax.gather(dim=-1, index=max_block_index).view(-1)
 
 
-
 @triton.jit(do_not_specialize=["step"])
 def _draft_step_kernel(
     sampled_ptr,
@@ -1049,7 +1048,6 @@ def draft_philox_gumbel_sample(
     return sampled.view(-1)
 
 
-
 @triton.jit
 def _synthid_words(
     block_idx,
@@ -1102,9 +1100,7 @@ def _apply_layer(probs, one_probs, zero_mass, one_mass):
     return probs * factor + (probs * offset.to(tl.float32) + one_probs), mean
 
 
-@triton.jit(
-    do_not_specialize=["key_0", "key_1", "stream_0", "stream_1", "num_blocks"]
-)
+@triton.jit(do_not_specialize=["key_0", "key_1", "stream_0", "stream_1", "num_blocks"])
 def _synthid_kernel(
     output_ptr,
     output_stride,
