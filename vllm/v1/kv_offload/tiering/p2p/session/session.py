@@ -275,6 +275,10 @@ class P2PSession:
         """New blocks stored locally — match against pending fetch demand."""
         self._server.add_stored_blocks(kv_request_id, keys, block_ids, job_id)
 
+    def drain_stores(self) -> list[StoreResult]:
+        """Fail queued stores without interrupting transfers already in flight."""
+        return self._server.drain_stores()
+
     def finish_request(self, kv_request_id: str) -> None:
         """Called when the request is finishing locally.
 

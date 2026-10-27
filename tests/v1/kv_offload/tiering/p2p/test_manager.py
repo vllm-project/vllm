@@ -8,6 +8,7 @@ using fake transport and session objects.
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
 import uuid
@@ -17,7 +18,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from tests.v1.kv_connector.unit.test_offloading_connector import (
+    _poll_until,
+    _wait_for_prefix_cache_reset,
+)
+from tests.v1.kv_offload.conftest import make_offloading_config
 from tests.v1.kv_offload.tiering.test_tiering_offloading import _mock_mmap_region
+from vllm import LLM, SamplingParams, TokensPrompt
+from vllm.config import KVTransferConfig
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
 from vllm.v1.kv_offload.base import (
@@ -27,6 +35,8 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     ScheduleEndContext,
 )
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     TieringOffloadingMetrics,
@@ -57,6 +67,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     ConnectMsg,
     DisconnectMsg,
 )
+from vllm.v1.metrics.reader import Gauge
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -883,6 +894,9 @@ class _FakeSession:
         self._stores = []
         self._new_fetch_ids = []
         return result
+
+    def drain_stores(self):
+        return []
 
     def request_blocks(self, job_id, kv_request_id, keys, block_ids):
         self.requests.append((job_id, kv_request_id))
@@ -3084,3 +3098,166 @@ class TestIdleWhileServingPeers:
             assert tiering.has_pending_work() is True
         finally:
             tiering.shutdown()
+
+
+@pytest.fixture
+def drain_peers(monkeypatch):
+    """Real managers and sessions; only the wire transports are in memory."""
+    init_none_hash(sha256)
+    a = _LoopbackControl("A:1")
+    b = _LoopbackControl("B:2")
+    a.pair(b)
+    controls = {"A:1": a, "B:2": b}
+    monkeypatch.setattr(
+        manager_module, "ZmqTransport", lambda local_id, *_: controls[local_id]
+    )
+    monkeypatch.setattr(
+        manager_module, "NixlTransport", lambda *_, **__: _FakeData("drain")
+    )
+    spec = CPUOffloadingSpec(make_offloading_config())
+    peers = [
+        P2PSecondaryTierManager(
+            spec, memoryview(bytearray(65536)), host=host, port=port
+        )
+        for host, port in [("A", 1), ("B", 2)]
+    ]
+    try:
+        yield peers
+    finally:
+        for peer in peers:
+            peer.shutdown()
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_drain_fails_unfetched_stores_and_rejects_late_fetch(drain_peers, bound):
+    """Reset must release every queued pin without offering stale chunk ids."""
+    consumer, producer = drain_peers
+    ctx = _req_context(_remote_prefiller_kv_params("B", 2))
+    consumer.on_new_request(ctx)
+    for _ in range(3):
+        list(consumer.get_finished_jobs())
+        list(producer.get_finished_jobs())
+
+    key = OffloadKey(b"unfetched")
+    if bound:
+        # An initial handoff binds the id to a session before more stores arrive.
+        first = OffloadKey(b"first")
+        consumer.submit_load(_job_metadata(10, [first], [0], ctx.kv_transfer_params))
+        list(producer.get_finished_jobs())
+        producer.submit_store(
+            _job_metadata(11, [first], [0], _remote_decoder_kv_params())
+        )
+        assert list(producer.get_finished_jobs()) == [JobResult(11, True)]
+        assert list(consumer.get_finished_jobs()) == [JobResult(10, True)]
+
+    for job_id in (20, 21):
+        producer.submit_store(
+            _job_metadata(job_id, [key], [job_id - 20], _remote_decoder_kv_params())
+        )
+    producer.drain_jobs()
+    assert sorted(producer.get_finished_jobs(), key=lambda result: result.job_id) == [
+        JobResult(20, False),
+        JobResult(21, False),
+    ]
+    producer.drain_jobs()
+    assert list(producer.get_finished_jobs()) == []
+
+    consumer.submit_load(_job_metadata(30, [key], [1], ctx.kv_transfer_params))
+    list(producer.get_finished_jobs())
+    # A late consumer must never read a slot released by drain.
+    assert list(consumer.get_finished_jobs()) == [JobResult(30, False)]
+    producer.submit_store(_job_metadata(31, [key], [0], _remote_decoder_kv_params()))
+    assert list(producer.get_finished_jobs()) == [JobResult(31, False)]
+
+
+def test_reset_cache_releases_parked_p2p_slots(drain_peers):
+    """The real tiering reset can reclaim every slot held for an absent decoder."""
+    _, producer = drain_peers
+    region = SharedOffloadRegion(
+        engine_id=str(uuid.uuid4()),
+        num_chunks=8,
+        rank=0,
+        kv_bytes_per_chunk=4096,
+        cpu_page_size=4096,
+    )
+    tiering = TieringOffloadingManager(
+        CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=region),
+        [producer],
+        tier_poll_interval_s=0,
+    )
+    ctx = _req_context(_remote_decoder_kv_params())
+    keys = [OffloadKey(b"one"), OffloadKey(b"two")]
+    try:
+        tiering.on_new_request(ctx)
+        store = tiering.prepare_store(keys, ctx)
+        assert store is not None
+        tiering.complete_store(store.keys_to_store, ctx)
+        tiering.on_schedule_end(ScheduleEndContext([], ()))
+        tiering.reset_cache()
+        tiering.on_reset_flushed()
+        assert all(tiering.lookup(key, ctx) is LookupResult.MISS for key in keys)
+        replacement = tiering.prepare_store(
+            [OffloadKey(str(i).encode()) for i in range(8)], ctx
+        )
+        assert replacement is not None
+        assert len(replacement.keys_to_store) == 8
+    finally:
+        tiering.shutdown()
+        region.cleanup()
+
+
+def test_p2p_cache_reset_with_absent_decoder(monkeypatch):
+    """A real prefill engine can reset while its decoder never fetches KV."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    llm = LLM(
+        model="facebook/opt-125m",
+        max_model_len=256,
+        max_num_batched_tokens=256,
+        gpu_memory_utilization=0.2,
+        attention_config={"backend": "TRITON_ATTN"},
+        enforce_eager=True,
+        async_scheduling=False,
+        disable_log_stats=False,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "cpu_bytes_to_use": 8 << 20,
+                "block_size": 16,
+                "spec_name": "TieringOffloadingSpec",
+                "secondary_tiers": [{"type": "p2p", "host": "127.0.0.1", "port": port}],
+            },
+        ),
+    )
+    prompt = TokensPrompt(prompt_token_ids=list(range(100, 165)))
+    params = SamplingParams(
+        temperature=0,
+        max_tokens=1,
+        extra_args={
+            "kv_transfer_params": {"remote_decoder": {"kv_request_id": "absent"}}
+        },
+    )
+
+    def has_parked_cascade():
+        llm.llm_engine.step()
+        return any(
+            isinstance(m, Gauge)
+            and m.name == "vllm:kv_offload_tiering_active_cascade_jobs"
+            and m.value > 0
+            for m in llm.get_metrics()
+        )
+
+    try:
+        before = llm.generate(prompt, params, use_tqdm=False)[0]
+        _poll_until(has_parked_cascade, timeout_s=10, what="a parked P2P store")
+        _wait_for_prefix_cache_reset(llm, reset_connector=True)
+        after = llm.generate(
+            prompt, SamplingParams(temperature=0, max_tokens=1), use_tqdm=False
+        )[0]
+        assert after.num_cached_tokens == 0
+        assert after.outputs[0].token_ids == before.outputs[0].token_ids
+    finally:
+        llm.llm_engine.engine_core.shutdown()

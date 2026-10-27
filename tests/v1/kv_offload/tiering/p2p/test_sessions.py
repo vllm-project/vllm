@@ -3831,3 +3831,38 @@ class TestPeerFaultEscalation:
         transport._peer_faults["peer:8000"] = "late"
         session.poll()
         assert session.death_reason == "peer disconnected"
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_drain_stores_keeps_inflight_pins_until_transport_finishes(success):
+    """Drain fails queued jobs once, but cannot release slots read by a WRITE."""
+    session, conn, transport = _make_session()
+    _activate(session, conn)
+    session.add_stored_blocks(
+        "req-1", [OffloadKey(b"active"), OffloadKey(b"extra")], [0, 1], job_id=1
+    )
+    session.add_stored_blocks("req-1", [OffloadKey(b"queued")], [2], job_id=2)
+    _fetch(conn, "req-1", [b"active"], [5])
+    assert session.poll().stores == []
+    (tid,) = transport._transfers
+
+    assert session.drain_stores() == [StoreResult(2, False)]
+    assert session.has_pending_work
+    assert session.drain_stores() == []
+    assert session.poll().stores == []
+    assert transport._cancel_calls == []
+
+    (transport._poll_done if success else transport._poll_failed).append(tid)
+    assert session.poll().stores == [StoreResult(1, success)]
+    assert not session.has_pending_work
+    assert session.drain_stores() == []
+    # The completed job also supplied an unmatched block. Drain must remove
+    # that reference before its primary slot can be reused.
+    _fetch(conn, "req-1", [b"extra"], [6])
+    session.poll()
+    assert len(transport._transfers) == 1
+    session.finish_request("req-1")
+    session.poll()
+    done = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+    assert done[-1][TransferDoneMsg.SUCCESS] is False
+    assert session.poll().stores == []

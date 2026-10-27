@@ -675,7 +675,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def drain_jobs(self) -> None:
         """Block until every submitted load/store job has completed or failed.
 
-        Loops calling ``_poll_once()`` until no session has outstanding
+        Fail stores still waiting for a fetch, then loop calling ``_poll_once()`` until no session has outstanding
         inbound loads or in-flight outbound stores, and no reaped session's
         transfer is still retained (bounded by its hold cap). Mid-flight
         transfers are NOT cancelled — the caller
@@ -689,8 +689,21 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         the reap's close() sets the event, so every event is set on return.
         """
         start = time.monotonic()
+        self._reaped_stores.update(dict.fromkeys(self._kv_to_session, start))
+        self._kv_to_session.clear()
+        for kid, batches in self._unbound_stores.items():
+            self._reaped_stores[kid] = start
+            for batch in batches:
+                self._finished_jobs.append(JobResult(batch.job_id, success=False))
+        self._unbound_stores.clear()
+
         warned = False
         while True:
+            for session in self._sessions.values():
+                for result in session.drain_stores():
+                    self._finished_jobs.append(
+                        JobResult(result.job_id, success=result.success)
+                    )
             self._poll_once()
             pending = bool(self._retained) or any(
                 s.has_pending_work for s in self._sessions.values()

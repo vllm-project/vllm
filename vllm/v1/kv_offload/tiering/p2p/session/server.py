@@ -759,6 +759,19 @@ class ServerRole:
                 continue
             self._finalize_outbound(kv_request_id, key)
 
+    def drain_stores(self) -> list[StoreResult]:
+        """Withdraw unfetched supply while preserving pins for active writes."""
+        for kv_request_id, st in list(self._requests.items()):
+            for round_key, rnd in list(st.outbound.items()):
+                rnd.available.clear()
+                rnd.finishing = True
+                self._pending_store_results.extend(self._fail_unwritten_round_jobs(rnd))
+                if not rnd.inflight:
+                    self._finalize_outbound(kv_request_id, round_key, success=False)
+        results = self._pending_store_results
+        self._pending_store_results = []
+        return results
+
     def collect_results(self) -> list[StoreResult]:
         """Drain timeouts, deferred results, and transport completions.
 
