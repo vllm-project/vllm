@@ -849,15 +849,18 @@ def test_tiering_cache_reset_resumes_promotions_on_idle_engine(
 @pytest.mark.distributed
 def test_hybrid_dcp_partial_tail_cpu_replay():
     """A DCP hybrid resumes its sub-block prompt checkpoint from CPU."""
-    hash_size = 128
+    hash_size = 16
     llm = LLM(
         model="Qwen/Qwen3.5-0.8B",
-        tensor_parallel_size=2,
+        tensor_parallel_size=4,
         decode_context_parallel_size=2,
         enable_prefix_caching=True,
         disable_hybrid_kv_cache_manager=False,
         mamba_cache_mode="align",
+        block_size=512,
+        mamba_block_size=512,
         prefix_match_unit=hash_size,
+        gdn_prefill_backend="triton",
         mamba_cache_dtype="float32",
         mamba_ssm_cache_dtype="float32",
         max_model_len=16384,
