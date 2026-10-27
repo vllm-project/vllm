@@ -243,7 +243,8 @@ class _SharedPoolWorkerHandle(_MoriWorkerHandle):
     def poll(self, job: TransferJobState) -> TransferJobState | None:
         with self._job_lock:
             future = self._futures.get(id(job))
-        if future is not None and not future.done():
+            is_load = id(job) in self._load_deadlines
+        if not is_load and future is not None and not future.done():
             return None
         return super().poll(job)
 
