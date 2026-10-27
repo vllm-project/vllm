@@ -1072,8 +1072,8 @@ class SparseAttnIndexer(CustomOp):
         use_fp4_cache: bool = False,
         compress_ratio: int = 1,
         candidate_blocks: torch.Tensor | None = None,
-       candidate_block_size: int = 0,
-       candidate_write: bool = False,
+        candidate_block_size: int = 0,
+        candidate_write: bool = False,
         semantic_uncompressed_max_model_len: int = 0,
         semantic_compress_ratio: int = 1,
     ):
