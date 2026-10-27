@@ -647,8 +647,8 @@ class SpeculativeConfig:
     """With ``dspark_draft_topk``, run the sequential Markov walk over the
     top-k candidates in one kernel and cache only those candidates' draft
     logits. Falls back to the per-step loop with a quantized Markov head, a
-    reduced draft vocabulary, draft watermarking or the online acceptance
-    estimator."""
+    reduced draft vocabulary, draft watermarking, the online acceptance
+    estimator, or ``dspark_draft_topk`` x Markov rank above 128 x 256."""
 
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C

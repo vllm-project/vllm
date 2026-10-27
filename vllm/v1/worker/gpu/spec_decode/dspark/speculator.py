@@ -86,7 +86,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         dtype, fill = super().draft_logits_spec(vllm_config)
-        if self.speculative_config.dspark_fused_topk_walk:
+        if self._topk_walk is not None:
             # The fused walk writes only the top-k candidates of each row.
             fill = float("-inf")
         return dtype, fill
@@ -132,25 +132,25 @@ class DSparkSpeculator(DFlashSpeculator):
     def _init_topk_walk(self, model: torch.nn.Module) -> None:
         assert self._draft_topk is not None
         markov_head = getattr(model.model, "markov_head", None)
-        if isinstance(markov_head, DSparkMarkovHead):
-            markov_w1 = markov_head.markov_w1.weight
-            markov_w2 = getattr(markov_head.markov_w2, "weight", None)
-        if self._d2t_scatter_index is not None:
+        if model.draft_id_to_target_id is not None:
             reason = "a reduced draft vocabulary"
         elif self.draft_watermarker is not None:
             reason = "draft watermarking"
         elif self.use_acceptance_estimator:
             reason = "the online acceptance estimator"
-        elif (
-            not isinstance(markov_head, DSparkMarkovHead)
-            or markov_w2 is None
-            or markov_w2.dtype != markov_w1.dtype
+        elif not isinstance(markov_head, DSparkMarkovHead) or (
+            getattr(markov_head.markov_w2, "weight", None) is None
+            or markov_head.markov_w2.weight.dtype != markov_head.markov_w1.weight.dtype
         ):
             reason = "a quantized Markov head"
+        elif not TopkMarkovWalk.supports(
+            self._draft_topk, markov_head.markov_w1.weight.shape[1]
+        ):
+            reason = "this dspark_draft_topk and Markov rank"
         else:
             self._topk_walk = TopkMarkovWalk(
-                markov_w1,
-                markov_w2,
+                markov_head.markov_w1,
+                markov_head.markov_w2,
                 model.logits_processor.scale,
                 self.max_num_reqs,
                 self.num_speculative_steps,
@@ -301,13 +301,6 @@ class DSparkSpeculator(DFlashSpeculator):
                 self.draft_logits_num_shards,
                 self.draft_logits_shard_idx,
             )
-            if self.use_confidence_head:
-                prev_tokens = torch.cat(
-                    [prev[:, None], self.draft_tokens[:num_reqs, :-1]], dim=1
-                )
-                confidence_markov_embeds = self.model.markov_embed(
-                    prev_tokens.flatten()
-                )
         else:
             # Reuse the dense backbone output as the normal sampler's input.
             # Fill once for all positions, then scatter only the corrected
@@ -315,11 +308,9 @@ class DSparkSpeculator(DFlashSpeculator):
             base_logits.fill_(float("-inf"))
             idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
             sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
-            markov_embeds = []
+            prev_i = prev
             for i in range(n_spec):
-                markov_embed = self.model.markov_embed(prev)
-                if self.use_confidence_head:
-                    markov_embeds.append(markov_embed)
+                markov_embed = self.model.markov_embed(prev_i)
                 logits_i = self.model.apply_markov_bias_gathered(
                     markov_embed,
                     base_logits[:, i],
@@ -330,15 +321,15 @@ class DSparkSpeculator(DFlashSpeculator):
                     logits_i, idx_map[:, i], sample_pos[:, i], i
                 )
                 self.draft_tokens[:num_reqs, i] = draft_sampled_i
-                prev = draft_sampled_i
-            if self.use_confidence_head:
-                confidence_markov_embeds = torch.stack(markov_embeds, dim=1).flatten(
-                    0, 1
-                )
+                prev_i = draft_sampled_i
 
         if self.use_confidence_head:
+            # Each step's Markov input is the token sampled before it.
+            prev_tokens = torch.cat(
+                [prev[:, None], self.draft_tokens[:num_reqs, :-1]], dim=1
+            )
             confidence = self.model.compute_confidence(
-                sample_hidden, confidence_markov_embeds
+                sample_hidden, self.model.markov_embed(prev_tokens.flatten())
             )
             self.draft_token_confidence_probs[:num_reqs] = confidence.view(
                 num_reqs, n_spec

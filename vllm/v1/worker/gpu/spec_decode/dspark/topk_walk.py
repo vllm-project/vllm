@@ -76,29 +76,35 @@ def _topk_markov_walk_kernel(
         seed = 0
 
     prev = tl.load(anchor_ids_ptr + row).to(tl.int64)
+    r_mask = r < RANK
+    # W2[ids] does not depend on the walk, so each step prefetches the next
+    # step's tile; only the W1[prev] load stays on the serial chain.
+    next_ids = tl.load(
+        candidate_ids_ptr + row * NUM_STEPS * TOP_K + k, mask=k_mask, other=0
+    )
+    next_w = tl.load(
+        markov_w2_ptr + next_ids.to(tl.int64)[:, None] * markov_w2_stride + r[None, :],
+        mask=k_mask[:, None] & r_mask[None, :],
+        other=0.0,
+    )
     for step in range(NUM_STEPS):
         flat = row * NUM_STEPS + step
-        ids = tl.load(candidate_ids_ptr + flat * TOP_K + k, mask=k_mask, other=0)
+        ids = next_ids
+        weight = next_w
         values = tl.load(base_values_ptr + flat * TOP_K + k, mask=k_mask, other=0.0)
-        bias = tl.zeros([BLOCK_K], dtype=tl.float32)
-        for r_start in tl.static_range(0, RANK, BLOCK_R):
-            r_mask = r_start + r < RANK
-            embed = tl.load(
-                markov_w1_ptr + prev * markov_w1_stride + r_start + r,
-                mask=r_mask,
-                other=0.0,
-            )
-            weight = tl.load(
-                markov_w2_ptr
-                + ids.to(tl.int64)[:, None] * markov_w2_stride
-                + r_start
-                + r[None, :],
-                mask=k_mask[:, None] & r_mask[None, :],
-                other=0.0,
-            )
-            bias += tl.sum(
-                weight.to(tl.float32) * embed.to(tl.float32)[None, :], axis=1
-            )
+        has_next = step + 1 < NUM_STEPS
+        next_ids = tl.load(
+            candidate_ids_ptr + (flat + 1) * TOP_K + k, mask=k_mask & has_next, other=0
+        )
+        next_w = tl.load(
+            markov_w2_ptr
+            + next_ids.to(tl.int64)[:, None] * markov_w2_stride
+            + r[None, :],
+            mask=(k_mask & has_next)[:, None] & r_mask[None, :],
+            other=0.0,
+        )
+        embed = tl.load(markov_w1_ptr + prev * markov_w1_stride + r, mask=r_mask)
+        bias = tl.sum(weight.to(tl.float32) * embed.to(tl.float32)[None, :], axis=1)
         # Round once to the cache dtype, as baddbmm does, and sample exactly the
         # value the rejection sampler will read back.
         logits = (values.to(tl.float32) + scale * bias).to(values.dtype)
@@ -129,25 +135,41 @@ def _topk_markov_walk_kernel(
             USE_FP64=USE_FP64,
         )
         scores = tl.where(k_mask, scores, float("-inf"))
-        # Ties go to the smallest token id, as in the dense argmax.
-        best = tl.max(scores, axis=0)
-        prev = tl.min(tl.where(scores == best, ids, 1 << 62), axis=0).to(tl.int64)
+        best, best_k = tl.max(scores, axis=0, return_indices=True)
+        # Ties go to the smallest token id, as in the dense argmax. A NaN score
+        # matches nothing; then keep the max's own candidate so prev stays in
+        # range.
+        is_best = k_mask & (scores == best)
+        tied_min = tl.min(tl.where(is_best, ids, 1 << 62), axis=0)
+        best_id = tl.sum(tl.where(k == best_k, ids, 0), axis=0)
+        any_best = tl.sum(is_best.to(tl.int32), axis=0) > 0
+        prev = tl.where(any_best, tied_min, best_id).to(tl.int64)
         tl.store(draft_tokens_ptr + row * draft_tokens_stride + step, prev)
 
 
 class TopkMarkovWalk:
     """Runs the DSpark top-k Markov walk and keeps the cached candidate ids."""
 
+    # One program holds two [top_k, rank] W2 tiles; larger ones spill.
+    MAX_TILE = 128 * 256
+
+    @classmethod
+    def supports(cls, top_k: int, rank: int) -> bool:
+        return (
+            triton.next_power_of_2(top_k) * triton.next_power_of_2(rank) <= cls.MAX_TILE
+        )
+
     def __init__(
         self,
-        markov_w1: torch.Tensor,
-        markov_w2: torch.Tensor,
+        markov_w1: torch.nn.Module,
+        markov_w2: torch.nn.Module,
         scale: float,
         max_num_reqs: int,
         num_steps: int,
         top_k: int,
         device: torch.device,
     ):
+        # Modules, not tensors: weight reloads may rebind their parameters.
         self.markov_w1 = markov_w1
         self.markov_w2 = markov_w2
         self.scale = scale
@@ -175,15 +197,17 @@ class TopkMarkovWalk:
         draft_logits_shard_idx: int = 0,
     ) -> None:
         num_reqs = base_values.shape[0]
-        rank = self.markov_w1.shape[1]
+        markov_w1 = self.markov_w1.weight
+        markov_w2 = self.markov_w2.weight
+        rank = markov_w1.shape[1]
         _topk_markov_walk_kernel[(num_reqs,)](
             base_values.contiguous(),
             candidate_ids.contiguous(),
             anchor_ids.contiguous(),
-            self.markov_w1,
-            self.markov_w1.stride(0),
-            self.markov_w2,
-            self.markov_w2.stride(0),
+            markov_w1,
+            markov_w1.stride(0),
+            markov_w2,
+            markov_w2.stride(0),
             idx_mapping.contiguous(),
             sample_pos.contiguous(),
             temperature,
@@ -199,9 +223,10 @@ class TopkMarkovWalk:
             NUM_STEPS=self.num_steps,
             TOP_K=self.top_k,
             BLOCK_K=triton.next_power_of_2(self.top_k),
-            BLOCK_R=min(64, triton.next_power_of_2(rank)),
+            BLOCK_R=triton.next_power_of_2(rank),
             SAMPLE_PROBABILISTIC=draft_logits is not None,
             USE_FP64=use_fp64,
             CACHE_NUM_SHARDS=draft_logits_num_shards,
             CACHE_SHARD_IDX=draft_logits_shard_idx,
+            num_warps=8,
         )

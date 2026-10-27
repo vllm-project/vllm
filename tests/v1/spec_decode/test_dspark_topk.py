@@ -305,6 +305,12 @@ class _TopkDraftModel:
             markov_embed, logits, values, index, self.scale
         )
 
+    def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
+        return draft_ids
+
+    def compute_confidence(self, head_hidden, markov_embed):
+        return markov_embed.float().sum(-1)
+
 
 def _topk_speculator(
     batch: int,
@@ -313,6 +319,7 @@ def _topk_speculator(
     fused: bool,
     scale: float = 0.5,
     num_shards: int = 1,
+    probabilistic: bool = True,
 ) -> DSparkSpeculator:
     """A top-k DSpark sampler whose Markov products and sums are exact in fp32,
     so the fused walk and the per-step loop must agree bit for bit."""
@@ -345,12 +352,14 @@ def _topk_speculator(
     spec.use_fp64_gumbel = use_fp64
     spec.draft_logits_num_shards = num_shards
     spec.draft_logits_shard_idx = num_shards - 1
-    spec.draft_logits = torch.full(
-        ((max_num_reqs + num_shards - 1) // num_shards, n_spec, vocab_size),
-        float("-inf"),
-        dtype=torch.bfloat16,
-        device=device,
-    )
+    spec.draft_logits = None
+    if probabilistic:
+        spec.draft_logits = torch.full(
+            ((max_num_reqs + num_shards - 1) // num_shards, n_spec, vocab_size),
+            float("-inf"),
+            dtype=torch.bfloat16,
+            device=device,
+        )
     spec.temperature = torch.full((max_num_reqs,), temperature, device=device)
     spec.seeds = torch.randint(0, 2**62, (max_num_reqs,), generator=gen, device=device)
     spec._step_cols = torch.arange(n_spec, dtype=torch.int32, device=device)
@@ -372,11 +381,14 @@ def _topk_speculator(
     spec.draft_tokens = torch.zeros(
         max_num_reqs, n_spec, dtype=torch.int64, device=device
     )
+    spec.draft_token_confidence_probs = torch.zeros(
+        max_num_reqs, n_spec, dtype=torch.float32, device=device
+    )
     spec._topk_walk = None
     if fused:
         spec._topk_walk = TopkMarkovWalk(
-            head.markov_w1.weight,
-            head.markov_w2.weight,
+            head.markov_w1,
+            head.markov_w2,
             scale,
             max_num_reqs,
             n_spec,
@@ -437,3 +449,25 @@ def test_fused_topk_walk_clears_previous_candidates():
     torch.testing.assert_close(
         fused.draft_logits, reference.draft_logits, atol=0, rtol=0
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_fused_topk_walk_greedy_with_confidence_head():
+    """Greedy drafting (no draft logits cache) picks the same tokens, and both
+    paths feed the confidence head each step's previous token."""
+    batch = 5
+    paths = []
+    for use_walk in (False, True):
+        spec = _topk_speculator(batch, 1.0, False, fused=use_walk, probabilistic=False)
+        spec.use_confidence_head = True
+        hidden = torch.zeros(batch * spec.num_speculative_steps, 1, device="cuda")
+        spec._sample_sequential(batch, hidden)
+        paths.append(spec)
+    reference, fused = paths
+
+    torch.testing.assert_close(fused.draft_tokens, reference.draft_tokens)
+    anchors = reference.input_buffers.input_ids[reference._anchor_idx]
+    prev = torch.cat([anchors[:, None], reference.draft_tokens[:batch, :-1]], dim=1)
+    expected = reference.model.markov_embed(prev).float().sum(-1)
+    for spec in paths:
+        torch.testing.assert_close(spec.draft_token_confidence_probs[:batch], expected)
