@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.utils.cpu_resource_utils import (
     DEVICE_CONTROL_ENV_VAR,
     get_memory_node_info,
-    get_visible_memory_node,
+    get_worker_memory_nodes,
 )
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
@@ -806,7 +806,7 @@ class CpuPlatform(Platform):
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
-        allowed_mem_node_list = get_visible_memory_node(get_assigned_physical_gpu_ids())
+        allowed_mem_node_list = get_worker_memory_nodes(get_assigned_physical_gpu_ids())
         mem_status_list = [get_memory_node_info(i) for i in allowed_mem_node_list]
         memory_usage = 0
         for s in mem_status_list:

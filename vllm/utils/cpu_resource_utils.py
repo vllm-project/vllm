@@ -278,6 +278,22 @@ def get_visible_memory_node(assigned_node_ids: list[int] | None = None) -> list[
     return allowed_memory_node_list
 
 
+def get_worker_memory_nodes(assigned_node_ids: list[int] | None) -> list[int]:
+    """Like get_visible_memory_node, but falls back to all visible nodes when
+    none of the assigned nodes exists."""
+    nodes = get_visible_memory_node(assigned_node_ids)
+    if nodes or assigned_node_ids is None:
+        return nodes
+    visible_nodes = get_visible_memory_node()
+    logger.warning_once(
+        "NUMA nodes %s assigned to this data-parallel rank do not exist on this "
+        "host; falling back to the visible nodes %s.",
+        tuple(assigned_node_ids),
+        tuple(visible_nodes),
+    )
+    return visible_nodes
+
+
 @cache
 def _synthesize_cpu_list() -> list[LogicalCPUInfo]:
     """Synthesize a flat CPU list: each logical CPU is its own core on
