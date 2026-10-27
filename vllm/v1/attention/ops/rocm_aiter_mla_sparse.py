@@ -3017,10 +3017,12 @@ def _sparse_attn_decode_gfx950_partial_loaded_tile(
     block_idx = safe_slot // BLOCK_SIZE
     pos_in_block = safe_slot % BLOCK_SIZE
     cache_block_ptr = cache_ptr + block_idx.to(tl.int64) * cache_stride0
-    # RECORD is the per-token byte width the KV-cache spec publishes.
+    # RECORD is the per-token byte width the KV-cache spec publishes. The V4.1
+    # records interleave each token's scales after its own data; the V4 page
+    # puts its whole data region ahead of its whole scale region.
     if RECORD == 288:
-        token_data_ptr = cache_block_ptr + pos_in_block * 256
-        token_scale_ptr = cache_block_ptr + BLOCK_SIZE * 256 + pos_in_block * 32
+        token_data_ptr = cache_block_ptr + pos_in_block * 288
+        token_scale_ptr = token_data_ptr + 256
         k_nope_0a = _load_v41_nvfp4_gfx950_chunk(
             token_data_ptr, token_scale_ptr, valid, 0, 128, BLOCK_K
         )
@@ -3036,11 +3038,13 @@ def _sparse_attn_decode_gfx950_partial_loaded_tile(
     else:
         # V4 and V4.1 differ only in the scale granularity and what sits in the
         # last chunk: V4.1 quantized the RoPE dims, V4 kept them in bf16.
-        DATA: tl.constexpr = 512 if RECORD == 528 else 576
-        SCALES: tl.constexpr = 16 if RECORD == 528 else 8
         QUANT: tl.constexpr = 32 if RECORD == 528 else 64
-        token_data_ptr = cache_block_ptr + pos_in_block * DATA
-        token_scale_ptr = cache_block_ptr + BLOCK_SIZE * DATA + pos_in_block * SCALES
+        if RECORD == 528:
+            token_data_ptr = cache_block_ptr + pos_in_block * 528
+            token_scale_ptr = token_data_ptr + 512
+        else:
+            token_data_ptr = cache_block_ptr + pos_in_block * 576
+            token_scale_ptr = cache_block_ptr + BLOCK_SIZE * 576 + pos_in_block * 8
         k_nope_0a = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
             token_data_ptr, token_scale_ptr, valid, 0, 128, BLOCK_K, IS_FNUZ, QUANT
         )

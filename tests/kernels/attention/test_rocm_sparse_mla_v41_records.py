@@ -89,9 +89,12 @@ _PACKERS = {288: _pack_nvfp4, 528: _pack_v41_mxfp8, 584: _pack_v4}
 
 
 def _paged(data: torch.Tensor, scales: torch.Tensor, block_size: int) -> torch.Tensor:
-    """A page holds its whole data region ahead of its whole scale region."""
+    """The V4.1 records put each token's scales right after its own data; a V4
+    page holds its whole data region ahead of its whole scale region."""
     num_blocks = data.shape[0] // block_size
     width = data.shape[1] + scales.shape[1]
+    if width != 584:
+        return torch.cat([data, scales], dim=1).view(num_blocks, block_size, width)
     cache = torch.empty(
         num_blocks, block_size * width, dtype=torch.uint8, device=data.device
     )
