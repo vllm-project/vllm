@@ -48,7 +48,7 @@ def _granite_arg_converter(raw_args: str, partial: bool) -> str:
 
 def _granite_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
     """Return an ``O(|delta|)`` extender when ``raw_args`` ends inside a
-    top-level string value of the ``arguments`` object.
+    string value (or nested string) of the ``arguments`` object.
 
     In JSON-array collection mode,
     ``StreamingParserEngine._feed_json_collection_char`` feeds element
@@ -57,8 +57,9 @@ def _granite_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
     character re-runs ``_granite_arg_converter`` and ``_safe_arg_prefix`` over
     the entire accumulated element buffer (``O(N^2)``). While streaming inside
     a top-level JSON string value of ``arguments``, raw delta characters up to
-    an unescaped closing ``"`` are already valid JSON string content and extend
-    the safe prefix directly.
+    an unescaped closing ``"`` extend the safe prefix directly; inside a nested
+    string at ``depth >= 2`` (where ``open_value_streams`` is ``False``), the
+    same extender skips per-character conversion until the string closes.
     """
     try:
         span = extract_json_member_object(raw_args, "arguments")
@@ -80,24 +81,26 @@ def _granite_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
                 escape = True
             elif ch == '"':
                 in_string = False
+                if depth == 1:
+                    after_colon = False
             continue
         if ch == '"':
             in_string = True
         elif ch in "{[":
-            if depth == 1:
-                after_colon = False
             depth += 1
         elif ch in "}]":
             depth -= 1
             if depth <= 0:
                 return None
+            if depth == 1:
+                after_colon = False
         elif depth == 1:
             if ch == ":":
                 after_colon = True
-            elif ch == ",":
+            elif ch not in " \t\n\r":
                 after_colon = False
 
-    if not (depth == 1 and after_colon and in_string):
+    if not (depth >= 1 and after_colon and in_string):
         return None
 
     pending_escape = escape

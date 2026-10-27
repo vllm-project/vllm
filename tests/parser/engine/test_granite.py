@@ -145,29 +145,42 @@ class TestArgConverter:
 
 class TestArgValueExtender:
     def test_unit_positions(self):
-        # Not inside a top-level string value of ``arguments`` -> None.
+        # Not inside an argument value string -> None.
         assert _granite_arg_value_extender("") is None
         assert _granite_arg_value_extender('{"name": "fn') is None
         assert _granite_arg_value_extender('{"name": "fn", "arguments": {') is None
         assert _granite_arg_value_extender('{"name": "fn", "arguments": {"k') is None
-        assert _granite_arg_value_extender('{"name": "fn", "arguments": {"k": ') is None
         assert (
-            _granite_arg_value_extender('{"name": "fn", "arguments": {"k": 12') is None
-        )
-        assert (
-            _granite_arg_value_extender(
-                '{"name": "fn", "arguments": {"k": {"nested": "v'
-            )
+            _granite_arg_value_extender('{"name": "fn", "arguments": {"k": "v", "k2')
             is None
         )
         assert (
-            _granite_arg_value_extender('{"name": "fn", "arguments": {"k": ["v') is None
+            _granite_arg_value_extender(
+                '{"name": "fn", "arguments": {"k": {"a": "b"}, "k2'
+            )
+            is None
+        )
+        assert _granite_arg_value_extender('{"name": "fn", "arguments": {"k": ') is None
+        assert (
+            _granite_arg_value_extender('{"name": "fn", "arguments": {"k": 12') is None
         )
         assert (
             _granite_arg_value_extender('{"name": "fn", "arguments": {"k": "v"}}')
             is None
         )
         assert _granite_arg_value_extender('{"name": "fn", "arguments": [1') is None
+
+        # Open nested strings at depth >= 2 also return an extender so
+        # per-character streaming does not re-scan the full buffer; the engine
+        # drops its output because ``open_value_streams`` is False there.
+        for nested_raw in (
+            '{"name": "fn", "arguments": {"k": {"nested": "v',
+            '{"name": "fn", "arguments": {"k": ["v',
+        ):
+            nested_ext = _granite_arg_value_extender(nested_raw)
+            assert nested_ext is not None
+            assert nested_ext("more") == "more"
+            assert nested_ext('end"') is None
 
         # Open top-level string value -> extender handles plain text & escapes,
         # bail-outs on unescaped closing quote.
@@ -196,30 +209,38 @@ class TestArgValueExtender:
             "vllm.parser.granite._granite_arg_converter", counting_converter
         )
         try:
-            counts: dict[int, int] = {}
-            for n_lines in (20, 200):
-                calls = 0
-                body = "\\n".join(
-                    f"line {i}: x = {i} + \\\"quoted\\\" + 'single'"
-                    for i in range(n_lines)
-                )
-                text = (
-                    f'{TOOL_TOKEN} [{{"name": "write", '
-                    f'"arguments": {{"content": "{body}", "mode": "w"}}}}]'
-                )
-                p = GraniteParser(mock_tokenizer)
-                results = _stream(p, mock_request, text, chunk_size=1)
-                args = _collect_args(results)
-                assert json.loads(args[0]) == {
-                    "content": "\n".join(
+            for nested in (False, True):
+                counts: dict[int, int] = {}
+                for n_lines in (20, 200):
+                    calls = 0
+                    body = "\\n".join(
+                        f"line {i}: x = {i} + \\\"quoted\\\" + 'single'"
+                        for i in range(n_lines)
+                    )
+                    expected_body = "\n".join(
                         f"line {i}: x = {i} + \"quoted\" + 'single'"
                         for i in range(n_lines)
-                    ),
-                    "mode": "w",
-                }
-                counts[n_lines] = calls
-            # A 10x longer string value must not trigger any extra converter calls.
-            assert counts[200] == counts[20]
+                    )
+                    if nested:
+                        text = (
+                            f'{TOOL_TOKEN} [{{"name": "edit", '
+                            f'"arguments": {{"edits": '
+                            f'[{{"path": "a.py", "text": "{body}"}}]}}}}]'
+                        )
+                        expected = {"edits": [{"path": "a.py", "text": expected_body}]}
+                    else:
+                        text = (
+                            f'{TOOL_TOKEN} [{{"name": "write", '
+                            f'"arguments": {{"content": "{body}", "mode": "w"}}}}]'
+                        )
+                        expected = {"content": expected_body, "mode": "w"}
+                    p = GraniteParser(mock_tokenizer)
+                    results = _stream(p, mock_request, text, chunk_size=1)
+                    args = _collect_args(results)
+                    assert json.loads(args[0]) == expected
+                    counts[n_lines] = calls
+                # A 10x longer string value must not trigger any extra converter calls.
+                assert counts[200] == counts[20]
         finally:
             granite_config.cache_clear()
 
