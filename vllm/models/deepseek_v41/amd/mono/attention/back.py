@@ -370,7 +370,7 @@ def stage_split(c, unit):
                 fx.ptr_store(mw, st + ((hgi * nht + ht) * nkt + kt) * HEAD_TILE + r16)
             svs.append(sv)
         gpu.barrier()
-        lst = st + d.heads * nkt
+        lst = st + d.heads_pad * nkt
         for ht in range_constexpr(nht):
             hti = hgi * nht + ht
             m = fx.ptr_load(st + (hti * nkt) * HEAD_TILE + r16)
@@ -488,14 +488,37 @@ def stage_split(c, unit):
                 )
                 w2 = v4.to(fx.BFloat16).bitcast(fx.Int32)
                 words += [w2[0], w2[1]]
-            off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // 2
-            for hlf in range_constexpr(2):
-                bo.buffer_store(
-                    fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
-                    rsrc(c["part"]),
-                    off + 4 * hlf,
-                    cache_modifier=CM_DEV,
-                )
+            if const_expr(d.heads < d.heads_pad):
+                # TP8: 8 heads a rank in one 16-wide head tile; the padded
+                # columns (hh >= heads) are not stored
+                off = (
+                    ((t * nchunk + ch) * d.heads + fx.min(hh, d.heads - 1)) * HEAD_DIM
+                    + dbase
+                    + 16 * g
+                ) // 2
+                if hh < d.heads:
+                    for hlf in range_constexpr(2):
+                        bo.buffer_store(
+                            fx.Vector.from_elements(
+                                words[4 * hlf : 4 * hlf + 4], fx.Int32
+                            ),
+                            rsrc(c["part"]),
+                            off + 4 * hlf,
+                            cache_modifier=CM_DEV,
+                        )
+            else:
+                off = (
+                    ((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g
+                ) // 2
+                for hlf in range_constexpr(2):
+                    bo.buffer_store(
+                        fx.Vector.from_elements(
+                            words[4 * hlf : 4 * hlf + 4], fx.Int32
+                        ),
+                        rsrc(c["part"]),
+                        off + 4 * hlf,
+                        cache_modifier=CM_DEV,
+                    )
         publish(c, c["srdy"], t * nchunk + ch)
         stamp(c, 7)
 
@@ -720,10 +743,10 @@ def back_lds_members(s: int, d: Dims) -> dict:
 
     @fx.struct
     class SplitLds:
-        q: fx.Array[fx.Int32, d.heads * Q_ROW, 16]
+        q: fx.Array[fx.Int32, d.heads_pad * Q_ROW, 16]
         raw: fx.Array[fx.Int32, ck * REC // 4, 16]
-        p: fx.Array[fx.Int32, d.heads * p_row(d, s), 16]
-        st: fx.Array[fx.Float32, 2 * d.heads * (WAVES // head_groups(d, s)), 16]
+        p: fx.Array[fx.Int32, d.heads_pad * p_row(d, s), 16]
+        st: fx.Array[fx.Float32, 2 * d.heads_pad * (WAVES // head_groups(d, s)), 16]
 
     @fx.struct
     class GemvLds:
