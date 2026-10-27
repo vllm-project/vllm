@@ -1102,6 +1102,15 @@ def test_scheduler_request_finished():
     assert "id-1" in scheduler_connector._reqs_need_send
     assert scheduler_connector._reqs_need_send["id-1"][1] == [[10, 11]]
 
+    # Case: Stop token sampled as the single prefill token (the router
+    # discards it, so the decoder still needs the KV)
+    scheduler_connector._reqs_need_send.clear()
+    request.status = RequestStatus.FINISHED_STOPPED
+    delay_free, _ = scheduler_connector.request_finished(request, block_ids=([10, 11],))
+    assert delay_free is True
+    assert scheduler_connector._reqs_need_send["id-1"][1] == [[10, 11]]
+    assert "id-1" not in scheduler_connector._reqs_not_processed
+
     # Case: Aborted (No need to transfer, free blocks immediately)
     scheduler_connector._reqs_need_send.clear()
     request.status = RequestStatus.FINISHED_ABORTED
