@@ -326,6 +326,7 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
     runner.capture_model()
 
     assert lock_calls == ["lock"]
+    assert runner.cudagraph_manager is not None
     capture_inner_cudagraphs = runner.model_state.capture_inner_cudagraphs
     assert isinstance(capture_inner_cudagraphs, Mock)
     capture_inner_cudagraphs.assert_called_once_with(
