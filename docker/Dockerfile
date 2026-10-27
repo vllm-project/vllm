@@ -1170,6 +1170,14 @@ ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 # Catch GPU<->CPU syncs in execute_model/sample_tokens
 ENV VLLM_GPU_SYNC_CHECK=error
 
+# CI experiment (pytorch/pytorch#198747, test-infra#9212): disable the background
+# Inductor cache-key prefetch that torch.compile() starts in torch 2.15, to see
+# whether the hang in (L4) Distributed Models Shard 1 goes away. Do not merge.
+RUN f=$(python3 -c "import importlib.util as u; print(u.find_spec('torch._inductor.codecache').origin)") \
+    && sed -i 's/^    for prefetch in _cache_key_prefetchers:$/    return  # CI experiment (pytorch#198747): no background cache-key prefetch\n    for prefetch in _cache_key_prefetchers:/' "$f" \
+    && test "$(grep -c 'CI experiment (pytorch#198747)' "$f")" = 1 \
+    && python3 -c "import torch._inductor.codecache as c; c.prefetch_cache_keys(); print('Inductor cache-key prefetch disabled')"
+
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
