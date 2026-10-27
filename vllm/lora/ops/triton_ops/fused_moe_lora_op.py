@@ -1142,7 +1142,6 @@ def _fused_moe_lora_kernel(
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
         accumulator = accumulator * moe_weight[:, None]
-    accumulator = accumulator.to(c_ptr.dtype.element_ty)
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = _get_c_ptrs(
@@ -1162,12 +1161,17 @@ def _fused_moe_lora_kernel(
 
     if SPLIT_K == 1:
         if ADD_INPUTS:
-            prev = tl.load(c_ptrs, mask=c_mask, other=0.0)
+            prev = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
             tl.store(c_ptrs, prev + accumulator, mask=c_mask)
         else:
-            tl.store(c_ptrs, accumulator, mask=c_mask)
+            tl.store(c_ptrs, accumulator.to(c_ptr.dtype.element_ty), mask=c_mask)
     else:
-        tl.atomic_add(c_ptrs, accumulator, mask=c_mask, sem="relaxed")
+        tl.atomic_add(
+            c_ptrs,
+            accumulator.to(c_ptr.dtype.element_ty),
+            mask=c_mask,
+            sem="relaxed",
+        )
 
 
 @torch.inference_mode()
