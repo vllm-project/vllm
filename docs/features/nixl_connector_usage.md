@@ -429,7 +429,9 @@ workers poll right before returning each step output instead of after the
 step calls. Notifications may reach the scheduler before its next step; this
 ordering is not guaranteed. With the `uni`
 executor the engine polls the worker's connector right before each schedule.
-Failed loads use the regular completion path. This feature is disabled by
+Failed loads use the regular completion path. Unexpected poll errors fail the
+engine through the early channel; if that channel also fails, the worker exits
+and the executor's worker monitor shuts down its peers. This feature is disabled by
 default and requires workload-specific latency and overhead validation.
 
 ## Metrics Reference

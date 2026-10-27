@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Report completed KV pulls between model outputs and the next schedule()."""
 
+import os
 import time
 
 import torch
@@ -92,7 +93,13 @@ class EarlyKVRecvSender:
                 self._socket.send_pyobj(req_ids)
         except Exception as e:
             logger.exception("Early KV receive poll failed")
-            self._socket.send_pyobj(f"{type(e).__name__}: {e}")
+            try:
+                self._socket.send_pyobj(f"{type(e).__name__}: {e}", zmq.NOBLOCK)
+            except Exception:
+                logger.exception("Early KV receive error channel failed")
+                # Wake the executor's worker monitor without entering collective
+                # teardown or letting a utility RPC consume this fatal error.
+                os._exit(1)
         finally:
             # Measured from the end of a poll, so long polls do not run back
             # to back.

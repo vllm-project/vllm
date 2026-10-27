@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import multiprocessing
 import threading
 import time
+from contextlib import suppress
 
 import pytest
 
@@ -92,8 +94,8 @@ def test_sender_stops_polling_when_idle_or_shut_down(monkeypatch, rpc_queue, rec
     sender = _sender(monkeypatch, _PendingConnector(), receiver.path)
     try:
         # A paused engine sends nothing: block in dequeue() instead of spinning.
-        monkeypatch.setattr(early_kv_recv, "_ACTIVE_WINDOW_S", 0.05)
-        time.sleep(0.1)
+        now = time.perf_counter()
+        monkeypatch.setattr(early_kv_recv.time, "perf_counter", lambda: now + 2)
         assert _wait_for_poll(sender, reader) is False
         sender.step_rpc_done()
         assert _wait_for_poll(sender, reader) is True
@@ -115,6 +117,29 @@ def test_poll_failure_reaches_the_engine(monkeypatch, receiver):
         assert received == ["RuntimeError: post-processing failed"]
     finally:
         sender.close()
+
+
+def _poll_with_broken_error_channel(path):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        sender = _sender(monkeypatch, _PendingConnector(done={"r"}), path)
+        sender.close()  # IPC can no longer deliver completion or error.
+        # An ordinary RPC exception can be consumed by a utility call.
+        with suppress(Exception):
+            sender.poll()
+
+
+def test_broken_error_channel_terminates_worker(receiver):
+    process = multiprocessing.get_context("spawn").Process(
+        target=_poll_with_broken_error_channel, args=(receiver.path,)
+    )
+    process.start()
+    try:
+        process.join(timeout=30)
+        assert process.exitcode == 1
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join()
 
 
 @pytest.mark.parametrize(
