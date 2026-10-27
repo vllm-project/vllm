@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -573,6 +574,121 @@ def test_registration_ignores_a_sub_block_padding_tail(page_covers_view):
     )
 
     assert _descriptor_geometry(padded) == _descriptor_geometry(unpadded)
+
+
+def _make_mixed_block_attention_worker(num_logical_blocks=4, num_layers=3):
+    """Two HMA attention groups with equal pages but different block sizes.
+
+    The backend only runs 16-token kernel blocks, so the model runner splits the
+    32-token group's rows and keeps the 16-token group's rows whole, as with the
+    sliding and full attention groups of Gemma 4. The shared allocation holds
+    several layers, so no single view covers it.
+    """
+    split_spec = FullAttentionSpec(
+        block_size=32, num_kv_heads=1, head_size=8, dtype=torch.float16
+    )
+    whole_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16
+    )
+    page = split_spec.page_size_bytes
+    assert whole_spec.page_size_bytes == page
+    layer_stride = num_logical_blocks * page
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_logical_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_layers * layer_stride,
+                layers=[f"{prefix}.{i}" for i in range(num_layers)],
+                layer_stride=layer_stride,
+                block_stride=page,
+            )
+            for prefix in ("split", "whole")
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"split.{i}" for i in range(num_layers)], split_spec),
+            KVCacheGroupSpec([f"whole.{i}" for i in range(num_layers)], whole_spec),
+        ],
+    )
+
+    vllm_config = create_vllm_config(block_size=16)
+    vllm_config.cache_config.enable_prefix_caching = False
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [16]
+    fake_backend.get_name.return_value = "FLASH_ATTN"
+    fake_backend.full_cls_name.return_value = "fake.FLASH_ATTN"
+    fake_platform = MagicMock()
+    fake_platform.device_type = "cuda"
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
+
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    allocation = torch.zeros(num_layers * layer_stride, dtype=torch.uint8)
+    caches = {}
+    for i in range(num_layers):
+        layer = allocation[i * layer_stride : (i + 1) * layer_stride]
+        caches[f"split.{i}"] = layer.view(2 * num_logical_blocks, 2, 16, -1)
+        caches[f"whole.{i}"] = layer.view(num_logical_blocks, 2, 16, -1)
+
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(bw, "current_platform", fake_platform),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
+        worker.register_kv_caches(caches)
+    return SimpleNamespace(worker=worker, allocation=allocation, page=page)
+
+
+@pytest.mark.cpu_test
+def test_whole_kernel_rows_of_a_smaller_block_group_tile_into_nixl_pages():
+    """A group whose kernel keeps whole rows is registered as dense NIXL pages.
+
+    NIXL splits every attention block by one ratio, taken from the largest group
+    block. A 16-token row next to a split 32-token group must be addressed as
+    two half-row pages that tile it exactly (#63997).
+    """
+    registered = _make_mixed_block_attention_worker(num_logical_blocks=4)
+    worker, page = registered.worker, registered.page
+    half = page // 2
+
+    assert worker._physical_blocks_per_logical_kv_block == 2
+    assert worker.block_len_per_layer == [half] * 3
+    assert worker.block_stride_per_layer == [half] * 3
+    assert worker.region_num_blocks == [8] * 3
+    geometry = _descriptor_geometry(registered)
+    assert sorted(geometry["desc_offsets"]) == list(range(0, 12 * page, half))
+    assert set(geometry["desc_lens"]) == {half}
+
+    def remote_meta(engine_id, block_size, ppl):
+        block_len = page // ppl
+        return NixlAgentMetadata(
+            engine_id=engine_id,
+            agent_metadata=b"remote-agent-meta",
+            device_id=0,
+            kv_caches_base_addr=[0x10_000_000, 0x20_000_000, 0x30_000_000],
+            num_blocks=4 * ppl,
+            block_lens=[block_len] * 3,
+            block_strides=[block_len] * 3,
+            kv_cache_layout=worker.kv_cache_layout,
+            block_size=block_size,
+            ssm_sizes=(0, 0),
+            attn_backend_name=worker.backend_name,
+            physical_blocks_per_logical_kv_block=ppl,
+        )
+
+    _register_remote_agents(worker, remote_meta("same-engine", 16, 2), tp_size=1)
+    # The pages split rows at bytes, not tokens or heads, so a peer with a
+    # different block geometry cannot read them.
+    with pytest.raises(NotImplementedError, match="different kernel block sizes"):
+        _register_remote_agents(worker, remote_meta("other-engine", 8, 4), tp_size=1)
 
 
 def _make_mla_hybrid_worker(

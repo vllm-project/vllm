@@ -1020,6 +1020,9 @@ class NixlBaseConnectorWorker:
         # explicitly because aliased layers share a region keyed by address, so
         # e.g. a scratch page lands in the region of the page it overlays.
         self._group_region_indices = list[list[int] | None]()
+        # Whether some attention view keeps whole logical rows that NIXL
+        # addresses as `_physical_blocks_per_logical_kv_block` dense pages.
+        self._tiles_whole_kernel_rows = False
         self._ple_region_index: int | None = None
         # Page length of the PLE short-conv state; its region may be shared with
         # pages of a different (smaller) size, so it cannot use the region's.
@@ -1559,6 +1562,7 @@ class NixlBaseConnectorWorker:
         seen_base_addresses: list[int] = []
         self._ssm_region_indices = []
         region_groups: list[set[int]] = []
+        self._tiles_whole_kernel_rows = False
         self._ple_block_len = None
         self._ple_region_index = None
 
@@ -1679,6 +1683,19 @@ class NixlBaseConnectorWorker:
                     block_stride = physical_page_size
                 else:
                     block_stride = cache.stride(0) * cache.element_size()
+                ratio = self._physical_blocks_per_logical_kv_block
+                if (
+                    not is_mla_region
+                    and ratio > 1
+                    and cache.shape[0] * ratio == num_blocks
+                    and block_stride == ratio * physical_page_size
+                    and cache.is_contiguous()
+                ):
+                    # The ratio comes from the largest group block. A group whose
+                    # kernel runs its own smaller block keeps whole logical rows,
+                    # so address each row as `ratio` dense pages that tile it.
+                    block_stride = physical_page_size
+                    self._tiles_whole_kernel_rows = True
                 # A connector that registers the backing as one memory region
                 # may need its length rounded up to a page boundary. Such a tail
                 # is shorter than one block, so it cannot make the storage
@@ -2778,6 +2795,23 @@ class NixlBaseConnectorWorker:
         ):
             raise NotImplementedError(
                 "DCP region pulls require matching logical and physical block sizes"
+            )
+        if self._tiles_whole_kernel_rows and (
+            tp_ratio != 1
+            or block_size_ratio != 1
+            or remote_physical_per_logical != self._physical_blocks_per_logical_kv_block
+        ):
+            # Dense pages split a whole row at arbitrary bytes, not at heads or
+            # tokens, so they only line up with a peer of the same geometry.
+            raise NotImplementedError(
+                "KV cache groups with different kernel block sizes require "
+                "matching TP and block sizes on both NIXL peers: "
+                f"local TP={self.transfer_topo.tp_size}, remote TP={remote_tp_size}, "
+                f"local block size={self.block_size}, "
+                f"remote block size={nixl_agent_meta.block_size}, "
+                "local/remote physical blocks per logical="
+                f"{self._physical_blocks_per_logical_kv_block}/"
+                f"{remote_physical_per_logical}."
             )
         if (
             self._has_mamba
