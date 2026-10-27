@@ -449,6 +449,7 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         *,
         skip_attn: bool = False,
+        uniform_decode: bool = False,
         is_profile: bool = False,
         randomize_inputs: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
@@ -459,6 +460,11 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
 
         # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
+        if uniform_decode:
+            num_tokens = max(num_tokens, self.decode_query_len)
+            num_reqs = num_tokens // self.decode_query_len
+            assert num_tokens % self.decode_query_len == 0
+
         assert num_tokens <= self.max_num_tokens, (
             f"Dummy run with {num_tokens} tokens exceeds max_num_batched_tokens "
             f"({self.max_num_tokens})"

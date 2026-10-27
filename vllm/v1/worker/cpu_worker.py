@@ -150,19 +150,22 @@ class CPUWorker(Worker):
 
         # Construct the model runner
         if self.use_v2_model_runner:
-            from vllm.v1.worker.cpu.model_runner import (
-                CPUModelRunner as CPUModelRunnerV2,
-            )
-            from vllm.v1.worker.cpu.model_runner import (
-                NoTritonCPUModelRunner as NoTritonCPUModelRunnerV2,
-            )
+            if HAS_TRITON:
+                from vllm.v1.worker.cpu.model_runner import (
+                    CPUModelRunner as CPUModelRunnerV2,
+                )
 
-            model_runner_cls = (
-                CPUModelRunnerV2 if HAS_TRITON else NoTritonCPUModelRunnerV2
-            )
-            self.model_runner: CPUModelRunner = model_runner_cls(  # type: ignore
-                self.vllm_config, self.device
-            )
+                self.model_runner: CPUModelRunner = CPUModelRunnerV2(  # type: ignore
+                    self.vllm_config, self.device
+                )
+            else:
+                from vllm.v1.worker.cpu.no_triton_model_runner import (
+                    NoTritonCPUModelRunner as NoTritonCPUModelRunnerV2,
+                )
+
+                self.model_runner = NoTritonCPUModelRunnerV2(  # type: ignore
+                    self.vllm_config, self.device
+                )
         else:
             self.model_runner = CPUModelRunner(self.vllm_config, torch.device("cpu"))
 
