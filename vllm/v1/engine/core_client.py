@@ -1775,15 +1775,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
                 waiting, running, kv_cache_usage = current_counts[idx]
-                # Estimate engine load as the greater of the coordinator's
-                # latest (waiting + running) snapshot and this client's own
-                # in-flight count (scaled by the number of clients). The
-                # in-flight floor is exact and can't be erased by a snapshot
-                # rebind, so a burst spreads round-robin even when snapshots
-                # race with routing decisions; the snapshot raises the score
-                # when other clients or stale requests load the engine.
                 inflight = self.engine_inflight[self.core_engines[idx]]
-                score: float = max(self.client_count * inflight, waiting + running)
+                # A sole client tracks every request, including completions
+                # newer than the snapshot. Multiple clients still need global
+                # backpressure for requests routed by their peers.
+                score: float = (
+                    inflight
+                    if self.client_count == 1
+                    else max(self.client_count * inflight, waiting + running)
+                )
                 if waiting:
                     # Waiting requests are penalized in proportion to KV cache
                     # pressure: a queue on a KV-bound engine drains slowly, so
@@ -1823,29 +1823,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             for req_id in outputs.finished_requests:
                 if (engine := self.reqs_in_flight.pop(req_id, None)) is not None:
                     self.engine_inflight[engine] -= 1
-                    self._release_from_snapshot(engine)
-
-    def _release_from_snapshot(self, engine: EngineIdentity) -> None:
-        """Take a finished request off its engine's latest stats snapshot.
-
-        This mirrors the local increment made when a request is routed. The
-        coordinator publishes snapshots every 100ms, so without it an engine
-        that has just freed a slot keeps its old count until the next one:
-        when every engine is at its max_num_seqs, the freed engine then ties
-        with full engines and a new request can land on a full engine, where
-        it waits for a whole request to finish before it starts.
-        """
-        try:
-            idx = self.core_engines.index(engine)
-        except ValueError:
-            return
-        if idx >= len(self.lb_engines):
-            return
-        counts = self.lb_engines[idx]
-        if counts[1] > 0:
-            counts[1] -= 1
-        elif counts[0] > 0:
-            counts[0] -= 1
 
     @staticmethod
     async def eep_process_engine_core_notification(

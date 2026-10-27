@@ -264,14 +264,14 @@ def test_dplb_late_interaction_sticky_routing():
 
 
 def test_dplb_non_late_interaction_still_uses_lb():
-    client = _make_dplb_client()
+    client = _make_dplb_client(client_count=2)
     client.lb_engines = [[2, 1, 0.0], [0, 0, 0.0], [1, 0, 0.0]]
 
     request = make_request(SamplingParams(max_tokens=1))
     chosen_engine = client.get_core_engine_for_request(request)
 
     assert chosen_engine == client.core_engines[1]
-    assert client.lb_engines[1][0] == 1
+    assert client.lb_engines[1][0] == 2
 
 
 def test_dplb_in_flight_request_stays_on_same_engine():
@@ -364,9 +364,17 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
 
 def test_dplb_snapshot_backpressure_overrides_inflight():
     """An engine reported heavily loaded by the coordinator is avoided even
-    when this client has routed nothing to it."""
-    client = _make_dplb_client(num_engines=2)
+    when this client has no outstanding requests on it."""
+    client = _make_dplb_client(num_engines=2, client_count=2)
+    request = make_request(SamplingParams(max_tokens=1))
+    request.data_parallel_rank = 0
+    client.get_core_engine_for_request(request)
+    # This snapshot already excludes our completed request; all remaining
+    # work belongs to another client and must not be decremented.
     client.lb_engines = [[5, 10, 0.0], [0, 0, 0.0]]
+    outputs = EngineCoreOutputs(finished_requests={request.request_id})
+    asyncio.run(DPLBAsyncMPClient.process_engine_outputs(client, outputs))
+    assert client.lb_engines == [[5, 10, 0.0], [0, 0, 0.0]]
 
     chosen = client.get_core_engine_for_request(
         make_request(SamplingParams(max_tokens=1))
@@ -375,10 +383,16 @@ def test_dplb_snapshot_backpressure_overrides_inflight():
     assert chosen == client.core_engines[1]
 
 
-def test_dplb_kv_pressure_amplifies_waiting_penalty():
+@pytest.mark.parametrize("client_count", [1, 2])
+def test_dplb_kv_pressure_amplifies_waiting_penalty(client_count):
     """A waiting queue on a KV-bound engine (slow drain) is penalized, while
     the same queue with low KV usage is not (e.g. transient burst)."""
-    client = _make_dplb_client(num_engines=2)
+    client = _make_dplb_client(num_engines=2, client_count=client_count)
+    for rank, count in enumerate((15, 20) if client_count == 1 else (5, 5)):
+        for _ in range(count):
+            request = make_request(SamplingParams(max_tokens=1))
+            request.data_parallel_rank = rank
+            client.get_core_engine_for_request(request)
     # Engine 0 has a smaller total but is KV-bound with a queue.
     client.lb_engines = [[5, 10, 1.0], [0, 20, 0.2]]
 
@@ -388,7 +402,12 @@ def test_dplb_kv_pressure_amplifies_waiting_penalty():
     assert chosen == client.core_engines[1]
 
     # Same counts without KV pressure: the smaller total wins.
-    client = _make_dplb_client(num_engines=2)
+    client = _make_dplb_client(num_engines=2, client_count=client_count)
+    for rank, count in enumerate((15, 20) if client_count == 1 else (5, 5)):
+        for _ in range(count):
+            request = make_request(SamplingParams(max_tokens=1))
+            request.data_parallel_rank = rank
+            client.get_core_engine_for_request(request)
     client.lb_engines = [[5, 10, 0.2], [0, 20, 0.2]]
 
     chosen = client.get_core_engine_for_request(
@@ -411,9 +430,11 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
-def test_dplb_finished_request_frees_its_slot_before_next_snapshot():
-    """A request that finishes between two stats snapshots frees its engine
-    at once: the next request goes there, not to an engine that is full."""
+@pytest.mark.parametrize("snapshot_before_completion", [False, True])
+def test_dplb_single_client_completion_ignores_stale_snapshot(
+    snapshot_before_completion,
+):
+    """Completion counts stay exact whether the snapshot already excludes it or not."""
     client = _make_dplb_client(num_engines=3)
     # Every engine runs 16 requests, its max_num_seqs, and the last snapshot
     # says so.
@@ -424,13 +445,20 @@ def test_dplb_finished_request_frees_its_slot_before_next_snapshot():
     # One request on the last engine in scan order finishes.
     freed = client.core_engines[2]
     done = next(r for r, e in zip(reqs, engines) if e == freed)
+    if snapshot_before_completion:
+        client.lb_engines[2][1] = 15
+    snapshot = [counts.copy() for counts in client.lb_engines]
     outputs = EngineCoreOutputs(finished_requests={done.request_id})
     asyncio.run(DPLBAsyncMPClient.process_engine_outputs(client, outputs))
+    assert client.lb_engines == snapshot
 
+    # A delayed snapshot can reintroduce the pre-completion count.
+    client.lb_engines = [[0, 16, 0.1] for _ in range(3)]
     chosen = client.get_core_engine_for_request(
         make_request(SamplingParams(max_tokens=1))
     )
     assert chosen == freed
+    assert list(client.engine_inflight.values()) == [16, 16, 16]
 
 
 @pytest.mark.parametrize("final_sent", [False, True])
