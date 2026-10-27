@@ -88,46 +88,55 @@ pub struct HfChatRenderer {
 
 impl HfChatRenderer {
     /// Create a renderer from the given template string.
+    ///
+    /// Templates are probed for their content format when compiled, rendering
+    /// with `special_tokens` and `default_template_kwargs`, so both are given
+    /// here.
     pub fn new(
         template: Option<String>,
         default_template_kwargs: HashMap<String, JsonValue>,
+        special_tokens: Option<HfSpecialTokens>,
         content_format: ContentFormatOption,
     ) -> Result<Self> {
-        Ok(Self {
-            default_template: template
-                .map(|template| {
-                    CompiledChatTemplate::new(template, content_format)
-                        .map_err(|error| Error::ChatTemplate(error.to_report_string()))
-                })
-                .transpose()?,
+        let mut renderer = Self {
+            default_template: None,
             tool_use_template: None,
             default_template_kwargs,
             content_format,
-            special_tokens: None,
+            special_tokens,
             multimodal: None,
             trust_request_chat_template: false,
             request_template_fuel: request_template_fuel(
                 std::env::var_os("VLLM_CHAT_TEMPLATE_FUEL").as_deref(),
             )
             .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
-        })
+        };
+        renderer.default_template =
+            template.map(|template| renderer.compile_template(template, None)).transpose()?;
+        Ok(renderer)
     }
 
     /// Use a separate model template for requests with tools, as Transformers
     /// selects a `tool_use` template when tools are passed.
     pub fn with_tool_use_template(mut self, template: Option<String>) -> Result<Self> {
-        self.tool_use_template = template
-            .map(|template| {
-                CompiledChatTemplate::new(template, self.content_format)
-                    .map_err(|error| Error::ChatTemplate(error.to_report_string()))
-            })
-            .transpose()?;
+        self.tool_use_template =
+            template.map(|template| self.compile_template(template, None)).transpose()?;
         Ok(self)
     }
 
-    pub fn with_special_tokens(mut self, special_tokens: Option<HfSpecialTokens>) -> Self {
-        self.special_tokens = special_tokens;
-        self
+    /// Compile `template` with this renderer's content format, limiting each
+    /// render to `fuel` template instructions.
+    fn compile_template(
+        &self,
+        template: String,
+        fuel: Option<u64>,
+    ) -> Result<CompiledChatTemplate> {
+        let probe = ProbeContext {
+            special_tokens: self.special_tokens.as_ref(),
+            template_kwargs: Some(&self.default_template_kwargs),
+        };
+        CompiledChatTemplate::new(template, self.content_format, fuel, &probe)
+            .map_err(|error| Error::ChatTemplate(error.to_report_string()))
     }
 
     pub fn with_multimodal(mut self, multimodal: Option<MultimodalRenderInfo>) -> Self {
@@ -196,10 +205,10 @@ impl HfChatRenderer {
         Ok(Self::new(
             template,
             options.default_chat_template_kwargs,
+            special_tokens,
             options.chat_template_content_format,
         )?
         .with_tool_use_template(tool_use_template)?
-        .with_special_tokens(special_tokens)
         .with_multimodal(multimodal)
         .with_trust_request_chat_template(options.trust_request_chat_template))
     }
@@ -222,11 +231,7 @@ impl HfChatRenderer {
             .chat_options
             .chat_template
             .as_ref()
-            .map(|template| {
-                CompiledChatTemplate::new(template.clone(), self.content_format)
-                    .map(|template| template.with_fuel(self.request_template_fuel))
-                    .map_err(|error| Error::ChatTemplate(error.to_report_string()))
-            })
+            .map(|template| self.compile_template(template.clone(), self.request_template_fuel))
             .transpose()?;
         let model_template = if request.tools().is_empty() {
             None
@@ -247,13 +252,7 @@ impl HfChatRenderer {
         effective_template: &CompiledChatTemplate,
         request: &ChatRequest,
     ) -> Result<RenderedPrompt> {
-        let content_format = effective_template.content_format_for(
-            &request.messages,
-            &ProbeContext {
-                special_tokens: self.special_tokens.as_ref(),
-                template_kwargs: &self.default_template_kwargs,
-            },
-        );
+        let content_format = effective_template.content_format_for(&request.messages);
         let mut messages =
             to_template_messages(&request.messages, content_format, self.multimodal.as_ref())?;
 
@@ -746,6 +745,7 @@ mod tests {
         HfChatRenderer::new(
             template.map(str::to_owned),
             HashMap::new(),
+            None,
             ChatTemplateContentFormatOption::Auto,
         )?
         .with_trust_request_chat_template(true)
@@ -776,13 +776,18 @@ mod tests {
         request: &ChatRequest,
         content_format: ChatTemplateContentFormatOption,
     ) -> Result<crate::RenderedPrompt> {
-        HfChatRenderer::new(Some(template.to_string()), HashMap::new(), content_format)?
-            .with_multimodal(Some(MultimodalRenderInfo {
-                image_token: Some("<image>".to_string()),
-                video_token: Some("<video>".to_string()),
-                audio_token: Some("<audio>".to_string()),
-            }))
-            .render(request)
+        HfChatRenderer::new(
+            Some(template.to_string()),
+            HashMap::new(),
+            None,
+            content_format,
+        )?
+        .with_multimodal(Some(MultimodalRenderInfo {
+            image_token: Some("<image>".to_string()),
+            video_token: Some("<video>".to_string()),
+            audio_token: Some("<audio>".to_string()),
+        }))
+        .render(request)
     }
 
     fn image_request() -> ChatRequest {
@@ -893,6 +898,7 @@ mod tests {
         let error = HfChatRenderer::new(
             Some("{{ messages[0].content }}".to_string()),
             HashMap::new(),
+            None,
             ChatTemplateContentFormatOption::String,
         )
         .unwrap()
@@ -1213,6 +1219,31 @@ mod tests {
     }
 
     #[test]
+    fn chat_template_probes_render_with_special_tokens() {
+        // Parts render only with `bos_token` defined: concatenating an
+        // undefined value fails.
+        let template = "{%- for message in messages %}{%- if message.content is string %}{{ message.content }}{%- else %}{%- for part in message.content %}{{ bos_token + part.text }}{%- endfor %}{%- endif %}{%- endfor %}";
+        let request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("a"),
+            ChatContentPart::text("b"),
+        ])]);
+        let rendered = HfChatRenderer::new(
+            Some(template.to_string()),
+            HashMap::new(),
+            Some(HfSpecialTokens {
+                bos_token: Some(NamedSpecialToken::Text("<s>".to_string())),
+                ..Default::default()
+            }),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap()
+        .apply_chat_template(&request)
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("<s>a<s>b".to_string()));
+    }
+
+    #[test]
     fn chat_template_falls_back_to_strings_when_no_probe_renders() {
         // The template accepts only its own input format, which no probe
         // conversation follows.
@@ -1244,6 +1275,7 @@ mod tests {
         let rendered = HfChatRenderer::new(
             Some("{{ messages[0].content }}".to_string()),
             HashMap::new(),
+            None,
             ChatTemplateContentFormatOption::Auto,
         )
         .unwrap()
@@ -1279,6 +1311,7 @@ mod tests {
         let renderer = HfChatRenderer::new(
             Some("{{ messages[0].content }}".to_string()),
             HashMap::new(),
+            None,
             ChatTemplateContentFormatOption::Auto,
         )
         .unwrap();
@@ -1338,10 +1371,10 @@ mod tests {
         let rendered = HfChatRenderer::new(
             Some("{{ bos_token }}|{{ bos_token is defined }}".to_string()),
             HashMap::new(),
+            Some(special_tokens),
             ChatTemplateContentFormatOption::Auto,
         )
         .unwrap()
-        .with_special_tokens(Some(special_tokens))
         .apply_chat_template(&request)
         .unwrap();
 
@@ -1379,7 +1412,7 @@ mod tests {
             Some(
                 "{%- if messages[0].content is string -%}{{ messages[0].content }}{%- else -%}{%- for item in messages[0].content %}{{ item.text }}|{%- endfor -%}{%- endif -%}".to_string(),
             ),
-            HashMap::new(),
+            HashMap::new(), None,
             ChatTemplateContentFormatOption::String,
         )
         .unwrap()
@@ -1400,6 +1433,7 @@ mod tests {
         let rendered = HfChatRenderer::new(
             Some("{{ messages[0].content[0].text }}{{ messages[0].content[1].text }}".to_string()),
             HashMap::new(),
+            None,
             ChatTemplateContentFormatOption::OpenAi,
         )
         .unwrap()
@@ -1432,7 +1466,7 @@ mod tests {
                 ("default_only".to_string(), Value::String("x".to_string())),
                 ("reasoning_effort".to_string(), Value::String("medium".to_string())),
                 ("mode".to_string(), Value::String("strict".to_string())),
-            ]),
+            ]), None,
             ChatTemplateContentFormatOption::Auto,
         )
         .unwrap();
@@ -1457,6 +1491,7 @@ mod tests {
                 "reasoning_effort".to_string(),
                 Value::String("medium".to_string()),
             )]),
+            None,
             ChatTemplateContentFormatOption::Auto,
         )
         .unwrap();
@@ -1486,6 +1521,7 @@ mod tests {
         let renderer = HfChatRenderer::new(
             Some("{{ reasoning_effort }}|{{ enable_thinking }}".to_string()),
             HashMap::new(),
+            None,
             ChatTemplateContentFormatOption::Auto,
         )
         .unwrap();
@@ -1521,6 +1557,7 @@ mod tests {
             let rendered = HfChatRenderer::new(
                 Some("{{ reasoning_effort|tojson }}|{{ enable_thinking }}".to_string()),
                 HashMap::new(),
+                None,
                 ChatTemplateContentFormatOption::Auto,
             )
             .unwrap()
@@ -1554,6 +1591,7 @@ mod tests {
                         .to_string(),
                 ),
                 HashMap::new(),
+                None,
                 ChatTemplateContentFormatOption::Auto,
             )
             .unwrap()
@@ -1832,14 +1870,14 @@ mod tests {
         HfChatRenderer::new(
             Some(STEP5_VL_TEMPLATE.to_string()),
             HashMap::new(),
+            Some(HfSpecialTokens {
+                bos_token: Some(NamedSpecialToken::Text(
+                    "<｜begin▁of▁sentence｜>".to_string(),
+                )),
+                ..Default::default()
+            }),
             content_format,
         )?
-        .with_special_tokens(Some(HfSpecialTokens {
-            bos_token: Some(NamedSpecialToken::Text(
-                "<｜begin▁of▁sentence｜>".to_string(),
-            )),
-            ..Default::default()
-        }))
         .with_multimodal(Some(MultimodalRenderInfo {
             image_token: Some("<im_patch>".to_string()),
             ..Default::default()

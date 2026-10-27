@@ -13,7 +13,6 @@ use std::ffi::OsStr;
 use std::fs;
 use std::iter;
 use std::path::Path;
-use std::sync::OnceLock;
 
 use minijinja::{Environment, Error as MinijinjaError, ErrorKind, Value};
 use serde::{Deserialize, Serialize};
@@ -49,6 +48,15 @@ pub(super) fn request_template_fuel(value: Option<&OsStr>) -> Result<Option<u64>
             .ok_or_else(|| TemplateError::InvalidFuel(value.to_owned()))?,
     };
     Ok((fuel > 0).then_some(fuel))
+}
+
+/// Render the `chat` template of `env` with `ctx`.
+fn render(env: &Environment<'_>, ctx: TemplateContext<'_>) -> Result<String> {
+    let tmpl = env.get_template("chat")?;
+    tmpl.render(ctx).map_err(|error| match error.kind() {
+        ErrorKind::OutOfFuel => TemplateError::OutOfFuel(error),
+        _ => TemplateError::Jinja(error),
+    })
 }
 
 /// Build a pre-configured environment with the given template string.
@@ -172,18 +180,30 @@ pub(super) struct CompiledChatTemplate {
 enum ContentFormatSelection {
     /// Configured with `--chat-template-content-format`.
     Configured(ChatTemplateContentFormat),
-    /// Chosen per request from the template's capabilities, probed on first
-    /// use: probes need the renderer's special tokens and default template
-    /// kwargs.
-    Auto(OnceLock<ContentCapabilities>),
+    /// Chosen per request from the template's capabilities, probed when the
+    /// template is compiled.
+    Auto(ContentCapabilities),
 }
 
 impl CompiledChatTemplate {
     /// Compile the given chat template string into a [`CompiledChatTemplate`].
-    pub fn new(template: String, content_format: ChatTemplateContentFormatOption) -> Result<Self> {
+    ///
+    /// Each render is limited to `fuel` template instructions; `None` removes
+    /// the limit. With [`ChatTemplateContentFormatOption::Auto`], the template
+    /// is probed here, rendering with `probe` and under the same fuel limit.
+    pub fn new(
+        template: String,
+        content_format: ChatTemplateContentFormatOption,
+        fuel: Option<u64>,
+        probe: &ProbeContext<'_>,
+    ) -> Result<Self> {
         let template = rewrite_generation_blocks(template)?;
+        let mut env = build_environment(template)?;
+        env.set_fuel(fuel);
         let content_format = match content_format {
-            ChatTemplateContentFormatOption::Auto => ContentFormatSelection::Auto(OnceLock::new()),
+            ChatTemplateContentFormatOption::Auto => ContentFormatSelection::Auto(
+                ContentCapabilities::probe(&|ctx| render(&env, ctx), probe),
+            ),
             ChatTemplateContentFormatOption::String => {
                 ContentFormatSelection::Configured(ChatTemplateContentFormat::String)
             }
@@ -191,41 +211,23 @@ impl CompiledChatTemplate {
                 ContentFormatSelection::Configured(ChatTemplateContentFormat::OpenAi)
             }
         };
-        let env = build_environment(template)?;
         Ok(Self {
             env,
             content_format,
         })
     }
 
-    /// Limit each render to `fuel` template instructions; `None` removes the
-    /// limit.
-    pub fn with_fuel(mut self, fuel: Option<u64>) -> Self {
-        self.env.set_fuel(fuel);
-        self
-    }
-
     /// Apply the compiled template to the given context and return the rendered
     /// prompt.
     pub fn apply(&self, ctx: TemplateContext<'_>) -> Result<String> {
-        let tmpl = self.env.get_template("chat")?;
-        tmpl.render(ctx).map_err(|error| match error.kind() {
-            ErrorKind::OutOfFuel => TemplateError::OutOfFuel(error),
-            _ => TemplateError::Jinja(error),
-        })
+        render(&self.env, ctx)
     }
 
     /// The content format to render `messages` with.
-    pub fn content_format_for(
-        &self,
-        messages: &[ChatMessage],
-        probe: &ProbeContext<'_>,
-    ) -> ChatTemplateContentFormat {
+    pub fn content_format_for(&self, messages: &[ChatMessage]) -> ChatTemplateContentFormat {
         match &self.content_format {
             ContentFormatSelection::Configured(content_format) => *content_format,
-            ContentFormatSelection::Auto(capabilities) => capabilities
-                .get_or_init(|| ContentCapabilities::probe(self, probe))
-                .content_format_for(messages),
+            ContentFormatSelection::Auto(capabilities) => capabilities.content_format_for(messages),
         }
     }
 }
@@ -241,21 +243,22 @@ mod tests {
 
     use super::*;
 
+    fn compile(
+        template: String,
+        content_format: ChatTemplateContentFormatOption,
+    ) -> Result<CompiledChatTemplate> {
+        CompiledChatTemplate::new(template, content_format, None, &ProbeContext::default())
+    }
+
     fn content_format_for_user_message(
         template: &CompiledChatTemplate,
     ) -> ChatTemplateContentFormat {
-        template.content_format_for(
-            &[ChatMessage::user("hello")],
-            &ProbeContext {
-                special_tokens: None,
-                template_kwargs: &HashMap::new(),
-            },
-        )
+        template.content_format_for(&[ChatMessage::user("hello")])
     }
 
     #[test]
     fn test_chat_template_state_valid_template() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{ messages }}".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -270,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_midchain_dotted_integer_lookup() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{ values.0.name }}".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -290,7 +293,7 @@ mod tests {
 
     #[test]
     fn test_chat_template_state_invalid_template() {
-        let result = CompiledChatTemplate::new(
+        let result = compile(
             "{% invalid".to_string(),
             ChatTemplateContentFormatOption::Auto,
         );
@@ -306,7 +309,7 @@ mod tests {
     fn test_strftime_now_matches_transformers_contract() {
         // `strftime_now` renders local wall-clock time with strftime-style
         // formats, like the transformers Jinja environment.
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{ strftime_now('literal') }}|{{ strftime_now('%Y-%m-%d') }}".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -326,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_raise_exception_returns_template_message() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '.') }}"
                 .to_string(),
             ChatTemplateContentFormatOption::Auto,
@@ -351,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_raise_exception_in_untaken_branch_renders() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{% if messages %}{{ raise_exception('unreachable') }}{% endif %}ok".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -362,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_unknown_function_is_not_reported_as_thrown() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{ undefined_helper('not registered') }}".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -381,11 +384,12 @@ mod tests {
     fn render_turns(turns: usize, fuel: Option<u64>) -> Result<String> {
         let template =
             "{% for turn in turns %}{% for _ in range(10) %}{{ turn }}{% endfor %}{% endfor %}";
-        let template = CompiledChatTemplate {
-            env: build_environment(template.to_string())?,
-            content_format: ContentFormatSelection::Configured(ChatTemplateContentFormat::String),
-        }
-        .with_fuel(fuel);
+        let template = CompiledChatTemplate::new(
+            template.to_string(),
+            ChatTemplateContentFormatOption::String,
+            fuel,
+            &ProbeContext::default(),
+        )?;
         let mut kwargs = HashMap::new();
         kwargs.insert("turns".to_string(), serde_json::json!(vec![0; turns]));
         template.apply(TemplateContext {
@@ -426,8 +430,7 @@ mod tests {
     fn test_special_tokens_injected_into_context() {
         let template = "{{ bos_token }}hello{{ eos_token }}";
         let template =
-            CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
-                .unwrap();
+            compile(template.to_string(), ChatTemplateContentFormatOption::Auto).unwrap();
 
         let special_tokens = HfSpecialTokens {
             bos_token: Some(NamedSpecialToken::Text("<s>".to_string())),
@@ -449,8 +452,7 @@ mod tests {
     fn test_special_tokens_undefined_when_not_provided() {
         let template = "{% if bos_token is defined %}{{ bos_token }}{% endif %}hello";
         let template =
-            CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
-                .unwrap();
+            compile(template.to_string(), ChatTemplateContentFormatOption::Auto).unwrap();
 
         let result = template.apply(TemplateContext::default()).unwrap();
         assert_eq!(result, "hello");
@@ -461,8 +463,7 @@ mod tests {
         let template =
             "{{ bos_token }}hello{% if eos_token is defined %}{{ eos_token }}{% endif %}";
         let template =
-            CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
-                .unwrap();
+            compile(template.to_string(), ChatTemplateContentFormatOption::Auto).unwrap();
 
         let special_tokens = HfSpecialTokens {
             bos_token: Some(NamedSpecialToken::Text("<s>".to_string())),
@@ -482,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_tojson_filter_supports_indent_and_sort_keys() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{{ payload | tojson(indent=2, sort_keys=true) }}".to_string(),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -538,7 +539,7 @@ mod tests {
 
     #[test]
     fn test_chat_template_state_respects_explicit_content_format_override() {
-        let template = CompiledChatTemplate::new(
+        let template = compile(
             "{% for item in messages[0].content %}{{ item.text }}{% endfor %}".to_string(),
             ChatTemplateContentFormatOption::String,
         )
