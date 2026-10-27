@@ -231,15 +231,12 @@ def _insert_context_kv(
     positions: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    """RoPE + quant + paged-cache insert of (already kv_norm'd) context KV.
-
-    The shared ``fused_deepseek_v4_kv_rope_insert`` with zero query heads
-    (context tokens have no query) -- the same call
-    ``nvidia/dspark.py`` makes here. With zero query heads the op schedules
-    only the KV branch, preserving its RoPE rounding and quantization, so
-    the stock path's dummy-Q allocation, zero-fill and quantized write
-    disappear with the cache contents identical by construction.
-    """
+    """RoPE + quant + paged-cache insert of (already kv_norm'd) context KV:
+    the shared ``fused_deepseek_v4_kv_rope_insert`` with zero query heads
+    (context tokens have no query) -- the same call ``nvidia/dspark.py``
+    makes here. Only the KV branch is scheduled, so the stock path's
+    dummy-Q allocation and quantized write disappear; cache contents are
+    identical by construction."""
     swa_cache = attn.swa_cache_layer.kv_cache
     cache_dtype = swa_cache.dtype
     torch.ops._C.fused_deepseek_v4_kv_rope_insert(

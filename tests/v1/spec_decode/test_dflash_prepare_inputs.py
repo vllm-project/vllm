@@ -26,8 +26,9 @@ pytestmark = pytest.mark.skipif(
 def _force_fastpaths_supported(monkeypatch):
     # The draft-prepare fastpaths are ROCm-gated in the speculator; these
     # tests pin their contracts on any GPU.
+    monkeypatch.setattr(speculator_module, "_draft_prepare_dedup_armed", lambda: True)
     monkeypatch.setattr(
-        speculator_module, "_draft_prepare_fastpaths_supported", lambda: True
+        speculator_module, "_dflash_prepare_pad_fix_armed", lambda: True
     )
 
 
@@ -288,8 +289,9 @@ def test_prepare_dflash_inputs_two_draft_groups_dedup_and_pad(monkeypatch):
 def test_draft_prepare_fastpaths_off_platform_keeps_stock_paths(monkeypatch):
     # Non-ROCm platforms keep the stock paths: every draft group call
     # recomputes the shared outputs and pads the full in-kernel tail.
+    monkeypatch.setattr(speculator_module, "_draft_prepare_dedup_armed", lambda: False)
     monkeypatch.setattr(
-        speculator_module, "_draft_prepare_fastpaths_supported", lambda: False
+        speculator_module, "_dflash_prepare_pad_fix_armed", lambda: False
     )
     out = _run_prepare(
         target_positions=[10, 11, 12, 13],
