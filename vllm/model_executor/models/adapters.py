@@ -284,7 +284,7 @@ def as_embedding_model(cls: type[_T]) -> type[_T]:
 def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
     """Resolve the label count for a sequence classification head.
 
-    ``PretrainedConfig.num_labels`` is derived from ``id2label``, which always
+    ``PreTrainedConfig.num_labels`` is derived from ``id2label``, which always
     carries a default of two entries. Composite configs (such as multimodal
     checkpoints) declare their label space on the top-level config, so reading
     ``num_labels`` from ``get_text_config()`` silently returns that default and
@@ -297,9 +297,9 @@ def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
     if text_config is hf_config:
         return hf_config.num_labels
 
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
-    if hf_config.num_labels != PretrainedConfig().num_labels:
+    if hf_config.num_labels != PreTrainedConfig().num_labels:
         return hf_config.num_labels
     return text_config.num_labels
 
@@ -539,7 +539,7 @@ def load_weights_using_from_2_way_softmax(
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if text_config.tie_word_embeddings:
+    if language_model.config.get_text_config().tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
@@ -608,7 +608,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if text_config.tie_word_embeddings:
+    if language_model.config.get_text_config().tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
