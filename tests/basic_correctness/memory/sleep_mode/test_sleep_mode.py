@@ -80,6 +80,33 @@ def test_end_to_end(model: str):
     assert output[0].outputs[0].text == output3[0].outputs[0].text
 
 
+def _fail_after_sleep(worker) -> None:
+    sleep = worker.sleep
+
+    def sleep_then_fail(*args, **kwargs):
+        sleep(*args, **kwargs)
+        raise RuntimeError("injected failure after sleep")
+
+    worker.sleep = sleep_then_fail
+
+
+@create_new_process_for_each_test()
+def test_wake_up_after_failed_sleep(monkeypatch, gpu_memory_cleared):
+    """A sleep that fails after releasing memory must stay wakeable."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    llm = LLM("hmellor/tiny-random-LlamaForCausalLM", enable_sleep_mode=True)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    expected = llm.generate(prompt, sampling_params)[0].outputs[0].text
+
+    llm.collective_rpc(_fail_after_sleep)
+    with pytest.raises(Exception, match="injected failure after sleep"):
+        llm.sleep(level=1)
+
+    assert llm.wake_up()
+    assert llm.generate(prompt, sampling_params)[0].outputs[0].text == expected
+
+
 @create_new_process_for_each_test()
 def test_deep_sleep(gpu_memory_cleared):
     model = "hmellor/tiny-random-LlamaForCausalLM"
