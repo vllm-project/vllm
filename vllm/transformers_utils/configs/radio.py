@@ -14,6 +14,7 @@ VIT_TIMM_DIM_BY_NAME: dict[str, tuple[int, int, int, int]] = {
     "vit_base_patch16_224": (768, 12, 12, 3072),
     "vit_large_patch16_224": (1024, 24, 16, 4096),
     "vit_huge_patch16_224": (1280, 32, 16, 5120),
+    "vit_so400m_patch16_224": (1152, 27, 16, 4304),
 }
 
 OPENAI_CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
