@@ -738,7 +738,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # layer output buffer; the chunked prefill kernel cannot, so this
         # stays None there and the merge copy below runs as before.
         ns_out = None
-        if _aiter_flashkda_runs_prefill(
+        if attn_metadata_narrowed.num_prefills > 0 and _aiter_flashkda_runs_prefill(
             self.kda_prefill_backend, attn_metadata_narrowed
         ):
             assert q_ns is not None
