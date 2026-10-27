@@ -241,6 +241,10 @@ compatible_strategies:
   - multi_node_dep
   - pd_cluster
 
+kv_offload_hardware:
+  ascend_910c: unsupported
+  ascend_950dt: unsupported
+
 # TP-per-node + DP-across-nodes only makes sense where one node holds a full
 # replica and the cluster fabric fits the DP pattern: H200 (TP8·DP2 from 2
 # nodes) and GB200/GB300 NVL trays (TP4·DP4 from 4 trays). It's therefore not
@@ -1870,6 +1874,10 @@ guide: |
   Confirm that a final answer is returned, and inspect the prefill/decode logs for successful KV transfers and transfer errors. Health checks alone do not exercise RDMA. Preserve `reasoning_content` and tool calls when building multi-turn conversations, as described in the [model card](https://huggingface.co/moonshotai/Kimi-K3#6-model-usage).
 
   ## Ascend mixed Prefill/Decode deployment
+
+  KV Offload supports only **Off** on Ascend 910C (A3) and 950DT (A5), in both
+  mixed and disaggregated serving. Simple, CPU offloading, Mooncake Store, and
+  LMCache are unavailable for these recipe profiles.
 
   In the four-node A3/A5 mixed deployment, node 0 runs the API server and
   Nodes 1-3 join with `--headless` and their respective
