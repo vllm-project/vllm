@@ -60,6 +60,7 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
@@ -82,6 +83,7 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
+from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
@@ -91,14 +93,6 @@ from .qsa import Qwen4ExpQSAAttention
 # Transformers v5.18 renamed `qwen_sparse_attention` to `indexed_attention`
 # TODO: Delete qwen_... once Transformers 5.18.0 is the minimum required version.
 _QSA_LAYER_TYPES = ("qwen_sparse_attention", "indexed_attention")
-
-
-def is_hc_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
-    """Enable GR/PLE SP explicitly or automatically with sequence-parallel MoE."""
-    parallel_config = vllm_config.parallel_config
-    return parallel_config.tensor_parallel_size > 1 and (
-        parallel_config.enable_hc_sp or parallel_config.use_sequence_parallel_moe
-    )
 
 
 def without_modelopt_fp4(
@@ -433,7 +427,13 @@ class Qwen4ExpModel(nn.Module):
             if layer_type in _QSA_LAYER_TYPES
             and getattr(config, "indexer_n_heads", None) is not None
         )
-        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
+        self.embed_tokens: VocabParallelEmbedding | PPMissingLayer
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size, config.hidden_size
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         def get_layer(prefix: str) -> Qwen4ExpDecoderLayer:
             layer_idx = extract_layer_index(prefix)
@@ -734,11 +734,15 @@ class Qwen4ExpForCausalLM(
         self.model = Qwen4ExpModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        self.lm_head: ParallelLMHead | PPMissingLayer
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -1041,7 +1045,9 @@ class Qwen4ExpForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-        if not get_pp_group().is_first_rank and self.use_deepstack:
+        if not get_pp_group().is_first_rank and hasattr(
+            config.vision_config, "deepstack_visual_indexes"
+        ):
             assert self.language_model.model.start_layer >= len(
                 config.vision_config.deepstack_visual_indexes
             ), (

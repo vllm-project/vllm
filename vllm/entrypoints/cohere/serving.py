@@ -251,7 +251,7 @@ class CohereServingChatV2(OpenAIServingChat):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
-        tool_strict_level: str = "auto",
+        tool_strict_level: str | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
@@ -321,7 +321,14 @@ class CohereServingChatV2(OpenAIServingChat):
             case ChatCompletionResponse():
                 return self._chat_completion_to_v2(generator, request)
             case _:
-                return self._chat_completion_stream_to_v2(generator, request)
+                return generator
+
+    def chat_completion_stream_generator(
+        self, *args: Any, **kwargs: Any
+    ) -> AsyncGenerator[str, None]:
+        return self._chat_completion_stream_to_v2(
+            self.chat_completion_stream_generator_raw(*args, **kwargs)
+        )
 
     def to_chat_completion_request(
         self, request: CohereChatV2Request
@@ -502,7 +509,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # Map every content block to a plain ``{"type": "text", "text":
         # ...}`` part, mirroring the shape :meth:`_convert_user_message`
         # emits for multi-part user content. vLLM's
-        # ``_parse_chat_message_content`` collapses a text-only tool
+        # ``parse_chat_message_content`` collapses a text-only tool
         # part list back into ``"\n".join(...)`` on the way to the
         # renderer, so simple chat templates that expect string tool
         # content still work; keeping the list here just preserves the
@@ -512,7 +519,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # Tool message content uses ``ToolMessageV2Content``, a union of
         # ``TextToolContent`` and ``DocumentToolContent``. The latter
         # produces ``{"type": "document", "document": {...}}`` blocks,
-        # which vLLM's shared ``_parse_chat_message_content_parts`` in
+        # which vLLM's shared ``parse_chat_message_content_parts`` in
         # ``vllm/renderers/chat_utils.py`` rejects because the OpenAI
         # ``ChatCompletionContentPartParam`` union only knows text /
         # image / audio / etc. Emitting them anyway triggers a Pydantic
@@ -601,7 +608,7 @@ class CohereServingChatV2(OpenAIServingChat):
             json_schema=(
                 JsonSchemaResponseFormat(
                     name="cohere_v2_json_schema",
-                    json_schema=rf.json_schema,
+                    schema=rf.json_schema,
                 )
                 if rf.json_schema
                 else None
@@ -1428,10 +1435,9 @@ class CohereServingChatV2(OpenAIServingChat):
 
     async def _chat_completion_stream_to_v2(
         self,
-        generator: AsyncGenerator[str, None],
-        request: CohereChatV2Request,
+        generator: AsyncGenerator[ChatCompletionStreamResponse | ErrorResponse, None],
     ) -> AsyncGenerator[str, None]:
-        """Translate an OpenAI-style chat completion SSE stream into Cohere's
+        """Translate raw OpenAI chat completion chunks into Cohere's
         v2 stream-event format.
 
         Cohere's v2 stream lifecycle is:
@@ -1445,19 +1451,9 @@ class CohereServingChatV2(OpenAIServingChat):
         state = _StreamState()
 
         try:
-            async for item in generator:
-                if not item.startswith("data:"):
-                    continue
-                data_str = item[len("data:") :].strip().rstrip("\n")
-                if not data_str:
-                    continue
-                if data_str == "[DONE]":
-                    # OpenAI's stream terminator. Fall through to the
-                    # post-loop cleanup so we always emit ``message-end``
-                    # even if the usage-only chunk was skipped.
-                    break
-
-                chunk = ChatCompletionStreamResponse.model_validate_json(data_str)
+            async for chunk in generator:
+                if isinstance(chunk, ErrorResponse):
+                    raise RuntimeError(chunk.error.message)
                 state.last_chunk_id = chunk.id
 
                 if not state.started:
@@ -1514,7 +1510,9 @@ class CohereServingChatV2(OpenAIServingChat):
 
         except Exception as exc:
             logger.exception("Error converting chat completion stream to v2")
-            if state.started and not state.ended:
+            if not state.ended:
+                for ev in self._close_open_blocks(state):
+                    yield ev
                 yield _sse(
                     json.dumps(
                         {
@@ -1530,11 +1528,7 @@ class CohereServingChatV2(OpenAIServingChat):
             yield _DONE_FRAME
             return
 
-        # Normal completion or ``[DONE]``: ensure ``message-end`` is always
-        # emitted. Upstream may close the stream without sending the final
-        # usage-only chunk (e.g. on shutdown, or when ``[DONE]`` is the only
-        # terminator); without this fallback Cohere clients would hang
-        # waiting for the closing event.
+        # Ensure message-end is emitted even without a final usage chunk.
         if state.started and not state.ended:
             for ev in self._close_open_blocks(state):
                 yield ev
