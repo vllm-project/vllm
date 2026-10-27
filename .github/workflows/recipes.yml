@@ -26,3 +26,6 @@ jobs:
     with:
       source: vllm
       path: recipes
+      # Temporary dependency: recipes PR #1152 adds the Mooncake V2 renderer
+      # and fixed-size PD groups. Remove this pin after it reaches main.
+      renderer-ref: refs/pull/1152/head

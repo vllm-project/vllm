@@ -273,7 +273,7 @@ strategy_hardware:
   pd_cluster:
     ascend_910c: unsupported
     # A5 target: P DP1/TP8/PP4/EP8; D DP4/TP8/EP32 (4 nodes per role).
-    # Role-specific PD command generation will be adapted separately.
+    # Each role scales as independent 4-node groups (8 NPUs per node).
     ascend_950dt: supported
 
 default_strategy: single_node_tp
@@ -423,15 +423,18 @@ strategy_overrides:
     router:
       intra_node_data_parallel_size: 1
     env:
-      VLLM_SSM_CONV_STATE_LAYOUT: "DS"
-    # Blackwell only (cuda_copy is CUDA-only); replaces the recipe-level nvidia block.
+      VLLM_SSM_CONV_STATE_LAYOUT: DS
     hardware_overrides:
       blackwell:
         extra_env:
-          UCX_TLS: "rc,cuda_copy"
+          UCX_TLS: rc,cuda_copy
     prefill:
-      parallelism: tep
-      tp: 8
+      parallelism:
+        default: tep
+        ascend_950dt: tp
+      tp:
+        default: 8
+        ascend_950dt: 8
       vllm_args:
         - "--max-num-batched-tokens"
         - "16384"
@@ -439,9 +442,72 @@ strategy_overrides:
         - "--disable-flashinfer-autotune"
       env:
         VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: "1"
+      nodes:
+        ascend_950dt: 4
+      nodes_per_instance:
+        ascend_950dt: 4
+      pp:
+        ascend_950dt: 4
+      hardware_overrides:
+        ascend_950dt:
+          remove_args:
+            - "--disable-flashinfer-autotune"
+            - "--no-disable-hybrid-kv-cache-manager"
+            - "--data-parallel-hybrid-lb"
+            - "--no-enable-prefix-caching"
+          extra_args:
+            - "--data-parallel-size"
+            - "1"
+            - "--distributed-executor-backend"
+            - mp
+            - "--master-port"
+            - "41000"
+            - "--enable-prefix-caching"
+            - "--enable-expert-parallel"
+            - "--max-model-len"
+            - "262144"
+            - "--max-num-seqs"
+            - "32"
+            - "--gpu-memory-utilization"
+            - "0.80"
+            - "--mm-processor-cache-gb"
+            - "1"
+            - "--skip-mm-profiling"
+            - "--tokenizer-mode"
+            - kimi_k3
+            - "--seed"
+            - "1024"
+            - "--max-num-batched-tokens"
+            - "16384"
+            - "--enforce-eager"
+            - "--additional-config"
+            - '{"enable_flashcomm1":true,"multistream_overlap_shared_expert":false,"enable_fused_mc2":2,"enable_shared_expert_dp":true}'
+          extra_env:
+            HCCL_BUFFSIZE: "800"
+            HCCL_IF_IP: $LOCAL_IP
+            HCCL_SOCKET_IFNAME: $IFACE_NAME
+            GLOO_SOCKET_IFNAME: $IFACE_NAME
+            HCCL_OP_EXPANSION_MODE: CCU_SCHED
+            ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+            PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+            VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+            VLLM_HOST_IP: $LOCAL_IP
+            PYTHONHASHSEED: "0"
+            LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+            VLLM_PP_LAYER_PARTITION: 24,24,24,21
+          feature_overrides:
+            spec_decoding:
+              args:
+                - "--speculative-config"
+                - '{"method":"dspark","model":"Inferact/Kimi-K3-DSpark-Block5","num_speculative_tokens":7,"draft_sample_method":"greedy","draft_tensor_parallel_size":8,"enforce_eager":true}'
     decode:
-      parallelism: dep
-      tp: 1
+      parallelism:
+        default: dep
+        ascend_950dt: dep
+      tp:
+        default: 1
+        ascend_950dt: 8
       env: {}
       vllm_args:
         - "--data-parallel-hybrid-lb"
@@ -451,6 +517,66 @@ strategy_overrides:
         - "--max-num-batched-tokens"
         - "32"
         - "--no-disable-hybrid-kv-cache-manager"
+      nodes:
+        ascend_950dt: 4
+      nodes_per_instance:
+        ascend_950dt: 4
+      pp:
+        ascend_950dt: 1
+      hardware_overrides:
+        ascend_950dt:
+          remove_args:
+            - "--disable-flashinfer-autotune"
+            - "--no-disable-hybrid-kv-cache-manager"
+            - "--data-parallel-hybrid-lb"
+            - "--no-enable-prefix-caching"
+          extra_args:
+            - "--enable-prefix-caching"
+            - "--enable-expert-parallel"
+            - "--max-model-len"
+            - "262144"
+            - "--max-num-seqs"
+            - "32"
+            - "--gpu-memory-utilization"
+            - "0.80"
+            - "--mm-processor-cache-gb"
+            - "1"
+            - "--skip-mm-profiling"
+            - "--tokenizer-mode"
+            - kimi_k3
+            - "--seed"
+            - "1024"
+            - "--max-num-batched-tokens"
+            - "768"
+            - "--block-size"
+            - "768"
+            - "--cp-kv-cache-interleave-size"
+            - "768"
+            - "--compilation-config"
+            - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+            - "--additional-config"
+            - '{"multistream_overlap_shared_expert":true,"enable_mlapo":true,"scheduler_config":{"recompute_scheduler_enable":true}}'
+          extra_env:
+            HCCL_BUFFSIZE: "800"
+            HCCL_IF_IP: $LOCAL_IP
+            HCCL_SOCKET_IFNAME: $IFACE_NAME
+            GLOO_SOCKET_IFNAME: $IFACE_NAME
+            HCCL_OP_EXPANSION_MODE: CCU_SCHED
+            ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+            PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+            VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+            VLLM_HOST_IP: $LOCAL_IP
+            PYTHONHASHSEED: "0"
+            LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+          feature_overrides:
+            spec_decoding:
+              args:
+                - "--speculative-config"
+                - '{"method":"dspark","model":"Inferact/Kimi-K3-DSpark-Block5","num_speculative_tokens":7,"draft_sample_method":"greedy","draft_tensor_parallel_size":8,"enforce_eager":false}'
+    connectors:
+      ascend_950dt:
+        - mooncakev2
 
 # Tuned presets: the SemiAnalysis InferenceX AgentX lanes, each a delta on
 # the baseline command for one GPU + strategy, on by default there (Baseline
@@ -1731,3 +1857,16 @@ guide: |
   ```
 
   Confirm that a final answer is returned, and inspect the prefill/decode logs for successful KV transfers and transfer errors. Health checks alone do not exercise RDMA. Preserve `reasoning_content` and tool calls when building multi-turn conversations, as described in the [model card](https://huggingface.co/moonshotai/Kimi-K3#6-model-usage).
+
+  ## Ascend 950DT PD separation
+
+  The A5 PD profile uses MooncakeConnectorV2 and the Ascend load-balancing proxy.
+  Each prefill instance occupies four eight-NPU nodes (DP1/TP8/PP4/EP8), and each
+  decode instance occupies four eight-NPU nodes (DP4/TP8/EP32). Each pool therefore
+  grows in 32-NPU groups; the default is one prefill group plus one decode group
+  (eight nodes, 64 NPUs total). Additional groups are independent replicas.
+
+  The [official basic PD reference](https://docs.vllm.ai/projects/vllm-ascend-cn/zh-cn/latest/tutorials/models/Kimi-K3.html#52-basic-eight-node-pd-separation-deployment) documents the fixed eight-node
+  topology. Group replication and the private MXFP4 checkpoint have not been
+  validated on NPU hardware here. The guide's pooled PD section adds a MemCache
+  KV cache pool; this profile uses the basic Mooncake V2 transfer path.
