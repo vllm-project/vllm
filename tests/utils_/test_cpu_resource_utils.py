@@ -21,6 +21,7 @@ _V1_USAGE_PATH = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
 
 
 _PROC_SELF_CGROUP = "/stub/proc/self/cgroup"
+_PROC_SELF_MOUNTINFO = "/stub/proc/self/mountinfo"
 
 
 @pytest.fixture(autouse=True)
@@ -29,11 +30,12 @@ def _clear_cgroup_cache():
     # of the test host never leaks into these tests. Set directly rather than
     # through monkeypatch so this fixture is torn down after the tests' own
     # monkeypatches are undone.
-    original = getattr(cru, "_PROC_SELF_CGROUP", None)
+    original = (cru._PROC_SELF_CGROUP, cru._PROC_SELF_MOUNTINFO)
     cru._PROC_SELF_CGROUP = _PROC_SELF_CGROUP
+    cru._PROC_SELF_MOUNTINFO = _PROC_SELF_MOUNTINFO
     cru.get_cgroup_memory_limit.cache_clear()
     yield
-    cru._PROC_SELF_CGROUP = original
+    cru._PROC_SELF_CGROUP, cru._PROC_SELF_MOUNTINFO = original
     cru.get_cgroup_memory_limit.cache_clear()
 
 
@@ -262,6 +264,69 @@ def test_cgroup_resolution_default_and_override(
     assert cru.get_cgroup_memory_usage() == (
         None if expected_limit is None else 2 * GiB_bytes
     )
+
+
+def test_cgroup_usage_reflects_headroom_of_every_limited_parent(monkeypatch):
+    """A parent limit also counts its other children: an empty 1 GiB child
+    under a 2 GiB parent whose siblings use 1.75 GiB has 0.25 GiB left."""
+    monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(
+        monkeypatch,
+        {
+            _PROC_SELF_CGROUP: "0::/pod/ctr\n",
+            _V2_LIMIT_PATH: "max\n",
+            "/sys/fs/cgroup/pod/memory.max": f"{2 * GiB_bytes}\n",
+            "/sys/fs/cgroup/pod/memory.current": f"{7 * GiB_bytes // 4}\n",
+            "/sys/fs/cgroup/pod/ctr/memory.max": f"{1 * GiB_bytes}\n",
+            "/sys/fs/cgroup/pod/ctr/memory.current": "0\n",
+        },
+    )
+
+    limit = cru.get_cgroup_memory_limit()
+    assert limit == 1 * GiB_bytes
+    assert limit - cru.get_cgroup_memory_usage() == GiB_bytes // 4
+
+
+@pytest.mark.parametrize(
+    ("mountinfo", "proc_self_cgroup", "limit_path"),
+    [
+        # A delegated cgroup2 subtree listed before the main mount.
+        (
+            "40 25 0:30 /user.slice/delegated /mnt/delegated rw - cgroup2 cgroup2 rw\n"
+            "41 25 0:30 / /mnt/main rw - cgroup2 cgroup2 rw\n",
+            "0::/job\n",
+            "/mnt/main/job/memory.max",
+        ),
+        # The mount exposes a subtree: its root is the container's cgroup.
+        (
+            "30 25 0:27 /docker/abc /mnt/ctr rw - cgroup2 cgroup2 rw\n",
+            "0::/docker/abc/job\n",
+            "/mnt/ctr/job/memory.max",
+        ),
+        # cgroup v1 with the memory controller co-mounted as "cpu,memory".
+        (
+            "31 25 0:28 / /mnt/cpu,memory rw - cgroup cgroup rw,cpu,memory\n",
+            "5:cpu,memory:/pod\n",
+            "/mnt/cpu,memory/pod/memory.limit_in_bytes",
+        ),
+    ],
+)
+def test_cgroup_mount_is_resolved_from_mountinfo(
+    monkeypatch, mountinfo, proc_self_cgroup, limit_path
+):
+    monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(
+        monkeypatch,
+        {
+            _PROC_SELF_MOUNTINFO: mountinfo,
+            _PROC_SELF_CGROUP: proc_self_cgroup,
+            limit_path: f"{1 * GiB_bytes}\n",
+        },
+    )
+
+    assert cru.get_cgroup_memory_limit() == 1 * GiB_bytes
 
 
 def test_cgroup_skipped_on_non_linux(monkeypatch):
