@@ -441,6 +441,7 @@ async def test_batched_parser_receives_each_prompt_prefix() -> None:
     serving.chat_template = None
     serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
     serving.default_chat_template_kwargs = {}
+    serving.online_renderer = MagicMock(reasoning_effort_map={})
 
     request = BatchChatCompletionRequest(
         model="test-model",
