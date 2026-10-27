@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import numpy as np
 import torch
 
 import vllm.envs as envs
@@ -136,6 +137,7 @@ def sparse_attn_indexer_kpool(
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
+    shardq_layer_name: str = "",
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -257,6 +259,14 @@ def sparse_attn_indexer_kpool(
                 "mxfp8" if mqa_logits_use_mx_scales() else scale_fmt,
             )
 
+    # ShardQ step: score only this rank's tokens and write their top-k
+    # compactly to the first rows, as the token-sharded attention reads them.
+    shardq = None
+    if shardq_layer_name:
+        mla_shardq = getattr(attn_metadata.get(shardq_layer_name), "shardq", None)
+        if mla_shardq is not None:
+            shardq = mla_shardq.split
+
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
@@ -320,9 +330,22 @@ def sparse_attn_indexer_kpool(
 
             row_start, row_end = chunk.token_start, chunk.token_end
             cu_seqlen_ks, cu_seqlen_ke = chunk.cu_seqlen_ks, chunk.cu_seqlen_ke
+            q_rows: slice | torch.Tensor = slice(row_start, row_end)
+            topk_rows = q_rows
+            if shardq is not None:
+                # KV gathers above stay unconditional for continuation chunks
+                # that reuse the workspace.
+                lo, hi = np.searchsorted(shardq.local_idx_cpu, (row_start, row_end))
+                if lo == hi:
+                    continue
+                q_rows = shardq.local_idx[lo:hi]
+                topk_rows = slice(int(lo), int(hi))
+                chunk_rows = q_rows - row_start
+                cu_seqlen_ks = cu_seqlen_ks[chunk_rows]
+                cu_seqlen_ke = cu_seqlen_ke[chunk_rows]
 
-            q_slice = q_quant[row_start:row_end]
-            q_scale_slice = q_scale[row_start:row_end] if q_scale is not None else None
+            q_slice = q_quant[q_rows]
+            q_scale_slice = q_scale[q_rows] if q_scale is not None else None
             # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
             # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
             if use_fp4_cache:
@@ -341,7 +364,7 @@ def sparse_attn_indexer_kpool(
                 logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
             else:
                 q_scale_slice, chunk_weights = mqa_logits_mx_inputs(
-                    q_slice_cast, q_scale_slice, weights[row_start:row_end]
+                    q_slice_cast, q_scale_slice, weights[q_rows]
                 )
                 # Compressed: row i starts at K position cu_seqlen_ks[i].
                 row_ends = cu_seqlen_ke - cu_seqlen_ks
@@ -367,7 +390,7 @@ def sparse_attn_indexer_kpool(
                 )
                 topk_dst = pool_topk
             else:
-                topk_dst = topk_indices_buffer[row_start:row_end, :topk_tokens]
+                topk_dst = topk_indices_buffer[topk_rows, :topk_tokens]
 
             if logits.shape[1] == 0:
                 topk_dst.fill_(-1)
@@ -399,7 +422,7 @@ def sparse_attn_indexer_kpool(
                     # Fused expand-pools + append-tail into one Triton kernel
                     # (replaces ~25 elementwise ops). seq_len is token-granular
                     # (pos+1); the kernel derives pool_len internally.
-                    q_seq = positions[row_start:row_end].to(torch.int32) + 1
+                    q_seq = positions[q_rows].to(torch.int32) + 1
                     expanded = kpool_ops.expand_pools_and_append_tail(
                         pool_ids, q_seq, index_kpool
                     )
@@ -408,7 +431,7 @@ def sparse_attn_indexer_kpool(
                     expanded = kpool_ops.expand_pools_to_tokens(
                         pool_ids, valid, topk_tokens, index_kpool
                     )
-                topk_indices_buffer[row_start:row_end, : expanded.shape[-1]] = expanded
+                topk_indices_buffer[topk_rows, : expanded.shape[-1]] = expanded
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
@@ -683,6 +706,9 @@ class SparseAttnIndexerKpool(CustomOp):
     `custom_ops` in `CompilationConfig` to enable the platform specific path.
     """
 
+    # Follows a ShardQ split (see MLAAttention.use_shardq).
+    supports_shardq = True
+
     def __init__(
         self,
         k_cache,
@@ -700,6 +726,8 @@ class SparseAttnIndexerKpool(CustomOp):
         super().__init__()
         self.k_cache = k_cache
         self.tail_cache = tail_cache
+        # Set by the MLA layer that consumes this op's top-k under ShardQ.
+        self.shardq_layer_name = ""
         self.quant_block_size = quant_block_size
         self.scale_fmt = scale_fmt
         self.topk_tokens = topk_tokens
@@ -814,4 +842,5 @@ class SparseAttnIndexerKpool(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
+            self.shardq_layer_name,
         )

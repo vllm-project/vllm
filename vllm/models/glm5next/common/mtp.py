@@ -136,6 +136,12 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             self_attn = layer.mtp_block.self_attn
             assert isinstance(self_attn, Glm5NextMLAAttention)
             self._mtp_mla_attns.append(self_attn.mla_attn)
+            # Draft steps reuse top-k rows by token slot
+            # (index_share_for_mtp_iteration), which ShardQ's compact per-rank
+            # rows would break.
+            self_attn.mla_attn.mla_attn.use_shardq = False
+            if self_attn.indexer is not None:
+                self_attn.indexer.indexer_op.shardq_layer_name = ""
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def set_skip_topk(self, skip: bool):

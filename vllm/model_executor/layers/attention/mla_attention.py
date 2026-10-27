@@ -299,6 +299,7 @@ from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
 )
+from vllm.v1.attention.ops.shardq import reserve_shardq_buffers
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -596,6 +597,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             **extra_impl_args,
         )
         self.impl = impl  # type: ignore[assignment]
+        # ShardQ gives each TP rank a slice of a prefill step's tokens, so the
+        # indexer must score only that slice and write its top-k compactly.
+        # Indexer ops opt in; DeepseekV32Attention decides on its own.
+        indexer_op = getattr(indexer, "indexer_op", None)
+        self.use_shardq = False
+        if (
+            use_sparse
+            and indexer_op is not None
+            and getattr(impl, "use_shardq", False)
+            and getattr(indexer_op, "supports_shardq", False)
+        ):
+            self.use_shardq = True
+            indexer_op.shardq_layer_name = self.layer_name
         index_group = getattr(impl, "index_group", None)
         self.hisparse_cache = (
             index_group.cache(cast(Any, impl).index_group_index)
@@ -946,6 +960,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 dtype=k_c_normed.dtype,
             )
             self.impl.reserve_workspace()
+            if self.use_shardq:
+                scheduler_config = get_current_vllm_config().scheduler_config
+                fp8_query = (
+                    is_quantized_kv_cache(self.kv_cache_dtype)
+                    and self.impl.supports_quant_query_input
+                )
+                reserve_shardq_buffers(
+                    scheduler_config.max_num_batched_tokens,
+                    scheduler_config.max_num_seqs,
+                    self.num_heads,
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                    self.kv_lora_rank,
+                    current_platform.fp8_dtype() if fp8_query else k_c_normed.dtype,
+                    k_c_normed.dtype,
+                    k_c_normed.device,
+                )
 
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
@@ -1131,7 +1161,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # call decode attn
             if not self.impl.is_sparse:
                 assert attn_metadata.decode is not None
-            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
+            if self.use_shardq and getattr(attn_metadata, "shardq", None) is not None:
+                attn_out = self.impl.forward_mqa_shardq(  # type: ignore[attr-defined]
+                    mqa_q, kv_cache, attn_metadata, self
+                )
+                lse = None
+            else:
+                attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                    mqa_q, kv_cache, attn_metadata, self
+                )
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
