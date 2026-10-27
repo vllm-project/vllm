@@ -253,7 +253,7 @@ case "${VLLM_XPU_KERNEL_NIGHTLY:-0}" in
       echo "Failed to get the kernel nightly image from Buildkite metadata" >&2
       exit 1
     fi
-    if [[ -z "$image_name" ]]; then
+    if [[ -z "$image_name" || "$image_name" == "pending" ]]; then
       echo "Kernel nightly image is not ready; refusing to use a release image" >&2
       exit 1
     fi
