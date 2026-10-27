@@ -9,7 +9,7 @@ compared with another kernel.
 Weights are random in the checkpoint's formats; the references read them raw,
 before vLLM's shuffles. Every bound is a priori: the quantization rules and data
 movement exact, each rounding of the kernels' fp32 chains at 2^-24 (v_exp /
-v_rcp / v_rsq / v_log / sqrt at 1 ulp), the scaled FP8 / FP4 MFMAs as
+v_rcp / v_rsq / v_log at 1 ulp, CDNA4 ISA 12.8), the scaled FP8 / FP4 MFMAs as
 ``_gemv_err`` models them. Plain outputs are poisoned before the checked launch
 and must match an unpoisoned one bit for bit; every case then replays in one
 graph, bit for bit."""
@@ -245,6 +245,8 @@ def _moe(vc, kind: str, seed: int, rank: int, device):
         torch.Generator(device=device).manual_seed(2001 + rank + seed),
         torch.Generator(device=device).manual_seed(2000 + seed),
         vc.model_config.hf_config.vocab_size,
+        # 2^-11 .. 2^-7: the adversarial shared gate stays mostly inside its clamp
+        shared_codes=(116, 121),
     )
     if kind == "adv":
         sh, e = moe.shared_experts, moe.experts.routed_experts
@@ -285,9 +287,9 @@ def _fn_as_read(fn):
 
 def _gate_err(x, fn, scale, base, eps, hc_eps, iters):
     """First-order bound on ``stage_gate``'s (pre, post, comb): sum |d out / d e|
-    |e| over its roundings e, along its op order -- 2^-24 an fp32 op, 2^-23 a
-    1-ulp v_exp / v_rcp / v_rsq or division, 2^-23 an op with a rounded f32
-    constant; the mix projection 58 2^-24 sum |x fn| (4 MFMAs 16x16x4 at
+    |e| over its roundings e, along its op order -- 2^-24 an fp32 op or the
+    IEEE division, 2^-23 a 1-ulp v_exp / v_rcp / v_rsq or an op with a rounded
+    f32 constant; the mix projection 58 2^-24 sum |x fn| (4 MFMAs 16x16x4 at
     (4 + 1) roundings, 8 waves, 14 + 16 slices), the sum of squares 37 2^-24
     (a pair, 6 lanes, 14 + 16 slices)."""
     errs = []
@@ -299,7 +301,7 @@ def _gate_err(x, fn, scale, base, eps, hc_eps, iters):
 
     def sigmoid(z):
         e = r(torch.exp2(r(z * -LOG2E, 2 * U)), 2 * U)
-        return r(1 / r(1 + e, U), 2 * U)
+        return r(1 / r(1 + e, U), U)
 
     def rsum(c, dim):
         a, b, c_, d = c.unbind(dim)
@@ -914,12 +916,12 @@ def _check_moe(region, moe, raw, xk, ffn, route_ids, kind, rank, tag, two_hop, c
     ids, wts = rt[0, :, :TOPK], rt[0, :, TOPK:].view(torch.float32).double()
     scores = R.router_scores(tot, "sqrt_softplus")
     # ``_score``: x log2e (2 u), exp2 (2 u + 2 u |x|), 1 + e (u), log (2 u),
-    # x ln2 (2 u) -> sp; sqrt (2 u): each score's relative error
+    # x ln2 (2 u) -> sp; sqrt (IEEE, u): each score's relative error
     lx = tot.double()
     ex = lx.clamp(max=20).exp()
     sp = torch.where(lx > 20, lx, torch.log1p(ex))
     dsp = 4 * U * sp + U * (1 + ex / (1 + ex) * (2 + 2 * lx.abs()))
-    dsc = torch.where(lx > 20, 0, dsp) / (2 * sp) + 2 * U
+    dsc = torch.where(lx > 20, 0, dsp) / (2 * sp) + U
     if route_ids is not None:
         assert torch.equal(ids, route_ids), (ctx, "hash ids")
     else:
@@ -940,8 +942,8 @@ def _check_moe(region, moe, raw, xk, ffn, route_ids, kind, rank, tag, two_hop, c
             assert (tot > 20).any(), (ctx, "softplus' linear branch")
     sw, dsc = scores.gather(1, ids.long()), dsc.gather(1, ids.long())
     wref = sw * ROUTED_SCALE / sw.sum(-1, keepdim=True)
-    # the weights: 5 adds, a division, a product
-    rel = dsc + (sw * dsc).sum(-1, True) / sw.sum(-1, True) + 8 * U
+    # the weights: 5 adds, a division (IEEE), a product
+    rel = dsc + (sw * dsc).sum(-1, True) / sw.sum(-1, True) + 7 * U
     _apriori("route_w", (wts - wref).abs() / (rel * wref), ctx)
 
     sh = d.sh_inter
@@ -950,7 +952,8 @@ def _check_moe(region, moe, raw, xk, ffn, route_ids, kind, rank, tag, two_hop, c
     g, u, eg, eu = xd @ sg.T, xd @ su.T, _gemv_err(xd, sg), _gemv_err(xd, su)
     act, ref, dg, du = _swiglu(g, u, eg, eu)
     smid = R.pairs(region("smid"), M * sh, tag).view(torch.float32).view(M, sh)
-    # gate and up -> bf16; silu: expf (2 u), 1 + e (u), the division (2 u), ->
+    # gate and up -> bf16; silu: expf (3 u: v_exp's 1 ulp, its reduced
+    # argument's rounding ln 2 u / 2), 1 + e (u), the division (IEEE, u), ->
     # bf16; x up (u) -> bf16
     rnd = (
         _half_ulp(smid)

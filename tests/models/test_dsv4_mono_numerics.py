@@ -11,11 +11,13 @@ sparse MLA, the inverse-RoPE MXFP8 wo_a BMM), the TP all-reduce and
 ``DeepseekV4MoE``: on CSA layers (their top-k) and HCA ones (every compressed
 row), bias-routed and hash-routed, at one- and two-hop widths.
 
-Each stage is compared on its own input, so a failure names the stage. The
-kernels quantize activations as MXFP8 (E8M0 a 32), where vLLM's FP8 GEMMs take
-fp32 scales a 128: where the two differ by more than rounding, each is
-measured against the exact fp32 result and the kernels must be as close to it
-as vLLM is."""
+Each of vLLM's stages runs on the kernels' own input of that stage, so the two
+outputs differ by the stage's arithmetic only, and every bound is derived from
+it (``seam_parity``, the units below): where both paths round one fp32 chain
+to bf16, to a bf16 ulp; where they quantize onto different E4M3 grids, in
+units of the expected rms of those roundings."""
+
+import math
 
 import pytest
 import ray
@@ -47,31 +49,153 @@ def _on_cdna4() -> bool:
     return get_cdna_version() == 4
 
 
-def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
-    a, b = a.float().reshape(-1), b.float().reshape(-1)
-    return torch.nn.functional.cosine_similarity(a, b, dim=0).item()
+# ---------------------------------------------------------------- parity bounds
+# Shared with ``test_dsv4_mono_layers.py``. The kernels and vLLM's ops compute
+# the same functions in different formats; each comparison feeds both the same
+# stage input, so a difference is the two paths' arithmetic only:
+# - where both round the same fp32 chain once to bf16 (the seams' folds and
+#   norms), elementwise to one bf16 ulp;
+# - where both quantize the same values onto different E4M3 grids (the
+#   kernels' MXFP8, E8M0 a 32, against vLLM's FP8 with an fp32 scale a 128 or
+#   its 128-wide MXFP8), in units of the two independent roundings' rms.
+U = 2.0**-24
 
 
-def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Relative L2 error of ``a`` against ``b``: unlike the cosine, it sees a
-    wrong scale."""
-    a, b = a.float().reshape(-1), b.float().reshape(-1)
-    return ((a - b).norm() / b.norm()).item()
+def _rn_rms(bits: int) -> float:
+    """A row's relative error ||RN(x) - x|| / ||x|| (as ``_rows_rel``) after
+    one round-to-nearest onto a grid of ``bits`` mantissa bits: the error
+    uniform over +-half a step, the step 2^-bits of the value's binade, so
+    E[step^2 / 12] / E[x^2], summed over the binades of a Gaussian row (the
+    rows here are sums of thousands of random products; the scale and a
+    SwiGLU product's distribution move it by < 0.3 %)."""
+
+    def mass(e):
+        return math.erfc(2.0**e / 2**0.5) - math.erfc(2.0 ** (e + 1) / 2**0.5)
+
+    return math.sqrt(sum(mass(e) * 4.0 ** (e - bits) / 12 for e in range(-40, 8)))
 
 
-def _random_moe(moe, gd, gr, vocab: int) -> None:
+# one rounding onto E4M3 (3 mantissa bits): 0.0266 (an MXFP8 a 32 or 128 scale
+# is a power of two, which leaves it; a 128 block's fp32 scale, 0.0257)
+E4M3_RN = _rn_rms(3)
+# two such roundings onto unrelated grids: independent, sqrt(2) of one
+TWO_GRIDS = math.sqrt(2) * E4M3_RN
+# the attention's activation quantizations, on different grids on the two
+# paths: its input (wqkv), qr (wq_b), the output heads (wo_a), z (wo_b). Each
+# relative error reaches the output with gain 1: RMSNorm, RoPE and the random
+# FP8 GEMMs keep a relative error in expectation, and a score error from q
+# moves the softmax output by the scores' spread, 1 (q is RMS-normed per head,
+# the keys kv-normed).
+ATTN_GRIDS = 4
+# the same for bf16 (7 mantissa bits)
+BF16_RN = _rn_rms(7)
+# a step's KV record: the input's grid (wqkv; kv_norm and RoPE keep a
+# relative error), then the record's own E4M3 rounding of the 448 nope dims
+# (the 64 RoPE dims stay bf16)
+KV_GRIDS = math.sqrt(1 + 448 / 512)
+# The routed MoE: both paths quantize its input by the same rule (AITER's
+# MXFP8, bit for bit) but its SwiGLU output from different values: AITER's
+# tuned FlyDSL stage 1 quantizes the fp32 SwiGLU in its epilogue, the kernels
+# (as AITER's unfused stage 1, which writes bf16) its bf16 rounding. E4M3's
+# rounding midpoints are bf16 values (5 significant bits), so the bf16 value
+# ties at a midpoint -- and rounds to even -- wherever the fp32 one is within
+# half a bf16 ulp of it: a 2^-7 / 2^-3 / 2 = 2^-5 chance an element, one step
+# s there. E4M3_RN^2 = E[s^2] / 12 / E[y^2], so the rms relative difference
+# sqrt(2^-5 E[s^2] / E[y^2]) = sqrt(12 2^-5) E4M3_RN: 1.6 %.
+MID_FLIP = math.sqrt(12 * 2.0**-5) * E4M3_RN
+# The bf16 roundings of a MoE output on either path, in roundings of the whole
+# output (each at its operand's share of the energy, the picks' outputs
+# independent, alike in size): the six weighted picks (1), the adds of the 2nd
+# .. 6th (sum k / 6 = 20 / 6; AITER's stage 2 adds bf16 atomically, the
+# kernels in top-k order), routed + shared (1), the TP sum (fp32, one rounding;
+# a rank's partial roundings carry 1 / TP of the energy each)
+MOE_BF16 = 1 + 20 / 6 + 1 + 1
+# a "unit" is the derived expectation. Within two is good (its gain model is
+# an expectation, not a bound); a wiring or semantic fault shows as tens.
+UNITS_OK = 2.0
+
+
+def _rows_rel(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    a, b = a.double().flatten(1), b.double().flatten(1)
+    return (a - b).norm(dim=1) / b.norm(dim=1)
+
+
+def seam_parity(p: dict, sub: str, x, res, post, comb, first: bool, m, v):
+    """A seam's two paths on the same inputs (x, res, post, comb: the fold's;
+    ``first``: the first layer's seam, no fold) -> each check's worst error
+    over its bound (<= 1 holds). ``m`` / ``v``: (residual, post, comb, normed)
+    of the kernels / vLLM. ``p``: the layer's seam parameters.
+
+    - residual: one fp32 fold (5 products: 5 u |terms| each) then bf16 on
+      both, so the paths differ by at most a bf16 ulp;
+    - post / comb: vLLM's fused seam mixes the fp32 fold, the kernels (as
+      vLLM's unfused seam and its torch reference) the bf16 residual, and read
+      fn as bf16 hi + lo: that shift is exact in f64; the rest, each path's
+      fp32 chain, is ``_gate_err``'s a-priori bound;
+    - normed: both collapse their own bf16 residual by their own pre mix,
+      round it to bf16, RMSNorm it (the RMS of the unrounded collapse) and
+      round to bf16: each within one bf16 ulp of the f64 value, either
+      rounding of a collapse within its a-priori error of a tie."""
+    from . import mono_reference as R
+    from .test_dsv4_mono_io import _bf16_known, _fn_as_read, _gate_err, _seam_ref
+
+    eps, hc_eps, iters, norm_eps = p["eps"]
+    fn = p[f"hc_{sub}_fn"].double()
+    scale, base = p[f"hc_{sub}_scale"], p[f"hc_{sub}_base"]
+    w = p[f"{sub}_norm"].double()
+    M = res.shape[0]
+    out = {}
+    if first:
+        res_b = res_f = res.double()
+    else:
+        res_f, eps_f = _seam_ref(x, res, post.reshape(M, -1), comb)
+        err = (m[0].double() - v[0].double()).abs()
+        bound = 0.5 * (R.ulp(m[0]) + R.ulp(v[0])) + 2 * eps_f
+        out["residual"] = (err / bound).max().item()
+        res_b = m[0].double()
+    fn_m = _fn_as_read(fn)
+    mix_m = R.mhc_mixes(res_b.flatten(1), fn_m, scale, base, HC, eps, hc_eps,
+                        hc_eps, 2.0, iters)  # fmt: skip
+    mix_v = R.mhc_mixes(res_f.flatten(1), fn, scale, base, HC, eps, hc_eps, hc_eps,
+                        2.0, iters)  # fmt: skip
+    b = _gate_err(res_b.flatten(1), fn_m, scale, base, eps, hc_eps, iters)
+    for k, name in ((1, "post"), (2, "comb")):
+        d = v[k].double().reshape(M, -1) - m[k].double().reshape(M, -1)
+        shift = (mix_v[k] - mix_m[k]).reshape(M, -1)
+        out[name] = ((d - shift).abs() / (2 * b[k])).max().item()
+    paths = (("normed", m[3], mix_m[0], res_b),
+             ("normed_vllm", v[3], mix_v[0], v[0].double()))  # fmt: skip
+    for who, got, pre, rows in paths:
+        rows = rows.view(M, HC, -1)
+        col = R.mhc_collapse(rows, pre)
+        dcol = ((4 * U * pre.abs() + b[0])[..., None] * rows.abs()).sum(1)
+        col_b, amb = _bf16_known(col, dcol)
+        gain = torch.rsqrt(col.square().mean(-1, keepdim=True) + norm_eps) * w
+        ref = col_b * gain
+        bound = R.ulp(ref) + gain.abs() * amb
+        out[who] = ((got.double() - ref).abs() / bound).max().item()
+    return out
+
+
+def _random_moe(moe, gd, gr, vocab: int, shared_codes=(118, 123)) -> None:
     """Random parameters in the loaded layout, before post-load processing: this
     rank's shards (``gd``, a device generator) of the MXFP4 routed experts
     (random nibbles, E8M0 scales) and the FP8 shared expert (one E8M0 a
-    128 x 128 block); the replicated router from ``gr``, seeded alike on every
-    rank (a hash layer's table: distinct experts a token)."""
+    128 x 128 block, 2^-9 .. 2^-5: half the routed experts' weight rms, FP4
+    rms 2.9 at 2^-9 .. 2^-6, so the shared output is about a fifth of the
+    routed one -- a fault in either shows over the other's roundings);
+    the replicated router from ``gr``, seeded alike on every rank (a hash
+    layer's table: distinct experts a token). ``shared_codes`` bounds the
+    shared expert's E8M0 codes."""
     u8 = torch.uint8
     for lin in (moe.shared_experts.gate_up_proj, moe.shared_experts.down_proj):
         w = torch.randn(lin.weight.shape, generator=gd, device=gd.device)
         lin.weight.data.copy_(w.clamp(-6, 6).to(lin.weight.dtype))
         sc = lin.weight_scale_inv.data.view(u8)
         sc.copy_(
-            torch.randint(116, 121, sc.shape, generator=gd, device=gd.device, dtype=u8)
+            torch.randint(
+                *shared_codes, sc.shape, generator=gd, device=gd.device, dtype=u8
+            )
         )
     e = moe.experts.routed_experts
     for name, lo, hi in (("weight", 0, 256), ("weight_scale", 118, 122)):
@@ -325,6 +449,37 @@ class _ExactMoE:
         g, u = gu[..., :n].clamp(max=10), gu[..., n:].clamp(-10, 10)
         return torch.nn.functional.silu(g) * u
 
+    def rules(self, x: torch.Tensor, ids: torch.Tensor, fp32_mid: bool):
+        """The routed experts as the A8W4 rules compute them, in f64 from the
+        loaded weights, the shared expert exact: x as MXFP8 (the ceil code of
+        RN(amax RN(1 / 448)), AITER's activation quant and the kernels'), each
+        pick's gate / up GEMM and clamped SwiGLU, MXFP8 again -- of the SwiGLU
+        rounded to bf16 (the kernels; AITER's unfused stage 1, which writes
+        bf16) or of its fp32 value (``fp32_mid``: AITER's tuned FlyDSL stage 1,
+        which quantizes in its epilogue) -- and the down GEMM, f64 routing
+        weights. ``ids``: [M, topk] picks -> (output, shared) on this rank."""
+        from . import mono_reference as R
+        from .test_dsv4_mono_io import _rule_ceil
+
+        def mxfp8(t):
+            q, codes = R.mx_quantize(t, _rule_ceil)
+            return (q.unflatten(-1, (-1, 32)) * R.e8m0(codes)[..., None]).flatten(-2)
+
+        moe, x = self.moe, x.double()
+        scores = torch.nn.functional.softplus(x @ moe.gate.weight.double().T).sqrt()
+        w = scores.gather(1, ids.long())
+        w = w / w.sum(1, keepdim=True) * moe.routed_scaling_factor
+        shared = self._swiglu(x @ self.sgu.double().T) @ self.sd.double().T
+        out = shared.clone()
+        xq = mxfp8(x)
+        for t in range(x.shape[0]):
+            w13 = self._experts(self.w13, ids[t].long()).double()
+            act = self._swiglu(torch.einsum("knh,h->kn", w13, xq[t]))
+            act = mxfp8(act if fp32_mid else R.bf16_rne(act))
+            w2 = self._experts(self.w2, ids[t].long()).double()
+            out[t] += (w[t, :, None] * torch.einsum("khn,kn->kh", w2, act)).sum(0)
+        return out, shared
+
     def __call__(self, x: torch.Tensor, route: torch.Tensor | None) -> torch.Tensor:
         moe, x = self.moe, x.float()
         scores = torch.nn.functional.softplus(x @ moe.gate.weight.float().T).sqrt()
@@ -396,6 +551,41 @@ class _ExactAttention:
         return z.reshape(M, -1) @ self.wo_b.T
 
 
+def _route_check(moe, x, route, *picks, tag=None):
+    """The f64 route of the MoE input rows ``x`` (a hash layer's ``route``)
+    against each path's ``picks`` [M, topk]: as sets, equal on every row
+    whose 6th / 7th margin of score + bias clears both paths' score errors --
+    the kernels' logits (``test_dsv4_mono_io``'s router bound, 242 u |x| |w|),
+    vLLM's fp32 router GEMM in any order (HIDDEN u |x| |w|), through
+    sqrt(softplus)'s slope, and the bias add. -> (f64 picks, rows both paths
+    route as them)."""
+    k = moe.n_activated_experts
+    xd, gw = x.double(), moe.gate.weight.double()
+    if route is not None:
+        ids = route.long()
+    else:
+        logits = xd @ gw.T
+        sel = torch.nn.functional.softplus(logits).sqrt()
+        sel = sel + moe.gate.e_score_correction_bias.double()
+        top = sel.topk(k + 1, dim=1)
+        ids = top.indices[:, :k]
+        dl = (33 * HIDDEN // 1024 + 11 + HIDDEN) * U * (xd.abs() @ gw.abs().T)
+        slope = torch.sigmoid(logits) / (
+            2 * torch.nn.functional.softplus(logits).sqrt()
+        )
+        tie = 2 * (slope * dl + 4 * U * sel.abs()).amax(1)
+        margin = top.values[:, k - 1] - top.values[:, k]
+    keep = torch.ones(x.shape[0], dtype=torch.bool, device=x.device)
+    for got in picks:
+        same = (got.long().sort(1).values == ids.sort(1).values).all(1)
+        if route is not None:
+            assert same.all(), (tag, "hash route")
+        else:
+            assert (margin[~same] < tie[~same]).all(), (tag, "route", margin, tie)
+        keep &= same
+    return ids, keep
+
+
 def _attn_output(runner, epoch: int, M: int, rank: int) -> torch.Tensor:
     """The wo_b partials every rank pushed to this rank's ATTN region in the
     launch pair of ``epoch``, summed: [M, hidden] fp32. On two hops a rank
@@ -445,8 +635,7 @@ def _check_layer(rank: int, tp: int, device) -> None:
     from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
-    from vllm.model_executor.kernels.mhc.torch import mhc_pre_torch
-    from vllm.model_executor.layers.mhc import MHCFusedPostPreOp, MHCPreOp
+    from vllm.model_executor.layers.mhc import MHCFusedPostPreOp
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.deepseek_v4.amd.model import DeepseekV4MoE
     from vllm.models.deepseek_v4.amd.mono.dims import INDEX_TOPK
@@ -487,7 +676,6 @@ def _check_layer(rank: int, tp: int, device) -> None:
     runner = MonoRunner(tp, rank, get_tp_group().cpu_group, device, max_topk=hca_long)
     with set_current_vllm_config(vc):
         fused = MHCFusedPostPreOp()
-        pre = MHCPreOp()
 
     def random_moe(layer):
         """A layer's MoE (layer 0's routes by hash) and its exact reference."""
@@ -530,14 +718,6 @@ def _check_layer(rank: int, tp: int, device) -> None:
                 cfg.hc_eps, cfg.hc_eps, 2.0, cfg.hc_sinkhorn_iters,
                 norm_weight=sm["norm"], norm_eps=eps,
             )  # fmt: skip
-
-    def mix_ref(sub, res):
-        sm = seams[sub]
-        post, comb, _ = mhc_pre_torch(
-            res, sm["fn"], sm["scale"], sm["base"], eps, cfg.hc_eps, cfg.hc_eps,
-            2.0, cfg.hc_sinkhorn_iters,
-        )  # fmt: skip
-        return post, comb
 
     def moe_out(moe, x, ids):
         with set_forward_context(None, vc):
@@ -619,9 +799,47 @@ def _check_layer(rank: int, tp: int, device) -> None:
         route = moe.gate.tid2eid[ids].contiguous() if hashed else None
         swa_v, swa_m = s["swa_cache"], _clone_cache(s["swa_cache"])
 
-        # vLLM's decode chain
+        # ---- the whole layer by the kernels (K1 + K2); then each of vLLM's
+        # stages on the kernels' input of that stage
+        epoch = int(runner.epoch[0])
+        o = runner.forward(
+            mw, x0, res0, post0, comb0, s["positions"], s["slot_mapping"],
+            swa_m, s["swa_indices"], s["swa_lens"], s["token_to_req"],
+            topk_indices=s["topk"], comp_cache=s["comp_cache"],
+            select=lambda normed, qr: None,
+            comp_block_table=s["comp_block_table"], route_ids=route,
+            topk=width, global_keys=hca,
+        )  # fmt: skip
+        torch.accelerator.synchronize()
+        res_mid, normed = runner.res_mid[:M].clone(), runner.normed[:M].clone()
+        post_a, comb_a = runner.post_a[:M].clone(), runner.comb_a[:M].clone()
+        a_m = _attn_output(runner, epoch, M, rank)
+        layout, scratch = scratch_layout(M, tp, width), runner.scratch(M, width)
+        off = layout["normed"][0]
+        xk = scratch[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN).clone()
+        off = layout["route"][0]
+        n = moe.n_activated_experts
+        picks = scratch[off : off + M * 2 * n * 8].view(torch.int32).view(M, 2 * n, 2)
+        assert (picks[..., 1] == 2 * epoch + 2).all(), tag
+        route_m = picks[:, :n, 0].long()
+        p = {
+            f"hc_{sub}_{name}": seams[sub][name]
+            for sub in seams
+            for name in ("fn", "scale", "base")
+        }
+        p.update({f"{sub}_norm": seams[sub]["norm"] for sub in seams})
+        p["eps"] = (eps, cfg.hc_eps, cfg.hc_sinkhorn_iters, eps)
+        within, units = {}, {}
+
+        # the attention seam
         res, post, comb, xa = seam("attn", x0, res0, post0, comb0)
-        x8, xs = ops.group_fp8_quant(xa, transpose_scale=True)
+        for k, r in seam_parity(p, "attn", x0, res0, post0, comb0, False,
+                                (res_mid, post_a, comb_a, normed),
+                                (res, post, comb, xa)).items():  # fmt: skip
+            within[f"attention seam {k}"] = r
+
+        # vLLM's attention on the kernels' normed rows, into its own cache copy
+        x8, xs = ops.group_fp8_quant(normed, transpose_scale=True)
         qr_kv = ops.gemm_a8w8_blockscale_bpreshuffle(x8, wqkv_sh, xs, w["wqkv_s"], bf)
         qr8, qrs, kvn = ops.fused_qk_rmsnorm_group_quant(
             qr_kv[:, :Q_RANK], w["q_norm"], eps, qr_kv[:, Q_RANK:], w["kv_norm"], eps,
@@ -662,74 +880,73 @@ def _check_layer(rank: int, tp: int, device) -> None:
         part = ops.gemm_a8w8_blockscale_bpreshuffle(z8, wo_b_sh, zs, w["wo_b_s"], bf)
         a = tensor_model_parallel_all_reduce(part.clone())
 
-        # ---- the whole layer: K1 + K2
-        epoch = int(runner.epoch[0])
-        o = runner.forward(
-            mw, x0, res0, post0, comb0, s["positions"], s["slot_mapping"],
-            swa_m, s["swa_indices"], s["swa_lens"], s["token_to_req"],
-            topk_indices=s["topk"], comp_cache=s["comp_cache"],
-            select=lambda normed, qr: None,
-            comp_block_table=s["comp_block_table"], route_ids=route,
-            topk=width, global_keys=hca,
-        )  # fmt: skip
-        torch.accelerator.synchronize()
-        # the attention seam: the residual vLLM's, the mixes the fp32 reference's
-        assert _cos(runner.res_mid[:M], res) > 0.99999, tag
-        pm, cm = mix_ref("attn", runner.res_mid[:M])
-        torch.testing.assert_close(
-            runner.post_a[:M].view_as(pm), pm, rtol=1e-4, atol=1e-5
-        )
-        torch.testing.assert_close(
-            runner.comb_a[:M].view_as(cm), cm, rtol=1e-4, atol=1e-5
-        )
-        normed = runner.normed[:M]
-        assert _cos(normed, xa) > 0.999 and _rel(normed, xa) < 0.02, tag
-        # the step's KV records, as each path wrote them: each against the
-        # exact KV rows of its own input
-        kv_m = _read_records(swa_m, SWA_BLOCK, s["slot_mapping"])
-        kv_v = _read_records(swa_v, SWA_BLOCK, s["slot_mapping"])
-        err_v = _rel(kv_v, exact_attn.kv(xa, s["positions"], cos_sin))
-        err_m = _rel(kv_m, exact_attn.kv(normed, s["positions"], cos_sin))
-        assert err_m < 1.2 * err_v + 5e-3, (tag, "kv", err_m, err_v)
-        assert _cos(kv_m, kv_v) > 0.998, (tag, _cos(kv_m, kv_v))
-        # the attention output (wo_b's partials, reduced): both against the
-        # exact attention of their own input over their own cache
-        a_m = _attn_output(runner, epoch, M, rank)
-        ref_v = tensor_model_parallel_all_reduce(
-            exact_attn(xa, s, ratio, swa_v, cos_sin)
-        )
-        ref_m = tensor_model_parallel_all_reduce(
-            exact_attn(normed, s, ratio, swa_m, cos_sin)
-        )
-        err_v, err_m = _rel(a, ref_v), _rel(a_m, ref_m)
-        assert err_m < 1.2 * err_v + 5e-3, (tag, err_m, err_v)
-        assert _cos(a_m, a) > 0.995, (tag, _cos(a_m, a))
-        # the FFN half on the kernels' own attention output
-        res2_m, _, _, _ = seam("ffn", a_m.to(bf), runner.res_mid[:M],
-                                              runner.post_a[:M].view(M, HC, 1),
-                                              runner.comb_a[:M])  # fmt: skip
-        torch.testing.assert_close(o[1], res2_m, rtol=2**-7, atol=1e-4)
-        pm, cm = mix_ref("ffn", o[1])
-        torch.testing.assert_close(o[2].view_as(pm), pm, rtol=1e-4, atol=1e-5)
-        torch.testing.assert_close(o[3].view_as(cm), cm, rtol=1e-4, atol=1e-5)
-        sm = seams["ffn"]
-        with set_current_vllm_config(vc):
-            _, _, xf_m = pre(
-                o[1], sm["fn"], sm["scale"], sm["base"], eps,
-                cfg.hc_eps, cfg.hc_eps, 2.0, cfg.hc_sinkhorn_iters,
-                norm_weight=sm["norm"], norm_eps=eps,
-            )  # fmt: skip
-        # the MoE on K2's own FFN input (where routing cannot differ)
-        off = scratch_layout(M, tp, width)["normed"][0]
-        xk = runner.scratch(M, width)[off : off + M * HIDDEN * 2]
-        xk = xk.view(bf).view(M, HIDDEN)
-        cos, rel = _cos(xk, xf_m), _rel(xk, xf_m)
-        assert cos > 0.999 and rel < 0.02, (tag, "ffn input", rank, cos, rel)
-        mo = moe_out(moe, xk, ids)
-        ref = tensor_model_parallel_all_reduce(exact_moe(xk, route))
-        err_v, err_m = _rel(mo, ref), _rel(o[0], ref)
-        assert err_m < 1.1 * err_v + 2e-3, (tag, err_m, err_v)
-        assert _cos(o[0], mo) > 0.999, (tag, _cos(o[0], mo))
+        # each path's KV records of the step and attention output against the
+        # exact ones of the shared input (each over its own cache), and the two
+        # outputs against each other
+        kv = exact_attn.kv(normed, s["positions"], cos_sin)
+        for who, cache in (("kernels", swa_m), ("vllm", swa_v)):
+            err = _rows_rel(_read_records(cache, SWA_BLOCK, s["slot_mapping"]), kv)
+            units[f"KV records, {who}"] = err / (KV_GRIDS * E4M3_RN)
+        expect = math.sqrt(ATTN_GRIDS) * E4M3_RN
+        for who, got, cache in (("kernels", a_m, swa_m), ("vllm", a, swa_v)):
+            ref = tensor_model_parallel_all_reduce(
+                exact_attn(normed, s, ratio, cache, cos_sin)
+            )
+            units[f"attention, {who}"] = _rows_rel(got, ref) / expect
+        units["attention parity"] = _rows_rel(a_m, a) / (expect * math.sqrt(2))
+
+        # the FFN seam on the kernels' attention output (bf16, as it reads it)
+        a_m = a_m.to(bf)
+        res2, post2, comb2, xf = seam("ffn", a_m, res_mid, post_a.view(M, HC, 1),
+                                      comb_a)  # fmt: skip
+        for k, r in seam_parity(p, "ffn", a_m, res_mid, post_a, comb_a, False,
+                                (o[1], o[2], o[3], xk),
+                                (res2, post2, comb2, xf)).items():  # fmt: skip
+            within[f"FFN seam {k}"] = r
+
+        # the MoE on the kernels' FFN input
+        router, select = moe.experts.router, moe.experts.router.select_experts
+        picked: dict = {}
+
+        def routed(*args, select=select, picked=picked, **kw):
+            picked["w"], picked["ids"] = select(*args, **kw)
+            return picked["w"], picked["ids"]
+
+        router.select_experts = routed
+        try:
+            mo = moe_out(moe, xk, ids)
+        finally:
+            del router.select_experts
+        route_v = picked["ids"].long()
+        rids, keep = _route_check(moe, xk, route, route_m, route_v, tag=tag)
+        want = {}
+        for who, fp32_mid in (("kernels", False), ("vllm", True)):
+            y, shared = exact_moe.rules(xk, rids, fp32_mid)
+            want[who] = tensor_model_parallel_all_reduce(y.float()).double()
+            shared = tensor_model_parallel_all_reduce(shared.float()).double()
+        # each path against its own rules: what is left is the shared expert's
+        # two MXFP8 / FP8 roundings (the input's reaching both SwiGLU operands:
+        # sqrt(3) roundings' worth) and the bf16 roundings of the partial sums
+        # (``MOE_BF16``)
+        size = want["kernels"].norm(dim=1)
+        rest = (3 * (E4M3_RN * shared.norm(dim=1)) ** 2
+                + MOE_BF16 * (BF16_RN * size) ** 2).sqrt() / size  # fmt: skip
+        for who, got in (("kernels", o[0]), ("vllm", mo)):
+            units[f"MoE, {who}"] = (_rows_rel(got, want[who]) / rest)[keep]
+        # the two rules' difference: the SwiGLU's MXFP8 flips, relative to the
+        # routed output, aggregated over the step's tokens (each token's few
+        # hundred flips are heavy-tailed)
+        d = (want["kernels"] - want["vllm"])[keep]
+        y_routed = (want["vllm"] - shared)[keep]
+        units["MoE SwiGLU flips"] = (d.norm() / y_routed.norm() / MID_FLIP).reshape(1)
+
+        for k, r in within.items():
+            assert r <= 1.0, (tag, rank, k, r)
+        for k, r in units.items():
+            assert r.max().item() <= UNITS_OK, (tag, rank, k, r.max().item())
+        if rank == 0:
+            print(tag, {k: round(r, 3) for k, r in within.items()},
+                  {k: round(r.max().item(), 3) for k, r in units.items()})  # fmt: skip
 
         outs = runner._outs(M, res0)
         meta = dict(

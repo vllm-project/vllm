@@ -9,14 +9,22 @@ distinct per layer and per TP shard, the experts generated in the checkpoint's
 MXFP4 format and converted by that same path.
 
 - layer: each sparse ``MiniMaxM3DecoderLayer``'s FFN half (seam all-reduce and
-  residual, post-attention norm, MoE) on captured decode-step inputs, native
-  vs the fused launch;
-- model: teacher-forced decode (trace replay) with full-vocabulary logprobs,
-  --monokernel eager and under FULL graphs (with frequent epoch resets) vs
-  native eager;
-- fail-stop: a late rank fault under FULL graphs returns no token."""
+  residual, post-attention norm, MoE) on native's captured decode-step inputs;
+- model: teacher-forced decode (trace replay), --monokernel eager: every fused
+  launch of the engine's real steps against vLLM's own ops on that launch's
+  inputs, within the a-priori bounds of both paths' arithmetic (``_launch_check``);
+  under FULL graphs (with frequent epoch resets) the full-vocabulary logprobs
+  equal eager's bit for bit;
+- fail-stop: a late rank fault under FULL graphs returns no token.
+
+End to end, a ulp-level difference of a launch is amplified past any a-priori
+bound: native reruns differ alike, as native's MoE sums its terms with BF16
+atomics in run-dependent order, and attention over the FP8 KV cache and top-k
+near-ties grow such differences. So the logprobs are compared against
+--monokernel eager, which is deterministic, not against native."""
 
 import zlib
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -29,7 +37,9 @@ LAYERS = 5
 SPARSE = (3, 4)
 VOCAB = 4096
 STEPS = 8
-BATCHES = (1, 3, 16)
+# decode widths that are graph capture sizes: no padded rows, whose stock ops
+# are not batch invariant
+BATCHES = (1, 4, 16)
 FALLBACK_SEQS = 20
 FALLBACK_SHORT = 8
 SEED = 0
@@ -161,6 +171,11 @@ def _randomize(worker):
         layer.self_attn.q_norm.weight.fill_(-1.0)
         if layer.layer_id not in SPARSE:
             continue
+        if layer.layer_id == SPARSE[-1]:
+            # its uniform attention would average V over the prompt, whose
+            # FFNs ran stock with native's BF16 atomics: decode then depends
+            # on run-to-run rounding; layer 3's seam carries the attention
+            layer.self_attn.o_proj.weight.zero_()
         moe = layer.block_sparse_moe
         if moe.gate._bf16x3_weight is not None:
             moe.gate._bf16x3_weight.copy_(
@@ -253,21 +268,133 @@ def _decode(llm, capture=False, requests=None):
     return torch.tensor(rows)
 
 
-def _metrics(got, want):
-    got, want = got.float(), want.float()
-    err = got - want
-    cos = torch.nn.functional.cosine_similarity(got.flatten(), want.flatten(), dim=0)
-    rel = err.norm() / want.norm()
-    row = (err.norm(dim=-1) / want.norm(dim=-1)).max()
-    return cos.item(), rel.item(), row.item()
+# vLLM's Gemma norm on ROCm (an f32 weight: the native torch ops): the f32
+# mean of squares in any order and its division within (H + 1) U, halved by
+# the rsqrt; the add, rsqrt (2 U), two products and 1 + w
+TORCH_NORM_ETA = (0.5 * (6144 + 1) + 6) * 2.0**-24
 
 
-def _logit_errors(got, want):
-    """Cosine over all rows and each row's relative L2 error of the logits
-    (logprobs less their row mean)."""
-    got, want = (x.float() - x.float().mean(-1, keepdim=True) for x in (got, want))
-    cos = torch.nn.functional.cosine_similarity(got.flatten(), want.flatten(), dim=0)
-    return cos.item(), (got - want).norm(dim=-1) / want.norm(dim=-1)
+def _scratch(runner, s):
+    """A launch's X, router logits (its parts summed as its route stage does)
+    and route from its scratch; ``tags``: every pair carries the launch's."""
+    from tests.models import mono_reference as R
+    from tests.models.minimax_m3.amd_specialized_decode import test_ops as O
+    from vllm.models.minimax_m3.amd.specialized_decode.mono import ffn
+
+    tag = int(runner.epoch[0])
+
+    def pairs(name, n):
+        p = runner.region(s, name)[: n * 8].view(torch.int32).view(n, 2)
+        return p[:, 0].clone(), bool((p[:, 1] == tag).all())
+
+    route, route_tags = pairs("route", s * 2 * ffn.TOPK)
+    parts, part_tags = pairs("logit", s * ffn.EXPERTS * ffn.ROUTER_PARTS)
+    parts = parts.view(torch.float32).view(s, ffn.EXPERTS, 4, -1).double()
+    route = route.view(s, -1)
+    return dict(
+        x=R.words(runner.region(s, "xn"), s * ffn.HIDDEN, torch.bfloat16).view(s, -1),
+        logits=O._f32_sum(O._f32_sum(parts)),
+        ids=route[:, : ffn.TOPK].contiguous(),
+        wts=route[:, ffn.TOPK :].contiguous().view(torch.float32),
+        tags=route_tags and part_tags,
+    )
+
+
+def _launch_check(layer, part, residual, out, res_out, scratch):
+    """One fused launch against vLLM's own ops on the launch's own inputs to
+    each stage, every rank alike: the residual exactly; X within a step of the
+    norm (and its flips within their expected count); the router logits and,
+    on rows clear of a 4th/5th near-tie, the route within both paths' bounds;
+    the output against vLLM's experts on X and the launch's route (an exact
+    tie or a near-tie is then the same choice), within the bf16 rounding
+    budget of the two paths' expert sums and the TP reduction."""
+    from tests.models import mono_reference as R
+    from tests.models.minimax_m3.amd_specialized_decode import test_ops as O
+    from vllm.distributed import tensor_model_parallel_all_reduce as all_reduce
+    from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
+        fused_allreduce_gemma_rms_norm,
+    )
+    from vllm.models.minimax_m3.amd.specialized_decode.mono import ffn
+
+    moe = layer.block_sparse_moe
+    routed = moe.experts.routed_experts
+    x, ids_m, wts_m = scratch["x"], scratch["ids"], scratch["wts"]
+    want_x, want_res = fused_allreduce_gemma_rms_norm(
+        part.clone(), residual.clone(), layer.post_attention_layernorm
+    )
+    m = dict(residual=torch.equal(res_out, want_res), tags=scratch["tags"])
+    flips = O._norm_flips(x, want_x, O.MONO_NORM_ETA + TORCH_NORM_ETA)
+    m["x_steps"], m["x_flips"], m["x_limit"] = flips
+
+    logits, _ = moe.gate(x)
+    err = O._router_err(x, moe.gate.weight)
+    m["logits"] = O._ratio((scratch["logits"] - logits.double()).abs(), err)
+    # the route stage on the launch's own logits: each path's scores within
+    # SCORE_ERR, its weights within their own bound
+    own = scratch["logits"].float()
+    wts, ids = moe.experts.router.select_experts(
+        x, own, routed.quant_method.topk_indices_dtype
+    )
+    m["shared"] = bool(
+        (ids[:, ffn.TOPK] == ffn.SHARED).all() and (wts[:, ffn.TOPK] == 1).all()
+    )
+    clear = O._clear_choices(own, moe.e_score_correction_bias, O.SCORE_ERR)
+    got_ids, order = ids_m.long().sort(-1)
+    want_ids, want_order = ids[:, : ffn.TOPK].long().sort(-1)
+    m["clear"], m["rows"] = int(clear.sum()), len(clear)
+    m["route_ids"] = torch.equal(got_ids[clear], want_ids[clear])
+    ek = O._weight_err(own[clear].double().gather(1, got_ids[clear]))
+    got_w = wts_m.gather(1, order)[clear].double()
+    want_w = wts[:, : ffn.TOPK].gather(1, want_order)[clear].double()
+    m["route_w"] = (
+        O._ratio((got_w - want_w).abs(), 2 * ek * want_w) if m["clear"] else 0
+    )
+
+    fids = torch.cat([ids_m.to(ids.dtype), ids[:, ffn.TOPK :]], 1)
+    fwts = torch.cat([wts_m, wts[:, ffn.TOPK :]], 1)
+
+    def experts(cols):
+        return routed.forward_modular(
+            x=x,
+            topk_weights=fwts[:, cols].contiguous(),
+            topk_ids=fids[:, cols].contiguous(),
+        )
+
+    want = all_reduce(experts(list(range(ffn.TOPK + 1))))
+    terms = torch.stack([experts([k]) for k in range(ffn.TOPK + 1)]).double()
+    bound, var = O._combine_budget(terms)
+    total = terms.abs().sum(0)
+    bound, var, total = (all_reduce(t.float()).double() for t in (bound, var, total))
+    # the ranks' partials summed in f32 by both (3 adds, each within U of sum
+    # |P|), then each rounded once to bf16: at most a step apart
+    step = R.ulp(total)
+    bound = bound + 6 * O.U * total + step
+    var = var + 2 * step.square() / 12
+    m.update(O._combine_stats(out, want, bound, var, total))
+    return m
+
+
+def _assert_launches(results, label):
+    """Every launch's checks (``_launch_check``) on every rank; the route
+    compared on at least half the rows, and the mean square and bias over
+    all of rank 0's launches (the ranks' outputs are the same all-reduced
+    sums, not independent samples) within the variance model."""
+    from tests.models.minimax_m3.amd_specialized_decode import test_ops as O
+
+    flat = [m for rank in results for m in rank]
+    assert flat
+    for m in flat:
+        assert m["residual"] and m["tags"] and m["shared"]
+        assert m["x_steps"] <= 1 and m["x_flips"] <= m["x_limit"]
+        assert m["logits"] <= 1 and m["route_ids"] and m["route_w"] <= 1
+        assert m["ratio"] <= 1
+    assert sum(m["clear"] for m in flat) >= sum(m["rows"] for m in flat) / 2
+    sums = ("n", "sq", "var", "b2var", "bias", "proj")
+    merged = {k: sum(m[k] for m in results[0]) for k in sums}
+    merged.update({k: max(m[k] for m in flat) for k in ("ratio", "ulps", "b2max")})
+    flips = sum(m["x_flips"] for m in flat)
+    print(f"{label}: {len(flat)} launches, X flips {flips}")
+    O._assert_combine(merged, label)
 
 
 def _backbone(worker):
@@ -306,9 +433,6 @@ def _stash(worker, s):
 def _replay(worker):
     """Each captured sparse layer's FFN half, native and fused, on every rank."""
     from vllm.forward_context import set_forward_context
-    from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
-        fused_allreduce_gemma_rms_norm,
-    )
     from vllm.models.minimax_m3.amd.specialized_decode.runtime.executor import (
         FfnExecutor,
     )
@@ -323,25 +447,27 @@ def _replay(worker):
     }
     weights = {i: MonoLayerWeights.from_layer(layer) for i, layer in layers.items()}
     executor = FfnExecutor(list(layers.values()), weights, BATCHES, 4)
-    results = {}
+    results = []
     with torch.no_grad(), set_forward_context(None, worker.vllm_config):
         for s, caps in worker._ffn_caps.items():
             for i, (hidden, residual, part) in caps.items():
                 layer = layers[i]
                 _, residual = layer.input_layernorm(hidden, residual)
-                x, want_res = fused_allreduce_gemma_rms_norm(
-                    part, residual, layer.post_attention_layernorm
-                )
-                want = layer.block_sparse_moe(x)
                 slots = torch.arange(s, dtype=torch.int64, device=part.device)
-                got, got_res = executor.runner(part, residual, weights[i], slots)
-                results[(s, i)] = (*_metrics(got, want), torch.equal(got_res, want_res))
+                out, res_out = executor.runner(part, residual, weights[i], slots)
+                scratch = _scratch(executor.runner, s)
+                results.append(
+                    _launch_check(layer, part, residual, out, res_out, scratch)
+                )
     failed = executor.health().failed
     executor.close()
     return results, failed
 
 
-def _engine(vllm_runner, model_dir, mono, graphs=False, **extra):
+def _engine(vllm_runner, model_dir, mono, graphs=False, in_process=None, **extra):
+    """``in_process``: a MonkeyPatch to run the engine core in this process."""
+    if in_process is not None:
+        in_process.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     extra.setdefault("max_num_seqs", max(BATCHES))
     return vllm_runner(
         model_dir,
@@ -377,25 +503,43 @@ def _env():
 
 @pytest.fixture(scope="module")
 def native(vllm_runner, model_dir):
-    """Native eager: the reference logprobs and the layer replays."""
-    with _engine(
-        vllm_runner, model_dir, mono=False, max_num_seqs=FALLBACK_SEQS
-    ) as runner:
+    """Native eager: each sparse layer's FFN inputs at the first decode step
+    of each batch, and their replays."""
+    with _engine(vllm_runner, model_dir, mono=False) as runner:
         runner.llm.collective_rpc(_randomize)
-        logprobs = _decode(runner.llm, capture=True)
-        layers = runner.llm.collective_rpc(_replay)
-        fallback = _decode(runner.llm, requests=_fallback_requests())
-    return SimpleNamespace(logprobs=logprobs, layers=layers, fallback=fallback)
+        _decode(runner.llm, capture=True)
+        return runner.llm.collective_rpc(_replay)
+
+
+@pytest.fixture(scope="module")
+def mono_eager(vllm_runner, model_dir):
+    """--monokernel eager, teacher-forced, the engine core in-process (each
+    batch's requests all join its first step, so the steps are the same every
+    run): the logprobs, the engagement and every launch's checks."""
+    with (
+        pytest.MonkeyPatch.context() as mp,
+        _engine(vllm_runner, model_dir, mono=True, in_process=mp) as runner,
+    ):
+        llm = runner.llm
+        llm.collective_rpc(_randomize)
+        start = llm.collective_rpc(_count_launches)
+        llm.collective_rpc(_record_forwards)
+        llm.collective_rpc(_record_launches)
+        logprobs = _decode(llm)
+        after = llm.collective_rpc(_reset_state)
+        fused, stocked = _engaged(llm, start, llm.collective_rpc(_forwards))
+        launches = llm.collective_rpc(_check_launches)
+    return SimpleNamespace(
+        logprobs=logprobs, after=after, fused=fused, stocked=stocked, launches=launches
+    )
 
 
 def test_sparse_layers_match_native(native):
-    """Every rank, both sparse layers, decode widths 1, 3 and 16: the fused
-    launch against the native FFN half; the residual exactly."""
-    for results, failed in native.layers:
-        assert not failed
-        for cos, rel, row, residual_equal in results.values():
-            assert residual_equal
-            assert cos > 0.9999 and rel < 1e-2 and row < 1e-2
+    """Every rank, both sparse layers, decode widths 1, 4 and 16: the fused
+    launch on native's captured inputs against vLLM's own ops
+    (``_launch_check``)."""
+    assert not any(failed for _, failed in native)
+    _assert_launches([results for results, _ in native], "replay")
 
 
 def _specialized(worker):
@@ -461,28 +605,25 @@ def _engaged(llm, start, forwards):
     return outputs - stock, stocked
 
 
-def _record_forwards(worker, native_aux=False):
+def _record_forwards(worker):
     """Every backbone forward from here on: its tokens, positions, prefill and
-    decode counts, whether it ran the fused launches, and on decode steps EAGLE3's
-    auxiliary states (``native_aux``: the hidden states plus residual after
-    the layers before ``AUX_LAYERS``, as a native EAGLE3 target takes them)."""
+    decode counts, whether it ran the fused launches, and on decode steps
+    EAGLE3's auxiliary states."""
     from vllm.forward_context import get_forward_context
 
     backbone = _backbone(worker)
     decode = backbone.specialized_decode
     name = backbone.layers[SPARSE[0]].self_attn.layer_name
-    states: list[torch.Tensor] = []
     worker._forwards = []
 
     def pre(mod, args):
-        states.clear()
         worker._mono_steps = decode.mono_steps if decode else 0
 
     def post(mod, args, out):
         metadata = get_forward_context().attn_metadata[name]
         prefills, decodes = metadata.num_prefills, metadata.num_decodes
         mono = decode is not None and decode.mono_steps > worker._mono_steps
-        aux = out[1] if isinstance(out, tuple) else states
+        aux = out[1] if isinstance(out, tuple) else None
         if prefills or not aux:
             aux = None
         else:
@@ -491,24 +632,78 @@ def _record_forwards(worker, native_aux=False):
             (args[0].tolist(), args[1].tolist(), prefills, decodes, mono, aux)
         )
 
-    def native_state(mod, args, out):
-        states.append(out[0] + out[1])
-
     worker._forward_hooks = [
         backbone.register_forward_pre_hook(pre),
         backbone.register_forward_hook(post),
     ]
-    if native_aux:
-        worker._forward_hooks += [
-            backbone.layers[i - 1].register_forward_hook(native_state)
-            for i in AUX_LAYERS
-        ]
 
 
 def _forwards(worker):
     for hook in worker._forward_hooks:
         hook.remove()
     return worker._forwards
+
+
+def _record_launches(worker):
+    """From here on, every fused launch as the module after it reads it: the
+    residual and attention partial it took, its output and residual out, and
+    its scratch."""
+    backbone = _backbone(worker)
+    executor = _executor(worker)
+    layers = list(backbone.layers)
+    taken: dict[int, list] = {}
+    worker._launches = []
+
+    def took(mod, args, out, lid):
+        taken[lid] = [executor.launches[lid], out[1].clone(), None]
+
+    def attended(mod, args, kwargs, out, lid):
+        taken[lid][2] = out.clone()
+
+    def read(mod, args, lid):
+        took = taken.pop(lid, None)
+        if took is None or executor.launches[lid] == took[0]:
+            return
+        _, residual, part = took
+        scratch = _scratch(executor.runner, part.shape[0])
+        out, res_out = args[0].clone(), args[1].clone()
+        worker._launches.append((lid, part, residual, out, res_out, scratch))
+
+    hooks = []
+    for i, layer in enumerate(layers):
+        if layer.layer_id not in SPARSE:
+            continue
+        lid = layer.layer_id
+        reader = layers[i + 1].input_layernorm if i + 1 < len(layers) else None
+        hooks += [
+            layer.input_layernorm.register_forward_hook(partial(took, lid=lid)),
+            layer.self_attn.register_forward_hook(
+                partial(attended, lid=lid), with_kwargs=True
+            ),
+            (reader or backbone.norm).register_forward_pre_hook(partial(read, lid=lid)),
+        ]
+    worker._launch_hooks = hooks
+
+
+def _check_launches(worker):
+    """Every launch ``_record_launches`` saw, through ``_launch_check``."""
+    from vllm.forward_context import set_forward_context
+
+    for hook in worker._launch_hooks:
+        hook.remove()
+    layers = {layer.layer_id: layer for layer in _backbone(worker).layers}
+    with torch.no_grad(), set_forward_context(None, worker.vllm_config):
+        return [
+            _launch_check(layers[lid], *tensors) for lid, *tensors in worker._launches
+        ]
+
+
+def _launch_states(worker):
+    """Each recorded launch's output plus residual out, as EAGLE3 takes it."""
+    return [
+        (out + res_out).float().cpu().numpy().tobytes()
+        for _, _, _, out, res_out, _ in worker._launches
+    ]
 
 
 def _reset_every(worker, steps):
@@ -524,44 +719,47 @@ def _reset_state(worker):
 
 
 @pytest.mark.parametrize("graphs", [False, True], ids=["eager", "full_graphs"])
-def test_model_matches_native(vllm_runner, model_dir, native, graphs):
-    """Teacher-forced decode with --monokernel against native eager. Under
-    FULL graphs (async scheduling) the epoch resets every 3 sampled steps,
-    on every rank at the same steps, and no wait times out."""
+def test_model_matches_native(vllm_runner, model_dir, mono_eager, graphs, monkeypatch):
+    """Teacher-forced decode with --monokernel. Eager: every launch matches
+    vLLM's own ops (``_launch_check``). Under FULL graphs (async scheduling)
+    the logprobs equal eager's bit for bit, the epoch resets every 3 sampled
+    steps on every rank at the same steps, and no wait times out."""
+    ref = mono_eager
+    assert ref.fused >= len(BATCHES) * (STEPS - 1)
+    assert all(prefills for _, prefills, _ in ref.stocked)
+    assert not any(failed for _, failed in ref.after)
+    if not graphs:
+        assert all(len(rank) == len(SPARSE) * ref.fused for rank in ref.launches)
+        _assert_launches(ref.launches, "eager")
+        return
     with _engine(
         vllm_runner,
         model_dir,
         mono=True,
-        graphs=graphs,
-        async_scheduling=True if graphs else None,
+        graphs=True,
+        in_process=monkeypatch,
+        async_scheduling=True,
     ) as runner:
         llm = runner.llm
         llm.collective_rpc(_randomize)
-        if graphs:
-            before = llm.collective_rpc(_reset_every, args=(3,))
+        before = llm.collective_rpc(_reset_every, args=(3,))
         start = llm.collective_rpc(_count_launches)
         llm.collective_rpc(_record_forwards)
         logprobs = _decode(llm)
         after = llm.collective_rpc(_reset_state)
         fused, stocked = _engaged(llm, start, llm.collective_rpc(_forwards))
-    assert fused >= len(BATCHES) * (STEPS - 1)
-    assert all(prefills for _, prefills, _ in stocked)
-    cos, rows = _logit_errors(logprobs, native.logprobs)
-    close = (rows < 3e-2).float().mean().item()
-    print(f"cos {cos:.5f}, median row {rows.median():.2e}, within 3e-2 {close:.3f}")
-    # native's MoE sums in BF16 atomics: native reruns differ by ~1e-2 a row,
-    # and by ~0.2 on the 4-13% of rows where that flips a near-tie expert
-    assert cos > 0.99 and close > 0.8
+    assert fused == ref.fused
+    assert torch.equal(logprobs, ref.logprobs)
     assert not any(failed for _, failed in after)
-    if graphs:
-        resets = {n - b for (n, _), b in zip(after, before)}
-        assert len(resets) == 1 and resets.pop() >= len(BATCHES) * STEPS // 3 - 1
+    resets = {n - b for (n, _), b in zip(after, before)}
+    assert len(resets) == 1 and resets.pop() >= len(BATCHES) * STEPS // 3 - 1
 
 
-def test_fallback_steps_match_native(vllm_runner, model_dir, native):
+def test_fallback_steps_match_native(vllm_runner, model_dir):
     """--monokernel eager over steps it hands to stock: decode steps of over
     16 rows and mixed prefill / decode steps, between plain decode steps that
-    run the fused launches; the logprobs match native's."""
+    run the fused launches; every launch, on the state the stock steps left,
+    matches vLLM's own ops (``_launch_check``)."""
     from vllm.models.minimax_m3.amd.specialized_decode.mono.ffn import MAX_TOKENS
 
     with _engine(
@@ -571,17 +769,16 @@ def test_fallback_steps_match_native(vllm_runner, model_dir, native):
         llm.collective_rpc(_randomize)
         start = llm.collective_rpc(_count_launches)
         llm.collective_rpc(_record_forwards)
-        logprobs = _decode(llm, requests=_fallback_requests())
+        llm.collective_rpc(_record_launches)
+        _decode(llm, requests=_fallback_requests())
         forwards = llm.collective_rpc(_forwards)
-        _, stocked = _engaged(llm, start, forwards)
+        fused, stocked = _engaged(llm, start, forwards)
+        launches = llm.collective_rpc(_check_launches)
     assert any(rows > MAX_TOKENS and not prefills for rows, prefills, _ in stocked)
     assert any(prefills and decodes for _, prefills, decodes in stocked)
     assert forwards[0][-1][4]
-    cos, rows = _logit_errors(logprobs, native.fallback)
-    q75 = rows.quantile(0.75).item()
-    print(f"cos {cos:.5f}, median row {rows.median():.2e}, q75 row {q75:.2e}")
-    # native reruns of this batch differ alike: ~1e-2 a row, ~0.2 on 10-16%
-    assert cos > 0.99 and q75 < 2e-2
+    assert all(len(rank) == len(SPARSE) * fused for rank in launches)
+    _assert_launches(launches, "fallback")
 
 
 def _arm_late_fault(worker, rank, ticks):
@@ -669,27 +866,6 @@ def _spec_requests():
     ]
 
 
-def _aux_states(forwards, sequences):
-    """EAGLE3's auxiliary states of each decode row whose tokens up to it in
-    its forward follow the final sequence, by (request, position)."""
-    states = {}
-    for tokens, positions, _, _, _, aux in forwards:
-        if aux is None:
-            continue
-        aux = torch.frombuffer(bytearray(aux), dtype=torch.float32)
-        aux = aux.view(len(AUX_LAYERS), len(tokens), -1)
-        follows: dict[int, bool] = {}
-        for row, (token, position) in enumerate(zip(tokens, positions)):
-            request = position // PROMPT_STRIDE - 1
-            seq = sequences[request]
-            follows[request] = follows.get(request, True) and (
-                position < len(seq) and seq[position] == token
-            )
-            if follows[request]:
-                states[request, position] = aux[:, row]
-    return states
-
-
 @pytest.mark.parametrize(
     "graphs, spec_tokens",
     [(True, 3), (False, 1), (False, 5)],
@@ -700,10 +876,10 @@ def test_eagle3_verify_steps_match_native(
 ):
     """EAGLE3 (random draft) with --monokernel: the verify steps of 1-4
     requests run the fused launches up to 16 rows (k=5: 18 and 24 rows run
-    stock); the target's full-vocabulary logprobs along the generated tokens,
-    and eager EAGLE3's auxiliary states, match native eager teacher-forced on
-    them. Under FULL graphs a late rank fault during a verify step then
-    returns no token."""
+    stock). Eager: every launch matches vLLM's own ops (``_launch_check``) and
+    EAGLE3's auxiliary states after the fused layers are the launches' outputs
+    plus residuals. Under FULL graphs a late rank fault during a verify step
+    then returns no token."""
     from vllm import SamplingParams
     from vllm.models.minimax_m3.amd.specialized_decode.mono.ffn import MAX_TOKENS
     from vllm.v1.engine.exceptions import EngineDeadError
@@ -711,7 +887,6 @@ def test_eagle3_verify_steps_match_native(
     greedy = SamplingParams(
         max_tokens=STEPS, temperature=0, logprobs=-1, detokenize=False, ignore_eos=True
     )
-    sequences, mono_rows, mono_aux = [], [], []
     recorded: list[list] = [[] for _ in range(4)]
     with _engine(
         vllm_runner,
@@ -727,27 +902,20 @@ def test_eagle3_verify_steps_match_native(
         llm = runner.llm
         llm.collective_rpc(_randomize)
         start = llm.collective_rpc(_count_launches)
+        if not graphs:
+            llm.collective_rpc(_record_launches)
         for prompts in _spec_requests():
             llm.collective_rpc(_record_forwards)
-            outputs = llm.generate(prompts, greedy, use_tqdm=False)
-            forwards = llm.collective_rpc(_forwards)
-            sequences.append(
-                [
-                    prompt["prompt_token_ids"] + list(out.outputs[0].token_ids)
-                    for prompt, out in zip(prompts, outputs)
-                ]
-            )
-            for out in outputs:
-                for step in out.outputs[0].logprobs[1:]:
-                    mono_rows.append([step[v].logprob for v in range(VOCAB)])
-            for rank, seen in zip(recorded, forwards):
+            llm.generate(prompts, greedy, use_tqdm=False)
+            for rank, seen in zip(recorded, llm.collective_rpc(_forwards)):
                 rank += seen
-            fused = [f for f in forwards[0] if f[4]]
-            mono_aux.append(_aux_states(fused, sequences[-1]))
         fused_steps, stocked = _engaged(llm, start, recorded)
         wide = [rows for rows, prefills, _ in stocked if not prefills]
         assert bool(wide) == ((1 + spec_tokens) * max(SPEC_BATCHES) > MAX_TOKENS)
-        if graphs:
+        if not graphs:
+            states = llm.collective_rpc(_launch_states)[0]
+            launches = llm.collective_rpc(_check_launches)
+        else:
             capfd.readouterr()
             llm.collective_rpc(_arm_late_fault, args=(2, 500_000))
             with pytest.raises(EngineDeadError):
@@ -755,45 +923,14 @@ def test_eagle3_verify_steps_match_native(
     if graphs:
         logs = "".join(capfd.readouterr())
         assert "hipErrorLaunchFailure" in logs or "HSA_STATUS_ERROR_EXCEPTION" in logs
-
-    native_rows, native_aux = [], []
-    with _engine(vllm_runner, model_dir, mono=False) as runner:
-        llm = runner.llm
-        llm.collective_rpc(_randomize)
-        for prompts, seqs in zip(_spec_requests(), sequences):
-            params = [
-                SamplingParams(
-                    max_tokens=STEPS,
-                    temperature=0,
-                    logprobs=-1,
-                    trace_decode_token_ids=seq[len(prompt["prompt_token_ids"]) :],
-                    detokenize=False,
-                    ignore_eos=True,
-                )
-                for prompt, seq in zip(prompts, seqs)
-            ]
-            llm.collective_rpc(_record_forwards, args=(True,))
-            for out in llm.generate(prompts, params, use_tqdm=False):
-                for step in out.outputs[0].logprobs[1:]:
-                    native_rows.append([step[v].logprob for v in range(VOCAB)])
-            native_aux.append(_aux_states(llm.collective_rpc(_forwards)[0], seqs))
-    cos, rows = _logit_errors(torch.tensor(mono_rows), torch.tensor(native_rows))
-    close = (rows < 3e-2).float().mean().item()
-    print(
-        f"EAGLE3 cos {cos:.5f}, median row {rows.median():.2e}, within 3e-2 {close:.3f}"
-    )
-    assert cos > 0.99 and close > 0.8
-    if graphs:
         return
-    keys = [(b, k) for b, aux in enumerate(mono_aux) for k in aux if k in native_aux[b]]
-    assert len(keys) >= fused_steps
-    got = torch.stack([mono_aux[b][k] for b, k in keys], 1)
-    want = torch.stack([native_aux[b][k] for b, k in keys], 1)
-    for layer, g, w in zip(AUX_LAYERS, got, want):
-        err = (g - w).norm(dim=-1) / w.norm(dim=-1)
-        print(f"aux {layer}: median row {err.median():.2e}, max {err.max():.2e}")
-        # native verify rows against native decode rows differ alike: ~5e-3
-        # before the fused layers, after them ~1e-2 and up to 0.23 where
-        # native's BF16 atomics flip a near-tie expert
-        worst = 2e-2 if layer <= SPARSE[0] else 0.5
-        assert err.median() < 2e-2 and err.max() < worst
+    _assert_launches(launches, f"EAGLE3 k={spec_tokens}")
+    fused = [aux for *_, mono, aux in recorded[0] if mono]
+    assert len(fused) == fused_steps and len(states) == len(SPARSE) * fused_steps
+    # AUX_LAYERS[1:]: after layers 3 and 4, the fused ones
+    for step, aux in enumerate(fused):
+        aux = torch.frombuffer(bytearray(aux), dtype=torch.float32)
+        wants = states[2 * step : 2 * step + 2]
+        for got, want in zip(aux.view(len(AUX_LAYERS), -1)[1:], wants):
+            want = torch.frombuffer(bytearray(want), dtype=torch.float32)
+            assert torch.equal(got, want)

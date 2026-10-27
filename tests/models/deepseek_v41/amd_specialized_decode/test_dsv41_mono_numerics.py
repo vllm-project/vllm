@@ -19,7 +19,8 @@ Exact where the arithmetic is (data movement, the rank-order sums, the
 quantization rules on the kernel's own input); the documented rounding chain
 otherwise, with KAPPA for the hardware transcendentals and the scaled MFMA's
 accumulation. The first test's ``vllm_ops`` cases also run the ops vLLM runs
-for the same step and compare against them.
+for the same step and compare against them, stage by stage, within the budgets
+``test_dsv41_mono_layers`` derives from both paths' formats.
 
 On gfx942 at TP4, ``test_mono_decode_942_replays`` runs the composed runner on
 the copies of the weights that the model makes at load, at steps of 6, 8 and 42
@@ -36,6 +37,9 @@ import ray
 import torch
 
 from tests.models import mono_reference as R
+from tests.models.deepseek_v41.amd_specialized_decode import (
+    test_dsv41_mono_layers as L,
+)
 from tests.utils import (
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
@@ -96,18 +100,6 @@ def _on_gfx942() -> bool:
     return on_gfx942()
 
 
-def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
-    a, b = a.float().reshape(-1), b.float().reshape(-1)
-    return torch.nn.functional.cosine_similarity(a, b, dim=0).item()
-
-
-def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Relative L2 error of ``a`` against ``b``: unlike the cosine, it sees a
-    wrong scale."""
-    a, b = a.float().reshape(-1), b.float().reshape(-1)
-    return ((a - b).norm() / b.norm()).item()
-
-
 # ---------------------------------------------------------------- slow references
 
 U = 2.0**-24
@@ -123,12 +115,13 @@ KAPPA = dict(
     # relative rstd: the seam norm's 23 adds a thread, 6 + 2 butterfly levels,
     # 1 / H and the fma, halved by rsq, plus its 1 ulp (q / kv norms: fewer)
     rstd=(33 / 2 + 2) * U,
-    # the shared SiLU g / (1 + expf(-g)): LLVM's expf (an exact range reduction,
-    # v_exp_f32 1 ulp) 4u, 1 + e u, the divide 3u: with _silu's F32_2
-    act=4 * U,
-    # routing weights past the scores' error (allow): sqrt 1 ulp on a score and
-    # on the sum, the 5 top-k adds, the divide 3u, x scale u
-    route=(4 + 5 + 3 + 1) * U,
+    # the shared SiLU g / (1 + expf(-g)): LLVM's expf (v_exp_f32 1 ulp, 2u, of
+    # the reduced argument, whose rounding adds ln 2 u / 2) 3u; 1 + e u and the
+    # divide (v_div_scale / fmas / fixup: IEEE) u within _silu's F32_2
+    act=3 * U,
+    # routing weights past the scores' error (allow): the sqrt (LLVM's IEEE
+    # sqrt) u on a score and on the sum, the 5 top-k adds, the divide u, x scale u
+    route=(2 + 5 + 1 + 1) * U,
     # the mixes' error over _mix_bound
     mix=1.0,
 )
@@ -240,11 +233,11 @@ def _mix_bound(x, fn, scale, base, eps, hc_eps, iters):
     sc = scale.double()[[0] * HC + [1] * HC + [2] * HC * HC]
     z = v * sc + base.double()
     dz = sc.abs() * dv + U * z.abs()
-    # sigmoid: exp2 of RN(z RN(-log2 e)) (|z| + 1) 2u, 1 + e u, the divide 3u,
-    # pre's + eps u
+    # sigmoid: exp2 of RN(z RN(-log2 e)) (|z| + 1) 2u, 1 + e u, the divide
+    # (IEEE) u, pre's + eps u
     zs = z[:, : 2 * HC]
     s = torch.sigmoid(zs)
-    ds = s * ((1 - s) * (dz[:, : 2 * HC] + (zs.abs() + 1) * 2 * U) + 5 * U)
+    ds = s * ((1 - s) * (dz[:, : 2 * HC] + (zs.abs() + 1) * 2 * U) + 3 * U)
     # comb: the softmax and Sinkhorn steps, each step's rounding (exp: 3u |z -
     # max| in its argument and 2u; a normalization: the 4-sum 2u, + eps u, rcp
     # 2u, the product u) and dz carried to the output by the steps' Jacobians
@@ -836,7 +829,6 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
     q_norm, kv_norm = (1 + f32(Q_RANK, s=0.1)).to(bf), (1 + f32(HEAD_DIM, s=0.1)).to(bf)
     sink = f32(H, gen=gs)
     u8 = lambda t: t.view(torch.uint8)  # noqa: E731
-    gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
     router = {False: (moe.gate.weight, moe.gate.e_score_correction_bias)}
     router[True] = tuple(t.clone() for t in router[False])
     router[True][0][TIE[1]] = router[True][0][TIE[0]]
@@ -851,11 +843,6 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
     for sub, sm in seams.items():
         hi = sm["fn"].to(bf).float()
         fns[sub] = hi.double() + (sm["fn"] - hi).to(bf).double()
-
-    def top(x):
-        """The experts vLLM routes to: sqrt(softplus(logits)) + bias."""
-        sc = torch.nn.functional.softplus(x.float() @ gw.T).sqrt() + bias
-        return sc.topk(topk_k, dim=1).indices.sort(1).values
 
     # ---- the stage checks, on the kernels' own inputs (taps)
     def mx_rows(buf, words, codes, rows, k):
@@ -960,20 +947,20 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
         _, ref_w, _ = R.route(logits, gate_b, topk_k, "sqrt_softplus", 1.5, ids=ids)
 
         # the kernel's softplus (x itself past 20, as the reference's): exp2 of
-        # RN(x RN(log2 e)) (|x| + 1) 2u, 1 + e^x u, v_log_f32 within OpenCL's
-        # 3 ulp (LLVM: "good enough for OpenCL") and x RN(ln 2) 8u relative; so
-        # each score within d of the reference's, which the weights carry
+        # RN(x RN(log2 e)) (|x| + 1) 2u, 1 + e^x u, v_log_f32 1 ulp (CDNA4 ISA
+        # 12.8) and x RN(ln 2) 4u relative; so each score within d of the
+        # reference's, which the weights carry
         x = logits.double()
         sp = torch.nn.functional.softplus(x)
-        dsp = torch.sigmoid(x) * (x.abs() + 1) * 2 * U + U + 8 * U * sp
+        dsp = torch.sigmoid(x) * (x.abs() + 1) * 2 * U + U + 4 * U * sp
         d = sp.sqrt() - (sp - torch.where(x > 20, 0, dsp)).clamp(min=0).sqrt()
         di, si = d.gather(1, ids), sp.gather(1, ids).sqrt()
         allow = (1.5 * di + ref_w * di.sum(-1, keepdim=True)) / si.sum(-1, keepdim=True)
         err = ((w.double() - ref_w).abs() - allow).clamp(min=0) / ref_w
         stage("route", lambda k: _le(f"{tag} routing weights", err, k))
         sel = sp.sqrt() + gate_b.double()
-        # a selection value: d, sqrt's 1 ulp and the f32 + bias
-        e = d + 2 * U * sp.sqrt() + U * sel.abs()
+        # a selection value: d, the IEEE sqrt's u and the f32 + bias
+        e = d + U * sp.sqrt() + U * sel.abs()
         edge = sel.sort(-1, descending=True).indices[:, topk_k - 1 : topk_k + 1]
         bound = 2 * e.gather(1, edge).amax(-1)
         if hard:
@@ -1372,29 +1359,41 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
         normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
         o_n = [t[:n] for t in o]
         if case.vllm:
-            res_n, res2_n, xf_n, normed_n = res[:n], res2[:n], xf[:n], normed[:n]
-            assert _cos(runner.res_mid[:n], res_n) > 0.99999, tag
-            for got, want in (
-                (runner.post_a, post),
-                (runner.comb_a, comb),
-                (runner.pre_a, attn_pre),
-            ):
-                torch.testing.assert_close(
-                    got[:n].view_as(want[:n]), want[:n], rtol=1e-4, atol=1e-5
-                )
-            same_in = moe_out(normed_n)
-            # relative errors about 3x what the kernels show (0.3-0.5%)
-            assert _cos(o_n[1], res2_n) > 0.9999 and _rel(o_n[1], res2_n) < 0.01, tag
-            assert _cos(normed_n, xf_n) > 0.999 and _rel(normed_n, xf_n) < 0.012, tag
-            assert _cos(o_n[0], same_in) > 0.9999, tag
-            assert _rel(o_n[0], same_in) < 0.015, tag
-            # per token, where both FFN inputs pick the same experts
-            same = (top(xf_n) == top(normed_n)).all(1)
-            assert same.float().mean() >= 0.5, tag
-            tok = torch.nn.functional.cosine_similarity(
-                o_n[0].float(), out[:n].float(), dim=1
+            # vLLM's chain on the same inputs, stage by stage, within the
+            # budgets test_dsv41_mono_layers derives from both paths' formats
+            consts = dict(
+                gate=gate_w, bias=gate_b, topk=topk_k, ffn_norm=norm_w["ffn"],
+                seams={sub: [sm[k] for k in ("fn", "scale", "base")]
+                       for sub, sm in seams.items()},
+                eps=(cfg.rms_norm_eps, hc_eps, cfg.hc_sinkhorn_iters),
+            )  # fmt: skip
+            mid = runner.res_mid[:n]
+            inputs = tuple(t[:n] for t in (x0, res0, post0, comb0))
+            err = (mid.double() - res[:n].double()).abs()
+            assert (err <= L._fold_err(mid, inputs)).all(), tag
+            L._mixes_match(
+                tag,
+                [t[:n] for t in (runner.post_a, runner.comb_a, runner.pre_a)],
+                [t[:n] for t in (post, comb, attn_pre)],
+                mid,
+                res[:n],
+                consts["seams"]["attn"],
+                consts["eps"],
             )
-            assert tok[same].min() > 0.99, tag
+            attn_m = _rank_sum(_peer(runner, M, int(runner.epoch[0]) - 1)[0])[:n]
+            err = (attn_m.double() - a[:n].double()).norm(dim=-1)
+            assert (err <= L.ATTN_REL * a[:n].double().norm(dim=-1)).all(), tag
+            vllm_out = (out[:n], res2[:n], post2[:n], comb2[:n], ffn_pre[:n])
+            L._seam(
+                dict(
+                    attn=(attn_m,), attn_vllm=a[:n], res_mid=mid,
+                    post_a=runner.post_a[:n], comb_a=runner.comb_a[:n],
+                    pre_a=runner.pre_a[:n], mono=o_n, vllm=vllm_out,
+                    moe_in=normed[:n], moe_in_vllm=xf[:n], inputs=inputs,
+                ),
+                consts,
+            )  # fmt: skip
+            L._moe_parity(o_n[0], moe_out(normed[:n]), normed[:n], consts)
 
         if case.pad:
             # the pad rows leave the step's rows as they are without them
@@ -1424,10 +1423,18 @@ def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage
             assert torch.equal(attn_parts[rank], part), tag
             ffn_io(f"{tag} FFN launch", M, *fin, f, case.hard)
             if case.vllm:
-                torch.testing.assert_close(f[1][:n], res2_n, rtol=2**-8, atol=1e-6)
-                torch.testing.assert_close(normed[:n], xf_n, rtol=2**-7, atol=1e-6)
-                assert _cos(f[0][:n], out[:n]) > 0.9999, tag
-                assert _rel(f[0][:n], out[:n]) < 0.015, tag
+                # vLLM's FFN seam and MoE on the same attention output
+                L._seam(
+                    dict(
+                        attn=(_rank_sum(attn_parts)[:n],), attn_vllm=a[:n],
+                        res_mid=res[:n], post_a=post[:n], comb_a=comb[:n],
+                        pre_a=attn_pre[:n], mono=[t[:n] for t in f],
+                        vllm=vllm_out, moe_in=normed[:n], moe_in_vllm=xf[:n],
+                        inputs=(None,) * 4,
+                    ),
+                    consts,
+                )  # fmt: skip
+                L._moe_parity(f[0][:n], moe_out(normed[:n]), normed[:n], consts)
             ffn = runner._outs(M, fin[0])
         torch.accelerator.synchronize()
 

@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 mono decode path through the real model: a five-layer
 DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, and at TP4 on gfx942, served with
-``--monokernel`` on and off on the same random weights: every decoder layer's
-outputs at every decode step must match. Unlike
+``--monokernel`` on random weights. Every decode step of every layer also runs
+vLLM's path on the step's own inputs and caches, and the two must agree stage
+by stage (the attention output, the FFN seam, the MoE) within what each path's
+own rounding allows. Unlike
 ``test_dsv41_mono_numerics.py``, which checks the kernels against float64
 references one stage at a time, this runs ``DeepseekV4DecoderLayer.forward``
 as the engine does -- the model's hooks, the per-step path choice, the weights
@@ -35,6 +37,7 @@ import zlib
 import pytest
 import torch
 
+from tests.models import mono_reference as R
 from tests.models.utils import check_logprobs_close
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
@@ -57,6 +60,10 @@ TRUNCATED = {
     "engram_vocab_size": 1000,
     "dspark_target_layer_ids": [2, 3, 4],
 }
+HIDDEN = 5120
+# DeepseekV4DecoderLayer.forward's positional arguments
+FORWARD_ARGS = ("x", "positions", "input_ids", "pre_mix", "post_mix", "res_mix",
+                "residual")  # fmt: skip
 WHOLE, FFN = (0, 1, 2, 3, 4), ()
 DRAFT = (5, 6, 7)  # the DSpark draft's layers
 STEPS = 5  # decode steps after the prefill's token
@@ -176,83 +183,191 @@ class MonoProbe:
             if isinstance(m, DeepseekV4DecoderLayer)
         }
 
-    def capture_steps(self, lens: list[int]) -> None:
-        """Keep each decoder layer's outputs (x, residual) for every token taken
-        in a decode-only step (the steps the mono path takes), keyed by (layer,
-        prompt length, position, its token; for a draft layer, its draft block's
-        first position): a request's step and row can differ between engines
-        (requests reach the engine core while it runs), its prompt length and
-        position cannot. ``lens``: the prompt lengths, all distinct; a row's
-        request is the longest prompt not past its position. With them vLLM's
-        routing margin of each row: its last picked expert's score over the
-        next one's."""
+    def capture_steps(self, compare: bool) -> None:
+        """Count each decoder layer's decode-only steps (the steps the mono path
+        takes). With ``compare``, each such step of a mono layer then also runs
+        vLLM's path on the step's own inputs and caches, so every stage compares
+        on equal inputs. Two results of the mono step are forced into vLLM's:
+        an index source's top-k (a near-tie of index scores at the 512th entry
+        is a discontinuity) and the attention output (compared on its own, it
+        would otherwise carry its rounding into the FFN seam). The MoE runs
+        again on the mono step's own MoE input, its rows tiled to MAX_ROWS: at
+        some row counts AITER's fused stage 1 takes another MXFP8 scale rule
+        (https://github.com/ROCm/aiter/issues/6548), which this run sees as a
+        1.6-1.9% difference of vLLM's own MoE output at 3 rows. vLLM's path
+        writes the caches last, which no comparison depends on."""
         from vllm.forward_context import get_forward_context
+        from vllm.models.deepseek_v41.amd import mono_decode
+        from vllm.models.deepseek_v41.amd.mono.layer import (
+            peer_half_bytes,
+            scratch_layout,
+        )
 
-        self._captured: dict = {}
-        self._gaps: dict = {}
         self._steps: dict[int, int] = {}
-        self._keys: list | None = None
-        lens = sorted(lens)
+        self._records: list = []
+        self._consts: dict = {}
+        st: dict = {}
 
         def decode_only(layer) -> bool:
+            if torch.cuda.is_current_stream_capturing():
+                return False
             md = get_forward_context().attn_metadata
             if not isinstance(md, dict):
                 return False
             swa = md.get(layer.attn.swa_cache_layer.prefix)
             return swa is not None and swa.num_prefills == 0
 
-        def row_keys(layer_id, args, kwargs):
-            pos = kwargs.get("positions", args[1] if len(args) > 1 else None)
-            pos = pos.tolist()
-            if layer_id in DRAFT:
-                tag = list(pos)
-                for row in range(1, len(pos)):
-                    if pos[row] == pos[row - 1] + 1:
-                        tag[row] = tag[row - 1]
-            else:
-                ids = kwargs.get("input_ids", args[2] if len(args) > 2 else None)
-                tag = ids.tolist()
-            return [
-                (layer_id, max(n for n in lens if n <= p), p, a)
-                for p, a in zip(pos, tag)
-            ]
-
         def pre_hook(layer_id, layer):
-            def keys(module, args, kwargs):
-                self._keys = None
-                if decode_only(layer):
-                    self._keys = row_keys(layer_id, args, kwargs)
-                    self._steps[layer_id] = self._steps.get(layer_id, 0) + 1
+            def hook(module, args, kwargs):
+                st.clear()
+                if not decode_only(layer):
+                    return
+                self._steps[layer_id] = self._steps.get(layer_id, 0) + 1
+                if compare and layer.mono is not None:
+                    clone = lambda v: v.clone() if torch.is_tensor(v) else v  # noqa: E731
+                    st.update(
+                        layer=layer_id,
+                        mode="mono",
+                        args=[clone(a) for a in args],
+                        kwargs={k: clone(v) for k, v in kwargs.items()},
+                    )
 
-            return keys
+            return hook
+
+        def mono_outputs(layer, rows: int) -> dict:
+            """The step's MoE input and attention output (the ranks' wo_b
+            partials summed in rank order), as the kernels left them."""
+            runner = (
+                mono_decode._draft_runner if layer.mono.draft else mono_decode._runner
+            )
+            tp = runner.tp
+            lay = scratch_layout(
+                rows, tp, runner.experts, runner.topk, runner.ug_groups
+            )
+            off = lay["normed"][0]
+            moe_in = runner.scratch(rows)[off : off + rows * HIDDEN * 2]
+            ep = int(runner.epoch[0]) - 1
+            n = tp * rows * HIDDEN // 2
+            peer = runner.peer.bytes[(ep & 1) * peer_half_bytes(tp) :]
+            parts = R.pairs(peer, n, 2 * ep + 2).view(torch.bfloat16)
+            parts = parts.view(tp, rows, HIDDEN).float()
+            attn = parts[0]
+            for r in range(1, tp):
+                attn = attn + parts[r]
+            return dict(
+                moe_in=moe_in.view(torch.bfloat16).view(rows, HIDDEN).clone(),
+                attn=attn.to(torch.bfloat16),
+                res_mid=runner.res_mid[:rows].clone(),
+                post_a=runner.post_a[:rows].clone(),
+                comb_a=runner.comb_a[:rows].clone(),
+                pre_a=runner.pre_a[:rows].clone(),
+            )
 
         def hook(module, args, kwargs, out):
-            for row, key in enumerate(self._keys or ()):
-                kept = [t[row].float().cpu() for t in out[:2]]
-                self._captured.setdefault(key, kept)
+            if st.get("mode") != "mono":
+                return
+            layer_id, layer = st["layer"], module
+            rows = out[0].shape[0]
+            got = mono_outputs(layer, rows)
+            st["attn"] = got["attn"]
+            st["mode"] = "vllm"
+            mono, layer.mono = layer.mono, None
+            try:
+                want = layer.forward(*st["args"], **st["kwargs"])
+            finally:
+                layer.mono = mono
+            st["mode"] = "moe"
+            fc = get_forward_context()
+            kw = dict(zip(FORWARD_ARGS, st["args"])) | st["kwargs"]
+            ids = kw["input_ids"]
+            tile = torch.arange(mono_decode.MAX_ROWS, device=out[0].device) % rows
+            pad = fc.is_padding
+            fc.is_padding = None if pad is None else pad[:rows][tile].contiguous()
+            try:
+                moe = layer.ffn(
+                    got["moe_in"][tile].contiguous(), None if ids is None else ids[tile]
+                )[:rows]
+            finally:
+                fc.is_padding = pad
+            cpu = lambda ts: [t.cpu() for t in ts]  # noqa: E731
+            self._records.append(
+                dict(
+                    layer=layer_id,
+                    mono=cpu(out),
+                    vllm=cpu(want),
+                    attn=cpu((got["attn"], st["attn_vllm"])),
+                    moe=cpu((out[0], moe)),
+                    moe_in=got["moe_in"].cpu(),
+                    res_mid=got["res_mid"].cpu(),
+                    post_a=got["post_a"].cpu(),
+                    comb_a=got["comb_a"].cpu(),
+                    pre_a=got["pre_a"].cpu(),
+                    moe_in_vllm=st["moe_in_vllm"].cpu(),
+                    inputs=[
+                        None if t is None else t.cpu()
+                        for t in (
+                            kw.get("x"),
+                            kw.get("residual"),
+                            kw.get("post_mix"),
+                            kw.get("res_mix"),
+                        )
+                    ],
+                )
+            )
+            if layer_id not in self._consts:
+                gate = layer.ffn.gate
+                self._consts[layer_id] = dict(
+                    gate=gate.weight.float().cpu(),
+                    bias=gate.e_score_correction_bias.float().cpu(),
+                    topk=layer.ffn.n_activated_experts,
+                    ffn_norm=layer.ffn_norm.weight.float().cpu(),
+                    seams={
+                        sub: [
+                            getattr(layer, f"hc_{sub}_{n}").float().cpu()
+                            for n in ("fn", "scale", "base")
+                        ]
+                        for sub in ("attn", "ffn")
+                    },
+                    eps=(layer.rms_norm_eps, layer.hc_eps, layer.hc_sinkhorn_iters),
+                )
+            st.clear()
 
-        def gap(ffn, args, kwargs):
-            # vLLM's path only (the mono kernels route inside):
-            # sqrt(softplus(logits)) + bias as vLLM routes
-            if self._keys is not None:
-                h = args[0] if args else kwargs["hidden_states"]
-                logits = h.float() @ ffn.gate.weight.float().T
-                score = torch.nn.functional.softplus(logits).sqrt()
-                score = score + ffn.gate.e_score_correction_bias.float()
-                k = ffn.n_activated_experts
-                top = score.topk(k + 1, dim=-1).values
-                margin = (top[:, k - 1] - top[:, k]).tolist()
-                for row, key in enumerate(self._keys):
-                    self._gaps.setdefault(key, margin[row])
+        def ffn_hook(module, args, kwargs):
+            if st.get("mode") == "vllm":
+                st["moe_in_vllm"] = (
+                    args[0] if args else kwargs["hidden_states"]
+                ).clone()
+
+        def attn_hook(module, args, kwargs, out):
+            if st.get("mode") == "vllm":
+                st["attn_vllm"] = out.clone()
+                return st["attn"].view_as(out).to(out.dtype)
+            return None
+
+        def topk_hook(layer):
+            def hook(module, args, kwargs, out):
+                rows = st["args"][0].shape[0] if "args" in st else 0
+                buf = layer.attn.topk_indices_buffer[:rows]
+                if st.get("mode") == "mono":
+                    st["topk_mono"] = buf.clone()
+                elif st.get("mode") == "vllm" and "topk_mono" in st:
+                    buf.copy_(st["topk_mono"])
+
+            return hook
 
         for i, layer in self._decoder_layers().items():
             layer.register_forward_pre_hook(pre_hook(i, layer), with_kwargs=True)
             layer.register_forward_hook(hook, with_kwargs=True)
-            layer.ffn.register_forward_pre_hook(gap, with_kwargs=True)
+            layer.attn.register_forward_hook(attn_hook, with_kwargs=True)
+            layer.ffn.register_forward_pre_hook(ffn_hook, with_kwargs=True)
+            if layer.attn.indexer is not None:
+                layer.attn.indexer.indexer_op.register_forward_hook(
+                    topk_hook(layer), with_kwargs=True
+                )
 
     def save_capture(self, path: str) -> None:
         rank = self.rank  # type: ignore[attr-defined]
-        torch.save((self._captured, self._gaps), f"{path}.rank{rank}")
+        torch.save((self._records, self._consts), f"{path}.rank{rank}")
 
     def mono_layers(self) -> dict:
         from vllm.models.deepseek_v41.amd import mono_decode
@@ -296,18 +411,18 @@ def _decode(
     vllm_runner,
     monkeypatch,
     tp: int,
-    mono: bool,
     prompts,
     path: str,
     arch: str,
     spec: bool = False,
     graphs: bool = False,
+    compare: bool = False,
 ):
-    """Greedy decode of ``prompts`` with the mono path on or off, with DSpark
-    (``spec``), in FULL CUDA graphs of 8 rows (``graphs``) or eager: (each
-    prompt's output, the workers' mono layers before and after the decode);
-    each decoder layer's outputs for the tokens of decode-only steps, and
-    vLLM's routing margins, saved under ``path``."""
+    """Greedy decode of ``prompts`` on the mono path, with DSpark (``spec``),
+    in FULL CUDA graphs of 8 rows (``graphs``) or eager: (each prompt's output,
+    the workers' mono layers before and after the decode). With ``compare``,
+    every decode-only step's comparisons with vLLM's path (``capture_steps``)
+    are saved under ``path``."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
@@ -340,7 +455,7 @@ def _decode(
         hf_overrides=_truncate,
         worker_extension_cls=f"{__name__}.MonoProbe",
         moe_backend="aiter",
-        monokernel=mono,
+        monokernel=True,
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         **indexer,
@@ -353,34 +468,22 @@ def _decode(
         speculative_config=DSPARK if spec else None,
         **steps,
     ) as runner:
-        runner.llm.collective_rpc("capture_steps", args=([len(p) for p in prompts],))
+        runner.llm.collective_rpc("capture_steps", args=(compare,))
         before = runner.llm.collective_rpc("mono_layers")
         params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1, logprobs=5)
         outs = runner.llm.generate(
             [TokensPrompt(prompt_token_ids=p) for p in prompts], params
         )
-        runner.llm.collective_rpc("save_capture", args=(path,))
+        if compare:
+            runner.llm.collective_rpc("save_capture", args=(path,))
         probe = runner.llm.collective_rpc("mono_layers")
     return [o.outputs[0] for o in outs], before, probe
 
 
-def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
-    return ((a - b).norm() / b.norm()).item()
-
-
-def _prompts(rows: int, gap: int = STEPS) -> list[list[int]]:
-    """Prompts past both ratios' 512 compressed entries, so top-k selects.
-    The captures key a row by its prompt length and position, so the lengths
-    are more than ``gap`` apart: a request whose positions reached a longer
-    prompt's length would share that prompt's keys. Skipping the lengths that
-    are too close keeps the 8-row cases' lengths as they were."""
+def _prompts(rows: int) -> list[list[int]]:
+    """Prompts past both ratios' 512 compressed entries, so top-k selects."""
     g = torch.Generator().manual_seed(0)
-    lens: list[int] = []
-    for n in torch.randperm(1700, generator=g).add(300).tolist():
-        if all(abs(n - m) > gap for m in lens):
-            lens.append(n)
-        if len(lens) == rows:
-            break
+    lens = torch.randperm(1700, generator=g)[:rows].add(300).tolist()
     return [torch.randint(1000, 60000, (n,), generator=g).tolist() for n in lens]
 
 
@@ -417,74 +520,209 @@ def _engaged(
             assert moved == sum(a["steps"][i] for i in group), (b, a)
 
 
-def _matches(prompts, on, off, path: str, tp: int, layers) -> None:
-    """Each layer's outputs for the rows whose inputs match between the runs,
-    mono against vLLM's path, row by row: a target layer's rows whose greedy
-    tokens up to their own match, a draft layer's rows whose block follows
-    matching tokens."""
-    arch = _arch()
-    same: set[tuple[int, int]] = set()
-    token: dict[tuple[int, int], int] = {}
-    for prompt, a, b in zip(prompts, on, off):
-        n = len(prompt)
-        for step in range(STEPS):
-            if a.token_ids[: step + 1] != b.token_ids[: step + 1]:
-                break
-            same.add((n, n + step))
-            token[(n, n + step)] = a.token_ids[step]
+# ---- the parity budgets: each path's own rounding, on equal inputs
+#
+# E4M3 keeps 3 mantissa bits. A value rounded to it at an arbitrary point within
+# its ulp (2^-3 of its binade's base, so <= 2^-3 |v|) moves by <= 2^-3 |v| /
+# sqrt(12) rms: E4M3_RMS of it, whatever the block's power-of-two scale.
+E4M3_RMS = 2.0**-3 / 12**0.5
+# The attention output (the ranks' wo_b outputs summed), relative L2 a row. On
+# CDNA4 both paths quantize the same tensors by the same rules. Their inputs
+# agree up to f32 summation order as far as the attention core, whose p and
+# partials each rounds to bf16 its own way (~2^-8 relative). Past the core, the
+# inverse-RoPE MXFP8 and wo_a's MXFP8 turn that into one-step E4M3 flips. With
+# the two paths' roundings independent (the most they can differ), each stage
+# adds 2 E4M3_RMS^2 to the relative mean square, which random linear maps keep:
+# 2 E4M3_RMS = 7.2%. A value d (relative) away from a rounding boundary flips
+# with odds about d / ulp, so expected is about sqrt(0.07 d) a stage: 2^-8 ->
+# 1.2% -> 2.9% (2.5-3.4% seen). gfx942, unvalidated on hardware: vLLM dequantizes
+# the dense linears to bf16 at load and keeps bf16 activations, the kernels
+# quantize four (the layer input, the q rank, the core's and wo_a's outputs):
+# four one-sided E4M3_RMS^2 (the q rank's through logits of std ~1), the same.
+ATTN_REL = 2 * E4M3_RMS
+# The MoE on the same bf16 input, rms over a row, in units of 2^-7 rms of the
+# row (a bf16 ulp at the row's rms or above). The quantized inputs and every f32
+# sum agree up to summation order; the paths differ in summing a row's six
+# routed down outputs and the shared expert's in bf16: the kernels in top-k
+# order, AITER's atomics in any. 2 x 6 roundings of running sums, each uniform
+# within half an ulp of a sum no larger than the row's (independent terms):
+# sqrt(12 / 12) ulp, split over the ranks' partials, which add in f32 and round
+# once more (1 / sqrt(6)): ~1.1 expected (0.6 seen), 2 allowed. The MXFP8 scale
+# rule of aiter#6548 alone is 2.0-2.4.
+MOE_ULPS = 2.0
+# gfx942, unvalidated on hardware: vLLM's MoE keeps bf16 activations, the
+# kernels quantize the input and the intermediate (MXFP8). The input's
+# E4M3_RMS reaches gate and up alike; silu(g) u carries u's error and g's times
+# g silu'(g) / silu(g) = 1 + g sigmoid(-g), whose rms weighted by silu(g)^2 (the
+# relative L2 gain) is <= 1.21 for g ~ N(0, s^2) at any s, and pointwise <= 1.28
+# for g > 0; then the intermediate's own: sqrt(1 + 1.28^2 + 1) E4M3_RMS = 6.9%.
+MOE_REL_942 = (1 + 1.28**2 + 1) ** 0.5 * E4M3_RMS
+U = 2.0**-24
+# the seam norm's rstd, relative (test_dsv41_mono_numerics' KAPPA["rstd"])
+RSTD = (33 / 2 + 2) * U
 
-    def comparable(key) -> bool:
-        i, n, p, a = key
-        if i in DRAFT:
-            return (n, a) in same
-        return (n, p) in same and token[(n, p)] == a
 
-    # Layer 0 sees the same inputs on both paths, but its FFN input differs by
-    # up to test_dsv41_mono_numerics' 1.2%, which random weights amplify
-    # through the MoE: 3%. Each later layer takes the previous one's slightly
-    # different output, which random weights amplify (2-4% by layer 4): 8%. A
-    # token whose top-6 routing is a near-tie on vLLM's path may pick another
-    # expert: a 0.4% input difference moves scores near 0.8 by about 3e-3, so
-    # 6th / 7th scores within 5e-3 at layer 0 and, past it, where the input
-    # carries the earlier layers' differences (0.4-0.7%), within 1e-2. Once it
-    # has, its residual stream differs and the later layers are exempt for it.
-    # The residual stream: 3% (0.5% seen). A layer the kernels no longer
-    # follow is off by far more, on every token.
-    # On gfx942 vLLM's path runs the MoE with bf16 activations, while the
-    # kernels quantize them to MXFP8 before both expert GEMMs, as on CDNA4.
-    # With these random weights that alone moves the FFN output by 4.65%
-    # (5.0% at most over 256 tokens), so layer 0 gets 6% there (5.3% seen).
-    # The later layers' 8% holds on gfx942 too (5.6% seen). The residual
-    # stream then differs by 1.0% after layer 1 and by up to 2.5% after layer
-    # 4, still under its 3%. That moves scores near 0.8 by up to about 2e-2,
-    # so past layer 0 a near-tie is a gap within 2e-2 there (1.1e-2 seen).
-    # And 22% of the tokens flip an expert at some layer, at 8 and at 42 rows
-    # alike, so up to a third may flip there instead of a quarter.
-    first_bound = 0.06 if arch == "gfx942" else 0.03
-    later_tie = 2e-2 if arch == "gfx942" else 1e-2
-    flip_divisor = 3 if arch == "gfx942" else 4
+def _ulp(v: torch.Tensor) -> torch.Tensor:
+    return R.ulp(v.abs().clamp(min=2.0**-126))
+
+
+def _fn64(fn: torch.Tensor) -> torch.Tensor:
+    """A seam's fn as the kernels read it: bf16 hi + lo."""
+    hi = fn.to(torch.bfloat16).float()
+    return hi.double() + (fn - hi).to(torch.bfloat16).double()
+
+
+def _mixes(res, seam, eps):
+    """(the f64 mixes of the residual rows, the first-order bound on a seam's
+    computed ones about them, test_dsv41_mono_numerics' _mix_bound)."""
+    from tests.models.deepseek_v41.amd_specialized_decode.test_dsv41_mono_numerics import (  # noqa: E501
+        _mix_bound,
+    )
+
+    fn, scale, base = seam
+    rms_eps, hc_eps, iters = eps
+    x = res.flatten(1).to(torch.bfloat16)
+    fn = _fn64(fn)
+    hc = res.shape[1]
+    want = R.mhc_mixes(x, fn, scale, base, hc, rms_eps, hc_eps, hc_eps, 2.0, iters)
+    return want, _mix_bound(x, fn, scale, base, rms_eps, hc_eps, iters)
+
+
+def _fold_err(mid, inputs):
+    """How far the two paths' attention seam residuals ``mid`` may differ on
+    equal inputs (x, residual, post, comb): each path's f32 sum of post x + sum
+    comb r (5 rounded products, 4 adds) within 5u of the sum of its terms, so
+    the two bf16 results an ulp and those 10u apart."""
+    x, res, post, comb = inputs
+    err = _ulp(mid)
+    if res is not None and x is not None and x.dim() == 2 and res.dim() == 3:
+        x, res, post, comb = (t.double() for t in inputs)
+        terms = (post.reshape(*res.shape[:2], 1) * x[:, None]).abs()
+        terms = terms + torch.einsum("mij,mid->mjd", comb.abs(), res.abs())
+        err = err + 10 * U * terms
+    return err
+
+
+def _mixes_match(tag, got, got_v, res, res_v, seam, eps) -> None:
+    """A seam's (post, comb, pre) of both paths, each from its own residual:
+    within the f64 mixes' difference and each path's _mix_bound."""
+    (want, b), (want_v, b_v) = (_mixes(t.double(), seam, eps) for t in (res, res_v))
+    for i, name, k in ((0, "pre", 2), (1, "post", 0), (2, "comb", 1)):
+        a, a_v = (t.double().view_as(want[i]) for t in (got[k], got_v[k]))
+        allow = (want[i] - want_v[i]).abs() + b[i] + b_v[i]
+        err = (a - a_v).abs()
+        assert (err <= allow).all(), (tag, name, (err / allow).max().item())
+
+
+def _seam(r: dict, c: dict) -> None:
+    """The FFN seam of both paths: the residual and the MoE input each within
+    their roundings (bf16, f32 sums) and the attention seam's mixes, one or two
+    ulps, plus the difference of the attention outputs where vLLM's path took
+    its own (``attn_vllm``); the layer's mixes as ``_mixes_match``."""
+    f64 = lambda ts: [t.double() for t in ts]  # noqa: E731
+    attn, mid, comb_a, pre_a, post_a = f64(
+        (r["attn"][0], r["res_mid"], r["comb_a"], r["pre_a"], r["post_a"])
+    )
+    post_a = post_a.reshape(*mid.shape[:2], 1)
+    d_attn = 0
+    if r.get("attn_vllm") is not None:
+        d_attn = post_a * (attn - r["attn_vllm"].double()).abs()[:, None]
+    _, res, *mixes = f64(r["mono"])
+    _, res_v, *mixes_v = f64(r["vllm"])
+    _, (bpre, bpost, bcomb) = _mixes(mid, c["seams"]["attn"], c["eps"])
+    # the FFN seam's fold as the attention seam's, on the residuals and the
+    # attention seam's mixes, each path's within _mix_bound of the f64
+    terms = (post_a * attn[:, None]).abs() + torch.einsum(
+        "mij,mid->mjd", comb_a, mid.abs()
+    )
+    bound = (
+        _ulp(torch.maximum(res.abs(), res_v.abs()))
+        + d_attn
+        + 10 * U * terms
+        + torch.einsum("mij,mid->mjd", comb_a, _fold_err(mid, r["inputs"]))
+        + 2 * bpost[..., None] * attn[:, None].abs()
+        + 2 * torch.einsum("mij,mid->mjd", bcomb, mid.abs())
+    )
+    err = (res - res_v).abs()
+    assert (err <= bound).all(), ("residual", (err / bound).max().item())
+    # the MoE input: rmsnorm(sum pre_a r) w, the sum rounded to bf16, then the
+    # normed rows
+    lin = torch.einsum("mi,mid->md", pre_a, res)
+    d_lin = (
+        _ulp(lin)
+        + torch.einsum("mi,mid->md", pre_a, err)
+        + torch.einsum("mi,mid->md", 2 * bpre + 8 * U * pre_a, res.abs())
+    )
+    rstd = torch.rsqrt(lin.square().mean(-1, keepdim=True) + c["eps"][0])
+    d_rstd = (lin.abs() * d_lin).sum(-1, keepdim=True) / lin.square().sum(
+        -1, keepdim=True
+    ) + 2 * RSTD
+    w = c["ffn_norm"].double()
+    moe_in, moe_in_v = r["moe_in"].double(), r["moe_in_vllm"].double()
+    bound = (
+        _ulp(torch.maximum(moe_in.abs(), moe_in_v.abs()))
+        + w.abs() * rstd * d_lin
+        + (w * lin * rstd).abs() * (d_rstd + 4 * U)
+    )
+    err = (moe_in - moe_in_v).abs()
+    assert (err <= bound).all(), ("MoE input", (err / bound).max().item())
+    _mixes_match("FFN seam", mixes, mixes_v, res, res_v, c["seams"]["ffn"], c["eps"])
+
+
+def _route_ties(x: torch.Tensor, c: dict) -> torch.Tensor:
+    """Rows whose routing two f32 router GEMVs of the bf16 rows x may pick
+    differently. Each sums the same exact products (bf16 x bf16) in its own
+    order, each add rounding to nearest: errors uniform within half an ulp,
+    2^-24 |S_i| of the running sum, so sqrt(sum S_i^2 / 3) 2^-24 rms, taken at
+    6 sigma (the sequential order's S_i). A score sqrt(softplus(l)) + b moves
+    by that times its slope, plus 4u of its sqrt and add; a tie where the k-th
+    and (k+1)-th scores are closer than twice their two errors."""
+    x, w, k = x.double(), c["gate"].double(), c["topk"]
+    logit = x @ w.T
+    sp = torch.nn.functional.softplus(logit)
+    score = sp.sqrt() + c["bias"].double()
+    edge = score.sort(-1, descending=True).indices[:, k - 1 : k + 1]
+    sums = (x[:, None] * w[edge]).cumsum(-1)
+    dl = 6 * 2.0**-24 * (sums.square().sum(-1) / 3).sqrt()
+    lg, s = logit.gather(1, edge), sp.gather(1, edge).sqrt()
+    ds = torch.sigmoid(lg) / (2 * s.clamp(min=2.0**-126)) * dl
+    ds = ds + 4 * U * score.gather(1, edge).abs()
+    margin = score.gather(1, edge).diff(dim=1).abs()[:, 0]
+    return margin < 2 * ds.sum(-1)
+
+
+def _moe_parity(got, want, moe_in, c: dict, gfx942: bool = False) -> None:
+    """The MoE output of both paths on the same input ``moe_in``, a row within
+    MOE_ULPS (MOE_REL_942 on gfx942) unless its routing is a tie."""
+    got, want = got.double(), want.double()
+    if gfx942:
+        err = (got - want).norm(dim=-1) / want.norm(dim=-1)
+        bad = err > MOE_REL_942
+    else:
+        unit = 2.0**-7 * want.square().mean(-1).sqrt()
+        err = (got - want).square().mean(-1).sqrt() / unit
+        bad = err > MOE_ULPS
+    ties = _route_ties(moe_in, c)
+    assert not (bad & ~ties).any(), ("MoE", err.max().item())
+
+
+def _parity(path: str, tp: int, layers) -> None:
+    """Every compared step of every layer in ``layers``: the mono step against
+    vLLM's path on the same inputs and caches, stage by stage (see
+    ``capture_steps``), within the budgets above. A row whose routing is a tie
+    within the router's rounding may take another expert."""
+    gfx942 = _arch() == "gfx942"
     for rank in range(tp):
-        got, _ = torch.load(f"{path}/on.rank{rank}")
-        want, gaps = torch.load(f"{path}/off.rank{rank}")
-        keys = sorted(k for k in got.keys() & want.keys() if comparable(k))
-        rows = {(k[0] in DRAFT, *k[1:]) for k in keys}
-        for group in {i in DRAFT for i in layers}:
-            assert sum(r[0] == group for r in rows) >= len(prompts), keys
-        flipped: set = set()
-        for k in keys:
-            i, row = k[0], (k[0] in DRAFT, *k[1:])
-            if i not in layers or row in flipped:
-                continue
-            (x, res), (x_ref, res_ref) = got[k], want[k]
-            err = _rel(res, res_ref)
-            assert err < 0.03, (rank, k, "residual", err)
-            bound = first_bound if i == 0 else 0.08
-            err = _rel(x, x_ref)
-            if err >= bound:
-                tie = 5e-3 if i == 0 else later_tie
-                assert gaps[k] < tie, (rank, k, "x", err)
-                flipped.add(row)
-        assert len(flipped) <= len(rows) // flip_divisor, (rank, sorted(flipped))
+        records, consts = torch.load(f"{path}.rank{rank}")
+        assert {r["layer"] for r in records} == set(layers), sorted(consts)
+        for r in records:
+            c, tag = consts[r["layer"]], (rank, r["layer"])
+            got, want = (t.double() for t in r["attn"])
+            err = (got - want).norm(dim=-1) / want.norm(dim=-1)
+            assert (err <= ATTN_REL).all(), (tag, "attention", err.max().item())
+            _seam(r, c)
+            got, want = r["moe"]
+            _moe_parity(got, want, r["moe_in"], c, gfx942)
 
 
 @pytest.mark.parametrize(("tp", "rows"), [(2, 8), (4, 8), (4, 42)])
@@ -493,19 +731,15 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
     _skip_unless(arch, tp)
     if (tp, rows) not in CASES[arch]:
         pytest.skip(f"not a case of {arch}")
-    prompts = _prompts(rows)
-    on, before, probe_on = _decode(
-        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch
-    )
-    off, _, probe_off = _decode(
-        vllm_runner, monkeypatch, tp, False, prompts, f"{tmp_path}/off", arch
+    path = f"{tmp_path}/steps"
+    _, before, after = _decode(
+        vllm_runner, monkeypatch, tp, _prompts(rows), path, arch, compare=True
     )
     # both layer kinds took the mono path on every rank, at every decode step,
     # and on gfx942 from the weight copies made at load
     layers = {i: "whole" if i in WHOLE else "ffn" for i in WHOLE + FFN}
-    _engaged(before, probe_on, layers, STEPS)
-    assert all(set(r["layers"].values()) == {None} for r in probe_off)
-    _matches(prompts, on, off, str(tmp_path), tp, layers)
+    _engaged(before, after, layers, STEPS)
+    _parity(path, tp, layers)
 
 
 @pytest.mark.parametrize("tp", [4])
@@ -517,19 +751,14 @@ def test_mono_dspark_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
     _skip_unless(arch, tp)
     if arch != "cdna4":
         pytest.skip("the DSpark draft layers run whole on CDNA4")
-    # a draft block's rows reach 5 past a request's last position
-    prompts = _prompts(8, gap=2 * STEPS + DSPARK_TOKENS)
-    run = dict(arch=arch, spec=True)
-    on, before, probe_on = _decode(
-        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", **run
-    )
-    off, _, probe_off = _decode(
-        vllm_runner, monkeypatch, tp, False, prompts, f"{tmp_path}/off", **run
-    )
+    path = f"{tmp_path}/steps"
+    _, before, after = _decode(
+        vllm_runner, monkeypatch, tp, _prompts(8), path, arch, spec=True,
+        compare=True,
+    )  # fmt: skip
     layers = {i: "whole" for i in WHOLE} | {i: "draft" for i in DRAFT}
-    _engaged(before, probe_on, layers, 1)
-    assert all(set(r["layers"].values()) == {None} for r in probe_off)
-    _matches(prompts, on, off, str(tmp_path), tp, layers)
+    _engaged(before, after, layers, 1)
+    _parity(path, tp, layers)
 
 
 @pytest.mark.parametrize("tp", [2])
@@ -544,18 +773,15 @@ def test_mono_decode_full_graphs_match_eager(vllm_runner, monkeypatch, tmp_path,
         pytest.skip("the 8-row graph pads only on CDNA4 (gfx942: 6-row passes)")
     prompts = _prompts(5)
     eager, before_e, after_e = _decode(
-        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/eager", arch
+        vllm_runner, monkeypatch, tp, prompts, f"{tmp_path}/eager", arch
     )
     graphs, before_g, after_g = _decode(
-        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/graphs", arch,
+        vllm_runner, monkeypatch, tp, prompts, f"{tmp_path}/graphs", arch,
         graphs=True,
     )  # fmt: skip
     layers = {i: "whole" for i in WHOLE}
     _engaged(before_e, after_e, layers, STEPS)
     _engaged(before_g, after_g, layers, STEPS, replayed=True)
-    for rank in range(tp):
-        assert torch.load(f"{tmp_path}/eager.rank{rank}")[0], rank
-        assert not torch.load(f"{tmp_path}/graphs.rank{rank}")[0], rank
     check_logprobs_close(
         outputs_0_lst=[(o.token_ids, o.text, o.logprobs) for o in eager],
         outputs_1_lst=[(o.token_ids, o.text, o.logprobs) for o in graphs],

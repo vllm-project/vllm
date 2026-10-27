@@ -59,13 +59,6 @@ H, INTER = ffn.HIDDEN, ffn.INTER
 SHORT_WAIT = 10_000_000  # 100 ms of the 100 MHz clock
 
 
-def _metrics(got, want):
-    got, want = got.float().flatten(), want.float().flatten()
-    cos = torch.nn.functional.cosine_similarity(got, want, dim=0).item()
-    rel = ((got - want).norm() / want.norm()).item()
-    return cos, rel
-
-
 def _weights(rank=0, seed=0):
     """The checkpoint's MXFP4 experts (``raw``) and vLLM's post-load copies;
     ``rank`` > 0 draws its own experts (a TP shard), the replicated tensors
@@ -157,10 +150,20 @@ def _native_route(logits, bias):
     return ids, wts
 
 
-def _clear_choices(logits, bias, margin):
-    """Rows whose 4th and 5th biased scores differ by more than ``margin``."""
-    top = (logits.sigmoid() + bias).topk(ffn.TOPK + 1, dim=-1).values
-    return (top[:, ffn.TOPK - 1] - top[:, ffn.TOPK]) > margin
+def _native_router(x, router):
+    """The FP32 router GEMM ``GateLinear`` runs on gfx950 up to 32 rows."""
+    from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (
+        rocm_fp32_router_gemm,
+    )
+
+    return rocm_fp32_router_gemm(x, router)
+
+
+def _clear_choices(logits, bias, err):
+    """Rows whose float64 4th and 5th biased scores differ by more than twice
+    ``err``, the most any path's scores may be off: both pick the same four."""
+    top = (logits.double().sigmoid() + bias.double()).topk(ffn.TOPK + 1, dim=-1)
+    return (top.values[:, ffn.TOPK - 1] - top.values[:, ffn.TOPK]) > 2 * err
 
 
 def _pairs(region, n):
@@ -205,13 +208,14 @@ def _run(weights, s, seed=1, inputs=None, slots=None):
     parts = _pairs(runner.region(s, "logit"), s * ffn.EXPERTS * ffn.ROUTER_PARTS)
     parts = parts.view(torch.float32).view(s, ffn.EXPERTS, ffn.ROUTER_PARTS)
     route = _pairs(runner.region(s, "route"), s * 2 * ffn.TOPK).view(s, 2 * ffn.TOPK)
+    parts = parts.view(s, ffn.EXPERTS, 4, ffn.ROUTER_PARTS // 4)
     return SimpleNamespace(
         part=part,
         residual=residual,
         out=out,
         res_out=res_out,
         x=x,
-        logits=parts.sum(-1),
+        logits=_f32_sum(_f32_sum(parts.double())).float(),
         ids=route[:, : ffn.TOPK].contiguous(),
         wts=route[:, ffn.TOPK :].contiguous().view(torch.float32),
     )
@@ -220,36 +224,52 @@ def _run(weights, s, seed=1, inputs=None, slots=None):
 @pytest.mark.parametrize("s", [1, 3, 16])
 def test_ffn_stages_match_vllm_ops(weights, s):
     """Seam residual (exact), Gemma norm, FP32 router, top-4 and the shared +
-    routed A16W4 experts, each against its native op."""
+    routed A16W4 experts, each against its native op on the kernel's own input
+    to that stage, within the two paths' a-priori bounds."""
     r = _run(weights, s)
     want_x, want_res = gemma_fused_add_rmsnorm(
         r.part, r.residual, weights.post_norm, ffn.EPS
     )
     torch.testing.assert_close(r.res_out, want_res, rtol=0, atol=0)
-    cos, rel = _metrics(r.x, want_x)
-    assert cos > 0.99999 and rel < 4e-3
+    steps, flips, limit = _norm_flips(r.x, want_x)
+    print(f"s={s}: X {steps:.0f} step apart at most, {flips} flips (<= {limit:.0f})")
+    assert steps <= 1 and flips <= limit
 
-    want_logits = r.x.float() @ weights.router.T
-    torch.testing.assert_close(r.logits, want_logits, rtol=1e-4, atol=1e-4)
+    want_logits = _native_router(r.x, weights.router)
+    err = _ratio(
+        (r.logits.double() - want_logits.double()).abs(),
+        _router_err(r.x, weights.router),
+    )
+    print(f"s={s}: logits {err:.2g} of their bound")
+    assert err <= 1
 
     ids, wts = _native_route(r.logits, weights.router_bias)
-    clear = _clear_choices(r.logits, weights.router_bias, 1e-4)
+    # on the same f32 logits each path's scores are within SCORE_ERR, and
+    # AITER's weights (rcp(1 + exp2(-LOG2E x)), 3 adds, the division and
+    # the product) within the kernel's own bound: twice it apart at most
+    clear = _clear_choices(r.logits, weights.router_bias, SCORE_ERR)
     assert clear.any()
     got_ids, order = r.ids.sort(-1)
     want_ids, want_order = ids.sort(-1)
     assert torch.equal(got_ids[clear], want_ids[clear])
-    torch.testing.assert_close(
-        r.wts.gather(1, order)[clear],
-        wts.gather(1, want_order)[clear],
-        rtol=1e-5,
-        atol=1e-6,
-    )
+    got_w, want_w = r.wts.gather(1, order)[clear], wts.gather(1, want_order)[clear]
+    logits = r.logits.gather(1, got_ids.long())[clear].double()
+    ek = _weight_err(logits)
+    assert _ratio((got_w.double() - want_w.double()).abs(), 2 * ek * want_w) <= 1
 
     shared = torch.full((s, 1), ffn.SHARED, dtype=torch.int32, device=r.x.device)
     all_ids = torch.cat([r.ids, shared], 1)
     all_wts = torch.cat([r.wts, torch.ones_like(r.wts[:, :1])], 1)
-    cos, rel = _metrics(r.out, _native_experts(r.x, weights, all_ids, all_wts))
-    assert cos > 0.9999 and rel < 1e-2
+    want = _native_experts(r.x, weights, all_ids, all_wts)
+    terms = torch.stack(
+        [
+            _native_experts(r.x, weights, all_ids[:, [k]], all_wts[:, [k]])
+            for k in range(ffn.TOPK + 1)
+        ]
+    )
+    bound, var = _combine_budget(terms.double())
+    scale = terms.double().abs().sum(0)
+    _assert_combine(_combine_stats(r.out, want, bound, var, scale), f"s={s}")
 
 
 def test_route_ties(weights):
@@ -269,14 +289,15 @@ def test_route_ties(weights):
 
 
 def test_route_near_ties_match_vllm_ops(weights):
-    """The selection matches AITER's on native FP32 logits wherever the 4th/5th
-    margin exceeds the logits' measured difference times the maximal sigmoid
-    slope, twice."""
+    """The selection matches AITER's on vLLM's FP32 router logits wherever the
+    float64 4th/5th margin exceeds twice the most either path's scores may be
+    off: the sigmoid's slope (1/4) times its logits' bound, plus SCORE_ERR."""
     r = _run(weights, 16, seed=3)
-    logits = r.x.float() @ weights.router.T
-    bound = (r.logits - logits).abs().max().item() * 0.25 * 2
+    logits = _native_router(r.x, weights.router)
     ids, _ = _native_route(logits, weights.router_bias)
-    clear = _clear_choices(logits, weights.router_bias, bound)
+    exact = r.x.double() @ weights.router.double().T
+    err = _router_err(r.x, weights.router).amax(-1, keepdim=True) / 4 + SCORE_ERR
+    clear = _clear_choices(exact, weights.router_bias, err.squeeze(-1))
     assert clear.float().mean() > 0.5
     assert torch.equal(r.ids.sort(-1).values[clear], ids.sort(-1).values[clear])
 
@@ -294,6 +315,119 @@ def _sigmoid_err(x):
 # a sigmoid + bias score's error: the sigmoid's (5 + 2 c) U s <= 5.45 U (c s <=
 # 0.224), the add's half ulp of a score below 4
 SCORE_ERR = 8 * U
+# vLLM's FP32 router GEMM: each lane sums K / BLOCK_K products in order, then
+# tl.sum reduces BLOCK_K lanes, at most BLOCK_K / 64 a thread in order and a
+# log2 tree: depth <= 24 + 4 + 8 + the product at BLOCK_K 256, 3 + 32 + 11 + 1
+# at 2048, so within 48 U of sum |x w|
+NATIVE_ROUTER_DEPTH = 48
+# both norms' f32 relative errors before the bf16 rounding, the variance's
+# halved by the rsqrt: the kernel's SSQ parts (3 TASK_TRIPLES U) and its I/O
+# norm bound; the Triton op's mean square (8 a thread in order, a 10-level
+# tree, the products, the division, eps: 20 U), its add, sqrt, division, two
+# products and 1 + w
+MONO_NORM_ETA = (0.5 * (3 * ffn.TASK_TRIPLES + ffn.SEAM_TASKS + 2) + 6) * U
+NORM_ETA = MONO_NORM_ETA + (0.5 * 20 + 6) * U
+# Bernstein's tail for the count and mean-square checks: exp(-40) per check
+TAIL = 40.0
+
+
+def _router_err(x, router):
+    """Both paths' logits bounds on the same X: the kernel's 16 parts within
+    (ROUTER_K + 1) U of their sum |x w| (the I/O bound) summed in two rounds
+    of 4 adds, and vLLM's GEMM within its depth."""
+    cond = x.double().abs() @ router.double().abs().T
+    return (ffn.ROUTER_K + 1 + 6 + NATIVE_ROUTER_DEPTH) * U * cond
+
+
+def _weight_err(logits):
+    """A route weight 2 s_k / sum s's relative error on the picked f32 logits:
+    s_k within its sigmoid's error, the sum within its terms' mean error and 3
+    adds, the division and the product within U each."""
+    sk, ek = torch.sigmoid(logits), _sigmoid_err(logits)
+    return ek + (sk * ek).sum(-1, keepdim=True) / sk.sum(-1, keepdim=True) + 5 * U
+
+
+def _count_limit(mean):
+    """Bernstein's bound on a sum of independent Bernoulli whose means sum to
+    at most ``mean``, exceeded with probability exp(-TAIL)."""
+    return mean + TAIL / 3 + (TAIL**2 / 9 + 2 * TAIL * mean) ** 0.5
+
+
+def _norm_flips(got, want, eta=NORM_ETA):
+    """Two bf16 roundings of f32 norms each within ``eta`` (both paths) of the
+    exact one land at most one step apart, and only where a rounding boundary
+    falls between them: with a uniform position in its step, at most eta |x| /
+    ulp(x) a chance. Returns the largest difference in steps, the flips and
+    their Bernstein limit."""
+    diff = (got.double() - want.double()).abs()
+    step = R.ulp(torch.maximum(got.double().abs(), want.double().abs()))
+    expected = (eta * want.double().abs() / R.ulp(want.double())).sum().item()
+    return (diff / step).max().item(), int((diff > 0).sum()), _count_limit(expected)
+
+
+def _combine_budget(terms):
+    """The two paths' sums of the same bf16 expert terms ``terms`` [k, ..., H]
+    (the native op's, one expert a call: f32 w v rounded once onto a zeroed
+    output) -> per element, a bound on |mono - native| and the variance of the
+    difference if every rounding is uniform within half an ulp. Both round each
+    term's f32 product once; their f32 GEMVs and activations differ by about
+    sqrt(K) U of the dot products' scale, under 2^-8 of a bf16 ulp, and the
+    rare MID element rounding apart moves a term by |w2| ulp(mid), about 2^-4
+    ulp of the term (sqrt(INTER) such products), so the two roundings land at
+    most one step apart. Each path then makes k - 1 bf16 adds (mono shared
+    first then in top-k order, native's atomics in any order), each within half
+    an ulp of a partial sum: a subset sum, at most the larger of the positive
+    and the negative terms' sums."""
+    k = terms.shape[0]
+    mag = terms.abs()
+    step = R.ulp(mag + R.ulp(mag))
+    partial = torch.maximum(terms.clamp(min=0).sum(0), (-terms).clamp(min=0).sum(0))
+    add = R.ulp(partial + step.sum(0) + (k - 1) * R.ulp(mag.sum(0)))
+    bound = step.sum(0) + (k - 1) * add
+    var = (2 * step.square().sum(0) + 2 * (k - 1) * add.square()) / 12
+    return bound, var
+
+
+def _combine_stats(got, want, bound, var, scale):
+    """The largest difference over its bound and in ulps of ``scale``, and the
+    sums for the mean-square check: squares, the variance model, and
+    Bernstein's terms (each square is at most its bound squared); and the
+    signed sums for the bias checks, plain and along ``want``'s signs."""
+    signed = got.double() - want.double()
+    diff = signed.abs()
+    b2 = bound.square()
+    return dict(
+        ratio=_ratio(diff, bound),
+        ulps=(diff / R.ulp(scale)).max().item(),
+        n=diff.numel(),
+        bias=signed.sum().item(),
+        proj=(signed * want.double().sign()).sum().item(),
+        sq=diff.square().sum().item(),
+        var=var.sum().item(),
+        b2var=(b2 * var).sum().item(),
+        b2max=b2.max().item(),
+    )
+
+
+def _assert_combine(stats, label):
+    """Every element within its bound; the mean square within the variance
+    model's plus Bernstein's tail. Every rounding of both paths is to nearest,
+    its error symmetric: the differences have mean zero, so their sum, plain
+    and along the reference's signs (a scale or a directed rounding), stays
+    within Bernstein's two-sided tail."""
+    tail = TAIL * stats["b2max"] / 3
+    slack = tail + (tail**2 + 2 * TAIL * stats["b2var"]) ** 0.5
+    tail = TAIL * stats["b2max"] ** 0.5 / 3
+    drift = tail + (tail**2 + 2 * TAIL * stats["var"]) ** 0.5
+    bias = max(abs(stats["bias"]), abs(stats["proj"])) / drift
+    print(
+        f"{label}: MoE {stats['ratio']:.2f} of its bound, max {stats['ulps']:.2f} "
+        f"ulp of sum |terms|, rms {(stats['sq'] / stats['var']) ** 0.5:.2f} of "
+        f"the model's, bias {bias:.2f} of its tail"
+    )
+    assert stats["ratio"] <= 1
+    assert stats["sq"] <= stats["var"] + slack
+    assert bias <= 1
 
 
 def _mfma_err(x, w, waves):
@@ -418,7 +552,8 @@ def _stage_errors(w, r, parts, residual, valid, rank=0, experts=ffn.Experts.ALL)
     m["ssq"] = _ratio((r.ssq.view(-1, ffn.SEAM_TASKS)[v] - sq).abs(), width * U * sq)
 
     # norm on the kernel's SRES and SSQ: the 128 parts' sum, two divisions,
-    # sqrt, eps, two products and 1 + w, each within 1 f32 ulp
+    # sqrt, eps, two products and 1 + w, each rounded to nearest (U; LLVM's
+    # IEEE division and sqrt)
     eta = (0.5 * (ffn.SEAM_TASKS + 2) + 6) * U
     var = r.ssq.view(-1, ffn.SEAM_TASKS)[v].double().sum(-1, keepdim=True) / H
     xn = x * torch.rsqrt(var + ffn.EPS) * (1 + norm_w.double())
@@ -447,10 +582,7 @@ def _stage_errors(w, r, parts, residual, valid, rank=0, experts=ffn.Experts.ALL)
     m["route_rows"] = int(clear.sum())
     m["tie_rows"] = int(((gaps == 0).any(-1) & clear).sum())
     _, wts, _ = R.route(logits, None, ffn.TOPK, "sigmoid", ffn.ROUTED_SCALE, ids)
-    # 2 s_k / sum s: s_k within e_k, the sum within its terms' mean error and
-    # 3 adds, the division and the product within U each
-    sk, ek = (f(logits.gather(1, ids)) for f in (torch.sigmoid, _sigmoid_err))
-    ek = ek + (sk * ek).sum(-1, keepdim=True) / sk.sum(-1, keepdim=True) + 5 * U
+    ek = _weight_err(logits.gather(1, ids))
     m["route_w"] = _ratio((r.wts[v].double() - wts).abs(), ek * wts)
     m["pad"] = bool(
         (r.ids[~v] == -1).all()

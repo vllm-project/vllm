@@ -10,8 +10,11 @@ at TP8 shapes:
   reproduced. Every bound is a priori (error over its bound <= 1), derived
   from the stage's fp32 operations: U = 2^-24 a rounding, v_exp_f32 / v_rcp_f32
   / v_rsq_f32 1 ulp (2 U), the division IEEE, bf16 x bf16 products exact.
-- ``*_matches_vllm_ops``: K1 and K2 against the ops vLLM runs for the same
-  spec-verify step (nightly).
+- ``*_matches_vllm_ops`` (nightly): every K1 / K2 stage and the op vLLM runs
+  for it, on the kernel's own input to that stage, must both round the stage's
+  float64 value c +- r: r from both paths' fp32 roundings (Hoeffding) plus each
+  bf16 / MXFP4 rounding the two may take apart, so they agree but within an
+  ulp of c's rounding points.
 - The protocol: a CUDA graph of K2 replayed 300 times, bit-identical, and a
   stalled rank (the fault hook): every rank's launch finishes and the output
   rank's flags fail the step.
@@ -35,8 +38,6 @@ from tests.utils import (
 from vllm.platforms import current_platform
 
 bf = torch.bfloat16
-# measured (vllm_ops only): vLLM's ops document no error bound
-COS_MIN = 0.9999
 K1_STEPS = 6
 U = 2.0**-24
 
@@ -52,16 +53,6 @@ def _on_gfx950() -> bool:
 needs_gfx950 = pytest.mark.skipif(
     not _on_gfx950(), reason="the K3 mono kernels need gfx950 (MI355X)"
 )
-
-
-def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
-    a, b = a.float().reshape(-1), b.float().reshape(-1)
-    return F.cosine_similarity(a, b, dim=0).item()
-
-
-def _rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
-    a, b = a.float(), b.float()
-    return ((a - b).norm() / b.norm()).item()
 
 
 def _randn(g, *shape, scale=1.0, dtype=bf):
@@ -216,6 +207,200 @@ def _merge_max(m: dict, new: dict) -> None:
         m[k] = max(m.get(k, 0.0), v)
 
 
+# ------------------------------------------------- vLLM parity (nightly)
+# A stage's two paths (the kernel; vLLM's op on the kernel's input to it)
+# compute the same float64 value c, each with its own fp32 roundings, then round
+# to the stage's format. A rounding is a zero-mean error within +-h (U |partial|
+# an add, k U |y| a function good to k U); taken independent (Higham & Mary's
+# probabilistic model), Hoeffding bounds their sum by LAM sqrt(sum h^2) but for
+# 1e-12 of the values (a run checks ~1e7). Variances below are sum h^2 / 3,
+# over both paths.
+LAM = math.sqrt(2 * math.log(2e12))
+
+
+def _sum_var(t2, t, depth):
+    """One fp32 sum of terms t through at most ``depth`` adds (t2 = sum t^2,
+    t = sum t): each add's rounding within +-U |partial|, the partials' sum of
+    squares taken as depth (t2 + t^2), above its mean for terms of random sign
+    (a chain of n: n / 2 t2 + n / 3 t^2; a tree: depth t2 + 2 t^2)."""
+    return U * U / 3 * depth * (t2 + t * t)
+
+
+def _fn_var(y, k):
+    return (k * U * y) ** 2 / 3
+
+
+def _r(var):
+    """The Hoeffding radius of a sum of roundings of variance ``var``."""
+    return LAM * (3 * var).sqrt()
+
+
+def _rounds(c, r, fmt=bf):
+    """[lo, hi]: what a value in c +- r rounds to in ``fmt`` (monotone)."""
+    fn = R.bf16_rne if fmt == bf else R.f32_rne
+    return fn(c - r), fn(c + r)
+
+
+def _outside(got, c, r, fmt=bf) -> float:
+    """How far ``got`` lies outside [lo, hi] of c +- r, in ulps of c."""
+    lo, hi = _rounds(c.double(), r, fmt)
+    g = got.double()
+    out = (lo - g).clamp(min=0) + (g - hi).clamp(min=0)
+    out = out / R.ulp(c.double().abs().clamp(min=2.0**-126), fmt)
+    return out.max().item() if out.numel() else 0.0
+
+
+def _ulps(a, b, c) -> float:
+    """|a - b| in bf16 ulps of |c|, floored at its row's rms (a value from
+    cancellation judged on its row's scale)."""
+    a, b, c = a.double(), b.double(), c.double()
+    floor = c.square().mean(-1, keepdim=True).sqrt()
+    return ((a - b).abs() / R.ulp(torch.maximum(c.abs(), floor))).max().item()
+
+
+def _both(m, name, got, want, c, r, fmt=bf, r_v=None) -> None:
+    """Records how far the kernel's ``got`` (m[name]) and vLLM's ``want``
+    (m[name_v], against r_v if given) lie outside c +- r (ulps of c, 0
+    inside), and their largest gap (m[name_ulps], _ulps)."""
+    for key, val, rr in (
+        (name, got, r),
+        (name + "_v", want, r if r_v is None else r_v),
+    ):
+        m[key] = max(m.get(key, 0.0), _outside(val, c, rr, fmt))
+    m[name + "_ulps"] = max(m.get(name + "_ulps", 0.0), _ulps(got, want, c))
+
+
+def _split_var(x, w, parts: int):
+    """The extra variance of a bf16 x @ w^T whose K is split into ``parts``
+    partials each rounded to bf16 and summed in bf16 (AITER's FlyDSL hgemm,
+    vLLM's linear on gfx950: slice-K waves meet in a bf16 LDS tile, split-K
+    CTAs add with bf16 atomics): each rounding within half an ulp (<= 2^-8 of
+    the value), a partial's square taken at its mean for terms of random sign
+    (t2 / parts + (t / parts)^2), a running sum's at t2 + t^2."""
+    if parts == 1:
+        return 0.0
+    x, w = x.double(), w.double()
+    t2, t = (x * x) @ (w * w).T, x @ w.T
+    sq = parts * (t2 / parts + (t / parts) ** 2) + (parts - 1) * (t2 + t * t)
+    return 2.0**-16 / 3 * sq
+
+
+def _attn_res_var(prefix, blocks, w_norm, w_qk, w_out, eps, out_eps):
+    """R.attn_res and both paths' fp32 error variance: every sum over D 63
+    deep in all (the kernel's 21; vLLM's Triton kernel 42: 8192 / (64 lanes x
+    4 warps) = 32 a thread, a 6-step butterfly, 4 warps), exp2 / rsq / rcp 2 U,
+    first order through the softmax and both norms."""
+    dd = 21 + 42
+    src = torch.cat([blocks.double(), prefix.double()[:, None]], 1)
+    D = src.size(-1)
+    wq = w_norm.double() * w_qk.double()
+    ss = src.square().sum(-1)
+    rstd = torch.rsqrt(ss / D + eps)
+    v_rstd = (rstd**3 / 2 / D) ** 2 * _sum_var((src**4).sum(-1), ss, dd)
+    v_rstd = v_rstd + 2 * _fn_var(rstd, 4)
+    dq = src @ wq
+    lg = dq * rstd
+    v_lg = rstd**2 * _sum_var((src * src) @ (wq * wq), dq, dd) + dq**2 * v_rstd
+    v_lg = v_lg + 2 * _fn_var(lg, 2)
+    p = torch.softmax(lg, -1)
+    v_p = p**2 * (v_lg + (p**2 * v_lg).sum(-1, keepdim=True)) + 2 * _fn_var(p, 6)
+    mixed = (p[..., None] * src).sum(1)
+    v_mixed = (v_p[..., None] * src**2).sum(1)
+    v_mixed = v_mixed + _sum_var((p[..., None] * src).square().sum(1), mixed, 18)
+    ms = mixed.square().sum(-1, keepdim=True)
+    ro = torch.rsqrt(ms / D + out_eps)
+    proj = torch.einsum("md,mid->mi", mixed, src)
+    v_ms = 4 * (v_p * proj**2).sum(-1, keepdim=True)
+    v_ms = v_ms + _sum_var((mixed**4).sum(-1, keepdim=True), ms, dd)
+    v_ro = (ro**3 / 2 / D) ** 2 * v_ms + 2 * _fn_var(ro, 4)
+    w = w_out.double()
+    y = mixed * ro * w
+    v_y = (ro * w) ** 2 * v_mixed + (mixed * w) ** 2 * v_ro + 2 * _fn_var(y, 2)
+    return y, v_y
+
+
+def _dot_var(x, w, depth=None):
+    """The float64 x @ w^T and both paths' fp32 error variance over its exact
+    products, ``depth`` deep (default K: vLLM's GEMMs document no order)."""
+    x, w = x.double(), w.double()
+    c = x @ w.T
+    depth = x.size(-1) if depth is None else depth
+    return c, 2 * _sum_var((x * x) @ (w * w).T, c, depth)
+
+
+def _l2n_var(c, v, scale=1.0):
+    """The l2-normed x / sqrt(sum x^2 + 1e-6) scale, x to variance v (first
+    order), plus both paths' 128-deep sum and rsq."""
+    n2 = c.square().sum(-1, keepdim=True) + 1e-6
+    y = c / n2.sqrt()
+    y2 = y * y
+    vy = (v * (1 - y2) ** 2 + y2 * ((y2 * v).sum(-1, keepdim=True) - y2 * v)) / n2
+    vs = _sum_var((c**4).sum(-1, keepdim=True), n2, c.size(-1)) / (4 * n2 * n2)
+    return y * scale, (vy + 2 * vs * y2) * scale**2 + 2 * _fn_var(y * scale, 4)
+
+
+def _kda_step_var(S, comps, q, k, v, g, beta, a_log, dt_bias, lb, scale, vin):
+    """R.kda_step on S = (value, variance) and q, k, v to variances ``vin``:
+    both paths' fp32 error to first order. The delta rule's rank-1 errors
+    (xi_v kvec_k, one xi a value row) stay ``comps`` so that o, a dot over k,
+    keeps their correlation. -> (S', comps', (o, variance))."""
+
+    def mv(a, b):
+        return torch.einsum("hvk,hk->hv", a, b)
+
+    Sc, Sv = S
+    K = k.size(-1)
+    vq, vk, vv = vin
+    qn, v_qn = _l2n_var(q.double(), vq, scale)
+    kn, v_kn = _l2n_var(k.double(), vk)
+    z = torch.exp(a_log.double())[:, None] * (g.double() + dt_bias.double())
+    s = torch.sigmoid(z)
+    gate = lb * s
+    # exp(a_log) and the sum to 4 U, the sigmoid, the product
+    v_gate = 2 * (lb * s * (1 - s) * z) ** 2 * (4 * U) ** 2 / 3 + 2 * _fn_var(gate, 6)
+    dec = torch.exp(gate)
+    v_dec = dec * dec * v_gate + 2 * _fn_var(dec, 4)
+    S1 = Sc * dec[:, None]
+    v_S1 = Sv * (dec * dec)[:, None] + Sc * Sc * v_dec[:, None] + 2 * _fn_var(S1, 1)
+    comps = [(vx, kv * dec) for vx, kv in comps]
+    p = mv(S1, kn)
+    v_p = mv(v_S1, kn * kn) + mv(S1 * S1, v_kn)
+    v_p = v_p + 2 * _sum_var(mv(S1 * S1, kn * kn), p, K)
+    b = torch.sigmoid(beta.double())
+    e = v.double() - p
+    vn = e * b[:, None]
+    v_new = (b * b)[:, None] * (vv + v_p + 2 * _fn_var(e, 1)) + 2 * _fn_var(vn, 6)
+    comps = [
+        (vx, kv - b[:, None] * (kv * kn).sum(-1, keepdim=True) * kn) for vx, kv in comps
+    ]
+    comps.append((v_new, kn))
+    S2 = S1 + vn[:, :, None] * kn[:, None]
+    v_S2 = v_S1 + (vn * vn)[:, :, None] * v_kn[:, None] + 2 * _fn_var(S2, 2)
+    o = mv(S2, qn)
+    v_o = mv(v_S2, qn * qn) + mv(S2 * S2, v_qn)
+    v_o = v_o + 2 * _sum_var(mv(S2 * S2, qn * qn), o, K)
+    for vx, kv in comps:
+        v_o = v_o + vx * ((kv * qn).sum(-1) ** 2)[:, None]
+    return (S2, v_S2), comps, (o, v_o)
+
+
+def _gated_rms_var(o, v_o, g2, w, eps):
+    """The gated norm o rsqrt(mean o^2 + eps) w sigmoid(g2), o to variance
+    v_o (first order), plus both paths' 128-deep sum, rsq, sigmoid and three
+    products."""
+    o, g2, w = o.double(), g2.double(), w.double()
+    n = o.size(-1)
+    ms = o.square().sum(-1, keepdim=True)
+    rstd = torch.rsqrt(ms / n + eps)
+    v_ms = 2 * _sum_var((o**4).sum(-1, keepdim=True), ms, n)
+    v_ms = v_ms + 4 * (o * o * v_o).sum(-1, keepdim=True)
+    v_rstd = (rstd**3 / 2 / n) ** 2 * v_ms
+    ws = w * torch.sigmoid(g2)
+    y = o * rstd * ws
+    v_y = ws**2 * (rstd**2 * v_o + o**2 * v_rstd) + 2 * _fn_var(y, 12)
+    return y, v_y
+
+
 # ---------------------------------------------------------------- K1
 
 
@@ -271,86 +456,6 @@ def _kda_inputs(
         w["st_idx"][-pads:] = 0
         w["num_acc"][-pads:] = 1
     return w
-
-
-def _kda_reference(w, nb: int, write_idx: int):
-    from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-        causal_conv1d_update,
-    )
-    from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
-    from vllm.models.kimi_k3.amd.ops.third_party.kda import fused_recurrent_kda
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
-        HD,
-        NH,
-        PROJ,
-        QKV,
-    )
-    from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
-
-    S, q = w["st_idx"].numel(), w["st_idx"].size(1)
-    prefix, blocks = w["prefix"].clone(), w["blocks"].clone()
-    x = attn_res(
-        prefix,
-        w["delta"],
-        blocks,
-        w["ares_nw"],
-        w["ares_qk"],
-        w["in_nw"],
-        nb,
-        write_idx,
-        1e-5,
-        1e-5,
-    )
-    proj = F.linear(x, w["w_in"])
-    mixed_qkv, g2, f_a, beta = proj.split([QKV, PROJ, HD, NH + 4], dim=-1)[:4]
-    g1 = F.linear(f_a, w["w_fb"])
-    conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
-    qsl = torch.arange(0, S + 1, q, dtype=torch.int32, device="cuda")
-    conv = causal_conv1d_update(
-        mixed_qkv.contiguous(),
-        conv_state,
-        w["conv_w"],
-        None,
-        activation="silu",
-        conv_state_indices=w["st_idx"][:, 0].contiguous(),
-        num_accepted_tokens=w["num_acc"],
-        query_start_loc=qsl,
-        max_query_len=q,
-        validate_data=False,
-        out=torch.empty_like(mixed_qkv),
-    )
-    q_, k, v = (
-        rearrange(t, "n (h d) -> 1 n h d", d=HD) for t in conv.split(PROJ, dim=-1)
-    )
-    core = torch.empty(1, S, NH, HD, dtype=bf, device="cuda")
-    fused_recurrent_kda(
-        q=q_,
-        k=k,
-        v=v,
-        raw_g=rearrange(g1, "n (h d) -> 1 n h d", d=HD),
-        raw_beta=beta[:, :NH].unsqueeze(0),
-        A_log=w["a_log"],
-        dt_bias=w["dt_bias"],
-        lower_bound=-5.0,
-        initial_state=rstate,
-        cu_seqlens=qsl,
-        ssm_state_indices=w["st_idx"],
-        num_accepted_tokens=w["num_acc"],
-        uniform_sequence_length=q,
-        out=core,
-    )
-    with set_current_vllm_config(VllmConfig()):
-        norm = FusedRMSNormGated(HD, activation="sigmoid").cuda()
-    norm.weight.data = w["on_w"].clone()
-    out = norm.forward_cuda(core, rearrange(g2, "n (h d) -> 1 n h d", d=HD))
-    return {
-        "prefix": prefix,
-        "blocks": blocks,
-        "conv_state": conv_state,
-        "rstate": rstate,
-        "core": out.reshape(S, PROJ),
-    }
 
 
 def _strided_copy(t: torch.Tensor) -> torch.Tensor:
@@ -425,28 +530,284 @@ def _k1(w, nb: int, write_idx: int = -1, poison: bool = False):
     return out
 
 
+def _k1_taps(w, out, nb: int, write_idx: int, tag: int = 257) -> dict:
+    """K1's x rows, in_proj output and q, k (each [S, ...]) from ``out``'s
+    scratch."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
+        HD,
+        HIDDEN,
+        NH,
+        NPROJ,
+        scratch_layout,
+    )
+
+    S, q = w["st_idx"].numel(), w["st_idx"].size(1)
+    lay = scratch_layout(_k1_key(w, nb, write_idx))
+    sc = out["scratch"]
+    qk = _tap(sc[lay["qk"][0] :], S * NH * 2 * HD, tag).view(-1, NH, q, 2, HD)
+    return {
+        "x": R.words(sc[lay["x"][0] :], S * HIDDEN, bf).view(S, HIDDEN),
+        "proj": _tap(sc[lay["proj"][0] :], S * NPROJ, tag).view(S, NPROJ),
+        "qk": qk.permute(0, 2, 3, 1, 4).reshape(S, 2, NH, HD),
+    }
+
+
+def _kda_vllm_stages(w, taps, nb: int, write_idx: int) -> dict:
+    """VLLM's ops for K1's stages, each on the kernel's input to it: attn_res
+    (the layer's inputs), in_proj (its x), causal_conv1d_update and f_b (its
+    proj), fused_recurrent_kda (its q, k; vLLM's v and g1) and
+    FusedRMSNormGated (vLLM's o)."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+        causal_conv1d_update,
+    )
+    from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+    from vllm.models.kimi_k3.amd.ops.third_party.kda import fused_recurrent_kda
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
+        BETA_0,
+        FA_0,
+        G2_0,
+        HD,
+        NH,
+        PROJ,
+        QKV,
+    )
+    from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+
+    S, q = w["st_idx"].numel(), w["st_idx"].size(1)
+    v = {"prefix": w["prefix"].clone(), "blocks": w["blocks"].clone()}
+    v["x"] = attn_res(
+        v["prefix"],
+        w["delta"],
+        v["blocks"],
+        w["ares_nw"],
+        w["ares_qk"],
+        w["in_nw"],
+        nb,
+        write_idx,
+        1e-5,
+        1e-5,
+    )
+    v["proj"] = F.linear(taps["x"], w["w_in"])
+    proj = taps["proj"].to(bf)
+    v["conv_state"] = _strided_copy(w["conv_state"])
+    v["rstate"] = _strided_copy(w["rstate"])
+    qsl = torch.arange(0, S + 1, q, dtype=torch.int32, device="cuda")
+    v["conv"] = causal_conv1d_update(
+        proj[:, :QKV].contiguous(),
+        v["conv_state"],
+        w["conv_w"],
+        None,
+        activation="silu",
+        conv_state_indices=w["st_idx"][:, 0].contiguous(),
+        num_accepted_tokens=w["num_acc"],
+        query_start_loc=qsl,
+        max_query_len=q,
+        validate_data=False,
+        out=torch.empty(S, QKV, dtype=bf, device="cuda"),
+    )
+    g1 = F.linear(proj[:, FA_0 : FA_0 + HD], w["w_fb"])
+    qk = taps["qk"].to(bf)
+    o = torch.empty(1, S, NH, HD, dtype=bf, device="cuda")
+    fused_recurrent_kda(
+        q=qk[None, :, 0].contiguous(),
+        k=qk[None, :, 1].contiguous(),
+        v=rearrange(v["conv"][:, 2 * PROJ :], "n (h d) -> 1 n h d", d=HD).contiguous(),
+        raw_g=rearrange(g1, "n (h d) -> 1 n h d", d=HD),
+        raw_beta=proj[None, :, BETA_0 : BETA_0 + NH],
+        A_log=w["a_log"],
+        dt_bias=w["dt_bias"],
+        lower_bound=-5.0,
+        initial_state=v["rstate"],
+        cu_seqlens=qsl,
+        ssm_state_indices=w["st_idx"],
+        num_accepted_tokens=w["num_acc"],
+        uniform_sequence_length=q,
+        out=o,
+    )
+    with set_current_vllm_config(VllmConfig()):
+        norm = FusedRMSNormGated(HD, activation="sigmoid").cuda()
+    norm.weight.data = w["on_w"].clone()
+    g2 = rearrange(proj[:, G2_0 : G2_0 + PROJ], "n (h d) -> 1 n h d", d=HD)
+    v["core"] = norm.forward_cuda(o, g2).reshape(S, PROJ)
+    return v
+
+
+def _k1_path(w, taps, rounded: bool, g1=None) -> dict:
+    """One path of K1's conv, recurrence and gated norm from the kernel's
+    proj (and, ``rounded``, its q, k), as intervals c +- r per stage: "qk" [S,
+    2, NH, HD], "state" slot -> [NH, HD, HD], "core" row -> [NH, HD].
+    ``rounded``: the kernel's (and vLLM's Triton ops'): q, k, v, g1 and o in
+    bf16; v, g1 and o never leave the kernel's LDS, so each the two paths may
+    round apart is allowed its exact effect (a float64 rerun). Else AITER's
+    fused decode: conv, q, k, v and o in fp32, g1 the given vLLM f_b output."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
+        BETA_0,
+        FA_0,
+        G2_0,
+        HD,
+        NH,
+        PROJ,
+        QKV,
+    )
+
+    S, q = w["st_idx"].numel(), w["st_idx"].size(1)
+    proj = taps["proj"].double()
+    cw = w["conv_w"].double()
+    lb, eps = w.get("lower_bound", -5.0), w.get("onorm_eps", 1e-5)
+    rest = (w["a_log"], w["dt_bias"].view(NH, HD), lb, HD**-0.5)
+    res: dict = {"qk": [], "state": {}, "core": {}}
+    for rq in range(S // q):
+        rows = slice(rq * q, (rq + 1) * q)
+        slots = w["st_idx"][rq].tolist()
+        acc = int(w["num_acc"][rq]) - 1
+        old = w["conv_state"][max(slots[0], 0)].double()
+        seq = torch.cat([old[:, acc : acc + 3], proj[rows, :QKV].T], 1)
+        t = torch.stack([seq[:, j : j + 4] * cw for j in range(q)])
+        pre = t.sum(-1)
+        # 4 products rounded, 3 adds: 5 deep; SiLU's exp2, rcp, two products
+        v_pre = 2 * _sum_var(t.square().sum(-1), pre, 5)
+        sg = torch.sigmoid(pre)
+        conv = pre * sg
+        v_conv = (sg * (1 + pre * (1 - sg))) ** 2 * v_pre + 2 * _fn_var(conv, 6)
+        conv, v_conv = conv.view(q, 3, NH, HD), v_conv.view(q, 3, NH, HD)
+        res["qk"].append((conv[:, :2], _r(v_conv[:, :2])))
+        slot0 = slots[acc]
+        if slot0 <= 0:
+            continue
+        beta = proj[rows, BETA_0 : BETA_0 + NH]
+        flips = []
+        if rounded:
+            qk = taps["qk"][rows].double()
+            c_g1, v_g1 = _dot_var(proj[rows, FA_0 : FA_0 + HD], w["w_fb"])
+            vg = []
+            for i, (c, var) in enumerate(((conv[:, 2], v_conv[:, 2]), (c_g1, v_g1))):
+                c = c.view(q, NH, HD)
+                vg.append(R.bf16_rne(c))
+                flips += [(i, end) for end in _rounds(c, _r(var.view(q, NH, HD)))]
+            vin: list = [None] * q
+        else:
+            qk = conv[:, :2]
+            vg = [conv[:, 2], g1[rows].double().view(q, NH, HD)]
+            vin = [(v_conv[j, 0], v_conv[j, 1], v_conv[j, 2]) for j in range(q)]
+        S0 = w["rstate"][slot0].double()
+        base_S, base_o, St = [], [], S0
+        for j in range(q):
+            St, oj = R.kda_step(
+                St, qk[j, 0], qk[j, 1], vg[0][j], vg[1][j], beta[j], *rest
+            )
+            base_S.append(St)
+            base_o.append(oj)
+        allow_S = [torch.zeros_like(S0) for _ in range(q)]
+        allow_o = [torch.zeros_like(base_o[0]) for _ in range(q)]
+        for i, alt in flips:
+            for jj, h, x in (alt != vg[i]).nonzero().tolist():
+                hs = slice(h, h + 1)
+                Sb = (S0 if jj == 0 else base_S[jj - 1])[hs]
+                for t_ in range(jj, q):
+                    vgb = [vg[0][t_][hs].clone(), vg[1][t_][hs].clone()]
+                    if t_ == jj:
+                        vgb[i][0, x] = alt[jj, h, x]
+                    hr = (rest[0][hs], rest[1][hs], *rest[2:])
+                    Sb, ob = R.kda_step(
+                        Sb, qk[t_, 0][hs], qk[t_, 1][hs], *vgb, beta[t_][hs], *hr
+                    )
+                    allow_S[t_][hs] += (Sb - base_S[t_][hs]).abs()
+                    allow_o[t_][hs] += (ob - base_o[t_][hs]).abs()
+        St, Sv = S0, torch.zeros_like(S0)
+        comps: list = []
+        zero = torch.zeros_like(base_o[0])
+        for j in range(q):
+            (St, Sv), comps, (oc, v_o) = _kda_step_var(
+                (St, Sv),
+                comps,
+                qk[j, 0],
+                qk[j, 1],
+                vg[0][j],
+                vg[1][j],
+                beta[j],
+                *rest,
+                vin=vin[j] or (zero, zero, zero),
+            )
+            v_S = Sv + sum(vx[:, :, None] * (kv * kv)[:, None] for vx, kv in comps)
+            res["state"][slots[j]] = (St, _r(v_S) + allow_S[j])
+            g2 = proj[rq * q + j, G2_0 : G2_0 + PROJ].view(NH, HD)
+            if not rounded:
+                yc, v_y = _gated_rms_var(oc, v_o, g2, w["on_w"], eps)
+                res["core"][rq * q + j] = (yc, _r(v_y))
+                continue
+            lo, hi = _rounds(oc, _r(v_o) + allow_o[j])
+            base = R.bf16_rne(oc)
+            yc, v_y = _gated_rms_var(base, zero, g2, w["on_w"], eps)
+            r_y = _r(v_y)
+            for end in (lo, hi):
+                for h, x in (end != base).nonzero().tolist():
+                    ob = base[h : h + 1].clone()
+                    ob[0, x] = end[h, x]
+                    yb, _ = _gated_rms_var(ob, zero[:1], g2[h : h + 1], w["on_w"], eps)
+                    r_y[h] += (yb[0] - yc[h]).abs()
+            res["core"][rq * q + j] = (yc, r_y)
+    return res
+
+
+def _k1_vllm_check(w, out, nb: int, write_idx: int) -> dict:
+    """Every K1 stage and vLLM's op on the kernel's input to it against
+    their shared interval (_both)."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
+        HD,
+        NH,
+        PROJ,
+    )
+
+    taps = _k1_taps(w, out, nb, write_idx)
+    v = _kda_vllm_stages(w, taps, nb, write_idx)
+    S, q = w["st_idx"].numel(), w["st_idx"].size(1)
+    m: dict = {}
+
+    def both(name, got, want, c, r, fmt=bf):
+        _both(m, name, got, want, c, r, fmt)
+
+    assert torch.equal(v["prefix"], out["prefix"]), "prefix"
+    assert torch.equal(v["blocks"], out["blocks"]), "blocks"
+    assert torch.equal(v["conv_state"], out["conv_state"]), "conv state"
+    ares = (
+        out["prefix"],
+        out["blocks"][:, :nb],
+        w["ares_nw"],
+        w["ares_qk"],
+        w["in_nw"],
+    )
+    c, var = _attn_res_var(*ares, 1e-5, 1e-5)
+    both("x", taps["x"], v["x"], c, _r(var))
+    c, var = _dot_var(taps["x"], w["w_in"])
+    both("proj", taps["proj"], v["proj"], c, _r(var))
+    path = _k1_path(w, taps, rounded=True)
+    conv_qk = v["conv"][:, : 2 * PROJ].view(S, 2, NH, HD)
+    for rq, (c, r) in enumerate(path["qk"]):
+        rows = slice(rq * q, (rq + 1) * q)
+        both("qk", taps["qk"][rows], conv_qk[rows], c, r)
+    for slot, (c, r) in path["state"].items():
+        both("state", out["rstate"][slot], v["rstate"][slot], c, r, torch.float32)
+    for row, (c, r) in path["core"].items():
+        both("core", out["core"][row].view(NH, HD), v["core"][row].view(NH, HD), c, r)
+    return m
+
+
 @needs_gfx950
 @pytest.mark.parametrize("dim_first", [True, False])
 @pytest.mark.parametrize("nacc", [1, 3])
 @pytest.mark.parametrize("write", [False, True])
 def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
-    """K1 against attn_res -> in_proj -> f_b -> causal_conv1d_update ->
-    fused_recurrent_kda -> FusedRMSNormGated on one spec-verify step (one
-    request, 8 tokens), including the state each step leaves behind; a second
-    launch is bit-identical."""
+    """K1 stage by stage against attn_res, in_proj, causal_conv1d_update,
+    f_b, fused_recurrent_kda and FusedRMSNormGated, each on the kernel's input
+    to it (one request of 8 tokens), the states included."""
     nb = 4
     # a block-write layer appends block nb (block_write_idx == prev_valid_blocks)
     write_idx = nb if write else -1
     w = _kda_inputs([nacc], dim_first, q=8)
-    ref = _kda_reference(w, nb, write_idx)
-    out = _k1(w, nb, write_idx)
-
-    torch.testing.assert_close(out["prefix"], ref["prefix"], atol=0, rtol=0)
-    torch.testing.assert_close(out["blocks"], ref["blocks"], atol=0, rtol=0)
-    # the conv output feeds the recurrence in fp32 here, bf16 in the reference
-    errs = {k: _rel_l2(out[k], ref[k]) for k in ("conv_state", "rstate", "core")}
-    assert errs["conv_state"] < 1e-3 and errs["rstate"] < 1e-3, errs
-    assert _cos(out["core"], ref["core"]) > COS_MIN, errs
+    m = _k1_vllm_check(w, _k1(w, nb, write_idx), nb, write_idx)
+    stages = ("x", "proj", "qk", "state", "core")
+    assert all(m[s + p] == 0 for s in stages for p in ("", "_v")), m
 
 
 def _k1_check(w, out, nb: int, write_idx: int, tag: int = 257) -> dict:
@@ -635,52 +996,6 @@ def _all_reduce_fp32(t: torch.Tensor) -> torch.Tensor:
     return t.to(bf)
 
 
-def _moe_reference(x, mw, rank: int):
-    """KimiMoE's decode path on ``x``: sigmoid router + bias top-16, the latent
-    down, aiter's MXFP4 experts, the latent all-reduce + RMSNorm, this rank's
-    up_proj rows into the shared experts' output, the final all-reduce."""
-    from aiter import ActivationType, QuantType
-    from aiter.fused_moe import fused_moe
-
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import (
-        SI,
-        TOPK,
-        UP_N,
-    )
-
-    sig = torch.sigmoid(torch.mm(x.float(), mw["w_gate"].float().t()))
-    ids = torch.topk(sig + mw["bias"], TOPK, dim=-1, sorted=True).indices
-    wts = sig.gather(-1, ids)
-    wts = wts / wts.sum(-1, keepdim=True)
-    gu = F.linear(x, mw["w_sgu"])
-    shared = F.linear(_situ(gu[:, :SI], gu[:, SI:]), mw["w_sd"])
-    y = fused_moe(
-        F.linear(x, mw["w_ld"]),
-        mw["w13"],
-        mw["w2"],
-        wts.float(),
-        ids.to(torch.int32),
-        None,
-        ActivationType.Situv2,
-        QuantType.per_1x32,
-        False,
-        mw["w13s"],
-        mw["w2s"],
-        None,
-        None,
-        dtype=bf,
-        gate_mode="separated",
-        beta=4.0,
-        linear_beta=25.0,
-    )
-    lat = _all_reduce_fp32(y).float()
-    ln = lat * torch.rsqrt(lat.pow(2).mean(-1, keepdim=True) + 1e-5) * mw["ln_w"]
-    lo = rank * UP_N
-    up = ln.to(bf).float() @ mw["w_up_shard"].float().t()
-    shared[:, lo : lo + UP_N] = (shared[:, lo : lo + UP_N].float() + up).to(bf)
-    return _all_reduce_fp32(shared)
-
-
 def _moe_raw(rank: int, device, seed: int = 0, w13_codes=(118, 123)) -> dict:
     """The MoE weights as the checkpoint holds them: MXFP4 experts as fp4x2
     bytes (gate rows, then up) and E8M0 codes."""
@@ -773,10 +1088,16 @@ def _k2_inputs(rank: int, device, seed: int = 0):
 
 def _k2_launch(runner, w, mw, prefix, out, reset: bool, nb: int = 4):
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import compile_build
 
     key = k2.K2Build(
         tokens=w["core"].size(0), nblocks=nb + int(reset), reset=reset, **runner.fault
     )
+    if not torch.cuda.is_current_stream_capturing():
+        # every rank compiles before any launches, as the engine does: a rank
+        # still compiling would outlast the in-kernel waits (WAIT_SECONDS)
+        compile_build(key)
+        dist.barrier()
     k2.k2_launch(
         key,
         core=w["core"],
@@ -1101,6 +1422,377 @@ def _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     return device
 
 
+def _k2_taps(runner, key, tag: int) -> dict:
+    """K2's stage outputs of one launch (``tag``'s mailbox pairs, plain rows)."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import (
+        HIDDEN,
+        LAT,
+        SI,
+        TOPK,
+        TP,
+        UP_N,
+        E,
+    )
+
+    s = key.tokens
+    lay = k2.scratch_layout(key)
+    sc = runner.scratch
+
+    def scratch(name, n, dtype=torch.float32):
+        return _tap(sc[lay[name][0] :], n, tag, dtype)
+
+    def peer(name, n, dtype=torch.float32):
+        return _tap(_peer(runner, s, name), n, tag, dtype)
+
+    def plain(name, n):
+        return R.words(sc[lay[name][0] :], n, bf)
+
+    route = scratch("route", s * 2 * TOPK, torch.int32).view(s, 2, TOPK)
+    rlog = peer("rlog", TP * s * (E // TP)).view(TP, s, E // TP)
+    return {
+        "ar": peer("ar", TP * s * HIDDEN // 2, bf).view(TP, s, HIDDEN),
+        "x": plain("xrow", s * HIDDEN).view(s, HIDDEN),
+        "rlog": rlog.transpose(0, 1).reshape(s, E),
+        "lat": peer("lat", s * LAT // 2, bf).view(s, LAT),
+        "sgu": scratch("sgu", s * SI, bf).view(s, 2 * SI),
+        "h": scratch("h", s * SI // 2, bf).view(s, SI),
+        "ids": route[:, 0].long(),
+        "wts": route[:, 1].contiguous().view(torch.float32),
+        "latr": peer("latr", TP * s * LAT // 2, bf).view(TP, s, LAT),
+        "ln": plain("ln", s * LAT).view(s, LAT),
+        "shp": plain("shp", s * UP_N).view(s, UP_N),
+        "final": peer("final", TP * s * HIDDEN // 2, bf).view(TP, s, HIDDEN),
+    }
+
+
+def _rank_sum_var(parts):
+    """The ranks' bf16 parts summed in fp32 in any order (both paths):
+    (float64 sum, variance)."""
+    p = parts.double()
+    c = p.sum(0)
+    return c, 2 * _sum_var(p.square().sum(0), c, p.size(0))
+
+
+def _mx_alts(v, d) -> tuple:
+    """MXFP4 (AITER's inline rule: e8m0_roundup6 codes, E2M1 RNE) of rows v
+    [..., K] known to +-d: (quantized v, [(row, delta over K)]), a delta for
+    each value whose other neighbour, or group whose other code, v +- d may
+    round to."""
+    vb, db = v.unflatten(-1, (-1, 32)), d.unflatten(-1, (-1, 32))
+    code = R.e8m0_roundup6(vb.abs().amax(-1))
+    sc = R.e8m0(code)[..., None]
+    q = R.to_e2m1_rne(vb / sc) * sc
+    alts = []
+    for end in R.boundary(R.to_e2m1_rne, vb / sc, db / sc)[1:]:
+        for *row, g, j in ((end * sc) != q).nonzero().tolist():
+            delta = torch.zeros_like(v[tuple(row)])
+            delta[g * 32 + j] = end[(*row, g, j)] * sc[(*row, g, 0)] - q[(*row, g, j)]
+            alts.append((tuple(row), delta))
+    for end in R.boundary(R.e8m0_roundup6, vb.abs().amax(-1), db.amax(-1))[1:]:
+        for *row, g in (end != code).nonzero().tolist():
+            s2 = R.e8m0(end[(*row, g)])
+            delta = torch.zeros_like(v[tuple(row)])
+            delta[g * 32 : g * 32 + 32] = (
+                R.to_e2m1_rne(vb[(*row, g)] / s2) * s2 - q[(*row, g)]
+            )
+            alts.append((tuple(row), delta))
+    return q.flatten(-2), alts
+
+
+def _k2_vllm_check(runner, key, w, mw, prefix, out, ops, tag: int) -> dict:
+    """Every K2 stage of one launch and vLLM's op (``ops``) on the kernel's
+    input to it against their shared interval, as _k1_vllm_check; both paths'
+    top-16 picks among those the scores' intervals allow, the kernel's then
+    feeding both (rows with a choice counted)."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import (
+        HIDDEN,
+        LAT,
+        RI,
+        SI,
+        TOPK,
+        UP_N,
+    )
+
+    t = _k2_taps(runner, key, tag)
+    s, rank = key.tokens, runner.rank
+    m: dict = {}
+
+    def both(name, got, want, c, r, fmt=bf, r_v=None):
+        _both(m, name, got, want, c, r, fmt, r_v)
+
+    parts = ops.get("parts", {})
+
+    def gemm(name, got, x, wt, op):
+        c, v = _dot_var(x, wt)
+        r_v = _r(v + _split_var(x, wt, parts.get(name, 1)))
+        both(name, got, op(x), c, _r(v), r_v=r_v)
+
+    gemm("ar", t["ar"][rank], w["core"], w["w_o"], ops["partial"])
+    # the attention all-reduce (+ the prefix), on the kernel's partials
+    c, v = _rank_sum_var(t["ar"])
+    lo, hi = _rounds(c, _r(v))
+    delta = ops["all_reduce"](t["ar"][rank].clone())
+    want = delta.double()
+    if not key.reset:
+        lo, hi = (R.bf16_rne(w["prefix"].double() + e) for e in (lo, hi))
+        want = R.bf16_rne(w["prefix"].double() + want)
+    for name, g in (("prefix", prefix.double()), ("prefix_v", want)):
+        m[name] = ((lo - g).clamp(min=0) + (g - hi).clamp(min=0)).max().item()
+    blocks = w["blocks"][:, : key.nblocks]
+    ares = (w["ares_nw"], w["ares_qk"], w["in_nw"], key.eps, key.out_eps)
+    c, v = _attn_res_var(prefix, blocks, *ares)
+    both("x", t["x"], ops["attn_res"](prefix, blocks), c, _r(v))
+    x = t["x"].double()
+    # router logits: the kernel's 8 chained bf16 MFMAs a wave (33 U each), 8
+    # waves, 4 K parts (275 deep); vLLM's gate up to three K-deep fp32 sums
+    # (its bf16x3 split) and a product rounding
+    wg = mw["w_gate"].double()
+    c = x @ wg.T
+    t2 = (x * x) @ (wg * wg).T
+    v_lg = _sum_var(t2, c, 275) + _sum_var(t2, c, 3 * x.size(-1) + 1)
+    logits_v = ops["router"](t["x"])
+    both("rlog", t["rlog"], logits_v, c, _r(v_lg), torch.float32)
+    sig = torch.sigmoid(c)
+    sel = sig + mw["bias"].double()
+    r_sel = _r(
+        (sig * (1 - sig)) ** 2 * v_lg + 2 * _fn_var(sig, 8) + 2 * _fn_var(sel, 1)
+    )
+    # an expert must be picked when fewer than TOPK others can score above it,
+    # may be when fewer than TOPK others surely do
+    lo_s, hi_s = sel - r_sel, sel + r_sel
+    eye = torch.eye(sel.size(-1), dtype=torch.bool, device=sel.device)
+    above = (hi_s[:, None, :] >= lo_s[:, :, None]) & ~eye
+    must = above.sum(-1) < TOPK
+    may = ((lo_s[:, None, :] > hi_s[:, :, None]) & ~eye).sum(-1) < TOPK
+    ids_v, wts_v = ops["select"](t["x"], logits_v)
+    for name, got in (("route_ids", t["ids"]), ("route_ids_v", ids_v)):
+        picked = torch.zeros_like(must).scatter_(1, got.long(), True)
+        bad = (picked.sum(-1) != TOPK) | (picked < must).any(-1)
+        m[name] = int((bad | (picked > may).any(-1)).sum())
+    m["forced_rows"] = int((must != may).any(-1).sum())
+    ids = t["ids"]
+    # weights: the picked sigmoids over their 16-deep sum, first order
+    ws = sig.gather(1, ids)
+    v_ws = ((sig * (1 - sig)) ** 2 * v_lg).gather(1, ids) + 2 * _fn_var(ws, 8)
+    tot = ws.sum(-1, keepdim=True)
+    c_w = ws / tot
+    v_w = (v_ws + c_w**2 * v_ws.sum(-1, keepdim=True)) / tot**2
+    v_w = (
+        v_w
+        + 2 * _sum_var(ws.square().sum(-1, keepdim=True), tot, TOPK) * c_w**2 / tot**2
+    )
+    v_w = v_w + 2 * _fn_var(c_w, 2)
+    m["route_w"] = _outside(t["wts"], c_w, _r(v_w), torch.float32)
+    same = (ids.sort(-1).values == ids_v.sort(-1).values).all(-1)
+    wv = torch.empty_like(wts_v)
+    wv.scatter_(1, ids.argsort(-1), wts_v.gather(1, ids_v.argsort(-1)))
+    m["route_w_v"] = _outside(wv[same], c_w[same], _r(v_w)[same], torch.float32)
+    for name, wt in (("lat", mw["w_ld"]), ("sgu", mw["w_sgu"])):
+        gemm(name, t[name], t["x"], wt, ops[name])
+    g, u = t["sgu"][:, :SI].double(), t["sgu"][:, SI:].double()
+    both(
+        "h",
+        t["h"],
+        ops["situ"](t["sgu"]),
+        R.situ(g, u),
+        math.sqrt(2) * LAM * _situ_vllm_err(g, u),
+    )
+
+    # routed experts on the kernel's latent and picks. The MXFP4 latent is one
+    # rule's in both (exact); gate / up are FP4 MFMA chains; SiTUv2 in fp32
+    # (AITER's epilogue); MXFP4 again,
+    # each value or code the two may round apart allowed its exact effect;
+    # down (3 MFMAs); bf16(w acc) a pick; their bf16 sum in top-k order (the
+    # kernel) or any order (AITER's atomic adds): 15 roundings of half an ulp
+    # of the partial, any order's partial within the picks' negative and
+    # positive sums (and their roundings, 15 2^-9); at most the roundings' sum
+    # (below Hoeffding's LAM sqrt(15) at 15)
+    raw = mw["raw"]
+    lat = t["lat"].double()
+    codes = R.e8m0_roundup6(lat.abs().unflatten(-1, (-1, 32)).amax(-1))
+    sc = R.e8m0(codes).repeat_interleave(32, -1)
+    latq = R.to_e2m1_rne(lat / sc).unflatten(-1, (-1, 128)) * sc.unflatten(
+        -1, (-1, 128)
+    )
+    union, slot = ids.unique(return_inverse=True)
+    w13 = R.dequant_mxfp4(raw["w13"][union], raw["w13s"][union])
+    w2 = R.dequant_mxfp4(raw["w2"][union], raw["w2s"][union])
+    wts = t["wts"].double()
+    cs, allow = [], torch.zeros(s, LAT, dtype=torch.float64, device=lat.device)
+    m["mx_alts"] = 0
+
+    def mfma_var(wm, a):
+        """An FP4 MFMA chain over 128-blocks: an fp32 sum, each product through
+        its MFMA's 128 adds (within 129 U, test_mono_primitives) and the chain's
+        (both paths)."""
+        c = torch.einsum("srnk,snk->sr", wm, a)
+        t2 = torch.einsum("srnk,snk->sr", wm * wm, a * a)
+        return c, 2 * _sum_var(t2, c, wm.size(-2) + 129)
+
+    for k in range(TOPK):
+        e = slot[:, k]
+        gu, v_gu = mfma_var(w13[e].unflatten(-1, (-1, 128)), latq)
+        g, u = gu.split(RI, -1)
+        # SiTU = 4 tanh(g / 4) sigmoid(g) 25 tanh(u / 25), its partials
+        tg, sg, tu = torch.tanh(g / 4), torch.sigmoid(g), torch.tanh(u / 25)
+        dg = 25 * tu * ((1 - tg**2) * sg + 4 * tg * sg * (1 - sg))
+        du = 4 * tg * sg * (1 - tu**2)
+        vg_, vu_ = v_gu.split(RI, -1)
+        d = _r(dg**2 * vg_ + du**2 * vu_) + math.sqrt(2) * LAM * _situ_aiter_err(g, u)
+        inter, alts = _mx_alts(R.situ(g, u), d)
+        w2e = w2[e]
+        acc, v_acc = mfma_var(
+            w2e.unflatten(-1, (-1, 128)), inter.unflatten(-1, (-1, 128))
+        )
+        wk = wts[:, k : k + 1]
+        for (row,), dlt in alts:
+            allow[row] += (wk[row] * (w2e[row] @ dlt)).abs()
+        m["mx_alts"] += len(alts)
+        lo, hi = _rounds(wk * acc, wk * _r(v_acc))
+        cs.append(R.bf16_rne(wk * acc))
+        allow += torch.maximum(hi - cs[-1], cs[-1] - lo)
+    y, run = cs[0].clone(), cs[0].clone()
+    h1, h2 = torch.zeros_like(allow), torch.zeros_like(allow)
+    for ck in cs[1:]:
+        y, run = y + ck, run + ck
+        h = R.ulp(run.abs().clamp(min=2.0**-126)) / 2
+        h1, h2 = h1 + h, h2 + h * h
+        run = R.bf16_rne(run)
+    picks = torch.stack(cs)
+    big = torch.maximum(picks.clamp(min=0).sum(0), (-picks).clamp(min=0).sum(0))
+    big = (big * (1 + TOPK * 2.0**-9)).clamp(min=2.0**-126)
+    any_order = (TOPK - 1) * R.ulp(big) / 2
+    y_v = ops["experts"](t["lat"], t["wts"], ids)
+    m["latr"] = _outside(t["latr"][rank], y, torch.minimum(LAM * h2.sqrt(), h1) + allow)
+    m["latr_v"] = _outside(y_v, y, any_order + allow)
+    m["latr_ulps"] = _ulps(t["latr"][rank], y_v, y)
+    # the latent all-reduce (both on the kernel's y), RMSNorm: the sum's
+    # roundings the two may take apart allowed their exact effect; the
+    # kernel's sum of squares 34 deep, vLLM's LAT
+    c, v = _rank_sum_var(t["latr"])
+    lo, hi = _rounds(c, _r(v))
+    base = R.bf16_rne(c)
+    ln = R.rmsnorm(base, mw["ln_w"], key.ln_eps)
+    r_ln = torch.zeros_like(ln)
+    for end in (lo, hi):
+        for row, col in (end != base).nonzero().tolist():
+            b2 = base[row].clone()
+            b2[col] = end[row, col]
+            r_ln[row] += (R.rmsnorm(b2, mw["ln_w"], key.ln_eps) - ln[row]).abs()
+    ms = base.square().sum(-1, keepdim=True)
+    rstd = torch.rsqrt(ms / LAT + key.ln_eps)
+    v_ms = _sum_var((base**4).sum(-1, keepdim=True), ms, 34 + LAT)
+    v_ln = (base * mw["ln_w"].double()) ** 2 * (rstd**3 / 2 / LAT) ** 2 * v_ms
+    v_ln = v_ln + 2 * _fn_var(ln, 4)
+    lnorm_v = ops["lnorm"](ops["all_reduce"](t["latr"][rank].clone()))
+    both("ln", t["ln"], lnorm_v, ln, _r(v_ln) + r_ln)
+    # up (this rank's columns, onto the shared partial) and the shared down
+    mine = torch.zeros(HIDDEN, dtype=torch.bool, device=lat.device)
+    mine[rank * UP_N : (rank + 1) * UP_N] = True
+    c, v = _dot_var(t["ln"], mw["w_up_shard"])
+    c = c + t["shp"].double()
+    both(
+        "up",
+        t["final"][rank][:, mine],
+        ops["up"](t["ln"], t["shp"]),
+        c,
+        _r(v + 2 * _fn_var(c, 1)),
+    )
+    c, v = _dot_var(t["h"], mw["w_sd"])
+    sd = ops["sdown"](t["h"])
+    both("sdown", t["shp"], sd[:, mine], c[:, mine], _r(v[:, mine]))
+    both(
+        "sdown", t["final"][rank][:, ~mine], sd[:, ~mine], c[:, ~mine], _r(v[:, ~mine])
+    )
+    c, v = _rank_sum_var(t["final"])
+    both("out", out, ops["all_reduce"](t["final"][rank].clone()), c, _r(v))
+    return m
+
+
+def _vllm_ops(w, mw, key) -> dict:
+    """The ops vLLM's latent-MoE layer runs, as plain calls on these weights."""
+    from aiter import ActivationType, QuantType
+    from aiter.fused_moe import fused_moe
+
+    from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages.moe import SI, TOPK
+
+    def select(x, logits):
+        sig = torch.sigmoid(logits)
+        ids = torch.topk(sig + mw["bias"], TOPK, dim=-1, sorted=True).indices
+        wts = sig.gather(-1, ids)
+        return ids, wts / wts.sum(-1, keepdim=True)
+
+    def experts(lat, wts, ids):
+        return fused_moe(
+            lat,
+            mw["w13"],
+            mw["w2"],
+            wts.contiguous(),
+            ids.to(torch.int32).contiguous(),
+            None,
+            ActivationType.Situv2,
+            QuantType.per_1x32,
+            False,
+            mw["w13s"],
+            mw["w2s"],
+            None,
+            None,
+            dtype=bf,
+            gate_mode="separated",
+            beta=4.0,
+            linear_beta=25.0,
+        )
+
+    def lnorm(lat):
+        lat = lat.float()
+        rstd = torch.rsqrt(lat.pow(2).mean(-1, keepdim=True) + key.ln_eps)
+        return (lat * rstd * mw["ln_w"]).to(bf)
+
+    def ares(prefix, blocks):
+        nb = blocks.size(1)
+        b = blocks.contiguous()
+        return attn_res(
+            prefix.clone(),
+            None,
+            b,
+            w["ares_nw"],
+            w["ares_qk"],
+            w["in_nw"],
+            nb,
+            -1,
+            key.eps,
+            key.out_eps,
+        )
+
+    return {
+        "partial": lambda core: F.linear(core, w["w_o"]),
+        "all_reduce": _all_reduce_fp32,
+        "attn_res": ares,
+        "router": lambda x: torch.mm(x.float(), mw["w_gate"].float().t()),
+        "select": select,
+        "lat": lambda x: F.linear(x, mw["w_ld"]),
+        "sgu": lambda x: F.linear(x, mw["w_sgu"]),
+        "situ": lambda sgu: _situ(sgu[:, :SI], sgu[:, SI:]),
+        "experts": experts,
+        "lnorm": lnorm,
+        "up": lambda ln, shp: (
+            shp.float() + ln.float() @ mw["w_up_shard"].float().t()
+        ).to(bf),
+        "sdown": lambda h: F.linear(h, mw["w_sd"]),
+    }
+
+
+K2_STAGES = tuple(
+    f"{s}{p}"
+    for s in ("ar", "prefix", "x", "rlog", "route_ids", "route_w", "lat", "sgu")
+    + ("h", "latr")
+    + ("ln", "up", "sdown", "out")
+    for p in ("", "_v")
+)
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def _k2_worker(
     monkeypatch: pytest.MonkeyPatch,
@@ -1111,43 +1803,21 @@ def _k2_worker(
 ) -> None:
     device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
 
-    from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
-    S, nb = 8, 4
     runner = MonoRunner(device)
     mw = _moe_weights(rank, device)
     w = _k2_inputs(rank, device)
-
     for reset in (True, False):
         runner.step_begin()
         prefix = w["prefix"].clone()
-        out = torch.empty(S, HIDDEN, dtype=bf, device=device)
+        out = torch.empty_like(prefix)
         key = _k2_launch(runner, w, mw, prefix, out, reset)
         torch.accelerator.synchronize()
-
-        attn = _all_reduce_fp32(F.linear(w["core"], w["w_o"]))
-        # a block-write layer's prefix restarts at the attention output
-        ref_prefix = attn if reset else w["prefix"].clone()
-        delta = None if reset else attn
-        x_ref = attn_res(
-            ref_prefix,
-            delta,
-            w["blocks"],
-            w["ares_nw"],
-            w["ares_qk"],
-            w["in_nw"],
-            nb + int(reset),
-            -1,
-            1e-5,
-            1e-5,
-        )
-        # the kernel sums the ranks in rank order, NCCL in its own order
-        assert _rel_l2(prefix, ref_prefix) < 1e-2
-        x = _k2_x(runner, key)
-        assert _cos(x, x_ref) > COS_MIN
-        assert _cos(out, _moe_reference(x, mw, rank)) > COS_MIN
+        tag = (int(runner.epoch.item()) % (1 << 22)) * 256 + 3 + 1
+        ops = _vllm_ops(w, mw, key)
+        m = _k2_vllm_check(runner, key, w, mw, prefix, out, ops, tag)
+        assert all(m[k] == 0 for k in K2_STAGES), m
         _assert_ranks_agree(out, tp_size)
 
     _assert_replays_bit_identical(runner, w, mw)

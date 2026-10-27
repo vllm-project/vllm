@@ -451,9 +451,9 @@ class _Rounded:
 
 # The roundings of the helpers, from their source and ISA: an f32 op, ``/``
 # (v_div_scale / fmas / fixup) and fmath.sqrt (correct-sqrt) round to nearest,
-# 2^-24; a rounded f32 constant another 2^-24 on its product; v_exp_f32 and
-# v_rcp_f32 1 ulp (AMD), 2^-23, flushing results below 2^-126; v_log_f32
-# 1 ulp too (LLVM AMDGPUUsage, llvm.log2: "Hardware provides 1ULP accuracy").
+# 2^-24; a rounded f32 constant another 2^-24 on its product; v_exp_f32,
+# v_log_f32 and v_rcp_f32 1 ulp, 2^-23, flushing results below 2^-126 (CDNA3 /
+# CDNA4 ISA 12.8: "1ULP accuracy, denormals are flushed").
 def _hw(r, v):
     return r(v, 2 * _U, R.FLT_MIN)
 
