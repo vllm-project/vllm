@@ -226,9 +226,10 @@ def test_connector_estimate_changes_order_but_does_not_replace_admission():
     )
     long_req = create_requests(1, num_tokens=97, req_ids=["long"])[0]
     short_req = create_requests(1, num_tokens=33, req_ids=["short"])[0]
-    long_req.kv_transfer_params = {"cached_tokens": 96}
     scheduler.add_request(short_req)
     scheduler.add_request(long_req)
+    assert scheduler.waiting.peek_request() is short_req
+    long_req.kv_transfer_params = {"cached_tokens": 96}
     assert scheduler.waiting.peek_request() is long_req
     output = scheduler.schedule()
     assert [r.req_id for r in output.scheduled_new_reqs] == ["long"]

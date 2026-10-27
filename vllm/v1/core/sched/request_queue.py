@@ -274,9 +274,8 @@ class ResidualSJFRequestQueue(RequestQueue):
         return request
 
     def peek_request(self) -> Request:
-        if self._selected_request is None:
-            request, _ = self.get_best_request()
-            self._selected_request = request
+        request, _ = self.get_best_request()
+        self._selected_request = request
         return self._selected_request
 
     def prepend_request(self, request: Request) -> None:
