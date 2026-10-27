@@ -21,7 +21,10 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
+from vllm.model_executor.model_loader.reload import (
+    direct,
+    initialize_layerwise_reload,
+)
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     finish_direct_reload,
@@ -88,10 +91,6 @@ def _pack(layer):  # (e): not idempotent, must never run on converted bytes
     replace_parameter(layer, "weight", (layer.weight * 2).t().contiguous())
 
 
-def _rebind(layer):  # new storage on every run
-    layer.weight.data = layer.weight.data + 1
-
-
 _SHAPES = {
     "attn.kv_b.weight": ((8, 4), torch.bfloat16),
     "proj.weight": ((4, 6), torch.bfloat16),
@@ -99,7 +98,6 @@ _SHAPES = {
     "nvfp4.weight": ((4, 4), torch.bfloat16),
     "nvfp4.weight_scale_2": ((), torch.float32),
     "engram.weight": ((3, 5), torch.bfloat16),
-    "rebind.weight": ((2, 2), torch.float32),
 }
 _PWAL = {
     "attn.kv_b": None,
@@ -107,7 +105,6 @@ _PWAL = {
     "mimo": _requantize,
     "nvfp4": _consume_scale_2,
     "engram": _pack,
-    "rebind": _rebind,
 }
 
 
@@ -118,13 +115,11 @@ class _Layer(torch.nn.Module):
 
 
 class _ToyModel(torch.nn.Module):
-    def __init__(self, rebind: bool = False):
+    def __init__(self):
         super().__init__()
         self.attn = _Layer(_derive_w_uk)
         self.attn.register_buffer("k_scale", torch.tensor(0.5))  # not in checkpoint
         for name, (shape, dtype) in _SHAPES.items():
-            if name.startswith("rebind.") and not rebind:
-                continue
             *path, local = name.split(".")
             parent = self
             for i, part in enumerate(path):
@@ -147,19 +142,18 @@ class _ToyModel(torch.nn.Module):
         return loaded
 
 
-def _checkpoint(scale: float = 1.0, rebind: bool = False) -> dict[str, torch.Tensor]:
+def _checkpoint(scale: float = 1.0) -> dict[str, torch.Tensor]:
     gen = torch.Generator().manual_seed(0)
     return {
         name: ((torch.rand(shape, generator=gen) + 0.5) * scale).to(dtype)
         for name, (shape, dtype) in _SHAPES.items()
-        if rebind or not name.startswith("rebind.")
     }
 
 
-def _cold_start(weights: dict[str, torch.Tensor], **kwargs) -> _ToyModel:
+def _cold_start(weights: dict[str, torch.Tensor]) -> _ToyModel:
     """As ``BaseModelLoader.load_model`` does."""
     with _DEVICE:
-        model = _ToyModel(**kwargs)
+        model = _ToyModel()
     model.load_weights(weights.items())
     process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
     return model
@@ -284,36 +278,6 @@ class TestUnsent:
         _assert_same(after, _state(_cold_start(expected)))
 
 
-class _OneLayer(torch.nn.Module):
-    """One layer ``s`` with a (4, 4) weight and the given post-load
-    processing; ``hook`` is an optional model-level post-load hook."""
-
-    def __init__(self, fn, hook=None):
-        super().__init__()
-        self.s = _Layer(fn)
-        self.s.register_parameter(
-            "weight", torch.nn.Parameter(torch.empty(4, 4), requires_grad=False)
-        )
-        self.hook = hook
-
-    def process_weights_after_loading(self):
-        if self.hook is not None:
-            self.hook(self)
-
-    def load_weights(self, weights):
-        for name, weight in weights:
-            default_weight_loader(self.get_parameter(name), weight)
-        return {name for name, _ in weights}
-
-
-def _one_layer(fn, weight, hook=None) -> _OneLayer:
-    with _DEVICE:
-        model = _OneLayer(fn, hook)
-    model.load_weights([("s.weight", weight)])
-    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
-    return model
-
-
 class TestRefusals:
     def test_refused_begin_leaves_the_model_untouched(self):
         # proj is viewed back first, in module order; mimo's storage is short
@@ -325,14 +289,13 @@ class TestRefusals:
             begin_direct_reload(model)
         _assert_same(_state(model), before, addresses=True)
 
-    def test_draft_lm_head_quantization_refused(self):
+    def test_draft_lm_head_quantization_refused(self, monkeypatch):
         # the quantized draft lm_head would be written into the target's
-        model = _cold_start(_checkpoint())
-        model._direct_draft_lm_head_quantization = "fp8"
-        before = _state(model)
+        spec = SimpleNamespace(draft_lm_head_quantization="fp8")
+        config = SimpleNamespace(speculative_config=spec)
+        monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
         with pytest.raises(RuntimeError, match="draft_lm_head_quantization"):
-            begin_direct_reload(model)
-        _assert_same(_state(model), before, addresses=True)
+            _cold_start(_checkpoint())
 
 
 def test_retry_after_aborted_update_matches_cold_start():

@@ -93,13 +93,6 @@ def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
     return view.copy_(new)
 
 
-def layout_span(shape: tuple[int, ...], stride: tuple[int, ...]) -> int:
-    """Elements a strided layout spans, from its first to its last."""
-    if 0 in shape:
-        return 0
-    return 1 + sum((s - 1) * st for s, st in zip(shape, stride))
-
-
 def _view_in_place(
     old_param: torch.Tensor, new_tensor: torch.Tensor
 ) -> torch.Tensor | None:
@@ -122,9 +115,7 @@ def _view_in_place(
         return None  # e.g. a transposed view of the same storage: rebind keeps it
     itemsize = new_tensor.element_size()
     offset = old_param.storage_offset() * old_param.element_size()
-    if offset % itemsize or offset + layout_span(shape, stride) * itemsize > (
-        storage.nbytes()
-    ):
+    if offset % itemsize or offset + _extent(new_tensor) * itemsize > storage.nbytes():
         return None
     view = torch.empty(0, dtype=new_tensor.dtype, device=old_param.device)
     return view.set_(storage, offset // itemsize, shape, stride)

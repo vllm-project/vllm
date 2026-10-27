@@ -40,7 +40,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
-from vllm.model_executor.utils import layout_span
+from vllm.model_executor.utils import _extent, is_weights_pre_processed
 
 logger = init_logger(__name__)
 
@@ -80,14 +80,15 @@ def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tenso
 def record_checkpoint_layout(model: torch.nn.Module) -> None:
     """Cold start, before post-load processing: remember each tensor's
     checkpoint layout. Runs once; reloads reuse the cold-start record."""
-    if getattr(model, "_direct_layout_recorded", False):
-        return
-    model._direct_layout_recorded = True
+    if getattr(model, "_direct_layout_recorded", False) or is_weights_pre_processed():
+        return  # pre-processed weights are already in runtime layout
     config = get_current_vllm_config_or_none()
     spec = config.speculative_config if config is not None else None
-    model._direct_draft_lm_head_quantization = (
-        spec.draft_lm_head_quantization if spec is not None else None
-    )
+    if spec is not None and spec.draft_lm_head_quantization is not None:
+        # after `begin` the draft's quantized lm_head is a view of the target
+        # lm_head's storage: post-load processing would write it there
+        raise RuntimeError("direct reload: draft_lm_head_quantization is not supported")
+    model._direct_layout_recorded = True
     for _, t in _loadable_tensors(model):
         if not t.is_meta and not hasattr(t, "_ckpt_layout"):
             t._ckpt_layout = (tuple(t.shape), t.stride(), t.dtype, t.storage_offset())
@@ -108,7 +109,8 @@ def _checkpoint_views(
             continue
         shape, stride, dtype, offset = layout
         storage = t.untyped_storage()
-        need = (offset + layout_span(shape, stride)) * dtype.itemsize
+        span = _extent(torch.empty_strided(shape, stride, device="meta"))
+        need = (offset + span) * dtype.itemsize
         if need > storage.nbytes():
             raise RuntimeError(
                 f"direct reload: {name} storage has {storage.nbytes()} bytes, "
@@ -129,10 +131,6 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     bytes until a finish succeeds."""
     if not getattr(model, "_direct_layout_recorded", False):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
-    if model._direct_draft_lm_head_quantization is not None:
-        # the draft's quantized lm_head is a view of the target lm_head's
-        # storage after `begin`: post-load processing would write it there
-        raise RuntimeError("direct reload: draft_lm_head_quantization is not supported")
     views = _checkpoint_views(model)
 
     # nothing above modified the model
