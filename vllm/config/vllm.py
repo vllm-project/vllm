@@ -3136,6 +3136,9 @@ class VllmConfig:
         if self.aux_output_config.enabled:
             unsupported.append("routed-expert auxiliary outputs")
 
+        if self.lora_config and self.lora_config.enable_tower_connector_lora:
+            unsupported.append("multimodal tower and connector LoRA")
+
         return unsupported
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:

@@ -4,6 +4,7 @@ import time
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from copy import deepcopy
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
@@ -13,12 +14,14 @@ from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
+from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -37,10 +40,12 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cpu.attn_utils import (
     FastPrefillHelper,
+    build_slot_mappings_by_layer,
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
@@ -71,6 +76,7 @@ from vllm.v1.worker.cpu.sampler import CPUSampler, CPUWatermarkSampler
 from vllm.v1.worker.cpu.states import CPURequestState
 from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
 from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer, free_before_shutdown
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
     clear_layer_kv_caches,
@@ -79,6 +85,13 @@ from vllm.v1.worker.utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class ExecuteModelState(NamedTuple):
+    input_batch: InputBatch
+    hidden_states: torch.Tensor | None
+    finished_req_ids: set[str]
+    ec_connector_output: ECConnectorOutput | None
 
 
 def sort_batch_req_ids(
@@ -178,6 +191,7 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
 
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+        self.execute_model_state: ExecuteModelState | None = None
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
 
@@ -782,6 +796,153 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
         self.model_state.postprocess_state(
             idx_mapping, num_sampled, self.req_states.num_computed_tokens
         )
+
+    def _merge_ec_connector_no_forward(
+        self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
+    ) -> ModelRunnerOutput:
+        return ModelRunnerOutput.with_ec_conn_output(
+            output,
+            self.ec_connector.no_forward(scheduler_output).ec_connector_output,
+        )
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> ModelRunnerOutput | IntermediateTensors | None:
+        self.update_pp_decode_requests()
+        self.finish_requests(scheduler_output)
+        self.free_states(scheduler_output)
+        self.add_requests(scheduler_output)
+        self.update_requests(scheduler_output)
+        if self.encoder_cache is not None:
+            # add_requests initializes RoPE positions from CPU metadata first.
+            for req_id, updates in scheduler_output.encoder_input_updates.items():
+                self.encoder_cache.update_encoder_inputs(req_id, updates)
+
+        if scheduler_output.total_num_scheduled_tokens == 0:
+            empty_output = self.kv_connector.no_forward(scheduler_output)
+            return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
+
+        batch_req_state, _ = self.gather_batch_req_state(
+            scheduler_output, dummy_run=False
+        )
+        assert batch_req_state is not None
+        input_batch = self.prepare_inputs(scheduler_output, batch_req_state)
+        block_tables, slot_mappings = self.prepare_attn(input_batch)
+        self.model_state.preprocess_state(
+            input_batch,
+            block_tables,
+            self.kv_cache_config,
+            self.req_states.num_computed_tokens,
+        )
+
+        num_tokens = scheduler_output.total_num_scheduled_tokens
+        _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
+            num_tokens_unpadded=num_tokens,
+            num_tokens_padded=num_tokens,
+            allow_microbatching=False,
+            parallel_config=self.parallel_config,
+            cudagraph_mode=0,
+        )
+        num_active_loras = 0
+        if self.lora_config:
+            lora_inputs = self.lora_state.make_lora_inputs(
+                input_batch.req_ids,
+                input_batch.idx_mapping_np,
+                input_batch.num_scheduled_tokens,
+                np.diff(input_batch.cu_num_logits_np),
+            )
+            num_active_loras = len(lora_inputs[2])
+            self._set_active_loras(*lora_inputs)
+
+        slot_mappings_by_layer = build_slot_mappings_by_layer(
+            slot_mappings, self.kv_cache_config
+        )
+        attn_metadata = self.model_state.prepare_attn(
+            input_batch,
+            block_tables,
+            slot_mappings,
+            self.attn_groups,
+            self.kv_cache_config,
+        )
+
+        input_ids = input_batch.input_ids
+        inputs_embeds = None
+        ec_connector_output = None
+        if self.uses_inputs_embeds and self.is_first_pp_rank:
+            scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+            with self.ec_connector.maybe_get_output(
+                scheduler_output
+            ) as ec_connector_output:
+                inputs_embeds = self.model_state.prepare_inputs_embeds(
+                    scheduled_encoder_inputs, input_batch, self.req_states
+                )
+            if inputs_embeds is not None and not requires_raw_input_tokens(self.model):
+                input_ids = None
+
+        model_inputs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "positions": input_batch.positions,
+            "inputs_embeds": inputs_embeds,
+            "intermediate_tensors": None,
+            **self.model_state.prepare_inputs(input_batch, self.req_states),
+        }
+        if not self.is_first_pp_rank:
+            if not requires_raw_input_tokens(self.model):
+                model_inputs["input_ids"] = None
+            model_inputs["inputs_embeds"] = None
+
+            assert intermediate_tensors is not None
+            assert self.intermediate_tensors is not None
+            n = input_batch.num_tokens_after_padding
+            new_tensors = {
+                k: v[:n].copy_(intermediate_tensors.tensors[k][:n])
+                for k, v in self.intermediate_tensors.tensors.items()
+            }
+            model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
+            del intermediate_tensors
+
+        skip_compiled = bool(
+            self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs
+        )
+        batch_descriptor = BatchDescriptor(
+            num_tokens=input_batch.num_tokens_after_padding,
+            has_lora=self.lora_config is not None,
+            num_active_loras=num_active_loras,
+        )
+        with set_forward_context(
+            attn_metadata,
+            self.vllm_config,
+            num_tokens=input_batch.num_tokens_after_padding,
+            num_tokens_across_dp=num_tokens_across_dp,
+            batch_descriptor=batch_descriptor,
+            slot_mapping=slot_mappings_by_layer,
+            skip_compiled=skip_compiled,
+            is_padding=input_batch.is_padding,
+        ):
+            self.kv_connector.pre_forward(scheduler_output, input_batch)
+            model_output = self.model(**model_inputs)
+        self.kv_connector.finish_forward()
+
+        if self.is_last_pp_rank:
+            assert isinstance(model_output, torch.Tensor)
+            hidden_states = model_output
+            output_intermediate_tensors = None
+        else:
+            assert isinstance(model_output, IntermediateTensors)
+            hidden_states = None
+            output_intermediate_tensors = model_output
+
+        self.execute_model_state = ExecuteModelState(
+            input_batch=input_batch,
+            hidden_states=hidden_states,
+            finished_req_ids=scheduler_output.finished_req_ids,
+            ec_connector_output=ec_connector_output,
+        )
+
+        return output_intermediate_tensors
 
     def shutdown(self) -> None:
         """Release CPU tensors (model weights, KV caches, workspace) so that

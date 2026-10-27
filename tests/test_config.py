@@ -1094,6 +1094,7 @@ def test_cpu_no_triton_v2_rejects_unsupported_features(monkeypatch):
     config.parallel_config.enable_batch_sharded_sampling = True
     config.parallel_config.enable_eplb = True
     config.aux_output_config.enable_return_routed_experts = True
+    config.lora_config = SimpleNamespace(enable_tower_connector_lora=True)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", False)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
 
@@ -1105,7 +1106,7 @@ def test_cpu_no_triton_v2_rejects_unsupported_features(monkeypatch):
         "custom logits processors, "
         "decode context parallelism, prefill context parallelism, "
         "batch-sharded sampling, expert parallel load balancing, "
-        "routed-expert auxiliary outputs"
+        "routed-expert auxiliary outputs, multimodal tower and connector LoRA"
     )
 
 
