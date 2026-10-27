@@ -85,7 +85,7 @@ from .dev import (
     uniform,
     wave_incl_scan,
 )
-from .k3 import _lay, fp4_mma, sel_peer, task_ring
+from .k3 import _lay, dn_loads, fp4_mma, sel_peer, task_ring
 
 DM = 4096
 INTER = 4096
@@ -142,8 +142,6 @@ def build(key: BuildM):
     UNR = S != 96  # down task loop as a ring (unroll 3, fixed slots)
     W13_BYTES = EL * 2 * INTER * (DM // 2)
     W13S_BYTES = EL * 2 * INTER * (DM // 32)
-    W2_BYTES = EL * DM * (INTER // 2)
-    W2S_BYTES = EL * DM * (INTER // 32)
     tag_par = lambda tag: tag & 1
 
     @fx.struct
@@ -360,30 +358,6 @@ def build(key: BuildM):
                 )
 
     # ------------------------------------------------------------ down
-    def dn_loads(w2, w2s, w_post, rt, task, lane, wave, ok):
-        r = lane % 16
-        g = lane // 16
-        task = ok.select(task, fx.Int32(0))
-        v = task >> 8
-        j = task & 255
-        e = uniform(fx.ptr_load(rt["ve_u"] + fx.min(v, VMAX - 1)))
-        rbase = e * DM + j * 16
-        ops = []
-        for i in range_constexpr(2):
-            c = 2 * wave + i
-            wb = (rbase * (INTER // 2) + (2 * c) * 1024 + lane * 16) // 4
-            ops.append(ld_vec_if(ok, w2, wb, 4, W2_BYTES, CM_NT))
-            ops.append(ld_vec_if(ok, w2, wb + 256, 4, W2_BYTES, CM_NT))
-            sdw = (
-                (rbase >> 5) * (8 * (INTER // 32))
-                + 64 * c
-                + 16 * (2 * (g % 2) + g // 2)
-                + r
-            )
-            ops.append(ld_i32_if(ok, w2s, sdw, W2S_BYTES))
-        ops.append(ld_i32_if(ok, w_post, 8 * j + lane % 8, DM * 2))
-        return ops
-
     @traced
     def load_rows_a(scratch, tag, health, rt, hsel, al, tid):
         """LDS row n := A row of pick pk[hsel][n] (polled; zeros for an empty slot)."""
@@ -630,7 +604,9 @@ def build(key: BuildM):
             load_rows_h(h, rt, 1, mg.h.ptr, tid)
         task_ring(gu_ld, gu_c, q, task, it, t1, False, 1)
         # down: same tasks
-        dn_ld = lambda t: dn_loads(w2, w2s, w_post, rt, t, lane, wave, t < t1)
+        dn_ld = lambda t: dn_loads(
+            w2, w2s, w_post, rt["ve_u"], t, lane, wave, t < t1, VMAX
+        )
         dq = [dn_ld(t0 + d) for d in range(PF_DN)]
         gpu.barrier()
         load_rows_a(scratch, tag, health, rt, 0, md.a.ptr, tid)

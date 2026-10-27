@@ -108,6 +108,7 @@ INTER = 4096
 E = 256
 TOPK = 8
 W = 8  # ranks in the TP = EP group
+EL = E // W  # local experts
 ROUTE_EPS = 1e-15
 PRE_EPS = 1e-5
 POST_EPS = 1e-8
@@ -116,6 +117,8 @@ HROW = DM + XPAD
 AROW = INTER + XPAD
 KCH = 128
 FCH = 256
+W2_BYTES = EL * DM * (INTER // 2)
+W2S_BYTES = EL * DM * (INTER // 32)
 KQ = 8  # stage-A K split (CTAs a group)
 NG = BLOCKS // KQ  # stage-A groups
 XQ = HID // KQ  # stage-A K a CTA
@@ -313,6 +316,34 @@ def fp4_mma(ops, base, bl, brow, lane, acc, c, jpar, rows, row0=0):
     return acc
 
 
+def dn_loads(w2, w2s, w_post, etab, task, lane, wave, ok, nv=None):
+    """Task (u, j)'s w2 operands for this wave (expert etab[u], u clamped below nv)."""
+    r = lane % 16
+    g = lane // 16
+    task = ok.select(task, fx.Int32(0))
+    u = task >> 8
+    j = task & 255
+    e = uniform(fx.ptr_load(etab + (u if nv is None else fx.min(u, nv - 1))))
+    rbase = e * DM + j * 16
+    ops = []
+    for i in range_constexpr(2):
+        c = 2 * wave + i
+        wb = (rbase * (INTER // 2) + (2 * c) * 1024 + lane * 16) // 4
+        ops.append(ld_vec_if(ok, w2, wb, 4, W2_BYTES, CM_NT))
+        ops.append(ld_vec_if(ok, w2, wb + 256, 4, W2_BYTES, CM_NT))
+        sdw = (
+            (rbase >> 5) * (8 * (INTER // 32))
+            + 64 * c
+            + 16 * (2 * (g % 2) + g // 2)
+            + r
+        )
+        ops.append(ld_i32_if(ok, w2s, sdw, W2S_BYTES))
+    # the epilogue's w_post pair (rows 16j + 2 (lane % 8), +1): loaded with the weights,
+    # not in the epilogue, where it would wait behind the whole prefetch queue
+    ops.append(ld_i32_if(ok, w_post, 8 * j + lane % 8, DM * 2))
+    return ops
+
+
 @traced
 def task_ring(load, compute, q, task, it, end, unr, *args):
     """Tasks task .. end - 1: compute(q[0], task, it, *args) with the next len(q) tasks' loads
@@ -435,7 +466,6 @@ def build(key: Build):
     CA = XQ // KCH // WAVES  # stage-A pre-proj chunks a wave
     CO = OK_K // KCH // WAVES  # o_proj chunks a wave
     QPF = 4  # qkvg tiles issued before stage G (of NQT)
-    EL = E // W  # local experts
     P = S * TOPK
     RROUNDS = (S + WAVES - 1) // WAVES
     lay, _ = scratch_layout(S)
@@ -446,8 +476,6 @@ def build(key: Build):
     GUSPLIT = S == 16
     W13_BYTES = EL * 2 * INTER * (DM // 2)
     W13S_BYTES = EL * 2 * INTER * (DM // 32)
-    W2_BYTES = EL * DM * (INTER // 2)
-    W2S_BYTES = EL * DM * (INTER // 32)
     # stage A: a KQ-CTA group (K parts) covers RT pre-proj rows and EG router experts
     RS_PRE = DM // W
     RT = RS_PRE // NG  # 512 / 32 = 16
@@ -1025,32 +1053,6 @@ def build(key: Build):
                     pick * (INTER // 2) + j * 8 + rp,
                     bf16_pair(av[0], av[1]),
                 )
-
-    def dn_loads(w2, w2s, w_post, rt, task, lane, wave, ok):
-        r = lane % 16
-        g = lane // 16
-        task = ok.select(task, fx.Int32(0))
-        u = task >> 8
-        j = task & 255
-        e = uniform(fx.ptr_load(rt["uexp"] + u))
-        rbase = e * DM + j * 16
-        ops = []
-        for i in range_constexpr(2):
-            c = 2 * wave + i
-            wb = (rbase * (INTER // 2) + (2 * c) * 1024 + lane * 16) // 4
-            ops.append(ld_vec_if(ok, w2, wb, 4, W2_BYTES, CM_NT))
-            ops.append(ld_vec_if(ok, w2, wb + 256, 4, W2_BYTES, CM_NT))
-            sdw = (
-                (rbase >> 5) * (8 * (INTER // 32))
-                + 64 * c
-                + 16 * (2 * (g % 2) + g // 2)
-                + r
-            )
-            ops.append(ld_i32_if(ok, w2s, sdw, W2S_BYTES))
-        # the epilogue's w_post pair (rows 16j + 2 (lane % 8), +1): loaded with the weights,
-        # not in the epilogue, where it would wait behind the whole prefetch queue
-        ops.append(ld_i32_if(ok, w_post, 8 * j + lane % 8, DM * 2))
-        return ops
 
     @traced
     def dn_build_picks(rt, u0, u1, tid):
@@ -2294,8 +2296,8 @@ def build(key: Build):
             ops, t, i, scratch, tag, rt, tid, lane, wave, sc_.h.ptr, sc_.red.ptr
         )
         task_ring(gu_ld, gu_c, q, t0, fx.Int32(0), t1, UNR)
-        dn_ld = lambda t: dn_loads(w2, w2s, w_post, rt, t, lane, wave, t < t1)
-        dq = [dn_loads(w2, w2s, w_post, rt, t0, lane, wave, t0 < t1)]
+        dn_ld = lambda t: dn_loads(w2, w2s, w_post, rt["uexp"], t, lane, wave, t < t1)
+        dq = [dn_loads(w2, w2s, w_post, rt["uexp"], t0, lane, wave, t0 < t1)]
         gpu.barrier()
         u0 = t0 >> 8
         u1 = last >> 8
