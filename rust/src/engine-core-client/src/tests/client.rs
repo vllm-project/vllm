@@ -37,7 +37,7 @@ use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
-use crate::protocol::utility::{PauseMode, UtilityOutput, UtilityResultEnvelope};
+use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
     setup_mock_engine_with_init, spawn_mock_engine_task,
@@ -2490,7 +2490,7 @@ async fn sleep_and_wake_calls_record_engine_sleep_state() {
     .await;
 
     let mut series = vec![("connected", engine_sleep_state_series(MODEL))];
-    client.sleep(1, PauseMode::default()).await.unwrap();
+    client.sleep(SleepLevel::OffloadWeights, PauseMode::default()).await.unwrap();
     series.push(("sleep level 1", engine_sleep_state_series(MODEL)));
     assert!(!client.wake_up(Some(vec!["weights".to_owned()])).await.unwrap());
     series.push(("partial wake", engine_sleep_state_series(MODEL)));
@@ -2499,7 +2499,7 @@ async fn sleep_and_wake_calls_record_engine_sleep_state() {
     client.release_kv_cache_memory().await.unwrap();
     series.push(("release kv cache", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
-    client.sleep(2, PauseMode::default()).await.unwrap();
+    client.sleep(SleepLevel::DiscardAll, PauseMode::default()).await.unwrap();
     series.push(("sleep level 2", engine_sleep_state_series(MODEL)));
 
     expect_test::expect![[r#"

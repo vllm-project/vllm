@@ -2262,6 +2262,45 @@ async fn control_list_loras_requires_lora_enabled_engine() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn control_sleep_rejects_unknown_level() {
+    let mut ready = default_ready_response();
+    ready.enable_sleep_mode = true;
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-sleep-level".to_vec(),
+            ready,
+            Arc::new(FakeTextBackend),
+            None,
+            |_, _| boxed_test_future(async move {}),
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut control_client = ControlClient::new(channel);
+    let status = control_client
+        .sleep(pb::SleepRequest {
+            level: Some(3),
+            mode: pb::PauseMode::Unspecified.into(),
+        })
+        .await
+        .expect_err("level 3 should be rejected");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        status.message(),
+        "invalid sleep level `3`; expected one of: 0, 1, 2"
+    );
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn control_forwards_weight_update_without_pause_guard() {
     let mut ready = default_ready_response();
     ready.weight_transfer_backend = Some("nccl".to_string());

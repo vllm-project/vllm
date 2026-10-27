@@ -16,6 +16,7 @@ use crate::protocol::stats::{
     CachedTokensBySource, KvConnectorStats, MooncakeStats, MooncakeTransferStats,
     MultiConnectorStats, NixlStats, SchedulerStats,
 };
+use crate::protocol::utility::SleepLevel;
 use crate::transport::ConnectedEngine;
 
 const WAITING_REASON_CAPACITY: &str = "capacity";
@@ -29,11 +30,10 @@ const SLEEP_STATES: [&str; 3] = ["awake", "weights_offloaded", "discard_all"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EngineSleepState {
     Awake,
-    /// Sleeping at the given level. Level 0 (`release_kv_cache_memory`, or
-    /// `sleep` with level 0) only clears `awake`.
-    Asleep {
-        level: u32,
-    },
+    Asleep(SleepLevel),
+    /// After `release_kv_cache_memory`, which Python records like a level-0
+    /// sleep.
+    KvCacheReleased,
 }
 
 impl EngineSleepState {
@@ -42,7 +42,9 @@ impl EngineSleepState {
     fn gauge_values(self) -> [u64; 3] {
         match self {
             Self::Awake => [1, 0, 0],
-            Self::Asleep { level } => [0, u64::from(level == 1), u64::from(level == 2)],
+            Self::Asleep(SleepLevel::PauseOnly) | Self::KvCacheReleased => [0, 0, 0],
+            Self::Asleep(SleepLevel::OffloadWeights) => [0, 1, 0],
+            Self::Asleep(SleepLevel::DiscardAll) => [0, 0, 1],
         }
     }
 }

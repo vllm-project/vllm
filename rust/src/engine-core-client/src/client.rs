@@ -22,7 +22,7 @@ use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
-use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
+use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode, SleepLevel};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
@@ -952,16 +952,16 @@ impl EngineCoreClient {
     }
 
     /// Put the engine to sleep.
-    pub async fn sleep(&self, level: u32, mode: PauseMode) -> Result<()> {
+    pub async fn sleep(&self, level: SleepLevel, mode: PauseMode) -> Result<()> {
         self.call_utility::<(), _>("sleep", (level, mode)).await?;
-        self.inner.record_sleep_state(EngineSleepState::Asleep { level });
+        self.inner.record_sleep_state(EngineSleepState::Asleep(level));
         Ok(())
     }
 
     /// Release KV cache memory while keeping model weights resident.
     pub async fn release_kv_cache_memory(&self) -> Result<()> {
         self.call_utility::<(), _>("release_kv_cache_memory", ()).await?;
-        self.inner.record_sleep_state(EngineSleepState::Asleep { level: 0 });
+        self.inner.record_sleep_state(EngineSleepState::KvCacheReleased);
         Ok(())
     }
 

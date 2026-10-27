@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
-use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
+use vllm_engine_core_client::protocol::utility::{PauseMode as EnginePauseMode, SleepLevel};
 
 use super::{ControlServer, pb};
 use crate::config::LoraModulePath;
@@ -377,7 +377,10 @@ impl pb::control_server::Control for ControlServiceImpl {
         self.require_sleep_mode()?;
         let request = request.into_inner();
         let mode = pause_mode(request.mode)?;
-        let level = request.level.unwrap_or(1);
+        let level = match request.level {
+            Some(level) => SleepLevel::try_from(level).map_err(Status::invalid_argument)?,
+            None => SleepLevel::OffloadWeights,
+        };
         let _guard = self.rl_lock.lock().await;
         self.client()
             .sleep(level, mode)
