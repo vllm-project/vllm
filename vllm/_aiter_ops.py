@@ -2508,6 +2508,19 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def triton_preshuffle_gemm_supports_skip_reduce(cls) -> bool:
+        """Whether installed aiter's Triton `gemm_a8w8_preshuffle` accepts
+        `skip_reduce`. Added in aiter v0.1.27."""
+        import inspect
+
+        try:
+            from aiter.ops.triton.gemm_a8w8 import gemm_a8w8_preshuffle
+        except ImportError:
+            return False
+        return "skip_reduce" in inspect.signature(gemm_a8w8_preshuffle).parameters
+
+    @classmethod
+    @if_aiter_supported
     def is_mha_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MHA_ENABLED
 
