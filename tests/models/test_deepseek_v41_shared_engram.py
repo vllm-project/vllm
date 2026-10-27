@@ -19,15 +19,33 @@ from vllm.models.deepseek_v41.nvidia.ops.shared_engram_owner import (
 from vllm.models.deepseek_v41.nvidia.ops.shared_engram_vmm import TableHandles
 
 
-def test_disconnected_consumer_prevents_owner_drain():
+def test_disconnected_consumer_prevents_owner_drain(caplog):
     state = _OwnerState({"generation": "generation-1"}, "private-token")
-    lease = state.attach("private-token")
+    client = {"peer": "192.0.2.7", "hostname": "worker-7", "pid": 42}
+    lease = state.attach("private-token", client)
     state.lose_control(lease)
     assert not state.active
     assert state.uncertain == {lease}
+    assert state.drain_status()["clients"][lease] == client
+    assert "retaining backing" in caplog.text
     state.draining = True
     with pytest.raises(PermissionError, match="rejected"):
         state.attach("private-token")
+
+
+def test_normal_detach_removes_client_from_drain_status(capsys):
+    state = _OwnerState({"generation": "generation-1"}, "private-token")
+    lease = state.attach("private-token", {"peer": "127.0.0.1", "pid": 4})
+    state.detach(lease)
+    output = capsys.readouterr().out
+    assert "ENGRAM_OWNER_ATTACH" in output
+    assert "ENGRAM_OWNER_DETACH" in output
+    assert state.drain_status() == {
+        "generation": "generation-1",
+        "active": [],
+        "uncertain": [],
+        "clients": {},
+    }
 
 
 def test_fabric_manifest_rejects_missing_or_malformed_chunks():

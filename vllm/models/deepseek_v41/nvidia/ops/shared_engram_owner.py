@@ -189,27 +189,71 @@ class _OwnerState:
         self.token = token
         self.active: set[str] = set()
         self.uncertain: set[str] = set()
+        self.lease_clients: dict[str, dict] = {}
         self.draining = False
         self.condition = threading.Condition()
 
-    def attach(self, token: str) -> str:
+    def attach(self, token: str, client: dict | None = None) -> str:
         with self.condition:
             if self.draining or not secrets.compare_digest(token, self.token):
                 raise PermissionError("shared Engram attachment rejected")
             lease = secrets.token_hex(16)
             self.active.add(lease)
+            self.lease_clients[lease] = client or {}
+            print(
+                "ENGRAM_OWNER_ATTACH "
+                + json.dumps(
+                    {
+                        "generation": self.manifest["generation"],
+                        "lease": lease,
+                        "client": self.lease_clients[lease],
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
             return lease
 
     def detach(self, lease: str) -> None:
         with self.condition:
             self.active.remove(lease)
+            client = self.lease_clients.pop(lease, {})
+            print(
+                "ENGRAM_OWNER_DETACH "
+                + json.dumps(
+                    {
+                        "generation": self.manifest["generation"],
+                        "lease": lease,
+                        "client": client,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
             self.condition.notify_all()
 
     def lose_control(self, lease: str) -> None:
         with self.condition:
             self.active.discard(lease)
             self.uncertain.add(lease)
+            logger.warning(
+                "Engram lease control lost; retaining backing: %s client=%s",
+                lease,
+                self.lease_clients.get(lease, {}),
+            )
             self.condition.notify_all()
+
+    def drain_status(self) -> dict:
+        """Snapshot outstanding leases while holding the condition lock."""
+        return {
+            "generation": self.manifest["generation"],
+            "active": sorted(self.active),
+            "uncertain": sorted(self.uncertain),
+            "clients": {
+                lease: self.lease_clients.get(lease, {})
+                for lease in sorted(self.active | self.uncertain)
+            },
+        }
 
 
 class _RequestHandler(socketserver.StreamRequestHandler):
@@ -221,7 +265,19 @@ class _RequestHandler(socketserver.StreamRequestHandler):
             request = json.loads(self.rfile.readline(MAX_CONTROL_LINE))
             if request.get("op") != "attach":
                 raise ValueError("expected attach")
-            lease = state.attach(str(request.get("token", "")))
+            client: dict[str, str | int] = {"peer": str(self.client_address[0])}
+            supplied = request.get("client")
+            if isinstance(supplied, dict):
+                for key in ("hostname", "pid", "device", "layer"):
+                    value = supplied.get(key)
+                    if (
+                        isinstance(value, int)
+                        and value >= 0
+                        or isinstance(value, str)
+                        and len(value) <= 128
+                    ):
+                        client[key] = value
+            lease = state.attach(str(request.get("token", "")), client)
             reply = {"ok": True, "lease": lease, "manifest": state.manifest}
             self.wfile.write(json.dumps(reply).encode() + b"\n")
             self.wfile.flush()
@@ -312,7 +368,12 @@ def run_owner(model_dir: Path, address: tuple[str, int], token_file: Path, devic
         thread.join()
         with state.condition:
             while state.active or state.uncertain:
-                state.condition.wait()
+                print(
+                    "ENGRAM_OWNER_DRAIN_WAIT "
+                    + json.dumps(state.drain_status(), sort_keys=True),
+                    flush=True,
+                )
+                state.condition.wait(timeout=60)
     for mapping in reversed(mappings):
         mapping.close()
 
@@ -334,7 +395,16 @@ def attach_table(
     lease = None
     try:
         token = token_file.read_text().strip()
-        request = {"op": "attach", "token": token}
+        request = {
+            "op": "attach",
+            "token": token,
+            "client": {
+                "hostname": socket.gethostname(),
+                "pid": os.getpid(),
+                "device": device,
+                "layer": layer,
+            },
+        }
         connection.sendall(json.dumps(request).encode() + b"\n")
         response = b""
         while not response.endswith(b"\n"):

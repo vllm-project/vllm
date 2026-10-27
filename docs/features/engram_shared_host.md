@@ -72,11 +72,16 @@ The owner stops accepting new attachments during shutdown and waits for all
 leases to detach. A lost control socket leaves an uncertain lease: the owner
 does not infer that GPU reads stopped, and it does not transparently fail over
 to another generation. An operator must establish that those consumer
-processes are gone before forcing owner teardown.
+processes are gone before forcing owner teardown. The owner logs attach and
+detach events with a bounded client identity (host, PID, device, layer). On
+shutdown, `ENGRAM_OWNER_DRAIN_WAIT` reports active and uncertain lease IDs and
+their recorded clients every 60 seconds until all leases are released. An
+uncertain lease is not cleared automatically by a lost TCP connection.
 
 ## Validation status
 
-On one four-GPU GB200 host, current vLLM main at `40fe396b` with Torch 2.14
+On one four-GPU GB200 host, vLLM source rebased on `a9b727a6` with Torch 2.14
+and the published `40fe396b` native wheel
 passed separate-process CUDA import, direct Engram gather, CUDA Graph replay,
 and real checkpoint first/middle/last row checks. One owner published the
 188.833 GiB generation; consumer attachment showed no RSS increase for the
