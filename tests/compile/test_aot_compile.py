@@ -9,6 +9,7 @@ import pickle
 import subprocess
 import sys
 import tempfile
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -194,6 +195,43 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
                 "Expected was_aot_compile_fn_loaded_from_disk to be True"
             )
             assert torch.allclose(ret, expected)
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_aot_load_restores_artifacts_on_loading_thread(
+    monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path
+):
+    """Guard caller-thread restoration while exercising a real AOT round trip."""
+    from torch._inductor.standalone_compile import AOTCompiledArtifact
+
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+    monkeypatch.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+    disable_envs_cache()
+    args = (torch.arange(100, dtype=torch.float32).reshape(10, 10),)
+    vllm_config = make_vllm_config()
+    with use_vllm_config(vllm_config):
+        expected = CompiledMod(vllm_config=vllm_config)(*args)
+
+    restoring_threads = []
+    deserialize = AOTCompiledArtifact.deserialize
+
+    def record_thread(entry):
+        restoring_threads.append(threading.get_ident())
+        return deserialize(entry)
+
+    monkeypatch.setattr(AOTCompiledArtifact, "deserialize", staticmethod(record_thread))
+    monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", "1")
+    disable_envs_cache()
+    vllm_config = make_vllm_config()
+    with use_vllm_config(vllm_config):
+        cached_mod = CompiledMod(vllm_config=vllm_config)
+        actual = cached_mod(*args)
+
+    assert cached_mod.was_aot_compile_fn_loaded_from_disk
+    assert restoring_threads
+    assert set(restoring_threads) == {threading.get_ident()}
+    assert torch.equal(actual, expected)
 
 
 @pytest.mark.skipif(
@@ -499,13 +537,14 @@ def test_standalone_compile_correctness():
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 @create_new_process_for_each_test("spawn")
 def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
-    """Test that compiling gpt2 twice results in a cache hit.
+    """Test that compiling gpt2 twice results in a cache hit, and that the
+    loaded artifacts reproduce the compiling engine's greedy tokens.
 
     Counter values are read from the EngineCore subprocess via
     ``LLM.collective_rpc`` so the test works under default V1
     multiprocessing (no shared memory between test and engine).
     """
-    from vllm import LLM
+    from vllm import LLM, SamplingParams
 
     def _snap(self):
         from vllm.compilation.counter import compilation_counter
@@ -531,7 +570,8 @@ def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
             max_model_len=256,
         )
 
-        llm_model.generate("Hello, my name is")
+        params = SamplingParams(temperature=0.0, max_tokens=16)
+        expected = llm_model.generate("Hello, my name is", params)
         assert llm_model.collective_rpc(_snap)[0] == (1, 1, 0)
 
         # Clean up first model
@@ -547,8 +587,9 @@ def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
             ),
             max_model_len=256,
         )
-        llm_model.generate("Hello, my name is")
+        actual = llm_model.generate("Hello, my name is", params)
         assert llm_model.collective_rpc(_snap)[0] == (0, 0, 1)
+        assert actual[0].outputs[0].token_ids == expected[0].outputs[0].token_ids
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")

@@ -35,6 +35,8 @@ tests should set it to a fresh directory.
 
 By default, the cache saves compiled artifacts as binary files. If you would like to interact with the generated code for debugging purposes, set the field `compile_cache_save_format=unpacked` in the compilation config, or omit this and set the env variable `VLLM_COMPILE_CACHE_SAVE_FORMAT=unpacked`.
 
+When the cache holds a mega AOT artifact (`VLLM_USE_MEGA_AOT_ARTIFACT`, on by default with AOT compilation and PyTorch 2.12 or newer), vLLM restores its compiled submodules one at a time, in saved order, on every platform. This avoids overlapping updates to Inductor's shared Triton kernel cache from this loader's submodule restores and may increase startup time for caches with many submodules. It does not disable autotuning or guarantee identical outputs across restarts.
+
 ## Dynamic shapes and vllm guard dropping
 
 `torch.compile` is designed to guard on dynamic shapes with no hesitation
