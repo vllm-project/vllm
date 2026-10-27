@@ -51,6 +51,11 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.quantization import (
+    _CUSTOMIZED_METHOD_TO_QUANT_CONFIG,
+    QUANTIZATION_METHODS,
+    register_quantization_config,
+)
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
@@ -2646,3 +2651,98 @@ def test_online_quant_load_format_dummy(
     ) as llm:
         outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)
         print(outputs[0][1])
+
+
+class _OotOnlineConfig(OnlineQuantizationConfig):
+    """Stand-in for a backend-specific online quantization config."""
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 0
+
+
+def _register_online_config(name: str):
+    """Register ``_OotOnlineConfig`` for ``name`` and return a restore hook.
+
+    ``register_quantization_config`` is how an out-of-tree platform overrides a
+    quantization method; these tests pin that ``get_quant_config`` then builds
+    the registered class instead of a hardcoded ``OnlineQuantizationConfig``.
+    """
+    previous = _CUSTOMIZED_METHOD_TO_QUANT_CONFIG.get(name)
+    added_to_methods = name not in QUANTIZATION_METHODS
+    supported = current_platform.supported_quantization
+    added_to_platform = bool(supported) and name not in supported
+
+    register_quantization_config(name)(_OotOnlineConfig)
+
+    def restore() -> None:
+        if previous is None:
+            _CUSTOMIZED_METHOD_TO_QUANT_CONFIG.pop(name, None)
+        else:
+            _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[name] = previous
+        if added_to_methods and name in QUANTIZATION_METHODS:
+            QUANTIZATION_METHODS.remove(name)
+        if (
+            added_to_platform
+            and current_platform.supported_quantization
+            and name in current_platform.supported_quantization
+        ):
+            current_platform.supported_quantization.remove(name)
+
+    return restore
+
+
+def test_registered_online_config_is_instantiated(tmp_path) -> None:
+    """A subclass registered for a new method name must be the one built."""
+    name = "test_oot_online_method"
+    restore = _register_online_config(name)
+    try:
+        _write_minimal_llama_config(tmp_path)
+        args = quant_config_args(moe="mxfp8")
+        model_config = ModelConfig(
+            model=str(tmp_path),
+            quantization=name,
+            quantization_config=args,
+        )
+
+        result = weight_utils.get_quant_config(model_config, LoadConfig())
+
+        assert type(result) is _OotOnlineConfig
+        assert result.args is args
+    finally:
+        restore()
+
+
+def test_registered_online_config_is_used_for_online_method(tmp_path) -> None:
+    """``--quantization online`` must build the registered subclass."""
+    restore = _register_online_config("online")
+    try:
+        _write_minimal_llama_config(tmp_path)
+        args = quant_config_args(moe="mxfp4")
+        model_config = ModelConfig(
+            model=str(tmp_path),
+            quantization="online",
+            quantization_config=args,
+        )
+
+        result = weight_utils.get_quant_config(model_config, LoadConfig())
+
+        assert type(result) is _OotOnlineConfig
+        assert result.args.moe == args.moe
+    finally:
+        restore()
+
+
+def test_registered_online_config_is_used_for_shorthand(tmp_path) -> None:
+    """A shorthand resolved from ``_ONLINE_SHORTHANDS`` also honours it."""
+    restore = _register_online_config("fp8_per_block")
+    try:
+        _write_minimal_llama_config(tmp_path)
+        model_config = ModelConfig(model=str(tmp_path), quantization="fp8_per_block")
+
+        result = weight_utils.get_quant_config(model_config, LoadConfig())
+
+        assert type(result) is _OotOnlineConfig
+        assert result.args.linear is not None
+    finally:
+        restore()
