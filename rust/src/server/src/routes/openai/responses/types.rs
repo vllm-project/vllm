@@ -168,8 +168,9 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub temperature: Option<f32>,
     /// Whether to apply the engine's configured watermark to generated text.
-    #[serde(default = "default_true")]
-    pub watermarking: bool,
+    /// `None` requests it like `true`, matching Chat Completions.
+    #[serde(default)]
+    pub watermarking: Option<bool>,
     #[serde(default)]
     pub top_p: Option<f32>,
     #[serde(default, deserialize_with = "deserialize_request_top_k")]
@@ -589,7 +590,7 @@ mod tests {
         .unwrap();
         assert!(matches!(request.input, ResponsesInput::Text(text) if text == "hello"));
         assert!(request.include_reasoning);
-        assert!(request.watermarking);
+        assert_eq!(request.watermarking, None);
         assert_eq!(request.model.as_deref(), Some("test-model"));
     }
 

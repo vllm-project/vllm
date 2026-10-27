@@ -269,6 +269,7 @@ pub(crate) fn prepare_responses_request(
                 merge_ec_transfer_params(vllm_xargs, ec_transfer_params.as_ref()),
                 kv_transfer_params.as_ref(),
             ),
+            ..SamplingParams::default()
         },
         chat_options: ChatOptions {
             generation_prompt_mode,

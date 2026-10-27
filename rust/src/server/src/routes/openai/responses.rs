@@ -30,7 +30,9 @@ use vllm_chat::{ChatEventStream, FinishReason};
 use self::convert::{ResponseMeta, build_response, build_usage, prepare_responses_request};
 use self::types::{ResponseItemStatus, ResponsesRequest, ResponsesResponse};
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, chat_submit_error, invalid_request, server_error, text_submit_error};
+use crate::error::{
+    ApiError, chat_submit_error, engine_error, invalid_request, server_error, text_submit_error,
+};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, unix_timestamp};
@@ -140,10 +142,8 @@ async fn collect_responses(
         ..
     } = collected;
 
-    if matches!(finish_reason, FinishReason::Error) {
-        return Err(server_error!(
-            "responses generation failed with a retryable internal error"
-        ));
+    if let FinishReason::Error(error) = &finish_reason {
+        return Err(engine_error(error.as_deref()));
     }
     let status = response_status(&finish_reason);
 
@@ -174,7 +174,7 @@ fn response_status(finish_reason: &FinishReason) -> ResponseItemStatus {
     match finish_reason {
         FinishReason::Length => ResponseItemStatus::Incomplete,
         FinishReason::Abort => ResponseItemStatus::Cancelled,
-        FinishReason::Error => ResponseItemStatus::Failed,
+        FinishReason::Error(_) => ResponseItemStatus::Failed,
         FinishReason::Stop(_) | FinishReason::Repetition(_) => ResponseItemStatus::Completed,
     }
 }

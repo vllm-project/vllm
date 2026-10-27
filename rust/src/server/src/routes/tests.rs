@@ -4442,6 +4442,11 @@ async fn engine_request_errors_map_to_http_status() {
                 status,
             ),
             ("/inference/v1/generate", raw(false), status),
+            (
+                "/v1/responses",
+                json!({"model": model, "input": "hello"}),
+                status,
+            ),
             ("/inference/v1/generate", raw(true), StatusCode::OK),
         ];
         for (uri, request, expected_status) in cases {

@@ -16,7 +16,7 @@ use super::*;
 
 fn reasoning_answer_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
     vec![
-        (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
+        (token_ids("<think>Need tool.</think>"), None),
         (bytes_to_token_ids(b"answer"), None),
         // '!' is the fake tokenizer's stop token; it is suppressed from the
         // visible text but carries the finish reason.
@@ -323,12 +323,17 @@ async fn responses_auto_truncation_reaches_engine() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn responses_watermarking_defaults_and_opt_out_reach_engine_core() {
-    for watermarking in [None, Some(true), Some(false)] {
+    for (watermarking, expected) in [
+        (None, true),
+        (Some(json!(null)), true),
+        (Some(json!(true)), true),
+        (Some(json!(false)), false),
+    ] {
         let (app, engine_task) = test_app_with_backend_and_engine_request_check(
             Arc::new(FakeChatBackend::new()),
             move |request| {
                 let params = request.sampling_params.as_ref().expect("sampling params");
-                assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+                assert_eq!(params.watermarking, expected);
             },
         )
         .await;
@@ -338,7 +343,7 @@ async fn responses_watermarking_defaults_and_opt_out_reach_engine_core() {
             "input": "hello",
         });
         if let Some(watermarking) = watermarking {
-            body["watermarking"] = json!(watermarking);
+            body["watermarking"] = watermarking;
         }
         let response = responses_call(&app, body).await;
 
@@ -612,6 +617,8 @@ async fn responses_store_dependent_features_are_rejected() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["error"]["param"], "response_id");
+    assert_eq!(json["error"]["type"], "NotFoundError");
+    assert_eq!(json["error"]["code"], 404);
 
     // Retrieval and cancellation of never-stored responses are 404.
     for (method, uri) in [
