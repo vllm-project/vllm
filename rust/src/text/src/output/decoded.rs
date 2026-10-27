@@ -46,6 +46,23 @@ impl Default for TextDecodeOptions {
     }
 }
 
+impl TextDecodeOptions {
+    /// If we are excluding stop strings from output, we need to buffer
+    /// the output so that we don't return the beginning of a stop string
+    /// when streaming the outputs.
+    fn min_bytes_to_buffer(&self) -> usize {
+        match self.include_stop_str_in_output {
+            true => 0,
+            false => self
+                .stop_strings
+                .as_ref()
+                .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
+                .unwrap_or(1)
+                .saturating_sub(1),
+        }
+    }
+}
+
 /// Terminal metadata carried on the final [`DecodedTextEvent`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Finished {
@@ -173,18 +190,7 @@ pub async fn decoded_text_event_stream(
                 Some(tokenizer) => tokenizer.create_decode_stream(
                     prompt_token_ids,
                     decode_options.skip_special_tokens,
-                    // If we are excluding stop strings from output, we need to buffer
-                    // the output so that we don't return the beginning of a stop string
-                    // when streaming the outputs.
-                    match decode_options.include_stop_str_in_output {
-                        true => 0,
-                        false => decode_options
-                            .stop_strings
-                            .as_ref()
-                            .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
-                            .unwrap_or(1)
-                            .saturating_sub(1),
-                    },
+                    decode_options.min_bytes_to_buffer(),
                 ),
                 None => Box::new(TokenOnlyDecoder),
             };
