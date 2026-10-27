@@ -214,7 +214,18 @@ def compute_global_topk_ragged_indices_and_indptr(
     # On gfx942 with --monokernel, a decode batch of up to 16
     # rows is packed with one launch instead of 4 (topk_pack.py). Other
     # batches return None there and take the function below.
+    # A PCP rank with no decode rows passes a 0-element buffer. The fused
+    # packer reshapes it with -1, which cannot infer a width, so skip it.
     from vllm.models.deepseek_v41.amd.ops import topk_pack
+
+    if topk_indices.numel() == 0:
+        return _compute_global_topk_ragged_indices_and_indptr_old(
+            topk_indices,
+            token_to_req_indices,
+            block_table,
+            block_size,
+            is_valid_token,
+        )
 
     fused = topk_pack.pack(
         topk_indices,
@@ -241,6 +252,21 @@ def _compute_global_topk_ragged_indices_and_indptr_old(
     block_size: int,
     is_valid_token: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # PCP shards decode requests. The rank that owns no rows arrives with a
+    # 0-element index buffer; reshape(n, -1) cannot infer the width, and
+    # raising here leaves the other rank blocked in the shared-memory
+    # broadcast. Return the empty ragged triple the decode path accepts.
+    if topk_indices.numel() == 0:
+        num_tokens = topk_indices.shape[0]
+        topk_lens = torch.zeros(
+            num_tokens, dtype=torch.int32, device=topk_indices.device
+        )
+        return (
+            torch.empty(0, dtype=torch.int32, device=topk_indices.device),
+            _build_indptr_from_lengths(topk_lens),
+            topk_lens,
+        )
+
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
     topk = topk_indices.shape[1]
@@ -1100,6 +1126,20 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             attn_metadata.get(self.swa_cache_layer.prefix),
         )
         assert swa_metadata is not None
+
+        if self.use_pcp:
+            # Kernels fill only real tokens. Clear the pad before inverse
+            # RoPE (bf16) and before MXFP8 data/scale are read.
+            num_tokens = (
+                swa_metadata.num_decode_tokens + swa_metadata.num_prefill_tokens
+            )
+            if isinstance(output, QuantizedActivation):
+                output.data[num_tokens:].zero_()
+                output.scale[num_tokens:].zero_()
+            else:
+                output[num_tokens:].zero_()
+            if num_tokens == 0:
+                return
 
         swa_only = self.compress_ratio == 0
         self_kv_cache = None if swa_only else self._compressed_kv_cache()

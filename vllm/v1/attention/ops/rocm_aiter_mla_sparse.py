@@ -4606,6 +4606,13 @@ def rocm_sparse_attn_decode(
         "rocm_sparse_attn_decode",
     )
 
+    # PCP shards decode requests, so the non-owner rank arrives here with no
+    # rows. reshape(..., -1) cannot infer a width from a 0-element tensor.
+    # Skip the kernel; it has no collective, and returning lets this rank join
+    # the later ones.
+    if swa_indices.numel() == 0:
+        return 0
+
     main_indices = swa_indices.reshape(swa_indices.shape[0], -1)
 
     extra_cache = None
