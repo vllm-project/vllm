@@ -50,21 +50,24 @@ def query_tiles(heads: int, q: int) -> int:
     return -(-heads * q // ROWS)
 
 
-def max_planned_requests(heads: int, q: int) -> int:
+def max_planned_requests(heads: int, q: int, capacity: int = CAPACITY) -> int:
     """Most requests whose partials the kernel can address."""
-    return MAX_TILES // query_tiles(heads, q)
+    tiles = (1 << 31) // (ROWS * capacity * LATENT * 2)
+    return tiles // query_tiles(heads, q)
 
 
-def workspace_bytes(heads: int, q: int, requests: int) -> int:
+def workspace_bytes(heads: int, q: int, requests: int, capacity: int = CAPACITY) -> int:
     """Split-KV scratch of ``requests``: FP16 partials and FP32 partial LSEs."""
-    return requests * query_tiles(heads, q) * ROWS * CAPACITY * (LATENT * 2 + 4)
+    return requests * query_tiles(heads, q) * ROWS * capacity * (LATENT * 2 + 4)
 
 
-def work_list_len(heads: int, q: int, requests: int, clusters: int) -> int:
+def work_list_len(
+    heads: int, q: int, requests: int, clusters: int, max_waves: int = MAX_WAVES
+) -> int:
     """Entries of the work list: the planned clusters of up to ``MAX_WAVES`` waves
     (more if one split per request and query tile needs them, so no planned entry
     is ever dropped), then one wave of empty entries that ends every walk."""
-    waves = max(MAX_WAVES, -(-requests * query_tiles(heads, q) // clusters))
+    waves = max(max_waves, -(-requests * query_tiles(heads, q) // clusters))
     return (waves + 1) * clusters
 
 
@@ -157,6 +160,8 @@ def _compile(
     causal: bool,
     lse: bool,
     cp: tuple[int, int, int],
+    capacity: int = CAPACITY,
+    pdl: bool = False,
 ):
     """The KV-balanced FP8 MLA decode for one shape: packed query rows, causal among a
     request's q rows unless ``causal`` is off, FP16 partials, BF16 latent output,
@@ -190,7 +195,7 @@ def _compile(
         cp_interleave_size=cp[2],
         reducer_d_tiles=1,
         pack_q=True,
-        reducer_max_splits=max(4, 1 << (CAPACITY - 1).bit_length()),
+        reducer_max_splits=max(4, 1 << (capacity - 1).bit_length()),
         partial_fp16=True,
         work_list=True,
         reg_split=REG_SPLIT,
@@ -241,7 +246,7 @@ def _compile(
         Float32(1.0),  # softmax scale
         Float32(1.0),  # output scale
         cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
-        False,  # PDL
+        pdl,  # PDL: wait on / release the neighbouring kernels
         None,  # local visible lengths
         compact(Int32, (sym(),), assumed_align=4),  # work list
     )
@@ -272,17 +277,33 @@ class KvBalancedMla:
         max_requests: int,
         causal: bool,
         device: torch.device,
+        *,
+        capacity: int = CAPACITY,
+        min_split_tokens: int = MIN_SPLIT_TOKENS,
+        max_waves: int = MAX_WAVES,
+        pdl: bool = False,
     ):
+        """``capacity`` (most splits of one request), ``min_split_tokens`` and
+        ``max_waves`` bound the planner; the defaults suit large decode batches."""
         assert supports(heads, q, device)
-        assert max_requests <= max_planned_requests(heads, q)
+        # min_split_tokens of one tile would make Triton specialize the planner's
+        # min_tiles argument to a constexpr 1.
+        assert 1 <= capacity <= 255 and min_split_tokens >= 2 * KV_TILE
+        self.capacity, self.min_split_tokens = capacity, min_split_tokens
+        # PDL: launch as a programmatic dependent of the previous kernel (its
+        # prologue overlaps the producer's tail) and release the next one early.
+        self.pdl = pdl
+        assert max_requests <= max_planned_requests(heads, q, capacity)
         self.heads, self.q, self.causal = heads, q, causal
         self.max_requests = max_requests
         self.arch = torch.cuda.get_device_capability(device)
         self.q_tiles = query_tiles(heads, q)
         self.clusters = max_active_clusters(device)
-        self.list_len = work_list_len(heads, q, max_requests, self.clusters)
+        self.list_len = work_list_len(
+            heads, q, max_requests, self.clusters, max_waves
+        )
         self.max_waves = self.list_len // self.clusters - 1
-        self.workspace_bytes = workspace_bytes(heads, q, max_requests)
+        self.workspace_bytes = workspace_bytes(heads, q, max_requests, capacity)
         self.block_b = triton.next_power_of_2(max(16, max_requests))
 
     def plan(
@@ -301,14 +322,14 @@ class KvBalancedMla:
             self.q_tiles,
             self.clusters,
             self.max_waves,
-            CAPACITY,
-            MIN_SPLIT_TOKENS // KV_TILE,
+            self.capacity,
+            self.min_split_tokens // KV_TILE,
             OVERHEAD_TILES,
             self.list_len,
             KV_TILE=KV_TILE,
             BLOCK_W=triton.next_power_of_2(self.max_waves),
             BLOCK_B=self.block_b,
-            BLOCK_R=triton.next_power_of_2(CAPACITY * self.q_tiles),
+            BLOCK_R=triton.next_power_of_2(self.capacity * self.q_tiles),
             BLOCK_T=1024,
             SEARCH_STEPS=20,
         )
@@ -327,6 +348,7 @@ class KvBalancedMla:
         lse: torch.Tensor | None = None,
         causal_lens: torch.Tensor | None = None,
         cp: tuple[int, int, int] = (1, 0, 1),
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """BF16 latent [T, H, 512] of the FP8 ``query`` [T, H, 576] (``q`` rows per
         request) over the FP8 ``cache`` [blocks, page, 576] with the plan in
@@ -341,9 +363,10 @@ class KvBalancedMla:
         # shared workspace.
         workspace = workspace[: self.workspace_bytes]
         query = query.view(requests, self.q, self.heads, LATENT + ROPE)
-        out = query.new_empty(
-            (requests, self.q, self.heads, LATENT), dtype=torch.bfloat16
-        )
+        shape = (requests, self.q, self.heads, LATENT)
+        if out is None:
+            out = query.new_empty(shape, dtype=torch.bfloat16)
+        out = out.view(shape)
         cache = cache.view(torch.float8_e4m3fn)
         kernel = _compile(
             self.heads,
@@ -354,6 +377,8 @@ class KvBalancedMla:
             self.causal,
             lse is not None,
             cp,
+            self.capacity,
+            self.pdl,
         )
         with tvm_ffi.use_torch_stream():
             kernel(
@@ -365,7 +390,7 @@ class KvBalancedMla:
                 out,
                 lse,
                 workspace,
-                Int32(CAPACITY),
+                Int32(self.capacity),
                 seq_lens,
                 seq_lens if causal_lens is None else causal_lens,
                 counts[:requests],

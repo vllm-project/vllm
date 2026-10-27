@@ -26,7 +26,7 @@ from .query import MlaQuery
 from .value import MlaValue
 
 # tokenspeed (SM-filling splits) streams long contexts fast; trtllm-gen wins from B16.
-TRTLLM_CORE_BATCH, CORES = 16, ("tokenspeed", "trtllm")
+TRTLLM_CORE_BATCH, CORES = 16, ("tokenspeed", "trtllm", "kv_balanced")
 _FLASHINFER: dict[tuple[torch.device, int], tuple[torch.Tensor, torch.Tensor]] = {}
 
 
@@ -74,9 +74,12 @@ def core_for(batch, core="auto", q=1):
     q > 1: tokenspeed, whose SM-filling splits stream long contexts far faster)."""
     if core == "auto":
         core = "trtllm" if batch >= TRTLLM_CORE_BATCH and q == 1 else "tokenspeed"
+    if core == "kv_balanced":
+        raise ValueError("Kimi K3 MLA core kv_balanced needs DCP")
     if core not in CORES:
         raise ValueError(
-            f"Kimi K3 MLA core {core!r}: expected auto, tokenspeed or trtllm"
+            f"Kimi K3 MLA core {core!r}: expected auto, tokenspeed, trtllm or "
+            "kv_balanced"
         )
     return core
 
@@ -147,6 +150,7 @@ class PreparedMla:
         dcp=None,
         parity=0,
         queries=(1,),
+        first=False,
     ):
         self.heads = attention.W_UK_T.shape[0]
         norms = attention.q_a_layernorm.weight, attention.kv_a_layernorm.weight
@@ -162,12 +166,27 @@ class PreparedMla:
         )
         self.query_scratch, self.kernels = query_scratch, {}
         shapes = [(b, q) for b in pitches for q in queries if b % q == 0]
-        self.cores = {(b, q): core_for(b, core, q) for b, q in shapes}
+        stock = "auto" if core == "kv_balanced" and dcp is not None else core
+        self.cores = {(b, q): core_for(b, stock, q) for b, q in shapes}
         # The split count only depends on this bound; seq_lens bound the work.
         self.max_seq = max_context or 1 << 17
         self.dcp, self.parity = dcp, parity
+        # kv_balanced (DCP only): the first MLA layer plans each step's splits.
+        self.balanced, self.first = None, first
         if dcp is not None:
-            self.cores = dict.fromkeys(shapes, "tokenspeed")
+            if core == "kv_balanced":
+                from .balanced import BalancedCore
+
+                heads = dcp.size * self.heads
+                most = max(pitches, default=1)
+                self.balanced = {
+                    q: BalancedCore(heads, q, most // q, self.device)
+                    for q in queries
+                    if most >= q
+                }
+            self.cores = dict.fromkeys(
+                shapes, "kv_balanced" if self.balanced else "tokenspeed"
+            )
             self.max_seq = local_max(self.max_seq, dcp.size)
         shape, bf16 = (max(pitches, default=0), self.heads, 512), torch.bfloat16
         self.latent = torch.empty(shape, dtype=bf16, device=self.device)
@@ -219,6 +238,17 @@ class PreparedMla:
                 cp.update(pack=True)
         query, out = query.view(reqs, q, *query.shape[1:]), out.view(reqs, q, -1, 512)
         args = cache, block_table[:reqs], lengths[:reqs], self.max_seq
+        if self.cores[batch, q] == "kv_balanced":
+            cp = (box.size, box.rank, box.interleave)
+            tot = lengths if totals is None else totals
+            self.balanced[q].run(
+                query, cache, block_table[:reqs], lengths[:reqs], tot[:reqs],
+                self.stock_scales, out, lse, cp,
+                # Eager calls (compile warmup) plan for themselves; in a captured
+                # step the first MLA layer plans for all.
+                plan=self.first or not torch.cuda.is_current_stream_capturing(),
+            )
+            return
         if self.cores[batch, q] == "trtllm":
             trtllm_decode(query, *args, self.stock_scales, out)
             return
