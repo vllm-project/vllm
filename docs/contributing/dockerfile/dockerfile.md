@@ -45,6 +45,11 @@ docker build -f docker/Dockerfile.efa \
     --build-arg BASE_IMAGE=vllm/vllm-openai:latest -t vllm:openai-efa docker/
 ```
 
+The release pipeline publishes the CUDA 13.0 EFA image to DockerHub as
+`vllm/vllm-openai:latest-efa` and `vllm/vllm-openai:v<version>-efa` for releases,
+and as `vllm/vllm-openai:efa-nightly` and `vllm/vllm-openai:efa-nightly-<commit>`
+for nightly builds.
+
 The image does not change vLLM's Mooncake protocol default (`rdma`). To use
 EFA, set it per connector:
 

@@ -95,6 +95,25 @@ def test_nightly_metadata_args_fall_back_to_pipeline_slug() -> None:
     assert option_values(args, "--tag") == [expected_tag]
 
 
+@pytest.mark.parametrize(
+    ("variant", "expected_image_tag"),
+    [
+        ("efa", "vllm/vllm-openai:efa-nightly-def456"),
+        ("cu134-efa", "vllm/vllm-openai:cu134-nightly-def456-efa"),
+    ],
+)
+def test_nightly_variant_tags_match_published_nightly_tags(
+    variant: str, expected_image_tag: str
+) -> None:
+    """push-nightly-builds.sh <variant> publishes as <variant>-nightly-<commit>."""
+    args = run_helper(
+        variant,
+        env={"BUILDKITE": "1", "BUILDKITE_COMMIT": "def456", "NIGHTLY": "1"},
+    )
+
+    assert build_args(args)["VLLM_IMAGE_TAG"] == expected_image_tag
+
+
 def test_local_metadata_args_use_local_overrides() -> None:
     args = run_helper(
         env={
