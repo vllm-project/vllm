@@ -494,6 +494,43 @@ def test_file_has_correct_size(iid):
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
 
 
+def test_hugetlbfs_dir_rounds_mapping_to_huge_pages(iid, monkeypatch):
+    """A huge-page directory maps one file of whole huge pages, even when
+    segments are requested, but exposes only the KV."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    huge_page = 2 * 1024 * 1024
+    real_statvfs = os.statvfs
+    monkeypatch.setattr(
+        region_module.os,
+        "statvfs",
+        lambda path: (
+            SimpleNamespace(f_bsize=huge_page)
+            if path == "/dev/shm"
+            else real_statvfs(path)
+        ),
+    )
+    free_space_check = MagicMock()
+    monkeypatch.setattr(region_module, "check_shm_free_space", free_space_check)
+
+    r = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=3,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        num_segments=3,
+    )
+    try:
+        assert r.is_hugetlb
+        assert r._segments == [(r.mmap_path, 0, huge_page)]
+        assert os.path.getsize(r.mmap_path) == huge_page
+        assert r.base_tensor.numel() == r.total_size_bytes == 3 * PAGE_SIZE
+    finally:
+        r.cleanup()
+        _cleanup_file(r.mmap_path)
+    free_space_check.assert_not_called()
+
+
 def test_madvise_success_selects_madvise_population(iid, monkeypatch):
     """A successful probe must keep using MADV_POPULATE_WRITE — the fallback
     helper must never be invoked on a kernel that accepts the advice.
@@ -1180,6 +1217,7 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     mock_close.assert_called_once_with(9999)
     mock_check.assert_called_once_with(
         4 * PAGE_SIZE,
+        shm_path="/dev/shm",
         allocation_name="CPU KV offload shared region in /dev/shm",
     )
 
