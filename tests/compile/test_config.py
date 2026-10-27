@@ -135,10 +135,14 @@ def test_custom_op():
             {},
             "cannot both enable and disable.*rms_norm",
         ),
-        (
+        pytest.param(
             ["-rotary_embedding"],
-            {"pass_config": PassConfig(enable_qk_norm_rope_fusion=True)},
+            {"pass_config": PassConfig(fuse_qk_norm_rope_kvcache=True)},
             "cannot both enable and disable.*rotary_embedding",
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(),
+                reason="fuse_qk_norm_rope_kvcache is ROCm-only",
+            ),
         ),
     ],
 )

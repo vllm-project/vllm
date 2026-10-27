@@ -7,7 +7,7 @@ from torch import Tensor
 from torch.library import Library
 
 from vllm import ir
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -35,8 +35,19 @@ direct_register_aiter_op = functools.partial(
 AITER_SUPPORTED = is_aiter_found()
 """Most kernels in this file are supported if AITER is installed."""
 
-AITER_TRITON_ROTARY_SUPPORTED = rocm_aiter_ops.is_triton_rotary_embed_enabled()
-"""AITER Triton rotary is only available when its feature gate is enabled."""
+AITER_ROTARY_SUPPORTED = is_aiter_found_and_supported()
+"""AITER rotary kernels need a supported ROCm arch; enablement is by priority."""
+
+
+def aiter_rotary_supported_args(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> bool:
+    return cos_sin_cache.shape[-1] == head_size
 
 
 def flatten_to_2d_is_free(x: Tensor) -> bool:
@@ -183,26 +194,79 @@ direct_register_aiter_op(
 )
 
 
+def _rotary_embedding_impl(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> tuple[Tensor, Tensor]:
+    # Out-of-place, so lowering needs no defensive copies of query/key.
+    from aiter.ops.triton.rope.rope import rope_cached_thd_positions_2c_fwd
+
+    num_tokens = positions.numel()
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
+    query_out, key_out = rope_cached_thd_positions_2c_fwd(
+        query.view(num_tokens, -1, head_size),
+        key.view(num_tokens, -1, head_size),
+        cos,
+        sin,
+        positions.view(num_tokens),
+        0 if is_neox else 1,
+        reuse_freqs_front_part=True,
+        nope_first=False,
+    )
+    return query_out.view(query.shape), key_out.view(key.shape)
+
+
+def _rotary_embedding_fake(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> tuple[Tensor, Tensor]:
+    return torch.empty_like(query), torch.empty_like(key)
+
+
+direct_register_aiter_op(
+    op_name="rotary_embedding",
+    op_func=_rotary_embedding_impl,
+    fake_impl=_rotary_embedding_fake,
+)
+
+
+def rotary_embedding_functional(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> tuple[Tensor, Tensor]:
+    return torch.ops.vllm_aiter.rotary_embedding(
+        positions, query, key, head_size, cos_sin_cache, is_neox
+    )
+
+
 @ir.ops.rotary_embedding.register_impl(
     "aiter",
-    supported=AITER_TRITON_ROTARY_SUPPORTED,
+    supported=AITER_ROTARY_SUPPORTED,
+    supports_args=aiter_rotary_supported_args,
     inplace=True,
+    functional_impl=rotary_embedding_functional,
 )
 def rotary_embedding(
     positions: Tensor,
     query: Tensor,
     key: Tensor,
     head_size: int,
-    rotary_dim: int,
     cos_sin_cache: Tensor,
     is_neox: bool,
 ) -> tuple[Tensor, Tensor]:
     torch.ops.vllm.rocm_aiter_triton_rotary_embedding(
-        positions,
-        query,
-        key,
-        head_size,
-        cos_sin_cache,
-        is_neox,
+        positions, query, key, head_size, cos_sin_cache, is_neox
     )
     return query, key

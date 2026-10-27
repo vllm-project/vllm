@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+import inspect
+from typing import TYPE_CHECKING
+
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
@@ -24,11 +28,12 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 
+if TYPE_CHECKING:
+    from vllm.v1.attention.backend import AttentionImpl
+
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import (
-    MatcherRotaryEmbedding,
-)
+from .matcher_utils import MatcherRotaryEmbedding, rope_covers_full_head
 from .rms_quant_fusion import (
     empty_bf16,
     empty_i64,
@@ -43,6 +48,16 @@ def _supports_static_q_fp8_quant_fusion() -> bool:
     return STATIC_FP8_QUANT_OP is not None and FP8_DTYPE is not None
 
 
+@functools.cache
+def _accepts_rope_out_buffers(impl_type: "type[AttentionImpl]") -> bool:
+    """Whether do_rope_and_kv_cache_update takes query_out/key_out. Out-of-tree
+    backends may still override it with the older in-place signature."""
+    params = inspect.signature(impl_type.do_rope_and_kv_cache_update).parameters
+    return "query_out" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
 def fused_rope_and_unified_kv_cache_update_impl(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -51,7 +66,7 @@ def fused_rope_and_unified_kv_cache_update_impl(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     layer_name: LayerNameType,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """This impl fetches the KV cache and slot mapping from the forward context,
     then calls the layer impl's `AttentionImpl.do_rope_and_kv_cache_update` method.
     It also returns a dummy tensor, similar to `Attention.unified_kv_cache_update`,
@@ -60,20 +75,32 @@ def fused_rope_and_unified_kv_cache_update_impl(
     """
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
-    if layer_slot_mapping is not None:
-        attn_layer.impl.do_rope_and_kv_cache_update(
-            attn_layer,
-            query,
-            key,
-            value,
-            positions,
-            cos_sin_cache,
-            is_neox,
-            kv_cache,
-            layer_slot_mapping,
-        )
+    if layer_slot_mapping is None:
+        return query.new_empty(0), query.clone(), key.clone()
 
-    return query.new_empty(0)
+    out_buffers: dict[str, torch.Tensor] = {}
+    if _accepts_rope_out_buffers(type(attn_layer.impl)):
+        # Write rotated q/k to fresh buffers so the op stays functional without
+        # copying its inputs first.
+        query_out, key_out = torch.empty_like(query), torch.empty_like(key)
+        out_buffers = {"query_out": query_out, "key_out": key_out}
+    else:
+        # Older signature: rotate copies in place to keep the op functional.
+        query_out, key_out = query.clone(), key.clone()
+        query, key = query_out, key_out
+    attn_layer.impl.do_rope_and_kv_cache_update(
+        attn_layer,
+        query,
+        key,
+        value,
+        positions,
+        cos_sin_cache,
+        is_neox,
+        kv_cache,
+        layer_slot_mapping,
+        **out_buffers,
+    )
+    return query_out.new_empty(0), query_out, key_out
 
 
 def fused_rope_and_unified_kv_cache_update_fake(
@@ -84,14 +111,18 @@ def fused_rope_and_unified_kv_cache_update_fake(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     layer_name: LayerNameType,
-) -> torch.Tensor:
-    return torch.empty(0, device=query.device, dtype=query.dtype)
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return (
+        torch.empty(0, device=query.device, dtype=query.dtype),
+        torch.empty_like(query),
+        torch.empty_like(key),
+    )
 
 
 direct_register_custom_op(
     op_name="fused_rope_and_unified_kv_cache_update",
     op_func=fused_rope_and_unified_kv_cache_update_impl,
-    mutates_args=["query", "key"],
+    mutates_args=[],
     fake_impl=fused_rope_and_unified_kv_cache_update_fake,
 )
 
@@ -163,8 +194,7 @@ class RopeStaticQQuantKVCachePattern:
             q_view = q.view(-1, self.num_heads, self.head_size)
             k_view = k.view(-1, self.num_kv_heads, self.head_size)
             v_view = v.view(-1, self.num_kv_heads, self.head_size_v)
-            rope_kv_results = auto_functionalized(
-                self.FUSED_ROPE_KV_OP,
+            rope_kv_results = self.FUSED_ROPE_KV_OP(
                 query=q_view,
                 key=k_view,
                 value=v_view,
@@ -219,8 +249,7 @@ class RopeStaticQQuantKVCachePattern:
             q_view = q.view(-1, self.num_heads, self.head_size)
             k_view = k.view(-1, self.num_kv_heads, self.head_size)
             v_view = v.view(-1, self.num_kv_heads, self.head_size_v)
-            rope_kv_results = auto_functionalized(
-                self.FUSED_ROPE_KV_OP,
+            rope_kv_results = self.FUSED_ROPE_KV_OP(
                 query=q_view,
                 key=k_view,
                 value=v_view,
@@ -271,6 +300,7 @@ class RopeStaticQQuantKVCachePattern:
             self.get_inputs(),
             fwd_and_view_to_reshape,
             pm_pass,
+            extra_check=lambda match: rope_covers_full_head(match, self.head_size),
         )
 
 
@@ -338,8 +368,7 @@ class RopeReshapeKVCachePattern:
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
-            results = auto_functionalized(
-                self.FUSED_OP,
+            results = self.FUSED_OP(
                 query=q,
                 key=k,
                 value=v,
@@ -368,8 +397,7 @@ class RopeReshapeKVCachePattern:
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
-            results = auto_functionalized(
-                self.FUSED_OP,
+            results = self.FUSED_OP(
                 query=q,
                 key=k,
                 value=v,
@@ -403,6 +431,7 @@ class RopeReshapeKVCachePattern:
             self.get_inputs(),
             fwd_and_view_to_reshape,
             pm_pass,
+            extra_check=lambda match: rope_covers_full_head(match, self.head_size),
         )
 
 

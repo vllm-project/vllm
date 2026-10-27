@@ -87,14 +87,41 @@ def fused_add_rms_norm(
     return x, x_residual
 
 
-rope_supported_args = lambda positions, query, key, head_size, rotary_dim, cos_sin_cache, is_neox: (  # noqa: E501
-    # The C++ kernel derives rotary_dim from the cos/sin cache's last dim.
-    rotary_dim == cos_sin_cache.shape[-1]
-    and query.dtype == key.dtype
-    and query.dtype == cos_sin_cache.dtype
-)
-"""vLLM C rotary kernel requires rotary_dim to equal the cos/sin cache width and
-query/key/cache to share a dtype."""
+def rope_supported_args(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor | None,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> bool:
+    # The C++ kernels need a [max_position, rot_dim] cache (FoPE uses 3D).
+    return (
+        cos_sin_cache.dim() == 2
+        and query.dtype == cos_sin_cache.dtype
+        and (key is None or key.dtype == query.dtype)
+    )
+
+
+def rotary_embedding_functional(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> tuple[Tensor, Tensor]:
+    from vllm import _custom_ops as ops
+
+    num_tokens = positions.numel()
+    q = query.reshape(num_tokens, -1, head_size)
+    k = key.reshape(num_tokens, -1, head_size)
+    query_out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+    key_out = torch.empty(k.shape, dtype=k.dtype, device=k.device)
+    ops.rotary_embedding_out(
+        positions.flatten(), q, k, query_out, key_out, head_size, cos_sin_cache, is_neox
+    )
+    return query_out.view(query.shape), key_out.view(key.shape)
 
 
 @ir.ops.rotary_embedding.register_impl(
@@ -102,19 +129,66 @@ query/key/cache to share a dtype."""
     supports_args=rope_supported_args,
     supported=CUDA_ALIKE,
     inplace=True,
+    functional_impl=rotary_embedding_functional,
 )
 def rotary_embedding(
     positions: Tensor,
     query: Tensor,
     key: Tensor,
     head_size: int,
-    rotary_dim: int,
     cos_sin_cache: Tensor,
     is_neox: bool,
 ) -> tuple[Tensor, Tensor]:
     from vllm import _custom_ops as ops
 
-    # ops.rotary_embedding() is in-place; the IR inplace machinery clones the
-    # activations for the functional (default) overload, so mutating here is safe.
     ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache, is_neox)
     return query, key
+
+
+def rope_query_only_supported_args(
+    positions: Tensor,
+    query: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> bool:
+    return rope_supported_args(
+        positions, query, None, head_size, cos_sin_cache, is_neox
+    )
+
+
+def rotary_embedding_query_only_functional(
+    positions: Tensor,
+    query: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> Tensor:
+    from vllm import _custom_ops as ops
+
+    q = query.reshape(positions.numel(), -1, head_size)
+    query_out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+    ops.rotary_embedding_out(
+        positions.flatten(), q, None, query_out, None, head_size, cos_sin_cache, is_neox
+    )
+    return query_out.view(query.shape)
+
+
+@ir.ops.rotary_embedding_query_only.register_impl(
+    "vllm_c",
+    supports_args=rope_query_only_supported_args,
+    supported=CUDA_ALIKE,
+    inplace=True,
+    functional_impl=rotary_embedding_query_only_functional,
+)
+def rotary_embedding_query_only(
+    positions: Tensor,
+    query: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> Tensor:
+    from vllm import _custom_ops as ops
+
+    ops.rotary_embedding(positions, query, None, head_size, cos_sin_cache, is_neox)
+    return query

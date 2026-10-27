@@ -343,6 +343,8 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        query_out: torch.Tensor | None = None,
+        key_out: torch.Tensor | None = None,
     ):
         key_cache, value_cache = self._split_kv_cache(
             kv_cache,
@@ -368,4 +370,6 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             layer._v_scale,
             True,
             is_fp8_kv_cache,
+            query_out=query_out,
+            key_out=key_out,
         )

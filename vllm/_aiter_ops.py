@@ -3712,6 +3712,8 @@ class rocm_aiter_ops:
         v_scale: torch.Tensor,
         flash_layout: bool,
         apply_scale: bool,
+        query_out: torch.Tensor | None = None,
+        key_out: torch.Tensor | None = None,
     ):
         from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
 
@@ -3731,8 +3733,8 @@ class rocm_aiter_ops:
             is_neox,
             flash_layout=flash_layout,
             apply_scale=apply_scale,
-            q_out=query,
-            k_out=key,
+            q_out=query if query_out is None else query_out,
+            k_out=key if key_out is None else key_out,
             output_zeros=False,
         )
 

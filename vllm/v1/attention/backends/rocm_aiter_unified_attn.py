@@ -456,8 +456,13 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        query_out: torch.Tensor | None = None,
+        key_out: torch.Tensor | None = None,
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            if query_out is not None and key_out is not None:
+                query_out.copy_(query)
+                key_out.copy_(key)
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
@@ -483,4 +488,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             layer._v_scale,
             flash_layout,
             is_fp8_kv_cache,
+            query_out=query_out,
+            key_out=key_out,
         )

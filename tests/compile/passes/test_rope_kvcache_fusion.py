@@ -14,7 +14,6 @@ from tests.v1.attention.utils import (
 )
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.fusion import rope_kvcache_fusion
-from vllm.compilation.passes.fusion.matcher_utils import ROTARY_OP
 from vllm.compilation.passes.fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
@@ -48,7 +47,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
 )
 
-INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 VLLM_UNIFIED_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_kv_cache_update
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -79,9 +77,10 @@ def test_kv_cache_update_ops_fake_tensor_metadata(monkeypatch: pytest.MonkeyPatc
         *args
     )
     fake_output = rope_kvcache_fusion.fused_rope_and_unified_kv_cache_update_fake(*args)
-    assert runtime_output.shape == fake_output.shape
-    assert runtime_output.dtype == fake_output.dtype
-    assert runtime_output.device == fake_output.device
+    for runtime_tensor, fake_tensor in zip(runtime_output, fake_output):
+        assert runtime_tensor.shape == fake_tensor.shape
+        assert runtime_tensor.dtype == fake_tensor.dtype
+        assert runtime_tensor.device == fake_tensor.device
 
 
 def test_rope_kvcache_fusion_default_keeps_large_ranges_unfused():
@@ -110,6 +109,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         dtype: torch.dtype,
         device: torch.device,
         prefix: str = "model.layers.0.self_attn.attn",
+        rotary_dim: int | None = None,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -125,15 +125,12 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
 
         self.rotary_emb = RotaryEmbedding(
             head_size,
-            rotary_dim=head_size,
+            rotary_dim=rotary_dim or head_size,
             max_position_embeddings=4096,
             base=10000,
             is_neox_style=is_neox,
             dtype=self.dtype,
         )
-
-        # Whether to check for the RoPE custom op or component index_select
-        self.enable_rope_custom_op = self.rotary_emb.enabled()
 
         # Register layer metadata for the fusion pass via Attention.
         self.attn = Attention(
@@ -233,14 +230,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
-        ops = []
-        if self.enable_rope_custom_op:
-            if rocm_aiter_ops.is_triton_rotary_embed_enabled():
-                ops.append(torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default)
-            else:
-                ops.append(ROTARY_OP)
-        else:
-            ops.append(INDEX_SELECT_OP)
+        ops = [torch.ops.vllm_ir.rotary_embedding.default]
         ops.append(torch.ops.vllm.unified_kv_cache_update.default)
         return ops
 
@@ -278,14 +268,7 @@ class QKRoPEStaticQKVCacheTestModel(QKRoPEKVCacheTestModel):
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
-        ops = []
-        if self.enable_rope_custom_op:
-            if rocm_aiter_ops.is_triton_rotary_embed_enabled():
-                ops.append(torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default)
-            else:
-                ops.append(ROTARY_OP)
-        else:
-            ops.append(INDEX_SELECT_OP)
+        ops = [torch.ops.vllm_ir.rotary_embedding.default]
         ops.append(torch.ops.vllm.unified_kv_cache_update.default)
         return ops
 
@@ -302,7 +285,7 @@ class QKRoPEStaticQKVCacheTestModel(QKRoPEKVCacheTestModel):
         AttentionBackendEnum.ROCM_AITER_FA,
     ],
 )
-@pytest.mark.parametrize("enable_rope_custom_op", [True])  # [True, False])
+@pytest.mark.parametrize("enable_rope_custom_op", [True, False])
 @pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
 @pytest.mark.parametrize("num_heads", [64])
 @pytest.mark.parametrize("num_kv_heads", [8])
@@ -310,6 +293,8 @@ class QKRoPEStaticQKVCacheTestModel(QKRoPEKVCacheTestModel):
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+# Fused RoPE+KV-cache kernels only rotate whole heads; partial rotary stays unfused.
+@pytest.mark.parametrize("rotary_ratio", [1.0, 0.5])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(),
@@ -326,6 +311,7 @@ def test_rope_kvcache_fusion(
     is_neox: bool,
     dtype: torch.dtype,
     kv_cache_dtype: CacheDType,
+    rotary_ratio: float,
     monkeypatch: pytest.MonkeyPatch,
 ):
     torch.set_default_device("cuda")
@@ -352,7 +338,14 @@ def test_rope_kvcache_fusion(
         ),
     )
 
-    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+    rope_priority = ["aiter", "native"] if enable_aiter_triton_rope else ["native"]
+    vllm_config.kernel_config.ir_op_priority.rotary_embedding = rope_priority
+
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        monkeypatch.context() as m,
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         m.setenv(
             "VLLM_ROCM_USE_AITER_TRITON_ROPE", "1" if enable_aiter_triton_rope else "0"
@@ -368,6 +361,7 @@ def test_rope_kvcache_fusion(
             is_neox=is_neox,
             dtype=dtype,
             device=torch.get_default_device(),
+            rotary_dim=int(head_size * rotary_ratio),
         )
 
         fusion_pass = RopeKVCacheFusionPass(vllm_config)
@@ -415,10 +409,12 @@ def test_rope_kvcache_fusion(
             kv_cache_fused = attn_layer.kv_cache
         del dummy
 
-        assert fusion_pass.matched_count == 1
-
-        backend.check_before_ops(model.ops_in_model_before())
-        backend.check_after_ops(model.ops_in_model_after())
+        if rotary_ratio < 1.0:
+            assert fusion_pass.matched_count == 0
+        else:
+            assert fusion_pass.matched_count == 1
+            backend.check_before_ops(model.ops_in_model_before())
+            backend.check_after_ops(model.ops_in_model_after())
 
         if dtype == torch.float16:
             ATOL, RTOL = (2e-3, 2e-3)
@@ -442,7 +438,7 @@ def test_rope_kvcache_fusion(
     "attn_backend",
     [AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN],
 )
-@pytest.mark.parametrize("enable_rope_custom_op", [True])
+@pytest.mark.parametrize("enable_rope_custom_op", [True, False])
 @pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
 @pytest.mark.parametrize("num_heads", [64])
 @pytest.mark.parametrize("num_kv_heads", [8])
@@ -496,7 +492,14 @@ def test_rope_static_qquant_kvcache_fusion(
         ),
     )
 
-    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+    rope_priority = ["aiter", "native"] if enable_aiter_triton_rope else ["native"]
+    vllm_config.kernel_config.ir_op_priority.rotary_embedding = rope_priority
+
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        monkeypatch.context() as m,
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         m.setenv(
             "VLLM_ROCM_USE_AITER_TRITON_ROPE", "1" if enable_aiter_triton_rope else "0"

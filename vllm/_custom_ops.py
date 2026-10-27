@@ -234,6 +234,21 @@ def rotary_embedding(
         )
 
 
+def rotary_embedding_out(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor | None,
+    query_out: torch.Tensor,
+    key_out: torch.Tensor | None,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    torch.ops._C.rotary_embedding_out(
+        positions, query, key, query_out, key_out, head_size, cos_sin_cache, is_neox
+    )
+
+
 # layer norm ops
 def rms_norm(
     out: torch.Tensor,

@@ -4078,6 +4078,52 @@ def test_ir_op_platform_defaults_support_sparse_gelu(mode, backend):
         assert ir.ops.gelu_and_mul_sparse.get_priority() == expected
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
+@pytest.mark.parametrize(
+    ("custom_ops", "pass_config", "triton_rope", "expected"),
+    [
+        # Unfused RoPE stays on Inductor codegen when compiling.
+        ([], PassConfig(), True, ["native"]),
+        # The custom op or a RoPE fusion keeps unfused RoPE on a kernel.
+        (["+rotary_embedding"], PassConfig(), False, ["vllm_c", "native"]),
+        (
+            [],
+            PassConfig(enable_qk_norm_rope_fusion=True),
+            False,
+            ["vllm_c", "native"],
+        ),
+        # AITER Triton RoPE comes first only when its env gate is on (ROCm).
+        (["+rotary_embedding"], PassConfig(), True, ["aiter", "vllm_c", "native"]),
+    ],
+)
+def test_rotary_embedding_platform_priority(
+    custom_ops, pass_config, triton_rope, expected, monkeypatch
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    config = SimpleNamespace(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            backend="inductor",
+            custom_ops=custom_ops,
+            pass_config=pass_config,
+        )
+    )
+    try:
+        with monkeypatch.context() as m:
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
+            m.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "1" if triton_rope else "0")
+            rocm_aiter_ops.refresh_env_variables()
+            if not (current_platform.is_rocm() and rocm_aiter_ops.is_enabled()):
+                expected = [p for p in expected if p != "aiter"]
+            priority = current_platform.get_default_ir_op_priority(config)
+    finally:
+        # rocm_aiter_ops caches env values; re-read them once env is restored.
+        rocm_aiter_ops.refresh_env_variables()
+    assert priority.rotary_embedding == expected
+    assert priority.rotary_embedding_query_only == [p for p in expected if p != "aiter"]
+
+
 def test_ir_op_priority_str():
     """Test that passing a comma-delimited string works."""
     from vllm.config.kernel import IrOpPriorityConfig

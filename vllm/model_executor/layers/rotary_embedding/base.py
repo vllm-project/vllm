@@ -19,6 +19,10 @@ class RotaryEmbeddingBase(CustomOp):
 
     # --8<-- [end:rotary_embedding]
 
+    rope_is_inplace: bool = True
+    """Whether the custom-op forward rotates query/key in place, also under
+    torch.compile (forward_native is out-of-place for every subclass)."""
+
     def __init__(
         self,
         head_size: int,
@@ -49,10 +53,7 @@ class RotaryEmbeddingBase(CustomOp):
         if not hasattr(self, "use_flashinfer"):
             self.use_flashinfer = False
 
-        # AITER's bf16 cos/sin cache is prepared whenever the AITER Triton
-        # rotary feature is on, independent of the RoPE custom-op flag. The
-        # AITER kernel itself is now selected via the rotary_embedding IR op
-        # priority (see vllm/kernels/aiter_ops.py), not dispatched here.
+        # Fusions may pick the AITER kernel even when the RoPE custom op is off.
         self.use_aiter = rocm_aiter_ops.is_triton_rotary_embed_enabled()
 
         if init_cache:
@@ -137,6 +138,9 @@ class RotaryEmbeddingBase(CustomOp):
 
 
 class RotaryEmbedding(RotaryEmbeddingBase):
+    # A vLLM IR op: under torch.compile it returns new tensors.
+    rope_is_inplace = False
+
     def __init__(
         self,
         head_size: int,
@@ -167,7 +171,10 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         cos_sin_cache: torch.Tensor,
         is_neox_style: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """A PyTorch-native implementation of forward()."""
+        """A PyTorch-native implementation of forward().
+
+        Also the reference for fusion matchers and kernel tests.
+        """
         positions = positions.flatten()
         num_tokens = positions.shape[0]
         cos_sin = cos_sin_cache.index_select(0, positions)
@@ -209,21 +216,19 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         """A PyTorch-native implementation of forward()."""
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         if key is None:
-            return self.forward_static(
+            query = ir.ops.rotary_embedding_query_only(
                 positions,
                 query,
-                key,
                 self.head_size,
-                self.rotary_dim,
                 cos_sin_cache,
                 self.is_neox_style,
             )
+            return query, None
         return ir.ops.rotary_embedding(
             positions,
             query,
             key,
             self.head_size,
-            self.rotary_dim,
             cos_sin_cache,
             self.is_neox_style,
         )
@@ -247,30 +252,38 @@ class RotaryEmbedding(RotaryEmbeddingBase):
 
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
 
+        # Eager callers rely on in-place RoPE, but a non-inplace provider (e.g.
+        # the native fallback) returns new tensors. Under torch.compile inputs
+        # are donated to maybe_inplace, so return its outputs instead.
+        compiling = torch.compiler.is_compiling()
         if key is None:
-            from vllm import _custom_ops as ops
-
-            # ops.rotary_embedding() is an in-place operation
-            # that updates the query and key tensors.
-            ops.rotary_embedding(
+            query_out = ir.ops.rotary_embedding_query_only.maybe_inplace(
                 positions,
                 query,
-                key,
                 self.head_size,
                 cos_sin_cache,
                 self.is_neox_style,
             )
-            return query, key
+            if compiling:
+                return query_out, None
+            if query_out is not query:
+                query.copy_(query_out)
+            return query, None
 
-        return ir.ops.rotary_embedding.maybe_inplace(
+        query_out, key_out = ir.ops.rotary_embedding.maybe_inplace(
             positions,
             query,
             key,
             self.head_size,
-            self.rotary_dim,
             cos_sin_cache,
             self.is_neox_style,
         )
+        if compiling:
+            return query_out, key_out
+        if query_out is not query:
+            query.copy_(query_out)
+            key.copy_(key_out)
+        return query, key
 
     def forward_hip(
         self,

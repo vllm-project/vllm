@@ -865,6 +865,11 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
 
+        # With opaque layer names, same-shape layers produce identical search
+        # patterns. Register each distinct shape once while retaining every
+        # shape in heterogeneous models such as Gemma4 (head_dim 256 and 512).
+        registered_shapes: set[tuple[int, int, int, int]] = set()
+
         for _, layer in attn_layers.items():
             supports_rope = layer.impl.fused_qk_norm_rope_kvcache_supported()
             supports_mrope = (
@@ -893,6 +898,16 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                     layer.head_size,
                 )
                 continue
+            shape_key = (
+                layer.num_heads,
+                layer.num_kv_heads,
+                layer.head_size,
+                layer.head_size_v,
+            )
+            if _USE_LAYERNAME:
+                if shape_key in registered_shapes:
+                    continue
+                registered_shapes.add(shape_key)
             if supports_rope:
                 for epsilon in [1e-5, 1e-6]:
                     for neox in [True, False]:
@@ -944,13 +959,6 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                     mrope_section=section,
                                     is_interleaved=is_interleaved,
                                 ).register(self.patterns)
-
-            # Opaque LayerName is a pattern wildcard on torch >= 2.11, so
-            # homogeneous attention layers produce duplicate search patterns.
-            # As in the other LayerName-aware fusion passes, one supported
-            # layer registers all shape/style variants for the model.
-            if _USE_LAYERNAME:
-                break
 
         self.dump_patterns(config, self.patterns)
 

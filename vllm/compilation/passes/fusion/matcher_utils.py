@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 from torch._higher_order_ops import auto_functionalized
+from torch._inductor.pattern_matcher import Match
 from torch._ops import OpOverload
 
 from vllm import ir
@@ -85,7 +86,23 @@ class MatcherCustomOp(ABC):
         raise NotImplementedError
 
 
+def rope_covers_full_head(match: Match, head_size: int) -> bool:
+    """Whether the matched cos/sin cache rotates whole heads. AITER's
+    fused_qk_rope_reshape_and_cache does not support partial rotary."""
+    cache = match.kwargs["cos_sin_cache"].meta["val"]
+    return cache.shape[-1] == head_size
+
+
+def rope_custom_op_is_c_kernel() -> bool:
+    """XPU's RotaryEmbedding.forward_xpu calls the in-place `_C` kernel directly
+    instead of the vLLM IR op, so its graphs contain `_C.rotary_embedding`."""
+    return current_platform.is_xpu() and RotaryEmbedding.enabled()
+
+
 class MatcherRotaryEmbedding(MatcherCustomOp):
+    """Matches base RoPE as RotaryEmbedding emits it: the flashinfer custom op,
+    the in-place `_C` op on XPU with the custom op enabled, else the IR node."""
+
     def __init__(
         self,
         is_neox: bool,
@@ -93,40 +110,21 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         num_heads: int,
         num_kv_heads: int,
         use_flashinfer: bool = False,
-        match_rocm_aiter: bool | None = None,
-        enabled: bool | None = None,
     ) -> None:
-        if enabled is None:
-            enabled = RotaryEmbedding.enabled()
-        if match_rocm_aiter is None:
-            match_rocm_aiter = rocm_aiter_ops.is_triton_rotary_embed_enabled()
-
-        super().__init__(enabled)
+        super().__init__(enabled=use_flashinfer or rope_custom_op_is_c_kernel())
+        self.rotary_op = FLASHINFER_ROTARY_OP if use_flashinfer else ROTARY_OP
         self.is_neox = is_neox
         self.head_size = head_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.q_size = self.num_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
-        self.rotary_dim = head_size
-        # The base RoPE is a vLLM IR op emitted on every platform (incl. ROCm
-        # AITER, whose kernel is now an IR provider), so always match the IR
-        # node. Only flashinfer stays on its dedicated custom op.
-        self.use_ir_op = not use_flashinfer
-        if use_flashinfer:
-            self.rotary_op = FLASHINFER_ROTARY_OP
-        elif match_rocm_aiter:
-            self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
-        else:
-            self.rotary_op = ROTARY_OP
-        if self.use_ir_op:
-            self.forward = self.forward_custom
 
     def inputs(self) -> list[torch.Tensor]:
         positions = self.empty_int64(5)
         query = self.empty(5, self.q_size)
         key = self.empty(5, self.kv_size)
-        cos_sin_cache = self.empty(4096, self.rotary_dim)
+        cos_sin_cache = self.empty(4096, self.head_size)
         return [positions, query, key, cos_sin_cache]
 
     def forward_custom(
@@ -136,16 +134,6 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         key: torch.Tensor | None,
         cos_sin_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self.use_ir_op:
-            return ir.ops.rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                self.rotary_dim,
-                cos_sin_cache,
-                self.is_neox,
-            )
         result = auto_functionalized(
             self.rotary_op,
             positions=positions,
@@ -163,21 +151,12 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor | None,
+        key: torch.Tensor,
         cos_sin_cache: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        result: tuple[torch.Tensor, torch.Tensor | None] = (
-            RotaryEmbedding.forward_static(
-                positions,
-                query,
-                key,
-                self.head_size,
-                self.rotary_dim,
-                cos_sin_cache,
-                self.is_neox,
-            )
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return ir.ops.rotary_embedding(
+            positions, query, key, self.head_size, cos_sin_cache, self.is_neox
         )
-        return result
 
 
 class MatcherMRotaryEmbedding(MatcherCustomOp):

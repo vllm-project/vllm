@@ -247,6 +247,14 @@ void rotary_embedding(torch::stable::Tensor& positions,
                       int64_t head_size, torch::stable::Tensor& cos_sin_cache,
                       bool is_neox, int64_t rope_dim_offset, bool inverse);
 
+void rotary_embedding_out(torch::stable::Tensor& positions,
+                          torch::stable::Tensor& query,
+                          std::optional<torch::stable::Tensor> key,
+                          torch::stable::Tensor& query_out,
+                          std::optional<torch::stable::Tensor> key_out,
+                          int64_t head_size,
+                          torch::stable::Tensor& cos_sin_cache, bool is_neox);
+
 void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
                         int64_t num_heads_k, int64_t num_heads_v,
                         int64_t head_dim, double eps,

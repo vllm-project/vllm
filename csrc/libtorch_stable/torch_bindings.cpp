@@ -402,6 +402,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                 Tensor cos_sin_cache, bool is_neox, int "
       "rope_dim_offset=0, bool inverse=False) -> ()");
 
+  // Out-of-place rotary embedding; also copies the non-rotated tail.
+  ops.def(
+      "rotary_embedding_out(Tensor positions, Tensor query, Tensor? key,"
+      "                     Tensor! query_out, Tensor!? key_out, int head_size,"
+      "                     Tensor cos_sin_cache, bool is_neox) -> ()");
+
   // Function for fused QK Norm and RoPE
   ops.def(
       "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
@@ -802,6 +808,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
+  ops.impl("rotary_embedding_out", TORCH_BOX(&rotary_embedding_out));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
   ops.impl("fused_deepseek_v4_kv_rope_insert",
            TORCH_BOX(&fused_deepseek_v4_kv_rope_insert));

@@ -744,7 +744,9 @@ class CudaPlatformBase(Platform):
         if envs.VLLM_USE_OINK_OPS:
             rms_norm = ["oink"] + default
 
-        rotary_embedding = ["vllm_c", "native"]
+        rotary_embedding = default
+        if cc.uses_rope_kernel():
+            rotary_embedding = ["vllm_c", *(p for p in default if p != "vllm_c")]
 
         return IrOpPriorityConfig.with_default(
             default,
@@ -752,6 +754,7 @@ class CudaPlatformBase(Platform):
             fused_add_rms_norm=rms_norm,
             gelu_and_mul_sparse=["triton", "native"],
             rotary_embedding=rotary_embedding,
+            rotary_embedding_query_only=rotary_embedding,
         )
 
     @classmethod
