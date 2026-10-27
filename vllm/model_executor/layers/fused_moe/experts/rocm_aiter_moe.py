@@ -532,7 +532,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return True
+        return False
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -762,6 +762,10 @@ class AiterMxfp4Experts(AiterExperts):
     Kimi-K3's MXFP4 experts requantized to packed int4 at load on gfx942."""
 
     _AITER_QUANT_TYPE = AiterQuantType.BLOCK_1X32
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
