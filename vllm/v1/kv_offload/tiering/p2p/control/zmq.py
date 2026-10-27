@@ -67,6 +67,13 @@ for _ev in _FATAL_MONITOR_EVENTS:
     _MONITOR_EVENT_MASK |= _ev
 
 
+def _normalize_host(host: str) -> str:
+    """Strip the brackets from a bracketed IPv6 literal, if present."""
+    if host.startswith("[") and host.endswith("]"):
+        return host[1:-1]
+    return host
+
+
 def _tcp_addr(host: str, port: int | str) -> str:
     return make_zmq_path("tcp", host, int(port))
 
@@ -164,6 +171,7 @@ class ZmqTransport(ControlTransport):
     def __init__(self, local_id: str, host: str, port: int) -> None:
         self._local_id = local_id
         self._closed = False
+        host = _normalize_host(host)
 
         self._connections: dict[str, ZmqConnection] = {}
         self._pending_inbound: list[tuple[str, dict]] = []
@@ -273,6 +281,7 @@ class ZmqTransport(ControlTransport):
     ) -> ZmqConnection:
         """Create a DEALER socket + monitor and register the connection."""
         host, port_str = peer_id.rsplit(":", 1)
+        host = _normalize_host(host)
         dealer_addr = _tcp_addr(host, port_str)
 
         logger.debug(

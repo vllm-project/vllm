@@ -342,9 +342,10 @@ Rather than embedding `host`/`port` in each `secondary_tiers` entry, set them on
 - `VLLM_P2P_SIDE_CHANNEL_HOST` (default `localhost`): address the P2P control socket binds to. It is used **verbatim** as both the bind address and the identity peers dial back — there is no auto-detection (this mirrors `VLLM_NIXL_SIDE_CHANNEL_HOST`). The default binds the loopback interface only, so peers on another host cannot reach it. **For any cross-host P2P deployment you must set this explicitly to the node's routable IP** (e.g. the pod IP) before launching `vllm serve` — otherwise remote peers will fail to connect. The NIXL agent name is a separate per-process identifier, so peers sharing a `host:port` never collide.
 - `VLLM_P2P_SIDE_CHANNEL_PORT` (default `5710`): base port for the P2P control socket. The port actually bound is `VLLM_P2P_SIDE_CHANNEL_PORT + data_parallel_index` — one socket per DP replica, matching NIXL (for DP=1 the offset is 0). The peer's port is passed as `remote_port` in `kv_transfer_params`; the router/EPP that selects the DP rank (e.g. via the `X-data-parallel-rank` header) computes `remote_port = base + rank`. The DP-index offset separates replicas *within* one deployment; two co-located *deployments* (a prefiller and a decoder on the same host) still need distinct base ports (e.g. decoder base `5711`) to avoid a bind collision.
 
-IPv6 literals are also supported for the control channel. Pass the address without
-brackets (for example, `::1` for local testing) in `host`,
-`VLLM_P2P_SIDE_CHANNEL_HOST`, and the peer's `remote_host`; supply the port separately.
+IPv6 literals are also supported for the control channel, in `host`,
+`VLLM_P2P_SIDE_CHANNEL_HOST`, and the peer's `remote_host`. Write them without
+brackets (for example, `::1` for local testing); a bracketed literal such as
+`[::1]` is accepted too and normalized. Supply the port separately.
 
 #### Orchestration-Layer Protocol
 

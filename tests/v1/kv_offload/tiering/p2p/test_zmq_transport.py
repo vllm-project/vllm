@@ -20,6 +20,7 @@ from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
 
 def _free_port(host: str = "127.0.0.1") -> int:
     """Find a free TCP port."""
+    host = host.removeprefix("[").removesuffix("]")
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as s:
         s.bind((host, 0))
@@ -165,6 +166,31 @@ class TestZmqTransportConnectivity:
 
             msgs = _wait_for_messages(transport_b, conn_b, 1)
             assert msgs == [{"type": "reply", "from": "a"}]
+        finally:
+            transport_a.close()
+            transport_b.close()
+
+    def test_bracketed_ipv6_host_is_accepted(self):
+        """A bracketed IPv6 literal binds and dials like the bare form."""
+        transport_a, port_a = _make_transport("::1")
+        transport_b, port_b = _make_transport("[::1]")
+
+        try:
+            conn_b = transport_b.connect(f"::1:{port_a}")
+            conn_b.send({"type": "connect", "from": "b"})
+
+            new_conns = _wait_for_inbound(transport_a)
+            assert len(new_conns) == 1
+            conn_a = new_conns[0]
+            assert conn_a.peer_id == f"[::1]:{port_b}"
+            assert _wait_for_messages(transport_a, conn_a, 1) == [
+                {"type": "connect", "from": "b"}
+            ]
+
+            conn_a.send({"type": "reply", "from": "a"})
+            assert _wait_for_messages(transport_b, conn_b, 1) == [
+                {"type": "reply", "from": "a"}
+            ]
         finally:
             transport_a.close()
             transport_b.close()
