@@ -6,7 +6,7 @@ from unittest import mock
 import pytest
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, PretrainedConfig
+from transformers import AutoConfig, PreTrainedConfig
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -62,7 +62,7 @@ def test_glm_mtp_defers_lm_head(default_vllm_config):
     assert layer.shared_head.head is None
 
 
-def _tiny_glm_mtp_config(model: str) -> PretrainedConfig:
+def _tiny_glm_mtp_config(model: str) -> PreTrainedConfig:
     config = AutoConfig.from_pretrained(model)
     shrink = dict(
         hidden_size=256,
