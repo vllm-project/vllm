@@ -50,7 +50,7 @@ from dataclasses import dataclass
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels.kernels_common import LOG2E
-from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64
 
 from . import k5
@@ -67,8 +67,6 @@ from .dev import (
     bf_hi,
     bf_lo,
     butterfly,
-    e8m0_f32,
-    fp4x8_bf16,
     fresh,
     hw_exp2,
     hw_rsq,
@@ -80,8 +78,6 @@ from .dev import (
     mb_poll,
     mb_put,
     mb_put_sys,
-    mfma_bf16,
-    permlane_swap,
     popcount,
     readlane,
     st_if,
@@ -89,7 +85,7 @@ from .dev import (
     uniform,
     wave_incl_scan,
 )
-from .k3 import _lay, sel_peer, task_ring
+from .k3 import _lay, fp4_mma, sel_peer, task_ring
 
 DM = 4096
 INTER = 4096
@@ -97,7 +93,6 @@ E = 256
 W = 8  # ranks in the TP = EP group
 EL = E // W  # local experts
 TOPK = 8
-FCH = 256
 POST_EPS = 1e-8
 HROW = DM + 8
 AROW = INTER + 8
@@ -303,36 +298,6 @@ def build(key: BuildM):
             ops.append(ld_i32_if(ok, w13s, sdw, W13S_BYTES))
         return ops
 
-    def fp4_mma(ops, base, bl, brow, lane, acc, c, jpar=None):
-        """Chunk c (256 K) of a 16-row group times LDS B rows lane % 16: 8 MFMA steps.
-        ``jpar``: the task's 16-row group parity (j & 1), for the shuffled scales."""
-        g = lane // 16
-        t = lane % 16
-        sw = ops[base + 2]
-        sa_, sb_ = permlane_swap(32, sw, sw)
-        shs = (g // 2) * 16 + jpar * 8
-        s0 = e8m0_f32((sa_ >> shs) & 0xFF)
-        s1 = e8m0_f32((sb_ >> shs) & 0xFF)
-        # shuffled, contiguous loads: permlane32_swap then permlane16_swap give the MFMA operand (as k3 fp4_mma)
-        x0, x1 = [], []
-        for jj in range_constexpr(4):
-            a_, b_ = permlane_swap(32, ops[base][jj], ops[base + 1][jj])
-            p_, q_ = permlane_swap(16, a_, b_)
-            x0.append(p_)
-            x1.append(q_)
-        xs = [x0, x1]
-        for d in range_constexpr(8):
-            a = fp4x8_bf16(xs[d // 4][d % 4], s0 if d < 4 else s1)
-            kk = FCH * c + 64 * g + 8 * d
-            b = fx.Vector(
-                fx.ptr_load(
-                    bl + (t * brow + kk) // 2,
-                    result_type=fx.Vector.make_type(4, fx.Int32),
-                )
-            ).bitcast(fx.BFloat16)
-            acc = mfma_bf16(a, b, acc)
-        return acc
-
     @traced
     def load_rows_h(h, rt, hsel, hl, tid):
         """LDS row n := h row of the token of pick pk[hsel][n] (zeros for an empty slot)."""
@@ -361,7 +326,7 @@ def build(key: BuildM):
         acc = fx.Vector.filled(4, 0.0, fx.Float32)
         for i in range_constexpr(4):
             acc = fp4_mma(
-                ops, 3 * i, hl, HROW, lane, acc, 4 * (wave % 4) + i, jpar=(task & 1)
+                ops, 3 * i, hl, HROW, lane, acc, 4 * (wave % 4) + i, task & 1, 16
             )
         par = (it & 1) * (WAVES * 64 * 4)
         fx.ptr_store(acc, red + (par + (wave * 64 + lane) * 4))
@@ -452,9 +417,7 @@ def build(key: BuildM):
         tid = fresh(tid)
         acc = fx.Vector.filled(4, 0.0, fx.Float32)
         for i in range_constexpr(2):
-            acc = fp4_mma(
-                ops, 3 * i, al, AROW, lane, acc, 2 * wave + i, jpar=(task & 1)
-            )
+            acc = fp4_mma(ops, 3 * i, al, AROW, lane, acc, 2 * wave + i, task & 1, 16)
         par = (it & 1) * (WAVES * 64 * 4)
         fx.ptr_store(acc, red + (par + (wave * 64 + lane) * 4))
         gpu.barrier()

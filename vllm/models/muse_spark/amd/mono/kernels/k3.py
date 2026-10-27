@@ -276,6 +276,43 @@ def sel_peer(pl, d):
     return p
 
 
+def fp4_mma(ops, base, bl, brow, lane, acc, c, jpar, rows, row0=0):
+    """Chunk c (256 K) of a 16-row MXFP4 group: 8 MFMA steps, B column n = LDS row row0 + n (at
+    most rows - 1: columns past the expert's picks read some row, their outputs are never stored).
+    ``jpar``: the task's 16-row group parity (j & 1), for the shuffled scales."""
+    g = lane // 16
+    t = fx.min(row0 + lane % 16, rows - 1)
+    sw = ops[base + 2]
+    # a = the dword of the lane's lower-half partner (K block % 4 = 2 (g % 2)), b = of the upper-half one
+    # (2 (g % 2) + 1); the byte = 2 (g // 2) (K block + 4) + the row group parity (rows + 16)
+    sa_, sb_ = permlane_swap(32, sw, sw)
+    shs = (g // 2) * 16 + jpar * 8
+    s0 = e8m0_f32((sa_ >> shs) & 0xFF)
+    s1 = e8m0_f32((sb_ >> shs) & 0xFF)
+    # loaded (shuffled): vector q lane 16 p + r' = row r', piece 4 q + p; MFMA lane 16 g + r wants row r
+    # pieces 2 g, 2 g + 1: X0 = [V0 p0, V0 p2, V1 p0, V1 p2], X1 = [V0 p1, V0 p3, V1 p1, V1 p3] (16-lane
+    # rows) = permlane32_swap then permlane16_swap, no bpermute
+    x0, x1 = [], []
+    for jj in range_constexpr(4):
+        a_, b_ = permlane_swap(32, ops[base][jj], ops[base + 1][jj])
+        p_, q_ = permlane_swap(16, a_, b_)
+        x0.append(p_)
+        x1.append(q_)
+    xs = [x0, x1]
+    for d in range_constexpr(8):
+        word = xs[d // 4][d % 4]
+        a = fp4x8_bf16(word, s0 if d < 4 else s1)
+        kk = FCH * c + 64 * g + 8 * d
+        b = fx.Vector(
+            fx.ptr_load(
+                bl + (t * brow + kk) // 2,
+                result_type=fx.Vector.make_type(4, fx.Int32),
+            )
+        ).bitcast(fx.BFloat16)
+        acc = mfma_bf16(a, b, acc)
+    return acc
+
+
 @traced
 def task_ring(load, compute, q, task, it, end, unr, *args):
     """Tasks task .. end - 1: compute(q[0], task, it, *args) with the next len(q) tasks' loads
@@ -900,47 +937,6 @@ def build(key: Build):
                 ops.append(ld_i32_if(ok, w13s, sdw, W13S_BYTES))
         return ops
 
-    def fp4_mma(ops, base, bl, brow, lane, wave, acc, i, c=None, bsel=None, jpar=None):
-        """Chunk c (default 2 wave + i) of one row group: 8 MFMA steps. ``bsel``
-        (row base, valid count): B column n reads LDS row base + n, zero past count.
-        ``jpar``: the task's 16-row group parity (j & 1), for the shuffled scales."""
-        g = lane // 16
-        t = fx.min(lane % 16, S - 1)
-        if bsel is not None:
-            # columns past the expert's picks read some row: their outputs are never stored
-            t = fx.min(bsel[0] + lane % 16, S - 1)
-        if c is None:
-            c = 2 * wave + i
-        sw = ops[base + 2]
-        # a = the dword of the lane's lower-half partner (K block % 4 = 2 (g % 2)), b = of the upper-half one
-        # (2 (g % 2) + 1); the byte = 2 (g // 2) (K block + 4) + the row group parity (rows + 16)
-        sa_, sb_ = permlane_swap(32, sw, sw)
-        shs = (g // 2) * 16 + jpar * 8
-        s0 = e8m0_f32((sa_ >> shs) & 0xFF)
-        s1 = e8m0_f32((sb_ >> shs) & 0xFF)
-        # loaded (shuffled): vector q lane 16 p + r' = row r', piece 4 q + p; MFMA lane 16 g + r wants row r
-        # pieces 2 g, 2 g + 1: X0 = [V0 p0, V0 p2, V1 p0, V1 p2], X1 = [V0 p1, V0 p3, V1 p1, V1 p3] (16-lane
-        # rows) = permlane32_swap then permlane16_swap, no bpermute
-        x0, x1 = [], []
-        for jj in range_constexpr(4):
-            a_, b_ = permlane_swap(32, ops[base][jj], ops[base + 1][jj])
-            p_, q_ = permlane_swap(16, a_, b_)
-            x0.append(p_)
-            x1.append(q_)
-        xs = [x0, x1]
-        for d in range_constexpr(8):
-            word = xs[d // 4][d % 4]
-            a = fp4x8_bf16(word, s0 if d < 4 else s1)
-            kk = FCH * c + 64 * g + 8 * d
-            b = fx.Vector(
-                fx.ptr_load(
-                    bl + (t * brow + kk) // 2,
-                    result_type=fx.Vector.make_type(4, fx.Int32),
-                )
-            ).bitcast(fx.BFloat16)
-            acc = mfma_bf16(a, b, acc)
-        return acc
-
     @traced
     def load_h_norm(hv, wv, tid, lane, wave, hl, tok):
         """Rstd per token from the full h_raw, h = bf16(h_raw rstd w) -> LDS."""
@@ -976,16 +972,7 @@ def build(key: Build):
             acc = fx.Vector.filled(4, 0.0, fx.Float32)
             for i in range_constexpr(4):
                 acc = fp4_mma(
-                    ops,
-                    3 * i,
-                    hl,
-                    HROW,
-                    lane,
-                    wave,
-                    acc,
-                    i,
-                    c=4 * (wave % 4) + i,
-                    jpar=(task & 1),
+                    ops, 3 * i, hl, HROW, lane, acc, 4 * (wave % 4) + i, task & 1, S
                 )
             par = (it & 1) * (WAVES * 64 * 4)
             fx.ptr_store(acc, red + (par + (wave * 64 + lane) * 4))
@@ -994,10 +981,10 @@ def build(key: Build):
             acc_u = fx.Vector.filled(4, 0.0, fx.Float32)
             for i in range_constexpr(2):
                 acc_g = fp4_mma(
-                    ops, 3 * i, hl, HROW, lane, wave, acc_g, i, jpar=(task & 1)
+                    ops, 3 * i, hl, HROW, lane, acc_g, 2 * wave + i, task & 1, S
                 )
                 acc_u = fp4_mma(
-                    ops, 6 + 3 * i, hl, HROW, lane, wave, acc_u, i, jpar=(task & 1)
+                    ops, 6 + 3 * i, hl, HROW, lane, acc_u, 2 * wave + i, task & 1, S
                 )
             par = (it & 1) * (2 * WAVES * 64 * 4)
             fx.ptr_store(acc_g, red + (par + (wave * 64 + lane) * 4))
@@ -1138,16 +1125,7 @@ def build(key: Build):
         acc = fx.Vector.filled(4, 0.0, fx.Float32)
         for i in range_constexpr(2):
             acc = fp4_mma(
-                ops,
-                3 * i,
-                al,
-                AROW,
-                lane,
-                wave,
-                acc,
-                i,
-                bsel=(rowb, nv),
-                jpar=(task & 1),
+                ops, 3 * i, al, AROW, lane, acc, 2 * wave + i, task & 1, S, rowb
             )
         par = (it & 1) * (WAVES * 64 * 4)
         fx.ptr_store(acc, red + (par + (wave * 64 + lane) * 4))

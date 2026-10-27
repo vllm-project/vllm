@@ -111,7 +111,6 @@ NRP = OWN // 2  # their row pairs
 NTILES = QH // 16  # post-proj 16-row tiles a rank
 KSP = BLOCKS // NTILES  # post-proj K split
 TOPK = 8
-ROUTE_EPS = 1e-15
 PRE_EPS = 1e-5
 POST_EPS = 1e-8
 KCH = 128
