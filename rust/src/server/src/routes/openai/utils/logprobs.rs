@@ -187,6 +187,16 @@ pub fn text_len(text: &str) -> u32 {
     u32::try_from(text.chars().count()).unwrap_or(u32::MAX)
 }
 
+/// The text offset just past the last token of a completions `logprobs`
+/// payload, where the next token's offset starts.
+pub fn text_end_offset(logprobs: &LogProbs) -> Option<u32> {
+    logprobs
+        .text_offset
+        .last()
+        .zip(logprobs.tokens.last())
+        .map(|(&offset, token)| offset.saturating_add(text_len(token)))
+}
+
 /// Concatenate two OpenAI-style completion logprobs payloads in token order.
 pub fn append_openai_logprobs(mut prefix: LogProbs, suffix: LogProbs) -> LogProbs {
     prefix.tokens.extend(suffix.tokens);
@@ -218,12 +228,7 @@ pub fn collected_logprobs_to_openai(
         })?;
         let prompt_logprobs =
             decoded_prompt_logprobs_to_openai(prompt_logprobs, 0, return_tokens_as_token_ids)?;
-        let completion_start = prompt_logprobs
-            .text_offset
-            .last()
-            .zip(prompt_logprobs.tokens.last())
-            .map(|(&offset, token)| offset.saturating_add(text_len(token)))
-            .unwrap_or(0);
+        let completion_start = text_end_offset(&prompt_logprobs).unwrap_or(0);
         return match collected.logprobs.as_ref() {
             Some(completion_logprobs) => Ok(append_openai_logprobs(
                 prompt_logprobs,
