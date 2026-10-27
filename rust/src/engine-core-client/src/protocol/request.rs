@@ -141,6 +141,8 @@ pub struct EngineCoreRequest {
     /// keys the engine would add (LoRA, multimodal, cache salt).
     #[serde(default)]
     pub block_hashes: Option<Vec<BlockHash>>,
+    #[serde(default)]
+    pub include_prefill_progress: bool,
 }
 
 /// A prefix-cache block hash, carried as msgpack bin like Python `bytes`.
@@ -231,7 +233,7 @@ mod tests {
             other => panic!("expected array, got {other:?}"),
         };
 
-        assert_eq!(array.len(), 23);
+        assert_eq!(array.len(), 24);
         assert_eq!(array[0], Value::from("req-1"));
         assert_eq!(array[2], Value::Nil);
         assert_eq!(array[4], Value::Nil);
@@ -241,6 +243,8 @@ mod tests {
         assert!(matches!(&array[21], Value::Map(_)));
         // `block_hashes`, filled in by the client.
         assert_eq!(array[22], Value::Nil);
+        // Matches the Python `EngineCoreRequest.include_prefill_progress` slot.
+        assert_eq!(array[23], Value::from(false));
     }
 
     #[test]

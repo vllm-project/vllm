@@ -3993,6 +3993,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
                         watermarking: Some(
                             true,
                         ),
+                        prefill_progress: None,
                     },
                 ],
                 scheduler_stats: None,

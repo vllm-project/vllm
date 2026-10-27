@@ -162,6 +162,8 @@ pub struct SamplingParams {
     /// values below it are clamped up to it. The first and final outputs are
     /// always emitted immediately.
     pub stream_interval: Option<NonZeroU32>,
+    /// Include worker prefill-progress snapshots in the streaming response.
+    pub include_prefill_progress: bool,
 }
 
 #[allow(clippy::derivable_impls)] // more explicit
@@ -197,6 +199,7 @@ impl Default for SamplingParams {
             routed_experts_prompt_start: None,
             vllm_xargs: None,
             stream_interval: None,
+            include_prefill_progress: false,
         }
     }
 }

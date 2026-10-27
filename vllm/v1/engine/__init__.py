@@ -224,6 +224,7 @@ class EngineCoreRequest(
     # Prompt block hashes computed by the frontend with the engine's
     # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
     block_hashes: list[bytes] | None = None
+    include_prefill_progress: bool = False
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -232,6 +233,25 @@ class EngineCoreRequest(
             return self.sampling_params
         assert self.pooling_params is not None
         return self.pooling_params
+
+
+class PrefillProgress(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    request_id: str
+    sequence: int
+    phase: int
+    prompt_tokens: int
+    total_compute_tokens: int
+    completed_compute_tokens: int
+    remaining_compute_tokens: int
+    local_cached_tokens: int = 0
+    external_cached_tokens: int = 0
+    pending_kv_transfer_tokens: int = 0
+    cache_accounting_final: bool = False
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -306,11 +326,11 @@ class EngineCoreOutput(
 
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
-
     # Whether the sampler watermarks this request, after EngineCore enforcement.
     # Sent once, on the first output, when watermark_config is set. Appended last
     # for array_like compatibility.
     watermarking: bool | None = None
+    prefill_progress: PrefillProgress | None = None
 
     @property
     def finished(self) -> bool:

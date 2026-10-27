@@ -47,7 +47,7 @@ pub(crate) struct OutputSender {
     tx: mpsc::UnboundedSender<Result<Delivery>>,
     /// Minimum number of new tokens per delivery after the first one.
     stream_interval: usize,
-    /// Whether the first output has been delivered.
+    /// Whether the first ordinary output has been delivered.
     delivered_first: bool,
     /// Outputs held back since the last delivery.
     buffered: Vec<EngineCoreStreamOutput>,
@@ -59,19 +59,26 @@ impl OutputSender {
     /// Send one output, or hold it back until the held-back outputs reach the
     /// stream interval. The first output and the terminal output are always
     /// delivered immediately, the latter together with any held-back outputs.
+    /// Progress snapshots also bypass the token interval, since prefill may
+    /// produce no tokens for many steps. A progress-only output does not use
+    /// up the immediate delivery of the first generated token.
     pub fn send(&mut self, output: EngineCoreStreamOutput) {
         let finished = output.finished();
+        let has_progress = output.prefill_progress.is_some();
         if self.buffered.is_empty()
-            && (finished || !self.delivered_first || self.stream_interval == 1)
+            && (finished || has_progress || !self.delivered_first || self.stream_interval == 1)
         {
-            self.delivered_first = true;
+            self.delivered_first |= !has_progress
+                || !output.new_token_ids.is_empty()
+                || output.pooling_output.is_some()
+                || finished;
             self.deliver(Delivery::One(output));
             return;
         }
 
         self.buffered_tokens += output.new_token_ids.len();
         self.buffered.push(output);
-        if finished || self.buffered_tokens >= self.stream_interval {
+        if finished || has_progress || self.buffered_tokens >= self.stream_interval {
             self.flush();
         }
     }
@@ -124,7 +131,7 @@ mod tests {
     use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
-    use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutput};
+    use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutput, PrefillProgress};
 
     fn output(token_ids: &[u32]) -> EngineCoreStreamOutput {
         EngineCoreStreamOutput {
@@ -195,6 +202,40 @@ mod tests {
             ]
         "#]]
         .assert_debug_eq(&deliveries(&mut receiver));
+    }
+
+    #[test]
+    fn prefill_progress_does_not_wait_for_generated_tokens() {
+        let (mut sender, mut receiver) = channel(4);
+        sender.send(output(&[]));
+        let mut progress = output(&[]);
+        progress.output.prefill_progress = Some(Box::new(PrefillProgress {
+            request_id: "req".to_owned(),
+            sequence: 1,
+            phase: 3,
+            prompt_tokens: 100,
+            total_compute_tokens: 100,
+            completed_compute_tokens: 50,
+            remaining_compute_tokens: 50,
+            local_cached_tokens: 0,
+            external_cached_tokens: 0,
+            pending_kv_transfer_tokens: 0,
+            cache_accounting_final: true,
+        }));
+        sender.send(progress.clone());
+
+        receiver.try_recv().unwrap().unwrap();
+        let delivery = receiver.try_recv().unwrap().unwrap();
+        assert_eq!(
+            delivery.last().prefill_progress.as_ref().unwrap().remaining_compute_tokens,
+            50
+        );
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+
+        let (mut sender, mut receiver) = channel(4);
+        sender.send(progress);
+        sender.send(output(&[1]));
+        assert_eq!(deliveries(&mut receiver), vec![vec![vec![]], vec![vec![1]]]);
     }
 
     #[test]

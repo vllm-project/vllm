@@ -106,6 +106,7 @@ class EngineCoreRequest(
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
     block_hashes: list[bytes] | None = None
+    include_prefill_progress: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,7 @@ class EngineCoreOutput(
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
     watermarking: bool | None = None
+    prefill_progress: object | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):

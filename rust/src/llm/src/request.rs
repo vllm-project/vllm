@@ -63,6 +63,8 @@ pub struct GenerateRequest {
     pub reasoning_ended: Option<bool>,
     /// Optional LoRA adapter request applied to this generation.
     pub lora_request: Option<LoraRequest>,
+    /// Whether the engine should stream request-scoped prefill progress.
+    pub include_prefill_progress: bool,
 }
 
 #[derive(Debug)]
@@ -95,6 +97,7 @@ impl GenerateRequest {
             reasoning_parser_kwargs,
             reasoning_ended,
             lora_request,
+            include_prefill_progress,
         } = self;
 
         let external_request_id = request_id;
@@ -125,6 +128,7 @@ impl GenerateRequest {
                 resumable: false,
                 session_id,
                 kv_hints,
+                include_prefill_progress,
                 external_req_id: Some(external_request_id),
                 reasoning_ended,
                 reasoning_parser_kwargs,
@@ -214,6 +218,7 @@ mod tests {
             }),
             reasoning_ended: None,
             lora_request: None,
+            include_prefill_progress: false,
         }
     }
 
