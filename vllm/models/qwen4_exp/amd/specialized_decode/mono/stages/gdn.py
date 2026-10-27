@@ -5,7 +5,8 @@ outputs the block's earlier stages put to PROJ / BAPART (``in_proj``):
 
     gdn  (S x NV value heads x 8 chunks of 16 state rows, task n on CTA
          (n + goff) % 256; a CTA runs its tasks phase by phase, so the rounds'
-         hand-offs overlap): the conv update of the owned channels (a key
+         hand-offs overlap; from BATCH_ROUNDS rounds it polls each hand-off
+         for all of them at once): the conv update of the owned channels (a key
          head's q / k by its first value head's tasks, out through QK), the
          gates, q / k l2norm, the recurrence on 16 state rows (fp32, in
          place), partial norms (ONRM), RMSNormGated -> ``core``
@@ -29,7 +30,7 @@ import math
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 
 from vllm.models.qwen4_exp.amd.specialized_decode.mono import layout as L
@@ -64,6 +65,8 @@ VCH = 16  # state rows a GDN task
 NVCH = HD // VCH  # 8
 SL = L.CONV_W - 1  # conv state entries (no spec decode)
 SOFTPLUS_THRESHOLD = 20.0
+# rounds from which a CTA polls each hand-off for all its rounds at once
+BATCH_ROUNDS = 4
 LOG2E = 1.0 / math.log(2.0)
 LN2 = math.log(2.0)
 
@@ -127,22 +130,24 @@ def _ba_out(c, i, t0, n):
     gpu.barrier()
 
 
-def ba_sums(c, t, h, parts):
+def ba_specs(c, t, h, parts):
+    s, nv = c["S"], c["gdn"].nv
+    return [
+        (c["bapart"], (((ro // ROWS) * parts + q) * s + t) * ROWS + ro % ROWS, 1)
+        for ro in (h, nv + h)
+        for q in range(parts)
+    ]
+
+
+def ba_sums(c, t, h, parts, got=None):
     """Head h's b and a of token t (in_proj_ba rows h, nv + h): the tasks'
     K parts summed in part order, rounded to bf16."""
-    s, nv = c["S"], c["gdn"].nv
-    got = c["poll"](
-        [
-            (c["bapart"], (((ro // ROWS) * parts + q) * s + t) * ROWS + ro % ROWS, 1)
-            for ro in (h, nv + h)
-            for q in range(parts)
-        ]
-    )
+    words = c["poll"](ba_specs(c, t, h, parts)) if got is None else got
     ba = []
     for e in range_constexpr(2):
-        v = f32_of(got[e * parts][0])
+        v = f32_of(words[e * parts][0])
         for q in range_constexpr(1, parts):
-            v = v + f32_of(got[e * parts + q][0])
+            v = v + f32_of(words[e * parts + q][0])
         ba.append(bf16_round(v))
     return ba[0], ba[1]
 
@@ -189,7 +194,7 @@ def gdn_stage(c, t, h, ch):
 
 
 @traced
-def gdn_conv(c, k, t, h, ch):
+def gdn_conv(c, k, t, h, ch, xw=None):
     """The owned channels' conv update: the window shifted (in place), the
     width-4 conv (each product rounded to bf16, fp32 sum), SiLU -> bf16; q / k
     out through QK (the key head's owner tasks), v to LDS."""
@@ -197,7 +202,10 @@ def gdn_conv(c, k, t, h, ch):
     a, g = c["args"], c["gdn"]
     part, owner = k["part"], k["owner"]
     if tid < 3 * VCH:
-        x = f32_of(c["poll"]([(c["proj"], t * g.proj + k["chan"], 1)])[0][0])
+        if const_expr(xw is None):
+            x = f32_of(c["poll"]([(c["proj"], t * g.proj + k["chan"], 1)])[0][0])
+        else:
+            x = f32_of(xw)
         owned = (part == 2) | owner
         if (k["slot"] > 0) & owned:
             rs = rsrc(k["cs"])
@@ -220,24 +228,35 @@ def gdn_conv(c, k, t, h, ch):
     gpu.barrier()
 
 
+def decay_beta(b, a, dtb, a_log):
+    """A head's decay exp(-exp(A_log) softplus(a + dt_bias)) and beta =
+    sigmoid(b)."""
+    x = a + dtb
+    sp = hw_log2(fx.Float32(1.0) + hw_exp(x)) * fx.Float32(LN2)
+    sp = (x <= fx.Float32(SOFTPLUS_THRESHOLD)).select(sp, x)
+    gl = -hw_exp(a_log) * sp
+    return hw_exp(gl), sigmoid(b)
+
+
 @traced
-def gdn_gates(c, k, t, h):
+def gdn_gates(c, k, t, h, qkw=None):
     """The key head's q and k (QK) l2-normed (q scaled by HD^-1/2); the head's
     decay exp(-exp(A_log) softplus(a + dt_bias)) and beta = sigmoid(b), b and a
     as the model's ``ba_of`` hands them over."""
     tid, lane, wave, g = c["tid"], c["lane"], c["wave"], c["gdn"]
     kh = h // (g.nv // g.nk)
     if tid < 2 * HD:
-        v = c["poll"]([(c["qk"], (t * g.nk + kh) * 2 * HD + tid, 1)])[0][0]
+        if const_expr(qkw is None):
+            v = c["poll"]([(c["qk"], (t * g.nk + kh) * 2 * HD + tid, 1)])[0][0]
+        else:
+            v = qkw
         fx.ptr_store(f32_of(v), c["qkl"] + tid)
-    if tid == 2 * HD:
-        b, a = c["ba_of"](c, t, h)
-        x = a + k["dtb"]
-        sp = hw_log2(fx.Float32(1.0) + hw_exp(x)) * fx.Float32(LN2)
-        sp = (x <= fx.Float32(SOFTPLUS_THRESHOLD)).select(sp, x)
-        gl = -hw_exp(k["a_log"]) * sp
-        fx.ptr_store(hw_exp(gl), c["scal"] + 0)
-        fx.ptr_store(sigmoid(b), c["scal"] + 1)
+    if const_expr(qkw is None):  # noqa: SIM102 (traced: `and` does not combine traced values)
+        if tid == 2 * HD:
+            b, a = c["ba_of"](c, t, h)
+            decay, beta = decay_beta(b, a, k["dtb"], k["a_log"])
+            fx.ptr_store(decay, c["scal"] + 0)
+            fx.ptr_store(beta, c["scal"] + 1)
     gpu.barrier()
     if wave < 2:
         x0 = fx.ptr_load(c["qkl"] + (wave * HD + lane))
@@ -330,6 +349,84 @@ def gdn_round(c, r):
     return cr, task < n, tc // (nv * NVCH), (tc // NVCH) % nv, tc % NVCH
 
 
+def _sel(vals, i):
+    v = vals[0]
+    for j in range(1, len(vals)):
+        v = (i == j).select(vals[j], v)
+    return v
+
+
+@traced
+def gdn_tasks_batched(c, tasks, ks):
+    """``gdn_tasks`` with each hand-off polled for every round at once: the conv
+    inputs and q / k one batch each, b / a and the norm partials a round on a
+    thread group."""
+    tid, g = c["tid"], c["gdn"]
+    rounds = len(tasks)
+    gate_tid = fx.min(tid, 2 * HD - 1)
+    xs = c["poll"](
+        [
+            (c["proj"], t * g.proj + k["chan"], 1)
+            for (_, _, t, _, _), k in zip(tasks, ks)
+        ]
+    )
+    for i, ((cr, live, t, h, ch), k) in enumerate(zip(tasks, ks)):
+        if live:
+            gdn_conv(cr, k, t, h, ch, xs[i][0])
+    # b / a: round r on thread 2 HD + r, in q / k's poll batch
+    r = fx.min(fx.max(tid - 2 * HD, 0), rounds - 1)
+    tr = _sel([tk[2] for tk in tasks], r)
+    hr = _sel([tk[3] for tk in tasks], r)
+    parts = c["ba_parts"]
+    got = c["poll"](
+        [
+            (c["qk"], (t * g.nk + h // (g.nv // g.nk)) * 2 * HD + gate_tid, 1)
+            for _, _, t, h, _ in tasks
+        ]
+        + ba_specs(c, tr, hr, parts)
+    )
+    qks = got[:rounds]
+    ba = ba_sums(c, tr, hr, parts, got[rounds:])
+    if (tid >= 2 * HD) & (tid < 2 * HD + rounds):
+        a = c["args"]
+        decay, beta = decay_beta(*ba, ld_bf(a["dt_bias"], hr), ld_f32(a["a_log"], hr))
+        fx.ptr_store(decay, c["scal"] + r * 4)
+        fx.ptr_store(beta, c["scal"] + r * 4 + 1)
+    gpu.barrier()
+    for i, ((cr, live, t, h, ch), k) in enumerate(zip(tasks, ks)):
+        if live:
+            gdn_gates(cr, k, t, h, qks[i][0])
+    for (cr, live, t, h, ch), k in zip(tasks, ks):
+        if live:
+            gdn_recur(cr, k, t, h, ch)
+    # norm: round r on threads 16 r ..
+    r = fx.min(tid // VCH, rounds - 1)
+    tr = _sel([tk[2] for tk in tasks], r)
+    hr = _sel([tk[3] for tk in tasks], r)
+    chr_ = _sel([tk[4] for tk in tasks], r)
+    live = _sel([tk[1] for tk in tasks], r) & (tid < rounds * VCH)
+    slot = _sel([k["slot"] for k in ks], r)
+    a = c["args"]
+    vr = chr_ * VCH + tid % VCH
+    z0 = 2 * g.nk * HD + g.nv * HD
+    got = c["poll"](
+        [(c["onrm"], (tr * g.nv + hr) * NVCH + q, 1) for q in range(NVCH)]
+        + [(c["proj"], tr * g.proj + z0 + hr * HD + vr, 1)]
+    )
+    if live:
+        ss = f32_of(got[0][0])
+        for q in range_constexpr(1, NVCH):
+            ss = ss + f32_of(got[q][0])
+        rr = hw_rsq(ss * fx.Float32(1.0 / HD) + fx.Float32(c["norm_eps"]))
+        y = fx.ptr_load(c["ol"] + (r * VCH + tid % VCH)) * rr * ld_bf(a["norm_w"], vr)
+        y = y * c["z_gate"](f32_of(got[NVCH][0]))
+        y = (slot > 0).select(y, fx.Float32(0.0))
+        bo.buffer_store(
+            y.to(fx.BFloat16), rsrc(a["core"]), tr * (g.nv * HD) + hr * HD + vr
+        )
+    gpu.barrier()
+
+
 @traced
 def gdn_tasks(c, rounds):
     """This CTA's GDN tasks (``rounds`` of them) phase by phase: a task waits
@@ -337,6 +434,14 @@ def gdn_tasks(c, rounds):
     phase's work before it waits in the next."""
     tasks = [gdn_round(c, r) for r in range(rounds)]
     ks = [gdn_stage(cr, t, h, ch) for cr, _, t, h, ch in tasks]
+    if const_expr(rounds >= BATCH_ROUNDS):
+        gdn_tasks_batched(c, tasks, ks)
+    else:
+        _gdn_phases(tasks, ks)
+
+
+@traced
+def _gdn_phases(tasks, ks):
     phases = (
         lambda cr, k, t, h, ch: gdn_conv(cr, k, t, h, ch),
         lambda cr, k, t, h, ch: gdn_gates(cr, k, t, h),
