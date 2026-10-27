@@ -1026,6 +1026,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.sampler.add_request(req_idx, warmup_params)
         self.sampler.apply_staged_writes()
         self.sampler(logits, dummy_input_batch)
+        if self.rejection_sampler is not None:
+            self._dummy_rejection_sampler_run(hidden_states)
+
+    @torch.inference_mode()
+    def _dummy_rejection_sampler_run(self, hidden_states: torch.Tensor) -> None:
+        # Verification computes logits for every draft position plus the bonus
+        # token of each request, which outgrows the sampler pass above.
+        assert self.rejection_sampler is not None and self.speculator is not None
+        query_len = self.decode_query_len
+        num_reqs = min(hidden_states.shape[0], self.max_num_tokens // query_len)
+        num_logits = num_reqs * query_len
+        batch = InputBatch.make_dummy(num_reqs, num_logits, self.input_buffers)
+        device = batch.idx_mapping.device
+        cu_num_logits_np = np.arange(0, num_logits + 1, query_len, dtype=np.int32)
+        batch = replace(
+            batch,
+            num_draft_tokens=num_logits - num_reqs,
+            num_draft_tokens_per_req=np.full(num_reqs, query_len - 1, dtype=np.int32),
+            logits_indices=torch.arange(num_logits, device=device),
+            cu_num_logits=torch.from_numpy(cu_num_logits_np).to(device),
+            cu_num_logits_np=cu_num_logits_np,
+            expanded_idx_mapping=batch.idx_mapping.repeat_interleave(query_len),
+            expanded_local_pos=torch.arange(
+                query_len, device=device, dtype=torch.int32
+            ).repeat(num_reqs),
+        )
+        logits = self.model.compute_logits(
+            hidden_states[:num_reqs].repeat_interleave(query_len, dim=0)
+        )
+        self.rejection_sampler(logits, batch, self.speculator.draft_logits)
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
