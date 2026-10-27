@@ -89,6 +89,11 @@ from vllm.v1.attention.ops.dcp import (
     dcp_a2a_lse_reduce,
     mask_dcp_empty_shards_,
 )
+from vllm.v1.attention.ops.fp8_prefill_cache import (
+    PrefillCacheExpansion,
+    expand_cache,
+    plan_expansion,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -742,6 +747,7 @@ class FIPrefill:
     """Metadata for the native FlashInfer prefill pathway (non-TRTLLM)."""
 
     wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
+    cache_expansion: PrefillCacheExpansion | None = None
 
 
 @dataclass
@@ -874,6 +880,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.attention_config = vllm_config.attention_config
         self._num_speculative_tokens = vllm_config.num_speculative_tokens
         self._workspace_buffer = None
+        self.fp8_prefill_expansion_budget = (
+            self.attention_config.flashinfer_prefill_cache_expansion_bytes
+        )
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
@@ -1834,6 +1843,36 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 if PIN_MEMORY:
                     kv_lens_prefill_cpu = kv_lens_prefill_cpu.pin_memory()
+                cache_expansion = None
+                if (
+                    self.fp8_prefill_expansion_budget
+                    and current_platform.is_device_capability(120)
+                    and self.q_data_type_prefill == torch.bfloat16
+                    and self.kv_cache_dtype == torch.float8_e4m3fn
+                    and self.head_dim == 256
+                    and get_flashinfer_layout_string(self.kv_cache_layout)
+                    in ("HND", "NHD")
+                    and attn_metadata.causal
+                    and not self.use_dcp
+                    and not self.has_sinks
+                    and not envs.VLLM_BATCH_INVARIANT
+                    and self.compilation_config.cudagraph_mode.mixed_mode()
+                    != CUDAGraphMode.FULL
+                ):
+                    cache_expansion = plan_expansion(
+                        paged_kv_indptr_prefill_cpu,
+                        paged_kv_indices,
+                        num_query_tokens=num_prefill_tokens,
+                        num_kv_heads=self.num_kv_heads,
+                        page_size=self.page_size,
+                        head_dim=self.head_dim,
+                        budget=self.fp8_prefill_expansion_budget,
+                        layout=get_flashinfer_layout_string(self.kv_cache_layout),
+                    )
+                    if cache_expansion is not None:
+                        logger.info_once(
+                            "Using bounded FP8 cache expansion for native prefill"
+                        )
                 if self.use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     prefill_wrapper.plan(
@@ -1869,8 +1908,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     )
                     prefill_wrapper.plan(
                         qo_indptr=qo_indptr_prefill_cpu,
-                        paged_kv_indptr=paged_kv_indptr_prefill_cpu,
-                        paged_kv_indices=paged_kv_indices,
+                        paged_kv_indptr=(
+                            cache_expansion.indptr
+                            if cache_expansion is not None
+                            else paged_kv_indptr_prefill_cpu
+                        ),
+                        paged_kv_indices=(
+                            cache_expansion.indices
+                            if cache_expansion is not None
+                            else paged_kv_indices
+                        ),
                         paged_kv_last_page_len=paged_kv_last_page_len_prefill_cpu,
                         seq_lens=kv_lens_prefill_cpu,
                         num_qo_heads=self.num_qo_heads,
@@ -1882,12 +1929,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         window_left=self.window_left,
                         logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type_prefill,
-                        kv_data_type=self.kv_cache_dtype,
+                        kv_data_type=(
+                            torch.bfloat16
+                            if cache_expansion is not None
+                            else self.kv_cache_dtype
+                        ),
                         o_data_type=o_dtype,
                         fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
                     )
-                attn_metadata.prefill = FIPrefill(wrapper=prefill_wrapper)
+                attn_metadata.prefill = FIPrefill(
+                    wrapper=prefill_wrapper, cache_expansion=cache_expansion
+                )
 
         ## DECODE PATHWAY
         if num_decodes > 0:
@@ -2416,6 +2469,11 @@ class FlashInferImpl(AttentionImpl):
                     kv_cache_sf = (
                         nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
                     )
+                    if attn_metadata.prefill.cache_expansion is not None:
+                        # Keep calibration in attention, after the exact cast.
+                        kv_cache_for_fi = expand_cache(
+                            *kv_cache_tuple, attn_metadata.prefill.cache_expansion
+                        )
 
                     # NVFP4 trtllm kernel only supports FP8 output.
                     # Use a pre-allocated FP8 buffer and dequantize
