@@ -260,8 +260,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             )
         if self.kv_cache_dtype not in _QSA_CACHE_DTYPES:
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16, FP8-e4m3, Octave, or mxfp4_qsa "
-                "main KV cache"
+                "QSA requires a BF16, FP8-e4m3, Octave, or mxfp4_qsa main KV cache"
             )
         self.supports_quant_query_input = False
         self.octave_fmt: rocm_octave.OctaveFormat | None = None
@@ -396,7 +395,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         token_to_req = token_to_req[:num_tokens]
         if self.kv_cache_dtype == "mxfp4_qsa":
             if query.dtype != torch.bfloat16:
-                raise NotImplementedError("Qwen4Exp QSA requires BF16 Q")
+                raise NotImplementedError("QSA requires BF16 Q")
             from .ops.qsa import qsa_sparse_paged_attention
 
             # K and V share one record per (token, head); see mxfp4_kv.py.
@@ -495,8 +494,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         cache_dtype = qsa_kv_cache_dtype(cache_config, prefix)
         if cache_dtype not in _QSA_CACHE_DTYPES:
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16, FP8-e4m3, Octave, or mxfp4_qsa "
-                "main KV cache"
+                "QSA requires a BF16, FP8-e4m3, Octave, or mxfp4_qsa main KV cache"
             )
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
@@ -584,8 +582,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             and self.kv_cache_torch_dtype != torch.bfloat16
         ):
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16, FP8-e4m3, Octave, or mxfp4_qsa "
-                "main KV cache"
+                "QSA requires a BF16, FP8-e4m3, Octave, or mxfp4_qsa main KV cache"
             )
         self.kv_sharing_target_layer_name = None
         self.kv_cache = torch.tensor([])

@@ -1030,7 +1030,7 @@ class Platform:
                 attn_page_size_1_token = tq_page
         else:
             if cache_config.cache_dtype == "mxfp4_qsa":
-                # Must match Qwen4ExpQSAAttention.get_kv_cache_spec, else the
+                # Must match the AMD QSA attention layer's get_kv_cache_spec, else the
                 # mamba state no longer fits the real (smaller) QSA page.
                 from vllm.models.qwen4_exp.amd.ops.mxfp4_kv import record_bytes
 

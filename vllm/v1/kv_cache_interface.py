@@ -145,7 +145,7 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     if kv_cache_dtype == "ultraquant_4bit":
         return KVQuantMode.ULTRAQUANT_4BIT
     if kv_cache_dtype == "mxfp4_qsa":
-        # Qwen4Exp's AMD QSA backend owns both the writer and the reader.
+        # The AMD QSA backend owns both the writer and the reader.
         return KVQuantMode.CUSTOM
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR

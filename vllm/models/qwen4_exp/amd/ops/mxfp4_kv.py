@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ``mxfp4_qsa`` main KV-cache format for the AMD Qwen4Exp QSA path.
+"""The ``mxfp4_qsa`` main KV-cache format for the AMD QSA path.
 
 OCP MXFP4 with 32-element groups: E2M1 codes packed two per byte (the low
 nibble holds the lower index) and one E8M0 scale per group. One (token, KV
