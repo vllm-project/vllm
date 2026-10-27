@@ -27,8 +27,6 @@ def eplb_map_and_record(
     valid = mask & (logical_ids >= 0) & (logical_ids < num_logical)
     safe_ids = tl.where(valid, logical_ids, 0)
     replicas = tl.load(replica_count + safe_ids, mask=valid, other=1)
-    # Avoid invalid modulo/div by forcing at least 1.
-    replicas = tl.maximum(replicas, 1)
     # floor(2^32 / phi), classic Knuth multiplicative hash multiplier.
     KNUTH_MULTIPLIER = 2654435769
     hashed = (token_idx.to(tl.int64) * KNUTH_MULTIPLIER) & 0xFFFFFFFF

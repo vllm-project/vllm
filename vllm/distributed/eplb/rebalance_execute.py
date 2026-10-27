@@ -183,7 +183,7 @@ def _first_rows(local_expert_ids: np.ndarray) -> dict[int, int]:
 def _remote_recv_rows(
     old_local_expert_ids: np.ndarray, new_local_expert_ids: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Sorted experts a rank receives remotely, with the first row needing each."""
+    """Experts a rank receives from peers (sorted), and the first row needing each."""
     is_unchanged = old_local_expert_ids == new_local_expert_ids
     new_valid = new_local_expert_ids != -1
     can_recv_local = np.isin(new_local_expert_ids, old_local_expert_ids)

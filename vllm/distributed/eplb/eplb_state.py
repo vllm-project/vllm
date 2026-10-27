@@ -720,8 +720,11 @@ class EplbState:
 
     def _maybe_log_balancedness(self) -> None:
         pending = self._pending_balancedness
-        while pending and pending[0][2].query():
-            step, steps_left, _, stats = pending.popleft()
+        while pending:
+            step, steps_left, copied, stats = pending[0]
+            if not copied.query():
+                break
+            pending.popleft()
             for model_name, tokens in stats:
                 avg_tokens, max_tokens = tokens.tolist()
                 balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0

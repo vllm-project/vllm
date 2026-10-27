@@ -780,15 +780,13 @@ def test_prepare_megamoe_inputs_is_bitwise_exact(num_tokens, hidden_size):
 @requires_sm100
 @pytest.mark.parametrize("nvfp4", [False, True])
 @pytest.mark.parametrize("num_tokens", [7, 100])
-def test_prepare_megamoe_eplb_matches_router_under_graph_replay(
+def test_prepare_megamoe_eplb_maps_and_records_under_graph_replay(
     monkeypatch, nvfp4, num_tokens
 ):
-    """Fused EPLB staging maps and records exactly as the router kernel, and a
-    replayed graph sees map and record-flag updates."""
+    """Fused EPLB staging maps each routed id to a replica of its logical expert
+    and records unpadded load, and a replayed graph sees map and record-flag
+    updates."""
     from vllm.distributed.eplb.eplb_state import EplbLayerState, compute_logical_maps
-    from vllm.model_executor.layers.fused_moe.router.base_router import (
-        eplb_map_to_physical_and_record,
-    )
 
     device = torch.device("cuda")
     hidden_size, top_k = 256, 6
@@ -871,6 +869,9 @@ def test_prepare_megamoe_eplb_matches_router_under_graph_replay(
     physical = state.logical_to_physical_map
     record_flag, load = state.should_record_tensor, state.expert_load_view
     assert physical is not None and record_flag is not None and load is not None
+    logical = torch.where(padding[:, None], -1, ids).long().cpu()
+    valid = (logical >= 0) & (logical < 8)
+    unpadded = torch.arange(num_tokens)[:, None] < num_tokens - 3
     for record in (False, True):
         physical.copy_(
             torch.where(physical >= 0, num_physical - 1 - physical, physical)
@@ -878,17 +879,17 @@ def test_prepare_megamoe_eplb_matches_router_under_graph_replay(
         record_flag.fill_(record)
         load.zero_()
         graph.replay()
-        expected_load = torch.zeros_like(load)
-        expected_ids = eplb_map_to_physical_and_record(
-            topk_ids=torch.where(padding[:, None], -1, ids),
-            expert_load_view=expected_load,
-            logical_to_physical_map=physical,
-            logical_replica_count=state.logical_replica_count,
-            record_enabled=record_flag,
-            num_unpadded_tokens=num_unpadded[1],
-        )
-        assert torch.equal(topk_idx, expected_ids.long())
-        assert torch.equal(load, expected_load)
+        physical_to_logical = torch.full((num_physical,), -1, dtype=torch.long)
+        for expert, slots in enumerate(physical.cpu()):
+            physical_to_logical[slots[slots >= 0]] = expert
+        mapped = topk_idx.cpu()
+        assert (mapped[~valid] == -1).all()
+        assert torch.equal(physical_to_logical[mapped[valid]], logical[valid])
+        recorded = mapped[valid & unpadded] if record else mapped.new_empty(0)
+        expected_load = torch.bincount(recorded, minlength=num_physical)
+        assert torch.equal(load.cpu(), expected_load.to(load.dtype))
+    # Tokens spread over the replicas of a replicated expert.
+    assert mapped[logical == 2].unique().numel() > 1
 
 
 def _shared_sf_tma_layout(sf: torch.Tensor, block_m: int) -> torch.Tensor:
