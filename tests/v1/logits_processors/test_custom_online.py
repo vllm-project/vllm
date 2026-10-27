@@ -15,11 +15,13 @@ from tests.v1.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG,
     DUMMY_LOGITPROC_FQCN,
     MAX_TOKENS,
-    MODEL_NAME,
     TEMP_GREEDY,
     prompts,
     setup_fake_entrypoint,
 )
+
+# The Rust frontend needs a tokenizer.json, which facebook/opt-125m lacks.
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 def _server_with_logitproc_entrypoint(
