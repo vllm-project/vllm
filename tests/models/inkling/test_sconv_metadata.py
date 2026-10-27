@@ -13,6 +13,7 @@ import torch
 
 from vllm.models.inkling.nvidia.ops.sconv import sconv_seq_metadata
 from vllm.models.inkling.nvidia.sconv_swa_attn import InklingSconvMetadataBuilder
+from vllm.platforms import current_platform
 
 CASES = [
     # (query_lens, extra_pad_tokens)
@@ -36,10 +37,13 @@ def _ref(query_start_loc: torch.Tensor, num_reqs: int, num_tokens: int):
     return seq_idx.to(torch.int32), cu_seqlens[seq_idx].to(torch.int32)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires CUDA or XPU",
+)
 @pytest.mark.parametrize("query_lens,extra_pad", CASES)
 def test_sconv_seq_metadata_matches_searchsorted(query_lens, extra_pad):
-    device = "cuda"
+    device = current_platform.device_type
     num_reqs = len(query_lens)
     query_start_loc = torch.tensor(
         [0] + list(torch.tensor(query_lens).cumsum(0)), dtype=torch.int32
@@ -66,9 +70,12 @@ def test_sconv_seq_metadata_matches_searchsorted(query_lens, extra_pad):
     assert torch.count_nonzero(query_start[num_actual_tokens:]) == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires CUDA or XPU",
+)
 def test_sconv_metadata_reuses_padded_static_buffers():
-    device = torch.device("cuda")
+    device = torch.device(current_platform.device_type)
     builder = object.__new__(InklingSconvMetadataBuilder)
     builder.seq_idx_buffer = torch.empty(8, dtype=torch.int32, device=device)
     builder.query_start_buffer = torch.empty(8, dtype=torch.int32, device=device)
