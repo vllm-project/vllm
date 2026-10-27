@@ -135,12 +135,20 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         params: TokenizeParams,
     ) -> TokensPrompt:
         tokens_prompt = super()._tokenize_prompt(prompt, params)
-        if not self._keeps_special_tokens(prompt, params):
-            return tokens_prompt
 
         # With an explicit side, the tokenizer does not truncate the prompt (see
         # `TokenizeParams.get_encode_kwargs`), so truncate it here and keep BOS,
         # the only token that mistral-common adds, as its own truncation does.
+        # Multimodal prompts are sliced again after placeholder expansion (see
+        # `_truncate_expanded_prompt`), which would cut BOS anyway.
+        if (
+            params.truncation_side is None
+            or not params.add_special_tokens
+            or prompt.get("multi_modal_data")
+            or prompt.get("multi_modal_uuids")
+        ):
+            return tokens_prompt
+
         tokenizer = self.get_tokenizer()
         token_ids = tokens_prompt["prompt_token_ids"]
         truncation = params._truncation_slice(tokenizer, len(token_ids))

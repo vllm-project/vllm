@@ -622,22 +622,6 @@ class BaseRenderer(ABC, Generic[_T]):
             and not prompt.get("multi_modal_uuids")
         )
 
-    def _keeps_special_tokens(
-        self,
-        prompt: "TextPrompt",
-        params: "TokenizeParams",
-    ) -> bool:
-        # Without an explicit side, the tokenizer truncates the prompt itself
-        # (see `TokenizeParams.get_encode_kwargs`). Multimodal prompts are sliced
-        # again after placeholder expansion (see `_truncate_expanded_prompt`),
-        # which would cut the special tokens anyway.
-        return (
-            params.truncation_side is not None
-            and params.add_special_tokens
-            and not prompt.get("multi_modal_data")
-            and not prompt.get("multi_modal_uuids")
-        )
-
     @staticmethod
     def _build_tokens_prompt(
         token_ids: Sequence[int],

@@ -1112,12 +1112,19 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         prompt: TextPrompt,
         params: TokenizeParams,
     ) -> TokensPrompt:
-        if not self._keeps_special_tokens(prompt, params):
-            return super()._tokenize_prompt(prompt, params)
-
         # With an explicit side, the tokenizer does not truncate the prompt (see
         # `TokenizeParams.get_encode_kwargs`), so truncate it here and keep the
-        # tokens that the tokenizer added, as its own truncation does.
+        # tokens that the tokenizer added, as its own truncation does. Multimodal
+        # prompts are sliced again after placeholder expansion (see
+        # `_truncate_expanded_prompt`), which would cut these tokens anyway.
+        if (
+            params.truncation_side is None
+            or not params.add_special_tokens
+            or prompt.get("multi_modal_data")
+            or prompt.get("multi_modal_uuids")
+        ):
+            return super()._tokenize_prompt(prompt, params)
+
         tokenizer = self.get_tokenizer()
         want_offsets = self._wants_offsets(prompt, params)
         encoding = tokenizer(
