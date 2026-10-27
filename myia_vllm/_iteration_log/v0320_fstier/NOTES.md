@@ -3174,3 +3174,66 @@ notre moteur avec la clé MEDIUM, fallback `key=OK`, **aucun échec**.
 
 **Restant ouvert** : Q41 (VRAM), #198 (écritures : le flux *neuf* est le
 levier), ACK du hub claudish (toujours sans réponse depuis 20:27Z).
+
+---
+
+## 27/10 01:45Z — Cycle de surveillance (T-55 min avant le reboot de la machine) — prod intacte, **pruneur et census confirmés en service**, charge en hausse
+
+**Moteur.** StartedAt `19:54:57Z` (inchangé), health 200 à **4,7 ms**, `RC=0`,
+0 `out of memory|Traceback|AssertionError|not found in cache` sur 20 000 lignes,
+`/dev/shm` **24G/63G (39 %)**, KV **831 723**, 3 conteneurs up.
+
+**VRAM.** GPU 0 = **23 594 MiB** (oscillation 23 581 → 23 622 → 23 594 autour de
+**23 600** : le « plateau » des quatre relevés du 26/10 est bien réfuté, c'est un
+**plafond de charge**, pas une fuite) ; GPU 1 = **22 278** (+272 depuis 23:40Z) ;
+GPU 2 = 88 (libre). Marge GPU 0 ≈ **970 MiB**. **Q41 toujours ouverte** (aucune
+réponse) ; la fenêtre naturelle d'application est le boot qui suit le reboot de
+~02:40Z.
+
+**Charge en hausse (à surveiller).** `prompt_tokens_total` 115,16 M (01:39Z) →
+**117,03 M** (01:45Z) ⇒ ~**5,2 K tokens/s de prefill soutenus**. Conséquence
+immédiate : **4 `WEDGE fail 1/2` en 30 min** (01:17:59, 01:24:10, 01:35:38,
+01:42:20), tous à `health=200`, **jamais `fail 2/2`**, **aucun restart** ⇒ les
+sondes de 90 s se font affamer pendant les gros prefills (comportement
+documenté), mais la cadence est inhabituelle (1-2 par 2 h auparavant) : les
+nouvelles arrivées attendent quand le prefill occupe le moteur. Prefix hit
+**67,8 %** (79,33 M / 117,05 M, en hausse), **préemptions toujours 1**, tier RAM
+`kv_offload_store_bytes` 261,7 Go, fs lu **22,65 Go**.
+
+**Tier fs — écritures réelles (scan date de naissance).** **2 463 fichiers nés
+depuis le boot = 64,65 Go réellement écrits** (41,21 Go à 23:41Z ⇒ **+23,44 Go
+en 2 h**) contre **76,69 Go soumis** (+26,4 Go) ⇒ **~3,0 Go encore supprimés
+(11 % du soumis)**. Correction de la lecture de 23:41Z : la fenêtre mesurée là
+mélangeait le régime de chauffe (au boot, 100 % sauté) ; **en régime établi le
+patch supprime encore ~1/9 des soumissions** — moins que le 33 % du boot, mais
+non nul. Ratio courant **0,55 Ko/token prompt**. Le flux dominant reste le
+**contenu neuf** ⇒ #198 (÷5) reste à instruire sur ce flux (admission + v2 GDN).
+
+**★ Le pruneur et le census horaires sont confirmés EN SERVICE** (conséquence
+directe du hotfix du 26/10 23:51Z) : pruneur **état écrit 01:20:03Z**
+(`mode=apply`, 116 fichiers supprimés, tier lu à 271,5 Go) ; census
+`last-result.json` **01:25:02Z `ok:true`, rc 0** → **6 jours de silence rompus**.
+Le tier est passé de 11 797 à **10 618 fichiers** (~1 200 supprimés depuis le
+hotfix) et il redescend sous le cap de 250 GiB à chaque passage.
+
+**Sécurité (census 2 h, 493 lignes, span réel 120 min).** **474×200**,
+**19×401** (clé morte connue `1f7f6080cb65` + 4 sans clé), **0×400**. IP avec
+200 = « ? » (242, direct interne), hairpin `90.65.170.144` (230) et
+**`82.66.89.184` (2×200)** = **l'IP parisienne du user** (Free, connue — Q13
+répondue le 08/10 : « sans doute mon IP parisienne ») : **pas une nouvelle IP,
+donc pas d'alerte**, mais son trafic était **arrêté depuis le 01/10 et reprend** —
+cohérent avec un user de retour qui tape sur le modèle local. Clé MEDIUM unique
+(empreinte `be312daf7c1c`).
+
+**Hôte.** Commit **355,3/395,3 Go = 89,9 %** (marge 40 Go) ⇒ **au-dessus du
+seuil 85 % : aucun travail lourd** (toujours pas de passe Lean). nbaudit
+`ok:true` 01:06Z (`Image/`). **G: OK** (le probe KO de 23:41Z était transitoire,
+il ne s'est pas reproduit). Condensation RSM : bannière **01:46:09Z**, primaire =
+notre moteur + clé MEDIUM, fallback `key=OK` ⇒ nominal.
+
+**Reboot ~02:40Z.** Rien à engager côté lane vllm : le prod est un conteneur
+Docker qui repart avec l'autologon, le tier fs survit, le tier RAM se recharge
+depuis le disque. La checklist de reprise est déjà écrite (dashboard
+`workspace-vllm` + ligne MEMORY du 27/10 01:40Z) : re-armer le cron, vérifier
+les 3 conteneurs / health / `StartedAt` / **VRAM GPU 0 après boot** / `/dev/shm`,
+re-traiter Q41, et mesurer #198 sur le flux neuf.
