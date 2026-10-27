@@ -19,11 +19,13 @@ from tests.v1.engine.utils import (
 )
 from vllm import PoolingParams
 from vllm.config.watermarking import WatermarkConfig
+from vllm.exceptions import RetryableRequestError, VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     CompletionOutput,
     PoolingRequestOutput,
+    RequestError,
     RequestOutput,
     SamplingMask,
     WeightVersionSpan,
@@ -42,6 +44,7 @@ from vllm.v1.engine.output_processor import (
     OutputProcessor,
     RequestOutputCollector,
     RequestState,
+    StreamingInputOutputCollector,
 )
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.loggers import PrometheusStatLogger
@@ -1642,6 +1645,137 @@ async def test_cumulative_output_collector_n():
     assert third[0].text == "c"
 
 
+def _make_boundary_output(
+    token_id: int, finish_reason: str | None, finished: bool = False
+) -> RequestOutput:
+    return RequestOutput(
+        request_id="my-request-id",
+        prompt=None,
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="a",
+                token_ids=[token_id],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason=finish_reason,
+            )
+        ],
+        finished=finished,
+    )
+
+
+@pytest.mark.asyncio
+async def test_streaming_input_collector_preserves_chunk_boundary():
+    """A pending chunk-boundary marker (finish_reason on a non-finished
+    output) must not be erased by merging the next chunk's output into it."""
+    collector = StreamingInputOutputCollector(
+        RequestOutputKind.DELTA, request_id="my-request-id-int"
+    )
+
+    collector.put(_make_boundary_output(0, "stop"))
+    collector.put(_make_boundary_output(1, None))
+    collector.put(_make_boundary_output(2, None))
+
+    boundary = await collector.get()
+    assert boundary.outputs[0].finish_reason == "stop"
+    assert boundary.outputs[0].token_ids == [0]
+
+    following = await collector.get()
+    assert following.outputs[0].finish_reason is None
+    assert following.outputs[0].token_ids == [1, 2]
+
+    assert collector.output is None
+    assert not collector._backlog
+    assert not collector.ready.is_set()
+
+
+def _make_streaming_input_request(
+    request_id: str, prompt_token_ids: list[int]
+) -> EngineCoreRequest:
+    """One chunk of a streaming-input (resumable) request."""
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        sampling_params=SamplingParams(
+            detokenize=False, output_kind=RequestOutputKind.DELTA
+        ),
+        pooling_params=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        resumable=True,
+        external_req_id=f"{request_id}-ext",
+    )
+
+
+def _add_streaming_request_with_queued_chunk(
+    processor: OutputProcessor, request_id: str
+) -> RequestOutputCollector:
+    queue = RequestOutputCollector(RequestOutputKind.DELTA, request_id=request_id)
+    processor.add_request(
+        _make_streaming_input_request(request_id, [1, 2, 3]), None, queue=queue
+    )
+    processor.add_request(_make_streaming_input_request(request_id, [7, 8]), None)
+    return queue
+
+
+def test_streaming_input_stop_is_chunk_boundary():
+    """STOP is a per-chunk boundary: finished is forced False, the queued
+    chunk is applied, and the request state stays alive."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _add_streaming_request_with_queued_chunk(processor, "stream-req")
+
+    processed = processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="stream-req",
+                new_token_ids=[4],
+                finish_reason=FinishReason.STOP,
+            )
+        ]
+    )
+
+    assert processed.reqs_to_abort == []
+    assert processor.get_num_unfinished_requests() == 1
+    output = queue.get_nowait()
+    assert output is not None
+    assert output.finished is False
+    assert output.outputs[0].finish_reason == "stop"
+    req_state = processor.request_states["stream-req"]
+    assert req_state.prompt_token_ids is not None
+    assert req_state.prompt_token_ids[-2:] == [7, 8]
+
+
+@pytest.mark.parametrize("finish_reason", [FinishReason.ABORT, FinishReason.ERROR])
+def test_streaming_input_abort_error_is_terminal(finish_reason: FinishReason):
+    """ABORT/ERROR is terminal, not a chunk boundary: finished stays True,
+    the state is freed, and an abort is routed back to the engine core."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _add_streaming_request_with_queued_chunk(processor, "stream-req")
+
+    processed = processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="stream-req",
+                new_token_ids=[],
+                finish_reason=finish_reason,
+            )
+        ]
+    )
+
+    assert processor.get_num_unfinished_requests() == 0
+    assert processed.reqs_to_abort == ["stream-req"]
+    output = queue.get_nowait()
+    assert output is not None
+    assert output.finished is True
+    assert output.outputs[0].finish_reason == str(finish_reason)
+
+
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
 @pytest.mark.parametrize("abort_by", ["internal", "external"])
 def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
@@ -1677,6 +1811,60 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("runner", ["generate", "pooling"])
+@pytest.mark.parametrize(
+    "error,exception_type",
+    [
+        (
+            RequestError(code="engine_paused", message="paused", retryable=True),
+            RetryableRequestError,
+        ),
+        (
+            RequestError(code="validation_error", message="incompatible backend"),
+            VLLMValidationError,
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_request_rejected_by_engine(runner: str, error, exception_type):
+    """A request the engine rejects on arrival (e.g. while paused) raises its
+    corresponding exception to the caller, leaves no stats behind, and ends a
+    streaming-input session, including any input chunks sent since."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams() if runner == "generate" else None,
+        pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
+        resumable=runner == "generate",
+    )
+    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
+    output_processor.add_request(request, None, queue=queue)
+    iteration_stats = IterationStats()
+
+    result = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request.request_id, [], finish_reason=FinishReason.ERROR, error=error
+            )
+        ],
+        iteration_stats=iteration_stats,
+    )
+
+    assert not output_processor.has_request(request.request_id)
+    assert result.reqs_to_abort == ([request.request_id] if request.resumable else [])
+    assert not iteration_stats.finished_requests
+    assert not iteration_stats.time_to_first_tokens_iter
+    with pytest.raises(exception_type, match=error.message):
+        queue.get_nowait()
 
 
 @pytest.mark.parametrize("output_kind", list(RequestOutputKind))

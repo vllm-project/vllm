@@ -6,6 +6,9 @@ import torch.nn as nn
 from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    quantized_lm_head_copy,
+)
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models.utils import PPMissingLayer
@@ -22,13 +25,19 @@ def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
         return True
     if draft is None or target is None:
         return False
+    # A quantized layer registers packed weights (`weight_packed`, `qweight`,
+    # ...) instead of `weight`, so the two copies cannot be compared. Keep the
+    # draft's own copy rather than assuming it matches the target.
+    w = getattr(draft, "weight", None)
+    target_w = getattr(target, "weight", None)
+    if not isinstance(w, torch.Tensor) or not isinstance(target_w, torch.Tensor):
+        return False
     # torch.equal on GPU allocates a bool mask the size of the input.
     # Use the faster GPU path when there is plenty of headroom;
     # otherwise compare on CPU.
-    w = draft.weight
     if w.is_cuda and torch.accelerator.get_memory_info(w.device)[0] < w.numel() * 2:
-        return torch.equal(w.cpu(), target.weight.cpu())
-    return torch.equal(w, target.weight)
+        return torch.equal(w.cpu(), target_w.cpu())
+    return torch.equal(w, target_w)
 
 
 def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module):
@@ -106,9 +115,14 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     if target_lm_head is not None and _should_share(
         eagle_model, "has_own_lm_head", draft_lm_head, target_lm_head
     ):
+        draft_head = target_lm_head
+        if speculative_config.draft_lm_head_quantization is not None:
+            draft_head = quantized_lm_head_copy(
+                target_lm_head, speculative_config.draft_lm_head_quantization
+            )
         if draft_lm_head is not None:
             del eagle_model.lm_head
-        eagle_model.lm_head = target_lm_head
+        eagle_model.lm_head = draft_head
 
         # MTP layers route logits through layer.shared_head.head, not
         # eagle_model.lm_head, so the per-layer copies need fixing up too.
@@ -119,7 +133,11 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                 sh = getattr(layer, "shared_head", None)
                 if sh is not None and hasattr(sh, "head"):
                     del sh.head
-                    sh.head = target_lm_head
+                    sh.head = draft_head
+    elif speculative_config.draft_lm_head_quantization is not None:
+        raise ValueError(
+            "draft_lm_head_quantization needs a drafter that shares the target lm_head."
+        )
 
     # Only now does the drafter hold the lm_head it drafts with.
     if speculative_config.draft_token_map is not None:

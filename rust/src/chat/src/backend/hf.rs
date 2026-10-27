@@ -6,7 +6,8 @@ use std::sync::Arc;
 use thiserror_ext::AsReport as _;
 use tracing::{info, warn};
 use vllm_text::backend::hf::{
-    HfTextBackend, ResolvedModelFiles, load_model_config, load_tokenizer_config,
+    HfTextBackend, ModelFileSources, ModelSource, ResolvedModelFiles, load_model_config,
+    load_tokenizer_config,
 };
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{DynTextBackend, TextBackend as _};
@@ -180,7 +181,15 @@ pub(super) async fn load_model_backends(
     model_id: &str,
     options: LoadModelBackendsOptions,
 ) -> Result<LoadedModelBackends> {
-    let mut files = ResolvedModelFiles::new(model_id, options.revision.as_deref()).await?;
+    let mut files = ResolvedModelFiles::from_sources(&ModelFileSources {
+        model: ModelSource {
+            id: model_id.to_string(),
+            revision: options.revision.clone(),
+        },
+        tokenizer: options.tokenizer.clone(),
+        hf_config: options.hf_config.clone(),
+    })
+    .await?;
     files.apply_overrides(&options.hf_overrides)?;
     let text_backend = HfTextBackend::from_resolved_model_files(
         files.clone(),
@@ -278,12 +287,15 @@ mod tests {
             "test-model".to_string(),
             LoadModelBackendsOptions {
                 revision: None,
+                tokenizer: None,
+                hf_config: None,
                 hf_overrides: Default::default(),
                 generation_config: Default::default(),
                 renderer,
                 language_model_only: false,
                 chat_template_content_format: Default::default(),
                 chat_template: None,
+                trust_request_chat_template: false,
                 default_chat_template_kwargs: HashMap::new(),
                 limit_mm_per_prompt: HashMap::new(),
             },
@@ -364,6 +376,34 @@ mod tests {
         assert_eq!(rendered.effective_template_kwargs["thinking"], true);
     }
 
+    #[tokio::test]
+    async fn reasoning_effort_map_rewrites_typed_effort_only() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"deepseek_v4"}"#,
+            "{}",
+        );
+        let processor = crate::ChatRequestProcessor::render_only(Arc::new(backend))
+            .with_reasoning_effort_map([("high".to_string(), "max".to_string())].into());
+
+        let mut request = request_with_user_text("hello");
+        request.chat_options.reasoning_effort = Some(crate::EffortValue::from("high"));
+        let prepared = processor.prepare_for_tokenization(request).await.unwrap();
+        assert_eq!(
+            prepared.reasoning_parser_kwargs.chat_template_kwargs["reasoning_effort"],
+            "max"
+        );
+
+        let mut request = request_with_user_text("hello");
+        request.chat_options.template_kwargs =
+            [("reasoning_effort".to_string(), serde_json::json!("high"))].into();
+        let prepared = processor.prepare_for_tokenization(request).await.unwrap();
+        assert_eq!(
+            prepared.reasoning_parser_kwargs.chat_template_kwargs["reasoning_effort"],
+            "high"
+        );
+    }
+
     #[test]
     fn auto_uses_harmony_renderer_and_output_processor_for_gpt_oss_model_type() {
         let backend = backend_for_selection(
@@ -380,7 +420,7 @@ mod tests {
         let error = match backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {
-                tool_strict_level: crate::ToolStrictLevel::Auto,
+                tool_strict_level: None,
                 tool_call_parser: &ParserSelection::Explicit("json".to_string()),
                 reasoning_parser: &ParserSelection::Auto,
             },
