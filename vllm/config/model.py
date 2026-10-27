@@ -1226,13 +1226,11 @@ class ModelConfig:
 
         if is_runai_obj_uri(model):
             object_storage_model = ObjectStorageModel(url=model)
-            object_storage_model.pull_files(
-                model, allow_pattern=["*.model", "*.py", "*.json"]
-            )
-            self.model_weights = model
-            self.model = object_storage_model.dir
 
-            # If tokenizer is same as model, download to same directory
+            # When the tokenizer URI is the same as the model URI, a single
+            # pull with the weight-ignore pattern already downloads a
+            # superset of the config-only allow-pattern pull, so skip the
+            # redundant second pass over the same bucket.
             if model == tokenizer:
                 object_storage_model.pull_files(
                     model,
@@ -1244,8 +1242,16 @@ class ModelConfig:
                         "*.pth",
                     ],
                 )
+                self.model_weights = model
+                self.model = object_storage_model.dir
                 self.tokenizer = object_storage_model.dir
                 return
+
+            object_storage_model.pull_files(
+                model, allow_pattern=["*.model", "*.py", "*.json"]
+            )
+            self.model_weights = model
+            self.model = object_storage_model.dir
 
         # Only download tokenizer if needed and not already handled
         if is_runai_obj_uri(tokenizer):

@@ -2977,6 +2977,27 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
     assert mock_pull_files.call_args_list[1][0][0] == tokenizer_url
 
 
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_s3_url_same_uri_pulls_files_once(mock_pull_files):
+    """Test that when the tokenizer URI equals the model URI, the files are
+    pulled from object storage in a single pass (the weight-ignore pull is a
+    superset of the config-only allow-pattern pull)."""
+    s3_url = "s3://example-bucket-1/model/"
+    config = MockConfig(model=s3_url, tokenizer=s3_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config, s3_url, s3_url)
+
+    assert mock_pull_files.call_count == 1, (
+        f"Expected a single pull_files call for identical model/tokenizer "
+        f"URIs, got {mock_pull_files.call_count}"
+    )
+    # The surviving pull must be the ignore-pattern (superset) variant
+    assert mock_pull_files.call_args[1].get("ignore_pattern") is not None
+
+    assert os.path.exists(config.model) and os.path.isdir(config.model)
+    assert os.path.exists(config.tokenizer) and os.path.isdir(config.tokenizer)
+    assert config.model == config.tokenizer
+
+
 @pytest.mark.parametrize(
     ("model_id", "expected_attn_type", "expected_result", "reason"),
     [
