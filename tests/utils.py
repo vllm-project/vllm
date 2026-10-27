@@ -552,9 +552,8 @@ class RemoteVLLMServer:
                 continue
         return members
 
-    @staticmethod
-    def _get_gpu_memory_per_device() -> list[tuple[float, float]] | None:
-        """Get (free_bytes, total_bytes) for each visible device.
+    def _get_gpu_memory_used(self) -> float | None:
+        """Get device-wide usage across visible devices in bytes.
 
         On ROCm this initializes HIP in the caller; subsequent multiprocessing
         GPU workers must use spawn, as the ROCm server helpers already do.
@@ -563,59 +562,31 @@ class RemoteVLLMServer:
             if current_platform.is_rocm():
                 # Use HIP logical devices. On MI355 DPX/NPS2, the primary
                 # AMD SMI device can expose whole-card memory counters.
-                readings = []
+                total_used = 0
                 for i in range(current_platform.device_count()):
                     free, total = torch.accelerator.get_memory_info(i)
-                    readings.append((float(free), float(total)))
-                return readings
+                    total_used += total - free
+                return float(total_used)
             elif current_platform.is_cuda():
                 with _nvml():
-                    readings = []
-                    for i in range(current_platform.device_count()):
+                    total_used = 0
+                    device_count = current_platform.device_count()
+                    for i in range(device_count):
                         handle = nvmlDeviceGetHandleByIndex(i)
                         mem_info = nvmlDeviceGetMemoryInfo(handle)
-                        readings.append((float(mem_info.free), float(mem_info.total)))
-                    return readings
+                        total_used += mem_info.used
+                    return total_used
             elif current_platform.is_xpu():
-                readings = []
-                for i in range(current_platform.device_count()):
+                total_used = 0
+                device_count = current_platform.device_count()
+                for i in range(device_count):
                     free, total = torch.xpu.mem_get_info(i)
-                    readings.append((float(free), float(total)))
-                return readings
+                    total_used += total - free
+                return total_used
         except Exception as e:
             print(f"[RemoteOpenAIServer] Could not query GPU memory: {e}")
             return None
         return None
-
-    def _get_gpu_memory_used(self) -> float | None:
-        """Get device-wide usage across visible devices in bytes."""
-        per_device = self._get_gpu_memory_per_device()
-        if per_device is None:
-            return None
-        return sum(total - free for free, total in per_device)
-
-    @staticmethod
-    def wait_for_idle_gpu(
-        num_devices: int, timeout: float = 60.0, poll_interval: float = 5.0
-    ) -> None:
-        """Opt-in preflight: give a just-exited process's VRAM a moment to
-        clear on a shared host before starting a server, so vLLM's own
-        startup free-memory check doesn't hit a stale reading. Only
-        checks the first ``num_devices`` devices the server will use, so
-        an unrelated job on another device isn't mistaken for contention.
-        Not a hard gate -- proceeds after ``timeout`` either way.
-        """
-        headroom_bytes = 4 * 1024**3 if current_platform.is_rocm() else 2 * 1024**3
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            per_device = RemoteVLLMServer._get_gpu_memory_per_device()
-            if per_device is None or all(
-                total - free <= headroom_bytes
-                for free, total in per_device[:num_devices]
-            ):
-                return
-            time.sleep(poll_interval)
-        print(f"[GPU memory preflight] Still busy after {timeout:.0f}s; proceeding.")
 
     def _wait_for_gpu_memory_release(
         self, timeout: float = 120.0, log_interval: float = 10.0
