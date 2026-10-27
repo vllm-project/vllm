@@ -143,6 +143,7 @@ if TYPE_CHECKING:
     VLLM_KV_CACHE_FAKE_QUANT_V_MODE: str = ""
     VLLM_KV_CACHE_SIGMA_CALIB_DIR: str = ""
     VLLM_ULTRAQUANT_QAE_SIGMA: str = ""
+    VLLM_ULTRAQUANT_ENCODER: str = ""
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
@@ -1313,6 +1314,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ultraquant_4bit, switches the store to query-aware MXFP4 encoding with a
     # block-diagonal Hadamard-32 key rotation; decode kernels are unchanged.
     "VLLM_ULTRAQUANT_QAE_SIGMA": lambda: os.getenv("VLLM_ULTRAQUANT_QAE_SIGMA", ""),
+    # Baseline encoders for ultraquant_4bit, same cache format and decode kernels:
+    # "ocp" = OCP MXFP4 (exponent floor(log2(amax)) - 2, nearest FP4) with no key
+    # rotation; "ocp_had32" = the same with a block-diagonal Hadamard-32 key
+    # rotation. Unset = the UltraQuant encoder (full-head Hadamard, constant c).
+    "VLLM_ULTRAQUANT_ENCODER": env_with_choices(
+        "VLLM_ULTRAQUANT_ENCODER", "", ["", "ocp", "ocp_had32"]
+    ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
     ),

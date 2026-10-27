@@ -121,7 +121,7 @@ def _ultraquant_store_kernel(
     H: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     BLOCK_D: tl.constexpr,
-    LOG2_D: tl.constexpr,
+    LOG2_D: tl.constexpr,  # butterfly stages: log2(D) full head, 5 Hadamard-32, 0 none
     # Layout
     GROUP_SIZE_C: tl.constexpr,
     N_GROUPS_C: tl.constexpr,
@@ -130,6 +130,9 @@ def _ultraquant_store_kernel(
     V_SCALES_OFFSET: tl.constexpr,
     FP4_C: tl.constexpr,
     UE8M0_BIAS_C: tl.constexpr,
+    # When 1, the exponent follows the OCP MX rule floor(log2(absmax)) - 2
+    # instead of round(log2(c * absmax)).
+    OCP_SCALE: tl.constexpr = 0,
     # When 1, the FP4 midpoints and the sorted->bits remap are materialised as
     # immediates instead of being read from `Midpoints_ptr`/`SortedToBits_ptr`.
     # That removes 28 scalar global loads and two 256-lane divergent gathers
@@ -183,9 +186,16 @@ def _ultraquant_store_kernel(
 
     # 3. UE8M0 snap: s_raw = c * absmax; exp = round(log2(s_raw));
     #    divisor = 2^exp (c folded in). Zero groups write byte=0.
-    k_s_raw = k_absmax * tl.cast(FP4_C, tl.float32)
-    k_s_safe = tl.where(k_is_zero, 1.0, k_s_raw)
-    k_log2 = tl.log2(k_s_safe)
+    if OCP_SCALE:
+        # Exact floor(log2) from the fp32 exponent bits; the -0.5 cancels the
+        # round-half-up below.
+        k_bits = tl.where(k_is_zero, 1.0, k_absmax).to(tl.int32, bitcast=True)
+        k_e = ((k_bits >> 23) & 0xFF) - 127
+        k_log2 = k_e.to(tl.float32) - 2.5
+    else:
+        k_s_raw = k_absmax * tl.cast(FP4_C, tl.float32)
+        k_s_safe = tl.where(k_is_zero, 1.0, k_s_raw)
+        k_log2 = tl.log2(k_s_safe)
     k_exp = tl.cast(tl.floor(k_log2 + 0.5), tl.int32)  # round-half-up
     k_s_snapped = tl.exp2(tl.cast(k_exp, tl.float32))
     k_s_div = tl.where(k_is_zero, 1.0, k_s_snapped)
@@ -227,9 +237,16 @@ def _ultraquant_store_kernel(
     v_absmax = tl.max(tl.abs(v_g), axis=1)
     v_is_zero = v_absmax == 0.0
 
-    v_s_raw = v_absmax * tl.cast(FP4_C, tl.float32)
-    v_s_safe = tl.where(v_is_zero, 1.0, v_s_raw)
-    v_log2 = tl.log2(v_s_safe)
+    if OCP_SCALE:
+        # Exact floor(log2) from the fp32 exponent bits; the -0.5 cancels the
+        # round-half-up below.
+        v_bits = tl.where(v_is_zero, 1.0, v_absmax).to(tl.int32, bitcast=True)
+        v_e = ((v_bits >> 23) & 0xFF) - 127
+        v_log2 = v_e.to(tl.float32) - 2.5
+    else:
+        v_s_raw = v_absmax * tl.cast(FP4_C, tl.float32)
+        v_s_safe = tl.where(v_is_zero, 1.0, v_s_raw)
+        v_log2 = tl.log2(v_s_safe)
     v_exp = tl.cast(tl.floor(v_log2 + 0.5), tl.int32)
     v_s_snapped = tl.exp2(tl.cast(v_exp, tl.float32))
     v_s_div = tl.where(v_is_zero, 1.0, v_s_snapped)
@@ -270,9 +287,12 @@ def ultraquant_store(
     *,
     PiT: torch.Tensor | None = None,  # unused; kept for call-site compatibility
     constant_c: float | None = None,
+    encoder: str = "",
 ) -> None:
     """Launch the ultraquant store kernel. Writes K/V into `kv_cache`
-    in-place at the slots specified by `slot_mapping`."""
+    in-place at the slots specified by `slot_mapping`. ``encoder`` selects a
+    baseline encoder (see ``VLLM_ULTRAQUANT_ENCODER``); readers must rotate Q
+    with the matching ``PiT``."""
     if key.dtype not in _SUPPORTED_DTYPES:
         raise ValueError(
             f"ultraquant_store: key.dtype must be one of "
@@ -337,7 +357,7 @@ def ultraquant_store(
         H=H,
         BLOCK_SIZE=block_size,
         BLOCK_D=BLOCK_D,
-        LOG2_D=int(D).bit_length() - 1,
+        LOG2_D={"": int(D).bit_length() - 1, "ocp": 0, "ocp_had32": 5}[encoder],
         GROUP_SIZE_C=gs,
         N_GROUPS_C=N_GROUPS_C,
         K_SCALES_OFFSET=K_SCALES_OFFSET,
@@ -345,6 +365,7 @@ def ultraquant_store(
         V_SCALES_OFFSET=V_SCALES_OFFSET,
         FP4_C=c,
         UE8M0_BIAS_C=UE8M0_BIAS,
+        OCP_SCALE=int(encoder != ""),
         CONST_TABLES=1,
         num_warps=4,
         num_stages=1,

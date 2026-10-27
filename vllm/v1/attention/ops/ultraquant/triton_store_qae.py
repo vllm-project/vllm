@@ -13,9 +13,13 @@ byte per 32 elements), so the decode kernels are unchanged. Differences:
   d^T S d with S the calibrated 32x32 query second moment of that (head, group).
 * V: no rotation; exponent chosen among the same three candidates by MSE.
 
-Two kernels with identical results: a per-group kernel for decode-sized writes and a
-tiled kernel (one program per head/group and 64 tokens, Sigma_g shared, rotation and
-S.d as [64,32]x[32,32] dots) for prefill.
+Two kernels with the same objective: a per-group kernel for decode-sized writes and a
+tiled kernel (one program per head/group and 16 tokens, Sigma_g shared) for prefill.
+Both update S.d and the cost incrementally (a flip of element i adds dq_i * S[i, :] to
+S.d and its gain to the cost), so each candidate needs only one S.d product. The tiled
+kernel runs the rotation and S.d on bf16 matrix cores (S.d as a three-term bf16 split,
+~fp32 accurate). Decode steps run under CUDA graphs, so the per-group kernel's latency,
+not launch overhead, is what matters there (analysis/uq/kernel/bench_store_graph.py).
 """
 
 from __future__ import annotations
@@ -40,9 +44,10 @@ from vllm.v1.attention.ops.ultraquant.triton_store import (
 )
 
 QAE_FLIPS = 4
-# Below this many tokens the per-group kernel (one program per token/head/group) is
-# faster than the tiled one; measured on MI355X (analysis/uq/kernel/bench_store.py).
-_TILED_MIN_TOKENS = 512
+# Below this many (token, head, group) items the per-group kernel is faster than the
+# tiled one (MI355X, CUDA-graph GPU time; analysis/uq/kernel/bench_store_graph.py).
+_TILED_MIN_ITEMS = 3072
+_TILED_BT = 16
 
 
 @triton.jit
@@ -155,18 +160,24 @@ def _ultraquant_store_qae_group_kernel(
         alt = tl.minimum(tl.maximum(tl.where(xn > lv, s + 1, s - 1), 0), 14)
         dq = (_e2m1_level(alt) - lv) * sc
         d = lv * sc - x
+        Sd = tl.sum(S * d[None, :], axis=1)
+        cost = tl.sum(d * Sd, axis=0)
         for _f in tl.static_range(FLIPS):
-            Sd = tl.sum(S * d[None, :], axis=1)
             gain = 2.0 * dq * Sd + dq * dq * s_diag
             gmin = tl.min(gain, axis=0)
             imin = tl.argmin(gain, axis=0)
             hit = (offs == imin) & (gmin < 0.0)
+            if gmin < 0.0:
+                cost += gmin
+                if _f < FLIPS - 1:
+                    # S symmetric: S d gains dq_i * S[i, :]
+                    dqi = tl.sum(tl.where(hit, dq, 0.0), axis=0)
+                    Sd = Sd + dqi * tl.load(Sigma_ptr + s_base + imin * 32 + offs)
             d = tl.where(hit, d + dq, d)
             tmp = tl.where(hit, alt, s)
             alt = tl.where(hit, s, alt)
             s = tmp
             dq = tl.where(hit, -dq, dq)
-        cost = tl.sum(d * tl.sum(S * d[None, :], axis=1), axis=0)
         take = cost < best_cost
         best_s = tl.where(take, s, best_s)
         best_e = tl.where(take, e, best_e)
@@ -238,7 +249,6 @@ def _ultraquant_store_qae_kernel(
     KV_cache_ptr,  # flat uint8
     Slot_mapping_ptr,  # [N] int64
     Sigma_ptr,  # [H, G, 32, 32] fp32
-    H32_ptr,  # [32, 32] fp32 normalised Hadamard
     N,
     stride_cache_block: tl.constexpr,
     stride_cache_pos: tl.constexpr,
@@ -255,7 +265,7 @@ def _ultraquant_store_qae_kernel(
     BT: tl.constexpr,
 ):
     # One program = one (head, group) and BT tokens: Sigma_g is shared by all of
-    # them, so the Hadamard rotation and every flip's S.d run as [BT,32]x[32,32] dots.
+    # them, so the Hadamard rotation and the initial S.d run as [BT,32]x[32,32] dots.
     hg = tl.program_id(0)
     head_idx = hg // N_GROUPS_C
     g = hg % N_GROUPS_C
@@ -273,13 +283,21 @@ def _ultraquant_store_qae_kernel(
     ld_mask = valid[:, None]
 
     # ── K ──
-    Hm = tl.load(H32_ptr + offs[:, None] * 32 + offs[None, :])
-    xr = tl.load(Key_ptr + elem[:, None] + offs[None, :], mask=ld_mask, other=0.0).to(
-        tl.float32
+    # Sylvester Hadamard signs (-1)^popcount(i & j): exact in bf16; the bf16 keys times
+    # +-1 summed in fp32 equal the fp32 rotation up to summation order.
+    ij = offs[:, None] & offs[None, :]
+    pc = (
+        (ij & 1) + ((ij >> 1) & 1) + ((ij >> 2) & 1) + ((ij >> 3) & 1) + ((ij >> 4) & 1)
     )
-    x = tl.dot(xr, Hm, input_precision="ieee")
+    Hs = tl.where((pc & 1) == 0, 1.0, -1.0).to(tl.bfloat16)
+    xr = tl.load(Key_ptr + elem[:, None] + offs[None, :], mask=ld_mask, other=0.0).to(
+        tl.bfloat16
+    )
+    x = tl.dot(xr, Hs) * 0.17677669529663687  # 1 / sqrt(32)
     s_base = ((head_idx * N_GROUPS_C + g) * 32).to(tl.int64) * 32
     S = tl.load(Sigma_ptr + s_base + offs[:, None] * 32 + offs[None, :])
+    S_hi = S.to(tl.bfloat16)
+    S_lo = (S - S_hi.to(tl.float32)).to(tl.bfloat16)
     s_diag = tl.sum(tl.where(offs[:, None] == offs[None, :], S, 0.0), axis=0)
 
     amax = tl.max(tl.abs(x), axis=1)
@@ -296,20 +314,30 @@ def _ultraquant_store_qae_kernel(
         alt = tl.minimum(tl.maximum(tl.where(xn > lv, s + 1, s - 1), 0), 14)
         dq = (_e2m1_level(alt) - lv) * sc
         d = lv * sc - x
+        # S symmetric: row i of d S = S d_i.
+        # Three-term bf16 split (hi.hi + lo.hi + hi.lo).
+        d_hi = d.to(tl.bfloat16)
+        d_lo = (d - d_hi.to(tl.float32)).to(tl.bfloat16)
+        Sd = tl.dot(d_hi, S_hi)
+        Sd = tl.dot(d_lo, S_hi, Sd)
+        Sd = tl.dot(d_hi, S_lo, Sd)
+        cost = tl.sum(d * Sd, axis=1)
         for _f in tl.static_range(FLIPS):
-            Sd = tl.dot(
-                d, S, input_precision="ieee"
-            )  # S symmetric: row i of d S = S d_i
             gain = 2.0 * dq * Sd + dq * dq * s_diag[None, :]
             gmin = tl.min(gain, axis=1)
             imin = tl.argmin(gain, axis=1)
-            hit = (offs[None, :] == imin[:, None]) & (gmin < 0.0)[:, None]
+            ok = gmin < 0.0
+            hit = (offs[None, :] == imin[:, None]) & ok[:, None]
+            cost = tl.where(ok, cost + gmin, cost)
+            if _f < FLIPS - 1:
+                dqi = tl.sum(tl.where(hit, dq, 0.0), axis=1)  # 0 where nothing flips
+                Srow = tl.load(Sigma_ptr + s_base + imin[:, None] * 32 + offs[None, :])
+                Sd = Sd + dqi[:, None] * Srow
             d = tl.where(hit, d + dq, d)
             tmp = tl.where(hit, alt, s)
             alt = tl.where(hit, s, alt)
             s = tmp
             dq = tl.where(hit, -dq, dq)
-        cost = tl.sum(d * tl.dot(d, S, input_precision="ieee"), axis=1)
         take = cost < best_cost
         best_s = tl.where(take[:, None], s, best_s)
         best_e = tl.where(take, e, best_e)
@@ -424,21 +452,19 @@ def ultraquant_store_qae(
     k2 = key.reshape(N * H, D).contiguous()
     v2 = value.reshape(N * H, D).contiguous()
     cache = _kv_cache_flat(kv_cache)
-    if N < _TILED_MIN_TOKENS:
+    if N * H * G < _TILED_MIN_ITEMS:
         _ultraquant_store_qae_group_kernel[(N * H, G)](
             k2, v2, cache, slot_mapping, sigma, **common, num_warps=1
         )
         return
-    BT = 64
-    _ultraquant_store_qae_kernel[(H * G, triton.cdiv(N, BT))](
+    _ultraquant_store_qae_kernel[(H * G, triton.cdiv(N, _TILED_BT))](
         k2,
         v2,
         cache,
         slot_mapping,
         sigma,
-        hadamard32_block_pit(32, key.device),
         N,
         **common,
-        BT=BT,
-        num_warps=4,
+        BT=_TILED_BT,
+        num_warps=1,
     )

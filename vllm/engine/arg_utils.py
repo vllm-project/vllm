@@ -2290,6 +2290,12 @@ class EngineArgs:
             )
 
             boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
+            # The QAE and OCP baseline encoders quantize every attention layer,
+            # boundary ones too.
+            if resolved_cache_dtype == "ultraquant_4bit" and (
+                envs.VLLM_ULTRAQUANT_QAE_SIGMA or envs.VLLM_ULTRAQUANT_ENCODER
+            ):
+                boundary = []
             # Sorted so the order does not depend on set iteration: the list is
             # a CacheConfig hash factor. Entries can also be attention type
             # names (e.g. "sliding_window"), so sort them as strings.

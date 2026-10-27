@@ -168,9 +168,20 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
         # Query-aware encoding changes the key rotation to a block-diagonal
         # Hadamard-32, which the FlyDSL decode (full-head butterfly) does not do.
         self._qae_sigma_path = envs.VLLM_ULTRAQUANT_QAE_SIGMA
+        # Baseline encoders (OCP MXFP4 with no / Hadamard-32 key rotation) also
+        # change the key rotation, so they also need the Triton decode.
+        self._encoder = envs.VLLM_ULTRAQUANT_ENCODER or ""
+        if self._qae_sigma_path and self._encoder:
+            raise ValueError(
+                "VLLM_ULTRAQUANT_QAE_SIGMA and VLLM_ULTRAQUANT_ENCODER are exclusive"
+            )
         self._use_ultraquant_flydsl = (
-            is_ultraquant_flydsl_available() and not self._qae_sigma_path
+            is_ultraquant_flydsl_available()
+            and not self._qae_sigma_path
+            and not self._encoder
         )
+        if self._encoder:
+            logger.info_once("UltraQuant: baseline encoder %s", self._encoder)
         # FlyDSL decode eligibility is static per layer config; compute once.
         self._flydsl_decode_eligible = ultraquant_flydsl_decode_eligible(
             head_size=self.head_size,
@@ -224,13 +235,16 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
             D = self.head_size
             # Pure Hadamard: orthonormal + symmetric (H = H^T), enabling
             # in-kernel butterfly fusion and trivial inverse for continuation.
-            if self._qae_sigma_path:
+            if self._qae_sigma_path or self._encoder == "ocp_had32":
                 from vllm.v1.attention.ops.ultraquant.triton_store_qae import (
                     hadamard32_block_pit,
                 )
 
                 H = hadamard32_block_pit(D, torch.device(device))
-                layer._uq_qae_sigma = self._qae_sigma_for_layer(layer, device)
+                if self._qae_sigma_path:
+                    layer._uq_qae_sigma = self._qae_sigma_for_layer(layer, device)
+            elif self._encoder == "ocp":
+                H = torch.eye(D, device=device, dtype=torch.float32)
             else:
                 H = _build_hadamard(D, str(device))
             layer._tq_PiT = H
@@ -288,6 +302,7 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
             kv_cache,
             slot_mapping,
             PiT=layer._tq_PiT,
+            encoder=self._encoder,
         )
 
     def _decode_attention(
