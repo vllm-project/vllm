@@ -255,7 +255,58 @@ Set `tenant_id` in the Mooncake JSON config when different vLLM deployments shou
 
 Strict isolation requires a Mooncake master started with `--enable_multi_tenants=true` and a tenant quota policy that registers each tenant. Non-default `tenant_id` also requires a Mooncake version whose `MooncakeDistributedStore.setup()` accepts the `tenant_id` parameter. In `standalone-store` mode, start the external `mooncake_client` with the matching tenant id because that process owns the real store client.
 
-### Standalone EGM over NVLink
+## Environment Variables
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `MOONCAKE_CONFIG_PATH` | Path to Mooncake JSON config file | (required) |
+| `VLLM_MOONCAKE_BOOTSTRAP_PORT` | Bootstrap port for MooncakeConnector P2P transfer (disagg mode only) | 8998 |
+| `MOONCAKE_PREFERRED_SEGMENT` | Pin this rank's replicas to a specific owner segment (`host:port`); used in `standalone-store` mode | — |
+| `MOONCAKE_REQUESTER_LOCAL_HOSTNAME` | Override the hostname the vLLM rank registers with Mooncake as a requester. Defaults to the rank's resolved IP. | — |
+| `VLLM_MOONCAKE_STORE_TIER_LOG` | When `1`, logs a per-batch tier summary (memory vs disk hits) for observability | disabled |
+| `VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO` | Fraction of the owner's DirectIO staging buffer that the requester will fill in a single `batch_get_into_multi_buffers` call. Lower → more conservative pre-split, more round trips. | 0.9 |
+
+## KV Transfer Config
+
+### KV Role Options
+
+- **kv_producer**: For instances that store KV caches to the pool.
+- **kv_consumer**: For instances that load KV caches from the pool.
+- **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
+
+### kv_connector_extra_config
+
+- `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
+- `lookup_async` (bool): Run the external prefix-cache lookup on a background thread so it never blocks the scheduler step. The request is held until the in-flight lookup completes, then resumed on a later step. Default: `false`.
+- `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
+- `custom_mem_pool` (str): Optional Mooncake allocator for the GPU KV cache.
+  `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);
+  `"BAREX"` selects the BAR-exposed allocator. Unset by default. Both are
+  incompatible with sleep mode and the CuMem allocator.
+- `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
+- `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
+- `store_tp_size` (int): Common Store TP for endpoints with different local TP sizes. It supports LBHNC and LBNHC local KV caches, with `store_tp_size >= local_tp_size` and `store_tp_size % local_tp_size == 0`. The current topology is one full-attention cache group, PCP/DCP disabled, and cross-layer blocks disabled. For GQA and MHA, the total KV-head count must be divisible by `store_tp_size`. Store shards contain fixed global KV-head ranges in the local layout. Shared endpoints use the same KV cache layout, pipeline-parallel size, and Store TP. The Store namespace includes the layout and PP size. Unsupported configurations use a topology-specific rank-local namespace.
+
+LBHNC/HND is strongly recommended for TP-sharded Store when supported. LBNHC/NHD
+creates many transfer segments and may significantly reduce PUT/GET performance.
+
+For example, with prefill TP 4, decode TP 2, and eight KV heads, set
+`store_tp_size` to 4 on both instances. Each decode rank reads and writes two
+of the four Store shards.
+
+MQA with one total KV head uses a replicated-head layout. For the supported
+prefill TP 4 to decode TP 2 case, every rank uses the
+same rank-0 key namespace. The four prefill replicas stripe block PUTs so each
+object is stored once, while both decode ranks GET every block into their local
+KV replica. `store_tp_size` does not appear in MQA keys, so identical MQA
+objects written at different store TP sizes share the same pool entry when PP
+sizes match.
+
+Tensor-parallel collectives and low-precision arithmetic are not bitwise
+invariant across TP sizes, so heterogeneous-TP reuse does not guarantee the
+same greedy output as recomputing the prefix at the decode TP size.
+
+## Standalone EGM over NVLink
 
 Extended GPU Memory (EGM) lets a separate Mooncake provider contribute
 Grace host memory to a shared KV Store over the NVLink fabric. This recipe
@@ -267,7 +318,7 @@ This recipe uses a provider on one OS node and vLLM requesters on another node
 in the same supported NVLink fabric and IMEX domain. A same-node run does not
 validate the cross-node EGM path.
 
-#### Requirements and scope
+### Requirements and scope
 
 - Use EGM-capable hardware, such as a supported GB200/GB300 NVLink deployment,
   with working CUDA fabric-handle import/export and IMEX on both nodes. Follow
@@ -299,7 +350,7 @@ validate the cross-node EGM path.
   the instances sharing KV. Start with a dense model and TP=1. Validate other
   model and parallelism combinations separately.
 
-#### Start the external provider
+### Start the external provider
 
 On the provider node, start the Mooncake master as described above. Use its
 reachable address, rather than loopback, in both nodes' configuration. For
@@ -328,7 +379,7 @@ Adjust `--size-gib` to the host-memory budget. It prints
 `EGM provider ready` only after successful setup; this confirms initialization,
 not successful transfers from a remote requester.
 
-#### Configure and start the requesters
+### Configure and start the requesters
 
 On the requester node, create `mooncake_egm_requester.json`:
 
@@ -383,7 +434,7 @@ sockets; it must differ for instances on the same host. Keep `cache_prefix`
 identical. Use an unused prefix for each validation run and do not send requests
 to B before the sharing check.
 
-#### Verify cross-instance reuse and shut down
+### Verify cross-instance reuse and shut down
 
 Keep the provider alive throughout this check. With `jq` installed, create a
 prompt longer than one KV block and submit it to A:
@@ -441,57 +492,6 @@ handle after an error. Successful close releases the EGM pool; failed cleanup
 requires a process restart. Restarting creates a new pool and requires cold
 prefill. This example does not implement eviction-safe provider removal,
 restart recovery or forced teardown during transfers.
-
-## Environment Variables
-
-| Variable | Description | Default |
-| --- | --- | --- |
-| `MOONCAKE_CONFIG_PATH` | Path to Mooncake JSON config file | (required) |
-| `VLLM_MOONCAKE_BOOTSTRAP_PORT` | Bootstrap port for MooncakeConnector P2P transfer (disagg mode only) | 8998 |
-| `MOONCAKE_PREFERRED_SEGMENT` | Pin this rank's replicas to a specific owner segment (`host:port`); used in `standalone-store` mode | — |
-| `MOONCAKE_REQUESTER_LOCAL_HOSTNAME` | Override the hostname the vLLM rank registers with Mooncake as a requester. Defaults to the rank's resolved IP. | — |
-| `VLLM_MOONCAKE_STORE_TIER_LOG` | When `1`, logs a per-batch tier summary (memory vs disk hits) for observability | disabled |
-| `VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO` | Fraction of the owner's DirectIO staging buffer that the requester will fill in a single `batch_get_into_multi_buffers` call. Lower → more conservative pre-split, more round trips. | 0.9 |
-
-## KV Transfer Config
-
-### KV Role Options
-
-- **kv_producer**: For instances that store KV caches to the pool.
-- **kv_consumer**: For instances that load KV caches from the pool.
-- **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
-
-### kv_connector_extra_config
-
-- `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
-- `lookup_async` (bool): Run the external prefix-cache lookup on a background thread so it never blocks the scheduler step. The request is held until the in-flight lookup completes, then resumed on a later step. Default: `false`.
-- `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
-- `custom_mem_pool` (str): Optional Mooncake allocator for the GPU KV cache.
-  `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);
-  `"BAREX"` selects the BAR-exposed allocator. Unset by default. Both are
-  incompatible with sleep mode and the CuMem allocator.
-- `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
-- `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
-- `store_tp_size` (int): Common Store TP for endpoints with different local TP sizes. It supports LBHNC and LBNHC local KV caches, with `store_tp_size >= local_tp_size` and `store_tp_size % local_tp_size == 0`. The current topology is one full-attention cache group, PCP/DCP disabled, and cross-layer blocks disabled. For GQA and MHA, the total KV-head count must be divisible by `store_tp_size`. Store shards contain fixed global KV-head ranges in the local layout. Shared endpoints use the same KV cache layout, pipeline-parallel size, and Store TP. The Store namespace includes the layout and PP size. Unsupported configurations use a topology-specific rank-local namespace.
-
-LBHNC/HND is strongly recommended for TP-sharded Store when supported. LBNHC/NHD
-creates many transfer segments and may significantly reduce PUT/GET performance.
-
-For example, with prefill TP 4, decode TP 2, and eight KV heads, set
-`store_tp_size` to 4 on both instances. Each decode rank reads and writes two
-of the four Store shards.
-
-MQA with one total KV head uses a replicated-head layout. For the supported
-prefill TP 4 to decode TP 2 case, every rank uses the
-same rank-0 key namespace. The four prefill replicas stripe block PUTs so each
-object is stored once, while both decode ranks GET every block into their local
-KV replica. `store_tp_size` does not appear in MQA keys, so identical MQA
-objects written at different store TP sizes share the same pool entry when PP
-sizes match.
-
-Tensor-parallel collectives and low-precision arithmetic are not bitwise
-invariant across TP sizes, so heterogeneous-TP reuse does not guarantee the
-same greedy output as recomputing the prefix at the decode TP size.
 
 ## Notes
 
