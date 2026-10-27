@@ -12,10 +12,9 @@ from functools import partial
 from typing import Protocol, runtime_checkable
 
 import torch
-import torch.distributed as dist
 
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.platforms import current_platform
@@ -37,7 +36,7 @@ class RoutedExpertsCaptureLayout:
     # Ordered (start, length) spans in input or rank-concatenated gathered rows.
     source_ranges: tuple[tuple[int, int], ...]
     # All group ranks participate, even with empty ranges. None skips gathering.
-    gather_group: dist.ProcessGroup | None = None
+    gather_group: GroupCoordinator | None = None
     # Physical row counts in group order, agreed by all ranks; empty without a group.
     # The backend must support the supplied sizes, including uneven/empty shards.
     shard_sizes: tuple[int, ...] = ()
@@ -133,22 +132,18 @@ class RoutedExpertsCapturer:
         topk_ids: torch.Tensor, layout: RoutedExpertsCaptureLayout
     ) -> torch.Tensor:
         if layout.gather_group is not None:
-            world_size = dist.get_world_size(layout.gather_group)
+            world_size = layout.gather_group.world_size
             if len(layout.shard_sizes) != world_size:
                 raise ValueError("capture shard_sizes must match gather group size")
             if any(size < 0 for size in layout.shard_sizes):
                 raise ValueError("capture shard_sizes must be non-negative")
-            rank = dist.get_rank(layout.gather_group)
+            rank = layout.gather_group.rank_in_group
             if topk_ids.shape[0] != layout.shard_sizes[rank]:
                 raise ValueError("capture local rows do not match shard_sizes")
-            gathered = torch.empty(
-                (sum(layout.shard_sizes), *topk_ids.shape[1:]),
-                dtype=topk_ids.dtype,
-                device=topk_ids.device,
-            )
-            shards = list(torch.split(gathered, layout.shard_sizes, dim=0))
-            dist.all_gather(shards, topk_ids.contiguous(), group=layout.gather_group)
-            topk_ids = gathered
+            if world_size > 1:
+                topk_ids = layout.gather_group.all_gatherv(
+                    topk_ids.contiguous(), dim=0, sizes=list(layout.shard_sizes)
+                )
         elif layout.shard_sizes:
             raise ValueError("capture shard_sizes require a gather group")
 

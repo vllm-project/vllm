@@ -10,6 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode, DeviceConfig, ModelConfig, VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import (
     BatchDescriptor,
     DPMetadata,
@@ -876,6 +877,31 @@ def test_explicit_capture_layout_preserves_microbatch_rows(capturer):
     assert (capturer.device_buffer[:, 1:] == -1).all()
 
 
+def _capture_group(rank=1, world_size=2):
+    from vllm.platforms.cpu import CpuPlatform
+
+    with (
+        patch("torch.distributed.get_rank", return_value=rank),
+        patch("torch.distributed.new_group"),
+        patch("vllm.platforms.current_platform", CpuPlatform()),
+    ):
+        return GroupCoordinator([list(range(world_size))], rank, "gloo", False)
+
+
+@pytest.mark.parametrize("rows", [0, 3])
+def test_explicit_capture_layout_single_rank_needs_no_communicator(rows, capturer):
+    group = _capture_group(rank=0, world_size=1)
+    ids = torch.arange(rows * 2, dtype=torch.int32).reshape(rows, 2)
+    layout = RoutedExpertsCaptureLayout(((0, rows),), group, (rows,))
+
+    assert group.device_communicator is None
+    capturer.capture(0, ids, layout=layout)
+
+    expected = torch.full_like(capturer.device_buffer, -1)
+    expected[:rows, 0] = ids
+    torch.testing.assert_close(capturer.device_buffer, expected)
+
+
 @pytest.mark.parametrize(
     ("shard_sizes", "ranges", "expected_rows"),
     [
@@ -884,13 +910,14 @@ def test_explicit_capture_layout_preserves_microbatch_rows(capturer):
         ((7, 7), ((7, 2), (0, 3)), [7, 8, 0, 1, 2]),
         ((2, 0), (), []),
         ((0, 2), ((0, 2),), [0, 1]),
+        ((0, 0), (), []),
     ],
 )
 @pytest.mark.parametrize("rank", [0, 1])
 def test_explicit_capture_layout_gathers_and_skips_internal_padding(
     shard_sizes, ranges, expected_rows, rank, capturer
 ):
-    gather_group = object()
+    gather_group = _capture_group(rank)
     rows = torch.arange(sum(shard_sizes), dtype=torch.int32)
     ids = torch.stack((rows, (rows + 1) % 16))
     peers = ids.T.split(shard_sizes)
@@ -899,19 +926,14 @@ def test_explicit_capture_layout_gathers_and_skips_internal_padding(
         assert not local.is_contiguous()
     layout = RoutedExpertsCaptureLayout(ranges, gather_group, shard_sizes)
 
-    def gather(outputs, input_, group):
-        assert group is gather_group
-        assert [output.shape[0] for output in outputs] == list(shard_sizes)
+    def gather(input_, dim, sizes):
+        assert dim == 0
+        assert sizes == list(shard_sizes)
         assert input_.is_contiguous()
         torch.testing.assert_close(input_, local)
-        for peer_rank, output in enumerate(outputs):
-            output.copy_(input_ if peer_rank == rank else peers[peer_rank])
+        return torch.cat(peers)
 
-    with (
-        patch(f"{_REC_MODULE}.dist.get_world_size", return_value=2),
-        patch(f"{_REC_MODULE}.dist.get_rank", return_value=rank),
-        patch(f"{_REC_MODULE}.dist.all_gather", side_effect=gather) as collective,
-    ):
+    with patch.object(gather_group, "all_gatherv", side_effect=gather) as collective:
         capturer.capture(layer_id=0, topk_ids=local, layout=layout)
 
     collective.assert_called_once()
@@ -932,21 +954,20 @@ def test_explicit_capture_layout_rejects_invalid_source_rows(span, capturer):
 
 
 @pytest.mark.parametrize(
-    ("sizes", "group", "message"),
+    ("sizes", "has_group", "message"),
     [
-        ((2,), object(), "group size"),
-        ((2, -1), object(), "non-negative"),
-        ((2, 3), object(), "local rows"),
-        ((2, 2), None, "require a gather group"),
+        ((2,), True, "group size"),
+        ((2, -1), True, "non-negative"),
+        ((2, 3), True, "local rows"),
+        ((2, 2), False, "require a gather group"),
     ],
 )
 def test_capture_rejects_invalid_collective_layout_before_gather(
-    sizes, group, message, capturer
+    sizes, has_group, message, capturer
 ):
+    group = _capture_group() if has_group else None
     with (
-        patch(f"{_REC_MODULE}.dist.get_world_size", return_value=2),
-        patch(f"{_REC_MODULE}.dist.get_rank", return_value=1),
-        patch(f"{_REC_MODULE}.dist.all_gather") as gather,
+        patch.object(GroupCoordinator, "all_gatherv") as gather,
         pytest.raises(ValueError, match=message),
     ):
         capturer.capture(
@@ -960,14 +981,15 @@ def test_capture_rejects_invalid_collective_layout_before_gather(
 
 @pytest.mark.parametrize("layer_id", [-1, 4])
 def test_capture_layout_rejects_invalid_layer_before_collective(layer_id, capturer):
+    group = _capture_group()
     with (
-        patch(f"{_REC_MODULE}.dist.all_gather") as gather,
+        patch.object(group, "all_gatherv") as gather,
         pytest.raises(IndexError, match="layer"),
     ):
         capturer.capture(
             layer_id,
             torch.ones((2, 2), dtype=torch.int32),
-            layout=RoutedExpertsCaptureLayout(((0, 4),), object(), (2, 2)),
+            layout=RoutedExpertsCaptureLayout(((0, 4),), group, (2, 2)),
         )
     gather.assert_not_called()
     assert (capturer.device_buffer == -1).all()
