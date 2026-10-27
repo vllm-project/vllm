@@ -128,6 +128,28 @@ speaker segments. Currently, this is supported by
 }
 ```
 
+### Streaming
+
+Set `stream=true` to receive `transcription.chunk` events over SSE. Every chunk
+carries the input audio `duration` in seconds, matching the `duration` field of
+the `verbose_json` response, so clients that bill by audio length do not need to
+decode the file themselves:
+
+```json
+{
+  "id": "transcribe-...",
+  "object": "transcription.chunk",
+  "created": 1750000000,
+  "model": "openai/whisper-large-v3-turbo",
+  "choices": [{"delta": {"content": "Hello"}, "finish_reason": null}],
+  "duration": 5.42
+}
+```
+
+Set `stream_include_usage=true` to receive a final chunk carrying token usage;
+that chunk reports `duration` as well. `/v1/audio/translations` streams
+`translation.chunk` events with the same `duration` field.
+
 ### Extra Parameters
 
 The following [sampling parameters](../../api/README.md#inference-parameters) are supported.

@@ -796,6 +796,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         created=created_time,
                         choices=[choice_data],
                         model=model_name,
+                        duration=audio_duration_s,
                     )
 
                     # handle usage stats if requested & if continuous
@@ -825,6 +826,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     choices=[],
                     model=model_name,
                     usage=final_usage,
+                    duration=audio_duration_s,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=True, exclude_none=True
