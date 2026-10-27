@@ -126,8 +126,18 @@ def _launched_kernels(fn, iters=3, attempts=3):
     return kernels
 
 
-def _has_wvsplitk_hf_sml(names):
-    return any("wvSplitK_hf_sml" in k for k in names)
+def _has_wvsplitk_hf(names):
+    """Any wvSplitK_hf skinny-kernel variant ran.
+
+    The csrc dispatch (WVSPLITK_CFG in csrc/rocm/skinny_gemms.cu) picks
+    between the wvSplitK_hf_sml_, wvSplitK_hf_ and wvSplitK_hf_big_
+    variants by LDS fit (Kbp*N vs the part's shared-memory size) and
+    M-tile divisibility, so the same shape lands on different variants
+    on different parts (MI300/gfx942 runs wvSplitK_hf_ for (2048, 7168)
+    at n=5 where MI355X/gfx950 runs wvSplitK_hf_sml_). The guard's
+    contract is about the skinny path as a whole, so match the family.
+    """
+    return any("wvSplitK_hf" in k for k in names)
 
 
 def _has_cijk(names):
@@ -250,7 +260,7 @@ def test_n5_big_weight_dispatch(cap_gib, expect_skinny):
     x = _x(5, BIG_SHAPE[1])
     ref = torch.nn.functional.linear(x, w)
     kernels = _launched_kernels(lambda: rocm_unquantized_gemm_impl(x, w, None))
-    assert _has_wvsplitk_hf_sml(kernels) == expect_skinny, f"kernels={kernels}"
+    assert _has_wvsplitk_hf(kernels) == expect_skinny, f"kernels={kernels}"
     if not expect_skinny:
         assert _has_cijk(kernels), (
             f"fall-through did not reach the hipBLASLt GEMM; kernels={kernels}"
@@ -277,7 +287,7 @@ def test_guard_no_op_where_it_must_be(shape, n, expect_skinny):
         _set_cap(cap_gib * 1024 * 1024 * 1024 if cap_gib else None)
         _skinny_guard_warned.clear()
         kernels = _launched_kernels(lambda: rocm_unquantized_gemm_impl(x, w, None))
-        assert _has_wvsplitk_hf_sml(kernels) == expect_skinny, (
+        assert _has_wvsplitk_hf(kernels) == expect_skinny, (
             f"cap={cap_gib} GiB: skinny dispatch changed for "
             f"shape={shape} n={n}; kernels={kernels}"
         )
@@ -286,11 +296,11 @@ def test_guard_no_op_where_it_must_be(shape, n, expect_skinny):
 
 
 def test_n1_big_weight_dispatch_unchanged():
-    """n=1 must keep the stock wvSplitK_hf_sml<..., 2, 1> kernel under the
+    """n=1 must keep the stock wvSplitK_hf skinny kernel under the
     guard (default ON) -- the carve-out keeps n=1 bit-identical to stock."""
     w = _weight(BIG_SHAPE)
     x = _x(1, BIG_SHAPE[1])
     kernels = _launched_kernels(lambda: rocm_unquantized_gemm_impl(x, w, None))
-    assert _has_wvsplitk_hf_sml(kernels), (
+    assert _has_wvsplitk_hf(kernels), (
         f"n=1 was redirected by the guard; the carve-out is missing; kernels={kernels}"
     )
