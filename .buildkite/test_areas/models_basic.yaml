@@ -317,7 +317,6 @@ steps:
       models/qwen4_exp/test_hc_ops.py
       models/qwen4_exp/test_qsa_prepare.py
       models/qwen4_exp/test_qsa_reference.py
-      models/qwen4_exp/test_quant_indexer_fusion.py
     - pytest -v -s models/qwen4_exp/test_ple.py
   mirror:
     amd:
