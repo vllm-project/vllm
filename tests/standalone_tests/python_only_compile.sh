@@ -198,9 +198,13 @@ elif [[ -n "${PYTHON_ONLY_COMPILE_PYTHON:-}" ]]; then
     cuda_variant="$(python3 -c 'import torch; print("cu" + torch.version.cuda.replace(".", ""))')"
     uv venv --python "${PYTHON_ONLY_COMPILE_PYTHON}" /tmp/python-only-venv
     source /tmp/python-only-venv/bin/activate
+    # RELEASE-ONLY: torch==2.15.0 is a pre-release that is not on PyPI yet, and uv's
+    # --torch-backend only knows the stable channels, so pull it from the PyTorch test
+    # channel. Switch back to --torch-backend once torch 2.15.0 is published to PyPI.
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 \
         VLLM_PRECOMPILED_WHEEL_VARIANT="${cuda_variant}" \
-        uv pip install -e . --torch-backend="${cuda_variant}"
+        uv pip install -e . \
+        --extra-index-url "https://download.pytorch.org/whl/test/${cuda_variant}"
 else
     # RELEASE-ONLY: torch==2.15.0 is a pre-release that is not on PyPI yet, so pull
     # it from the PyTorch test channel. Drop this once torch 2.15.0 is published to PyPI.
