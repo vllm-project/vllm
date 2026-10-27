@@ -420,7 +420,8 @@ __global__ void reshape_and_cache_flash_kernel(
   }
 }
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
+          bool skip_scale>
 __global__ void concat_and_cache_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
     const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
@@ -453,6 +454,9 @@ __global__ void concat_and_cache_mla_kernel(
           block_idx * block_stride + block_offset * entry_stride + i + offset;
       if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
         dst[dst_idx] = src[src_idx];
+      } else if constexpr (skip_scale) {
+        dst[dst_idx] =
+            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], 1.0f);
       } else {
         dst[dst_idx] =
             fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], *scale);
@@ -910,8 +914,8 @@ void reshape_and_cache_flash(
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)                    \
-  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>                  \
+#define LAUNCH_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE, SKIP_SCALE)      \
+  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE, SKIP_SCALE>      \
       <<<grid, block, 0, stream>>>(                                           \
           reinterpret_cast<KV_T*>(kv_c.data_ptr()),                           \
           reinterpret_cast<KV_T*>(k_pe.data_ptr()),                           \
@@ -919,6 +923,13 @@ void reshape_and_cache_flash(
           slot_mapping.const_data_ptr<int64_t>(), block_stride, entry_stride, \
           kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,         \
           reinterpret_cast<const float*>(scale.data_ptr()));
+
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)      \
+  if (skip_scale) {                                             \
+    LAUNCH_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE, true)  \
+  } else {                                                      \
+    LAUNCH_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE, false) \
+  }
 
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
@@ -938,7 +949,8 @@ void concat_and_cache_mla(
     torch::stable::Tensor& kv_cache,  // [num_blocks, block_size, (kv_lora_rank
                                       // + pe_dim)]
     torch::stable::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
-    const std::string& kv_cache_dtype, torch::stable::Tensor& scale) {
+    const std::string& kv_cache_dtype, torch::stable::Tensor& scale,
+    bool skip_scale) {
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
@@ -1029,6 +1041,9 @@ void concat_and_cache_mla(
                                CALL_CONCAT_AND_CACHE_MLA);
   }
 }
+
+#undef CALL_CONCAT_AND_CACHE_MLA
+#undef LAUNCH_CONCAT_AND_CACHE_MLA
 
 void concat_and_cache_mla_grouped(
     torch::stable::Tensor& kv_c,  // [num_layers, num_tokens, kv_lora_rank]
@@ -1864,7 +1879,7 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
     torch::stable::Tensor const& dst,               // [TOT_TOKENS, 576]
     torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
-    int64_t batch_size) {
+    int64_t batch_size, std::optional<torch::stable::Tensor> seq_starts) {
   // The kernel lives in nvfp4_ds_mla_cache_kernels.cu, which is only built when
   // the target list contains an SM100 arch.
 #if !defined(USE_ROCM) && defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
@@ -1887,6 +1902,13 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
   STD_TORCH_CHECK(
       workspace_starts.scalar_type() == torch::headeronly::ScalarType::Int,
       "workspace_starts must be int32");
+  if (seq_starts.has_value()) {
+    STD_TORCH_CHECK(
+        seq_starts.value().scalar_type() == torch::headeronly::ScalarType::Int,
+        "seq_starts must be int32");
+    STD_TORCH_CHECK(src_cache.device() == seq_starts.value().device(),
+                    "src_cache and seq_starts must be on the same device");
+  }
   STD_TORCH_CHECK(src_cache.device() == dst.device(),
                   "src_cache and dst must be on the same device");
   STD_TORCH_CHECK(src_cache.device() == block_table.device(),
@@ -1914,6 +1936,8 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
       src_cache.const_data_ptr<uint8_t>(), dst.data_ptr(),
       block_table.const_data_ptr<int32_t>(),
       workspace_starts.const_data_ptr<int32_t>(),
+      seq_starts.has_value() ? seq_starts.value().const_data_ptr<int32_t>()
+                             : nullptr,
       static_cast<int32_t>(batch_size), block_size, total_tokens,
       block_table_stride, cache_block_stride, cache_entry_stride,
       dst_entry_stride, stream);

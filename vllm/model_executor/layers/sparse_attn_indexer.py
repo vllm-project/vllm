@@ -1087,7 +1087,6 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
-        self._cp_kv_cache_interleave_size: int | None = None
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -1115,20 +1114,6 @@ class SparseAttnIndexer(CustomOp):
 
                 _PACK_DCP_TOPK_CANDIDATES_KERNEL.register_warmup()
                 _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL.register_warmup()
-
-    @property
-    def cp_kv_cache_interleave_size(self) -> int:
-        """With PD+DCP, the real value isn't known until block_size is finalized,
-        which happens after this layer is built. Safe to cache after the first access,
-        as long as the adjustment always runs before any forward pass
-        (it's set up in Worker.initialize_from_config, ahead of warmup/serving).
-        """
-        if self._cp_kv_cache_interleave_size is None:
-            value = self._parallel_config.cp_kv_cache_interleave_size
-            if isinstance(get_forward_context().attn_metadata, dict):
-                self._cp_kv_cache_interleave_size = value
-            return value
-        return self._cp_kv_cache_interleave_size
 
     def forward_native(
         self,
@@ -1188,7 +1173,7 @@ class SparseAttnIndexer(CustomOp):
             self.use_fp4_cache,
             self.dcp_rank,
             self.dcp_world_size,
-            self.cp_kv_cache_interleave_size,
+            self._parallel_config.cp_kv_cache_interleave_size,
             False,
             candidate_blocks=self.candidate_blocks,
             candidate_block_size=self.candidate_block_size,
@@ -1216,12 +1201,11 @@ class SparseAttnIndexer(CustomOp):
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
-        from vllm.platforms.rocm import on_gfx11, on_gfx950
+        from vllm.platforms.rocm import on_gfx950
 
         if (
             rocm_aiter_ops.is_enabled()
             or rocm_aiter_ops.is_rdna_aiter_enabled()
-            or on_gfx11()
             # The so-called AITER sparse indexer op has a native gfx950 path:
             # its cache insert, MQA logits, and top-k fallbacks are implemented
             # by local Triton/C++ kernels and do not require the aiter package.
@@ -1249,7 +1233,7 @@ class SparseAttnIndexer(CustomOp):
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path requires AITER or a supported "
-            "native architecture (gfx950/gfx11)."
+            "native architecture (gfx950)."
         )
 
     def forward_cpu(
