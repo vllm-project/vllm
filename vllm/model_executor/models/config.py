@@ -157,6 +157,48 @@ class Gemma3TextModelConfig(VerifyAndUpdateConfig):
         hf_config.is_causal = not hf_config.use_bidirectional_attention
 
 
+class MuseGlimmerAttentionConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm():
+            return
+
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        compilation_config = vllm_config.compilation_config
+        if rocm_aiter_ops.is_enabled() and (
+            "-muse_glimmer_rms_norm" not in compilation_config.custom_ops
+            and "+muse_glimmer_rms_norm" not in compilation_config.custom_ops
+        ):
+            # Route the sandwich norms through forward_hip so the AITER
+            # sandwich norm fusion can match them.
+            compilation_config.custom_ops.append("+muse_glimmer_rms_norm")
+
+        attention_config = vllm_config.attention_config
+        if (
+            rocm_aiter_ops.is_mha_enabled()
+            and attention_config.backend is None
+            and not attention_config.backend_per_kind
+        ):
+            attention_config.backend = AttentionBackendEnum.ROCM_AITER_FA
+
+        if rocm_aiter_ops.is_enabled() and (
+            attention_config.backend == AttentionBackendEnum.ROCM_AITER_FA
+            or AttentionBackendEnum.ROCM_AITER_FA
+            in attention_config.backend_per_kind.values()
+        ):
+            # Keep QK norm, RoPE and the KV write in one Inductor graph.
+            compilation_config.use_inductor_graph_partition = True
+            if (
+                "-rotary_embedding" not in compilation_config.custom_ops
+                and "+rotary_embedding" not in compilation_config.custom_ops
+            ):
+                compilation_config.custom_ops.append("+rotary_embedding")
+
+
 class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -1240,6 +1282,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "MiniMaxM3SparseForConditionalGeneration": (
         MiniMaxM3SparseForConditionalGenerationConfig
     ),
+    "MuseGlimmerForCausalLM": MuseGlimmerAttentionConfig,
+    "MuseGlimmerForConditionalGeneration": MuseGlimmerAttentionConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,

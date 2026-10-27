@@ -42,6 +42,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import BatchFeature, MuseGlimmerConfig, MuseGlimmerProcessor
 
+from vllm import ir
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -52,6 +53,7 @@ from vllm.distributed import (
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.model_executor.layers.linear import (
@@ -343,7 +345,8 @@ class MuseGlimmerMultiModalProcessor(
         ]
 
 
-class MuseGlimmerRMSNorm(nn.Module):
+@CustomOp.register("muse_glimmer_rms_norm")
+class MuseGlimmerRMSNorm(CustomOp):
     """RMSNorm mirroring HF MuseGlimmer exactly (fp32 compute, cast at the end).
 
     ``normed = _norm(x.float()) * (w.float() + weight_offset)`` cast back to the
@@ -361,7 +364,7 @@ class MuseGlimmerRMSNorm(nn.Module):
         super().__init__()
         self.eps = eps
         self.with_scale = with_scale
-        self.weight_offset = weight_offset
+        self.weight_offset = float(weight_offset)
         if with_scale:
             assert dim is not None
             self.weight = nn.Parameter(torch.zeros(dim))
@@ -371,11 +374,23 @@ class MuseGlimmerRMSNorm(nn.Module):
     def _norm(self, x: torch.Tensor) -> torch.Tensor:
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, hidden_states: torch.Tensor) -> torch.Tensor:
         out = self._norm(hidden_states.float())
         if self.with_scale:
             out = out * (self.weight.float() + self.weight_offset)
         return out.type_as(hidden_states)
+
+    def forward_cuda(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(hidden_states)
+
+    def forward_hip(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Same math as GemmaRMSNorm, expressed as the vLLM IR op so the ROCm
+        # AITER passes can match it. Weightless norms stay native for the
+        # QK-norm + RoPE + KV-cache fusion.
+        if not self.with_scale:
+            return self.forward_native(hidden_states)
+        weight = self.weight.float() + self.weight_offset
+        return ir.ops.rms_norm(hidden_states, weight, self.eps)
 
 
 class MuseGlimmerVisionAttention(nn.Module):
