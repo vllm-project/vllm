@@ -93,7 +93,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 # import overhead.
 GDN_AITER_TRITON_AVAILABLE = (
     rocm_aiter_ops.are_gdn_triton_kernels_available()
-    or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+    or rocm_aiter_ops.are_rdna_gdn_triton_kernels_available()
 )
 
 if GDN_AITER_TRITON_AVAILABLE:
