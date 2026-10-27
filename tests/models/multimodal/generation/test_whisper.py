@@ -4,12 +4,13 @@
 from collections.abc import Sequence
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 from transformers import AutoModelForSpeechSeq2Seq
 
 from vllm.assets.audio import AudioAsset
-from vllm.multimodal.audio import AudioResampler
+from vllm.multimodal.audio import AudioResampler, split_audio
 from vllm.platforms import current_platform
 
 from ....conftest import HfRunner, PromptAudioInput, VllmRunner
@@ -125,6 +126,50 @@ def check_model_available(model: str) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
+
+
+@pytest.mark.core_model
+def test_split_audio_preserves_transcription(vllm_runner) -> None:
+    audio, sample_rate = AudioAsset("mary_had_lamb").audio_and_sample_rate
+    boundary = 10 * sample_rate
+    chunks = split_audio(
+        audio,
+        sample_rate,
+        max_clip_duration_s=10,
+        overlap_duration_s=0,
+        min_energy_window_size=1,
+    )
+    reference = [audio[:boundary], audio[boundary:]]
+    assert len(chunks) == len(reference) == 2
+    for chunk, expected in zip(chunks, reference):
+        np.testing.assert_array_equal(chunk, expected)
+
+    with vllm_runner(
+        "openai/whisper-tiny",
+        dtype="half",
+        max_model_len=448,
+        max_num_seqs=2,
+        max_num_batched_tokens=4096,
+        gpu_memory_utilization=0.1,
+        kv_cache_memory_bytes=64 * 1024 * 1024,
+        enforce_eager=True,
+    ) as vllm_model:
+        outputs = [
+            vllm_model.generate_greedy_logprobs(
+                [VLLM_PROMPT] * len(parts),
+                max_tokens=64,
+                num_logprobs=5,
+                audios=[(part, sample_rate) for part in parts],
+            )
+            for parts in (chunks, reference)
+        ]
+    assert all(text.strip() for _, text, _ in outputs[0])
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="split_audio",
+        name_1="manual slices",
+    )
 
 
 @pytest.mark.parametrize("dtype", ["half"])

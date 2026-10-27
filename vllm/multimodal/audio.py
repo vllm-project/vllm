@@ -423,7 +423,7 @@ def split_audio(
         List of 1D audio chunks.
 
     Raises:
-        AssertionError: If ``audio_data`` is not 1D.
+        ValueError: If audio is not mono or the chunk size is less than one sample.
 
     Example:
         >>> audio = np.random.randn(1040000)  # 65 seconds at 16kHz
@@ -444,6 +444,10 @@ def split_audio(
         )
 
     chunk_size = int(sample_rate * max_clip_duration_s)
+    if chunk_size < 1:
+        raise ValueError(
+            "sample_rate * max_clip_duration_s must yield at least one sample"
+        )
     overlap_size = int(sample_rate * overlap_duration_s)
     chunks = []
     i = 0

@@ -426,6 +426,7 @@ The `split_audio` function:
 - Uses RMS energy to find low-amplitude regions within the overlap window
 - Preserves all audio samples (no data loss)
 - Supports any sample rate
+- Raises `ValueError` if `int(sample_rate * max_clip_duration_s)` is less than one sample, including when a positive duration rounds down to zero
 
 #### Automatic Audio Channel Normalization
 

@@ -711,6 +711,44 @@ class TestAudioPipelineE2E:
 class TestAudioChunking:
     """Tests for split_audio and find_split_point utilities in vllm.multimodal.audio."""
 
+    @pytest.mark.parametrize(
+        "sample_rate,max_clip_duration_s",
+        [(16000, 0.0), (16000, -1.0), (16000, 0.5 / 16000), (0, 30.0), (-16000, 30.0)],
+    )
+    @pytest.mark.parametrize("num_samples", [0, 1], ids=["empty", "nonempty"])
+    @pytest.mark.timeout(5)
+    def test_split_audio_rejects_nonpositive_chunk_size(
+        self, sample_rate, max_clip_duration_s, num_samples
+    ):
+        """Reject invalid chunk sizes instead of repeatedly appending empty chunks."""
+        with pytest.raises(ValueError, match="at least one sample"):
+            split_audio(
+                audio_data=np.zeros(num_samples, dtype=np.float32),
+                sample_rate=sample_rate,
+                max_clip_duration_s=max_clip_duration_s,
+                overlap_duration_s=0.0,
+                min_energy_window_size=1,
+            )
+
+    @pytest.mark.parametrize("samples_per_chunk", [1, 2])
+    def test_split_audio_preserves_samples_with_small_valid_chunks(
+        self, samples_per_chunk
+    ):
+        """The one-sample lower bound must still make progress without data loss."""
+        audio = np.array([0.25, -0.5, 0.75, -1.0], dtype=np.float32)
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=16000,
+            max_clip_duration_s=samples_per_chunk / 16000,
+            overlap_duration_s=0.0,
+            min_energy_window_size=1,
+        )
+
+        assert [chunk.size for chunk in chunks] == (
+            [1, 1, 1, 1] if samples_per_chunk == 1 else [2, 2]
+        )
+        np.testing.assert_array_equal(np.concatenate(chunks), audio)
+
     def test_split_audio_short_clip(self):
         """Audio shorter than max_clip_duration_s should not be split."""
         # 10 seconds of audio at 16kHz
