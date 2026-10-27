@@ -3,7 +3,7 @@
 """Validate MXFP8 TP4 linears and time HIP graph replay over rotating weights.
 
 Example (record the baseline and candidate SHAs):
-    baseline=$(git rev-parse origin/nho_tracking)
+    baseline=$(git rev-parse origin/main)
     git rev-parse "$baseline" HEAD
     git show "$baseline":vllm/model_executor/kernels/linear/mxfp8/rocm_native.py \
         > /tmp/baseline_rocm_native.py
