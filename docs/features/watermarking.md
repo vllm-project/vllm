@@ -42,8 +42,8 @@ same optional `watermarking` request field. The Rust token API accepts it in
 `sampling_params`, and the Rust gRPC `GenerateRequest` accepts it directly.
 Omitting the field requests watermarking by default.
 
-`--watermark-config '{"key":42,"enforce":true}'` overrides supported opt-outs;
-`enforce` defaults to `false`. Unsupported decoding modes remain unwatermarked.
+Deployments that require watermarking can enable `enforce` in `--watermark-config`
+to override request-level opt-outs. Enforcement is disabled by default.
 
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to
@@ -61,7 +61,8 @@ weaker detectability. See
 When `watermark_config` is set, the Prometheus counter
 `vllm:watermark_requests_total` counts finished requests by `status`:
 
-- `watermarked`: the Python frontend resolved watermarking on, including enforced opt-outs.
+- `watermarked`: watermarking was enabled for the request, including when
+  enforcement overrides an opt-out.
 - `skipped`: the request asked for the watermark (omitted or `true`) but could
   not use it, such as `temperature=0` and trace replay requests. A beam search
   request that asks for the watermark runs without it and logs a warning. Its
@@ -117,9 +118,9 @@ generation.
   Restrictive constraints can reduce the statistical evidence available to a
   detector.
 - Automatic language detection and generative scoring use unwatermarked
-  auxiliary generations unless enforced. Language-detection tokens are not part of the returned
-  transcription, and generative scoring returns scores rather than generated
-  text.
+  auxiliary generations unless enforced. Language-detection tokens are not part
+  of the returned transcription, and generative scoring returns scores rather
+  than generated text.
 - Speculative decoding has additional requirements and partial-watermarking
   modes described in [Speculative decoding](#speculative-decoding).
 
