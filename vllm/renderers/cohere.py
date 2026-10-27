@@ -776,8 +776,7 @@ class CohereRenderer(BaseRenderer[HfTokenizer]):
         # Command A+ adds BOS, and this renderer does not inherit HfRenderer.
         # Keep its mask so truncated echoes exclude only tokenizer-added tokens.
         if not (
-            isinstance(self.tokenizer, HfTokenizer)
-            and params.needs_detokenization
+            params.needs_detokenization
             and params.add_special_tokens
             and params.truncate_prompt_tokens is not None
             and params.truncation_side is not None
