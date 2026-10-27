@@ -29,6 +29,25 @@ def _requires_sm90_cutedsl():
         pytest.skip("cutedsl (cutlass) not installed")
 
 
+def _requires_sm90_or_sm100_cutedsl():
+    if not (
+        current_platform.is_device_capability((9, 0))
+        or current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("bf16x3 router GEMM requires an SM90 or SM100 GPU")
+    if not has_cutedsl():
+        pytest.skip("cutedsl (cutlass) not installed")
+
+
+def _use_single_rank(monkeypatch):
+    for module in (
+        "vllm.model_executor.layers.linear",
+        "vllm.model_executor.parameter",
+    ):
+        monkeypatch.setattr(f"{module}.get_tensor_model_parallel_rank", lambda: 0)
+        monkeypatch.setattr(f"{module}.get_tensor_model_parallel_world_size", lambda: 1)
+
+
 @pytest.mark.parametrize(
     ("num_tokens", "hidden_dim", "num_experts"),
     [
@@ -167,12 +186,7 @@ def test_sm90_gate_linear_dispatch(
     monkeypatch, input_size, output_size, num_tokens, uses_bf16x3
 ):
     _requires_sm90_cutedsl()
-    for module in (
-        "vllm.model_executor.layers.linear",
-        "vllm.model_executor.parameter",
-    ):
-        monkeypatch.setattr(f"{module}.get_tensor_model_parallel_rank", lambda: 0)
-        monkeypatch.setattr(f"{module}.get_tensor_model_parallel_world_size", lambda: 1)
+    _use_single_rank(monkeypatch)
     from vllm.model_executor.layers.fused_moe.router import bf16x3_router_gemm_sm90
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 
@@ -200,3 +214,28 @@ def test_sm90_gate_linear_dispatch(
     assert calls == ([num_tokens] if uses_bf16x3 else [])
     ref = torch.nn.functional.linear(x.double(), gate.weight.double())
     torch.testing.assert_close(out.double(), ref, rtol=0, atol=1e-4)
+
+
+def test_gate_linear_bf16x3_tier_traces_fullgraph(monkeypatch):
+    """Models compile with fullgraph=True, so the bf16x3 tier in
+    GateLinear.forward must trace without a graph break."""
+    _requires_sm90_or_sm100_cutedsl()
+    _use_single_rank(monkeypatch)
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    # Outside the fp32 GEMV table, so forward reaches the bf16x3 tier directly.
+    gate = GateLinear(
+        input_size=5120,
+        output_size=160,
+        bias=False,
+        out_dtype=torch.float32,
+        params_dtype=torch.float32,
+    ).cuda()
+    gate.weight.data.normal_(0, ROUTER_WEIGHT_SCALE)
+    x = torch.randn(64, 5120, device="cuda").to(torch.bfloat16)
+
+    torch._dynamo.reset()
+    out, _ = torch.compile(gate, backend="eager", fullgraph=True)(x)
+
+    eager_out, _ = gate(x)
+    torch.testing.assert_close(out, eager_out, rtol=0, atol=0)

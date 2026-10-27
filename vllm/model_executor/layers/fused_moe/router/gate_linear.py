@@ -107,6 +107,7 @@ class GateLinear(ReplicatedLinear):
         )
         self.out_dtype = out_dtype
         self.is_gfx950 = is_gfx950
+        self.is_hopper = is_hopper
 
         # A quantized gate exposes no plain ``weight``, so every specialized
         # tier below is disabled and forward falls back to ReplicatedLinear.
@@ -355,9 +356,21 @@ class GateLinear(ReplicatedLinear):
             output = LL_FP32W_GEMM_KERNEL(x, self.weight)
             return self._return(output)
 
-        # Tier 4: bf16x3 CuteDSL kernel for fp32 router weights
+        # Tier 4: bf16x3 CuteDSL kernel for fp32 router weights. The arch comes
+        # from __init__: a device query here breaks fullgraph torch.compile.
         if self.allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
-            output = bf16x3_router_gemm_module().bf16x3_router_gemm(x, self.weight)
+            if self.is_hopper:
+                from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm90 import (  # noqa: E501
+                    bf16x3_router_gemm as sm90_bf16x3_router_gemm,
+                )
+
+                output = sm90_bf16x3_router_gemm(x, self.weight)
+            else:
+                from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm100 import (  # noqa: E501
+                    bf16x3_router_gemm,
+                )
+
+                output = bf16x3_router_gemm(x, self.weight)
             return self._return(output)
 
         # Tier 6: cuBLAS bf16→fp32
@@ -432,7 +445,11 @@ def _is_hopper() -> bool:
 
 @cache
 def bf16x3_router_gemm_module():
-    """The CuteDSL bf16x3 router GEMM module for this device (SM90 or SM100)."""
+    """The CuteDSL bf16x3 router GEMM module for this device (SM90 or SM100).
+
+    Only for code that Dynamo does not trace, such as custom op bodies: Dynamo
+    ignores ``@cache`` and would trace the device query.
+    """
     if _is_hopper():
         from vllm.model_executor.layers.fused_moe.router import (
             bf16x3_router_gemm_sm90,
