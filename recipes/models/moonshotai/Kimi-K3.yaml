@@ -1910,8 +1910,9 @@ guide: |
   Run these commands in the installed vLLM Ascend environment. Keep the launcher
   and the node's own role template in the same directory; do not write both
   templates on the same node. Container setup belongs to the installation step.
-  Start each prefill group's rank 0 before its headless ranks 1-3. Every decode
-  node keeps its HTTP endpoint. The transfer connector remains MooncakeConnectorV2.
+  Start each prefill group's rank 0 before ranks 1-3. Both Prefill and Decode
+  omit `--headless` in PD separation; only mixed deployment workers use it.
+  Every decode node keeps its HTTP endpoint. The transfer connector remains MooncakeConnectorV2.
   The launcher runs in the foreground; open another shell for Start_Proxy, which
   runs the separate proxy script from the vLLM Ascend installation.
 
