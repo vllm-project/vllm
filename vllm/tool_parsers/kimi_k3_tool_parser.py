@@ -256,13 +256,31 @@ class KimiK3ToolParser(ToolParser):
         m_open = self._response_open_re.search(text)
         if m_open is not None:
             m_close = self._response_close_re.search(text, m_open.end())
-            if m_close is not None:
-                text = text[m_open.end() : m_close.start()]
-            else:
-                text = text[m_open.end() :]
+            text = (
+                text[m_open.end() : m_close.start()]
+                if m_close is not None
+                else text[m_open.end() :]
+            )
         else:
-            text = self._response_close_re.sub("", text)
+            m_close = self._response_close_re.search(text)
+            if m_close is not None:
+                # cap at the first close like the streaming path: anything
+                # after it (e.g. a <|close|>message<|sep|> trailer) is not
+                # response content
+                text = text[: m_close.start()]
         text = self._message_close_re.sub("", text)
+        if m_close is None:
+            # Nothing caps the text, so its tail may be a control-marker
+            # fragment from a stream cut mid-marker (e.g. max_tokens).
+            # Withhold it exactly like the streaming path's overlap holdback
+            # so raw markers never leak into content.
+            overlap = max(
+                _partial_tag_overlap(text, self.response_open),
+                _partial_tag_overlap(text, self.response_close),
+                _partial_tag_overlap(text, self.tools_open),
+            )
+            if overlap:
+                text = text[: len(text) - overlap]
         return text or None
 
     def _content(self, model_output: str, before: str) -> str | None:
