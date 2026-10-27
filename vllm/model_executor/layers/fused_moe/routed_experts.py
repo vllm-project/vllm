@@ -1348,6 +1348,13 @@ class RoutedExperts(PluggableLayer):
             )
 
         weights = list(self.named_parameters())
+
+        # EPLB must use shards when original weight storage has been released.
+        # Use explicit metadata: some tensor subclasses lack untyped_storage().
+        localized_freed = getattr(self, "localized_freed_full_weight_names", ())
+        if localized_freed:
+            weights = [(name, p) for name, p in weights if name not in localized_freed]
+
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
         # `w13_input_scale` and `w2_input_scale` are global per-tensor
