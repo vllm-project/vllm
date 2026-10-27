@@ -5015,6 +5015,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
             )
 
 
+@pytest.mark.cpu_test
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
