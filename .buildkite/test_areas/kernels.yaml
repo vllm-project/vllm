@@ -142,6 +142,17 @@ steps:
       commands:
       - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
 
+- label: ":nvidia: (H100) BF16x3 Router GEMM Kernels"
+  key: kernels-bf16x3-router-gemm-h100
+  timeout_in_minutes: 20
+  device: h100
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm90.py
+  - vllm/model_executor/layers/fused_moe/router/gate_linear.py
+  - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
+  commands:
+    - pytest -v -s kernels/test_bf16x3_router_gemm_cutedsl.py
+
 - label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
   timeout_in_minutes: 20
@@ -271,8 +282,9 @@ steps:
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
 # Files with dedicated jobs elsewhere in this file are excluded via --ignore
-# (test_bf16x3_router_gemm_cutedsl runs in Kernels (B200); test_ll_bf16_gemm and
-# test_ll_fp32w_gemm run in Gate Linear CuTeDSL Kernels (B200)).
+# (test_bf16x3_router_gemm_cutedsl runs in Kernels (B200) and BF16x3 Router GEMM
+# Kernels (H100); test_ll_bf16_gemm and test_ll_fp32w_gemm run in Gate Linear
+# CuTeDSL Kernels (B200)).
 - label: ":nvidia: (B200) Miscellaneous Kernels"
   key: kernels-root-misc-test-b200
   automatic_shard: true
@@ -643,10 +655,27 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (B200) Kernels Shard %N"
+- label: ":nvidia: (H100) MiniMax-M3 Sparse Prefill Kernels"
+  key: kernels-minimax-m3-sparse-prefill-h100
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/"
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/models/minimax_m3/common/ops/sparse_attn.py
+  - vllm/models/minimax_m3/common/sparse_attention.py
+  - vllm/models/minimax_m3/nvidia/ops/sparse_prefill.py
+  - tests/v1/attention/utils.py
+  - tests/kernels/attention/test_minimax_m3.py
+  - tests/kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+  commands:
+    - pytest -v -s tests/kernels/attention/test_minimax_m3.py -k prefill_sparse_attention_correctness
+    - pytest -v -s tests/kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+
+- label: ":nvidia: (B200) Kernels"
   key: kernels-b200
+  automatic_shard: true
   timeout_in_minutes: 30
-  parallelism: 3
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   # optional: true
@@ -671,7 +700,7 @@ steps:
   - vllm/platforms/cuda.py
   - vllm/cute_utils/
   - vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/
-  - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py
+  - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm100.py
   - cmake/external_projects/fmha_sm100.cmake
   - vllm/models/minimax_m3/common/sparse_attention.py
   - vllm/models/minimax_m3/nvidia/
@@ -694,52 +723,38 @@ steps:
   - tests/models/quantization/test_nvfp4.py
   commands:
     - nvidia-smi
-    - |
-      set -eu
-      case "$$BUILDKITE_PARALLEL_JOB" in
-        0)
-          pytest -v -s tests/kernels/attention/test_attention_selector.py
-          pytest -v -s tests/kernels/attention/test_cache.py -k nvfp4
-          pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
-          pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
-          pytest -v -s tests/kernels/test_top_k_per_row.py
-          pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
-          pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
-          pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
-          pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
-          pytest -v -s tests/kernels/test_bf16x3_router_gemm_cutedsl.py
-          ;;
-        1)
-          python3 examples/basic/offline_inference/chat.py
-          pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
-          pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
-          pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
-          pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
-          pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
-          pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
-          pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
-          pytest -v -s tests/models/quantization/test_nvfp4.py
-          ;;
-        2)
-          pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
-          pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
-          pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8 or cutlass_subset'
-          pytest -v -s tests/kernels/quantization/test_block_fp8.py::test_w8a8_block_fp8_cutlass_matmul
-          pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
-          pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
-          pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
-          pytest -v -s tests/kernels/moe/test_flashinfer.py
-          pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
-          pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
-          ;;
-        *)
-          echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" >&2
-          exit 1
-          ;;
-      esac
+    - python3 examples/basic/offline_inference/chat.py
+    - pytest -v -s tests/kernels/attention/test_attention_selector.py
+    - pytest -v -s tests/kernels/attention/test_cache.py -k nvfp4
+    - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
+    - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
+    - pytest -v -s tests/kernels/test_top_k_per_row.py
+    - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
+    - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
+    - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
+    - pytest -v -s tests/kernels/test_bf16x3_router_gemm_cutedsl.py
+    - pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
+    - pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
+    - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
+    - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
+    - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
+    - pytest -v -s tests/models/quantization/test_nvfp4.py
+    - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
+    - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
+    - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8 or cutlass_subset'
+    - pytest -v -s tests/kernels/quantization/test_block_fp8.py::test_w8a8_block_fp8_cutlass_matmul
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
+    - pytest -v -s tests/kernels/moe/test_flashinfer.py
+    - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
+    - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   mirror:
     amd:
-      label: ":amd: (MI355) NVFP4 Dense Emulation Shard %N"
+      label: ":amd: (MI355) NVFP4 Dense Emulation"
       dind: false
       device: mi355_1
       num_devices: 1
@@ -762,7 +777,7 @@ steps:
       # activation/KV-cache layouts and CUDA-only kernels need AMD backends.
       commands:
       - amd-smi
-      - pytest -v -s kernels/quantization/test_nvfp4_emulation.py -k test_nvfp4_dense_emulation --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - pytest -v -s kernels/quantization/test_nvfp4_emulation.py -k test_nvfp4_dense_emulation
 
 - label: ":nvidia: (B200) Gate Linear CuTeDSL Kernels"
   key: kernels-gate-linear-cutedsl-b200
