@@ -69,6 +69,7 @@ class KVOutputAggregator:
         # [req_id -> n_remaining_workers]
         self._recv_remaining_count = dict[str, int]()
         self._send_remaining_count = dict[str, int]()
+        self._failed_remaining_count = dict[str, int]()
         self._failed_recving_pending = set[str]()
         self._expected_finished_count = expected_finished_count
 
@@ -100,6 +101,7 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
+        all_failed = set[str]()
         aggregated_kv_connector_stats = None
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
@@ -166,10 +168,17 @@ class KVOutputAggregator:
                 combined_kv_cache_events.increment_workers(1)
 
             invalid_block_ids |= kv_output.invalid_block_ids
+            update_finished_set(
+                kv_output.failed_recving, self._failed_remaining_count, all_failed
+            )
             self._failed_recving_pending |= kv_output.failed_recving
 
-        failed_recving = self._failed_recving_pending & finished_recving
+        # A recv reported failed by every worker fails the request even if it
+        # has not finished; its blocks stay held until it does.
+        failed_recving = self._failed_recving_pending & (finished_recving | all_failed)
         self._failed_recving_pending -= failed_recving
+        for req_id in finished_recving:
+            self._failed_remaining_count.pop(req_id, None)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]

@@ -99,6 +99,37 @@ def test_aggregate_workers_output():
     assert aggregated_kv_output.failed_recving == {"req3"}
 
 
+def test_aggregate_failed_recving_from_all_workers_without_finish():
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+
+    # Rank 0 already finished the recv; a failure from one rank is not enough.
+    out = aggregator.aggregate(
+        [
+            DummyModelRunnerOutput(finished_recving={"req1"}, failed_recving={"req1"}),
+            DummyModelRunnerOutput(),
+        ]
+    )
+    assert not out.kv_connector_output.failed_recving
+    assert out.kv_connector_output.finished_recving is None
+
+    # Every rank reported it failed: forwarded without a finish.
+    out = aggregator.aggregate(
+        [DummyModelRunnerOutput(), DummyModelRunnerOutput(failed_recving={"req1"})]
+    )
+    assert out.kv_connector_output.failed_recving == {"req1"}
+    assert out.kv_connector_output.finished_recving is None
+
+    # The late finish is forwarded once, without failing the request again.
+    out = aggregator.aggregate(
+        [DummyModelRunnerOutput(), DummyModelRunnerOutput(finished_recving={"req1"})]
+    )
+    assert out.kv_connector_output.finished_recving == {"req1"}
+    assert not out.kv_connector_output.failed_recving
+    assert not aggregator._failed_remaining_count
+    assert not aggregator._failed_recving_pending
+    assert not aggregator._recv_remaining_count
+
+
 def test_aggregate_workers_output_with_expected_finished_count():
     # We create the aggregator expecting to collect from 4 workers
     aggregator = KVOutputAggregator(expected_finished_count=4)

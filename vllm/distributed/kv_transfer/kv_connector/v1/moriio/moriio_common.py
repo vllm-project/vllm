@@ -545,10 +545,8 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
-        # WRITE-mode consumer blocks whose write_done timed out (ROCm/mori#655).
-        # Filled by the scheduler, drained by the worker's
-        # get_block_ids_with_load_errors so vLLM frees/recomputes the request.
-        self.write_load_failed_block_ids: list[int] = []
+        # WRITE-mode consumer requests whose write_done timed out.
+        self.write_recv_timed_out_req_ids: set[ReqId] = set()
 
     def __repr__(self):
         return (
