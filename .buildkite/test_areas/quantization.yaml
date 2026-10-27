@@ -90,6 +90,7 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - tests/quantization/test_blackwell_moe.py
+  - vllm/models/muse_spark/
   - vllm/model_executor/models/deepseek_v2.py
   - vllm/model_executor/models/gpt_oss.py
   - vllm/model_executor/models/llama4.py
