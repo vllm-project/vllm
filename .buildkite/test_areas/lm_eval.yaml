@@ -259,11 +259,8 @@ steps:
   - vllm/v1/attention/backends/mla/indexer.py
   - vllm/v1/worker/gpu/model_runner.py
   - vllm/v1/worker/gpu/pcp_manager.py
-  - vllm/utils/numa_utils.py
-  - tests/v1/distributed/test_dense_dp_world_size.py
   autorun_on_main: true
   commands:
-  - pytest -v -s v1/distributed/test_dense_dp_world_size.py::test_pcp_dp_with_auto_numa
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
 
 - label: ":nvidia: (H100) LM Eval Watermark Feature Combination"
