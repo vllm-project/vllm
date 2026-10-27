@@ -14,6 +14,7 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantToolCall, ChatEvent,
+    FinishReason,
 };
 
 use super::convert::build_output_items;
@@ -88,6 +89,8 @@ pub(crate) struct OutputItemStreamer {
     /// Completed items emitted before the terminal event. This supplies the
     /// authoritative partial output when an upstream stream fails.
     completed_items: Vec<ResponseOutputItem>,
+    /// The last item's status is unknown until another item starts or generation ends.
+    pending_item: Option<(u32, ResponseOutputItem)>,
 }
 
 /// The currently streamed assistant output item.
@@ -117,12 +120,13 @@ impl OutputItemStreamer {
             include_reasoning,
             streamed_ids: Vec::new(),
             completed_items: Vec::new(),
+            pending_item: None,
         }
     }
 
     /// Process one chat event, returning the SSE events to emit.
     pub(crate) fn on_event(&mut self, event: &ChatEvent) -> Vec<ResponseStreamEvent> {
-        match event {
+        let mut events = match event {
             ChatEvent::Start { .. } | ChatEvent::LogprobsDelta { .. } | ChatEvent::Done { .. } => {
                 vec![]
             }
@@ -168,19 +172,47 @@ impl OutputItemStreamer {
                 vec![self.function_call_delta(delta.clone())]
             }
             ChatEvent::ToolCallEnd { call, .. } => self.close_current(Some(call)),
+        };
+        if let Some(position) = events
+            .iter()
+            .position(|event| event.event_type() == "response.output_item.added")
+            && let Some((index, item)) = self.pending_item.take()
+        {
+            events.insert(
+                position,
+                output_item_event("response.output_item.done", index, item),
+            );
         }
+        events
     }
 
     /// Close any still-open item, returning the close events. Defensive: the
     /// chat event contract closes blocks and tool calls explicitly.
-    pub(crate) fn on_stream_end(&mut self) -> Vec<ResponseStreamEvent> {
-        self.close_current(None)
+    pub(crate) fn on_stream_end(
+        &mut self,
+        finish_reason: Option<&FinishReason>,
+    ) -> Vec<ResponseStreamEvent> {
+        let mut events = self.close_current(None);
+        if let Some((index, mut item)) = self.pending_item.take() {
+            if matches!(finish_reason, Some(FinishReason::Length)) {
+                item.mark_incomplete();
+                if let Some(last) = self.completed_items.last_mut() {
+                    last.mark_incomplete();
+                }
+            }
+            events.push(output_item_event("response.output_item.done", index, item));
+        }
+        events
     }
 
     /// Build the final response output items, reusing streamed item IDs so
     /// streamed events and the terminal payload agree about IDs.
-    pub(crate) fn final_output_items(&self, message: &AssistantMessage) -> Vec<ResponseOutputItem> {
-        let mut items = build_output_items(message, self.include_reasoning);
+    pub(crate) fn final_output_items(
+        &self,
+        message: &AssistantMessage,
+        finish_reason: &FinishReason,
+    ) -> Vec<ResponseOutputItem> {
+        let mut items = build_output_items(message, self.include_reasoning, finish_reason);
         let mut consumed = vec![false; self.streamed_ids.len()];
         for item in &mut items {
             let kind = match item {
@@ -379,7 +411,6 @@ impl OutputItemStreamer {
                                 serde_json::to_value(part).expect("part must serialize"),
                             )],
                         ),
-                        output_item_event("response.output_item.done", output_index, item.clone()),
                     ],
                     item,
                 )
@@ -416,7 +447,6 @@ impl OutputItemStreamer {
                                 serde_json::to_value(&part).expect("part must serialize"),
                             )],
                         ),
-                        output_item_event("response.output_item.done", output_index, item.clone()),
                     ],
                     item,
                 )
@@ -432,7 +462,7 @@ impl OutputItemStreamer {
                     Some(call) => (call.id.clone(), call.name.clone(), call.arguments.clone()),
                     None => (call_id, name, arguments),
                 };
-                let mut events = vec![part_event(
+                let events = vec![part_event(
                     "response.function_call_arguments.done",
                     output_index,
                     &item_id,
@@ -448,14 +478,10 @@ impl OutputItemStreamer {
                     arguments,
                     status: Some(ResponseItemStatus::Completed),
                 };
-                events.push(output_item_event(
-                    "response.output_item.done",
-                    output_index,
-                    item.clone(),
-                ));
                 (events, item)
             }
         };
+        self.pending_item = Some((output_index, item.clone()));
         self.completed_items.push(item);
         self.output_index += 1;
         events
@@ -572,7 +598,7 @@ mod tests {
             name: "empty".to_string(),
         });
 
-        let events = streamer.on_event(&ChatEvent::ToolCallEnd {
+        let mut events = streamer.on_event(&ChatEvent::ToolCallEnd {
             index: 0,
             call: AssistantToolCall {
                 id: "call_1".to_string(),
@@ -580,6 +606,7 @@ mod tests {
                 arguments: String::new(),
             },
         });
+        events.extend(streamer.on_stream_end(Some(&FinishReason::Stop(None))));
         let payloads: Vec<Value> = events
             .into_iter()
             .map(|event| serde_json::from_str(&event.into_json(0)).unwrap())

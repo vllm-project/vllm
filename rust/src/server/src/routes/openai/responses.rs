@@ -251,7 +251,7 @@ async fn responses_event_stream(
             }
             Err(error) => {
                 error!(error = %error.as_report(), "responses stream failed");
-                for event in items.on_stream_end() {
+                for event in items.on_stream_end(None) {
                     y.yield_ok(event).await;
                 }
                 emit_failed(
@@ -269,7 +269,7 @@ async fn responses_event_stream(
         }
     }
 
-    for event in items.on_stream_end() {
+    for event in items.on_stream_end(terminal.as_ref().map(|output| &output.finish_reason)) {
         y.yield_ok(event).await;
     }
 
@@ -301,7 +301,7 @@ async fn responses_event_stream(
             &meta,
             &request_id,
             created_at,
-            items.final_output_items(&message),
+            items.final_output_items(&message, &finish_reason),
             "The model failed to generate a response.",
             Some(&usage),
         )
@@ -313,7 +313,7 @@ async fn responses_event_stream(
         &meta,
         &request_id,
         created_at,
-        items.final_output_items(&message),
+        items.final_output_items(&message, &finish_reason),
         response_status(&finish_reason),
         Some(build_usage(&usage)),
         kv_transfer_params,

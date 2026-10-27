@@ -445,27 +445,42 @@ async fn responses_non_streaming_length_finish_is_incomplete() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn responses_length_finish_only_marks_the_last_tool_incomplete() {
-    let mut outputs = weather_tool_call_output_specs();
-    outputs.last_mut().unwrap().1 = Some(EngineCoreFinishReason::Length);
-    let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
-        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
-        outputs,
-    )
-    .await;
-    let response = responses_call(
-        &app,
-        json!({"input": "weather?", "tools": [weather_function_tool()]}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    engine_task.await.unwrap();
-    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(response["status"], "incomplete");
-    assert_eq!(response["output"][0]["type"], "reasoning");
-    assert_eq!(response["output"][0]["status"], "completed");
-    assert_eq!(response["output"][1]["type"], "function_call");
-    assert_eq!(response["output"][1]["status"], "incomplete");
+    for stream in [false, true] {
+        let mut outputs = weather_tool_call_output_specs();
+        outputs.last_mut().unwrap().1 = Some(EngineCoreFinishReason::Length);
+        let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+            Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+            outputs,
+        )
+        .await;
+        let response = responses_call(
+            &app,
+            json!({"input": "weather?", "tools": [weather_function_tool()], "stream": stream}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        engine_task.await.unwrap();
+        let response: serde_json::Value = if stream {
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            let payloads = sse_json_payloads(&text);
+            let terminal = payloads.last().unwrap();
+            let done = payloads
+                .iter()
+                .filter(|event| event["type"] == "response.output_item.done")
+                .map(|event| event["item"].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(json!(done), terminal["response"]["output"]);
+            terminal["response"].clone()
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        };
+        assert_eq!(response["status"], "incomplete");
+        assert_eq!(response["output"][0]["type"], "reasoning");
+        assert_eq!(response["output"][0]["status"], "completed");
+        assert_eq!(response["output"][1]["type"], "function_call");
+        assert_eq!(response["output"][1]["status"], "incomplete");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -504,6 +519,12 @@ async fn responses_streaming_length_finish_emits_incomplete_event() {
         terminal["response"]["incomplete_details"]["reason"],
         "max_output_tokens"
     );
+    let item_done = payloads
+        .iter()
+        .find(|event| event["type"] == "response.output_item.done")
+        .expect("output item done");
+    assert_eq!(item_done["item"]["status"], "incomplete");
+    assert_eq!(item_done["item"], terminal["response"]["output"][0]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
