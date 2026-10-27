@@ -14,7 +14,7 @@ meta:
     - "moonshotai/Kimi-K2.5"
   default_hardware: b300
   default_variant:
-    ascend_950dt: ascend_w4a8
+    ascend_950dt: ascend_mxfp4
   hardware:
     h200: verified
     b200: verified
@@ -135,11 +135,56 @@ variants:
     description: "RedHatAI compressed-tensors NVFP4 quantization; MoE layers quantized to NVFP4, attention and embeddings at full precision"
 
   ascend_w4a8:
+    # https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8
     model_id: "Eco-Tech/Kimi-K3-w4a8"
     precision: int4
     label: "W4A8 (Ascend)"
     vram_minimum_gb: 1711
-    supported_hardware: [ascend_910c, ascend_950dt]
+    supported_hardware: [ascend_910c]
+    extra_args:
+      - "--quantization"
+      - "ascend"
+      - "--enable-prefix-caching"
+      - "--enable-expert-parallel"
+      - "--max-num-seqs"
+      - "16"
+      - "--max-model-len"
+      - "131072"
+      - "--max-num-batched-tokens"
+      - "24576"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--additional-config"
+      - '{"enable_cpu_binding":true, "enable_flashcomm1":true}'
+      - "--mm-encoder-tp-mode"
+      - "data"
+      - "--limit-mm-per-prompt"
+      - '{"vision_chunk": 2}'
+      - "--allowed-local-media-path"
+      - "/"
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'true'
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_BUFFSIZE: "800"
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:kimi-k3-a3"
+    description: "ModelSlim INT4 W4A8 for Ascend NPU. Requires --quantization ascend. Validated on 4× 910C mixed P/D."
+
+  ascend_mxfp4:
+    # Use the recipe default model until the A5 MXFP4 checkpoint is public.
+    precision: mxfp4
+    label: MXFP4(ASCEND)
+    vram_minimum_gb: 1711
+    supported_hardware: [ascend_950dt]
     extra_args:
       - "--quantization"
       - "ascend"
@@ -173,16 +218,16 @@ variants:
       HCCL_BUFFSIZE: "800"
       VLLM_ENGINE_READY_TIMEOUT_S: "7200"
     hardware_overrides:
-      ascend_910c:
-        docker_image: "quay.io/ascend/vllm-ascend:kimi-k3-a3"
       ascend_950dt:
         docker_image: "quay.io/ascend/vllm-ascend:kimi-k3-a5"
-    description: "ModelSlim INT4 W4A8 for Ascend NPU. Requires --quantization ascend. Validated on 4× 910C mixed P/D."
+    description: MXFP4 for Ascend 950DT (A5). Requires --quantization ascend and matching A5 ModelSlim weights, which are not yet public.
 
   fp8:
     model_id: "RedHatAI/Kimi-K3-FP8-BLOCK"
     precision: fp8
     vram_minimum_gb: 3360
+    # Ascend profiles use their dedicated quantized variants.
+    supported_hardware: [h100, h200, b200, b300, gb200, gb300, mi300x, mi325x, mi350x, mi355x]
     description: "RedHatAI FP8 block quantization"
 
 compatible_strategies:
