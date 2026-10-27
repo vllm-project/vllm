@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
+    VLLM_RESOLVE_PROCESS_CGROUP: bool | None = None
     VLLM_CPU_CI_ENV: bool = False
     VLLM_CPU_ATTN_SPLIT_KV: bool = True
     VLLM_ZENTORCH_WEIGHT_PREPACK: bool = True
@@ -907,6 +908,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_OMP_THREADS_BIND": lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "auto"),
     # (CPU backend only) CPU cores not used by OMP threads .
     # Those CPU cores will not be used by OMP threads of a rank.
+    # Set to 1 to resolve the cgroup of the vLLM process from /proc/self/cgroup
+    # and take the smallest memory limit from that cgroup up to the cgroup root,
+    # which is the limit the kernel enforces. Needed when the limit is on a
+    # parent cgroup, on a nested cgroup, in a container with the host cgroup
+    # namespace, or on a systemd scope / Slurm step. Set to 0 to read the limit
+    # at /sys/fs/cgroup only. Unset: the release default, currently 0 (see
+    # RESOLVE_PROCESS_CGROUP_BY_DEFAULT in vllm/utils/cpu_resource_utils.py).
+    "VLLM_RESOLVE_PROCESS_CGROUP": lambda: (
+        bool(int(os.environ["VLLM_RESOLVE_PROCESS_CGROUP"]))
+        if "VLLM_RESOLVE_PROCESS_CGROUP" in os.environ
+        else None
+    ),
     "VLLM_CPU_NUM_OF_RESERVED_CPU": lambda: (
         int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0"))
         if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ

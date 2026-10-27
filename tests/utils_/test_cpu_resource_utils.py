@@ -20,10 +20,20 @@ _V1_LIMIT_PATH = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
 _V1_USAGE_PATH = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
 
 
+_PROC_SELF_CGROUP = "/stub/proc/self/cgroup"
+
+
 @pytest.fixture(autouse=True)
 def _clear_cgroup_cache():
+    # Resolve the process cgroup from a stub path so the real /proc/self/cgroup
+    # of the test host never leaks into these tests. Set directly rather than
+    # through monkeypatch so this fixture is torn down after the tests' own
+    # monkeypatches are undone.
+    original = getattr(cru, "_PROC_SELF_CGROUP", None)
+    cru._PROC_SELF_CGROUP = _PROC_SELF_CGROUP
     cru.get_cgroup_memory_limit.cache_clear()
     yield
+    cru._PROC_SELF_CGROUP = original
     cru.get_cgroup_memory_limit.cache_clear()
 
 
@@ -104,6 +114,154 @@ def test_cgroup_no_limit_files_present(monkeypatch):
 
     assert cru.get_cgroup_memory_limit() is None
     assert cru.get_cgroup_memory_usage() is None
+
+
+def test_cgroup_v2_limit_on_parent_cgroup_is_found(monkeypatch):
+    """Kubernetes sets the pod limit on the parent cgroup; the container is a
+    child whose own memory.max is `max`. Limit and usage come from the parent."""
+    monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(
+        monkeypatch,
+        {
+            _PROC_SELF_CGROUP: "0::/kubepods/pod1/ctr\n",
+            _V2_LIMIT_PATH: "max\n",
+            _V2_USAGE_PATH: f"{10 * GiB_bytes}\n",
+            "/sys/fs/cgroup/kubepods/memory.max": "max\n",
+            "/sys/fs/cgroup/kubepods/memory.current": f"{9 * GiB_bytes}\n",
+            "/sys/fs/cgroup/kubepods/pod1/memory.max": f"{8 * GiB_bytes}\n",
+            "/sys/fs/cgroup/kubepods/pod1/memory.current": f"{2 * GiB_bytes}\n",
+            "/sys/fs/cgroup/kubepods/pod1/ctr/memory.max": "max\n",
+            "/sys/fs/cgroup/kubepods/pod1/ctr/memory.current": f"{1 * GiB_bytes}\n",
+        },
+    )
+
+    assert cru.get_cgroup_memory_limit() == 8 * GiB_bytes
+    assert cru.get_cgroup_memory_usage() == 2 * GiB_bytes
+
+
+def test_cgroup_v2_smallest_limit_in_hierarchy_wins(monkeypatch):
+    monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(
+        monkeypatch,
+        {
+            _PROC_SELF_CGROUP: "0::/pod1/ctr\n",
+            _V2_LIMIT_PATH: f"{20 * GiB_bytes}\n",
+            _V2_USAGE_PATH: f"{15 * GiB_bytes}\n",
+            "/sys/fs/cgroup/pod1/memory.max": f"{8 * GiB_bytes}\n",
+            "/sys/fs/cgroup/pod1/memory.current": f"{3 * GiB_bytes}\n",
+            "/sys/fs/cgroup/pod1/ctr/memory.max": f"{16 * GiB_bytes}\n",
+            "/sys/fs/cgroup/pod1/ctr/memory.current": f"{1 * GiB_bytes}\n",
+        },
+    )
+
+    assert cru.get_cgroup_memory_limit() == 8 * GiB_bytes
+    assert cru.get_cgroup_memory_usage() == 3 * GiB_bytes
+
+
+def test_cgroup_v2_bare_host_limit_on_scope(monkeypatch):
+    """On a bare host the root has no memory.max at all; a limit on the
+    process's systemd scope (or Slurm step) must still be found."""
+    monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(
+        monkeypatch,
+        {
+            _PROC_SELF_CGROUP: "0::/user.slice/run-1.scope\n",
+            _V2_LIMIT_PATH: None,
+            _V2_USAGE_PATH: None,
+            "/sys/fs/cgroup/user.slice/memory.max": "max\n",
+            "/sys/fs/cgroup/user.slice/memory.current": f"{6 * GiB_bytes}\n",
+            "/sys/fs/cgroup/user.slice/run-1.scope/memory.max": f"{1 * GiB_bytes}\n",
+            "/sys/fs/cgroup/user.slice/run-1.scope/memory.current": f"{100 << 20}\n",
+        },
+    )
+
+    assert cru.get_cgroup_memory_limit() == 1 * GiB_bytes
+    assert cru.get_cgroup_memory_usage() == 100 << 20
+
+
+def test_cgroup_v2_path_not_visible_in_mount_uses_root(monkeypatch):
+    """Host cgroup namespace: /proc/self/cgroup names a path that does not
+    exist inside the container's mount, so the root is used as before."""
+    monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(
+        monkeypatch,
+        {
+            _PROC_SELF_CGROUP: "0::/docker/0123abcd\n",
+            _V2_LIMIT_PATH: f"{4 * GiB_bytes}\n",
+            _V2_USAGE_PATH: f"{1 * GiB_bytes}\n",
+            "/sys/fs/cgroup/docker/0123abcd/memory.max": None,
+            "/sys/fs/cgroup/docker/0123abcd/memory.current": None,
+        },
+    )
+
+    assert cru.get_cgroup_memory_limit() == 4 * GiB_bytes
+    assert cru.get_cgroup_memory_usage() == 1 * GiB_bytes
+
+
+def test_cgroup_v1_limit_on_parent_cgroup_is_found(monkeypatch):
+    monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+    v1 = "/sys/fs/cgroup/memory"
+    _stub_files(
+        monkeypatch,
+        {
+            _PROC_SELF_CGROUP: "12:memory:/kubepods/pod1\n"
+            "3:cpu,cpuacct:/kubepods/pod1\n",
+            _V2_LIMIT_PATH: None,
+            _V1_LIMIT_PATH: f"{1 << 63}\n",
+            _V1_USAGE_PATH: f"{10 * GiB_bytes}\n",
+            f"{v1}/kubepods/memory.limit_in_bytes": f"{4 * GiB_bytes}\n",
+            f"{v1}/kubepods/memory.usage_in_bytes": f"{3 * GiB_bytes}\n",
+            f"{v1}/kubepods/pod1/memory.limit_in_bytes": f"{1 << 63}\n",
+            f"{v1}/kubepods/pod1/memory.usage_in_bytes": f"{1 * GiB_bytes}\n",
+        },
+    )
+
+    assert cru.get_cgroup_memory_limit() == 4 * GiB_bytes
+    assert cru.get_cgroup_memory_usage() == 3 * GiB_bytes
+
+
+_PARENT_LIMIT_FILES = {
+    _PROC_SELF_CGROUP: "0::/pod1/ctr\n",
+    _V2_LIMIT_PATH: "max\n",
+    _V2_USAGE_PATH: f"{10 * GiB_bytes}\n",
+    "/sys/fs/cgroup/pod1/memory.max": f"{8 * GiB_bytes}\n",
+    "/sys/fs/cgroup/pod1/memory.current": f"{2 * GiB_bytes}\n",
+}
+
+
+@pytest.mark.parametrize(
+    ("default", "env", "expected_limit"),
+    [
+        # Unset: the release default decides. Off keeps the old root-only read.
+        (False, None, None),
+        (True, None, 8 * GiB_bytes),
+        # An explicit value overrides the default either way.
+        (False, "1", 8 * GiB_bytes),
+        (True, "0", None),
+    ],
+)
+def test_cgroup_resolution_default_and_override(
+    monkeypatch, default, env, expected_limit
+):
+    """RESOLVE_PROCESS_CGROUP_BY_DEFAULT is the one line that flips the
+    behavior; VLLM_RESOLVE_PROCESS_CGROUP=1/0 overrides it."""
+    monkeypatch.setattr(cru, "RESOLVE_PROCESS_CGROUP_BY_DEFAULT", default)
+    if env is None:
+        monkeypatch.delenv("VLLM_RESOLVE_PROCESS_CGROUP", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", env)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(monkeypatch, _PARENT_LIMIT_FILES)
+
+    assert cru.get_cgroup_memory_limit() == expected_limit
+    assert cru.get_cgroup_memory_usage() == (
+        None if expected_limit is None else 2 * GiB_bytes
+    )
 
 
 def test_cgroup_skipped_on_non_linux(monkeypatch):
