@@ -219,9 +219,12 @@ async fn collect_completion(
         Some(prompt) if prompt_only => prompt.clone(),
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
-    let metrics = enable_per_request_metrics.then(|| {
-        PerRequestMetrics::from_timestamps(collected.timestamps, collected.usage.output_token_count)
-    });
+    let metrics = PerRequestMetrics::from_request(
+        enable_per_request_metrics,
+        collected.timestamps,
+        collected.usage.output_token_count,
+        collected.spec_decode_metrics,
+    );
     let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
@@ -408,12 +411,12 @@ async fn completion_chunk_stream(
                         yield_chunk!(final_chunk);
 
                         if include_usage {
-                            let metrics = enable_per_request_metrics.then(|| {
-                                PerRequestMetrics::from_timestamps(
-                                    finished.timestamps,
-                                    finished.usage.output_token_count,
-                                )
-                            });
+                            let metrics = PerRequestMetrics::from_request(
+                                enable_per_request_metrics,
+                                finished.timestamps,
+                                finished.usage.output_token_count,
+                                finished.spec_decode_metrics,
+                            );
                             y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                                 &envelope,
                                 Usage::from_token_usage(
@@ -497,12 +500,12 @@ async fn completion_chunk_stream(
                     yield_chunk!(final_chunk);
 
                     if include_usage {
-                        let metrics = enable_per_request_metrics.then(|| {
-                            PerRequestMetrics::from_timestamps(
-                                finished.timestamps,
-                                finished.usage.output_token_count,
-                            )
-                        });
+                        let metrics = PerRequestMetrics::from_request(
+                            enable_per_request_metrics,
+                            finished.timestamps,
+                            finished.usage.output_token_count,
+                            finished.spec_decode_metrics,
+                        );
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                             &envelope,
                             Usage::from_token_usage(finished.usage, enable_prompt_tokens_details),
@@ -670,7 +673,7 @@ mod tests {
 
     use futures::{StreamExt as _, stream};
     use itertools::Itertools as _;
-    use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_text::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedText,
         DecodedTextEvent, DecodedTokenLogprob, FinishReason, Finished, SampledDelta,
@@ -740,8 +743,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collected_completion_includes_metrics_only_when_enabled() {
-        let make_stream = || {
+    async fn collected_completion_combines_timing_and_spec_decode_metrics() {
+        let make_stream = |spec_decode_metrics| {
             stream::iter(vec![
                 Ok(DecodedTextEvent::Start {
                     prompt_token_ids: vec![1].into(),
@@ -755,12 +758,13 @@ mod tests {
                         usage: vllm_llm::TokenUsage {
                             prompt_token_count: 1,
                             output_token_count: 1,
-                            cached_token_count: 0,
+                            prompt_cache_usage: Default::default(),
                         },
                         finish_reason: FinishReason::stop_eos(),
                         kv_transfer_params: None,
                         ec_transfer_params: None,
                         sampling_mask: None,
+                        spec_decode_metrics,
                         timestamps: vllm_llm::RequestTimestamps {
                             queued_ts: 10.0,
                             scheduled_ts: 10.2,
@@ -774,7 +778,7 @@ mod tests {
 
         for enabled in [false, true] {
             let response = collect_completion(
-                make_stream(),
+                make_stream(None),
                 "cmpl-1".into(),
                 "model".into(),
                 1,
@@ -797,6 +801,31 @@ mod tests {
                 assert_eq!(json["metrics"], serde_json::Value::Null);
             }
         }
+
+        let response = collect_completion(
+            make_stream(Some(RequestSpecDecodeMetrics {
+                num_spec_tokens: 3,
+                histogram: vec![0, 1, 1, 0],
+                num_draft_tokens: 6,
+                ..Default::default()
+            })),
+            "cmpl-1".into(),
+            "model".into(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions::default(),
+        )
+        .await
+        .expect("completion response");
+        let json = serde_json::to_value(response).expect("serializable response");
+        assert_eq!(
+            json["metrics"]["time_to_first_token_ms"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            json["metrics"]["speculative_decoding"]["num_draft_tokens"],
+            6
+        );
     }
 
     #[tokio::test]
@@ -854,7 +883,10 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 5,
                         output_token_count: 2,
-                        cached_token_count: 3,
+                        prompt_cache_usage: vllm_llm::PromptCacheUsage {
+                            cached_token_count: 3,
+                            cache_creation_token_count: 0,
+                        },
                     },
                     finish_reason: FinishReason::Repetition(Some(StopReason::Text(
                         "repetition_detected".to_string(),
@@ -862,6 +894,12 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                        num_spec_tokens: 3,
+                        histogram: vec![0, 1, 1, 0],
+                        num_draft_tokens: 6,
+                        ..Default::default()
+                    }),
                     timestamps: vllm_llm::RequestTimestamps {
                         queued_ts: 10.0,
                         scheduled_ts: 10.2,
@@ -951,6 +989,14 @@ mod tests {
                 assert!((metrics.queue_time_ms.unwrap() - 200.0).abs() < 1e-9);
                 assert!((metrics.tokens_per_second.unwrap() - 2.5).abs() < 1e-9);
                 assert_eq!(
+                    metrics
+                        .speculative_decoding
+                        .as_ref()
+                        .expect("speculative decoding metrics")
+                        .num_draft_tokens,
+                    6
+                );
+                assert_eq!(
                     chunk
                         .usage
                         .as_ref()
@@ -1013,6 +1059,7 @@ mod tests {
                         kv_transfer_params: None,
                         ec_transfer_params: None,
                         sampling_mask: None,
+                        spec_decode_metrics: None,
                         timestamps: vllm_llm::RequestTimestamps::default(),
                     }),
                 ))
@@ -1059,7 +1106,7 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 2,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: Some(Box::new(
@@ -1067,6 +1114,7 @@ mod tests {
                     )),
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1122,12 +1170,13 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 2,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1187,12 +1236,13 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1241,12 +1291,13 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 1,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1298,7 +1349,7 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: Some(Box::new(
@@ -1306,6 +1357,7 @@ mod tests {
                     )),
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1378,12 +1430,13 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 1,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1454,12 +1507,13 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
                     timestamps: Default::default(),
                 }),
             )),

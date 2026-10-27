@@ -33,14 +33,16 @@ use self::convert::{ResponseOptions, prepare_generate_request};
 use self::types::{
     GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob, GenerateResponse,
     GenerateResponseChoice, GenerateResponseStreamChoice, GenerateStreamResponse,
-    MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo, SpeculativeDecodingMetrics,
-    StreamingSpeculativeDecodingMetrics,
+    MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
+use crate::routes::openai::utils::metrics::{
+    SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
+};
 use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::{LoggedOutput, log_output};
@@ -191,7 +193,7 @@ async fn generate_chunk_stream(
                     }
                 }
                 usage.prompt_token_count = prompt_tokens.unwrap_or_default();
-                usage.cached_token_count = usage.cached_token_count.max(output.cached_token_count);
+                usage.prompt_cache_usage.merge(output.prompt_cache_usage);
 
                 let token_ids = output.token_ids;
                 usage.output_token_count = usage.output_token_count.saturating_add(token_ids.len());
@@ -576,7 +578,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-    use vllm_llm::GeneratePromptInfo;
+    use vllm_llm::{GeneratePromptInfo, PromptCacheUsage};
 
     use super::*;
 
@@ -670,7 +672,7 @@ mod tests {
                 token_ids: Vec::new(),
                 logprobs: None,
                 finish_reason: None,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
@@ -689,7 +691,10 @@ mod tests {
                 token_ids: vec![33],
                 logprobs: None,
                 finish_reason: Some(FinishReason::stop_eos()),
-                cached_token_count: 2,
+                prompt_cache_usage: PromptCacheUsage {
+                    cached_token_count: 2,
+                    cache_creation_token_count: 0,
+                },
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
@@ -778,7 +783,7 @@ mod tests {
             token_ids,
             logprobs: None,
             finish_reason,
-            cached_token_count: 0,
+            prompt_cache_usage: Default::default(),
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
@@ -951,7 +956,7 @@ mod tests {
             usage: TokenUsage {
                 prompt_token_count: 2,
                 output_token_count: 1,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -1153,7 +1158,7 @@ mod tests {
             usage: TokenUsage {
                 prompt_token_count: 2,
                 output_token_count: 1,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -1191,7 +1196,7 @@ mod tests {
             usage: vllm_llm::TokenUsage {
                 prompt_token_count: prompt_token_ids.len(),
                 output_token_count: 1,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -1269,7 +1274,7 @@ mod tests {
             usage: TokenUsage {
                 prompt_token_count: 2,
                 output_token_count: 2,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             kv_transfer_params: None,
             ec_transfer_params: None,
