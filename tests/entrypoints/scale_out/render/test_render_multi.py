@@ -14,7 +14,7 @@ MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 
 @pytest.fixture(scope="module")
 def server():
-    args: list[str] = ["--trust-request-chat-template",         "--api-server-count", "2"]
+    args: list[str] = ["--trust-request-chat-template", "--api-server-count", "2"]
 
     with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -86,7 +86,6 @@ async def test_chat_completion_render_basic(client):
     assert "token_ids" in data
     assert isinstance(data["token_ids"], list)
     assert len(data["token_ids"]) > 0
-
 
 
 @pytest.mark.asyncio

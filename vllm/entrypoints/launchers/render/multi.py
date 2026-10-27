@@ -10,6 +10,7 @@ from multiprocessing.connection import wait as mp_wait
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Barrier
 from socket import socket
+from typing import Any
 
 import uvloop
 
@@ -17,7 +18,7 @@ from vllm.logger import configure_logging_from_args, init_logger
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.utils import shutdown
 
-from ..launcher import setup_server, _NOT_ACCEPTING
+from ..launcher import _NOT_ACCEPTING, setup_server
 from .entry import build_and_serve_renderer, build_vllm_config
 
 logger = init_logger(__name__)
@@ -54,9 +55,7 @@ def run_worker_proc(
     vllm_config.parallel_config._api_process_count = args.api_server_count
 
     peer_loads = (
-        (api_server_loads, api_process_rank)
-        if api_server_loads is not None
-        else None
+        (api_server_loads, api_process_rank) if api_server_loads is not None else None
     )
 
     async def _serve() -> None:
@@ -85,9 +84,10 @@ def run_worker_proc(
 
 def _wait_for_first_exit(processes: list[BaseProcess]) -> BaseProcess:
     """Block until *any* worker exits; return the one that finished first."""
-    sentinels = {p.sentinel: p for p in processes}
+    sentinels: dict[Any, BaseProcess] = {p.sentinel: p for p in processes}
     ready = mp_wait(list(sentinels.keys()))
     first = sentinels[ready[0]]
+    # join() populates exitcode; it returns immediately for a dead process.
     first.join()
     if first.exitcode not in (0, None):
         logger.error(

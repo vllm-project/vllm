@@ -6,7 +6,8 @@ import contextlib
 import signal
 import socket
 from argparse import Namespace
-from typing import MutableSequence, Any
+from collections.abc import MutableSequence
+from typing import Any
 
 from vllm import AsyncEngineArgs, envs
 from vllm.config import VllmConfig
