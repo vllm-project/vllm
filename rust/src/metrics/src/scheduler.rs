@@ -91,6 +91,13 @@ pub struct WaitingReasonLabels {
     pub reason: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct KvFetchStageLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub stage: &'static str,
+}
+
 /// Labels for per-operation Mooncake store connector telemetry. `operation`
 /// and `status` are dynamic (not known ahead of time), unlike the other
 /// fixed-label families in this module.
@@ -216,6 +223,7 @@ pub struct SchedulerMetrics {
     pub scheduler_running: Family<EngineLabels, U64Gauge>,
     pub scheduler_waiting: Family<EngineLabels, U64Gauge>,
     pub scheduler_waiting_by_reason: Family<WaitingReasonLabels, U64Gauge>,
+    pub scheduler_kv_fetch_by_stage: Family<KvFetchStageLabels, U64Gauge>,
     pub kv_cache_usage: Family<EngineLabels, F64Gauge>,
 
     /// `vllm:lora_requests_info`. Value is the emit-time unix timestamp in
@@ -300,6 +308,16 @@ impl SchedulerMetrics {
              'deferred' = deferred by transient constraints (LoRA budget, KV transfer, \
              blocked status). Sum of all reasons equals vllm:num_requests_waiting.",
             scheduler_waiting_by_reason.clone(),
+        );
+
+        let scheduler_kv_fetch_by_stage = Family::default();
+        registry.register(
+            "vllm:num_requests_kv_fetch_by_stage",
+            "Number of waiting requests by async KV load stage. \
+             Stage labels: 'waiting_to_start' = needs an async KV load that has not started; \
+             'in_progress' = load started and not yet reported finished; \
+             'completed_waiting' = load finished, request not running yet.",
+            scheduler_kv_fetch_by_stage.clone(),
         );
 
         let kv_cache_usage = Family::default();
@@ -582,6 +600,7 @@ impl SchedulerMetrics {
             scheduler_running,
             scheduler_waiting,
             scheduler_waiting_by_reason,
+            scheduler_kv_fetch_by_stage,
             kv_cache_usage,
             lora_info,
             prefix_cache_queries,

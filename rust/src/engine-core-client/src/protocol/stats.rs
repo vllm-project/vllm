@@ -49,6 +49,32 @@ impl CachedTokensBySource {
     }
 }
 
+/// Waiting requests with an async KV load, per load stage. Python sends a
+/// `dict[str, int]` keyed by stage, so absent stages default to zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KvFetchReqsByStage {
+    /// Needs an async KV load that has not started.
+    pub waiting_to_start: u64,
+    /// Load started and not yet reported finished.
+    pub in_progress: u64,
+    /// Load finished, request not running yet.
+    pub completed_waiting: u64,
+}
+
+impl KvFetchReqsByStage {
+    /// Label values, in the same order as [`Self::counts`].
+    pub const STAGES: [&'static str; 3] = ["waiting_to_start", "in_progress", "completed_waiting"];
+
+    pub fn counts(&self) -> [u64; 3] {
+        [
+            self.waiting_to_start,
+            self.in_progress,
+            self.completed_waiting,
+        ]
+    }
+}
+
 /// Stores prefix cache hit statistics.
 /// - `reset`: Whether `reset_prefix_cache` was invoked.
 /// - `queries`: Refers to the number of tokens that were queried.
@@ -341,6 +367,9 @@ pub struct SchedulerStats {
     /// Number of waiting requests deferred by transient constraints or a blocked status.
     #[serde(default)]
     pub num_skipped_waiting_reqs: u64,
+    /// Waiting requests with an async KV load, by load stage.
+    #[serde(default)]
+    pub num_kv_fetch_reqs_by_stage: KvFetchReqsByStage,
     /// Internal DP load-balancing step counter.
     pub step_counter: u64,
     /// Internal DP load-balancing wave number.
@@ -365,7 +394,7 @@ pub struct SchedulerStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{CachedTokensBySource, PrefixCacheStats};
+    use super::{CachedTokensBySource, KvFetchReqsByStage, PrefixCacheStats, SchedulerStats};
 
     #[test]
     fn prefix_cache_stats_hits_by_source_defaults_and_decodes() {
@@ -388,5 +417,32 @@ mod tests {
         let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
         assert_eq!(stats.hits_by_source.counts(), [0, 8, 4, 0, 0]);
         assert_eq!(CachedTokensBySource::SOURCES[1], "host");
+    }
+
+    #[test]
+    fn scheduler_stats_kv_fetch_reqs_by_stage_defaults_and_decodes() {
+        let mut payload = serde_json::json!({
+            "num_running_reqs": 1, "num_waiting_reqs": 2,
+            "step_counter": 0, "current_wave": 0, "kv_cache_usage": 0.5,
+            "prefix_cache_stats": {
+                "reset": false, "requests": 0, "queries": 0, "hits": 0,
+                "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0
+            },
+            "kv_cache_eviction_events": []
+        });
+
+        // Engines before vllm-project/vllm#58874 omit the field entirely.
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(
+            stats.num_kv_fetch_reqs_by_stage,
+            KvFetchReqsByStage::default()
+        );
+
+        payload["num_kv_fetch_reqs_by_stage"] =
+            serde_json::json!({"waiting_to_start": 3, "in_progress": 1});
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(stats.num_kv_fetch_reqs_by_stage.counts(), [3, 1, 0]);
     }
 }
