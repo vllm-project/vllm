@@ -236,6 +236,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
         enabled: bool | None = None,
         norm_before_gate: bool = True,
         group_size: int | None = None,
+        activation: str = "swish",
     ) -> None:
         if enabled is None:
             enabled = RMSNormGated.enabled()
@@ -244,6 +245,7 @@ class MatcherRMSNormGated(MatcherCustomOp):
         self.epsilon = epsilon
         self.norm_before_gate = norm_before_gate
         self.group_size = group_size
+        self.activation = activation
 
     def inputs(self) -> list[torch.Tensor]:
         x = self.empty(5, 16)
@@ -257,18 +259,14 @@ class MatcherRMSNormGated(MatcherCustomOp):
         z: torch.Tensor,
         weight: torch.Tensor,
     ) -> torch.Tensor:
-        from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
-            rmsnorm_fn,
-        )
-
-        return rmsnorm_fn(
+        return torch.ops.vllm.fla_rms_norm_gated(
             x,
+            z,
             weight,
-            bias=None,
-            z=z,
-            eps=self.epsilon,
-            group_size=self.group_size,
-            norm_before_gate=self.norm_before_gate,
+            self.epsilon,
+            self.group_size,
+            self.norm_before_gate,
+            self.activation,
         )
 
     def forward_native(
@@ -390,10 +388,13 @@ class MatcherQuantFP8(MatcherCustomOp):
         self.is_tma_aligned = is_tma_aligned
 
         if match_rocm_aiter:
-            assert not quant_key.scale.group_shape.is_per_tensor(), (
-                "ROCm aiter fusion pass does not support per tensor quantization"
-            )
-            if quant_key.scale.group_shape.is_per_token():
+            if quant_key.scale.group_shape.is_per_tensor():
+                assert quant_key.scale.static, (
+                    "ROCm aiter fusion pass only supports static per-tensor "
+                    "quantization"
+                )
+                self.QUANT_OP = rocm_aiter_ops.get_per_tensor_quant_op()
+            elif quant_key.scale.group_shape.is_per_token():
                 self.QUANT_OP = rocm_aiter_ops.get_per_token_quant_op()
             else:
                 assert quant_key.scale.group_shape.col == 128, (
@@ -428,14 +429,24 @@ class MatcherQuantFP8(MatcherCustomOp):
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         quant_key_group_shape = self.quant_key.scale.group_shape
+        if quant_key_group_shape == GroupShape.PER_TENSOR:
+            # rocm_aiter_per_tensor_quant mutates `out` and `scale` and returns
+            # None, so it has to be matched through auto_functionalized.
+            assert scale is not None
+            out = torch.empty_like(input, dtype=self.quant_key.dtype)
+            result = auto_functionalized(
+                self.QUANT_OP, out=out, x=input, scale=scale, is_dynamic=False
+            )
+            # `scale` is mutable, so its functionalized output is a distinct
+            # value; return it to keep the quant node inside the match.
+            return result[1], result[2]
         if quant_key_group_shape == GroupShape.PER_TOKEN:
             return self.QUANT_OP(  # type: ignore[no-any-return]
                 x=input,
                 quant_dtype=self.quant_key.dtype,
                 scale=scale,
             )
-        else:
-            return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
+        return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
 
     def forward_custom(
         self,
@@ -477,8 +488,13 @@ class MatcherQuantFP8(MatcherCustomOp):
 
         if self.quant_key.scale.static:
             assert scale is not None
+            group_shape = self.quant_key.scale.group_shape
             _, result = auto_functionalized(
-                self.QUANT_OP, result=result, input=input, scale=scale
+                self.QUANT_OP,
+                result=result,
+                input=input,
+                scale=scale,
+                group_shape=[group_shape.row, group_shape.col],
             )
             return result, scale
         else:

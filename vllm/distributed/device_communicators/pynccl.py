@@ -255,9 +255,14 @@ class PyNcclCommunicator:
             # thread teardown, so a direct call here self-deadlocks.
             # Run it in a daemon thread with a timeout: the main
             # thread proceeds, the graphs drop, and the abort returns.
+            # The thread must not reference self: if it outlives the join
+            # and finishes during interpreter shutdown, freeing self.group
+            # there releases the GIL in a C++ destructor and aborts.
+            nccl, comm, device_index = self.nccl, self.comm, self.device.index
+
             def _abort():
-                with torch.accelerator.device_index(self.device.index):
-                    self.nccl.ncclCommAbort(self.comm)
+                with torch.accelerator.device_index(device_index):
+                    nccl.ncclCommAbort(comm)
 
             abort_thread = threading.Thread(target=_abort, daemon=True)
             abort_thread.start()
