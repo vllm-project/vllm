@@ -111,8 +111,9 @@ def _cgroup_mount(controller: str | None, membership: str) -> tuple[str, str]:
 
     A mount can expose a subtree (mount root other than "/"), cgroup v1 can
     co-mount controllers as e.g. "cpu,memory", and several mounts can match.
-    The mount whose root contains ``membership`` wins, the most specific one
-    first; then the first match; then /sys/fs/cgroup.
+    The mount whose root contains ``membership`` wins. Among those, the one
+    with the shortest root wins, because it exposes the most ancestors and an
+    ancestor limit still applies. Then the first match; then /sys/fs/cgroup.
     """
     candidates: list[tuple[str, str]] = []
     try:
@@ -146,7 +147,7 @@ def _cgroup_mount(controller: str | None, membership: str) -> tuple[str, str]:
         if member_parts[: len(_path_parts(root))] == _path_parts(root)
     ]
     if containing:
-        return max(containing, key=lambda mount: len(_path_parts(mount[1])))
+        return min(containing, key=lambda mount: len(_path_parts(mount[1])))
     if candidates:
         return candidates[0]
     if controller is None:

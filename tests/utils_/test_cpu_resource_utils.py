@@ -12,6 +12,7 @@ import pytest
 from vllm.platforms import CpuArchEnum
 from vllm.utils import cpu_resource_utils as cru
 from vllm.utils import ompmultiprocessing as omp
+from vllm.utils import torch_utils
 from vllm.utils.mem_constants import GiB_bytes
 
 _V2_LIMIT_PATH = "/sys/fs/cgroup/memory.max"
@@ -40,7 +41,11 @@ def _clear_cgroup_cache():
 
 
 def _stub_files(monkeypatch, files: dict):
-    """Stub ``open()`` for a fixed set of paths; ``None`` -> OSError."""
+    """Stub ``open()`` for a fixed set of paths; ``None`` -> OSError.
+
+    Any other cgroup or /proc/self file raises OSError too, so the cgroups of
+    the machine that runs the tests never leak into them.
+    """
     real_open = open
 
     def fake_open(path, *args, **kwargs):
@@ -49,6 +54,11 @@ def _stub_files(monkeypatch, files: dict):
             if content is None:
                 raise OSError(f"no such file: {path}")
             return StringIO(content)
+        if isinstance(path, str) and (
+            path.startswith(("/sys/fs/cgroup", "/mnt/", "/stub/"))
+            or path in ("/proc/self/cgroup", "/proc/self/mountinfo")
+        ):
+            raise OSError(f"not stubbed: {path}")
         return real_open(path, *args, **kwargs)
 
     monkeypatch.setattr("builtins.open", fake_open)
@@ -325,6 +335,113 @@ def test_cgroup_mount_is_resolved_from_mountinfo(
             _PROC_SELF_MOUNTINFO: mountinfo,
             _PROC_SELF_CGROUP: proc_self_cgroup,
             limit_path: f"{1 * GiB_bytes}\n",
+        },
+    )
+
+    assert cru.get_cgroup_memory_limit() == 1 * GiB_bytes
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_cgroup_subtree_alias_does_not_hide_a_parent_limit(monkeypatch, reverse):
+    """Two mounts contain the process: the full hierarchy and a bind-mounted
+    subtree. The full view must win, because the parent limit still applies.
+    Reported by @adenzhou1350."""
+    monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+    mounts = [
+        "40 25 0:30 / /mnt/main rw - cgroup2 cgroup2 rw\n",
+        "41 25 0:30 /pod/ctr /mnt/ctr rw - cgroup2 cgroup2 rw\n",
+    ]
+    _stub_files(
+        monkeypatch,
+        {
+            _PROC_SELF_CGROUP: "0::/pod/ctr\n",
+            _PROC_SELF_MOUNTINFO: "".join(mounts[::-1] if reverse else mounts),
+            "/mnt/main/memory.max": "max\n",
+            "/mnt/main/pod/memory.max": f"{512 << 20}\n",
+            "/mnt/main/pod/memory.current": f"{256 << 20}\n",
+            "/mnt/main/pod/ctr/memory.max": f"{1024 << 20}\n",
+            "/mnt/main/pod/ctr/memory.current": "0\n",
+            "/mnt/ctr/memory.max": f"{1024 << 20}\n",
+            "/mnt/ctr/memory.current": "0\n",
+        },
+    )
+
+    limit = cru.get_cgroup_memory_limit()
+    usage = cru.get_cgroup_memory_usage()
+    assert limit == 512 << 20
+    assert usage is not None
+    assert limit - usage == 256 << 20
+
+
+@pytest.mark.parametrize(
+    ("pod_memory", "pod_cpu", "ctr_memory", "ctr_cpu", "memory", "cpus"),
+    [
+        # Memory limit on the pod, CPU quota on the container.
+        (f"{512 << 20}", "max 100000", "max", "150000 100000", 512 << 20, 1.5),
+        # CPU quota on the pod, memory limit on the container.
+        ("max", "200000 100000", f"{256 << 20}", "max 100000", 256 << 20, 2.0),
+    ],
+)
+def test_cgroup_memory_and_cpu_limits_on_different_levels(
+    monkeypatch, pod_memory, pod_cpu, ctr_memory, ctr_cpu, memory, cpus
+):
+    """A pod with both a memory limit and a CPU quota, on different levels.
+    The memory reader and the CPU-quota reader each find their own limit."""
+    monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(
+        monkeypatch,
+        {
+            _PROC_SELF_CGROUP: "0::/pod/ctr\n",
+            "/proc/self/cgroup": "0::/pod/ctr\n",
+            "/sys/fs/cgroup/pod/memory.max": f"{pod_memory}\n",
+            "/sys/fs/cgroup/pod/memory.current": f"{128 << 20}\n",
+            "/sys/fs/cgroup/pod/cpu.max": f"{pod_cpu}\n",
+            "/sys/fs/cgroup/pod/ctr/memory.max": f"{ctr_memory}\n",
+            "/sys/fs/cgroup/pod/ctr/memory.current": f"{64 << 20}\n",
+            "/sys/fs/cgroup/pod/ctr/cpu.max": f"{ctr_cpu}\n",
+        },
+    )
+
+    assert cru.get_cgroup_memory_limit() == memory
+    assert torch_utils._cgroup_cpu_limit() == cpus
+
+
+def test_cgroup_hybrid_host_reads_memory_from_v1(monkeypatch):
+    """Systemd hybrid layout: cgroup v2 at /sys/fs/cgroup/unified without the
+    memory controller, memory still on cgroup v1."""
+    monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(
+        monkeypatch,
+        {
+            _PROC_SELF_MOUNTINFO: (
+                "30 25 0:26 / /sys/fs/cgroup/unified rw - cgroup2 cgroup2 rw\n"
+                "35 25 0:31 / /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory\n"
+            ),
+            _PROC_SELF_CGROUP: "4:memory:/job\n0::/job\n",
+            "/sys/fs/cgroup/memory/job/memory.limit_in_bytes": f"{1 * GiB_bytes}\n",
+            "/sys/fs/cgroup/memory/job/memory.usage_in_bytes": f"{256 << 20}\n",
+        },
+    )
+
+    assert cru.get_cgroup_memory_limit() == 1 * GiB_bytes
+    assert cru.get_cgroup_memory_usage() == 256 << 20
+
+
+def test_cgroup_mount_point_with_escaped_space(monkeypatch):
+    """Mountinfo escapes a space in a path as \\040."""
+    monkeypatch.setenv("VLLM_RESOLVE_PROCESS_CGROUP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(
+        monkeypatch,
+        {
+            _PROC_SELF_MOUNTINFO: (
+                "40 25 0:30 / /mnt/my\\040cg rw - cgroup2 cgroup2 rw\n"
+            ),
+            _PROC_SELF_CGROUP: "0::/job\n",
+            "/mnt/my cg/job/memory.max": f"{1 * GiB_bytes}\n",
         },
     )
 
