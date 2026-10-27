@@ -261,6 +261,20 @@ pub struct StreamOptions {
     pub continuous_usage_stats: Option<bool>,
 }
 
+impl StreamOptions {
+    /// Whether no option is set, as in `"stream_options": {}`.
+    ///
+    /// Python rejects `stream_options` without `stream=true` only when the
+    /// object is non-empty, so an empty object must pass that check.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            include_usage,
+            continuous_usage_stats,
+        } = self;
+        include_usage.is_none() && continuous_usage_stats.is_none()
+    }
+}
+
 // ============================================================================
 // Tools and Function Calling
 // ============================================================================
@@ -271,6 +285,10 @@ pub struct Tool {
     #[serde(default = "default_function_tool_type")]
     pub tool_type: String,
     pub function: Function,
+    /// Tool-level form of [`Function::defer_loading`]; the function-level value
+    /// takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_loading: Option<bool>,
 }
 
 fn default_function_tool_type() -> String {
@@ -286,6 +304,9 @@ pub struct Function {
     pub parameters: Value,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
+    /// Whether the schema is loaded on demand via tool search (vLLM extension,
+    /// mirroring the OpenAI Responses and Anthropic Messages field).
+    pub defer_loading: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -556,9 +577,7 @@ impl Usage {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: cached_tokens
-                .filter(|&c| c > 0)
-                .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
+            prompt_tokens_details: cached_tokens.map(|c| PromptTokenUsageInfo { cached_tokens: c }),
             completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
         }
     }
@@ -627,6 +646,20 @@ mod usage_tests {
             usage.prompt_tokens_details.as_ref().map(|details| details.cached_tokens),
             Some(3)
         );
+    }
+
+    #[test]
+    fn token_usage_serializes_zero_cached_tokens_when_enabled() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 8,
+                output_token_count: 2,
+                cached_token_count: 0,
+            },
+            true,
+        );
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["prompt_tokens_details"]["cached_tokens"], 0);
     }
 
     #[test]
@@ -734,13 +767,16 @@ pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
+/// Mirrors the Python vLLM `ErrorInfo` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorDetail {
     pub message: String,
+    /// The error class, such as `BadRequestError`.
     #[serde(rename = "type")]
     pub error_type: String,
     pub param: Option<String>,
-    pub code: Option<String>,
+    /// The HTTP status code.
+    pub code: u16,
 }
 
 // ============================================================================
