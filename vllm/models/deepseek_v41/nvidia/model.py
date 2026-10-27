@@ -75,6 +75,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
@@ -710,7 +711,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             or self.parallel_config.data_parallel_size != 1
             or self.parallel_config.decode_context_parallel_size != 1
             or self.parallel_config.use_ubatching
-            or vllm_config.speculative_config is not None
+            or (
+                vllm_config.speculative_config is not None
+                and (
+                    not vllm_config.speculative_config.use_dspark()
+                    or vllm_config.speculative_config.enable_adaptive_verification
+                )
+            )
             or vllm_config.kv_transfer_config is not None
             or (
                 vllm_config.cache_config.enable_prefix_caching
@@ -720,7 +727,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         ):
             raise NotImplementedError(
                 "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
-                "microbatching, speculative decoding, KV transfer, or MegaMoE. "
+                "microbatching, KV transfer, or MegaMoE. "
+                "Speculative decoding requires fixed-length DSpark. "
                 "Prefix caching requires SWA bounded replay."
             )
         self.use_native_mega_moe = (
@@ -929,10 +937,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
-        )
-        if get_pp_group().is_last_rank and needs_mtp_hidden_states:
+        if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
