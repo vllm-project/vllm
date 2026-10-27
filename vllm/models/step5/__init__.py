@@ -4,6 +4,9 @@
 
 from typing import TYPE_CHECKING, Any
 
+# Registers the Step5 warmups; on ROCm they delegate to amd/.
+from .nvidia import warmup  # noqa: F401
+
 if TYPE_CHECKING:
     from .nvidia.model import Step5ForCausalLM
     from .nvidia.mtp import Step5MTP

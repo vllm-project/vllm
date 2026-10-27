@@ -302,7 +302,7 @@ def fused_recurrent_kda_fwd_kernel(
         tl.extra.cuda.gdc_launch_dependents()
 
 
-# Consumed by kimi_k3_triton_warmup.py during kernel_warmup().
+# Consumed by vllm/models/kimi_k3/warmup.py during kernel_warmup().
 def get_fused_recurrent_kda_fwd_warmup_profiles(
     num_heads: int,
 ) -> tuple[int, ...]:

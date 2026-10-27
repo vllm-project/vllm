@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.model_warmup import register_model_warmup
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -219,6 +220,7 @@ def _warm_gluon_chunk_kda(layer, input_dtype: torch.dtype) -> None:
         )
 
 
+@register_model_warmup("jit")
 @torch.inference_mode()
 def kimi_k3_triton_warmup(worker: Worker) -> None:
     """Warm Kimi-K3 Triton kernels reachable by this server."""
