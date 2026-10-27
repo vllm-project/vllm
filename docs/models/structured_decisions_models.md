@@ -11,6 +11,7 @@ used for classification and routing.
 | Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       |
 |---------------------------|---------------------|------------------|-------------------|-------------------------|
 | `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
+| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
 | `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
 
 ### Multimodal Models
@@ -18,13 +19,16 @@ used for classification and routing.
 !!! note
     For more information about multimodal models inputs, see [this page](./supported_models.md#list-of-multimodal-language-models).
 
-| Architecture                         | Inputs                              | ReadStrategy                   | Task             | Head              | Example HF Models                        |
-|--------------------------------------|-------------------------------------|--------------------------------|------------------|-------------------|------------------------------------------|
-| `ClefOmniForJointSchema`             | T + I + V                           | `JointSchemaStrategy`          | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-omni`                   |
-| `Lfm2VlForConditionalGeneration`     | T + I<sup>+</sup>                   | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
-| `Qwen3_5ForConditionalGeneration`    | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-0.8B`, etc.                |
-| `Qwen3_5MoeForConditionalGeneration` | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
-| `DiffusionGemmaForBlockDiffusion`    | T + I<sup>+</sup> + V<sup>+</sup>   | `DiffusionGemmaCanvasStrategy` | `generate`       | N/A               | `google/diffusiongemma-26B-A4B-it`, etc. |
+| Architecture                            | Inputs                                | ReadStrategy                   | Task             | Head              | Example HF Models                        |
+|-----------------------------------------|---------------------------------------|--------------------------------|------------------|-------------------|------------------------------------------|
+| `ClefOmniForJointSchema`                | T + I + V                             | `JointSchemaStrategy`          | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-omni`                   |
+| `D3ForSequenceClassification`           | T + I + V                             | `D3Strategy`                   | `classify`       | Linear (`score`)  | `vllm-sr/d3`, `vllm-sr/d3-mini`, etc.    |
+| `Gemma4ForConditionalGeneration`        | T + I<sup>+</sup> + V + A<sup>*</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `google/gemma-4-E2B-it`, etc.            |
+| `Gemma4UnifiedForConditionalGeneration` | T + I<sup>+</sup> + V + A             | `NextTokenStrategy`            | `generate`       | N/A               | `google/gemma-4-12B-it`, etc.            |
+| `Lfm2VlForConditionalGeneration`        | T + I<sup>+</sup>                     | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
+| `Qwen3_5ForConditionalGeneration`       | T + I<sup>E+</sup> + V<sup>E+</sup>   | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-0.8B`, etc.                |
+| `Qwen3_5MoeForConditionalGeneration`    | T + I<sup>E+</sup> + V<sup>E+</sup>   | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
+| `DiffusionGemmaForBlockDiffusion`       | T + I<sup>+</sup> + V<sup>+</sup>     | `DiffusionGemmaCanvasStrategy` | `generate`       | N/A               | `google/diffusiongemma-26B-A4B-it`, etc. |
 
 ## Online Serving
 
@@ -160,6 +164,30 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | options per `choice` | 26 |
 | levels per `score` | 10 |
 
+#### Joint reads
+
+With `"joint": true`, a diffusion model reads several questions from one canvas in
+one denoising step: the prompt numbers the questions, and each answer is read at
+its slot in a `number: answer` line. A one-question request is read per
+question, as without `joint`.
+
+Questions that do not fit the served canvas (`--diffusion-config
+'{"canvas_length": N}'`) are split, in order, into the fewest even runs that
+fit. Each run is one engine request and counts once for admission.
+
+The response adds a `joint` object, `null` when each question was read on its own:
+
+```json
+"joint": {"canvases": [{"questions": ["urgent", "bucket", "tone"], "width": 16, "slots": [2, 6, 11]}]}
+```
+
+- Answers can differ from per-question reads, since the slots see each other
+  and the question order.
+- `usage.output_tokens` counts each canvas once, up to its last slot.
+- Joint reads take the same limits as per-question reads: 64 questions per
+  request, no thinking, and each prompt plus its canvas within `max_model_len`.
+- `/v1/decisions` takes the same `joint` field as a vLLM extension.
+
 #### Request fields
 
 | field | meaning |
@@ -169,10 +197,11 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `cache_salt` | optional [prefix-cache salt](../usage/security.md#cache-salting) applied to every question |
-| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Liquid d1](#liquid-d1), images only) |
+| `joint` | optional boolean, default `false`; see [Joint reads](#joint-reads). DiffusionGemma only, other models return 400 |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; DiffusionGemma, images only, with or without `joint`; [Liquid d1](#liquid-d1), images only; multimodal `NextTokenStrategy` models such as Qwen3.5, images only) |
 
-A question with any field other than `type`, `instructions` and `criteria` is
-rejected with a 400.
+Unknown top-level fields, and question fields other than `type`,
+`instructions` and `criteria`, are rejected with a 400.
 
 When [tracing](../../examples/observability/opentelemetry/README.md) is enabled
 with `--otlp-traces-endpoint`, the HTTP `traceparent` and `tracestate` headers are
@@ -301,6 +330,42 @@ vllm serve Cloudflare/clef-omni
   with it when every video has one. Audio clips cannot be sent together with
   videos that have soundtracks.
 
+### Decision 3.0
+
+The Decision 3.0 models are a Qwen3.5 backbone with an answer-code readout:
+one forward pass per question, and the readout scores the question's options
+at the last token. vLLM detects the checkpoint's `decision_config.json` and
+serves it as a classification model. All six sizes take the same command:
+[`vllm-sr/d3`](https://huggingface.co/vllm-sr/d3) (27B),
+[`vllm-sr/d3-flash`](https://huggingface.co/vllm-sr/d3-flash) (9B),
+[`vllm-sr/d3-mini`](https://huggingface.co/vllm-sr/d3-mini) (4B),
+[`vllm-sr/d3-nano`](https://huggingface.co/vllm-sr/d3-nano) (2B),
+[`vllm-sr/d3-lite`](https://huggingface.co/vllm-sr/d3-lite) (0.8B) and
+[`vllm-sr/d3-edge`](https://huggingface.co/vllm-sr/d3-edge) (0.6B).
+
+```bash
+vllm serve vllm-sr/d3
+```
+
+- Each question is one read of the prompt the checkpoint's `d3_format.py`
+  writes: the state, the question and one line per option under an answer
+  code. A question's probabilities are the softmax of its options' code
+  logits at the checkpoint's temperature, so picks and probabilities match
+  `model.system_one()`. `confidence` and `usage` follow the definitions on
+  this page instead.
+- A choice can have up to 255 options. A JSON state is written as JSON text,
+  and an empty state as `(empty)`.
+- The full attention layers read the whole prompt in both directions, as the
+  checkpoint declares, so chunked prefill and prefix caching are off.
+- `instructions` returns 400, since the prompt is fixed.
+  `chat_template_kwargs` has no effect.
+- `images` and `videos` are placed before the text, images read at up to
+  1.6 megapixels and videos at 2 fps, at most 32 frames of up to
+  0.2 megapixels each, as the checkpoint's runtime does. The media are read
+  once and shared by every question of the request.
+- `/classify` and `/pooling` return the raw logits of all 255 codes; only the
+  first codes, one per option, belong to a question.
+
 ### Liquid d1
 
 [`LiquidAI/d1-3B`](https://huggingface.co/LiquidAI/d1-3B) is LFM2.5-VL-3B
@@ -322,4 +387,4 @@ vllm serve LiquidAI/d1-3B
 - A `choice` whose option names are all single letters is labeled with those
   letters.
 - When each request carries one question over a state that changes from
-  request to request, `--no-enable-prefix-caching` lowers latency.
+  request to request, `--disable-prefix-caching` lowers latency.
