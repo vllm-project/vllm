@@ -36,11 +36,8 @@ from vllm.entrypoints.launchers.run_batch import (
     validate_batch,
     validate_run_batch_args,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.completion.protocol import (
-    CompletionRequest,
-    CompletionResponse,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
+from vllm.entrypoints.openai.completion.protocol import CompletionResponse
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -561,7 +558,12 @@ def test_completions_endpoint():
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
     ):
-        input_file.write(INPUT_COMPLETIONS_BATCH)
+        # A chat line rides along: /v1/chat/completions and /v1/completions
+        # share their last URL segment, so each must reach its own handler.
+        chat_line = json.dumps(
+            json.loads(INPUT_BATCH.strip().split("\n")[0]) | {"custom_id": "chat-1"}
+        )
+        input_file.write(INPUT_COMPLETIONS_BATCH + "\n" + chat_line)
         input_file.flush()
         proc = subprocess.Popen(
             [
@@ -580,14 +582,21 @@ def test_completions_endpoint():
         assert proc.returncode == 0, f"{proc=}"
 
         contents = output_file.read()
-        lines = contents.strip().split("\n")
-        assert len(lines) == 2
-        for line in lines:
-            output = BatchRequestOutput.model_validate_json(line)
+        outputs = {
+            output.custom_id: output
+            for output in map(
+                BatchRequestOutput.model_validate_json, contents.strip().split("\n")
+            )
+        }
+        assert len(outputs) == 3
+        for output in outputs.values():
             assert output.error is None
-            assert isinstance(output.response.body, CompletionResponse)
+        assert isinstance(outputs["request-1"].response.body, CompletionResponse)
         # A list prompt returns one choice per prompt.
-        assert len(output.response.body.choices) == 2
+        completion = outputs["request-2"].response.body
+        assert isinstance(completion, CompletionResponse)
+        assert len(completion.choices) == 2
+        assert isinstance(outputs["chat-1"].response.body, ChatCompletionResponse)
 
 
 def test_completions_invalid_input():
@@ -1761,39 +1770,3 @@ def test_url_matches_accepts_any_prefix_for_unversioned_endpoints():
     assert url_matches("/v1/embeddings", "/v1/embeddings")
     for url in ("/v2/embeddings", "/api/v1/embeddings"):
         assert not url_matches("/v1/embeddings", url), url
-
-
-@pytest.mark.asyncio
-async def test_chat_and_text_completions_reach_their_own_handlers(tmp_path):
-    """/v1/chat/completions and /v1/completions share their last URL segment."""
-    chat_handler = AsyncMock(side_effect=VLLMValidationError("chat"))
-    completion_handler = AsyncMock(side_effect=VLLMValidationError("completion"))
-    registry = {
-        "chat_completions": {
-            "url": "/v1/chat/completions",
-            "handler_getter": lambda: chat_handler,
-            "wrapper_fn": None,
-        },
-        "completions": {
-            "url": "/v1/completions",
-            "handler_getter": lambda: completion_handler,
-            "wrapper_fn": None,
-        },
-    }
-    chat_request = INPUT_BATCH.strip().split("\n")[0]
-    completion_request = INPUT_COMPLETIONS_BATCH.strip().split("\n")[0]
-    input_path = _write_batch(tmp_path, [chat_request, completion_request])
-    output_path = tmp_path / "output.jsonl"
-
-    with (
-        open(input_path, encoding="utf-8") as input_file,
-        open(output_path, "w", encoding="utf-8") as output_file,
-    ):
-        await dispatch_batch(
-            input_file, output_file, registry, BatchProgressTracker(), 4
-        )
-
-    chat_handler.assert_awaited_once()
-    assert isinstance(chat_handler.await_args.args[0], ChatCompletionRequest)
-    completion_handler.assert_awaited_once()
-    assert isinstance(completion_handler.await_args.args[0], CompletionRequest)
