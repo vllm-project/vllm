@@ -174,6 +174,8 @@ see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more 
 
 Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../../examples/basic/online_serving/openai_chat_completion_client.py)
 
+With `--enable-prompt-tokens-details`, `/v1/chat/completions/batch` sums `cached_tokens`, `created_cache_tokens` and per-modality `multimodal_tokens` across conversations in `usage.prompt_tokens_details`; an unreported cache count makes that total `null`, and disabling the flag leaves the details `null`.
+
 #### Extra parameters
 
 The following [sampling parameters](../../api/README.md#inference-parameters) are supported.
