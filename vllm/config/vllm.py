@@ -3265,12 +3265,17 @@ class VllmConfig:
     def _validate_cudagraph_launch_mode(self) -> None:
         if self.compilation_config.cudagraph_launch_mode != "device":
             return
+        # Both draw from PyTorch's CUDA generator inside the captured graphs.
+        rng_users = []
         if self.mamba_config.enable_stochastic_rounding:
+            rng_users.append("--enable-mamba-cache-stochastic-rounding")
+        if envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY:
+            rng_users.append("VLLM_MOE_ROUTING_SIMULATION_STRATEGY")
+        if rng_users:
             raise ValueError(
                 "cudagraph_launch_mode='device' skips PyTorch's per-replay RNG "
-                "setup, which --enable-mamba-cache-stochastic-rounding needs "
-                "inside the captured graphs. Use cudagraph_launch_mode='host' "
-                "or disable stochastic rounding."
+                "setup, which the captured graphs need for "
+                f"{' and '.join(rng_users)}. Use cudagraph_launch_mode='host'."
             )
 
         from vllm.platforms import current_platform

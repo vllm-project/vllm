@@ -655,16 +655,12 @@ class CompilationConfig:
     - "host" (default): PyTorch instantiates them.
     - "device": vLLM instantiates them with
     `CUDA_GRAPH_INSTANTIATE_FLAG_DEVICE_LAUNCH` and uploads them at capture
-    time; replays are still launched from the host. An option to try when
-    host-launched CUDA graph replays hang (see pytorch/pytorch#196133), not a
-    performance optimization: each replay can
-    take a few microseconds longer, once per forward pass for `FULL` graphs
-    and once per piece for `PIECEWISE` graphs. A graph the driver cannot
-    instantiate this way keeps PyTorch's instantiation, with a warning.
+    time; replays are still launched from the host. A workaround to try when
+    host-launched replays hang (pytorch/pytorch#196133), not a performance
+    optimization: measure performance with and without it. Graphs the driver
+    cannot instantiate this way keep PyTorch's instantiation, with a warning.
     Random numbers drawn from PyTorch's CUDA generator inside a captured graph
-    are not seeded and repeat on every replay. Encoder and model-specific
-    helper graphs are not affected. Requires NVIDIA CUDA and the
-    `cuda-bindings` package.
+    repeat on every replay. Requires NVIDIA CUDA and `cuda-bindings`.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.

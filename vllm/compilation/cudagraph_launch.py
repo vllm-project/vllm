@@ -1,14 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""How captured CUDA graphs are instantiated.
-
-PyTorch instantiates every graph it captures with fixed flags. With
-``CompilationConfig.cudagraph_launch_mode="device"``, vLLM instantiates the
-graphs it captures for the model forward pass itself, with
-``CUDA_GRAPH_INSTANTIATE_FLAG_DEVICE_LAUNCH`` through cuda-bindings, uploads
-them at capture time and replays them with ``cuGraphLaunch``. Replays are
-still launched from the host.
-"""
+"""Device-launch instantiation of the CUDA graphs vLLM captures
+(``CompilationConfig.cudagraph_launch_mode="device"``)."""
 
 from __future__ import annotations
 
@@ -37,6 +30,30 @@ def new_cuda_graph(launch_mode: CUDAGraphLaunchMode = "host") -> torch.cuda.CUDA
     if launch_mode == "device":
         return DeviceLaunchCUDAGraph()
     return torch.cuda.CUDAGraph()
+
+
+def device_launch_counts() -> tuple[int, int]:
+    """Graphs instantiated for device launch and graphs that kept PyTorch's
+    instantiation so far in this process."""
+    return (
+        compilation_counter.num_cudagraph_device_launched,
+        compilation_counter.num_cudagraph_host_launch_fallbacks,
+    )
+
+
+def log_device_launch_summary(start: tuple[int, int]) -> None:
+    """Log how the graphs captured since ``device_launch_counts()`` returned
+    ``start`` were instantiated."""
+    launched, fallbacks = (n - s for n, s in zip(device_launch_counts(), start))
+    if fallbacks:
+        logger.warning(
+            "%d of %d CUDA graphs kept PyTorch's default instantiation instead of "
+            "device launch; see the earlier warning for the reason.",
+            fallbacks,
+            launched + fallbacks,
+        )
+    else:
+        logger.info("%d CUDA graphs were instantiated for device launch.", launched)
 
 
 def _destroy_graph_exec(graph_exec: Any) -> None:
@@ -88,24 +105,18 @@ def _instantiate_for_device_launch(raw_graph: int, stream: int) -> tuple[Any, st
 
 class DeviceLaunchCUDAGraph(torch.cuda.CUDAGraph):
     """A ``torch.cuda.CUDAGraph`` whose executable graph is instantiated for
-    device launch.
+    device launch in ``capture_end()``, while the captured graph is live, so
+    CUDA graph memory profiling counts it. A graph the driver refuses keeps
+    PyTorch's instantiation.
 
-    ``torch.cuda.CUDAGraph.capture_end()`` calls ``instantiate()`` while the
-    captured ``cudaGraph_t`` is live and destroys it afterwards, as for host
-    launch. The executable graph is instantiated and uploaded there, so CUDA
-    graph memory profiling counts its device memory and the first replay does
-    not pay for the upload; it is destroyed by ``reset()`` or when the graph is
-    garbage collected. A graph the driver refuses keeps PyTorch's own
-    instantiation; running out of memory raises ``torch.OutOfMemoryError``.
-    Otherwise PyTorch's ``instantiate()`` does not run, so neither do its
-    instantiate hooks and kernel-annotation remapping.
-
-    Replays bypass ``torch.cuda.CUDAGraph.replay()``, so PyTorch's per-replay
-    RNG setup does not run: random numbers drawn from PyTorch's CUDA generator
-    inside the graph are not seeded from the generator and repeat on every
-    replay. PyTorch's replay hooks, input-liveness checks and device guard do
-    not apply either; replay with the capture device current, as vLLM's
-    workers do.
+    PyTorch's instantiate hooks do not run, and replays bypass
+    ``torch.cuda.CUDAGraph.replay()``: its replay hooks, input-liveness checks
+    and device guard do not apply (replay with the capture device current, as
+    vLLM's workers do), and neither does its per-replay RNG setup. The seed
+    and offset of random numbers drawn from PyTorch's CUDA generator inside
+    the graph come from per-capture buffers that PyTorch fills only in
+    ``replay()``, so they are undefined: they ignore the seed and repeat on
+    every replay.
     """
 
     def __init__(self) -> None:
@@ -148,9 +159,10 @@ class DeviceLaunchCUDAGraph(torch.cuda.CUDAGraph):
         )
         if graph_exec is None:
             # Each rank decides this for its own graphs; log it on every rank.
+            # log_device_launch_summary() reports how many graphs fell back.
             logger.warning_once(
-                "A CUDA graph could not be instantiated for device launch (%s) "
-                "and keeps PyTorch's default instantiation.",
+                "CUDA graphs that could not be instantiated for device launch "
+                "(%s) keep PyTorch's default instantiation.",
                 reason,
                 scope="process",
             )

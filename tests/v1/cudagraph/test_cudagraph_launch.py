@@ -9,6 +9,8 @@ import pytest
 import regex as re
 import torch
 
+from tests.models.utils import check_logprobs_close
+from tests.utils import multi_gpu_marks
 from vllm.compilation import cudagraph_launch
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.compilation.counter import compilation_counter
@@ -65,6 +67,16 @@ def test_device_launch_rejects_mamba_stochastic_rounding():
             cache_config=CacheConfig(mamba_ssm_cache_dtype="float16"),
             mamba_config=mamba_config,
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
+def test_device_launch_rejects_moe_routing_simulation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The simulator draws random routing inside the captured MoE forward.
+    monkeypatch.setenv("VLLM_MOE_ROUTING_SIMULATION_STRATEGY", "uniform_random")
+    with pytest.raises(ValueError, match="VLLM_MOE_ROUTING_SIMULATION_STRATEGY"):
+        VllmConfig(compilation_config=CompilationConfig(cudagraph_launch_mode="device"))
 
 
 @pytest.fixture
@@ -264,7 +276,7 @@ def test_device_launch_skips_rng_replay_prologue(restore_vllm_stream):
     assert generator.get_offset() == offset
 
 
-def _graph_launch_state(worker) -> tuple[list[bool], int, int]:
+def _graph_launch_state(worker) -> tuple[list[bool], int, int, int]:
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
     from vllm.compilation.cuda_graph import CUDAGraphWrapper
 
@@ -288,16 +300,19 @@ def _graph_launch_state(worker) -> tuple[list[bool], int, int]:
     ]
     graphs += manager_graphs + breakable_graphs
     flags = [getattr(g, "device_launched", False) for g in graphs]
-    return flags, len(manager_graphs), len(breakable_graphs)
-
-
-def _fallbacks(worker) -> int:
-    return compilation_counter.num_cudagraph_host_launch_fallbacks
+    fallbacks = compilation_counter.num_cudagraph_host_launch_fallbacks
+    return flags, len(manager_graphs), len(breakable_graphs), fallbacks
 
 
 @requires_device_launch
 @pytest.mark.parametrize(
-    "use_v2_model_runner,breakable", [(False, False), (True, False), (True, True)]
+    "use_v2_model_runner,breakable,tp_size",
+    [
+        pytest.param(False, False, 1, id="mrv1"),
+        pytest.param(True, False, 1, id="mrv2"),
+        pytest.param(True, True, 1, id="mrv2-breakable"),
+        pytest.param(True, False, 2, id="mrv2-tp2", marks=multi_gpu_marks(num_gpus=2)),
+    ],
 )
 def test_device_launch_generation_matches_host(
     vllm_runner,
@@ -305,9 +320,12 @@ def test_device_launch_generation_matches_host(
     monkeypatch: pytest.MonkeyPatch,
     use_v2_model_runner: bool,
     breakable: bool,
+    tp_size: int,
 ):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", str(int(breakable)))
+    # A worker in this process would otherwise see earlier tests' fallbacks.
+    monkeypatch.setattr(compilation_counter, "num_cudagraph_host_launch_fallbacks", 0)
     prompts = ["Hello, my name is", "The capital of France is"]
     outputs = {}
     for launch_mode in ("host", "device"):
@@ -318,21 +336,35 @@ def test_device_launch_generation_matches_host(
                 # 16 covers the ~12-token prefill, 2 the batch-2 decode.
                 "cudagraph_capture_sizes": [1, 2, 4, 8, 16],
             },
+            tensor_parallel_size=tp_size,
             gpu_memory_utilization=0.4,
         ) as runner:
-            outputs[launch_mode] = runner.generate_greedy(prompts, max_tokens=16)
-            [(flags, num_manager_graphs, num_breakable_graphs)] = runner.collective_rpc(
-                _graph_launch_state
+            outputs[launch_mode] = runner.generate_greedy_logprobs(
+                prompts, max_tokens=16, num_logprobs=5
             )
-            [fallbacks] = runner.collective_rpc(_fallbacks)
-        assert flags
-        if launch_mode == "device":
-            assert all(flags)
-            assert fallbacks == 0
+            states = runner.collective_rpc(_graph_launch_state)
+        assert len(states) == tp_size
+        for flags, num_manager_graphs, num_breakable_graphs, fallbacks in states:
+            assert flags
+            if launch_mode == "host":
+                assert not any(flags)
+                continue
+            if tp_size == 1:
+                assert all(flags)
+                assert fallbacks == 0
+            else:
+                # Graphs with NCCL collectives may keep PyTorch's instantiation,
+                # depending on the all-reduce backend, and are counted as
+                # fallbacks (with any discarded profiling captures).
+                assert any(flags)
+                assert flags.count(False) <= fallbacks
             if use_v2_model_runner:
                 assert num_manager_graphs > 0
             if breakable:
                 assert num_breakable_graphs > 0
-        else:
-            assert not any(flags)
-    assert outputs["device"] == outputs["host"]
+    check_logprobs_close(
+        outputs_0_lst=outputs["host"],
+        outputs_1_lst=outputs["device"],
+        name_0="host",
+        name_1="device",
+    )

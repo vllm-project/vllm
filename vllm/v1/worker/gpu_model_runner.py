@@ -27,6 +27,10 @@ from vllm.compilation.breakable_cudagraph import (
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
+from vllm.compilation.cudagraph_launch import (
+    device_launch_counts,
+    log_device_launch_summary,
+)
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
     CompilationMode,
@@ -6428,6 +6432,7 @@ class GPUModelRunner(
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
+        launch_counts = device_launch_counts()
 
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
@@ -6518,6 +6523,8 @@ class GPUModelRunner(
             elapsed_time,
             cuda_graph_size / (1 << 30),
         )
+        if self.compilation_config.cudagraph_launch_mode == "device":
+            log_device_launch_summary(launch_counts)
         return cuda_graph_size
 
     def _warmup_and_capture(

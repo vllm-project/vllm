@@ -33,6 +33,10 @@ import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
+from vllm.compilation.cudagraph_launch import (
+    device_launch_counts,
+    log_device_launch_summary,
+)
 from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -1115,6 +1119,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
+        launch_counts = device_launch_counts()
         with freeze_gc_for_cudagraph_capture():
             torch.accelerator.empty_cache()
             start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -1179,6 +1184,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             elapsed_time,
             cuda_graph_size / (1 << 30),
         )
+        if (
+            not profile_only
+            and self.compilation_config.cudagraph_launch_mode == "device"
+        ):
+            log_device_launch_summary(launch_counts)
         return cuda_graph_size
 
     def _remove_request(self, req_id: str) -> bool:
