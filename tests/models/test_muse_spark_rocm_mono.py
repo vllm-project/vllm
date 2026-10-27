@@ -30,6 +30,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.models.muse_spark.amd.model import norm_residual_then_norm
 from vllm.models.muse_spark.amd.mono.decoder import (
@@ -43,7 +44,6 @@ from vllm.models.muse_spark.amd.mono.decoder import (
     collect_layer_weights,
     config_refusals,
     deployment_refusals,
-    effective_norm_weight,
     fused_attention_layers,
     kv_cache_refusal,
     layer_refusals,
@@ -108,14 +108,6 @@ TINY_TEXT = CHECKPOINT_TEXT | {
     "vocab_size": 512,
     "max_position_embeddings": 4096,
 }
-# target_layer_ids of Muse-Spark-Open-DSpark, of Muse-Spark-Open-DFlash2, and
-# of the embedding and every stock / mono seam.
-DRAFT_TARGET_LAYER_IDS = {
-    "dspark": [13, 29, 45, 57, 61],
-    "dflash2": [1, 16, 30, 44, 59],
-    "seams": [0, 1, 59, 60, 61],
-}
-
 _MX_FP4 = {
     "dtype": "fp4",
     "qscheme": "per_group",
@@ -147,8 +139,8 @@ def _quark_exclude(num_experts: int) -> list[str]:
     return names
 
 
-def _write_checkpoint_config(path, text: dict[str, Any]) -> None:
-    config = {
+def _checkpoint_config(text: dict[str, Any]) -> dict[str, Any]:
+    return {
         "architectures": ["MuseSparkForConditionalGeneration"],
         "model_type": "muse_spark",
         "dtype": "bfloat16",
@@ -203,25 +195,22 @@ def _write_checkpoint_config(path, text: dict[str, Any]) -> None:
             "export": {"kv_cache_group": [], "pack_method": "reorder"},
         },
     }
-    path.mkdir(parents=True, exist_ok=True)
-    (path / "config.json").write_text(json.dumps(config))
 
 
-def _write_dspark_config(path, target_layer_ids: list[int]) -> None:
-    config = {
-        "model_type": "muse_spark_dspark",
-        "num_hidden_layers": 2,
-        "moe": {"is_enabled": False},
-        "global_attn_cfg": [2048],
-        "layer_types": ["sliding_attention"] * 2,
-        "target_layer_ids": target_layer_ids,
-        "num_target_layers": len(target_layer_ids),
-        "markov_rank": 8,
-        "markov_head_type": "vanilla",
-        "dflash_config": {"causal": True, "target_layer_ids": target_layer_ids},
-    }
-    path.mkdir(parents=True, exist_ok=True)
-    (path / "config.json").write_text(json.dumps(config))
+# The target_layer_ids of Muse-Spark-Open-DSpark.
+DSPARK_TARGETS = [13, 29, 45, 57, 61]
+DSPARK = {
+    "model_type": "muse_spark_dspark",
+    "num_hidden_layers": 2,
+    "moe": {"is_enabled": False},
+    "global_attn_cfg": [2048],
+    "layer_types": ["sliding_attention"] * 2,
+    "target_layer_ids": DSPARK_TARGETS,
+    "num_target_layers": len(DSPARK_TARGETS),
+    "markov_rank": 8,
+    "markov_head_type": "vanilla",
+    "dflash_config": {"causal": True, "target_layer_ids": DSPARK_TARGETS},
+}
 
 
 def _vllm_config(
@@ -259,9 +248,9 @@ def _vllm_config(
 @pytest.fixture(scope="module")
 def checkpoints(tmp_path_factory):
     root = tmp_path_factory.mktemp("muse_spark")
-    _write_checkpoint_config(root / "tiny", TINY_TEXT)
-    for name, target_layer_ids in DRAFT_TARGET_LAYER_IDS.items():
-        _write_dspark_config(root / name, target_layer_ids)
+    for name, config in (("tiny", _checkpoint_config(TINY_TEXT)), ("dspark", DSPARK)):
+        (root / name).mkdir()
+        (root / name / "config.json").write_text(json.dumps(config))
     return root
 
 
@@ -459,29 +448,26 @@ def test_weight_views_alias_the_rank_slices(tiny_model) -> None:
     moe = layer.feed_forward
     experts = moe.experts.routed_experts
 
-    def aliases(view, base, row0=0):
+    assert w.w_r.shape == (dims.num_experts // 2, dims.hidden_size)
+    for view, base, row0 in (
+        (w.w_r, moe.router.weight, dims.num_experts // 2),
+        (w.w_pre, moe.pooler.weight, dims.pooled_size // 2),
+        (w.w_pp, moe.unpooler.weight, dims.hidden_size // 2),
+        (w.w_o, layer.self_attn.o_proj.weight, 0),
+        (w.w13, experts.w13_weight, 0),
+        (w.w13s, experts.w13_weight_scale, 0),
+        (w.w2, experts.w2_weight, 0),
+        (w.w2s, experts.w2_weight_scale, 0),
+        (w.bias, moe.expert_bias, 0),
+        (w.alpha_a, layer.add_attn.alpha, 0),
+        (w.beta_a, layer.add_attn.beta, 0),
+        (w.alpha, layer.add_ffn.alpha, 0),
+        (w.beta, layer.add_ffn.beta, 0),
+        (w.w_qkvg, nxt.self_attn.qkv_proj.weight, 0),
+    ):
         assert view.is_contiguous()
         offset = row0 * base.stride(0) * base.element_size()
         assert view.data_ptr() == base.data_ptr() + offset
-
-    aliases(w.w_r, moe.router.weight, dims.num_experts // 2)
-    assert w.w_r.shape == (dims.num_experts // 2, dims.hidden_size)
-    aliases(w.w_pre, moe.pooler.weight, dims.pooled_size // 2)
-    aliases(w.w_pp, moe.unpooler.weight, dims.hidden_size // 2)
-    for view, base in (
-        (w.w_o, layer.self_attn.o_proj.weight),
-        (w.w13, experts.w13_weight),
-        (w.w13s, experts.w13_weight_scale),
-        (w.w2, experts.w2_weight),
-        (w.w2s, experts.w2_weight_scale),
-        (w.bias, moe.expert_bias),
-        (w.alpha_a, layer.add_attn.alpha),
-        (w.beta_a, layer.add_attn.beta),
-        (w.alpha, layer.add_ffn.alpha),
-        (w.beta, layer.add_ffn.beta),
-        (w.w_qkvg, nxt.self_attn.qkv_proj.weight),
-    ):
-        aliases(view, base)
     for copy, norm in (
         (w.w_pffn, layer.pre_ffn_norm),
         (w.w_pren, moe.pre_expert_norm),
@@ -489,7 +475,6 @@ def test_weight_views_alias_the_rank_slices(tiny_model) -> None:
         (w.w_pff, layer.post_ffn_norm),
         (w.w_in, nxt.self_attn.pre_qkv_proj_norm),
     ):
-        assert torch.equal(copy, effective_norm_weight(norm))
         assert torch.equal(copy, (norm.weight.float() + norm.gain_center).bfloat16())
     # Layer 2 is a sliding-window layer (RoPE), layer 5 a full one (none).
     assert w.next_rope
@@ -507,108 +492,28 @@ def test_fused_attention_layers_follow_the_window(tiny_model) -> None:
 
 # ------------------------------------------- the launches, as the stock pieces
 
-_K3_HEAD = [
-    "attn_o",
-    "attn_g",
-    "stream_pre",
-    "w_o",
-    "alpha_a",
-    "beta_a",
-    "w_pffn",
-    "w_r",
-    "bias",
-    "w_pre",
-    "w_pren",
-    "w13",
-    "w13s",
-    "w2",
-    "w2s",
-    "w_post",
-    "w_pp",
-    "w_pff",
-    "alpha",
-    "beta",
-    "w_in",
-    "w_qkvg",
-    "stream_out",
-    "xn_out",
-    "part_out",
-    "q_out",
-    "g_out",
-    "k_cache",
-    "v_cache",
-    "slots",
-    "cos_sin",
-    "pos",
-    "scratch",
-    "epoch",
-    "health",
-    "tl",
-]
-_HA_HEAD = [
-    "attn_o",
-    "attn_g",
-    "stream_in",
-    "w_o",
-    "alpha_a",
-    "beta_a",
-    "w_pffn",
-    "w_r",
-    "bias",
-    "w_pre",
-    "w_pren",
-    "h_out",
-    "ids_out",
-    "sc_out",
-    "scratch",
-    "epoch",
-    "health",
-    "tl",
-]
-_HM_HEAD = [
-    "h",
-    "ids",
-    "sc",
-    "w13",
-    "w13s",
-    "w2",
-    "w2s",
-    "w_post",
-    "part_out",
-    "scratch",
-    "epoch",
-    "health",
-    "tl",
-]
-_HB_HEAD = [
-    "part",
-    "w_pp",
-    "w_pff",
-    "alpha",
-    "beta",
-    "w_in",
-    "w_qkvg",
-    "stream_out",
-    "sfull_out",
-    "q_out",
-    "g_out",
-    "k_cache",
-    "v_cache",
-    "slots",
-    "cos_sin",
-    "pos",
-    "scratch",
-    "epoch",
-    "health",
-    "tl",
-]
-_REPLICAS = ["w13r", "w13sr", "w2r", "w2sr", "eptab"]
+# The launch signatures of the FlyDSL sources, up to the peer pointers.
+_K3_HEAD = (
+    "attn_o attn_g stream_pre w_o alpha_a beta_a w_pffn w_r bias w_pre w_pren "
+    "w13 w13s w2 w2s w_post w_pp w_pff alpha beta w_in w_qkvg stream_out xn_out "
+    "part_out q_out g_out k_cache v_cache slots cos_sin pos scratch epoch health tl"
+)
+_HA_HEAD = (
+    "attn_o attn_g stream_in w_o alpha_a beta_a w_pffn w_r bias w_pre w_pren "
+    "h_out ids_out sc_out scratch epoch health tl"
+)
+_HM_HEAD = "h ids sc w13 w13s w2 w2s w_post part_out scratch epoch health tl"
+_HB_HEAD = (
+    "part w_pp w_pff alpha beta w_in w_qkvg stream_out sfull_out q_out g_out "
+    "k_cache v_cache slots cos_sin pos scratch epoch health tl"
+)
+_REPLICAS = " w13r w13sr w2r w2sr eptab"
 _DESC_WORDS = 10
 
 
-def _params(head: list[str], world_size: int, tail: str) -> list[str]:
-    """A launch's parameters in order (the FlyDSL sources' signatures)."""
-    return head + [f"peer{r}" for r in range(world_size)] + tail.split()
+def _params(head: str, world_size: int, tail: str) -> list[str]:
+    """A launch's parameters in order."""
+    return head.split() + [f"peer{r}" for r in range(world_size)] + tail.split()
 
 
 def _device_view(ptr: int, shape, dtype: torch.dtype, strides=None) -> torch.Tensor:
@@ -637,14 +542,8 @@ class StockLaunches:
         self.model, self.dims, self.bnd = model, dims, bnd
         self.calls: list[tuple[str, dict]] = []
         self.pending: dict[int, dict] = {}
-        self.k3 = _Kernel(self, "k3")
-        self.k5 = _Kernel(self, "k5")
-        self.k5m = _Kernel(self, "k5m")
-        self.attn_frag = _AttnFrag()
-
-    def kernels(self) -> MonoKernels:
-        return MonoKernels(
-            k3=self.k3, k5=self.k5, k5m=self.k5m, attn_frag=self.attn_frag
+        self.kernels = MonoKernels(
+            *(_Kernel(self, name) for name in ("k3", "k5", "k5m")), _AttnFrag()
         )
 
     def launcher(self, name: str, params: list[str], run):
@@ -683,22 +582,24 @@ class StockLaunches:
         out.copy_(layer.self_attn.attn(q, None, None))
         return out
 
-    def run_layer(self, i: int, rows: int, nreq: int, a: dict, out: dict) -> None:
-        """Layer i from its attention output to layer i+1's q, o-gate, stream."""
+    def run_layer(self, rows: int, a: dict, b: dict) -> None:
+        """Layer i from its attention output (launch ``a``) to layer i+1's q,
+        o-gate and stream (launch ``b``)."""
+        i, nreq = a["layer"], rows // ROWS_PER_REQUEST
         d, layer, nxt = self.dims, self.model.layers[i], self.model.layers[i + 1]
         o = self._attention(i, a["attn_o"], rows, nreq, a["fused"])
         g = _device_view(
             a["attn_g"], (rows, d.q_rows), torch.bfloat16, (a["g_stride"], 1)
         )
         stream = _device_view(a["stream"], (rows, d.hidden_size), torch.float32)
-        positions = _device_view(out["pos"], (rows,), torch.int64)
+        positions = _device_view(b["pos"], (rows,), torch.int64)
         _, _, kv_cache, slots = _attention_context(nxt)
-        assert out["k_cache"] == kv_cache.data_ptr()
-        assert out["v_cache"] == kv_cache.stride(0)
-        assert out["slots"] == slots.data_ptr()
+        assert b["k_cache"] == kv_cache.data_ptr()
+        assert b["v_cache"] == kv_cache.stride(0)
+        assert b["slots"] == slots.data_ptr()
         rope = nxt.self_attn.rotary_emb
         if rope is not None:
-            assert out["cos_sin"] == rope.cos_sin_cache.data_ptr()
+            assert b["cos_sin"] == rope.cos_sin_cache.data_ptr()
 
         y = layer.after_attention(stream, layer.self_attn.back(o, g))
         attn_input, stream_next = norm_residual_then_norm(
@@ -706,9 +607,10 @@ class StockLaunches:
         )
         qkv, _ = nxt.self_attn.qkv_proj(attn_input)
         q, _, _, g_next = nxt.self_attn._qk_norm_rope_kv_insert(qkv, positions)
-        for name, t in (("stream", stream_next), ("q", q), ("g", g_next)):
-            for ptr in out[name]:
-                _device_view(ptr, t.shape, t.dtype).copy_(t)
+        streams = ["stream_out"] + (["sfull_out"] if b.get("gather") else [])
+        for names, t in ((streams, stream_next), (["q_out"], q), (["g_out"], g_next)):
+            for name in names:
+                _device_view(b[name], t.shape, t.dtype).copy_(t)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -742,10 +644,10 @@ class _Kernel:
     def build(self, key: _Key):
         o, w = self.owner, key.W
         if self.name == "k3":
-            params = _params(_K3_HEAD, w, "layer rank g_stride " + " ".join(_REPLICAS))
+            params = _params(_K3_HEAD, w, "layer rank g_stride" + _REPLICAS)
             return o.launcher("k3", params, lambda a: _run_k3(o, key, a))
         if self.name == "k5m":
-            params = _params(_HM_HEAD, w, "layer rank nrows " + " ".join(_REPLICAS))
+            params = _params(_HM_HEAD, w, "layer rank nrows" + _REPLICAS)
             return o.launcher("hm", params, lambda a: None)
         ha = _params(_HA_HEAD, w, "layer rank g_stride s_full nrows")
         hb = _params(_HB_HEAD, w, "layer rank so_stride so_off gather nrows")
@@ -785,27 +687,16 @@ class _AttnFrag:
 
 
 def _run_k3(o: StockLaunches, key: _Key, a: dict) -> None:
-    rows = key.S
-    a = a | {"stream": a["stream_pre"], "fused": bool(key.attn)}
-    out = {k: a[k] for k in ("pos", "k_cache", "v_cache", "slots", "cos_sin")}
-    out |= {"stream": [a["stream_out"]], "q": [a["q_out"]], "g": [a["g_out"]]}
-    o.run_layer(a["layer"], rows, rows // ROWS_PER_REQUEST, a, out)
+    o.run_layer(key.S, a | {"stream": a["stream_pre"], "fused": bool(key.attn)}, a)
 
 
 def _run_hb(o: StockLaunches, key: _Key, b: dict) -> None:
     a = o.pending.pop(b["layer"])
-    nrows = b["nrows"]
-    assert a["nrows"] == nrows and a["layer"] == b["layer"]
-    a = a | {"stream": a["stream_in"]}
-    out = {k: b[k] for k in ("pos", "k_cache", "v_cache", "slots", "cos_sin")}
-    streams = [b["stream_out"]] + ([b["sfull_out"]] if b["gather"] else [])
-    out |= {"stream": streams, "q": [b["q_out"]], "g": [b["g_out"]]}
-    o.run_layer(a["layer"], nrows, nrows // ROWS_PER_REQUEST, a, out)
+    assert a["nrows"] == b["nrows"]
+    o.run_layer(b["nrows"], a | {"stream": a["stream_in"]}, b)
 
 
 def _attention_context(layer):
-    from vllm.model_executor.layers.attention.attention import get_attention_context
-
     return get_attention_context(layer.self_attn.attn.layer_name)
 
 
@@ -890,39 +781,30 @@ class Step:
         return hidden.clone(), [a.clone() for a in aux], kv
 
 
-def _set_aux_layers(tiny: TinyModel, draft) -> tuple[int, ...]:
-    """The aux ids the model runner sets for ``draft``'s target_layer_ids
-    (L = the output of layer L - 1, 0 = the embedding)."""
-    from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
-        get_eagle3_aux_layers_from_config,
-    )
-
-    config = SpeculativeConfig(
-        model=str(draft),
-        method="dspark",
-        num_speculative_tokens=ROWS_PER_REQUEST - 1,
-        target_model_config=tiny.vllm_config.model_config,
-        target_parallel_config=tiny.vllm_config.parallel_config,
-    )
-    layers = get_eagle3_aux_layers_from_config(config)
-    tiny.lm.set_aux_hidden_state_layers(layers)
-    return tiny.model.aux_hidden_state_layers
-
-
-def _attach(tiny: TinyModel, launches: StockLaunches, buckets: list[int]):
+def _run_mono(
+    tiny: TinyModel, step: Step, bnd: int, buckets: list[int], mode=CUDAGraphMode.NONE
+):
+    """The step with the monokernel attached, on the stock launches."""
     from vllm.distributed import get_tp_group
 
-    fused = fused_attention_layers(tiny.layers, 4096, _AttnFrag.VLLM_MAX_KEYS)
-    return MuseSparkMono(
+    launches = StockLaunches(tiny.model, tiny.dims, bnd)
+    tiny.model.mono = MuseSparkMono(
         tiny.model,
-        launches.kernels(),
+        launches.kernels,
         rank=0,
         group=get_tp_group().cpu_group,
         device=torch.device("cuda", 0),
         dims=tiny.dims,
         buckets=buckets,
-        fused_attention=fused,
+        fused_attention=fused_attention_layers(
+            tiny.layers, 4096, _AttnFrag.VLLM_MAX_KEYS
+        ),
     )
+    try:
+        return launches, step.run(tiny, mode)
+    finally:
+        tiny.model.mono.close()
+        tiny.model.mono = None
 
 
 def _assert_same_step(stock, mono) -> None:
@@ -939,36 +821,28 @@ def _assert_same_step(stock, mono) -> None:
 
 @requires_gfx950
 @pytest.mark.parametrize(
-    ("draft", "aux_layers"),
-    [
-        ("dspark", (14, 30, 46, 58, 62)),
-        ("dflash2", (2, 17, 31, 45, 60)),
-        ("seams", (1, 2, 60, 61, 62)),
-    ],
+    "aux_layers",
+    # vLLM's aux ids (L = the output of layer L - 1) for the target_layer_ids of
+    # Muse-Spark-Open-DSpark, of Muse-Spark-Open-DFlash2, and of the embedding
+    # and every stock / mono seam (0, 1, 59, 60, 61).
+    [(14, 30, 46, 58, 62), (2, 17, 31, 45, 60), (1, 2, 60, 61, 62)],
+    ids=["dspark", "dflash2", "seams"],
 )
 @pytest.mark.parametrize(
     ("num_reqs", "bnd"),
     [(1, 0), (2, 0), (3, 0), (3, 3), (4, 3), (5, 0), (7, 0)],
 )
 def test_mono_step_matches_the_stock_loop(
-    tiny_model, checkpoints, draft, aux_layers, num_reqs, bnd
+    tiny_model, aux_layers, num_reqs, bnd
 ) -> None:
     """8 / 16 rows: K3 with fused attention; 24-32 rows: HA + HM + HB on the
     32-row build (fused attention, replicated (bnd 3) or token-owner (bnd 0)
     stream); 40-56 rows: the 64-row build with vLLM's attention op between
     the launches. Same hidden states, aux states and KV caches as stock."""
-    assert _set_aux_layers(tiny_model, checkpoints / draft) == aux_layers
+    tiny_model.lm.set_aux_hidden_state_layers(aux_layers)
     step = Step(tiny_model, [ROWS_PER_REQUEST] * num_reqs, seed=num_reqs)
-    tiny_model.model.mono = None
     stock = step.run(tiny_model)
-
-    launches = StockLaunches(tiny_model.model, tiny_model.dims, bnd)
-    tiny_model.model.mono = _attach(tiny_model, launches, [8, 16, 32, 64])
-    try:
-        mono = step.run(tiny_model)
-    finally:
-        tiny_model.model.mono.close()
-        tiny_model.model.mono = None
+    launches, mono = _run_mono(tiny_model, step, bnd, [8, 16, 32, 64])
 
     kernels = {name for name, _ in launches.calls}
     assert kernels == ({"k3"} if num_reqs <= 2 else {"ha", "hm", "hb"})
@@ -990,16 +864,10 @@ def test_mono_step_matches_the_stock_loop(
     ],
     ids=["prefill", "mixed", "query-len-4", "136-rows", "piecewise"],
 )
-def test_other_steps_run_stock(tiny_model, checkpoints, query_lens, mode) -> None:
-    _set_aux_layers(tiny_model, checkpoints / "dspark")
+def test_other_steps_run_stock(tiny_model, query_lens, mode) -> None:
+    tiny_model.lm.set_aux_hidden_state_layers((14, 30, 46, 58, 62))
     step = Step(tiny_model, query_lens, seed=len(query_lens))
     stock = step.run(tiny_model, mode)
-    launches = StockLaunches(tiny_model.model, tiny_model.dims, 0)
-    tiny_model.model.mono = _attach(tiny_model, launches, [8, 16, 32, 64, 96, 128])
-    try:
-        mono = step.run(tiny_model, mode)
-    finally:
-        tiny_model.model.mono.close()
-        tiny_model.model.mono = None
+    launches, mono = _run_mono(tiny_model, step, 0, [8, 16, 32, 64, 96, 128], mode)
     assert launches.calls == []
     _assert_same_step(stock, mono)
