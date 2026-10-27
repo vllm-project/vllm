@@ -223,9 +223,11 @@ def m1c_serves(q: int, seqs: int) -> bool:
     share out evenly over the requests (``layers.m1c_at``)."""
     if q not in M1C_QLENS:
         return False
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_attn
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
+        mla_attn_geom,
+    )
 
-    return all(mla_attn.splits(q) % n == 0 for n in range(1, seqs + 1))
+    return all(mla_attn_geom.splits(q) % n == 0 for n in range(1, seqs + 1))
 
 
 def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:

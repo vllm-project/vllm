@@ -599,7 +599,6 @@ def test_qkv_gate_weights_split_the_merged_gate():
 def test_m1c_falls_back_where_its_splits_dont_share_out():
     """M1c's KV splits share out evenly over a width's requests or the width
     runs the asm decode: qlen 4's 80 splits over 12 rows (3 requests) don't."""
-    pytest.importorskip("flydsl")
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import (
         m1c_at,
         m1c_splits,
@@ -617,6 +616,7 @@ def test_m1c_falls_back_where_its_splits_dont_share_out():
 def test_mla_weight_views_fall_back_per_model():
     """An MLA layer M1 cannot read is no weight refusal: mla_weight_reasons
     names it, and the MLA layers run vLLM's ops."""
+    pytest.importorskip("flydsl")
     no_latent = SimpleNamespace(use_latent_moe=False, shared_experts=None)
     config = _k3_text_config()
     ffn = [i for i, kind in runtime.layer_kinds(config).items() if kind == "ffn"]

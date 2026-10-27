@@ -59,17 +59,21 @@ def m1c_at(runner: MonoRunner, width: int) -> bool:
     """``runner.m1c`` at this width: M1c's KV splits must share out evenly over
     the requests (qlen 4 has 80: a 12-row width, 3 requests, runs the asm
     decode instead)."""
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_attn
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
+        mla_attn_geom,
+    )
 
     q = runner.num_spec + 1
-    return runner.m1c and mla_attn.splits(q) % (width // q) == 0
+    return runner.m1c and mla_attn_geom.splits(q) % (width // q) == 0
 
 
 def m1c_splits(runner: MonoRunner, width: int) -> int:
     """M1b's ``splits``: M1c's, when K2 runs it at this width (else 0)."""
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla_attn
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
+        mla_attn_geom,
+    )
 
-    return mla_attn.splits(runner.num_spec + 1) if m1c_at(runner, width) else 0
+    return mla_attn_geom.splits(runner.num_spec + 1) if m1c_at(runner, width) else 0
 
 
 def _k2(

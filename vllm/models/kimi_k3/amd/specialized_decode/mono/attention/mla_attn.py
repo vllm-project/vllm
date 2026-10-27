@@ -40,11 +40,19 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T
 
+from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import LOG2E
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla import (
     ENTRY,
     KVL,
+)
+from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.mla_attn_geom import (
     NH,
+    RTILES,
+    TILE,
+    XCDS,
+    geometry,
+    splits,
 )
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     _hw_f32,
@@ -68,8 +76,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import (
     source_digest,
 )
 
-XCDS = 8
-TILE = 16  # tokens a wave's tile
+assert NH == mla.NH
 BLK = TILE * WAVES  # tokens a block
 CHUNK = 64  # bytes a token a K chunk (a DMA: 64 lanes x 16 B a tile)
 KLOADS = ENTRY // CHUNK  # 9 DMAs a tile: 8 of 8 tokens' whole 128 B lines (a
@@ -131,30 +138,6 @@ WS_K1 = 3  # a tile's chunks DMA'd after B1 two blocks ahead (the rest one)
 
 _STREAM = fx.Stream(None)
 _SOURCES = source_digest(".")
-
-
-RTILES = {4: 1, 8: 2}  # row tiles a CTA by qlen (3 head groups either way)
-
-
-def splits(qlen: int, rt: int = 0) -> int:
-    """KV splits of the launch (every request's together): the head groups'
-    CTAs an XCD hold a whole number of splits."""
-    return XCDS * geometry(qlen, rt)[2]
-
-
-def geometry(qlen: int, rt: int = 0):
-    """(heads a CTA, head groups, splits an XCD); a CTA ``rt`` row tiles of 16
-    (``RTILES`` by default)."""
-    ht = TILE * (rt or RTILES[qlen]) // qlen
-    hg = NH // ht
-    return ht, hg, BLOCKS // XCDS // hg
-
-
-def ctas(qlen: int, rt: int = 0) -> int:
-    """The working CTAs (0 .. ctas): a done flag each when fused (``cta``'s
-    ``done``), at (split, head group) ``split * hg + group``."""
-    _, hg, spx = geometry(qlen, rt)
-    return XCDS * spx * hg
 
 
 @dataclass(frozen=True)
