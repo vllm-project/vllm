@@ -965,6 +965,33 @@ def test_mxfp4_experts_check_accepts_aiter_deployments(
         _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
 
 
+def test_aiter_no_act_and_mul_support_is_mxfp4_only():
+    """Guard against re-broadening non-gated (relu2) support to fp8/bf16
+    AiterExperts."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+        AiterFp8BlockExperts,
+        AiterFp8ChannelExperts,
+        AiterFp8TensorExperts,
+        AiterMxfp4Experts,
+        AiterUnquantizedExperts,
+    )
+
+    assert AiterMxfp4Experts._supports_no_act_and_mul() is True
+
+    for cls in (
+        AiterExperts,
+        AiterUnquantizedExperts,
+        AiterFp8BlockExperts,
+        AiterFp8TensorExperts,
+        AiterFp8ChannelExperts,
+    ):
+        assert cls._supports_no_act_and_mul() is False, (
+            f"{cls.__name__} must not claim non-gated activation support "
+            "until its CK-Tile relu2 kernel path is implemented and verified."
+        )
+
+
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
     """The gfx950 AITER MXFP4 W4A16 MoE path should match the dequantized
