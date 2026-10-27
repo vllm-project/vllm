@@ -2080,16 +2080,16 @@ def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vl
 
 
 @pytest.mark.parametrize(
-    ("method", "use_v2_model_runner", "tail_tokens", "num_lookahead_tokens"),
+    ("method", "use_v2_model_runner", "num_lookahead_tokens"),
     [
-        ("dflash", True, 64 + 3 + 128, 4),
-        ("dspark", True, 64 + 3 + 128, 3),
-        ("dflash", False, None, None),
-        ("eagle", True, None, None),
+        ("dflash", True, 4),
+        ("dspark", True, 3),
+        ("dflash", False, None),
+        ("eagle", True, None),
     ],
 )
 def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
-    monkeypatch, method, use_v2_model_runner, tail_tokens, num_lookahead_tokens
+    monkeypatch, method, use_v2_model_runner, num_lookahead_tokens
 ):
     """Only a DFlash-family drafter's own sliding-window layers get the
     tail-only spec, and only on Model Runner V2, whose speculator writes no
@@ -2124,13 +2124,13 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
 
     assert type(spec_by_layer["layers.1"]) is SlidingWindowSpec
     draft_spec = spec_by_layer["draft.0"]
-    if tail_tokens is None:
+    if num_lookahead_tokens is None:
         assert type(draft_spec) is SlidingWindowSpec
         return
     assert isinstance(draft_spec, DFlashSlidingWindowSpec)
-    assert draft_spec.tail_tokens == tail_tokens
-    assert draft_spec.num_lookahead_tokens == num_lookahead_tokens
+    assert draft_spec.num_speculative_tokens == 3
     assert draft_spec.max_in_flight_steps == config.max_concurrent_batches
+    assert draft_spec.num_lookahead_tokens == num_lookahead_tokens
 
 
 _GQA_SPEC = FullAttentionSpec(

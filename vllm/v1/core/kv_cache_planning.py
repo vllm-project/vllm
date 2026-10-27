@@ -802,7 +802,7 @@ def _promote_local_kv_cache_specs(
                 # DFlash drafter's tail) is moot.
                 drop=(
                     "extra_retained_tokens",
-                    "tail_tokens",
+                    "num_speculative_tokens",
                     "max_in_flight_steps",
                     "num_lookahead_tokens",
                 ),
@@ -1607,11 +1607,6 @@ def get_kv_cache_configs(
     return kv_cache_configs
 
 
-# Tokens a DFlash drafter's tail keeps beyond its window and the rejected
-# draft tokens, for kernel tiles that straddle the window start.
-_DFLASH_TAIL_SLACK_TOKENS = 128
-
-
 def _use_dflash_sliding_window_specs(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> None:
@@ -1636,9 +1631,7 @@ def _use_dflash_sliding_window_specs(
         kv_cache_spec[layer_name] = replace_as(
             spec,
             DFlashSlidingWindowSpec,
-            tail_tokens=spec.sliding_window
-            + vllm_config.num_speculative_tokens
-            + _DFLASH_TAIL_SLACK_TOKENS,
+            num_speculative_tokens=vllm_config.num_speculative_tokens,
             max_in_flight_steps=vllm_config.max_concurrent_batches,
             num_lookahead_tokens=vllm_config.num_lookahead_tokens,
         )

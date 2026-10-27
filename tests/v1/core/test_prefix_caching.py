@@ -4910,7 +4910,7 @@ def test_dflash_drafter_hit_needs_cached_drafter_kv_only_in_its_tail(
                     head_size=1,
                     dtype=torch.float32,
                     sliding_window=8,
-                    tail_tokens=10,
+                    num_speculative_tokens=2,
                 ),
             ),
         ],
