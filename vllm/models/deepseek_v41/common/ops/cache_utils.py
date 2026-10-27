@@ -995,24 +995,8 @@ _COMBINE_TOPK_SWA_NUM_WORKERS = 256
 
 # Representative pointer alignment variants for Triton pointer specialization.
 _COMBINE_TOPK_SWA_POINTER_INPUTS = zip_inputs(
-    dict(
-        topk_indices=True,
-        query_start_loc=True,
-        seq_lens=True,
-        gather_lens=True,
-    ),
-    dict(
-        topk_indices=True,
-        query_start_loc=False,
-        seq_lens=False,
-        gather_lens=True,
-    ),
-    dict(
-        topk_indices=False,
-        query_start_loc=False,
-        seq_lens=False,
-        gather_lens=False,
-    ),
+    dict(topk_indices=True),
+    dict(topk_indices=False),
 )
 
 
@@ -1059,9 +1043,15 @@ class CombineTopkSwaIndicesKernel(
 
     @staticmethod
     @triton.jit(
+        # Each program reads one value from the per-request tensors, so their
+        # alignment buys nothing, while the chunked prefill passes them at any
+        # num_decodes / chunk_start offset.
         do_not_specialize=[
             "combined_indices_stride",
             "topk_indices_stride",
+            "query_start_loc_ptr",
+            "seq_lens_ptr",
+            "gather_lens_ptr",
             "M",
             "N",
         ]
@@ -1157,9 +1147,6 @@ class CombineTopkSwaIndicesKernel(
         *,
         topk_width: int,
         topk_indices: bool,
-        query_start_loc: bool,
-        seq_lens: bool,
-        gather_lens: bool,
         topk: int,
         compress_ratio: int,
         WINDOW_SIZE: int,
@@ -1167,9 +1154,6 @@ class CombineTopkSwaIndicesKernel(
         padded_topk = next_power_of_2(topk_width)
         input_variant = TritonPointerInputVariant.from_alignment(
             topk_indices=topk_indices,
-            query_start_loc=query_start_loc,
-            seq_lens=seq_lens,
-            gather_lens=gather_lens,
         )
         return self.CompileKey(
             TOP_K=topk,
@@ -1201,9 +1185,9 @@ class CombineTopkSwaIndicesKernel(
             int32_ptr,
             input_variant.pointer("topk_indices", torch.int32),
             1,  # do not specialize topk_indices_stride
-            input_variant.pointer("query_start_loc", torch.int32),
-            input_variant.pointer("seq_lens", torch.int32),
-            input_variant.pointer("gather_lens", torch.int32),
+            int32_ptr,  # do not specialize query_start_loc
+            int32_ptr,  # do not specialize seq_lens
+            int32_ptr,  # do not specialize gather_lens
             1,  # do not specialize M
             1,  # do not specialize N
             TOP_K=compile_key.TOP_K,
