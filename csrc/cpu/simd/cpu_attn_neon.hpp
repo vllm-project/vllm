@@ -1,7 +1,7 @@
 #ifndef CPU_ATTN_NEON_HPP
 #define CPU_ATTN_NEON_HPP
 
-#include "cpu_attn_impl.hpp"
+#include "../cpu_attn_impl.hpp"
 #include <arm_neon.h>
 #include <type_traits>
 #ifdef ARM_BF16_SUPPORT

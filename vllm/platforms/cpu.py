@@ -6,6 +6,7 @@ import os
 import platform
 import subprocess
 import sys
+from importlib.util import find_spec
 from typing import TYPE_CHECKING
 
 import torch
@@ -686,7 +687,10 @@ class CpuPlatform(Platform):
             and torch.cpu.get_capabilities().get("bf16", False)
             and torch.cpu.get_capabilities().get("sve", False)
         ):
-            if torch.cpu.get_capabilities().get("sve_max_length", False) == 256:
+            if (
+                find_spec("vllm._C_SVE256") is not None
+                and torch.cpu.get_capabilities().get("sve_max_length", False) == 256
+            ):
                 try:
                     import vllm._C_SVE256  # noqa: F401
                 except ImportError as e:
@@ -694,7 +698,10 @@ class CpuPlatform(Platform):
                         logger.warning_once(
                             "Failed to import from vllm._C_SVE256: %s", repr(e)
                         )
-            elif torch.cpu.get_capabilities().get("sve_max_length", False) == 128:
+            elif (
+                find_spec("vllm._C_SVE128") is not None
+                and torch.cpu.get_capabilities().get("sve_max_length", False) == 128
+            ):
                 try:
                     import vllm._C_SVE128  # noqa: F401
                 except ImportError as e:

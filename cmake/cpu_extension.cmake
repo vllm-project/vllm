@@ -536,7 +536,7 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
         "csrc/cpu/activation_lut_bf16.cpp"
-        "csrc/cpu/cpu_tanhf_neon.hpp"
+        "csrc/cpu/simd/cpu_tanhf_neon.hpp"
         ${VLLM_EXT_SRC})
     if (ARM_BF16_FOUND)
         set(VLLM_EXT_SRC "csrc/cpu/sgl-kernels/conv.cpp" ${VLLM_EXT_SRC})

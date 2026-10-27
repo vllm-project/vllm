@@ -66,8 +66,10 @@ struct tinygemm_kernel {
   }
 };
 
-#if defined(ARM_BF16_SUPPORT)
-#include "conv_arm.h"
+#if defined(CPU_CAPABILITY_SVE128) || defined(CPU_CAPABILITY_SVE256)
+#include "../sve/conv_sve.hpp"
+#elif defined(ARM_BF16_SUPPORT)
+#include "../simd/conv_neon.hpp"
 #endif
 
 #if defined(CPU_CAPABILITY_AVX512)

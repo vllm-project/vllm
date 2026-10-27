@@ -6,7 +6,7 @@
 #include <arm_neon.h>
 
 #include "cpu_tanhf_neon.hpp"
-#include "cpu_types_arm.hpp"
+#include "../cpu_types_arm.hpp"
 
 using namespace at::vec;
 
