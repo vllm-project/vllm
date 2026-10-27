@@ -48,6 +48,14 @@ _KIND_LOOKBACK = 5
 
 
 @triton.jit
+def _load_scalar(params, offset):
+    # The table is int64 because the address columns need 64 bits; every
+    # scalar column is a count or size that fits int32, the type the phase
+    # bodies were written against.
+    return tl.load(params + offset).to(tl.int32)
+
+
+@triton.jit
 def _token_map_body(
     output_ptr,
     query_start_loc_ptr,
@@ -385,14 +393,14 @@ def _decode_prologue_kernel(
             query_start_loc_ptr,
             seq_lens_ptr,
             _load_ptr(params + 4, tl.int32),
-            tl.load(params + 11),
-            tl.load(params + 12),
-            tl.load(params + 13),
-            tl.load(params + 14),
-            tl.load(params + 15),
+            _load_scalar(params, 11),
+            _load_scalar(params, 12),
+            _load_scalar(params, 13),
+            _load_scalar(params, 14),
+            _load_scalar(params, 15),
             num_actual_tokens,
-            tl.load(params + 16),
-            tl.load(params + 17),
+            _load_scalar(params, 16),
+            _load_scalar(params, 17),
             PAD_ID=-1,
             TRITON_BLOCK_SIZE=TRITON_BLOCK_SIZE,
         )
@@ -405,7 +413,7 @@ def _decode_prologue_kernel(
             _load_ptr(params + 4, tl.int32),
             num_decodes,
             max_decode_len,
-            tl.load(params + 11),
+            _load_scalar(params, 11),
             BLOCK_SIZE=TRITON_BLOCK_SIZE,
         )
     elif kind == 3:
@@ -414,12 +422,12 @@ def _decode_prologue_kernel(
             _load_ptr(params + 3, tl.int32),
             query_start_loc_ptr,
             positions_ptr,
-            tl.load(params + 11),
+            _load_scalar(params, 11),
             num_reqs_padded,
             num_mapped_tokens,
             num_actual_tokens,
-            tl.load(params + 13),
-            tl.load(params + 12),
+            _load_scalar(params, 13),
+            _load_scalar(params, 12),
             BLOCK=TRITON_BLOCK_SIZE,
         )
     elif kind == 4:
@@ -432,12 +440,12 @@ def _decode_prologue_kernel(
             _load_ptr(params + 7, tl.int32),
             query_start_loc_ptr,
             seq_lens_ptr,
-            tl.load(params + 11),
-            tl.load(params + 12),
-            tl.load(params + 13),
-            tl.load(params + 14),
-            tl.load(params + 15),
-            tl.load(params + 16),
+            _load_scalar(params, 11),
+            _load_scalar(params, 12),
+            _load_scalar(params, 13),
+            _load_scalar(params, 14),
+            _load_scalar(params, 15),
+            _load_scalar(params, 16),
             num_reqs_padded,
             num_mapped_tokens,
             TRITON_BLOCK_SIZE=TRITON_BLOCK_SIZE,
@@ -449,8 +457,8 @@ def _decode_prologue_kernel(
             query_start_loc_ptr,
             positions_ptr,
             _load_ptr(params + 4, tl.int32),
-            tl.load(params + 11),
-            tl.load(params + 12),
+            _load_scalar(params, 11),
+            _load_scalar(params, 12),
             DEPTH=DEPTH,
             BLOCK_DEPTH=BLOCK_DEPTH,
         )
