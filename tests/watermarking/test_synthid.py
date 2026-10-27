@@ -114,10 +114,15 @@ def test_synthid_logits_follow_philox_bits_and_reweighting(key, depth):
 )
 @pytest.mark.parametrize("depth", [1, 3, 4, 5, 8, 32])
 def test_synthid_accelerator_matches_cpu(depth):
-    logits = torch.randn(4, 3000, generator=torch.Generator().manual_seed(0))
+    logits = torch.randn(5, 7000, generator=torch.Generator().manual_seed(0))
     logits[0] *= 30  # peaked row
     logits[1, 100:] = float("-inf")  # masked tokens
-    contexts = torch.tensor([[-1, -1, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]])
+    # Top-k style survivors: whole kernel blocks between them are masked.
+    logits[4] = float("-inf")
+    logits[4, [7, 4100, 6999]] = torch.tensor([2.0, 0.5, -1.0])
+    contexts = torch.tensor(
+        [[-1, -1, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]]
+    )
     watermarker = SynthIDWatermarker(42, context_width=3, depth=depth)
 
     expected = watermarker.watermark_logits(logits.double(), contexts)

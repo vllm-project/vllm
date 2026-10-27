@@ -1143,6 +1143,21 @@ def _synthid_kernel(
             tl.store(output_row + offsets, logits, mask=mask)
             return
 
+    slots = sync_ptr + 1 + row * (2 * DEPTH + 4)
+    block_max = tl.max(logits, axis=0)
+    # A block of masked tokens (top-k/top-p) adds 0 to every row sum: post its
+    # arrivals without waiting and keep its -inf.
+    if block_max == float("-inf"):
+        tl.atomic_add(slots + 1, 1, sem="release")
+        for chunk in tl.static_range((DEPTH + 1) // 2):
+            tl.atomic_add(
+                slots + 2 + 4 * chunk + tl.arange(0, 4),
+                tl.full([4], 1 << 54, tl.int64),
+                sem="relaxed",
+            )
+        tl.store(output_row + offsets, logits, mask=mask)
+        return
+
     key_0 = key_0.to(tl.uint32)
     key_1 = key_1.to(tl.uint32)
     state_0, state_1, state_2, state_3 = _philox_context_state(
@@ -1161,8 +1176,7 @@ def _synthid_kernel(
         BLOCK_SIZE,
     )
     # Row max as an order-preserving integer key, so a zero slot is below it.
-    slots = sync_ptr + 1 + row * (2 * DEPTH + 4)
-    bits = tl.max(logits, axis=0).to(tl.int32, bitcast=True).to(tl.int64)
+    bits = block_max.to(tl.int32, bitcast=True).to(tl.int64)
     key = tl.where(bits < 0, -1 - bits, bits + (1 << 31))
     tl.atomic_max(slots, key, sem="relaxed")
     tl.atomic_add(slots + 1, 1, sem="release")
