@@ -579,6 +579,7 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
             ),
             model_config=SimpleNamespace(is_moe=False),
             cache_config=None,
+            kernel_config=None,
         )
         server = daemon.WeightCacheDaemon(
             vllm_config, global_rank, global_rank, "tcp://127.0.0.1:0"
@@ -765,6 +766,7 @@ def test_ipc_rope_matching(
                         model_config,
                         default_vllm_config.cache_config,
                         default_vllm_config.parallel_config,
+                        default_vllm_config.kernel_config,
                     )
             if is_reload:
                 expected = torch.zeros(2) if mismatch else server.model.rotary_cache
@@ -786,6 +788,138 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     )
     loader = IpcModelLoader(copy_mode)
     assert loader.get_external_weight_memory(None) == 0
+
+
+def _serve_one(handler):
+    """Fake ``IpcModelLoader._connect``: serve each request on a thread and
+    close the accepted connection afterwards, like ``serve_forever``.
+
+    Returns the fake and the list of server threads it started.
+    """
+    import socket
+
+    server_threads: list[threading.Thread] = []
+
+    def connect(timeout: float) -> socket.socket:
+        client, connection = socket.socketpair()
+
+        def serve() -> None:
+            with connection:
+                handler(connection)
+
+        server_thread = threading.Thread(target=serve, daemon=True)
+        server_thread.start()
+        server_threads.append(server_thread)
+        return client
+
+    return connect, server_threads
+
+
+def test_ipc_loader_detects_daemon_exit(monkeypatch):
+    """A zero-copy engine's watch connection closes exactly when the daemon
+    that served it exits; watches of exited engines are pruned."""
+    import socket
+
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+
+    server = object.__new__(daemon.WeightCacheDaemon)
+    server._watchers = []
+    connect, server_threads = _serve_one(server._handle_connection)
+    load_config = LoadConfig(
+        load_format="ipc_cache",
+        model_loader_extra_config={"socket_path": "/unused/daemon.sock"},
+    )
+    loaders = [ipc_loader.IpcModelLoader(load_config) for _ in range(2)]
+    threads = []
+    for loader in loaders:
+        monkeypatch.setattr(loader, "_connect", connect)
+        thread = loader._watch_daemon()
+        assert thread is not None
+        threads.append(thread)
+    for server_thread in server_threads:
+        server_thread.join(timeout=5)
+    # The second watch prunes nothing while the first engine is alive.
+    assert len(server._watchers) == 2
+    threads[0].join(timeout=0.2)
+    assert threads[0].is_alive() and not loaders[0].daemon_lost.is_set()
+
+    # The daemon exiting closes its end of every watch connection.
+    for watcher in server._watchers:
+        watcher.close()
+    for loader, thread in zip(loaders, threads):
+        thread.join(timeout=5)
+        assert loader.daemon_lost.is_set()
+
+    # A watcher whose engine has exited is pruned; a live one is kept.
+    peers = [socket.socketpair() for _ in range(2)]
+    server._watchers = [ours for ours, _ in peers]
+    peers[0][1].close()
+    server._prune_watchers()
+    assert server._watchers == [peers[1][0]]
+    for ours, theirs in peers:
+        ours.close()
+        theirs.close()
+
+
+def test_ipc_loader_skips_watch_on_old_daemon(monkeypatch):
+    """Daemons predating the watch command reject it; loading still works."""
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache import ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_msg,
+        send_msg,
+    )
+
+    def reject(connection) -> None:
+        assert recv_msg(connection) == {"cmd": "watch"}
+        send_msg(connection, {"status": "error", "message": "Unknown command"})
+
+    loader = ipc_loader.IpcModelLoader(
+        LoadConfig(
+            load_format="ipc_cache",
+            model_loader_extra_config={"socket_path": "/unused/daemon.sock"},
+        )
+    )
+    monkeypatch.setattr(loader, "_connect", _serve_one(reject)[0])
+    assert loader._watch_daemon() is None
+    assert not loader.daemon_lost.is_set()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@create_new_process_for_each_test("spawn")
+def test_daemon_releases_cublas_workspaces():
+    """Startup cleanup releases cached GEMM scratch without freeing live tensors."""
+    import os
+
+    import torch
+
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.distributed import init_distributed_environment
+    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
+
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:2"
+    os.environ["TORCH_CUBLAS_WORKSPACE_CACHE"] = "1"
+    config = VllmConfig(model_config=ModelConfig(model=QWEN_CASE.model))
+    address = f"tcp://127.0.0.1:{get_open_port()}"
+    server = WeightCacheDaemon(config, 0, 0, address)
+    torch.accelerator.set_device_index(0)
+    init_distributed_environment(1, 0, address, 0, backend="nccl")
+    torch._C._cuda_clearCublasWorkspaces()
+    matrix = torch.ones(128, 128, device="cuda")
+    result = torch.empty_like(matrix)
+    before = torch.accelerator.memory_allocated()
+    torch.mm(matrix, matrix, out=result)
+    torch.accelerator.synchronize()
+    assert torch.accelerator.memory_allocated() > before
+
+    server.release_distributed()
+    after = torch.accelerator.memory_allocated()
+    torch._C._cuda_clearCublasWorkspaces()
+    assert torch.accelerator.memory_allocated() == after, (
+        "daemon retained BLAS workspaces"
+    )
+    torch.testing.assert_close(result, torch.full_like(result, 128), rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -849,7 +983,7 @@ def test_ipc_cache_key_tracks_kv_quantization(
 
     import torch
 
-    from vllm.config import CacheConfig, LoadConfig, ParallelConfig
+    from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheKey,
@@ -873,6 +1007,7 @@ def test_ipc_cache_key_tracks_kv_quantization(
         cache_config=CacheConfig(
             cache_dtype="fp8", kv_cache_dtype_skip_layers=["1", "2"]
         ),
+        kernel_config=KernelConfig(),
     )
     server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
     config.cache_config = CacheConfig(
@@ -901,6 +1036,88 @@ def test_ipc_cache_key_tracks_kv_quantization(
     config.parallel_config.enable_expert_parallel = True
     config.parallel_config.expert_placement_strategy = "round_robin"
     loader.load_weights(model, model_config)
+    assert len(requested_keys) == 2
+    for key in requested_keys:
+        assert server.cache_key.mismatched_fields(key) == mismatched_fields
+
+
+@pytest.mark.parametrize(
+    "engine_kernel_config,mismatched_fields",
+    [
+        ({"moe_backend": "flashinfer_cutlass"}, []),
+        ({"moe_backend": "flashinfer_trtllm"}, ["moe_backend"]),
+        (
+            {"moe_backend": "flashinfer_cutlass", "linear_backend": "cutlass"},
+            ["linear_backend"],
+        ),
+        (
+            {
+                "moe_backend": "flashinfer_cutlass",
+                "linear_backend_per_quant": {"nvfp4_w4a16": "humming"},
+            },
+            ["linear_backend_per_quant"],
+        ),
+    ],
+)
+def test_ipc_cache_key_tracks_kernel_backends(
+    tmp_path, monkeypatch, engine_kernel_config, mismatched_fields
+):
+    """Weights processed for one MoE or linear backend have that backend's
+    layout, so an engine selecting a different backend must not reuse them."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
+    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheKey,
+        WeightCacheState,
+    )
+
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        dtype=torch.bfloat16,
+        quantization="modelopt_fp4",
+        quantization_config=None,
+        revision=None,
+        hf_config=SimpleNamespace(architectures=["Qwen3MoeForCausalLM"]),
+        hf_text_config=SimpleNamespace(),
+        is_moe=True,
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=ParallelConfig(),
+        speculative_config=None,
+        cache_config=CacheConfig(),
+        kernel_config=KernelConfig(moe_backend="flashinfer_cutlass"),
+    )
+    server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
+    config.kernel_config = KernelConfig(**engine_kernel_config)
+    for name in ("get_dp_group", "get_pp_group"):
+        monkeypatch.setattr(
+            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
+        )
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(ipc_loader, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    requested_keys: list[WeightCacheKey] = []
+
+    def request_state(key, *, is_reload=False):
+        requested_keys.append(key)
+        return WeightCacheState(entries={}, aliases={}, attrs={})
+
+    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    monkeypatch.setattr(loader, "_request_state", request_state)
+    monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
+    loader.load_model(config, model_config)
+    # A standalone reload on a fresh loader has no recorded key, so it keys on
+    # the current engine config.
+    reloader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    monkeypatch.setattr(reloader, "_request_state", request_state)
+    reloader.load_weights(torch.nn.Module(), model_config)
     assert len(requested_keys) == 2
     for key in requested_keys:
         assert server.cache_key.mismatched_fields(key) == mismatched_fields
