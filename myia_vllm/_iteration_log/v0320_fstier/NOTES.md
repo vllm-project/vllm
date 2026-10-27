@@ -3293,3 +3293,80 @@ défaut) — escalade du 26/10 23:52Z toujours valable.
 le reboot (la session a survécu) ; il a été **remplacé proprement** (supprimé puis
 recréé) pour garantir qu'il appartient à la session courante : **`d6ab14d5`,
 toutes les 2 h à :41**, vérifié par `CronList` ⇒ **un seul job**.
+
+## 27/10 04:15Z — Cycle : moteur sain sous trafic revenu, **prefix hits 92,3 %** (la question laissée ouverte au boot est répondue), wedge claudish réfuté côté moteur + **hairpin 443 KO depuis ai-01**, signature #431 mesurée, HF token → po-2023, **nbaudit v2 cadrée (#228)**
+
+**Prod** : health 200 @2,4 ms, RC=0, StartedAt 02:15:05Z (aucun restart depuis
+le boot), OOM 0, 3 conteneurs Up, VRAM **GPU0 22 076 / GPU1 21 378 MiB en
+charge** (sous la ligne d'alerte 23 500 — Q41), GPU2 98 MiB (CoursIA libre),
+`/dev/shm` 24G/63G (nominal), watchdog **3 795 sondes OK**, 2 `WEDGE fail 1/2`
+(03:03 et 03:11Z = famine prefill pendant des corps ~0,9 Mo en vol, jamais 2/2),
+**préemptions 0**, marge commit hôte **69,7 %** (268,1/384,4 Go — le reboot a
+vidé tmpfs/WSL ; très sous le seuil 85 %).
+
+**★ Hit préfixe 92,3 %** : `prefix_cache_hits_total` 19 697 504 /
+`prefix_cache_queries_total` 21 347 482 depuis le boot, sous le trafic revenu
+(~4,1 req/min sur la fenêtre census). Le point ouvert du cycle 02:35Z (« hits 0,
+non anormal post-boot, à re-mesurer sous trafic ») est **répondu :
+l'amortissement des préfixes est sain** à 0.73 + tiers RAM 24 + fs. Le moteur a
+traité 21,3 M tokens prompt en 2 h avec 92 % servis du cache.
+
+**Pruneur + census** : `fstier_state.json` 03:50:03Z mode apply — tier 268,797 Go
+> cap ⇒ 14 fichiers supprimés (367 Mo) ⇒ 268,43 Go = cap, 0 erreur, 2,66 s.
+Census `ok:true` 03:25:01Z. Les deux organes tiennent le régime post-reboot.
+
+**Sécurité** : 3 IP avec 200 sur la fenêtre — site hairpin `90.65.170.144`
+(783), interne sans XFF (782), poste user Paris `82.66.89.184` (2, trafic
+repris). **Aucune IP inconnue.** 114×401 = clé morte `1f7f6080cb65` en boucle
+(connu, process flotte).
+
+**★ Signature #431 mesurée (400 + corps >100 Ko)** : **29 occurrences sur 4
+jours** (~7/jour, fichier 21 877 lignes du 23/10 10:34Z au 27/10), corps
+**0,26-4,2 Mo**, quasi toutes `Bun/1.3.14` (sessions Claude Code via hub) + 2
+`AsyncOpenAI/Python` (sk-agent vision, 3,1/4,2 Mo). Paires même-corps à 10 s
+d'écart = **retry local** alors que #431 demande le reroutage cloud dans le même
+tour. Rendu au user (rapport cycle) et à claudish (dans la réponse wedge). Les 2
+sk-agent vision sont à relayer au propriétaire sk-agent (carnets Image/ base64
+en corps entier).
+
+**Signalement claudish « swift ECONNRESET wedge depuis 01:47Z » — réfuté côté
+moteur, un vrai point ouvert trouvé** : leur rapport (canaries 7/7 à ~21 s,
+8+ 400, 187 s « UNEXPLAINED ENDING », 502 IIS 01:53-01:56Z) se réconcilie
+ainsi : (1) 01:47-02:15Z = **reboot hôte** (attendu, 502 compris) ; (2) les 400
+= débordement de fenêtre ci-dessus ; (3) les 187 s et canaries = **famine
+prefill documentée** (dense 27B, WEDGE fail 1/2 vu au watchdog aux mêmes
+minutes). Le moteur n'a **pas** été recréé à 03:34Z (aucun StartedAt déplacé) ;
+queue 0 running/0 waiting, KV usage 0 %, et **38×200 Bun depuis 03:34Z** — leur
+trafic passe majoritairement. **Mesuré en revanche : hairpin 443 KO depuis ai-01
+lui-même** — 3/3 `curl https://api.medium…myia.io/health` → `000` à 21,1 s (aucun
+TCP ; A record 90.65.170.144 uniquement, W3SVC Running). Le ~21 s correspond
+exactement à leurs canaries. Discriminant demandé : cible exacte (host:port)
+des canaires — si c'est l'URL publique, le défaut siège **routeur/IIS, pas
+moteur**. Réponse envoyée 04:17Z (thread
+`po2025-swift-econnreset-wedge-20261027T0412Z`).
+
+**HF token → po-2023:vllm** : demande légitime du siège embeddings (conteneur à
+token vide, cache local seul = bloquant si purge+recreate). Envoyé par **DM
+pièce jointe auto-détruite 24 h** (fp `769d40e66497`, valeur jamais dans le
+corps), avec la précaution quota compte user + l'avertissement rotation
+pendante. Fichier scratchpad supprimé après envoi.
+
+**★ nbaudit v2 cadrée** — [vllm#228](https://github.com/jsboige/vllm/issues/228)
+(mandat user 27/10 « je suis pour poursuivre le travail ») : le producteur est
+sain mais **0 livraison depuis le 21/10 23:16Z** (4 séries entièrement auditées
+par les bots, 83 carnets #19451 hors périmètre `Image/` ⇒ `0 picked`) ; en
+parallèle une session ChatGPT anonyme + 2 agents CoursIA ont produit **14 issues
+en 15 min** (#22836-#22855) sur 10 carnets échantillonnés. Spec v2 : (a) unité =
+finding à **évidence verbatim** (chemin + cell_id + quote + claim) ; (b)
+**`propose_issue` validé** = seul chemin d'écriture (contrôle mécanique de la
+quote contre le HEAD + dedup + cap 10/h + kill switch), **pas de `gh` dans les
+mains de l'agent** ; (c) base préfixe réordonnée — mesuré : le chemin du carnet
+ouvre le prompt, donc le préfixe partagé = system prompt seul (5 611 caractères
+≈ 1 400 tokens) → viser 15-30 K (méthode + règles + catalogue faux positifs) ;
+(d) **tapis roulant sur TOUT le catalogue** (mandat user : « il fait son
+chemin »), séries contiguës, boucle auto-relancée, PR-collision reporté en fin
+de boucle, dedup à l'émission. PRs = P5, pas avant. Q42 close au registre.
+
+**Registre** : Q41 (VRAM/0.73) reste ouverte — mesure du cycle : 22 076 MiB en
+charge, sous la ligne d'alerte ; le pic à re-mesurer reste le critère. Q42 close
+(poursuite du travail + v2).
