@@ -68,23 +68,19 @@ from flydsl.expr.typing import Int32, Int64
 from .dev import (
     BLOCKS,
     CM_DEV,
-    CM_NT,
     CM_SYS,
     THREADS,
     WAVES,
     _add,
-    ballot,
     bf16_pair,
     bf16_round,
     bf_hi,
     bf_lo,
-    bpermute,
     butterfly,
     fresh,
     hw_exp2,
     hw_rsq,
     hw_sqrt,
-    lanes_below,
     ld_f32,
     ld_i32,
     ld_vec,
@@ -93,7 +89,6 @@ from .dev import (
     mb_put_if,
     mb_put_sys,
     mfma_bf16,
-    popcount,
     readlane,
     rsrc,
     st_if,
@@ -102,6 +97,7 @@ from .dev import (
     wave_sum,
     xred,
 )
+from .k3 import _lay, bf_mma_operand, bf_tile_load, route_token, sel_peer
 
 W = 8  # ranks in the TP = EP group
 HID = 8192
@@ -177,15 +173,6 @@ class Build:
         groups, the stream replicated); 0 (S > 32): the token-owner boundaries (one CTA a
         token, the stream token-sharded and all-gathered by HB)."""
         return 3 if self.S == 32 else 0
-
-
-def _lay(items):
-    out, off = {}, 0
-    for name, n in items:
-        off = (off + 255) // 256 * 256
-        out[name] = (off, n)
-        off += n
-    return out, (off + 4095) // 4096 * 4096
 
 
 def scratch_layout(S, world=W, bnd=0):
@@ -367,41 +354,7 @@ def build(key: Build):
     name_a = f"muse_k5a_s{S}" + (f"_fa{key.attn}" if key.attn else "")
     name_b = f"muse_k5b_s{S}_r{int(key.next_rope)}"
 
-    def sel_peer(pl, d):
-        p = pl[0]
-        for r_ in range_constexpr(1, W):
-            p = (d == r_).select(pl[r_], p)
-        return p
-
     # ------------------------------------------------------------ shared helpers
-    def bf_mma_operand(ops, qq, lane):
-        """Coalesced bf16 weight registers (rows 8 blk + lane / 8, 16 B at 128 h + 16 (lane % 8))
-        -> the MFMA A operand of step qq (K 32 qq + 8 g of row r)."""
-        r = lane % 16
-        g = lane // 16
-        h = qq // 2
-        src = 8 * (r % 8) + 4 * (qq % 2) + g
-        hi = r >= 8
-        ws = []
-        for jj in range_constexpr(4):
-            pa = bpermute(ops[h][jj], src)
-            pb = bpermute(ops[2 + h][jj], src)
-            ws.append(hi.select(pb, pa))
-        return fx.Vector.from_elements(ws, fx.Int32)
-
-    def bf_tile_load(wbase, row16, ldk, k, lane):
-        """16 rows (row16 ..) x 128 K (k ..) of a row-major bf16 [*, ldk] weight, coalesced."""
-        out = []
-        for blk in range_constexpr(2):
-            rowc = row16 + 8 * blk + lane // 8
-            for h in range_constexpr(2):
-                out.append(
-                    ld_vec(
-                        wbase, (rowc * ldk + k + 64 * h + 8 * (lane % 8)) // 2, 4, CM_NT
-                    )
-                )
-        return out
-
     def red_at(red, base_tile, rr, tt):
         """LDS offset of row rr (0..15), token tt (0..15) of MFMA tile slot base_tile."""
         return red + ((base_tile * 64 + 16 * (rr // 4) + tt) * 4 + rr % 4)
@@ -417,97 +370,6 @@ def build(key: Build):
         for w in range_constexpr(WAVES):
             tot = tot + fx.ptr_load(red4 + (slot * 8 + w))
         return tot
-
-    def okey(v):
-        b = v.bitcast(fx.Int32)
-        neg = b < fx.Int32(0)
-        return fx.Uint32(neg.select(~b, b ^ fx.Int32(-2147483648)))
-
-    @traced
-    def route_token(tkns, bias_v, lgss, tid, lane, rt):
-        """Tokens ``tkns`` (this wave's, all valid), interleaved for ILP: sigmoid +
-        bias, radix top-8, rank, renorm -> rid / rw."""
-        T_ = len(tkns)
-        keys, sigs = [], []
-        for x_ in range_constexpr(T_):
-            kx, sx = [], []
-            for i in range_constexpr(4):
-                lg = lgss[x_][i].bitcast(fx.Float32)
-                sg = fx.Float32(1.0) / (
-                    fx.Float32(1.0) + hw_exp2(lg * fx.Float32(-LOG2E))
-                )
-                sc = sg + bias_v[i]
-                live = sc == sc  # NaN ranks last
-                kx.append(okey(live.select(sc, fx.Float32(-3.0e38))))
-                sx.append((sg == sg).select(sg, fx.Float32(0.0)))
-            keys.append(kx)
-            sigs.append(sx)
-        th = [fx.Uint32(0) for _ in range(T_)]
-        for bit in range_constexpr(31, -1, -1):
-            for x_ in range_constexpr(T_):
-                cand = th[x_] | fx.Uint32(1 << bit)
-                n = fx.Int32(0)
-                for i in range_constexpr(4):
-                    n = n + popcount(ballot(keys[x_][i] >= cand))
-                th[x_] = (n >= TOPK).select(cand, th[x_])
-        for x_ in range_constexpr(T_):
-            tkn = tkns[x_]
-            n_gt = fx.Int32(0)
-            for i in range_constexpr(4):
-                n_gt = n_gt + popcount(ballot(keys[x_][i] > th[x_]))
-            need = fx.Int32(TOPK) - n_gt
-            eq_before = fx.Int32(0)
-            sel_before = fx.Int32(0)
-            sel_base = rt["sel"] + tkn * (TOPK * 3)
-            for i in range_constexpr(4):
-                eqb = ballot(keys[x_][i] == th[x_])
-                eq_rank = eq_before + lanes_below(eqb, lane)
-                sel = (keys[x_][i] > th[x_]) | (
-                    (keys[x_][i] == th[x_]) & (eq_rank < need)
-                )
-                selb = ballot(sel)
-                pos = sel_before + lanes_below(selb, lane)
-                if sel:
-                    fx.ptr_store(keys[x_][i].bitcast(fx.Int32), sel_base + pos * 3)
-                    fx.ptr_store(fx.Int32(lane + 64 * i), sel_base + (pos * 3 + 1))
-                    fx.ptr_store(
-                        sigs[x_][i].bitcast(fx.Int32), sel_base + (pos * 3 + 2)
-                    )
-                eq_before = eq_before + popcount(eqb)
-                sel_before = sel_before + popcount(selb)
-        q = fx.min(lane, TOPK - 1)
-        mks, mes, mss, ranks = [], [], [], []
-        for x_ in range_constexpr(T_):
-            sel_base = rt["sel"] + tkns[x_] * (TOPK * 3)
-            mk = fx.Uint32(fx.ptr_load(sel_base + q * 3))
-            me = fx.ptr_load(sel_base + (q * 3 + 1))
-            ms = fx.ptr_load(sel_base + (q * 3 + 2)).bitcast(fx.Float32)
-            rank_ = fx.Int32(0)
-            for j in range_constexpr(TOPK):
-                ok = fx.Uint32(fx.ptr_load(sel_base + j * 3))
-                oe = fx.ptr_load(sel_base + (j * 3 + 1))
-                before = (ok > mk) | ((ok == mk) & (oe < me))
-                rank_ = rank_ + before.select(fx.Int32(1), fx.Int32(0))
-            mks.append(mk)
-            mes.append(me)
-            mss.append(ms)
-            ranks.append(rank_)
-        # serial sum of the 8 sigmoids in rank order (+ eps), IEEE division
-        for x_ in range_constexpr(T_):
-            if lane < TOPK:
-                fx.ptr_store(mss[x_], rt["rw"] + (tkns[x_] * TOPK + ranks[x_]))
-        for x_ in range_constexpr(T_):
-            tkn = tkns[x_]
-            total = fx.Float32(0.0)
-            for j in range_constexpr(TOPK):
-                total = total + fx.ptr_load(rt["rw"] + (tkn * TOPK + j))
-            total = total + fx.Float32(ROUTE_EPS)
-            if lane < TOPK:
-                fx.ptr_store(
-                    fx.min(fx.max(mes[x_], 0), fx.Int32(E - 1)),
-                    rt["rid"] + (tkn * TOPK + ranks[x_]),
-                )
-                fx.ptr_store(mss[x_] / total, rt["rw"] + (tkn * TOPK + ranks[x_]))
 
     # ============================================================ HA
     def o_loads(w_o, bid, lane, wave):

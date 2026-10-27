@@ -89,6 +89,7 @@ from .dev import (
     uniform,
     wave_incl_scan,
 )
+from .k3 import _lay, sel_peer
 
 DM = 4096
 INTER = 4096
@@ -113,15 +114,6 @@ def build_vllm(S, W=8):
     """The HM build vLLM launches for S rows of a TP = EP = 8 group."""
     assert S in (32, 64, 96, 128) and W == 8, (S, W)
     return BuildM(S=S)
-
-
-def _lay(items):
-    out, off = {}, 0
-    for name, n in items:
-        off = (off + 255) // 256 * 256
-        out[name] = (off, n)
-        off += n
-    return out, (off + 4095) // 4096 * 4096
 
 
 def scratch_layout(S):
@@ -195,12 +187,6 @@ def build(key: BuildM):
         d_: MDn
 
     name = f"muse_k5m_s{S}"
-
-    def sel_peer(pl, d):
-        p = pl[0]
-        for r_ in range_constexpr(1, W):
-            p = (d == r_).select(pl[r_], p)
-        return p
 
     # ------------------------------------------------------------ tables
     @traced
