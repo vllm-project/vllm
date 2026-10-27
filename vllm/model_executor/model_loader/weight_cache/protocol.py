@@ -296,9 +296,10 @@ def _mix_safetensors_fingerprint(
 
     The header carries tensor names, dtypes, shapes and offsets but no weight
     values, so hashing it alone gives a base model and its fine-tune the same
-    key (#59647). Sampling the head of every tensor's data region catches a
-    value-only change at the cost of one small read per tensor, and stays
-    stable for byte-identical copies in different directories. The reads go
+    key (#59647). Sampling the head of every tensor's data region catches
+    value-only changes within that region at the cost of one small read per
+    tensor, and stays stable for byte-identical copies in different
+    directories. The reads go
     through ``pool`` but are mixed in sorted-name order, so the digest is
     identical to sequential sampling.
     """
@@ -336,7 +337,8 @@ def hash_checkpoint(model: str) -> str | None:
 
     Hashes each shard's metadata plus sampled tensor bytes so a daemon and an
     engine pointing at identical weights in different directories produce the
-    same key, while checkpoints that differ only in weight values do not.
+    same key, while a difference within any tensor's sampled head produces a
+    different key.
     Returns None when local safetensors files can't be located (e.g. an
     undownloaded Hugging Face repo id), leaving the caller to fall back to the
     model path.
