@@ -453,12 +453,13 @@ def flash_attn_varlen_func(
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
-        # SM90 FA4 fp8-KV path: fp8 e4m3 paged K/V dequantized and the K/V descale folded
-        # in-kernel; accepts bf16/fp16 Q and writes O in its native dtype (no Q cast, no
-        # output copy). Only the (batch, num_kv_heads) f32 K/V descales are forwarded.
+        # SM90/SM100/SM120 FA4 fp8-KV path: fp8 e4m3 paged K/V dequantized and the K/V
+        # descale folded in-kernel; accepts bf16/fp16 Q and writes O in its native
+        # dtype (no Q cast, no output copy). Only the (batch, num_kv_heads) f32 K/V
+        # descales are forwarded.
         fa4_fp8_kv_dequant = (
             k.dtype == torch.float8_e4m3fn
-            and torch.cuda.get_device_capability()[0] == 9
+            and torch.cuda.get_device_capability()[0] in (9, 10, 12)
         )
 
         out, softmax_lse, _, _ = _flash_attn_fwd(

@@ -100,7 +100,10 @@ def get_flash_attn_version(
             # Hopper (SM90): prefer FA3
             fa_version = 3
         elif device_capability.major == 10 and is_fa_version_supported(4):
-            # Blackwell (SM100+, restrict to SM100 for now): prefer FA4
+            # Blackwell (SM100+): prefer FA4
+            fa_version = 4
+        elif device_capability.major == 12 and is_fa_version_supported(4):
+            # Blackwell SM120: prefer FA4
             fa_version = 4
         else:
             # Fallback to FA2
@@ -230,7 +233,7 @@ def uses_fa4_hd256_kernel(
     if head_size_v is not None and head_size_v != 256:
         return False
     capability = current_platform.get_device_capability()
-    return capability is not None and capability.major in (10, 11)
+    return capability is not None and capability.major in (10, 11, 12)
 
 
 def _fa4_hd256_fallback_reason(
@@ -304,11 +307,13 @@ def flash_attn_supports_kv_cache_dtype(
         supports_fa4_hd256=supports_fa4_hd256,
     )
     is_sm90 = current_platform.is_device_capability_family(90)
+    is_sm100 = current_platform.is_device_capability_family(100)
+    is_sm120 = current_platform.is_device_capability_family(120)
     sm90_fp8_kv_supported = fa_version == 3 or (
         fa_version == 4 and head_size in (None, 512)
     )
     return (sm90_fp8_kv_supported and is_sm90) or (
-        fa_version == 4 and current_platform.is_device_capability_family(100)
+        fa_version == 4 and (is_sm100 or is_sm120)
     )
 
 

@@ -494,7 +494,7 @@ class FlashAttentionBackend(AttentionBackend):
         ):
             return (
                 "FP8 KV cache requires FA3 on SM90, FA4 with head_size=512 "
-                "on SM90, or FA4 on SM100"
+                "on SM90, or FA4 on SM100/SM120"
             )
         if (
             use_mm_prefix
