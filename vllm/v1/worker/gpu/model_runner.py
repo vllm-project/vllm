@@ -435,10 +435,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             time_after_load - time_before_load,
         )
 
-        # Initialize the components that require the model.
-        # The model state's device tensors are built once here and are not model
-        # parameters or buffers, so keep them out of the weights pool, which
-        # level-2 sleep discards (e.g. Qwen4Exp's ngram_context_offsets).
+        # Keep the model state out of the weights pool, which level-2 sleep discards.
         pool = (
             get_mem_allocator_instance().use_memory_pool(tag="runtime")
             if self.vllm_config.model_config.enable_sleep_mode
