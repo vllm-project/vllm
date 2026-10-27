@@ -1028,12 +1028,21 @@ class Platform:
             else:
                 attn_page_size_1_token = tq_page
         else:
+            if cache_config.cache_dtype == "mxfp4_qsa":
+                # Must match Qwen4ExpQSAAttention.get_kv_cache_spec, else the
+                # mamba state no longer fits the real (smaller) QSA page.
+                from vllm.models.qwen4_exp.amd.ops.mxfp4_kv import record_bytes
+
+                state_content_bytes = record_bytes(model_config.get_head_size())
+            else:
+                state_content_bytes = None
             attn_spec = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                state_content_bytes=state_content_bytes,
             )
             attn_page_size_1_token = backend_cls.customize_spec(
                 attn_spec

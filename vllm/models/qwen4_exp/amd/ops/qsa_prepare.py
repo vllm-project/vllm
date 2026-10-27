@@ -13,6 +13,8 @@ from torch import nn
 
 from vllm.triton_utils import tl, triton
 
+from .mxfp4_kv import block_records, head_dim_from_record_bytes, mxfp4_quantize_groups
+
 
 def supports_fused_pre_indexer(
     rotary_emb: nn.Module,
@@ -140,6 +142,42 @@ def _store_rotated(dst, y, o1, o2, scale):
     tl.store(dst + HALF + rot, _to_dst_dtype(o2, dst, scale))
 
 
+@triton.jit
+def _store_mxfp4_rotated(block, byte_offset, y, o1, o2, v_src, BLOCK_RECORDS):
+    """Store one K/V record into an mxfp4_qsa block (layout in mxfp4_kv.py).
+
+    ``y`` is the normalized K head; its first two 32-element groups are
+    replaced by the rotated halves ``o1``/``o2``. ``v_src`` points at the raw V.
+    """
+    D: tl.constexpr = y.shape[0]
+    tl.static_assert(o1.shape[0] == 32, "RoPE must cover exactly two MXFP4 groups")
+    GROUPS: tl.constexpr = D // 32
+    HALF_D: tl.constexpr = D // 2
+    record = byte_offset // (2 * (HALF_D + GROUPS))
+    group = tl.arange(0, GROUPS)[:, None]
+    pair = tl.arange(0, 16)[None, :]
+    byte = group * 16 + pair
+    scale_bytes = tl.arange(0, GROUPS)
+    # Round to BF16 first, like the K tensor the unfused path stores.
+    k = tl.reshape(y.to(tl.bfloat16).to(tl.float32), (GROUPS, 32))
+    k = tl.where(group == 0, o1.to(tl.bfloat16).to(tl.float32)[None, :], k)
+    k = tl.where(group == 1, o2.to(tl.bfloat16).to(tl.float32)[None, :], k)
+    even, odd = tl.split(tl.reshape(k, (GROUPS, 16, 2)))
+    packed, scales = mxfp4_quantize_groups(even, odd)
+    tl.store(block + record * HALF_D + byte, packed)
+    tl.store(block + BLOCK_RECORDS * D + record * GROUPS + scale_bytes, scales)
+
+    v = v_src + group * 32 + 2 * pair
+    packed, scales = mxfp4_quantize_groups(
+        tl.load(v).to(tl.float32), tl.load(v + 1).to(tl.float32)
+    )
+    tl.store(block + BLOCK_RECORDS * HALF_D + record * HALF_D + byte, packed)
+    tl.store(
+        block + BLOCK_RECORDS * (D + GROUPS) + record * GROUPS + scale_bytes,
+        scales,
+    )
+
+
 @triton.jit(
     do_not_specialize=[
         "num_tokens",
@@ -209,6 +247,8 @@ def _qsa_prepare_kernel(
     MAIN_HK: tl.constexpr,
     MAIN_D: tl.constexpr,
     MAIN_PAGE_SIZE: tl.constexpr,
+    MAIN_MXFP4: tl.constexpr = False,
+    MAIN_BLOCK_RECORDS: tl.constexpr = 0,
 ):
     pid = tl.program_id(0)
     num_index_work = num_k_work + tl.cdiv(num_tokens, TILE_T_Q) * tl.cdiv(HQ, TILE_H_Q)
@@ -257,15 +297,28 @@ def _qsa_prepare_kernel(
         if is_k:
             slot = tl.load(main_slots_ptr + token).to(tl.int64)
             if slot >= 0:
-                dst = (
-                    main_cache_ptr
-                    + (slot // MAIN_PAGE_SIZE) * main_cache_stride_block
-                    + (slot % MAIN_PAGE_SIZE) * main_cache_stride_token
-                    + kv_head * main_cache_stride_head
-                )
-                _store_rotated(dst, y, o1, o2, main_k_scale)
-                v = tl.load(src + MAIN_HK * MAIN_D + dims)
-                tl.store(dst + MAIN_D + dims, _to_dst_dtype(v, dst, main_v_scale))
+                if MAIN_MXFP4:
+                    _store_mxfp4_rotated(
+                        main_cache_ptr
+                        + (slot // MAIN_PAGE_SIZE) * main_cache_stride_block,
+                        (slot % MAIN_PAGE_SIZE) * main_cache_stride_token
+                        + kv_head * main_cache_stride_head,
+                        y,
+                        o1,
+                        o2,
+                        src + MAIN_HK * MAIN_D,
+                        MAIN_BLOCK_RECORDS,
+                    )
+                else:
+                    dst = (
+                        main_cache_ptr
+                        + (slot // MAIN_PAGE_SIZE) * main_cache_stride_block
+                        + (slot % MAIN_PAGE_SIZE) * main_cache_stride_token
+                        + kv_head * main_cache_stride_head
+                    )
+                    _store_rotated(dst, y, o1, o2, main_k_scale)
+                    v = tl.load(src + MAIN_HK * MAIN_D + dims)
+                    tl.store(dst + MAIN_D + dims, _to_dst_dtype(v, dst, main_v_scale))
         else:
             out = (token * MAIN_HQ + head) * MAIN_D
             _store_rotated(main_q_out_ptr + out, y, o1, o2, None)
@@ -585,7 +638,13 @@ def qsa_prepare(
     caller-owned buffer, e.g. one that outlives an opaque custom op.
     """
     num_tokens = q.shape[0]
-    main_head_dim = main_kv_cache.shape[-1] // 2
+    main_mxfp4 = main_kv_cache.dtype == torch.uint8
+    if main_mxfp4:
+        main_head_dim = head_dim_from_record_bytes(main_kv_cache.shape[-1])
+        main_block_records = block_records(main_kv_cache)
+    else:
+        main_head_dim = main_kv_cache.shape[-1] // 2
+        main_block_records = 0
     num_main_kv_heads = main_kv_cache.shape[2]
     num_main_q_heads = main_qkv.shape[1] // (2 * main_head_dim) - num_main_kv_heads
     main_q_out = main_qkv.new_empty(num_tokens, num_main_q_heads, main_head_dim)
@@ -695,6 +754,8 @@ def qsa_prepare(
         MAIN_HK=num_main_kv_heads,
         MAIN_D=main_head_dim,
         MAIN_PAGE_SIZE=main_kv_cache.shape[1],
+        MAIN_MXFP4=main_mxfp4,
+        MAIN_BLOCK_RECORDS=main_block_records,
         num_warps=1,
     )
     return main_q_out, main_gate_out

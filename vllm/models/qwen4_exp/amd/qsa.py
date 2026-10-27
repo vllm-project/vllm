@@ -56,10 +56,17 @@ from vllm.v1.kv_cache_interface import (
 from ..common.qsa_cache import QSAForwardMetadata
 from . import model
 from .indexer_qsa import QSAIndexer
+from .ops.mxfp4_kv import record_bytes, store_mxfp4_qsa
 
 # The KV cache dtypes the QSA path supports; shared by the backend's
 # supported_kv_cache_dtypes and the init gates so they cannot drift.
-_QSA_KV_CACHE_DTYPES: tuple[CacheDType, ...] = ("auto", "bfloat16", "fp8", "fp8_e4m3")
+_QSA_KV_CACHE_DTYPES: tuple[CacheDType, ...] = (
+    "auto",
+    "bfloat16",
+    "fp8",
+    "fp8_e4m3",
+    "mxfp4_qsa",
+)
 logger = init_logger(__name__)
 
 
@@ -122,9 +129,21 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             )
         if self.kv_cache_dtype not in _QSA_KV_CACHE_DTYPES:
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
+                "Qwen4Exp QSA requires a BF16, FP8-e4m3, or mxfp4_qsa main KV cache"
             )
         self.supports_quant_query_input = False
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        if self.kv_cache_dtype != "mxfp4_qsa":
+            return super().do_kv_cache_update(layer, key, value, kv_cache, slot_mapping)
+        store_mxfp4_qsa(key, value, kv_cache.transpose(1, 2), slot_mapping)
 
     def forward_qsa(
         self,
@@ -157,6 +176,23 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             raise RuntimeError("QSA owner did not provide its top-k buffer")
         logical_indices = topk_buffer[:num_tokens]
         token_to_req = token_to_req[:num_tokens]
+        if self.kv_cache_dtype == "mxfp4_qsa":
+            if query.dtype != torch.bfloat16:
+                raise NotImplementedError("Qwen4Exp QSA requires BF16 Q")
+            from .ops.qsa import qsa_sparse_paged_attention
+
+            # K and V share one record per (token, head); see mxfp4_kv.py.
+            mxfp4_cache = kv_cache.transpose(1, 2)
+            qsa_sparse_paged_attention(
+                query[:num_tokens],
+                mxfp4_cache,
+                mxfp4_cache,
+                logical_indices,
+                attn_metadata.block_table,
+                token_to_req,
+                output[:num_tokens],
+            )
+            return output
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
@@ -237,7 +273,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 )
         if cache_dtype not in _QSA_KV_CACHE_DTYPES:
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
+                "Qwen4Exp QSA requires a BF16, FP8-e4m3, or mxfp4_qsa main KV cache"
             )
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
@@ -323,9 +359,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if self.kv_cache_torch_dtype != torch.bfloat16 and self.kv_cache_dtype not in (
             "fp8",
             "fp8_e4m3",
+            "mxfp4_qsa",
         ):
             raise NotImplementedError(
-                "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
+                "Qwen4Exp QSA requires a BF16, FP8-e4m3, or mxfp4_qsa main KV cache"
             )
         self.kv_sharing_target_layer_name = None
         self.kv_cache = torch.tensor([])
@@ -384,6 +421,11 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             head_size_v=self.head_dim,
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            state_content_bytes=(
+                record_bytes(self.head_dim)
+                if self.kv_cache_dtype == "mxfp4_qsa"
+                else None
+            ),
         )
 
     def _run_qsa(

@@ -7,6 +7,7 @@ import torch
 
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.models.qwen4_exp.amd.indexer_qsa import apply_qsa_rope
+from vllm.models.qwen4_exp.amd.ops.mxfp4_kv import record_bytes, store_mxfp4_qsa
 from vllm.models.qwen4_exp.amd.ops.qsa import (
     qsa_compress_groups_with_ratio,
     qsa_store_cache_rows,
@@ -19,6 +20,8 @@ from vllm.models.qwen4_exp.common.qsa_cache import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+
+from .test_qsa_mxfp4_amd import _regions, dequantize_cache
 
 requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_rocm() or not HAS_TRITON,
@@ -77,10 +80,20 @@ def assert_fp8_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> N
     assert bool(((code_diff <= 1) | (abs_diff <= 2**-8)).all())
 
 
-def _make_main_inputs(num_tokens: int, main_fp8: bool = False) -> dict:
+def _make_main_inputs(num_tokens: int, main_kv: str = "auto") -> dict:
     """Random main-attention arguments with a paged cache in vLLM's layout."""
     num_blocks = num_tokens // MAIN_PAGE + 2
-    if main_fp8:
+    main_fp8 = main_kv == "fp8"
+    if main_kv == "mxfp4_qsa":
+        cache = torch.zeros(
+            num_blocks,
+            MAIN_HK,
+            MAIN_PAGE,
+            record_bytes(MAIN_D),
+            dtype=torch.uint8,
+            device="cuda",
+        ).transpose(1, 2)
+    elif main_fp8:
         # ROCm fp8 KV-cache layout: uint8 storage holding e4m3 codes in
         # the platform's native fp8 flavor, as the production typed views
         # do (FNUZ on MI300/MI325, OCP elsewhere).
@@ -147,6 +160,38 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
     ).view(num_tokens, -1)
     q, k = rope(positions, q, k)
     kv_cache = main["main_kv_cache"]
+    if kv_cache.dtype == torch.uint8:
+        torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
+        assert torch.equal(gate_out, gate)
+        keys = k.view(-1, MAIN_HK, MAIN_D)
+        expected = torch.zeros_like(kv_cache)
+        store_mxfp4_qsa(
+            keys, v.view(-1, MAIN_HK, MAIN_D), expected, main["main_slot_mapping"]
+        )
+        actual_k, actual_v, actual_k_scales, actual_v_scales = _regions(kv_cache)
+        expected_k, expected_v, expected_k_scales, expected_v_scales = _regions(
+            expected
+        )
+        # V is stored untransformed, so both writers see identical inputs.
+        assert torch.equal(actual_v, expected_v)
+        assert torch.equal(actual_v_scales, expected_v_scales)
+        # K differs from the unfused RoPE by up to 1 bf16 ulp, which flips
+        # an E2M1 code (or rarely a group's scale) at a rounding boundary.
+        assert (actual_k != expected_k).float().mean() < 0.01
+        assert (actual_k_scales != expected_k_scales).float().mean() < 0.01
+        slot = main["main_slot_mapping"]
+        valid = slot >= 0
+        decoded, _ = dequantize_cache(kv_cache)
+        stored = decoded[
+            (slot[valid] // MAIN_PAGE).long(), (slot[valid] % MAIN_PAGE).long()
+        ]
+        reference = keys[valid].float().unflatten(-1, (-1, 32))
+        group_max = reference.abs().amax(-1, keepdim=True)
+        error = (stored.unflatten(-1, (-1, 32)) - reference).abs()
+        # A fifth of the peak bounds E2M1 rounding; the 1-ulp RoPE shift can
+        # move an input across a rounding midpoint, adding up to 2^-7 * peak.
+        assert bool((error <= group_max * (1 / 5 + 2**-7) + 1e-6).all())
+        return
     if kv_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
         # The FP8 cache stores value / scale as e4m3fnuz codes. Compare
         # against a torch-side conversion: the C++ cache-update reference
@@ -208,7 +253,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
 
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
-@pytest.mark.parametrize("main_fp8", [False, True])
+@pytest.mark.parametrize("main_kv", ["auto", "fp8", "mxfp4_qsa"])
 @pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
@@ -233,7 +278,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
     ],
 )
 def test_qsa_fused_prepare_matches_unfused(
-    main_fp8,
+    main_kv,
     indexer_dtype,
     mrope,
     is_2d_positions,
@@ -396,7 +441,7 @@ def test_qsa_fused_prepare_matches_unfused(
     k_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
 
     fused_query = torch.empty(num_tokens, HQ, D, dtype=indexer_dtype, device=device)
-    main = _make_main_inputs(num_tokens, main_fp8)
+    main = _make_main_inputs(num_tokens, main_kv)
     main_q_out, main_gate_out = qsa_prepare(
         projected_qk[:, : HQ * D],
         projected_qk[:, HQ * D :],

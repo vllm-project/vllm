@@ -12,6 +12,8 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
+from .mxfp4_kv import block_records, head_dim_from_record_bytes, mxfp4_dequant_rows
+
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 
@@ -221,6 +223,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_FP8: tl.constexpr,
+    IS_MXFP4: tl.constexpr = False,
+    MXFP4_BLOCK_RECORDS: tl.constexpr = 0,
+    MXFP4_DOT_SCALED: tl.constexpr = False,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -275,33 +280,81 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         valid &= (physical_page >= 0) & (physical_page < num_cache_blocks)
         # physical_page * block stride can overflow int32 for large caches.
         safe_page = tl.maximum(physical_page, 0).to(tl.int64)
-        keys = tl.load(
-            k_cache_ptr
-            + safe_page[None, :] * stride_k_block
-            + page_offset[None, :] * stride_k_token
-            + kv_head * stride_k_head
-            + dim_offsets[:, None],
-            mask=valid[None, :],
-            other=0.0,
-        )
-        values = tl.load(
-            v_cache_ptr
-            + safe_page[:, None] * stride_v_block
-            + page_offset[:, None] * stride_v_token
-            + kv_head * stride_v_head
-            + dim_offsets[None, :],
-            mask=valid[:, None],
-            other=0.0,
-        )
-        if IS_FP8:
-            # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (an fp8
-            # QK dot measured slower and less accurate on the NVIDIA port).
-            keys = keys.to(query.dtype)
-            # Dequant V to fp16 for the PV dot: P <= 1 (online softmax) so
-            # fp16 has the range, its wider mantissa is more accurate, and
-            # the fp8->fp16 upcast with an fp16 PV dot is faster.
-            values = values.to(tl.float16)
-        scores = tl.dot(query, keys)
+        if IS_MXFP4:
+            # stride_k_token/stride_k_head count records here; see mxfp4_kv.py
+            # for the split block layout.
+            HALF_D: tl.constexpr = HEAD_DIM // 2
+            GROUPS: tl.constexpr = HEAD_DIM // 32
+            half_offsets = tl.arange(0, HALF_D)
+            group_offsets = tl.arange(0, GROUPS)
+            record = page_offset * stride_k_token + kv_head * stride_k_head
+            base = k_cache_ptr + safe_page * stride_k_block
+            k_packed = tl.load(
+                base[:, None] + record[:, None] * HALF_D + half_offsets[None, :],
+                mask=valid[:, None],
+                other=0,
+            )
+            k_scales = tl.load(
+                base[:, None]
+                + MXFP4_BLOCK_RECORDS * HEAD_DIM
+                + record[:, None] * GROUPS
+                + group_offsets[None, :],
+                mask=valid[:, None],
+                other=127,
+            )
+            v_packed = tl.load(
+                base[:, None]
+                + MXFP4_BLOCK_RECORDS * HALF_D
+                + record[:, None] * HALF_D
+                + half_offsets[None, :],
+                mask=valid[:, None],
+                other=0,
+            )
+            v_scales = tl.load(
+                base[:, None]
+                + MXFP4_BLOCK_RECORDS * (HEAD_DIM + GROUPS)
+                + record[:, None] * GROUPS
+                + group_offsets[None, :],
+                mask=valid[:, None],
+                other=127,
+            )
+            values = mxfp4_dequant_rows(v_packed, v_scales, HEAD_DIM)
+            if MXFP4_DOT_SCALED:
+                scores = tl.dot_scaled(
+                    query, None, "bf16", tl.trans(k_packed), k_scales, "e2m1"
+                )
+            else:
+                keys = tl.trans(mxfp4_dequant_rows(k_packed, k_scales, HEAD_DIM))
+                scores = tl.dot(query, keys)
+        else:
+            keys = tl.load(
+                k_cache_ptr
+                + safe_page[None, :] * stride_k_block
+                + page_offset[None, :] * stride_k_token
+                + kv_head * stride_k_head
+                + dim_offsets[:, None],
+                mask=valid[None, :],
+                other=0.0,
+            )
+            values = tl.load(
+                v_cache_ptr
+                + safe_page[:, None] * stride_v_block
+                + page_offset[:, None] * stride_v_token
+                + kv_head * stride_v_head
+                + dim_offsets[None, :],
+                mask=valid[:, None],
+                other=0.0,
+            )
+            if IS_FP8:
+                # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (an
+                # fp8 QK dot measured slower and less accurate on the NVIDIA
+                # port).
+                keys = keys.to(query.dtype)
+                # Dequant V to fp16 for the PV dot: P <= 1 (online softmax) so
+                # fp16 has the range, its wider mantissa is more accurate, and
+                # the fp8->fp16 upcast with an fp16 PV dot is faster.
+                values = values.to(tl.float16)
+            scores = tl.dot(query, keys)
         # Scaling scores avoids re-quantizing a scaled query to BF16.
         scores *= softmax_scale_log2
         scores = tl.where(valid[None, :], scores, -1.0e20)
@@ -833,10 +886,24 @@ def qsa_sparse_paged_attention(
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
     out: torch.Tensor | None = None,
+    mxfp4_dot_scaled: bool = False,
 ) -> torch.Tensor:
-    """Run sparse GQA directly over paged BF16 K/V caches."""
+    """Run sparse GQA directly over paged BF16, FP8, or mxfp4_qsa K/V caches.
+
+    An mxfp4_qsa cache is one ``[blocks, tokens, heads, record_bytes]`` uint8
+    view holding both K and V; pass it as ``k_cache`` and ``v_cache``.
+    """
     if not q.is_cuda or not HAS_TRITON:
         raise RuntimeError("paged QSA sparse attention requires a GPU and Triton")
+    is_mxfp4 = k_cache.dtype == torch.uint8
+    if is_mxfp4:
+        if v_cache is not k_cache:
+            raise ValueError("an mxfp4_qsa cache holds K and V in one view")
+        mxfp4_records = block_records(k_cache)
+        cache_head_dim = head_dim_from_record_bytes(k_cache.shape[3])
+    else:
+        mxfp4_records = 0
+        cache_head_dim = k_cache.shape[3]
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
     if logical_indices.ndim != 2 or logical_indices.shape[0] != q.shape[0]:
@@ -847,15 +914,15 @@ def qsa_sparse_paged_attention(
         raise ValueError("QSA sparse attention cache and block table must be nonempty")
     if logical_indices.shape[1] <= 0:
         raise ValueError("QSA sparse attention requires a positive selection width")
-    if q.shape[2] != k_cache.shape[3] or q.shape[1] % k_cache.shape[2]:
+    if q.shape[2] != cache_head_dim or q.shape[1] % k_cache.shape[2]:
         raise ValueError("QSA sparse attention requires valid grouped-query heads")
     head_dim = q.shape[2]
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
     is_fp8 = k_cache.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
     assert q.dtype == torch.bfloat16
     assert k_cache.dtype == v_cache.dtype
-    assert is_fp8 or k_cache.dtype == torch.bfloat16, (
-        "QSA sparse attention requires BF16 or FP8-e4m3 K/V"
+    assert is_fp8 or is_mxfp4 or k_cache.dtype == torch.bfloat16, (
+        "QSA sparse attention requires BF16, FP8-e4m3, or mxfp4_qsa K/V"
     )
     assert logical_indices.dtype == block_table.dtype == torch.int32
     assert token_to_req.dtype == torch.int32
@@ -916,6 +983,22 @@ def qsa_sparse_paged_attention(
             device=q.device,
         )
 
+    if is_mxfp4:
+        # The kernel indexes mxfp4 records, not bytes, within a block.
+        record = k_cache.shape[3]
+        stride_token = k_cache.stride(1) // record
+        stride_head = k_cache.stride(2) // record
+        cache_strides = (k_cache.stride(0), stride_token, stride_head) * 2
+    else:
+        cache_strides = (
+            k_cache.stride(0),
+            k_cache.stride(1),
+            k_cache.stride(2),
+            v_cache.stride(0),
+            v_cache.stride(1),
+            v_cache.stride(2),
+        )
+
     partial_grid = (q.shape[0], k_cache.shape[2], num_splits)
     _qsa_sparse_paged_gqa_splitk_kernel[partial_grid](
         q,
@@ -929,12 +1012,7 @@ def qsa_sparse_paged_attention(
         out,
         q.stride(0),
         q.stride(1),
-        k_cache.stride(0),
-        k_cache.stride(1),
-        k_cache.stride(2),
-        v_cache.stride(0),
-        v_cache.stride(1),
-        v_cache.stride(2),
+        *cache_strides,
         logical_indices.stride(0),
         block_table.stride(0),
         out.stride(0),
@@ -953,6 +1031,9 @@ def qsa_sparse_paged_attention(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         IS_FP8=is_fp8,
+        IS_MXFP4=is_mxfp4,
+        MXFP4_BLOCK_RECORDS=mxfp4_records,
+        MXFP4_DOT_SCALED=mxfp4_dot_scaled,
         num_warps=partial_warps,
         num_stages=partial_stages,
     )
