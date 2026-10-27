@@ -241,6 +241,7 @@ def aiter_moe_pads(
     intermediate_pad: int,
     activation: MoEActivation,
     use_mxfp4_w4a4: bool,
+    use_mxfp4_w4a16: bool,
     tp_size: int,
 ) -> tuple[int, int]:
     """Round the padding deltas to what AITER's MoE dispatch expects.
@@ -248,8 +249,9 @@ def aiter_moe_pads(
     SITU's A16W4 FlyDSL kernel pads per gate/up half, so its pads pass through
     unrounded. Otherwise the pads are rounded to AITER's CK/FlyDSL tile
     granularity, and at tp_size == 1 the intermediate pad is doubled for the
-    fused gate/up weight. The W4A4 SiLU path doubles it inside AITER, so it is
-    passed undoubled; doubling it here as well masks live intermediate rows.
+    fused gate/up weight. The W4A4 SiLU and W4A16 paths double it inside AITER,
+    so it is passed undoubled; doubling it here as well masks live
+    intermediate rows.
 
     Where AITER doubles it (v0.1.24.post1):
     - CK-Tile stage 1, aiter/fused_moe.py:
@@ -264,7 +266,11 @@ def aiter_moe_pads(
     """
     if activation == MoEActivation.SITU:
         return hidden_pad, intermediate_pad
-    double = tp_size == 1 and not (use_mxfp4_w4a4 and activation == MoEActivation.SILU)
+    double = (
+        tp_size == 1
+        and not use_mxfp4_w4a16
+        and not (use_mxfp4_w4a4 and activation == MoEActivation.SILU)
+    )
     return (
         hidden_pad // 128 * 128,
         intermediate_pad // 64 * 64 * (2 if double else 1),
@@ -407,12 +413,18 @@ def rocm_aiter_fused_experts(
             intermediate_pad,
             activation,
             quant_config.use_mxfp4_w4a4,
+            quant_config.use_mxfp4_w4a16,
             moe_config.tp_size,
         )
 
-        # SITU is Kimi K3's a16w4 path, where AITER keys its own scratch
-        # zeroing on a non-zero pad; leave that one as it is.
-        if quant_config.use_mxfp4_w4a16 and activation != MoEActivation.SITU:
+        # AITER's bias-less W4A16 FlyDSL stage 1 leaves the padded intermediate
+        # columns unwritten (ROCm/aiter#6598); the padded weights are zero, so
+        # declare no pad there. SITU zeroes its own scratch on a non-zero pad.
+        if (
+            quant_config.use_mxfp4_w4a16
+            and quant_config.w1_bias is None
+            and activation != MoEActivation.SITU
+        ):
             intermediate_pad = 0
 
         # AITER's stage1 GEMM needs gate_mode to match how weights were
