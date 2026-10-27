@@ -143,7 +143,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def _map_global_to_physical_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
         if self.global_to_physical is None:
             return topk_ids
-        return self.global_to_physical[topk_ids]
+        return torch.where(topk_ids >= 0, self.global_to_physical[topk_ids], -1)
 
     def _do_quant(
         self,
