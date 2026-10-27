@@ -20,6 +20,7 @@ pub(crate) struct StartProfileRequest {
     profile_prefix: Option<String>,
     delay_iterations: Option<u64>,
     max_iterations: Option<u64>,
+    profiler_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 fn valid_profile_prefix(prefix: &str) -> bool {
@@ -60,6 +61,7 @@ pub async fn start_profile(
             body.profile_prefix.as_deref(),
             body.delay_iterations,
             body.max_iterations,
+            body.profiler_kwargs.as_ref(),
         )
         .await
     {
