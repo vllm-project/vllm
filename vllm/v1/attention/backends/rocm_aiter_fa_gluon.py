@@ -8,7 +8,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import CommonAttentionMetadata, MultipleOf
 from vllm.v1.attention.backends.rocm_aiter_fa import (
     AiterFlashAttentionBackend,
     AiterFlashAttentionImpl,
@@ -44,6 +44,10 @@ def pa_gluon_supports(
 
 
 class AiterFlashAttentionGluonBackend(AiterFlashAttentionBackend):
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [_BLOCK_SIZE]
+
     @staticmethod
     def get_impl_cls() -> type["AiterFlashAttentionGluonImpl"]:
         return AiterFlashAttentionGluonImpl
