@@ -105,8 +105,7 @@ def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     m, d2 = x.shape
     d = d2 // 2
     assert x.dtype == torch.bfloat16 and x.stride(-1) == 1
-    bd = min(d, 1024)
-    assert d % bd == 0
+    bd = min(d & -d, 1024)  # largest pow2 divisor of d; TP shards 6144 to 1536/768
     out = torch.empty(m, d, dtype=x.dtype, device=x.device)
     if m > 0:
         _silu_and_mul_kernel[(m, d // bd)](x, out, x.stride(0), D=d, BD=bd, num_warps=4)
