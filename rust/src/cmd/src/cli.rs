@@ -37,7 +37,7 @@ use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
     CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogging,
-    ParserSelection, RenderConfig, RendererSelection,
+    ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -153,6 +153,14 @@ pub struct RenderArgs {
     /// Default JSON keyword arguments merged into every chat-template render.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// JSON mapping that rewrites a request's reasoning effort to a value the
+    /// chat template supports. Efforts not listed pass through unchanged, and
+    /// `reasoning_effort` in `chat_template_kwargs` is not rewritten.
+    ///
+    /// Example: `{"medium": "low", "xhigh": "max"}` for a template that only
+    /// knows low, high and max.
+    #[arg(long, value_parser = parse_json::<ReasoningEffortMap>, value_name = "JSON")]
+    reasoning_effort_map: Option<ReasoningEffortMap>,
     /// Whether to trust the chat template provided in the request. Only the HF
     /// chat-template renderer honors request templates; native renderers ignore
     /// them.
@@ -200,6 +208,7 @@ impl RenderArgs {
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             chat_template_content_format: self.chat_template_content_format,
@@ -327,6 +336,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
 
+    /// JSON mapping that rewrites a request's reasoning effort to a value the
+    /// chat template supports. Efforts not listed pass through unchanged, and
+    /// `reasoning_effort` in `chat_template_kwargs` is not rewritten.
+    ///
+    /// Example: `{"medium": "low", "xhigh": "max"}` for a template that only
+    /// knows low, high and max.
+    #[arg(long, value_parser = parse_json::<ReasoningEffortMap>, value_name = "JSON")]
+    #[serde(default)]
+    pub reasoning_effort_map: Option<ReasoningEffortMap>,
     /// Whether to trust the chat template provided in the request. If False,
     /// the server will always use the chat template specified by
     /// `--chat-template` or the ones from tokenizer. Only the HF chat-template
@@ -740,6 +758,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
@@ -818,6 +837,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
@@ -929,6 +949,9 @@ pub struct StructuredOutputsConfig {
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }
+
+/// Keys are API effort names, so unknown efforts fail at startup.
+type ReasoningEffortMap = HashMap<ReasoningEffort, String>;
 
 /// Parsed `VLLM_LOG_STATS_INTERVAL`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
