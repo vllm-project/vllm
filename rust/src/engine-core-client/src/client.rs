@@ -21,7 +21,7 @@ use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
-use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
+use crate::protocol::utility::{CheckpointState, EngineCoreUtilityRequest, PauseMode};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
@@ -473,11 +473,13 @@ impl EngineCoreClient {
         self.inner.pending_utility_call_count()
     }
 
-    /// Return the engine-side indices connected to this client.
+    /// Return the engine-side indices connected to this client, as stamped on
+    /// request output streams: an engine identity that does not encode an
+    /// index maps to 0, as in [`Self::call`].
     pub fn engine_indices(&self) -> Vec<u32> {
         self.engines
             .iter()
-            .map(|engine| engine.engine_id.engine_index().expect("engine id must encode as u16"))
+            .map(|engine| engine.engine_id.engine_index().unwrap_or(0))
             .collect()
     }
 
@@ -985,6 +987,43 @@ impl EngineCoreClient {
         Ok(())
     }
 
+    /// Start preparing every engine for a process checkpoint: drain with
+    /// `mode`, then release the KV cache and what a checkpoint must not contain.
+    /// Returns the first refusal from any engine. An engine that refuses
+    /// changes nothing, but with data parallelism the others may have started.
+    pub async fn checkpoint_prepare(&self, mode: PauseMode) -> Result<Option<String>> {
+        let refusals: Vec<Option<String>> =
+            self.call_utility("checkpoint_prepare", (mode,)).await?;
+        Ok(refusals.into_iter().flatten().next())
+    }
+
+    /// Bring back what `checkpoint_prepare` released and serve again.
+    pub async fn checkpoint_restore(&self) -> Result<()> {
+        self.call_utility::<(), _>("checkpoint_restore", ()).await?;
+        Ok(())
+    }
+
+    /// Return the checkpoint lifecycle state and the error that failed it.
+    ///
+    /// Engines move independently: failed if any failed, otherwise the state
+    /// all engines share, otherwise the transition in progress.
+    pub async fn checkpoint_state(&self) -> Result<(CheckpointState, Option<String>)> {
+        let mut states: Vec<(CheckpointState, Option<String>)> =
+            self.call_utility("checkpoint_state", ()).await?;
+        if let Some(index) = states.iter().position(|(state, _)| *state == CheckpointState::Failed)
+        {
+            return Ok(states.swap_remove(index));
+        }
+        let state = match states.iter().map(|(state, _)| *state).all_equal_value() {
+            Ok(state) => state,
+            Err(_) if states.iter().any(|(state, _)| *state == CheckpointState::Preparing) => {
+                CheckpointState::Preparing
+            }
+            Err(_) => CheckpointState::Restoring,
+        };
+        Ok((state, None))
+    }
+
     /// Return whether the scheduler is currently in any pause state.
     pub async fn is_scheduler_paused(&self) -> Result<bool> {
         self.call_utility_consensus("is_scheduler_paused", ()).await
@@ -996,6 +1035,7 @@ impl EngineCoreClient {
         profile_prefix: Option<&str>,
         delay_iterations: Option<u64>,
         max_iterations: Option<u64>,
+        profiler_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<()> {
         let mut active = self.profile_active.lock().await;
         if *active {
@@ -1008,7 +1048,13 @@ impl EngineCoreClient {
         if let Err(error) = self
             .call_utility::<(), _>(
                 "profile",
-                (true, profile_prefix, delay_iterations, max_iterations),
+                (
+                    true,
+                    profile_prefix,
+                    delay_iterations,
+                    max_iterations,
+                    profiler_kwargs,
+                ),
             )
             .await
         {
