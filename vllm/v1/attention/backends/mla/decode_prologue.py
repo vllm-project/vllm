@@ -1053,6 +1053,10 @@ class DecodePrologueBatch:
         return tensor
 
     def _commit_deferred_schedules(self) -> None:
+        # Steps that stage phases without deferring a schedule reach flush
+        # with an empty list, and _foreach_copy_ rejects empty lists.
+        if not self._deferred:
+            return
         sources = [
             get_paged_mqa_logits_metadata(
                 schedule.context_lens,
