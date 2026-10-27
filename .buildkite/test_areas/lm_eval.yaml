@@ -322,7 +322,6 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Spec Decode"
   key: lm-eval-spec-decode-4xb200
-  automatic_shard: true
   timeout_in_minutes: 120
   device: b200-k8s
   num_devices: 4
