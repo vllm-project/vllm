@@ -50,9 +50,10 @@ def _granite_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
     """Return an ``O(|delta|)`` extender when ``raw_args`` ends inside a
     top-level string value of the ``arguments`` object.
 
-    In ``tool_call_body_array`` mode, ``StreamingParserEngine._feed_array_char``
-    feeds element characters one at a time via ``_feed_args_char``, which emits
-    an ``ARG_VALUE_CHUNK`` event on every character. Without an extender, each
+    In JSON-array collection mode,
+    ``StreamingParserEngine._feed_json_collection_char`` feeds element
+    characters one at a time via ``_feed_args_char``, which emits an
+    ``ARG_VALUE_CHUNK`` event on every character. Without an extender, each
     character re-runs ``_granite_arg_converter`` and ``_safe_arg_prefix`` over
     the entire accumulated element buffer (``O(N^2)``). While streaming inside
     a top-level JSON string value of ``arguments``, raw delta characters up to
@@ -143,9 +144,9 @@ def granite_config() -> ParserEngineConfig:
             ),
         },
         arg_converter=_granite_arg_converter,
-        arg_value_extender=_granite_arg_value_extender,
         tool_call_body_array=True,
         stream_arg_deltas=True,
+        arg_value_extender=_granite_arg_value_extender,
     )
 
 
