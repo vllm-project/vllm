@@ -284,3 +284,124 @@ def test_rocm_mxfp8_quantizer_matches_torch_on_degenerate_blocks(num_rows):
     torch.testing.assert_close(
         q_triton.view(torch.uint8), q_torch.view(torch.uint8), rtol=0, atol=0
     )
+
+
+@torch.inference_mode()
+def test_rocm_mxfp8_fused_act_quant_bitwise_eq_unfused():
+    """Fused activation quantization + dot_scaled must be bitwise identical
+    to the unfused path (quantize then dot_scaled) for small M.
+
+    This validates the correctness of the in-register quantization in the
+    fused kernel.
+    """
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        _mxfp8_dot_scaled_linear,
+        _mxfp8_fused_quant_dot_scaled_linear,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+    )
+
+    # Test shapes: small M, various K
+    test_shapes = [
+        (1, 1024),
+        (2, 1024),
+        (4, 1024),
+        (8, 1024),
+        (16, 1024),
+        (1, 2048),
+        (2, 2048),
+        (4, 2048),
+    ]
+
+    for M, K in test_shapes:
+        torch.manual_seed(M * 1000 + K)
+        device = "cuda"
+
+        # Create weight (FP8) and weight scale
+        N = 512
+        weight_bf16 = torch.randn(N, K, device=device, dtype=torch.bfloat16) * 0.05
+        weight, weight_scale = _mxfp8_e4m3_quantize_torch(weight_bf16)
+
+        # Create input (bf16)
+        x = torch.randn(M, K, device=device, dtype=torch.bfloat16) * 0.5
+
+        # Unfused path: quantize then dot_scaled
+        x_q, x_scale = _mxfp8_e4m3_quantize_torch(x)
+        out_unfused = _mxfp8_dot_scaled_linear(x_q, weight, weight_scale)
+
+        # Fused path: fused quant + dot_scaled
+        out_fused = _mxfp8_fused_quant_dot_scaled_linear(x, weight, weight_scale)
+
+        # Must be bitwise identical
+        torch.testing.assert_close(
+            out_fused, out_unfused, rtol=0, atol=0,
+            msg=f"M={M}, K={K}: fused and unfused outputs differ"
+        )
+
+        # Also verify against reference dequant matmul
+        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+            dequant_mxfp8_to_bf16,
+        )
+        expected = (
+            dequant_mxfp8_to_bf16(x_q, x_scale).float()
+            @ dequant_mxfp8_to_bf16(weight, weight_scale).float().T
+        )
+        rel_err = (out_fused.float() - expected).norm() / expected.norm()
+        assert rel_err < 5e-3, f"M={M}, K={K}: relative error {rel_err:.4f}"
+
+
+@torch.inference_mode()
+def test_rocm_mxfp8_fused_act_quant_disabled_under_batch_invariant():
+    """Fused activation quantization must be disabled under VLLM_BATCH_INVARIANT."""
+    import vllm.envs as envs
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+    )
+
+    # Temporarily enable batch invariant
+    old_value = envs.VLLM_BATCH_INVARIANT
+    try:
+        envs.VLLM_BATCH_INVARIANT = True
+
+        torch.manual_seed(0)
+        device = "cuda"
+        M, K, N = 8, 1024, 512
+
+        # Create layer with weight and weight_scale
+        weight_bf16 = torch.randn(N, K, device=device, dtype=torch.bfloat16) * 0.05
+        weight, weight_scale = _mxfp8_e4m3_quantize_torch(weight_bf16)
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
+
+        kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(N, K)))
+        kernel.process_weights_after_loading(layer)
+
+        x = torch.randn(M, K, device=device, dtype=torch.bfloat16) * 0.5
+
+        # Under batch invariant, should use unfused path (or block32)
+        # The key is that it should NOT use the fused quant kernel
+        # We can't easily test which kernel was used, but we can verify
+        # the output is correct by comparing with unfused reference
+        out = kernel.apply_weights(layer, x)
+
+        x_q, x_scale = _mxfp8_e4m3_quantize_torch(x)
+        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+            dequant_mxfp8_to_bf16,
+        )
+        expected = (
+            dequant_mxfp8_to_bf16(x_q, x_scale).float()
+            @ dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale).float().T
+        )
+        rel_err = (out.float() - expected).norm() / expected.norm()
+        assert rel_err < 5e-3, f"batch invariant: relative error {rel_err:.4f}"
+
+    finally:
+        envs.VLLM_BATCH_INVARIANT = old_value

@@ -9,6 +9,7 @@ of that is dequantized to BF16 once at load and served by a plain linear
 instead, since ``can_implement`` does not filter on K.
 """
 
+import math
 import torch
 
 import vllm.envs as envs
@@ -82,6 +83,105 @@ def _mxfp8_linear_kernel(
     )
 
 
+# Fused activation quantization + dot_scaled kernel for small M (M <= 16)
+# This kernel quantizes bf16 activations in-register during the GEMM,
+# eliminating the separate mxfp8_e4m3_quantize kernel launch.
+# Used for M <= 16 on gfx950 (MI355X) with K <= 1024 (or K=2048 for M<=4).
+@triton.jit
+def _mxfp8_fused_quant_linear_kernel(
+    x_ptr,
+    w_ptr,
+    ws_ptr,
+    out_ptr,
+    M,
+    N,
+    K,
+    stride_xm,
+    stride_xk,
+    stride_wn,
+    stride_wk,
+    stride_wsn,
+    stride_wsk,
+    stride_om,
+    stride_on,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    QUANT_ROWS: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    TINY: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    # Each program handles QUANT_ROWS of activation quantization
+    # and fills a 16-row MFMA tile by repeating the quantized rows
+    offs_m = pid_m * QUANT_ROWS + tl.arange(0, QUANT_ROWS)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    m_mask = offs_m < M
+    n_mask = offs_n < N
+
+    # Output pointers (16-row tile)
+    out_row_base = pid_m * 16
+    o_ptrs = out_ptr + out_row_base[:, None] * stride_om + offs_n[None, :] * stride_on
+    out_mask = (out_row_base[:, None] < M) & n_mask[None, :]
+
+    # Accumulator for 16-row tile
+    acc = tl.zeros((16, BLOCK_N), dtype=tl.float32)
+
+    # Precompute the repeat pattern: which quantized row maps to each output row
+    repeat_idx = tl.arange(0, 16) % QUANT_ROWS
+
+    # K loop - runtime loop with constexpr BLOCK_K
+    for k_tile in range(0, K, BLOCK_K):
+        # K-tile offsets for weight loading (full BLOCK_K)
+        offs_k_full = k_tile + tl.arange(0, BLOCK_K)
+        offs_sk_full = k_tile // 32 + tl.arange(0, BLOCK_K // 32)
+
+        # Weight pointers for this K-tile (full BLOCK_K)
+        w_ptrs = w_ptr + offs_n[:, None] * stride_wn + offs_k_full[None, :] * stride_wk
+        ws_ptrs = ws_ptr + offs_n[:, None] * stride_wsn + offs_sk_full[None, :] * stride_wsk
+
+        # Load full weight tile
+        w = tl.load(w_ptrs, mask=n_mask[:, None] & (offs_k_full[None, :] < K), other=0.0)
+        ws = tl.load(ws_ptrs, mask=n_mask[:, None] & (offs_sk_full[None, :] < K // 32), other=0)
+
+        # Quantize in-register: per 32-element block
+        # We'll accumulate dot_scaled per block of 32
+        # Each iteration processes a 32-element block along K
+        for bk in tl.static_range(0, BLOCK_K, 32):
+            # Load 32 elements for each quant row
+            offs_k_32 = k_tile + bk + tl.arange(0, 32)
+            x_block = tl.load(
+                x_ptr + offs_m[:, None] * stride_xm + offs_k_32[None, :] * stride_xk,
+                mask=m_mask[:, None] & (offs_k_32[None, :] < K),
+                other=0.0,
+            ).to(tl.float32)
+
+            # Compute scale: amax per row, then E8M0 scale byte
+            amax = tl.maximum(tl.max(tl.abs(x_block), axis=1), TINY)
+            sb = tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0
+            sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
+            rescale = tl.exp2(127.0 - sb)
+
+            # Quantize to FP8
+            x_block_q = (x_block * rescale[:, None]).to(tl.float8e4nv)
+
+            # Load weight and weight scale for this 32-element block
+            w_block = w[:, bk:bk+32]
+            ws_block = ws[:, bk // 32:bk // 32 + 1]
+
+            # Repeat quantized rows to fill 16-row tile
+            x_block_q_16 = x_block_q[repeat_idx, :]
+            x_scale_16 = sb.to(tl.uint8)[repeat_idx, None]
+
+            # Accumulate dot_scaled for this 32-element block
+            acc += tl.dot_scaled(x_block_q_16, x_scale_16, "e4m3", w_block.T, ws_block, "e4m3")
+
+    # Store output
+    tl.store(o_ptrs, acc.to(out_ptr.dtype.element_ty), mask=out_mask)
+
+
 def _mxfp8_dot_scaled_linear(
     x: torch.Tensor,  # [M, K] bf16/fp16
     w: torch.Tensor,  # [N, K] fp8 e4m3
@@ -115,6 +215,81 @@ def _mxfp8_dot_scaled_linear(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    return out
+
+
+def _mxfp8_fused_quant_dot_scaled_linear(
+    x: torch.Tensor,  # [M, K] bf16
+    w: torch.Tensor,  # [N, K] fp8 e4m3
+    w_scale: torch.Tensor,  # [N, K//32] uint8 (E8M0)
+) -> torch.Tensor:
+    """Fused activation quantization + dot_scaled linear for small M (M <= 16).
+
+    This kernel fuses the MXFP8 activation quantization into the GEMM kernel,
+    eliminating the separate mxfp8_e4m3_quantize kernel launch.
+    """
+    M, K = x.shape
+    N = w.shape[0]
+
+    # Check if we should use fused kernel
+    # Fused for K <= 1024 (M <= 16) and K = 2048 (M <= 4)
+    use_fused = False
+    if M <= 16 and K <= 1024:
+        use_fused = True
+    elif M <= 4 and K == 2048:
+        use_fused = True
+
+    if not use_fused:
+        return _mxfp8_dot_scaled_linear(x, w, w_scale)
+
+    out = torch.empty((M, N), dtype=x.dtype, device=x.device)
+
+    # For small M, use the fused kernel with QUANT_ROWS = min(16, next_pow2(M))
+    QUANT_ROWS = min(16, 2 ** math.ceil(math.log2(M)))
+
+    # Block config for fused kernel
+    # Use BLOCK_N=16 (narrow tile for small M), BLOCK_K=128 or 256
+    if K % 256 == 0:
+        BLOCK_K = 256
+    elif K % 128 == 0:
+        BLOCK_K = 128
+    else:
+        BLOCK_K = 128
+
+    BLOCK_N = 16
+    num_warps = 2
+    num_stages = 2
+
+    grid = (triton.cdiv(M, QUANT_ROWS), triton.cdiv(N, BLOCK_N))
+
+    FP8_MAX = float(torch.finfo(torch.float8_e4m3fn).max)
+    TINY = float(torch.finfo(torch.float32).tiny)
+
+    _mxfp8_fused_quant_linear_kernel[grid](
+        x,
+        w,
+        w_scale,
+        out,
+        M,
+        N,
+        K,
+        x.stride(0),
+        x.stride(1),
+        w.stride(0),
+        w.stride(1),
+        w_scale.stride(0),
+        w_scale.stride(1),
+        out.stride(0),
+        out.stride(1),
+        BLOCK_M=QUANT_ROWS,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        QUANT_ROWS=QUANT_ROWS,
+        FP8_MAX=FP8_MAX,
+        TINY=TINY,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -274,6 +449,20 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             )
         out_shape = (*x.shape[:-1], layer.weight.shape[0])
         x2d = x.reshape(-1, x.shape[-1])
+        M = x2d.shape[0]
+        K = x2d.shape[-1]
+
+        # Use fused kernel for small M (M <= 16) on gfx950
+        # Disabled under VLLM_BATCH_INVARIANT
+        use_fused = (
+            not envs.VLLM_BATCH_INVARIANT
+            and x2d.dtype == torch.bfloat16
+            and M <= 16
+            and K % MXFP8_BLOCK_SIZE == 0
+            and current_platform.is_rocm()
+            and current_platform.supports_mx()
+        )
+
         if layer.weight_scale.shape[0] != layer.weight.shape[0]:
             # One scale row per 32 weight rows (see process_weights_after_loading).
             x_q, x_scale = mxfp8_e4m3_quantize(x2d)
@@ -283,7 +472,10 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         elif layer.weight.element_size() >= 2:
             out = torch.nn.functional.linear(x2d, layer.weight.to(x.dtype))
         elif x2d.shape[-1] % _DOT_SCALED_K_ALIGN == 0:
-            out = _mxfp8_dot_scaled_linear(x2d, layer.weight, layer.weight_scale)
+            if use_fused:
+                out = _mxfp8_fused_quant_dot_scaled_linear(x2d, layer.weight, layer.weight_scale)
+            else:
+                out = _mxfp8_dot_scaled_linear(x2d, layer.weight, layer.weight_scale)
         else:
             # process_weights_after_loading dequantizes these weights once, so
             # this runs only if it did not; dot_scaled would be invalid here.
