@@ -466,7 +466,6 @@ def sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
-    max_decode_tokens: int = 0,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -505,6 +504,15 @@ def sparse_attn_indexer(
             )
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
+
+        # Decode rows per step: each decode is padded to 1 + speculative tokens.
+        # The profiling run sets the vLLM config; other dummy runs may not.
+        max_decode_tokens = 0
+        if (cfg := get_current_vllm_config_or_none()) is not None:
+            max_decode_tokens = min(
+                cfg.scheduler_config.max_num_seqs,
+                cfg.scheduler_config.max_num_batched_tokens,
+            ) * (1 + cfg.num_speculative_tokens)
 
         # Dummy allocation for the peak logits memory during inference: the
         # prefill chunks' budget, or the decode logits, which eager and
@@ -1007,7 +1015,6 @@ def sparse_attn_indexer_fake(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
-    max_decode_tokens: int = 0,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1075,11 +1082,6 @@ class SparseAttnIndexer(CustomOp):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
-        # Decode rows per step: each decode is padded to 1 + speculative tokens.
-        scheduler_config = vllm_config.scheduler_config
-        self.max_decode_tokens = min(
-            scheduler_config.max_num_seqs, scheduler_config.max_num_batched_tokens
-        ) * (1 + vllm_config.num_speculative_tokens)
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
@@ -1192,7 +1194,6 @@ class SparseAttnIndexer(CustomOp):
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,
             topk_backend=self.topk_backend,
-            max_decode_tokens=self.max_decode_tokens,
         )
 
     def forward_xpu(
