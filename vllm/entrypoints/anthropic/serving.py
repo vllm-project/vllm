@@ -321,10 +321,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                     {"role": "system", "content": "t"},
                     {"role": "user", "content": "t"},
                 ],
+                tools=None,
                 add_generation_prompt=False,
             )
             return False
-        except jinja2.TemplateError:
+        except Exception:
+            # Non-TemplateError failures (e.g. TypeError from filters on
+            # undefined variables) must not abort server startup.
             return True
 
     @staticmethod

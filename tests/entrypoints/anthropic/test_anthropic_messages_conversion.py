@@ -1454,6 +1454,20 @@ class TestDetectMergeInlineSystem:
         """No chat_template → conservative default: merge."""
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
 
+    def test_tools_none_check_template_no_merge(self):
+        """OLMo 3-style ``tools is none`` check must see tools=None, not
+        Undefined, so ``tojson`` isn't reached"""
+        template = (
+            "{% if tools is none %}{% else %}{{ tools | tojson }}{% endif %}"
+            "{% for m in messages %}{{ m.content }}{% endfor %}"
+        )
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is False
+
+    def test_non_template_error_defaults_merge(self):
+        """A non-TemplateError render failure must not abort startup."""
+        template = "{{ undefined_var | tojson }}"
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is True
+
     @pytest.mark.parametrize(
         ("resolved", "expected"),
         [(PERMISSIVE_TEMPLATE, False), (Q35_TEMPLATE, True)],
