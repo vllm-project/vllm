@@ -172,6 +172,8 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
         Returns the prefix list of tokens that are accepted by the FSM.
         """
+        if self._is_terminated:
+            return []
         accepted_tokens = []
         for token in tokens:
             if self.matcher.accept_token(token):
