@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable, Iterator
 from enum import Enum
 
 from vllm.logger import init_logger
+from vllm.v1.core.sched.residual_sjf import residual_sjf_key
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -217,22 +218,11 @@ class ResidualSJFRequestQueue(RequestQueue):
         self._clock = clock
         self._selected_request: Request | None = None
 
-    @staticmethod
-    def _is_recovery_request(request: Request) -> bool:
-        return request.num_preemptions > 0 or request.num_computed_tokens > 0
-
     def _selection_key(
         self, request: Request, now: float
     ) -> tuple[int, int, float, str]:
-        if self._is_recovery_request(request):
-            return 0, 0, request.arrival_time, request.request_id
-        if now - request.arrival_time >= self._max_wait_seconds:
-            return 1, 0, request.arrival_time, request.request_id
-        return (
-            2,
-            self._residual_cost_fn(request),
-            request.arrival_time,
-            request.request_id,
+        return residual_sjf_key(
+            request, self._residual_cost_fn, now, self._max_wait_seconds
         )
 
     def get_best_request(

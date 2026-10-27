@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -8,8 +9,9 @@ import pytest
 from vllm.config import SchedulerConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.request_queue import ResidualSJFRequestQueue
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 from .utils import create_requests, create_scheduler, mock_kv
 
@@ -212,10 +214,20 @@ def test_residual_sjf_config_and_cli_validation():
             "residual_sjf",
             "--residual-sjf-max-wait-ms",
             "1234",
+            "--residual-sjf-preempt-prefills",
         ]
     )
     assert args.scheduling_policy == "residual_sjf"
     assert args.residual_sjf_max_wait_ms == 1234
+    assert args.residual_sjf_preempt_prefills
+    with pytest.raises(ValueError, match="requires residual_sjf"):
+        SchedulerConfig(
+            max_model_len=32,
+            max_num_batched_tokens=32,
+            max_num_seqs=1,
+            is_encoder_decoder=False,
+            residual_sjf_preempt_prefills=True,
+        )
 
 
 def test_connector_estimate_changes_order_but_does_not_replace_admission():
@@ -253,3 +265,158 @@ def test_local_estimate_refreshes_after_cache_reset():
     assert scheduler._get_residual_sjf_cost(waiting) == 1
     assert scheduler.reset_prefix_cache()
     assert scheduler._get_residual_sjf_cost(waiting) == 3
+
+
+def _finish_step(scheduler, output, finished_recving=None):
+    req_ids = list(output.num_scheduled_tokens)
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+            sampled_token_ids=[
+                [] if scheduler.requests[rid].is_prefill_chunk else [0]
+                for rid in req_ids
+            ],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            kv_connector_output=KVConnectorOutput(finished_recving=finished_recving),
+        ),
+    )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_residual_sjf_chunk_yield_keeps_kv_and_resumes(enabled, async_scheduling):
+    scheduler = create_scheduler(
+        scheduling_policy="residual_sjf",
+        residual_sjf_preempt_prefills=enabled,
+        async_scheduling=async_scheduling,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
+        max_num_seqs=2,
+    )
+    long_req = create_requests(1, num_tokens=129, req_ids=["long"])[0]
+    scheduler.add_request(long_req)
+    _finish_step(scheduler, scheduler.schedule())
+    blocks = scheduler.kv_cache_manager.get_block_ids("long")
+    short_req = create_requests(1, num_tokens=17, max_tokens=1, req_ids=["short"])[0]
+    scheduler.add_request(short_req)
+
+    output = scheduler.schedule()
+    if enabled:
+        assert output.num_scheduled_tokens == {"short": 17}
+        assert long_req.num_computed_tokens == 32
+        assert scheduler.kv_cache_manager.get_block_ids("long") == blocks
+        _finish_step(scheduler, output)
+        assert scheduler.schedule().num_scheduled_tokens == {"long": 32}
+    else:
+        assert output.num_scheduled_tokens == {"long": 32}
+    assert long_req.num_preemptions == 0
+
+
+@pytest.mark.parametrize("guard", ["full_slots", "paused_new", "aged"])
+def test_residual_sjf_chunk_yield_respects_admission_and_aging(guard):
+    scheduler = create_scheduler(
+        scheduling_policy="residual_sjf",
+        residual_sjf_preempt_prefills=True,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
+        max_num_seqs=1 if guard == "full_slots" else 2,
+    )
+    long_req = create_requests(1, num_tokens=129, req_ids=["long"])[0]
+    if guard == "aged":
+        long_req.arrival_time = time.time() - 20
+    scheduler.add_request(long_req)
+    _finish_step(scheduler, scheduler.schedule())
+    scheduler.add_request(create_requests(1, num_tokens=17, req_ids=["short"])[0])
+    if guard == "paused_new":
+        scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    assert scheduler.schedule().num_scheduled_tokens == {"long": 32}
+
+
+def test_residual_sjf_failed_reservation_does_not_stall_resident_prefill():
+    scheduler = create_scheduler(
+        scheduling_policy="residual_sjf",
+        residual_sjf_preempt_prefills=True,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=24,
+        max_num_seqs=3,
+        num_blocks=8,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    long_req = create_requests(1, num_tokens=97, req_ids=["long"])[0]
+    scheduler.add_request(long_req)
+    _finish_step(scheduler, scheduler.schedule())
+    scheduler.add_request(create_requests(1, num_tokens=1, req_ids=["decode"])[0])
+    _finish_step(scheduler, scheduler.schedule())
+    waiting = create_requests(1, num_tokens=257, req_ids=["waiting"])[0]
+    waiting.kv_transfer_params = {"cached_tokens": 225}
+    scheduler.add_request(waiting)
+    output = scheduler.schedule()
+    # The estimate promises a short suffix, but the actual miss cannot fit KV.
+    assert output.num_scheduled_tokens == {"decode": 1}
+    _finish_step(scheduler, output)
+    assert scheduler.schedule().num_scheduled_tokens == {"long": 23, "decode": 1}
+    assert long_req.num_preemptions == 0
+
+
+def test_residual_sjf_yield_preserves_decode_budget():
+    scheduler = create_scheduler(
+        scheduling_policy="residual_sjf",
+        residual_sjf_preempt_prefills=True,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
+        max_num_seqs=3,
+    )
+    scheduler.add_request(create_requests(1, num_tokens=129, req_ids=["long"])[0])
+    _finish_step(scheduler, scheduler.schedule())
+    scheduler.add_request(create_requests(1, num_tokens=1, req_ids=["decode"])[0])
+    _finish_step(scheduler, scheduler.schedule())
+    scheduler.add_request(create_requests(1, num_tokens=17, req_ids=["short"])[0])
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"decode": 1, "short": 17}
+
+
+def test_completed_connector_estimate_can_preempt_a_running_chunk():
+    scheduler = create_scheduler(
+        scheduling_policy="residual_sjf",
+        residual_sjf_preempt_prefills=True,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
+        max_num_seqs=2,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    scheduler.add_request(create_requests(1, num_tokens=129, req_ids=["running"])[0])
+    _finish_step(scheduler, scheduler.schedule())
+    waiting = create_requests(1, num_tokens=257, req_ids=["waiting"])[0]
+    scheduler.add_request(waiting)
+    _finish_step(scheduler, scheduler.schedule())
+    waiting.kv_transfer_params = {"cached_tokens": 256}
+    output = scheduler.schedule()
+    assert "waiting" in output.num_scheduled_tokens
+    # The real connector misses: estimated hits only affect order/budget.
+    assert output.num_scheduled_tokens["waiting"] == 16
+    assert waiting.num_computed_tokens == 16
+
+
+def test_residual_sjf_reserves_remote_compute_only_after_load_completion():
+    scheduler = create_scheduler(
+        scheduling_policy="residual_sjf",
+        residual_sjf_preempt_prefills=True,
+        max_num_batched_tokens=32,
+        max_num_seqs=2,
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=True),
+    )
+    scheduler.add_request(create_requests(1, num_tokens=257, req_ids=["long"])[0])
+    _finish_step(scheduler, scheduler.schedule(), finished_recving={"long"})
+    _finish_step(scheduler, scheduler.schedule())
+    scheduler.add_request(create_requests(1, num_tokens=49, req_ids=["loading"])[0])
+    _finish_step(scheduler, scheduler.schedule())  # start the asynchronous load
+    _finish_step(scheduler, scheduler.schedule())  # retry resident work
+
+    pending = scheduler.schedule()
+    assert pending.num_scheduled_tokens == {"long": 32}
+    _finish_step(scheduler, pending, finished_recving={"loading"})
+    assert scheduler.schedule().num_scheduled_tokens == {"loading": 17}

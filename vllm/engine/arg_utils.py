@@ -766,6 +766,7 @@ class EngineArgs:
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     residual_sjf_max_wait_ms: int = SchedulerConfig.residual_sjf_max_wait_ms
+    residual_sjf_preempt_prefills: bool = SchedulerConfig.residual_sjf_preempt_prefills
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
@@ -1792,6 +1793,10 @@ class EngineArgs:
             **scheduler_kwargs["residual_sjf_max_wait_ms"],
         )
         scheduler_group.add_argument(
+            "--residual-sjf-preempt-prefills",
+            **scheduler_kwargs["residual_sjf_preempt_prefills"],
+        )
+        scheduler_group.add_argument(
             "--enable-chunked-prefill",
             **{
                 **scheduler_kwargs["enable_chunked_prefill"],
@@ -2681,6 +2686,7 @@ class EngineArgs:
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,
             residual_sjf_max_wait_ms=self.residual_sjf_max_wait_ms,
+            residual_sjf_preempt_prefills=self.residual_sjf_preempt_prefills,
             scheduler_cls=self.scheduler_cls,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             long_prefill_token_threshold_adaptive=(

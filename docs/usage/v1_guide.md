@@ -96,6 +96,24 @@ the local estimate. Ranking estimates compute work, not network transfer time.
 Queue selection still scans waiting candidates; measure scheduler CPU time
 separately for deep queues.
 
+Add `--residual-sjf-preempt-prefills` with `--scheduling-policy residual_sjf`
+and `--enable-chunked-prefill` to let running prefill chunks yield budget to
+shorter remaining prefills (prefill SRPT). This option is disabled by default.
+Waiting and running prefills share the block-quantized residual cost and
+max-wait aging; running requests use their actual computed progress. This
+does not predict generation length. Resident KV stays allocated, and decode
+token demand is reserved before prefills share the budget.
+
+Only requests that fit in free running slots reserve waiting budget. Free slots
+exclude slots held by streaming sessions. Pending KV transfers do not reserve
+compute until completion is reported. Actual admission still checks KV availability;
+if no reserved request is admitted, the next step omits waiting reservations
+while continuing to protect decode demand.
+Reservations can leave a step partly unused when estimates are stale or a
+request starts an asynchronous load.
+Short-request TTFT can improve at the expense of long-request latency; measure
+both on the target workload. Max-wait aging is not a hard TTFT bound.
+
 The max-wait value controls the mean/tail tradeoff: smaller values behave
 closer to FCFS (flatter tail), larger values improve mean TTFT/E2E at the
 cost of P95/P99. Start at 1/2 to 1/3 of the target P95 wait and adjust
