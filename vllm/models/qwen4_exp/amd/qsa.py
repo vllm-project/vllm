@@ -229,14 +229,14 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         sinks: torch.Tensor | None = None,
     ) -> None:
         # The parent constructor probes flash-attn for quantized-KV support
-        # and raises where it is unavailable (ROCm), but QSA dequantizes fp8
+        # and raises where it is unavailable (ROCm), but QSA decodes fp8 and mxfp4_qsa
         # inside its own Triton kernel and never runs flash-attn over the
         # cache. Hand the parent "auto" for that probe and restore the real
         # dtype afterwards, mirroring the NVIDIA implementation: the parent
         # only uses it there, and the cache-update path reads the attribute
         # at call time.
         real_kv_cache_dtype = kv_cache_dtype
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        if kv_cache_dtype in ("fp8", "fp8_e4m3", "mxfp4_qsa"):
             kv_cache_dtype = "auto"
         super().__init__(
             num_heads,
