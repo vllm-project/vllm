@@ -2383,6 +2383,154 @@ def test_sharded_decode_index_score_matches_reference(
             assert torch.count_nonzero(r[[0, 2]]).item() == 0
 
 
+_E2M1_GRID = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def _random_nvfp4_index_rows(num_pages: int, page_size: int):
+    """Token-major NVFP4 index rows: codes ``[P, N, 64]``, e4m3 scales ``[P, N, 8]``.
+
+    Every code appears, including -0, and each 16-dim group gets its own scale.
+    """
+    codes = torch.randint(
+        0, 256, (num_pages, page_size, 64), dtype=torch.uint8, device="cuda"
+    )
+    exponent = torch.randint(-4, 2, (num_pages, page_size, 8), device="cuda")
+    mantissa = 1 + torch.randint(0, 8, exponent.shape, device="cuda") / 8
+    scales = (mantissa * torch.exp2(exponent.float())).to(torch.float8_e4m3fn)
+    return codes, scales.view(torch.uint8)
+
+
+def _dequant_nvfp4_index(codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """fp32 ``[..., 128]`` rows; the low nibble is the even dim."""
+    nibbles = torch.stack((codes & 15, codes >> 4), -1).flatten(-2).long()
+    grid = torch.tensor(_E2M1_GRID, device=codes.device)
+    values = grid[nibbles & 7] * torch.where(nibbles >= 8, -1.0, 1.0)
+    group_scales = scales.view(torch.float8_e4m3fn).float()
+    return (values.unflatten(-1, (8, 16)) * group_scales[..., None]).flatten(-2)
+
+
+def _nvfp4_shard_pages(codes, scales, rank, world, page_size, pitch_pad):
+    """This rank's ``[pages, ROWS, 72]`` shard pages: codes, then scales."""
+    num_pages = codes.shape[0]
+    rows = page_size // world
+    if page_size == 256:
+        owned = slice(rank * rows, (rank + 1) * rows)
+    else:
+        owned = slice(rank, None, world)
+    pitch = rows * 72 + pitch_pad
+    pages = torch.full((num_pages, pitch), 0xFF, dtype=torch.uint8, device="cuda")
+    pages[:, : rows * 64] = codes[:, owned].reshape(num_pages, -1)
+    pages[:, rows * 64 : rows * 72] = scales[:, owned].reshape(num_pages, -1)
+    return pages.as_strided((num_pages, rows, 72), (pitch, 72, 1))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Sharded index decode score requires Blackwell.",
+)
+@pytest.mark.parametrize(
+    "world,decode_query_len,max_decode_query_len,split_k",
+    [
+        (world, q, max_q, 128)
+        for world in (2, 4)
+        for q, max_q in ((1, 1), (3, 8), (8, 8))
+    ]
+    + [(2, 3, 8, 1)],
+)
+@pytest.mark.parametrize("page_size", [128, 256])
+# A pitch past ROWS * 72 B models shard pages inside larger compound pages.
+@pytest.mark.parametrize("pitch_pad", [0, 256])
+@pytest.mark.parametrize("pdl_mode", ["off", "prefetch"])
+def test_sharded_decode_index_score_nvfp4_matches_reference(
+    world,
+    decode_query_len,
+    max_decode_query_len,
+    split_k,
+    page_size,
+    pitch_pad,
+    pdl_mode,
+):
+    pytest.importorskip("cutlass")
+    from vllm.models.minimax_m3.nvidia.ops.index_decode_score_sharded import (
+        MAX_K_TILES,
+        minimax_m3_index_decode_score_sharded_cutedsl,
+    )
+
+    torch.manual_seed(0)
+    heads, head_dim = 4, HEAD_DIM
+    seq_lens = torch.tensor([97, 129, 4097, 0], device="cuda", dtype=torch.int32)
+    num_pages = 4 * 33
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).view(
+        4, 33
+    )
+    total_q = seq_lens.numel() * decode_query_len
+    q = torch.randn(total_q, heads, head_dim, device="cuda").to(torch.float8_e4m3fn)
+    codes, scales = _random_nvfp4_index_rows(num_pages, page_size)
+    kv = _dequant_nvfp4_index(codes, scales)
+    logical_table = block_table
+    if page_size == 256:
+        logical_table = (
+            block_table[..., None] * 2 + torch.arange(2, device="cuda")
+        ).flatten(1)
+    expected = torch.full((heads, total_q, MAX_K_TILES), -float("inf"), device="cuda")
+    active_q = 3 * decode_query_len
+    expected[:, :active_q] = _reference_decode_index_score(
+        q[:active_q],
+        kv.view(-1, BLOCK_SIZE, head_dim),
+        logical_table[:3],
+        seq_lens[:3],
+        decode_query_len,
+        MAX_K_TILES,
+    )
+
+    # P256 stores one column per physical page: global B128 page 2c + offset.
+    index_scale = 2 if page_size == 256 else 1
+    scores = torch.empty((total_q, heads, MAX_K_TILES // index_scale), device="cuda")
+    all_scores = torch.full((total_q, heads, MAX_K_TILES), -float("inf"), device="cuda")
+    positions = (
+        seq_lens.repeat_interleave(decode_query_len)
+        - decode_query_len
+        + torch.arange(total_q, device="cuda") % decode_query_len
+    )
+    valid = (positions // BLOCK_SIZE + 1).clamp_min(0).int()
+    column_ids = torch.arange(scores.shape[-1], device="cuda")
+    for rank in range(world):
+        shard = _nvfp4_shard_pages(codes, scales, rank, world, page_size, pitch_pad)
+        index_offset = rank * index_scale // world
+        local_valid = torch.where(
+            valid <= index_offset,
+            0,
+            (valid - 1 - index_offset) // index_scale + 1,
+        )
+        # Repeat launches, as layers and decode steps reuse the same buffers.
+        for reuse in range(2):
+            scores.fill_(1.0e9 + reuse)
+            minimax_m3_index_decode_score_sharded_cutedsl(
+                q,
+                shard,
+                block_table,
+                seq_lens,
+                rank,
+                decode_query_len,
+                max_decode_query_len,
+                scores,
+                split_k=split_k,
+                page_size=page_size,
+                world_size=world,
+                use_pdl=pdl_mode != "off",
+                prefetch_history=pdl_mode == "prefetch",
+            )
+        masked_scores = scores.masked_fill(
+            column_ids[None, None, :] >= local_valid[:, None, None], -float("inf")
+        )
+        columns = all_scores[..., index_offset::index_scale]
+        torch.maximum(columns, masked_scores, out=columns)
+    # e2m1 x e4m3 and e4m3 Q are exact in FP16, so only FP32 summation order differs.
+    torch.testing.assert_close(
+        all_scores.transpose(0, 1), expected, rtol=1e-5, atol=1e-4
+    )
+
+
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="Sharded index decode requires Blackwell.",

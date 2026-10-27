@@ -138,6 +138,63 @@ def fp8x4_to_fp16x4(x: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
 
 
 @dsl_user_op
+def nvfp4x8_to_fp16x8(x: Uint32, scale: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
+    # Eight e2m1 codes, low nibble first, times one {scale, scale} f16x2 pair.
+    # e2m1 x e4m3 is exact in f16 (<= 6 significant bits, 2^-10..2688).
+    out = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32()] * 4),
+        [x.ir_value(loc=loc, ip=ip), scale.ir_value(loc=loc, ip=ip)],
+        "{\n\t"
+        ".reg .b8 x0, x1, x2, x3;\n\t"
+        ".reg .b32 h0, h1, h2, h3;\n\t"
+        "mov.b32 {x0, x1, x2, x3}, $4;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h0, x0;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h1, x1;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h2, x2;\n\t"
+        "cvt.rn.f16x2.e2m1x2 h3, x3;\n\t"
+        "mul.rn.f16x2 $0, h0, $5;\n\t"
+        "mul.rn.f16x2 $1, h1, $5;\n\t"
+        "mul.rn.f16x2 $2, h2, $5;\n\t"
+        "mul.rn.f16x2 $3, h3, $5;\n\t"
+        "}\n",
+        "=r,=r,=r,=r,r,r",
+        has_side_effects=False,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+    vec = vector.from_elements(
+        ir.VectorType.get([4], T.i32(), loc=loc),
+        [llvm.extractvalue(T.i32(), out, [i], loc=loc, ip=ip) for i in range(4)],
+        loc=loc,
+        ip=ip,
+    )
+    return cute.TensorSSA(vec, 4, Uint32)
+
+
+@dsl_user_op
+def e4m3_to_fp16x2(x: Uint32, *, loc=None, ip=None) -> Uint32:
+    # The low byte of x as e4m3, broadcast to both f16x2 halves.
+    out = llvm.inline_asm(
+        T.i32(),
+        [x.ir_value(loc=loc, ip=ip)],
+        "{\n\t"
+        ".reg .b32 pair;\n\t"
+        ".reg .b16 lo, hi;\n\t"
+        "prmt.b32 pair, $1, $1, 0x0000;\n\t"
+        "mov.b32 {lo, hi}, pair;\n\t"
+        "cvt.rn.f16x2.e4m3x2 $0, lo;\n\t"
+        "}\n",
+        "=r,r",
+        has_side_effects=False,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+    return Uint32(out)
+
+
+@dsl_user_op
 def fp32x4_to_fp8x4(
     a0: Float32,
     a1: Float32,
