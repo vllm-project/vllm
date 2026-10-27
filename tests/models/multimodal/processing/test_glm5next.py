@@ -9,9 +9,14 @@ while ``video_grid_thw`` decides how many rows the vision tower produces. If
 the two disagree they collide in ``_merge_multimodal_embeddings``, which raises
 inside a worker and takes the engine down with it.
 
-The checks below are arithmetic: no weights, no GPU.
+The grid checks below are arithmetic: no weights, no GPU.
+``test_glm5_metadata_only_roundtrip`` loads the processor and compares
+raw media with metadata-only prompts.
 """
 
+import json
+
+import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -21,11 +26,102 @@ from transformers.models.glm5_next.video_processing_glm5_next import (
 )
 from transformers.video_utils import VideoMetadata
 
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.platforms import current_platform
+from vllm.renderers.chat_utils.item_tracker import _get_embeds_data
 
+from ....multimodal.utils import random_image, random_video
 from ...utils import build_model_context
+
+
+def _video_with_metadata(frames: np.ndarray):
+    num_frames = len(frames)
+    return (
+        frames,
+        {
+            "total_num_frames": num_frames,
+            "fps": 2.0,
+            "duration": num_frames / 2.0,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            "do_sample_frames": True,
+        },
+    )
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_glm5_metadata_only_roundtrip(modality):
+    """EC metadata reproduces the raw prompt for image and video."""
+    rng = np.random.RandomState(0)
+    if modality == "image":
+        mm_data = {"image": random_image(rng, 64, 65)}
+        limit = {"image": 1, "video": 0}
+        grid_key = "image_grid_thw"
+    else:
+        mm_data = {"video": _video_with_metadata(random_video(rng, 4, 5, 64, 65))}
+        limit = {"image": 0, "video": 1}
+        grid_key = "video_grid_thw"
+
+    ctx = build_model_context(
+        "zai-org/GLM-5.3-Flash",
+        limit_mm_per_prompt=limit,
+    )
+    mm_config = ctx.model_config.multimodal_config
+    mm_config.enable_mm_embeds = True
+    mm_config.allow_missing_mm_embeddings = True
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    prompt = processor.dummy_inputs.get_dummy_text({modality: 1})
+    raw = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
+    features = [
+        MultiModalFeatureSpec(
+            data=item,
+            modality=modality,
+            identifier=str(index),
+            mm_position=position,
+        )
+        for index, (item, position) in enumerate(
+            zip(raw["mm_kwargs"][modality], raw["mm_placeholders"][modality])
+        )
+    ]
+    published = collect_ec_item_metadata(
+        features, PlaceholderMetadataResolver(ctx.model_config)
+    )
+    metadata = json.loads(
+        json.dumps([entry["metadata"] for entry in published.values()])
+    )
+    assert len(metadata) == 1
+    assert grid_key in metadata[0]
+    if modality == "video":
+        assert metadata[0]["timestamps"]
+    mm_data_remote = _get_embeds_data(modality, metadata, processor)
+    remote = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({modality: mm_data_remote}),
+        hf_processor_mm_kwargs={},
+    )
+    assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
+    assert remote["mm_placeholders"] == raw["mm_placeholders"]
+
+    mm_config.allow_missing_mm_embeddings = False
+    ordinary_processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    with pytest.raises(ValueError, match="should contain the fields"):
+        ordinary_processor.info.parse_mm_data({modality: mm_data_remote})
 
 
 @pytest.fixture(scope="module")
