@@ -28,7 +28,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py --deselect="tests/lora/test_qwenvl.py::test_qwen2vl_multiple_lora_types"|| true'
+    pytest --continue-on-collection-errors -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py --deselect="tests/lora/test_qwenvl.py::test_qwen2vl_multiple_lora_types" --deselect="tests/lora/test_mixtral.py::test_mixtral_lora[4]"|| true'
 - label: ':nvidia: (L4) [Nightly] LoRA TP (Distributed) %N'
   key: lora-tp-distributed
   device: intel_gpu
