@@ -3580,3 +3580,72 @@ generation (#1502/#3329)` (07:39:23Z).
 **Registre** : Q41 seule, toujours ouverte. Le pic de charge de ce cycle est
 **22 358 MiB** — 6 h de trafic soutenu à 0,73 ne reproduisent pas le plateau de
 23 600 MiB d'avant reboot. Critère d'échec toujours non rempli, risque non démontré.
+
+## 27/10 10:11Z — 8 h sans restart, VRAM GPU 0 au plus haut du jour (22 505), #431 : le 400 ne se re-tente plus en local, relance #66 traitée
+
+**Moteur** : `StartedAt` 02:15:05Z **inchangé (8 h)**, health 200 @3,7 ms, RC=0, 3 conteneurs,
+OOM 0, **0** signature d'erreur, `/dev/shm` 24G/63G (39 %). **Dernier WEDGE 03:11:31Z (7 h)**
+— tous `fail 1/2`, aucun restart, aucune nouvelle alerte JIT depuis 05:47:38 (7 h : le jeu
+de formes est stable), aucun événement breaker depuis le HALF-OPEN recovered de 07:38:13.
+
+**VRAM GPU 0 = 22 505 MiB** — plus haut relevé du jour (série : 22 076 → 22 354 → 22 358 →
+22 505). Toujours ~1 000 MiB sous la ligne 23 500 ; quatre relevés montent d'environ
++150 MiB / 2 h mais la charge varie entre les cycles — **surveillé, pas extrapolé** (leçon
+« deux points ne font pas une pente » appliquée à mes propres quatre points : je note la
+série, je n'annonce pas de date de franchissement). GPU 1 21 650, GPU 2 45 (libre).
+
+### Amortissement : stationnaire à 90 %
+
+`prefix_cache_hits/queries` = 77 812 480 / 86 345 823 = **90,11 %** ; taux **marginal sur
+les 2 h** = 14,16/15,69 M = **90,2 %** (89,2 % au cycle précédent) ⇒ stationnaire, il ne
+se dégrade pas quand la charge monte. Tier fs **44,2 %** (8 533 343 queries externes,
+3 771 824 hits) — stable. **Préemptions 0.** Prefill soutenu : +15,7 M tokens prompt en 2 h
+≈ **2 180 tok/s**, pour +138,5 K tokens générés — profil condensation (gros préfixes,
+sorties courtes), conforme au workload pilote.
+
+### #431 — le 400 de débordement de fenêtre ne se re-tente PAS en local
+
+**3×400 aujourd'hui** (03:19, 03:53, 09:30Z), 4 sur 24 h glissantes, **toutes avec corps
+> 100 K** — la signature fenêtre+1 (session Bun/claude-code via hub qui croît au-delà de
+262 144). Analyse du 400 de **09:30:12Z (corps 953 523 o)** : la requête précédente de la
+même session (09:27:19Z, 923 071 o) était passée en 200 ; **aucune re-tentative du même
+corps** ensuite — la requête suivante arrive **19 min plus tard avec un corps plus petit**
+(902 042 o = auto-compact côté client), puis la session recroit (912 296 o à 10:09:27Z).
+C'est le comportement **voulu** par la règle #431 (« sur 400, jamais de retry local ») :
+le coût d'un franchissement = une requête morte + un auto-compact, pas une boucle. Ne
+prouve pas le routage cloud (invisible côté moteur) mais **l'absence de boucle locale est
+mesurée**. Historique : les paires même-corps ≤ 60 s existent dans le journal (ex. 942 554
+× 2 à 10 s d'écart, 901 417 × 2) mais **plus depuis le 26/10 au soir**.
+
+### Sécurité
+
+**Aucune IP inconnue** (7 h : `?` 1 690 internes sans XFF, `90.65.170.144` 504 hairpin
+connue, `82.66.89.184` 2 poste Paris connue). Fenêtre 3 h : 1 072 lignes = **1 057×200 /
+14×401 / 1×400**. Empreintes : MEDIUM `be312daf7c1c` 1 058 · clé morte `1f7f6080cb65` 12
+(descend, 22 au cycle précédent) · NONE 2. **Aucune empreinte inconnue nouvelle** — les
+deux clés mortes identifiées au cycle précédent (`b72157f4bb61`, `2703beff17f8`) ne
+réapparaissent pas.
+
+### Relance #66 (NanoClaw) — traitée
+
+Issue **jsboige/vllm#66** (« Sessions sk-agent longue durée : registre, reprise,
+persistance et service de condensation », ouverte par le user le 05/10, **22 jours, 0
+commentaire**). Réponse déposée sur l'issue
+([commentaire 6439190989](https://github.com/jsboige/vllm/issues/66#issuecomment-6439190989))
++ REPLY intercom à NanoClaw. Verdict : **(b) partiellement couvert** — la moitié économique
+(tier RAM+fs prod, reprise au restart prouvée) est déployée, l'inventaire demandé est fait
+(sk-agent expose `list_conversations`/`run_conversation`/`call_agent`, sans persistance
+au-delà du process), le volet condensation est supplanté par RSM + #198 ; **le registre de
+sessions et le protocole consommateur restent sans porteur**. Décision garder/recadrer/
+fermer laissée au user sur l'issue. NB : nbaudit v2 (#228) a choisi le modèle **inverse**
+de la session longue (sessions fraîches courtes + préfixe socle partagé servi par le KV
+cache) — c'est le fs tier qui rend ce modèle économique.
+
+### Hôte / tâches
+
+Marge commit **76,2 %** (293,0/384,4 Go) — stable. G: 85 % / 592 Go libres, **écriture OK**.
+Pruneur **09:50:02Z** : `mode=apply`, tier 269,1 Go → cap, **24 fichiers/630 Mo supprimés,
+0 erreur**. nbaudit `ok:true` **10:05:49Z**, `subpath Image/`.
+
+**Registre** : Q41 seule — le relevé de ce cycle (22 505 MiB) est le plus haut du jour mais
+reste sous la ligne 23 500 ; critère d'échec toujours non rempli.
