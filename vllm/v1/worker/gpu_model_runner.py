@@ -53,6 +53,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import (
     BatchDescriptor,
+    get_forward_context,
     set_forward_context,
 )
 from vllm.logger import init_logger
@@ -5777,9 +5778,9 @@ class GPUModelRunner(
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
                     is_padding=is_padding,
-                    is_dummy_run=True,
                 ),
             ):
+                get_forward_context().additional_kwargs["is_dummy_run"] = True
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,

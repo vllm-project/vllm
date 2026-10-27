@@ -103,7 +103,10 @@ class UnlimitedOCR2Attention(nn.Module):
         assert isinstance(all_metadata, dict)
         metadata = all_metadata[self.attn.layer_name]
         assert isinstance(metadata, TritonAttentionMetadata)
-        if context.is_dummy_run and metadata.max_query_len > 1:
+        if (
+            context.additional_kwargs.get("is_dummy_run", False)
+            and metadata.max_query_len > 1
+        ):
             result.zero_()
             return
         assert roles is not None
