@@ -1883,19 +1883,23 @@ guide: |
 
   The A5 PD builder presents five launch steps:
 
-  1. **Scripts** starts the matching A5 container and stages its launcher and proxy.
-  2. **Prefill** saves the prefill `run_dp_template.sh` with TP8/PP4.
-  3. **Decode** saves the decode `run_dp_template.sh` with DP4/TP8.
+  1. **Scripts** downloads only `launch_online_dp.py` into the current directory.
+  2. **Prefill** saves `run_dp_template.sh` on each prefill node with TP8/PP4.
+  3. **Decode** saves `run_dp_template.sh` on each decode node with DP4/TP8.
   4. **Start_Server** launches this host's selected role and node. Set
-     `ASCEND_PD_ROLE=prefill` or `decode` and the host's `IFACE_NAME`, then repeat
-     for all four nodes in each group, using that group's master and ranks 0-3.
+     `ASCEND_PD_ROLE=prefill` or `decode` and the host's `NIC_NAME`. It passes
+     `nic_name` and `local_ip` through the launcher's environment, and supplies
+     device, port, DP size, local rank, master address, RPC port, and TP size as
+     the template's seven positional arguments. Repeat on all four group nodes.
   5. **Start_Proxy** starts the client-facing proxy after both pools are ready.
 
-  Run the template and launcher steps inside the prepared container on each node.
+  Run these commands in the installed vLLM Ascend environment. Keep the launcher
+  and the node's own role template in the same directory; do not write both
+  templates on the same node. Container setup belongs to the installation step.
   Start each prefill group's rank 0 before its headless ranks 1-3. Every decode
   node keeps its HTTP endpoint. The transfer connector remains MooncakeConnectorV2.
-  The launcher runs in the foreground; open another shell in the prepared
-  container for Start_Proxy.
+  The launcher runs in the foreground; open another shell for Start_Proxy, which
+  runs the separate proxy script from the vLLM Ascend installation.
 
   The [official basic PD reference](https://docs.vllm.ai/projects/vllm-ascend-cn/zh-cn/latest/tutorials/models/Kimi-K3.html#52-basic-eight-node-pd-separation-deployment) documents the fixed eight-node
   topology. Group replication and the private MXFP4 checkpoint have not been
