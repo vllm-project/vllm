@@ -815,11 +815,13 @@ steps:
   - tests/parser
   - tests/transformers_utils
   - tests/config
+  - tests/platforms/test_cpu.py
   - tests/device_allocator
   device: cpu-small
   commands:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s config
+  - pytest -v -s platforms/test_cpu.py
   - pytest -v -s tools/test_check_test_tethering.py
   - pytest -v -s tools/test_check_agent_files.py
   - pytest -v -s tools/test_check_trust_remote_code.py
