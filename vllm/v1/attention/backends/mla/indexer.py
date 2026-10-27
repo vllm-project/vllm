@@ -214,6 +214,7 @@ class PrepareNativeDecodeLensKernel(
     @dataclass(frozen=True)
     class CompileKey:
         max_decode_len: int
+        compress_ratio: int
 
     BLOCK_SIZE = 256
 
@@ -222,8 +223,12 @@ class PrepareNativeDecodeLensKernel(
     def kernel(
         seq_lens_ptr,
         decode_seq_lens_ptr,
+        query_start_loc_ptr,
+        decode_lens_ptr,
+        per_req_decode_lens_ptr,
         num_decodes,
         max_decode_len,
+        compress_ratio,
         BLOCK_SIZE: tl.constexpr,
     ):
         idx = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -235,20 +240,36 @@ class PrepareNativeDecodeLensKernel(
         # Downstream kernels read these as uint32, turning -1 into ~4e9.
         seq_len = tl.load(seq_lens_ptr + req_id, mask=mask, other=0)
         per_token_seq_len = tl.maximum(seq_len - max_decode_len + local_idx + 1, 0)
+        if compress_ratio > 1:
+            per_token_seq_len = per_token_seq_len // compress_ratio
         tl.store(decode_seq_lens_ptr + idx, per_token_seq_len, mask=mask)
+
+        # The token-0 lane of each request publishes its query length, so
+        # build() needs no eager diff or per-request copy. query_start_loc is
+        # the [num_decodes] view; the req_id + 1 load stays inside the same
+        # [max_num_seqs + 1] allocation.
+        req_mask = mask & (local_idx == 0)
+        query_start = tl.load(query_start_loc_ptr + req_id, mask=req_mask, other=0)
+        query_end = tl.load(query_start_loc_ptr + req_id + 1, mask=req_mask, other=0)
+        decode_len = query_end - query_start
+        tl.store(decode_lens_ptr + req_id, decode_len, mask=req_mask)
+        tl.store(per_req_decode_lens_ptr + req_id, decode_len, mask=req_mask)
 
     def dispatch(  # type: ignore[override]
         self,
         *,
         max_decode_len: int,
+        compress_ratio: int,
     ) -> CompileKey:
         return self.CompileKey(
             max_decode_len=triton_scalar_specialization_rep(max_decode_len),
+            compress_ratio=triton_scalar_specialization_rep(compress_ratio),
         )
 
     def get_warmup_keys(self) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
             max_decode_len=(1, 2, 16),
+            compress_ratio=(1, 2),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
@@ -256,8 +277,12 @@ class PrepareNativeDecodeLensKernel(
         return dict(
             seq_lens=int32_ptr,
             decode_seq_lens=int32_ptr,
+            query_start_loc=int32_ptr,
+            decode_lens=int32_ptr,
+            per_req_decode_lens=int32_ptr,
             num_decodes=1,
             max_decode_len=compile_key.max_decode_len,
+            compress_ratio=compile_key.compress_ratio,
         )
 
     @kernel_launcher
@@ -265,8 +290,12 @@ class PrepareNativeDecodeLensKernel(
         self,
         seq_lens: torch.Tensor,
         decode_seq_lens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        decode_lens: torch.Tensor,
+        per_req_decode_lens: torch.Tensor,
         num_decodes: int,
         max_decode_len: int,
+        compress_ratio: int,
     ) -> LaunchSpec:
         return (triton.cdiv(num_decodes * max_decode_len, self.BLOCK_SIZE),), dict(
             BLOCK_SIZE=self.BLOCK_SIZE
@@ -1239,6 +1268,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         use_native: bool,
         next_n: int,
         max_decode_len: int,
+        compress_divisor: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, bool]:
         """Prepare native or per-token flattened decode tensors."""
         spec_config = self.vllm_config.speculative_config
@@ -1326,12 +1356,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if use_native and next_n > 1:
                 assert self.decode_seq_lens_buffer.dim() == 1
                 # (B, max_decode_len): token j attends to
-                # L - max_decode_len + j + 1 KV tokens.
+                # L - max_decode_len + j + 1 KV tokens. The kernel also
+                # publishes the per-request decode lens and applies
+                # compress_divisor, which build() sets to the compress ratio
+                # unless DCP must localize the bounds before dividing.
                 _PREPARE_NATIVE_DECODE_LENS_KERNEL(
                     seq_lens,
                     self.decode_seq_lens_buffer,
+                    query_start_loc,
+                    self.decode_lens_buffer,
+                    self.per_req_decode_lens_buffer,
                     num_decodes,
                     max_decode_len,
+                    compress_divisor,
                 )
                 seq_lens = self.decode_seq_lens_buffer[
                     : num_decodes * max_decode_len
@@ -1656,14 +1693,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         decode_metadata = None
         if num_decodes > 0:
-            if not self.supports_varlen:
-                torch.diff(
-                    common_attn_metadata.query_start_loc[: num_decodes + 1],
-                    out=self.decode_lens_buffer[:num_decodes],
-                )
-                self.per_req_decode_lens_buffer[:num_decodes].copy_(
-                    self.decode_lens_buffer[:num_decodes]
-                )
             decode_lens = self.decode_lens_buffer[:num_decodes]
             decode_lens_cpu = torch.diff(
                 common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
@@ -1698,6 +1727,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 and max_decode_len <= next_n
                 and step_next_n_ok
             )
+
+            # The native per-token kernel also publishes the per-request
+            # decode lens and the compressed seq lens, so those batches skip
+            # the eager diff/copy/divide below. DCP reads the decode lens
+            # before the kernel runs and localizes the bounds before
+            # dividing, so it keeps the eager path.
+            native_kernel_writes_lens = (
+                use_native and next_n > 1 and dcp_local_seq_lens is None
+            )
+            if not self.supports_varlen and not native_kernel_writes_lens:
+                torch.diff(
+                    common_attn_metadata.query_start_loc[: num_decodes + 1],
+                    out=decode_lens,
+                )
+                self.per_req_decode_lens_buffer[:num_decodes].copy_(decode_lens)
 
             if not self.supports_varlen:
                 global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
@@ -1765,6 +1809,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                         use_native=use_native,
                         next_n=next_n,
                         max_decode_len=max_decode_len,
+                        compress_divisor=(
+                            self.compress_ratio
+                            if native_kernel_writes_lens and self.compress_ratio > 1
+                            else 1
+                        ),
                     )
                 )
 
@@ -1784,7 +1833,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # compressed tokens. Convert uncompressed seq_lens to compressed.
             if self.compress_ratio > 1:
                 if seq_lens_is_buffer_view:
-                    seq_lens //= self.compress_ratio
+                    # The native kernel divided its own output; flattening
+                    # builds and DCP localization divide here instead.
+                    if not native_kernel_writes_lens:
+                        seq_lens //= self.compress_ratio
                 else:
                     # Copy to avoid mutating shared state; keeps CG address stable.
                     self.expanded_seq_lens_buffer[:num_decodes] = (
