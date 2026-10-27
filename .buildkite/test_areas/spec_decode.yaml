@@ -344,6 +344,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Spec Decode Draft Model"
   key: spec-decode-draft-model-nightly-b200
+  automatic_shard: true
   timeout_in_minutes: 40
   device: b200-k8s
   optional: true
@@ -418,9 +419,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode DeepSeek MTP Parallel Load"
+      label: ":amd: (MI355) Spec Decode DeepSeek MTP Parallel Load"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
@@ -590,7 +591,13 @@ steps:
     # Each Gemma4 parametrization is an indivisible ~23m floor. Keep them in
     # separate shards and put the remaining tests in shard 0, where new tests
     # land by default.
-    - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
+    - >-
+      if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then
+      pytest -v -s
+      v1/e2e/spec_decode/acceptance_rates/mtp_other/
+      --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
+      --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]";
+      fi
     - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi
     - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
   mirror:
