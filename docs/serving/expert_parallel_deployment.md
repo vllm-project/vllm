@@ -46,26 +46,6 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 
 ## Single Node Deployment
 
-### FlashInfer CuTeDSL MoE-EP on Rubin
-
-`--moe-backend flashinfer_moe_ep_cutedsl --enable-expert-parallel` supports
-SM100/SM103 and SM107 (Vera Rubin). On SM107, vLLM selects FlashInfer's native
-`Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig`; the legacy
-`Nvfp4CutedslMegaMoeConfig` alias targets SM100 and cannot be used on Rubin.
-Use a FlashInfer build exporting the SM107 config, CuTe DSL with native
-`sm_107a` and `cutlass.utils.rubin_helpers` support (4.8.0 or a compatible
-development build), and `nvshmem4py-cu13>=0.3.1`. Export
-`CUTE_DSL_ARCH=sm_107a` before starting Python to avoid an earlier CuTe import
-capturing a different target. The kernel uses NVSHMEM symmetric memory for EP;
-the optional FlashInfer NIXL-EP/NCCL-EP native extensions are not required for
-this backend. The separate `flashinfer_moe_ep_deep_gemm` backend remains
-restricted to SM100/SM103.
-
-The Rubin Docker build installs `flashinfer-python[sm107]==0.7.4` through
-`requirements/rubin-prerelease.txt` when `INSTALL_RUBIN_PRERELEASE=true`.
-The shared CUDA requirements keep the plain FlashInfer pin so CUDA 12 builds
-do not install CUDA 13 NVSHMEM bindings.
-
 ### Configuration
 
 Enable EP by setting the `--enable-expert-parallel` flag. The EP size is automatically calculated as:
@@ -177,6 +157,13 @@ Behavior:
 - For DeepSeek-V4 routing (DeepSeek-V4 and V4.1 checkpoints), vLLM sets `FLASHINFER_SM107_MEGA_CHECK_ROUTES=0` unless it is already set, because that router can return non-finite scores on valid routes and a failed check stops the worker. This disables all of FlashInfer's SM107 route checks in the process (non-finite scores, expert ids out of range, duplicate ids), so a router bug is not caught on the device. Export `FLASHINFER_SM107_MEGA_CHECK_ROUTES=1` to enable them. Other models keep FlashInfer's default.
 - Draft and MTP expert layers use the target's `--moe-backend` unless `--speculative-config` sets `moe_backend` and the speculative method applies it; DSpark does not, so its drafts always use the target's. For example, with DeepSeek-V4.1-Flash-NVFP4 and `--speculative-config '{"method": "dspark", ...}'`, both the target's NVFP4 experts and the draft's MXFP4 experts run on this backend.
 - Not supported on SM107 with this backend: EPLB, and reloading weights (`reload_weights`). The `flashinfer_moe_ep_mega_deep_gemm` backend does not support SM107.
+
+For NVFP4 experts on SM107, vLLM builds the kernel with `knobs="cache"`: FlashInfer takes the
+offline tuner's winner for the layer's configuration from
+`FLASHINFER_MOE_EP_KNOB_CACHE` (default
+`~/.cache/flashinfer/moe_ep_knob_cache.json`), else its built-in SM107
+heuristic. To tune, run `python -m flashinfer.moe_ep.tune` and give every rank
+the resulting cache. MXFP4 experts retain FlashInfer's default knob selection.
 
 ## Multi-Node Deployment
 

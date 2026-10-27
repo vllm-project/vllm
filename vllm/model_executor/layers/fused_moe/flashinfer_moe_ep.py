@@ -488,7 +488,7 @@ class FlashInferMoeEp:
                 fast_math=True,
                 apply_routing_weights_before_fc2=apply_topk_in_fc1,
                 combine_dtype="bf16",
-                knobs=None,
+                knobs="cache" if sm107 and not sm107_mxfp4 else None,
                 **scale_kwargs,
             )
         else:
