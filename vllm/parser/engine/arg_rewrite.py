@@ -14,11 +14,12 @@ import json
 
 import regex as re
 
-from vllm.parser.utils import JSON_WS
+from vllm.parser.utils import next_non_ws
 from vllm.tool_parsers.utils import (
     MAX_NESTING_DEPTH,
     canonical_schema_types,
     coerce_to_schema_type,
+    coerce_typed_value,
     is_escaped,
     schema_coercion_types,
     value_changed,
@@ -82,14 +83,7 @@ def _is_literal(literal: str) -> bool:
     return False
 
 
-def _next_non_ws(text: str, i: int) -> int:
-    n = len(text)
-    while i < n and text[i] in JSON_WS:
-        i += 1
-    return i
-
-
-def _changes_value(literal: str, coerced: object) -> bool:
+def _literal_changes_value(literal: str, coerced: object) -> bool:
     """Whether coercing *literal* to *coerced* changes its value or type."""
     try:
         parsed = json.loads(literal)
@@ -159,7 +153,7 @@ class _ArgsRewriter:
         return "".join(self._out)
 
     def _skip_ws(self, i: int) -> int:
-        j = _next_non_ws(self._text, i)
+        j = next_non_ws(self._text, i)
         if j > i:
             self._out.append(self._text[i:j])
         return j
@@ -192,7 +186,7 @@ class _ArgsRewriter:
         return len(self._text)
 
     def _delimited(self, j: int) -> bool:
-        k = _next_non_ws(self._text, j)
+        k = next_non_ws(self._text, j)
         return k < len(self._text) and self._text[k] in ",}]"
 
     def _coercion_types(self, schema: dict) -> list[str]:
@@ -203,6 +197,20 @@ class _ArgsRewriter:
         types = schema_coercion_types(schema)
         self._types_cache[id(schema)] = types
         return types
+
+    def _next_member(self, i: int, closer: str) -> tuple[int, bool]:
+        """Copy the separator after a member; return ``(offset, closed)``."""
+        text, out = self._text, self._out
+        i = self._skip_ws(i)
+        if i < len(text) and text[i] == ",":
+            out.append(",")
+            return self._skip_ws(i + 1), False
+        if i < len(text) and text[i] == closer:
+            out.append(closer)
+            return i + 1, True
+        # Only a pending input is a wait; trailing whitespace after a
+        # complete member is not a structural give-up.
+        return self._truncated(i, give_up=i < len(text)), True
 
     def _object(self, i: int, props: dict | None, depth: int) -> int:
         text, out = self._text, self._out
@@ -225,22 +233,10 @@ class _ArgsRewriter:
                 return self._truncated(i, give_up=i < len(text))
             out.append(":")
             i = self._skip_ws(i + 1)
-            i = self._value(
-                i, props.get(key) if props and key is not None else None, depth
-            )
-            if i >= len(text):
+            i = self._value(i, props.get(key) if props else None, depth)
+            i, done = self._next_member(i, "}")
+            if done:
                 return i
-            i = self._skip_ws(i)
-            if i < len(text) and text[i] == ",":
-                out.append(",")
-                i = self._skip_ws(i + 1)
-                continue
-            if i < len(text) and text[i] == "}":
-                out.append("}")
-                return i + 1
-            # Only a pending input is a wait; trailing whitespace after a
-            # complete member is not a structural give-up.
-            return self._truncated(i, give_up=i < len(text))
 
     def _array(self, i: int, items: dict | None, depth: int) -> int:
         text, out = self._text, self._out
@@ -253,33 +249,22 @@ class _ArgsRewriter:
                 out.append("]")
                 return i + 1
             i = self._value(i, items, depth)
-            if i >= len(text):
+            i, done = self._next_member(i, "]")
+            if done:
                 return i
-            i = self._skip_ws(i)
-            if i < len(text) and text[i] == ",":
-                out.append(",")
-                i = self._skip_ws(i + 1)
-                continue
-            if i < len(text) and text[i] == "]":
-                out.append("]")
-                return i + 1
-            return self._truncated(i, give_up=i < len(text))
 
     def _value(self, i: int, schema: object, depth: int) -> int:
         text, out = self._text, self._out
         if i >= len(text):
             return i
         c = text[i]
-        if c == "{" or c == "[":
+        if c in "{[":
             if depth >= MAX_NESTING_DEPTH:
                 return self._truncated(i)
-            if c == "{":
-                nested = schema.get("properties") if isinstance(schema, dict) else None
-                return self._object(
-                    i, nested if isinstance(nested, dict) else None, depth + 1
-                )
-            items = schema.get("items") if isinstance(schema, dict) else None
-            return self._array(i, items if isinstance(items, dict) else None, depth + 1)
+            subkey = "properties" if c == "{" else "items"
+            nested = schema.get(subkey) if isinstance(schema, dict) else None
+            walk = self._object if c == "{" else self._array
+            return walk(i, nested if isinstance(nested, dict) else None, depth + 1)
         if c == '"':
             scanned = self._scan_string(i)
             if scanned is None:
@@ -288,8 +273,8 @@ class _ArgsRewriter:
             if value is not None and isinstance(schema, dict):
                 types = self._coercion_types(schema)
                 if types:
-                    coerced = coerce_to_schema_type(value, types)
-                    if value_changed(value, coerced):
+                    coerced, changed = coerce_typed_value(value, schema, types=types)
+                    if changed:
                         out.append(json.dumps(coerced, ensure_ascii=False))
                         return j
             out.append(text[i:j])
@@ -298,7 +283,7 @@ class _ArgsRewriter:
 
     def _literal(self, i: int, schema: object) -> int:
         text, out = self._text, self._out
-        j = i + 1 if text[i] == "-" else i
+        j = i
         while j < len(text) and (text[j] in _NUMBER_CHARS or text[j].isalpha()):
             j += 1
         literal = text[i:j]
@@ -320,7 +305,7 @@ class _ArgsRewriter:
                 dumped = json.dumps(coerced, ensure_ascii=False)
                 if (
                     dumped != literal
-                    and _changes_value(literal, coerced)
+                    and _literal_changes_value(literal, coerced)
                     and not (
                         isinstance(coerced, str)
                         and "string" not in canonical_schema_types(types)
@@ -363,7 +348,7 @@ def _top_level_commas(text: str, depth: int, limit: int | None = None) -> list[i
 
 def _member_start(text: str, i: int) -> bool:
     """Whether the member following offset *i* begins with a quoted key."""
-    i = _next_non_ws(text, i)
+    i = next_non_ws(text, i)
     return i < len(text) and text[i] == '"'
 
 
@@ -387,11 +372,11 @@ def _resume_point(
     raw_commas = _top_level_commas(raw, depth, limit=len(corrected_commas))
     if len(raw_commas) < len(corrected_commas):
         return None
-    for k in range(len(corrected_commas) - 1, -1, -1):
-        if _member_start(raw, raw_commas[k]) and _member_start(
-            corrected, corrected_commas[k]
-        ):
-            return raw_commas[k], corrected_commas[k]
+    for raw_comma, corrected_comma in zip(
+        reversed(raw_commas), reversed(corrected_commas)
+    ):
+        if _member_start(raw, raw_comma) and _member_start(corrected, corrected_comma):
+            return raw_comma, corrected_comma
     return None
 
 
@@ -453,8 +438,12 @@ class _StreamingArgs:
         self._properties = properties
         self._string_keys = string_keys
         self._stop: int | None = None
-        self._nonfinite = _document_has_non_finite_literal(args_json)
-        corrected, self.safe, self.streams = self._rewrite(args_json)
+        # A property schema makes the rewriter parse regardless, so only the
+        # schema-less fast path needs the scan.
+        self._nonfinite = not properties and _document_has_non_finite_literal(args_json)
+        corrected, self.safe, self.streams = self._rewrite(
+            args_json, force_parse=self._nonfinite
+        )
         self._raw = args_json
         self._raw_boundary = 0
         self._corrected_boundary = 0
@@ -502,7 +491,7 @@ class _StreamingArgs:
     def _extends(self, args_json: str) -> bool:
         """Whether *args_json* still has the cached document as its prefix."""
         raw = self._raw
-        if not raw.startswith("{") or len(args_json) < len(raw):
+        if not raw.startswith("{"):
             return False
         # Compare the whole prefix: a converter that rewrites text far from
         # the end is invisible to a tail-only check when the tail repeats,
@@ -563,7 +552,6 @@ class _StreamingArgs:
         emit_rel = max(len(safe_tail) - skip, 0)
         end = self._corrected_boundary + emit_rel
         delta = ""
-        point = None
         if end > self._emitted:
             delta = body[self._emitted - self._corrected_boundary : emit_rel]
             self._emitted = end
@@ -635,7 +623,7 @@ def safe_arg_prefix(
             pending_key = None
     if last_colon < 0:
         return "", False
-    end = _next_non_ws(json_str, last_colon + 1)
+    end = next_non_ws(json_str, last_colon + 1)
     if end >= len(json_str) or json_str[end] != '"':
         return json_str[:end], False
     if string_keys is not None and last_key not in string_keys:

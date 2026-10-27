@@ -36,6 +36,7 @@ from vllm.parser.engine.arg_rewrite import (
     _ArgsRewriter,
     _document_has_non_finite_literal,
     _StreamingArgs,
+    safe_arg_prefix,
 )
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import (
@@ -2004,7 +2005,7 @@ class TestArgValueExtender:
 
 
 class TestSafeArgPrefix:
-    """Unit tests for ParserEngine._safe_arg_prefix."""
+    """Unit tests for safe_arg_prefix."""
 
     @pytest.mark.parametrize(
         "json_str, expected",
@@ -2026,7 +2027,7 @@ class TestSafeArgPrefix:
         ],
     )
     def test_safe_arg_prefix(self, json_str, expected):
-        assert ParserEngine._safe_arg_prefix(json_str)[0] == expected
+        assert safe_arg_prefix(json_str)[0] == expected
 
 
 # ── Coercion instability regression tests ────────────────────────
@@ -2052,7 +2053,7 @@ class TestCoercionInstabilityRegression:
 
     These tests exercise scenarios where a trailing value's coercion
     status changes between ticks (e.g. "4" coerces to int but "4e"
-    does not).  Before the _safe_arg_prefix fix, these would violate
+    does not).  Before the safe_arg_prefix fix, these would violate
     the startswith prefix invariant and permanently drop deltas.
     """
 
@@ -2295,7 +2296,7 @@ class TestIncrementalArgRewrite:
         for i in range(2, len(chunks) + 1):
             current = "".join(chunks[:i])
             corrected = _ArgsRewriter(current, properties, final=False).rewrite()
-            safe, _ = ParserEngine._safe_arg_prefix(corrected, string_keys)
+            safe, _ = safe_arg_prefix(corrected, string_keys)
             deltas.append(safe[len(emitted) :])
             emitted = safe
         return deltas
@@ -2478,7 +2479,7 @@ class TestIncrementalArgRewrite:
         for i in range(2, len(chunks) + 1):
             converted = _kv_converter("".join(chunks[:i]), True)
             corrected = _ArgsRewriter(converted, properties, final=False).rewrite()
-            safe, _ = ParserEngine._safe_arg_prefix(corrected, string_keys)
+            safe, _ = safe_arg_prefix(corrected, string_keys)
             expected.append(safe[len(emitted) :])
             emitted = safe
 

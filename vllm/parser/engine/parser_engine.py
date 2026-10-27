@@ -23,11 +23,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.parser.abstract_parser import Parser, StreamState
-from vllm.parser.engine.arg_rewrite import (
-    _ArgsRewriter,
-    _StreamingArgs,
-    safe_arg_prefix,
-)
+from vllm.parser.engine.arg_rewrite import _ArgsRewriter, _StreamingArgs
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import (
     ArgValueExtender,
@@ -300,13 +296,6 @@ class ParserEngine(Parser):
         return self._engine.feed(delta_text, delta_token_ids)
 
     # ── Schema-aware type correction ─────────────────────────────────
-
-    @staticmethod
-    def _safe_arg_prefix(
-        json_str: str, string_keys: set[str] | None = None
-    ) -> tuple[str, bool]:
-        """Return the streamable prefix of *json_str*."""
-        return safe_arg_prefix(json_str, string_keys)
 
     @staticmethod
     def _streamable_string_keys(properties: dict) -> set[str] | None:

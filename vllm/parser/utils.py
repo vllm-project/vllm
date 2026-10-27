@@ -68,6 +68,14 @@ def count_history_tool_calls(
 JSON_WS = " \t\r\n"
 
 
+def next_non_ws(text: str, i: int) -> int:
+    """Offset of the first non-whitespace character at or after *i*."""
+    n = len(text)
+    while i < n and text[i] in JSON_WS:
+        i += 1
+    return i
+
+
 def scan_json_object_end(raw: str, start: int) -> int | None:
     """Return the end index (exclusive) of the JSON object starting at
     ``raw[start]`` (which must be ``{``), or ``None`` when it is still
@@ -132,9 +140,7 @@ def extract_json_member_object(raw: str, key: str) -> str | None:
             in_string = True
             string_start = i
         elif ch == ":" and depth == 1 and last_string == key:
-            value_start = i + 1
-            while value_start < len(raw) and raw[value_start] in JSON_WS:
-                value_start += 1
+            value_start = next_non_ws(raw, i + 1)
             if value_start >= len(raw):
                 return None
             if raw[value_start] != "{":

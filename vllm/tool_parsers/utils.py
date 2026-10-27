@@ -1077,7 +1077,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     return candidate, added_text
 
 
-# Shared bound for recursive walks over model output and tool schemas.  Real
+# Shared bound for the recursive schema and document walks below.  Real
 # arguments and schemas nest a handful of levels deep; beyond this we stop
 # recursing rather than approach the interpreter's limit.
 MAX_NESTING_DEPTH = 200
@@ -1336,16 +1336,20 @@ def value_changed(before: Any, after: Any) -> bool:
     return type(after) is not type(before) or after != before
 
 
-def coerce_typed_value(value: Any, schema: Any) -> tuple[Any, bool]:
+def coerce_typed_value(
+    value: Any, schema: Any, *, types: list[str] | None = None
+) -> tuple[Any, bool]:
     """Coerce an already-typed value according to its property *schema*.
 
     Unlike :func:`coerce_to_schema_type`, *value* may be any JSON value;
     non-string values are serialized before coercion. A schema admitting any
     value (see :func:`schema_admits_any_value`) leaves the value as emitted,
-    since no branch of it justifies changing the type. Returns
+    since no branch of it justifies changing the type. *types* overrides the
+    types derived from *schema*, for callers that cache them. Returns
     ``(value, changed)``.
     """
-    types = schema_coercion_types(schema)
+    if types is None:
+        types = schema_coercion_types(schema)
     if not types:
         return value, False
     raw_value = (

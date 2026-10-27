@@ -28,7 +28,6 @@ from vllm.tool_parsers.utils import (
     canonical_schema_types,
     coerce_to_schema_type,
     coerce_typed_value,
-    extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
     partial_tag_overlap,
@@ -165,17 +164,15 @@ class K2HorizonToolParser(ToolParser):
         explicit_type: str | None,
     ) -> Any:
         explicit_base = cls._base_arg_type(explicit_type)
-        untyped = not schema_coercion_types(schema)
-        if untyped and explicit_base == "any":
-            return value
-        if untyped and explicit_base:
+        target_types = schema_coercion_types(schema)
+        if not target_types:
+            if explicit_base is None or explicit_base == "any":
+                return value
             # An untyped schema carries no type information, so the
             # model's explicit <arg_type> tag decides.
             target_types = [explicit_base]
-        else:
-            target_types = extract_types_from_schema(schema)
-            if explicit_base in target_types and len(target_types) > 1:
-                target_types = [explicit_base]
+        elif explicit_base in target_types and len(target_types) > 1:
+            target_types = [explicit_base]
 
         raw_value = (
             value if "string" in canonical_schema_types(target_types) else value.strip()
