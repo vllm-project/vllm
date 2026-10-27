@@ -159,6 +159,7 @@ fn load_lora_status(error: LoadLoraError) -> Status {
     let code = match &error {
         LoadLoraError::Disabled(_) => Code::FailedPrecondition,
         LoadLoraError::InvalidAdapter { .. } => Code::InvalidArgument,
+        LoadLoraError::PathAccess(LoraPathAccessError::NotFound { .. }) => Code::NotFound,
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidPath { .. }) => Code::InvalidArgument,
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidConfiguration { .. }) => {
             Code::Internal
@@ -538,4 +539,20 @@ pub(super) fn kv_event_source(response: &EngineCoreReadyResponse) -> Option<pb::
         hwm: config.hwm,
         max_queue_size: config.max_queue_size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use tonic::Code;
+
+    use super::load_lora_status;
+    use crate::lora::{LoadLoraError, LoraPathAccessError};
+
+    #[test]
+    fn load_lora_reports_missing_adapter_path_as_not_found() {
+        let status = load_lora_status(LoadLoraError::PathAccess(LoraPathAccessError::NotFound {
+            lora_path: "/not/an/adapter".to_string(),
+        }));
+        assert_eq!(status.code(), Code::NotFound);
+    }
 }
