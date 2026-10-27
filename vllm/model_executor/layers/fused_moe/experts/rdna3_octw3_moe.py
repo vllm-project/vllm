@@ -35,6 +35,12 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
+# From this many tokens on, the WMMA kernel (one expert token block per
+# workgroup) beats the fdot2 kernel, which re-decodes the weights every four
+# tokens. Measured at TP4 (E=384, top_k=10, K=2560, N=160).
+WMMA_MIN_TOKENS = 384
+WMMA_BLOCK_M64_TOKENS = 1536
+
 OCTW3_LEVELS = (-2.1520, -1.3439, -0.7560, -0.2451, 0.2451, 0.7560, 1.3439, 2.1520)
 
 
@@ -155,7 +161,9 @@ class Rdna3OctaveW3Experts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        return ((M, K), (M * topk * 2 * N,), (M, K))
+        # workspace2 holds [gate | up] and, on the WMMA path, the rotated
+        # SiLU-and-mul rows behind it.
+        return ((M, K), (M * topk * 3 * N,), (M, K))
 
     def apply(
         self,
@@ -183,6 +191,22 @@ class Rdna3OctaveW3Experts(mk.FusedMoEExpertsModular):
             global_num_experts = E
         rows = M * top_k
         gate_up_out = workspace2.view(-1)[: rows * 2 * N].view(rows, 2 * N)
+
+        if M >= WMMA_MIN_TOKENS:
+            self._apply_wmma(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                global_num_experts,
+                expert_map,
+                workspace13,
+                workspace2,
+                apply_router_weight_on_input,
+            )
+            return
 
         # Same block choice as Rdna3WNA16Experts.
         block_size_m = 1 if M <= 24 else 4
@@ -237,4 +261,73 @@ class Rdna3OctaveW3Experts(mk.FusedMoEExpertsModular):
             not apply_router_weight_on_input,
             top_k,
             self.had_w2,
+        )
+
+    def _apply_wmma(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        E, M, N, K, top_k = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
+        if global_num_experts == -1:
+            global_num_experts = E
+        rows = M * top_k
+        block_size_m = 64 if M >= WMMA_BLOCK_M64_TOKENS else 32
+        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+            topk_ids, block_size_m, global_num_experts, expert_map
+        )
+        topk_weights_f32 = topk_weights.reshape(-1).float()
+        if (
+            self._empty_topk_weights is None
+            or self._empty_topk_weights.device != hidden_states.device
+        ):
+            self._empty_topk_weights = torch.empty(
+                0, dtype=torch.float32, device=hidden_states.device
+            )
+        no_topk_weights = self._empty_topk_weights
+
+        # workspace13 may alias `output`; it is only zeroed after GEMM1 has
+        # consumed the rotated input.
+        x_rot = workspace13.view(-1)[: M * K].view(M, K)
+        ws2 = workspace2.view(-1)
+        gate_up_out = ws2[: rows * 2 * N].view(rows, 2 * N)
+        act = ws2[rows * 2 * N : rows * 3 * N].view(rows, N)
+
+        ops.octw3_rotate_rdna3(hidden_states, x_rot, False, self.had_w13)
+        ops.moe_octw3_wmma_gemm_rdna3(
+            x_rot,
+            gate_up_out,
+            w1,
+            self.w1_scale,
+            topk_weights_f32 if apply_router_weight_on_input else no_topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            top_k,
+            0,
+            block_size_m,
+        )
+        ops.octw3_rotate_rdna3(gate_up_out, act, True, self.had_w2)
+        output.zero_()
+        ops.moe_octw3_wmma_gemm_rdna3(
+            act,
+            output,
+            w2,
+            self.w2_scale,
+            no_topk_weights if apply_router_weight_on_input else topk_weights_f32,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            1,
+            top_k,
+            block_size_m,
         )
