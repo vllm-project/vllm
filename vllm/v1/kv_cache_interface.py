@@ -965,6 +965,62 @@ class SlidingWindowSpec(AttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class DFlashSlidingWindowSpec(SlidingWindowSpec):
+    """Sliding-window drafter KV that is only read near the sequence end.
+
+    DFlash/DSpark context KV is a per-position projection of the target's
+    hidden states, and draft attention runs only past the last target token.
+    An allocation whose target tokens end at ``T`` therefore backs only blocks
+    from ``T - tail_tokens`` on (earlier ones stay null), and a prefix hit only
+    needs cached drafter blocks in the tail before the request end.
+    """
+
+    tail_tokens: int
+    """Window plus slack for rejected draft tokens and kernel pages."""
+    max_in_flight_steps: int = 1
+    num_lookahead_tokens: int = 0
+    """Slots each allocation backs past its target tokens for the drafts."""
+
+    def max_admission_blocks_per_request(
+        self, max_in_flight_tokens: int, max_model_len: int
+    ) -> int:
+        # The processed prefix's tail plus one tail per in-flight step: steps
+        # back only their own trailing tail, however long their chunk. Both
+        # bounds cover the lookahead slots past the last allocation's tokens.
+        # The processed prefix keeps its whole tail, which reaches
+        # tail_tokens - sliding_window + 1 tokens below the window.
+        tail_blocks = (
+            cdiv(
+                self.tail_tokens
+                + self.extra_retained_tokens
+                + self.num_lookahead_tokens,
+                self.block_size,
+            )
+            + 1
+        )
+        return min(
+            super().max_admission_blocks_per_request(
+                max_in_flight_tokens
+                + self.num_lookahead_tokens
+                + self.tail_tokens
+                - self.sliding_window
+                + 1,
+                max_model_len,
+            ),
+            (self.max_in_flight_steps + 1) * tail_blocks,
+        )
+
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        return all(
+            isinstance(spec, DFlashSlidingWindowSpec)
+            and spec.sliding_window == self.sliding_window
+            for spec in kv_cache_specs.values()
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class CircularBufferSpec(AttentionSpec):
     """One block per request holding the raw keys of the token group that
     is still being compressed.

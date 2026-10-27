@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
     CrossAttentionSpec,
+    DFlashSlidingWindowSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     HiSparseHotSpec,
@@ -1181,6 +1182,205 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             0,
             num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
         )
+
+
+class DFlashSlidingWindowManager(SlidingWindowManager):
+    """Drafter sliding-window KV that is only read near the sequence end.
+
+    An allocation backs only the blocks a draft step can read, those from
+    ``num_tokens_main_model - tail_tokens`` on; lower blocks are null, so a
+    long prefill chunk holds one tail rather than the whole chunk. A prefix hit
+    at ``h`` for a request of ``L`` tokens needs cached blocks only in
+    ``[L - tail_tokens, h)``: lower blocks are never read and everything from
+    ``h`` on is recomputed.
+    """
+
+    def __init__(self, kv_cache_spec: DFlashSlidingWindowSpec, **kwargs) -> None:
+        super().__init__(kv_cache_spec, **kwargs)
+        self.tail_tokens = kv_cache_spec.tail_tokens
+        # req_id -> length of the block-table prefix known to be all null.
+        self._num_null_prefix_blocks: dict[str, int] = {}
+
+    def _remove_blocks_in_range(
+        self,
+        request_id: str,
+        first_block: int,
+        last_block: int,
+    ) -> None:
+        # Earlier chunks' tails sit above null runs, so unlike the base scan
+        # this one cannot stop at the first null block.
+        assert first_block == 0
+        blocks = self.req_to_blocks.get(request_id)
+        if blocks is None:
+            return
+        last_block = min(last_block, len(blocks))
+        start = self._num_null_prefix_blocks.get(request_id, 0)
+        freed: list[KVCacheBlock] = []
+        for i in range(last_block - 1, start - 1, -1):
+            if not blocks[i].is_null:
+                freed.append(blocks[i])
+                blocks[i] = self._null_block
+        if freed:
+            self.block_pool.free_blocks(freed)
+        self._num_null_prefix_blocks[request_id] = max(start, last_block)
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self._num_null_prefix_blocks.pop(request_id, None)
+        return super().pop_blocks_for_free(request_id)
+
+    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
+        # Keep the whole tail a prefix hit at this length needs, not only the
+        # window, so local hits, loads and frees leave what
+        # find_longest_cache_hit asks for.
+        return max(
+            0, num_computed_tokens - self.tail_tokens - self.extra_retained_tokens
+        )
+
+    @staticmethod
+    def _first_resident_block(
+        num_target_tokens: int, tail_tokens: int, block_size: int
+    ) -> int:
+        return max(num_target_tokens - tail_tokens, 0) // block_size
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+        prefill_end: int = 0,
+    ) -> int:
+        req_blocks = self.req_to_blocks.get(request_id, ())
+        if apply_admission_cap:
+            # Steps back only their own tail, so the peak holding is set by
+            # the steps in flight, not by the sequence length: reserve the cap.
+            assert self.max_admission_blocks_per_request is not None
+            num_held_blocks = sum(not block.is_null for block in req_blocks)
+            return max(self.max_admission_blocks_per_request - num_held_blocks, 0)
+
+        first_block = self._first_resident_block(
+            num_tokens_main_model, self.tail_tokens, self.block_size
+        )
+        num_required_blocks = cdiv(num_tokens, self.block_size)
+        if request_id in self.num_cached_block:
+            assert len(new_computed_blocks) == 0
+            return max(num_required_blocks - max(len(req_blocks), first_block), 0)
+
+        num_skipped_blocks = (
+            self.get_num_skipped_tokens(total_computed_tokens) // self.block_size
+        )
+        num_new_blocks = max(
+            num_required_blocks
+            - max(
+                num_skipped_blocks,
+                len(new_computed_blocks) + len(req_blocks),
+                first_block,
+            ),
+            0,
+        )
+        num_skipped_new_computed_blocks = max(0, num_skipped_blocks - len(req_blocks))
+        if self._has_partial_local_hit(new_computed_blocks, num_local_computed_tokens):
+            num_new_blocks += 1
+        return num_new_blocks + self._get_num_evictable_blocks(
+            new_computed_blocks[num_skipped_new_computed_blocks:]
+        )
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        req_blocks = self.req_to_blocks[request_id]
+        num_null_blocks = max(
+            self._first_resident_block(
+                num_tokens_main_model, self.tail_tokens, self.block_size
+            )
+            - len(req_blocks),
+            0,
+        )
+        # The nulls are new block-table entries the worker must append too.
+        null_blocks = [self._null_block] * num_null_blocks
+        req_blocks.extend(null_blocks)
+        return null_blocks + super().allocate_new_blocks(
+            request_id, num_tokens, num_tokens_main_model
+        )
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: BlockHashList,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        drop_eagle_block: bool,
+        alignment_tokens: int,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+        num_request_tokens: int | None = None,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        """Longest hit whose blocks in ``[L - tail_tokens, hit)`` are cached.
+
+        ``num_request_tokens`` (``L``) defaults to ``max_length``, which asks
+        for the tail before the hit itself, like plain sliding window.
+        Underestimating ``L`` only asks for more blocks than needed.
+        """
+        assert isinstance(kv_cache_spec, DFlashSlidingWindowSpec)
+        assert not drop_eagle_block, "Drafter context KV needs no EAGLE drop."
+        assert dcp_world_size == 1 and pcp_world_size == 1
+        block_size = kv_cache_spec.block_size
+        assert alignment_tokens % block_size == 0
+        block_hashes = resolve_block_hashes(
+            block_hashes,
+            block_pool.hash_block_size,
+            block_size,
+            supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
+            alignment_tokens=alignment_tokens,
+        )
+        if num_request_tokens is None:
+            num_request_tokens = max_length
+        max_num_blocks = max_length // block_size
+        first_block = cls._first_resident_block(
+            num_request_tokens, kv_cache_spec.tail_tokens, block_size
+        )
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [block_pool.null_block] * max_num_blocks for _ in kv_cache_group_ids
+        )
+        num_blocks = min(first_block, max_num_blocks)
+        while num_blocks < max_num_blocks and (
+            cached_block := block_pool.get_cached_block(
+                block_hashes[num_blocks], kv_cache_group_ids
+            )
+        ):
+            for computed, cached in zip(computed_blocks, cached_block):
+                computed[num_blocks] = cached
+            num_blocks += 1
+        num_blocks = (
+            num_blocks
+            * block_size
+            // alignment_tokens
+            * (alignment_tokens // block_size)
+        )
+        for computed in computed_blocks:
+            del computed[num_blocks:]
+        return computed_blocks, num_blocks * block_size
+
+    @classmethod
+    def reachable_block_mask(
+        cls,
+        start_block: int,
+        end_block: int,
+        alignment_tokens: int | None,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+        retention_interval: int | None = None,
+        reachable_boundaries: Sequence[int] = (),
+        dcp_world_size: int = 1,
+        final_segment_end_block: int | None = None,
+    ) -> list[bool] | None:
+        # Only tails are ever backed, and any of them can serve a later hit.
+        return None
 
 
 class CircularBufferManager(FullAttentionManager):
@@ -2688,6 +2888,11 @@ def register_all_kvcache_specs(vllm_config):
         SlidingWindowMLASpec,
         SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
+    )
+    KVCacheSpecRegistry.register(
+        DFlashSlidingWindowSpec,
+        DFlashSlidingWindowManager,
+        uniform_type_base_spec=DFlashSlidingWindowSpec,
     )
 
     KVCacheSpecRegistry.register(
