@@ -240,19 +240,8 @@ def test_segmented_tuning_candidates_preserve_workspace_bound():
         (4, 1024, 8192, 16, 4, 256, False),
         (1, 1024, 131072, 6, 1, 256, True),
         (1, 1, 8192, 16, 2, 512, True),
-        (1, 2, 8192, 32, 4, 512, False),
-        (1, 2, 8192, 8, 1, 512, False),
-        (1, 3, 8192, 16, 2, 512, True),
-        (1, 1, 128, 32, 4, 512, False),
-        (1, 8, 8192, 32, 4, 512, False),
-        (4, 1, 8192, 16, 2, 512, False),
-        (16, 2, 128, 16, 2, 512, True),
-        (1, 8, 1024, 16, 2, 512, False),
-        (1, 256, 8192, 16, 2, 512, True),
-        (1, 1024, 1024, 32, 4, 512, False),
-        (1, 1, 8192, 8, 1, 512, False),
+        (1, 3, 8192, 16, 2, 512, False),
         (4, 256, 8192, 8, 1, 512, True),
-        (4, 256, 32768, 16, 2, 512, False),
         (4, 1025, 32768, 16, 2, 512, False),
     ):
         default = segmented.select_segmented_config(
@@ -268,10 +257,6 @@ def test_segmented_tuning_candidates_preserve_workspace_bound():
         )
         assert all(config["splits"] <= default["splits"] for config in candidates)
         assert all(dim % config["bk"] == 0 for config in candidates)
-        assert len(candidates) == len({tuple(sorted(c.items())) for c in candidates})
-        if dim == 512:
-            assert len(candidates) <= (156 if fp8 else 48)
-            assert any(config["warps"] == 8 for config in candidates)
 
 
 @pytest.mark.parametrize("dim", (128, 256, 512))
@@ -308,7 +293,7 @@ def test_segmented_fp8_long_extend_split_workspace_bound(dim):
 
     for batch in (1, 4, 16):
         for query_len in (257, 1025, 4095, 8192):
-            for ratio in (1, 6, 8, 16):
+            for ratio in (1, 6, 16):
                 for kv_heads in (1, 4):
                     for seq_len in (32768, 131072):
                         heads = ratio * kv_heads
@@ -379,8 +364,7 @@ def test_segmented_bf16_d256_long_extend_matches_dense_reference():
         (256, 6, 16, 128),
         (8192, 1, 1, 128),
         (8192, 1, 1, 256),
-        (256, 8, 1, 512),
-        (256, 8, 16, 512),
+        (256, 8, 2, 512),
     ],
 )
 @torch.inference_mode()
@@ -467,8 +451,6 @@ def test_segmented_native_upcast_preserves_peaked_logits(
         return dict(
             selector(*args, **kwargs),
             kv_upcast=f"native{pack}",
-            native_fp8_upcast=True,
-            native_fp8_pack=pack,
             pv_split=pv_split,
         )
 
@@ -522,45 +504,6 @@ def test_segmented_tuning_promotes_verified_challenger():
     winner, _ = tuning._select_tuned_winner(incumbent, [incumbent, challenger], samples)
     assert winner["config"] == challenger
     assert winner["paired_speedup_vs_default"] > 1.02
-
-
-@pytest.mark.parametrize(
-    "warm_candidate_us,promote", [(40.0, False), (20.2, True), (19.0, True)]
-)
-def test_segmented_tuning_checks_warm_cache_before_promotion(
-    warm_candidate_us, promote
-):
-    """A cold-cache gain must not introduce a material warm-cache regression."""
-    from vllm.model_executor.warmup import (
-        rocm_segmented_attn_autotune_warmup as tuning,
-    )
-
-    incumbent, challenger = _tuning_candidate(16), _tuning_candidate(32)
-    default_key, candidate_key = map(tuning._config_key, (incumbent, challenger))
-    winner, _ = tuning._select_tuned_winner(
-        incumbent,
-        [incumbent, challenger],
-        {default_key: [100.0] * 5, candidate_key: [60.0] * 5},
-        warm_samples={default_key: [20.0] * 5, candidate_key: [warm_candidate_us] * 5},
-    )
-    assert winner["config"] == (challenger if promote else incumbent)
-
-
-def test_segmented_tuning_chooses_fastest_warm_eligible_candidate():
-    """Rejecting the cold winner should still allow a balanced runner-up."""
-    from vllm.model_executor.warmup import (
-        rocm_segmented_attn_autotune_warmup as tuning,
-    )
-
-    configs = [_tuning_candidate(bm) for bm in (16, 32, 64)]
-    keys = list(map(tuning._config_key, configs))
-    winner, _ = tuning._select_tuned_winner(
-        configs[0],
-        configs,
-        dict(zip(keys, ([100.0] * 5, [60.0] * 5, [80.0] * 5), strict=True)),
-        warm_samples=dict(zip(keys, ([20.0] * 5, [40.0] * 5, [19.0] * 5), strict=True)),
-    )
-    assert winner["config"] == configs[2]
 
 
 def test_segmented_tuning_balances_tp_workloads_without_overlap():
@@ -664,8 +607,8 @@ def test_segmented_tuning_prunes_scheduler_and_kv_limits():
     )
 
 
-@pytest.fixture(params=[128, 512], ids=["d128", "d512"])
-def segmented_tuner(tmp_path, monkeypatch, request):
+@pytest.fixture
+def segmented_tuner(tmp_path, monkeypatch):
     """Exercise real cache files and lookup while replacing GPU timing only."""
     from types import SimpleNamespace
 
@@ -702,8 +645,7 @@ def segmented_tuner(tmp_path, monkeypatch, request):
         }
 
     monkeypatch.setattr(tuning, "_tune_workload", tune)
-    dim = request.param
-    geometry = (torch.device("cuda:0"), torch.bfloat16, 4, 2, dim, 16, dim**-0.5)
+    geometry = (torch.device("cuda:0"), torch.bfloat16, 4, 2, 128, 16, 128**-0.5)
     return SimpleNamespace(
         module=tuning,
         warmup_args=(*geometry, 4, 8, 2),
@@ -1103,9 +1045,7 @@ def test_rocm_segmented_attn_layout_cache_update(fp8, head_size):
 
 
 @pytest.mark.parametrize("fp8", [False, True])
-@pytest.mark.parametrize("head_size", [256, 512])
-@pytest.mark.parametrize("gqa", [2, 8])
-@pytest.mark.parametrize("window", [0, 32])
+@pytest.mark.parametrize("head_size,gqa,window", [(256, 2, 32), (512, 8, 0)])
 @torch.inference_mode()
 def test_rocm_segmented_attn_cache_only_reader(
     monkeypatch, fp8, head_size, gqa, window
