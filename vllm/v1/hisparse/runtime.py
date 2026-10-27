@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NVIDIA HiSparse resident, host, and hot-cache data plane."""
+"""HiSparse resident, host, and hot-cache data plane."""
 
 from __future__ import annotations
 
@@ -22,11 +22,11 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
-from vllm.utils.torch_utils import async_tensor_h2d, current_stream
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import max_decode_query_len
+from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.types import SparseKVResidencyUpdate
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
 logger = init_logger(__name__)
 
@@ -166,9 +166,9 @@ def _check_residency_shared_memory(
     device: torch.device, config: ResolvedHiSparseConfig
 ) -> None:
     """Reject a config whose residency resolver exceeds per-block shared memory."""
-    # Mirrors hisparse_resolve_residency's layout: union hash keys and values
-    # (plus an empty slot), per-chunk offsets, five counters, done bits, and
-    # the int16 compacted LRU.
+    # Minimum resolver layout: union hash keys and values (plus an empty slot),
+    # per-chunk offsets, five counters, done bits, and the int16 compacted LRU.
+    # The kernel uses remaining shared memory to lower the hash-table load.
     hot_size = config.device_buffer_size
     num_chunks = cdiv(hot_size, 32)
     required = 4 * (2 * (config.max_union_rows + 1) + 3 * num_chunks + 7) + 2 * hot_size
@@ -212,8 +212,12 @@ def allocate_pinned_host_pool(size: int) -> tuple[torch.Tensor, torch.Tensor]:
     return registered[:size], registered
 
 
+def pin_tensor(tensor: torch.Tensor) -> None:
+    get_hisparse_backend().pin_tensor(tensor)
+
+
 class HiSparseHostPool:
-    """Keep the single host backing and its exact CUDA registration range."""
+    """Keep the single host backing and its exact registration range."""
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> None:
         self.vllm_config = vllm_config
@@ -221,6 +225,7 @@ class HiSparseHostPool:
         self.backing: torch.Tensor | None = None
         self.registered: torch.Tensor | None = None
         self.shared_region: SharedOffloadRegion | None = None
+        self.pinned: list[torch.Tensor] = []
 
     def allocate(self, size: int) -> torch.Tensor:
         if self.backing is not None:
@@ -239,7 +244,7 @@ class HiSparseHostPool:
             ]
             assert config.hisparse_host_num_blocks is not None
             assert config.hisparse_host_block_stride is not None
-            _, _, self.shared_region = allocate_hisparse_host_pools(
+            _, self.pinned, self.shared_region = allocate_hisparse_host_pools(
                 self.vllm_config,
                 tensor_sizes,
                 config.hisparse_host_num_blocks,
@@ -252,6 +257,7 @@ class HiSparseHostPool:
         else:
             check_hisparse_host_memory(size)
             self.backing, self.registered = allocate_pinned_host_pool(size)
+            self.pinned = [self.registered]
         return self.backing
 
 
@@ -276,7 +282,7 @@ def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
     """Whether replicated MLA host KV can share one local mmap."""
     parallel = vllm_config.parallel_config
     return (
-        current_platform.is_cuda_alike()
+        get_hisparse_backend().supports_shared_host_pool
         and parallel.tensor_parallel_size > 1
         and parallel.pipeline_parallel_size == 1
         and parallel.prefill_context_parallel_size == 1
@@ -400,21 +406,21 @@ def allocate_hisparse_host_pools(
         creator_memory_check=check_hisparse_host_memory,
         populate_shard=(tp_group.rank_in_group, tp_group.world_size),
     )
+    pinned: list[torch.Tensor] = []
     try:
         for start, end in _hisparse_registration_ranges(
             tensor_sizes, num_blocks, host_block_stride
         ):
             tensor = region.base_tensor[start:end]
             pin_tensor(tensor)
-            region.pinned_addresses.append(tensor.data_ptr())
-            region.is_pinned = True
+            pinned.append(tensor)
         pools = [
             region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
         ]
     except Exception:
-        region.cleanup()
+        release_pinned_state([], pinned, region)
         raise
-    return pools, [], region
+    return pools, pinned, region
 
 
 def release_pinned_state(
@@ -424,31 +430,31 @@ def release_pinned_state(
 ) -> None:
     """Synchronize and release registered host KV pools."""
     if pinned_host_pools or shared_host_region is not None:
+        backend = get_hisparse_backend()
         try:
             torch.accelerator.synchronize()
         except RuntimeError as e:
             logger.warning(
-                "HiSparse: CUDA context unusable at teardown (%s); leaving "
+                "HiSparse: device context unusable at teardown (%s); leaving "
                 "%d host-pool tensors pinned for kernel exit reclaim.",
                 e,
-                len(pinned_host_pools) + int(shared_host_region is not None),
+                len(pinned_host_pools),
             )
             return
 
-        cudart = torch.cuda.cudart()
         release_start = time.perf_counter()
         freed_bytes = 0
         while pinned_host_pools:
             tensor = pinned_host_pools[-1]
-            err = cudart.cudaHostUnregister(tensor.data_ptr())
-            if err.value != 0:
+            try:
+                backend.unpin_tensor(tensor)
+            except RuntimeError as error:
                 logger.warning(
-                    "HiSparse: cudaHostUnregister failed (code=%d); leaving "
+                    "HiSparse: host unregister failed (%s); leaving "
                     "%d host-pool tensors pinned for kernel exit reclaim.",
-                    err.value,
+                    error,
                     len(pinned_host_pools),
                 )
-                cudart.cudaGetLastError()
                 break
             freed_bytes += tensor.nbytes
             pinned_host_pools.pop()
@@ -460,6 +466,8 @@ def release_pinned_state(
             )
 
     for runtime in runtimes:
+        runtime.cache_ops = None
+        runtime.host_pool = None
         del runtime._host_cache
         del runtime.registered_host_pool
         del runtime.hot_backing
@@ -630,14 +638,11 @@ def build_hisparse_prefill_staging_plan(
 
 
 def _has_hisparse_ops() -> bool:
-    if not hasattr(torch.ops, "_C_cache_ops"):
+    try:
+        get_hisparse_backend().check_available()
+    except RuntimeError:
         return False
-    return (
-        hasattr(torch.ops._C_cache_ops, "hisparse_resolve_residency")
-        and hasattr(torch.ops._C_cache_ops, "hisparse_invalidate_written_slots")
-        and hasattr(torch.ops._C_cache_ops, "hisparse_gather_plan")
-        and hasattr(torch.ops._C_cache_ops, "hisparse_gather_compact")
-    )
+    return True
 
 
 class _SharedTopKState:
@@ -687,7 +692,10 @@ class HiSparseIndexGroup:
             dtype=torch.int32,
             device=device,
         )
-        self.lru_init = torch.arange(region_stride, dtype=torch.int16, device=device)
+        # NPU arange does not support int16 output, so generate int32 then cast.
+        self.lru_init = torch.arange(
+            region_stride, dtype=torch.int32, device=device
+        ).to(torch.int16)
         self.lru_slots = self.lru_init.repeat(max_num_reqs, 1).contiguous()
         self.shared_topk = _create_shared_topk_state(device, max_swap_rows, top_k)
         # Request ids the resolver reads, built on the copy stream: a
@@ -699,9 +707,10 @@ class HiSparseIndexGroup:
         )
         self.logical_topk_ready = logical_topk_ready
         self.followers: list[HiSparseRuntime] = []
-        self.swap_stats = torch.zeros(2, dtype=torch.uint64, device=device)
+        stats_dtype = get_hisparse_backend().stats_dtype
+        self.swap_stats = torch.zeros(2, dtype=stats_dtype, device=device)
         self.swap_stats_host = torch.empty(
-            2, dtype=torch.uint64, device="cpu", pin_memory=True
+            2, dtype=stats_dtype, device="cpu", pin_memory=True
         )
         self.stats_row_bytes = 0
 
@@ -727,13 +736,9 @@ class HiSparseRuntime:
         copy_stream: torch.Stream | None = None,
         logical_topk_ready: torch.Event | None = None,
     ) -> None:
-        if not _has_hisparse_ops():
-            raise RuntimeError(
-                "HiSparse requires its compiled _C_cache_ops CUDA kernels "
-                "(host-resident decode has no Python fallback). Rebuild vLLM "
-                "from source so "
-                "csrc/hisparse_kernels.cu is included."
-            )
+        self.backend = get_hisparse_backend()
+        self.backend.check_available()
+        self.cache_ops: Any = None
         self.max_num_reqs = max_num_reqs
         self.row_width = row_width
         self.kv_dtype = kv_dtype
@@ -774,7 +779,7 @@ class HiSparseRuntime:
         self.eager_host_mirror = config.eager_host_mirror
         self.resident_source_index = -1
         self.request_state_indices: torch.Tensor | None = None
-        self.shared_host_region: SharedOffloadRegion | None = None
+        self.host_pool: HiSparseHostPool | None = None
 
     @property
     def host_cache(self) -> torch.Tensor:
@@ -833,6 +838,7 @@ class HiSparseRuntime:
         self.registered_host_pool = (
             registered_host_pool if registered_host_pool is not None else kv_cache
         )
+        self.cache_ops = self.backend.create_cache_ops(self)
 
     def gather_prefill_cache(
         self,
@@ -858,14 +864,10 @@ class HiSparseRuntime:
             device=plan.block_table.device,
         )
         if plan.gpu_row_ids is not None and resident_cache is not None:
-            gpu_rows = plan.gpu_row_ids[0].to(torch.long)
-            src = gpu_rows.clamp_min(0)
-            resident_block_size = resident_cache.shape[1]
-            rows = resident_cache[src // resident_block_size, src % resident_block_size]
-            if rows.dtype != staged.dtype:
-                rows = rows.contiguous().view(staged.dtype)
-            staged.view(-1, row_width).copy_(rows)
-        torch.ops._C_cache_ops.hisparse_gather_plan(
+            self.backend.gather_resident_rows(
+                resident_cache, staged.view(-1, row_width), plan.gpu_row_ids[0]
+            )
+        self.cache_ops.hisparse_gather_plan(
             kv_cache.view(-1, row_width),
             staged,
             plan.row_ids,
@@ -880,7 +882,7 @@ class HiSparseRuntime:
     def reset_hot_state(self) -> None:
         """Drop all hot-buffer bookkeeping (hits become misses)."""
         group = self.index_group
-        compute_stream = current_stream()
+        compute_stream = torch.accelerator.current_stream()
         compute_stream.wait_stream(group.copy_stream)
         group.device_global_indices.fill_(-1)
         group.lru_slots.copy_(group.lru_init.expand_as(group.lru_slots))
@@ -912,7 +914,7 @@ class HiSparseRuntime:
         if num_tokens == 0:
             return
         assert self.request_state_indices is not None
-        torch.ops._C_cache_ops.hisparse_invalidate_written_slots(
+        self.cache_ops.hisparse_invalidate_written_slots(
             self.index_group.device_global_indices,
             self.request_state_indices,
             req_id_per_token[:num_tokens],
@@ -979,7 +981,7 @@ class HiSparseRuntime:
 
         # Padded rows are skipped by the kernel (request_state_indices) and must
         # come out as -1 so the attention kernel masks them.
-        torch.ops._C_cache_ops.hisparse_resolve_residency(
+        self.cache_ops.hisparse_resolve_residency(
             host_cache,
             hot.cache,
             self.hot_block_table,
@@ -1012,7 +1014,7 @@ class HiSparseRuntime:
     def _swap_rows(self, shared_rows: slice) -> None:
         hot = self.hot
         shared = self.index_group.shared_topk
-        torch.ops._C_cache_ops.hisparse_gather_compact(
+        self.cache_ops.hisparse_gather_compact(
             self.host_cache,
             hot.cache,
             shared.swap_host_physical_rows[shared_rows],
@@ -1035,7 +1037,7 @@ class HiSparseRuntime:
         num_valid_rows: torch.Tensor,
     ) -> None:
         group = self.index_group
-        compute_stream = current_stream()
+        compute_stream = torch.accelerator.current_stream()
         if group.logical_topk_ready is not None and not in_piecewise_cudagraph():
             group.copy_stream.wait_event(group.logical_topk_ready)
         else:
@@ -1072,7 +1074,7 @@ class HiSparseRuntime:
 
     def _stage_this_layer(self, shared_rows: slice) -> None:
         group = self.index_group
-        compute_stream = current_stream()
+        compute_stream = torch.accelerator.current_stream()
         group.copy_stream.wait_stream(compute_stream)
         with group.copy_stream:
             self._swap_rows(shared_rows)
@@ -1084,7 +1086,7 @@ class HiSparseRuntime:
     def wait_for_staged_swap(self) -> None:
         if not self._swap_staged or self._layer_ready_event is None:
             raise RuntimeError("HiSparse layer swap was not prefetched.")
-        current_stream().wait_event(self._layer_ready_event)
+        torch.accelerator.current_stream().wait_event(self._layer_ready_event)
         self._swap_staged = False
 
     def swap_in(
