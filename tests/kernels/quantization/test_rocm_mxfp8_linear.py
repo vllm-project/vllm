@@ -66,6 +66,18 @@ def _kernel_cls(backend: str, n: int, k: int) -> type:
     return AiterMxfp8LinearKernel
 
 
+@pytest.fixture
+def aiter_enabled(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    with monkeypatch.context() as context:
+        context.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+        yield
+    rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.usefixtures("aiter_enabled")
 @pytest.mark.parametrize("backend", ["rocm_native", "aiter"])
 @pytest.mark.parametrize("name,n,k", V41_ATTN_SHAPES, ids=lambda v: str(v))
 @pytest.mark.parametrize("num_tokens", [1, 2, 7, 16, 31, 32, 128, 1024])
@@ -103,6 +115,7 @@ def test_rocm_mxfp8_linear_matches_dequant_reference(backend, name, n, k, num_to
     assert rel < 5e-3, f"{name}: relative error {rel:.4f}"
 
 
+@pytest.mark.usefixtures("aiter_enabled")
 @torch.inference_mode()
 def test_aiter_mxfp8_linear_3d_input_and_bias():
     """A [batch, seq, K] input keeps its leading dims, and the bias is added."""
