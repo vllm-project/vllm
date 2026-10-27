@@ -2345,6 +2345,7 @@ class EngineArgs:
 
             launch = prepare_external_elastic_ep_launch(self)
             self.data_parallel_size = launch.data_parallel_size
+            self.data_parallel_size_local = launch.local_size
             if launch.first_rank is not None:
                 self.data_parallel_rank = launch.first_rank
             bootstrap_identity = launch.identity

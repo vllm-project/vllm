@@ -19,6 +19,7 @@ from prometheus_client.parser import text_string_to_metric_families
 from transformers import Qwen3MoeConfig
 
 from tests.utils import RemoteOpenAIServer
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed.elastic_ep.bootstrap import (
     ExternalElasticEPBootstrapServer,
     prepare_external_elastic_ep_launch,
@@ -30,9 +31,17 @@ from vllm.distributed.elastic_ep.external_elastic_ep import (
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.utils.network_utils import get_open_port, make_zmq_socket
-from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
+from vllm.v1.engine import (
+    EngineCoreRequest,
+    EngineCoreRequestType,
+    ReconfigureDistributedRequest,
+    ReconfigureRankType,
+)
+from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.engine.utils import EngineZmqAddresses
+from vllm.v1.executor import UniProcExecutor
 
 if TYPE_CHECKING:
     from vllm.v1.engine.core_client import DPAsyncMPClient
@@ -297,14 +306,16 @@ def test_external_elastic_ep_allocation_index_zero_initial_world(
     assert not launch.scale_up
 
 
-@pytest.mark.parametrize("local_size", [1, 4, 8])
+@pytest.mark.parametrize(
+    "local_size,nnodes", [(None, 1), (None, 2), (1, 1), (4, 1), (8, 1)]
+)
 @pytest.mark.parametrize("indexed", [False, True])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Real EngineArgs with EPLB requires a CUDA-like platform",
 )
 def test_external_lb_elastic_ep_local_range_config(
-    local_size, indexed, tmp_path, monkeypatch
+    local_size, nnodes, indexed, tmp_path, monkeypatch
 ):
     Qwen3MoeConfig(
         architectures=["Qwen3MoeForCausalLM"],
@@ -324,13 +335,14 @@ def test_external_lb_elastic_ep_local_range_config(
             model=str(tmp_path),
             elastic_ep_auto_bootstrap=True,
             elastic_ep_initial_dp_size=8,
-            elastic_ep_max_dp_size=8 + local_size,
+            elastic_ep_max_dp_size=8 + (local_size or 1),
             **(
                 {"elastic_ep_allocation_index": 0}
                 if indexed
                 else {"data_parallel_rank": 0}
             ),
             data_parallel_size_local=local_size,
+            nnodes=nnodes,
             enable_elastic_ep=True,
             enable_expert_parallel=True,
             enable_eplb=True,
@@ -341,9 +353,10 @@ def test_external_lb_elastic_ep_local_range_config(
     )
     assert config.data_parallel_size == 8
     assert config.data_parallel_rank == 0
-    assert config.data_parallel_size_local == local_size
-    assert config.data_parallel_external_lb is (local_size == 1)
-    assert config.data_parallel_hybrid_lb is (1 < local_size < 8)
+    resolved_local_size = local_size or 1
+    assert config.data_parallel_size_local == resolved_local_size
+    assert config.data_parallel_external_lb is (resolved_local_size == 1)
+    assert config.data_parallel_hybrid_lb is (1 < resolved_local_size < 8)
     assert config.elastic_ep_auto_bootstrap
     assert config.uses_external_elastic_ep
 
@@ -377,6 +390,99 @@ def test_external_elastic_ep_auto_bootstrap_preserves_executor_launch_arguments(
     assert (args.nnodes, args.node_rank, args.tensor_parallel_size) == (4, 0, 2)
     assert args.distributed_executor_backend == "mp"
     assert args.enable_fault_tolerance is enable_fault_tolerance
+
+
+@pytest.mark.asyncio
+async def test_external_elastic_ep_local_range_routes_after_old_size_stats():
+    """Incomplete global snapshots cannot replace a joiner's local load state."""
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            data_parallel_size=4,
+            data_parallel_rank=2,
+            data_parallel_size_local=2,
+            data_parallel_hybrid_lb=True,
+            distributed_executor_backend="mp",
+        )
+    )
+    input_address = f"tcp://127.0.0.1:{get_open_port()}"
+    output_address = f"tcp://127.0.0.1:{get_open_port()}"
+    with (
+        zmq.Context() as engine_ctx,
+        zmq.asyncio.Context() as stats_ctx,
+        engine_ctx.socket(zmq.DEALER) as rank2,
+        engine_ctx.socket(zmq.DEALER) as rank3,
+        make_zmq_socket(
+            stats_ctx, "tcp://127.0.0.1:0", zmq.XPUB, bind=True, linger=0
+        ) as coordinator,
+    ):
+        for rank, engine in enumerate((rank2, rank3), start=2):
+            engine.setsockopt(zmq.IDENTITY, rank.to_bytes(2, "little"))
+            engine.setsockopt(zmq.LINGER, 0)
+            engine.connect(input_address)
+            engine.send(b"")
+        client = DPLBAsyncMPClient(
+            config,
+            UniProcExecutor,
+            log_stats=False,
+            client_addresses={
+                "input_address": input_address,
+                "output_address": output_address,
+                "stats_update_address": coordinator.getsockopt_string(
+                    zmq.LAST_ENDPOINT
+                ),
+            },
+        )
+        try:
+            assert await asyncio.wait_for(coordinator.recv(), timeout=5) == b"\x01"
+            remote_counts = [[9, 9, 0.8], [9, 9, 0.8]]
+            snapshots = [
+                (remote_counts, rank2),
+                (remote_counts + [[4, 4, 0.8]], rank3),
+                (remote_counts + [[7, 4, 0.5], [0, 0, 0.0]], rank3),
+                (remote_counts, rank3),
+            ]
+
+            async def wait_for_snapshot(wave):
+                while client.current_wave != wave:
+                    await asyncio.sleep(0)
+
+            for wave, (counts, expected_engine) in enumerate(snapshots, start=1):
+                expected_counts = [
+                    row.copy()
+                    for row in (counts[2:4] if len(counts) == 4 else client.lb_engines)
+                ]
+                running = wave % 2 == 1
+                await coordinator.send(msgspec.msgpack.encode((counts, wave, running)))
+                await asyncio.wait_for(wait_for_snapshot(wave), timeout=5)
+                assert client.engines_running is running
+                request = EngineCoreRequest(
+                    request_id=f"joiner-{wave}",
+                    prompt_token_ids=[1],
+                    mm_features=None,
+                    sampling_params=SamplingParams(max_tokens=1),
+                    pooling_params=None,
+                    arrival_time=time.time(),
+                    lora_request=None,
+                    cache_salt=None,
+                    data_parallel_rank=None,
+                )
+                await client.add_request_async(request)
+                assert await asyncio.to_thread(expected_engine.poll, 5000)
+                assert (
+                    expected_engine.recv_multipart()[0]
+                    == EngineCoreRequestType.ADD.value
+                )
+                expected_counts[0 if expected_engine is rank2 else 1][0] += 1
+                assert client.lb_engines == expected_counts
+                assert client.engine_ranks_managed == [2, 3]
+        finally:
+            client.shutdown()
+            await asyncio.gather(
+                client.resources.stats_update_task,
+                client.resources.output_queue_task,
+                return_exceptions=True,
+            )
+            client.resources.ctx.term()
 
 
 def test_external_elastic_ep_auto_bootstrap_preserves_initial_rank_connection(

@@ -1591,6 +1591,8 @@ class DPAsyncMPClient(AsyncMPClient):
                         # Coordinator including all EngineCores. Slice to get
                         # just the cores managed by this client.
                         ranks = self.engine_ranks_managed
+                        if len(counts) <= ranks[-1]:
+                            continue
                         count_slice = slice(ranks[0], ranks[-1] + 1)
                         sliced_counts = counts[count_slice]
                         self.lb_engines = sliced_counts

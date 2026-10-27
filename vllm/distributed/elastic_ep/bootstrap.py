@@ -20,6 +20,7 @@ class ExternalElasticEPLaunch(msgspec.Struct):
     scale_up: bool
     identity: tuple[str, str] | None = None
     first_rank: int | None = None
+    local_size: int = 1
 
 
 class ExternalElasticEPBootstrapServer:
@@ -171,7 +172,9 @@ def prepare_external_elastic_ep_launch(args: "EngineArgs") -> ExternalElasticEPL
     if rank == 0:
         if local_size > initial_size:
             raise ValueError("Local DP ranks must fit within the initial DP world")
-        return ExternalElasticEPLaunch(initial_size, False, first_rank=rank)
+        return ExternalElasticEPLaunch(
+            initial_size, False, first_rank=rank, local_size=local_size
+        )
     timeout = envs.VLLM_ENGINE_READY_TIMEOUT_S
     if timeout <= 0:
         raise ValueError("Automatic bootstrap requires a positive engine-ready timeout")
@@ -221,4 +224,5 @@ def prepare_external_elastic_ep_launch(args: "EngineArgs") -> ExternalElasticEPL
             "Bootstrap handshake does not match the declared initial world"
         )
     launch.first_rank = rank
+    launch.local_size = local_size
     return launch

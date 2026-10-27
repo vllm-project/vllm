@@ -184,7 +184,9 @@ not membership commit or serving readiness, and does not trigger a resize. The
 external load balancer must still follow each endpoint's serving health.
 
 This mode supports external MP DP with one API server/core client per process.
-The default local rank count is one; see [Local Rank Ranges](#local-rank-ranges)
+The default local rank count is one and is retained through engine configuration,
+including with `--nnodes`; node geometry does not infer a different local range
+after bootstrap. See [Local Rank Ranges](#local-rank-ranges)
 for multi-rank startup. Local routing is inferred automatically for multi-rank
 clients; do not add explicit hybrid-LB or start-rank options. Headless startup
 does not use this discovery path. Fault tolerance may be enabled with an FT-capable all-to-all backend, as
