@@ -341,8 +341,7 @@ class SingleDirectionOffloadingHandler:
             else:
                 assert cpu_page_size == gpu_page_size * blocks_per_chunk
 
-        # Keep private containers for each handler. The worker owns the
-        # tensors; handlers only borrow references while transfers are live.
+        # Give each handler its own reference containers without copying tensors.
         self.src_tensors: list[torch.Tensor] = list(
             gpu_tensors if gpu_to_cpu else cpu_tensors
         )
