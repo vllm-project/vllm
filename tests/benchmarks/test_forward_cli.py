@@ -123,11 +123,12 @@ def test_balanced_routing_restores_expert_bias(dist_init):
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
     from vllm.models.muse_spark.common.moe import MuseSpark1xRouter
 
+    device = torch.device(current_platform.device_type)
     layer = torch.nn.Module()
-    gate = GateLinear(4, 8, params_dtype=torch.float32)
+    gate = GateLinear(4, 8, params_dtype=torch.float32).to(device)
     layer.add_module("router", gate)
     layer.top_k = 2
-    bias = torch.tensor([100.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    bias = torch.tensor([100.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], device=device)
     layer.register_buffer("expert_bias", bias.clone())
     selector = MuseSpark1xRouter(
         top_k=2,
@@ -135,10 +136,10 @@ def test_balanced_routing_restores_expert_bias(dist_init):
         expert_bias=layer.expert_bias,
         route_scale=1.0,
     )
-    hidden = torch.zeros(64, 4)
+    hidden = torch.zeros(64, 4, device=device)
     with torch.no_grad():
         gate.weight.zero_()
-    fixture = BalancedRouting(layer, 64, 0, 1, 4, 0, torch.device("cpu"))
+    fixture = BalancedRouting(layer, 64, 0, 1, 4, 0, device)
     try:
         logits, _ = gate(hidden)
         _, ids = selector.select_experts(hidden, logits)
