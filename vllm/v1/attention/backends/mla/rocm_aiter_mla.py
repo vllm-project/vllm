@@ -1009,11 +1009,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self._supports_fused_gather = (
             self._kv_cache_dtype_str != "fp8_ds_mla" and on_gfx950()
         )
-        self._gluon_fp8_decode_max_batch = _gluon_fp8_decode_max_batch(
-            vllm_config,
-            self._decode_num_heads,
-            self.mla_dims.kv_lora_rank,
-            self.mla_dims.qk_rope_head_dim,
+        layer = vllm_config.compilation_config.static_forward_context.get(
+            layer_names[0]
+        )
+        self._gluon_fp8_decode_max_batch = getattr(
+            getattr(layer, "impl", None), "_gluon_fp8_decode_max_batch", 0
         )
         # MLAAttention quantizes decode Q to FP8 before calling this backend
         # whenever the KV cache is FP8 and supports_quant_query_input is true.
@@ -2402,12 +2402,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             and self.qk_rope_head_dim == 64
         )
 
-        if _gluon_fp8_decode_max_batch(
+        self._gluon_fp8_decode_max_batch = _gluon_fp8_decode_max_batch(
             get_current_vllm_config(),
             self._decode_num_heads,
             self.kv_lora_rank,
             self.qk_rope_head_dim,
-        ):
+        )
+        if self._gluon_fp8_decode_max_batch:
             self.supports_quant_query_input = False
 
     def _concat_k_nope_k_pe(
