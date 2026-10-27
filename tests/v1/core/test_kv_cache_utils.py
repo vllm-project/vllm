@@ -65,8 +65,8 @@ from vllm.v1.hisparse.layout import (
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
+    HiSparseDeviceSpec,
     HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -92,8 +92,8 @@ from vllm.v1.request import Request
 pytestmark = pytest.mark.cpu_test
 
 
-def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
-    """Running requests pin only their resident tail; the newest still needs its
+def test_hisparse_steady_state_concurrency_excludes_released_device_pages():
+    """Running requests pin only their device tail; the newest still needs its
     full in-flight window to be admitted."""
     block_size = 16
     config = SimpleNamespace(
@@ -112,8 +112,8 @@ def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
             KVCacheGroupSpec(["source"], attn_spec, host_resident=True),
             KVCacheGroupSpec(["indexer"], attn_spec),
             KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(block_size=block_size, page_size=page_size),
+                ["device"],
+                HiSparseDeviceSpec(block_size=block_size, page_size=page_size),
             ),
             KVCacheGroupSpec(
                 ["hot"],
@@ -125,10 +125,10 @@ def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
         hisparse_host_num_blocks=100,
     )
 
-    # Admission takes indexer 10 + resident 10 + hot 4 = 24 blocks and steady
+    # Admission takes indexer 10 + device 10 + hot 4 = 24 blocks and steady
     # state 16, so 3 fit (2 x 16 + 24 <= 64) but not 4 (3 x 16 + 24 > 64).
     assert get_hisparse_steady_state_concurrency(config, kv_cache_config) == 3.5
-    # The worst-case bound charges all 10 resident pages.
+    # The worst-case bound charges all 10 device pages.
     assert get_max_concurrency_for_kv_cache_config(
         config, kv_cache_config
     ) == pytest.approx(64 / 24)
@@ -177,7 +177,7 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
 
 
 def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
-    """Workers report HiSparse's resident/hot caches, which lay out their own raw
+    """Workers report HiSparse's device/hot caches, which lay out their own raw
     backing; KV cache layout resolution must skip them."""
     from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 
@@ -207,7 +207,7 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     reported = specs | {
         name: group.kv_cache_spec
         for group in get_hisparse_kv_cache_groups(config, specs) or []
-        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        if isinstance(group.kv_cache_spec, (HiSparseDeviceSpec, HiSparseHotSpec))
         for name in group.layer_names
     }
     assert len(reported) > len(specs)

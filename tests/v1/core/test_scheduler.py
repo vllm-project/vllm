@@ -369,11 +369,11 @@ def _bind_hisparse_connector(scheduler):
     return coordinator
 
 
-def test_pending_hisparse_spill_keeps_scheduler_alive():
-    """A final host spill must complete after the last request finishes."""
+def test_pending_hisparse_write_back_keeps_scheduler_alive():
+    """A final host write-back must complete after the last request finishes."""
     scheduler = create_scheduler()
     coordinator = _bind_hisparse_connector(scheduler)
-    pending = coordinator.pending_spills
+    pending = coordinator.pending_transfers
     pending[0] = Mock()
     assert scheduler.has_requests()
     pending.clear()
@@ -2223,8 +2223,8 @@ def test_preempt_during_execution():
     assert requests[1].output_token_ids[0] == 42
 
 
-def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
-    """Pending reclamation must stall rather than preempt its owning request."""
+def test_pending_hisparse_block_frees_defer_preemption(monkeypatch):
+    """Pending block frees must stall rather than preempt its owning request."""
     scheduler = create_scheduler(enable_prefix_caching=False)
     request = create_requests(num_requests=1, num_tokens=16, block_size=16)[0]
     scheduler.add_request(request)
@@ -2250,7 +2250,7 @@ def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
     )
     monkeypatch.setattr(
         coordinator,
-        "has_pending_reclamation",
+        "has_pending_block_frees",
         Mock(return_value=True),
     )
 

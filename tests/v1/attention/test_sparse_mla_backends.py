@@ -122,7 +122,7 @@ from vllm.v1.hisparse.runtime import (
     build_hisparse_prefill_staging_plan,
     hisparse_prefill_staging_remap,
 )
-from vllm.v1.hisparse.types import SparseKVRowMirror
+from vllm.v1.hisparse.types import HiSparseRowMirror
 
 if current_platform.is_rocm():
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
@@ -1390,8 +1390,8 @@ class _StubHiSparseCacheHandle(HiSparseCacheHandle):
             setattr(self, name, value)
 
 
-def test_flashmla_hisparse_resident_mixed_batch_skips_host_staging(monkeypatch):
-    """A resident prefill batched with decodes reads resident KV in one kernel
+def test_flashmla_hisparse_device_mixed_batch_skips_host_staging(monkeypatch):
+    """A device prefill batched with decodes reads device KV in one kernel
     instead of staging its whole history from host."""
     num_tokens = 6
     q = torch.zeros(num_tokens, 4, 576, dtype=torch.bfloat16, device=DEVICE_TYPE)
@@ -1404,7 +1404,7 @@ def test_flashmla_hisparse_resident_mixed_batch_skips_host_staging(monkeypatch):
         return q[..., :512], None
 
     index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.caches = [_StubHiSparseCacheHandle(all_context_pages_resident=True)]
+    index_group.caches = [_StubHiSparseCacheHandle(all_context_pages_on_device=True)]
     monkeypatch.setattr(
         index_group,
         "convert_logical_to_physical_topk",
@@ -2168,7 +2168,7 @@ def _make_hisparse_runtime(
         index_group=index_group,
     )
     blocks_per_request = cdiv(runtime.region_stride, block_size)
-    # Leave one extra physical block for resident-tier tests. HMA group layouts
+    # Leave one extra physical block for device-tier tests. HMA group layouts
     # alias this backing, but distinct group allocations use distinct block IDs.
     num_blocks = max_num_reqs * blocks_per_request + 1
     raw = torch.zeros(
@@ -2238,9 +2238,9 @@ def test_hisparse_uses_graph_stable_request_state_mapping():
     runtime.request_state_indices = torch.tensor([1], dtype=torch.int32, device=device)
 
     cache_handle = HiSparseCacheHandle(runtime)
-    cache_handle.all_context_pages_resident = False
+    cache_handle.all_context_pages_on_device = False
     runtime.begin_forward()
-    cache_handle.swap_in(
+    cache_handle.resolve_residency(
         req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
         block_table=torch.tensor([[1]], dtype=torch.int32, device=device),
         logical_topk_indices=torch.tensor([[0]], dtype=torch.int32, device=device),
@@ -2271,19 +2271,19 @@ def test_hisparse_maps_speculative_rows_through_request_state():
     )
 
     cache_handle = HiSparseCacheHandle(runtime)
-    resident_table = torch.tensor([[1]], dtype=torch.int32, device=device)
+    device_table = torch.tensor([[1]], dtype=torch.int32, device=device)
     cache_handle.bind_cache(
         runtime.hot.cache.view(torch.int8),
         byte_offset=0,
         block_stride=block_size * row_width * torch.float32.itemsize,
         num_blocks=2,
         block_size=block_size,
-        block_table=resident_table,
+        block_table=device_table,
         slot_mapping=torch.arange(4, dtype=torch.int64, device=device),
     )
-    cache_handle.all_context_pages_resident = True
+    cache_handle.all_context_pages_on_device = True
     runtime.begin_forward()
-    physical = cache_handle.swap_in(
+    physical = cache_handle.resolve_residency(
         req_id_per_token=torch.zeros(4, dtype=torch.int32, device=device),
         block_table=torch.zeros((1, 1), dtype=torch.int32, device=device),
         logical_topk_indices=torch.zeros((4, 1), dtype=torch.int32, device=device),
@@ -2331,7 +2331,7 @@ def test_hisparse_speculative_rows_resolve_host_misses_consistently(
     )
     runtime.bind_source_cache(kv_pool)
     cache = HiSparseCacheHandle(runtime)
-    cache.all_context_pages_resident = False
+    cache.all_context_pages_on_device = False
 
     block_table = torch.arange(
         1, num_blocks + 1, dtype=torch.int32, device=device
@@ -2346,7 +2346,7 @@ def test_hisparse_speculative_rows_resolve_host_misses_consistently(
         topk = (rows * row_stride + base + step * (top_k // 2)) % (
             num_blocks * block_size
         )
-        hot_indices = cache.swap_in(
+        hot_indices = cache.resolve_residency(
             req_id_per_token=req_ids,
             block_table=block_table,
             logical_topk_indices=topk.clone(),
@@ -2384,14 +2384,14 @@ def test_hisparse_speculative_rows_count_a_shared_load_once():
     )
     runtime.bind_source_cache(kv_pool)
     cache = HiSparseCacheHandle(runtime)
-    cache.all_context_pages_resident = False
+    cache.all_context_pages_on_device = False
     block_table = torch.arange(
         1, num_blocks + 1, dtype=torch.int32, device=device
     ).view(1, num_blocks)
     topk = torch.arange(top_k, dtype=torch.int32, device=device).repeat(2, 1)
 
     runtime.begin_forward()
-    cache.swap_in(
+    cache.resolve_residency(
         req_id_per_token=torch.zeros(2, dtype=torch.int32, device=device),
         block_table=block_table,
         logical_topk_indices=topk,
@@ -2429,7 +2429,7 @@ def test_hisparse_resolver_reads_current_request_ids():
     ready = torch.Event()
     runtime.index_group.logical_topk_ready = ready
     cache = HiSparseCacheHandle(runtime)
-    cache.all_context_pages_resident = False
+    cache.all_context_pages_on_device = False
     cache.source_block_table = torch.arange(
         1, num_reqs * blocks_per_req + 1, dtype=torch.int32, device=device
     ).view(num_reqs, blocks_per_req)
@@ -2523,7 +2523,7 @@ def test_hisparse_union_table_scales_with_union_bound(top_k):
     )
     runtime.bind_source_cache(kv_pool)
     cache = HiSparseCacheHandle(runtime)
-    cache.all_context_pages_resident = False
+    cache.all_context_pages_on_device = False
     req_ids = torch.zeros(1, dtype=torch.int32, device=device)
     block_table = torch.arange(
         1, num_blocks + 1, dtype=torch.int32, device=device
@@ -2531,7 +2531,7 @@ def test_hisparse_union_table_scales_with_union_bound(top_k):
     topk = torch.arange(top_k, dtype=torch.int32, device=device).view(1, top_k)
 
     runtime.begin_forward()
-    hot_indices = cache.swap_in(
+    hot_indices = cache.resolve_residency(
         req_id_per_token=req_ids,
         block_table=block_table,
         logical_topk_indices=topk,
@@ -2588,7 +2588,7 @@ def test_hisparse_rejects_union_bound_beyond_shared_memory():
 
 
 @requires_hisparse_ops
-def test_hisparse_resident_rows_bypass_hot_lru():
+def test_hisparse_device_rows_bypass_hot_lru():
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 64, 8
     cache_handle = _make_hisparse_cache_handle(
@@ -2599,29 +2599,29 @@ def test_hisparse_resident_rows_bypass_hot_lru():
         block_size=block_size,
     )
     raw = cache_handle.runtime.hot.cache.view(torch.int8)
-    resident_table = torch.tensor([[1]], dtype=torch.int32, device=device)
-    resident_slots = torch.tensor([block_size], dtype=torch.int64, device=device)
+    device_table = torch.tensor([[1]], dtype=torch.int32, device=device)
+    device_slots = torch.tensor([block_size], dtype=torch.int64, device=device)
     cache_handle.bind_cache(
         raw,
         byte_offset=0,
         block_stride=block_size * row_width * torch.float32.itemsize,
         num_blocks=2,
         block_size=block_size,
-        block_table=resident_table,
-        slot_mapping=resident_slots,
+        block_table=device_table,
+        slot_mapping=device_slots,
     )
 
     host = torch.randn(1, block_size, row_width).pin_memory()
     cache_handle.runtime.bind_source_cache(host)
-    resident_rows = host[0].to(device).add(7)
-    cache_handle.runtime.hot.cache[1].copy_(resident_rows)
+    device_rows = host[0].to(device).add(7)
+    cache_handle.runtime.hot.cache[1].copy_(device_rows)
     source_table = torch.tensor([[5]], dtype=torch.int32, device=device)
     request_ids = torch.zeros(1, dtype=torch.int32, device=device)
     topk = torch.tensor([[1, 2, 3, 4]], dtype=torch.int32, device=device)
     lru_before = cache_handle.runtime.index_group.lru_slots.clone()
 
     cache_handle.runtime.begin_forward()
-    indices, valid_counts = cache_handle.swap_in(
+    indices, valid_counts = cache_handle.resolve_residency(
         req_id_per_token=request_ids,
         block_table=source_table,
         logical_topk_indices=topk,
@@ -2641,12 +2641,12 @@ def test_hisparse_resident_rows_bypass_hot_lru():
         cache_handle.runtime.hot.attention_cache.view(-1, row_width)[
             indices.to(torch.long)
         ],
-        resident_rows[topk.to(torch.long)],
+        device_rows[topk.to(torch.long)],
     )
 
 
 @requires_hisparse_ops
-def test_hisparse_swap_in_preserves_rows_across_eviction():
+def test_hisparse_resolve_residency_preserves_rows_across_eviction():
     device = torch.device(DEVICE_TYPE)
     block_size = 64
     row_width = 64
@@ -2668,7 +2668,7 @@ def test_hisparse_swap_in_preserves_rows_across_eviction():
     )
     runtime.bind_source_cache(kv_pool)
     cache = HiSparseCacheHandle(runtime)
-    cache.all_context_pages_resident = False
+    cache.all_context_pages_on_device = False
     cache.runtime.begin_forward()
 
     blocks_per_req = num_blocks // num_reqs
@@ -2685,7 +2685,7 @@ def test_hisparse_swap_in_preserves_rows_across_eviction():
         )
         topk[:, -1] = -1
 
-        hot_indices, valid_counts = cache.swap_in(
+        hot_indices, valid_counts = cache.resolve_residency(
             req_id_per_token=req_ids,
             block_table=block_table,
             logical_topk_indices=topk.clone(),
@@ -2742,7 +2742,7 @@ def test_hisparse_multi_step_swaps_match_independent():
         )
         runtime.bind_source_cache(kv_pool)
         cache = HiSparseCacheHandle(runtime)
-        cache.all_context_pages_resident = False
+        cache.all_context_pages_on_device = False
         return cache
 
     blocks_per_req = num_blocks // num_reqs
@@ -2775,13 +2775,16 @@ def test_hisparse_multi_step_swaps_match_independent():
             num_valid_rows=_valid_rows(req_ids.numel()),
         )
         producer_indices = [
-            producer.swap_in(logical_topk_indices=topk.clone(), **kw) for topk in topks
+            producer.resolve_residency(logical_topk_indices=topk.clone(), **kw)
+            for topk in topks
         ]
         independent_indices = [
-            indep.swap_in(logical_topk_indices=topk.clone(), **kw) for topk in topks
+            indep.resolve_residency(logical_topk_indices=topk.clone(), **kw)
+            for topk in topks
         ]
         follower_indices = [
-            shared.swap_in(logical_topk_indices=topk.clone(), **kw) for topk in topks
+            shared.resolve_residency(logical_topk_indices=topk.clone(), **kw)
+            for topk in topks
         ]
         torch.accelerator.synchronize()
 
@@ -2843,7 +2846,7 @@ def test_hisparse_multi_step_writes_request_major_output():
 
     cache.runtime.begin_forward()
     for step in range(query_len):
-        cache.swap_in(
+        cache.resolve_residency(
             request_ids,
             block_table,
             logical[:, step],
@@ -2877,7 +2880,7 @@ def test_hisparse_multi_step_writes_request_major_output():
 
 
 @requires_hisparse_ops
-def test_hisparse_kv_update_writes_resident_cache():
+def test_hisparse_kv_update_writes_device_cache():
     device = torch.device(DEVICE_TYPE)
     block_size = 4
     row_width = 8
@@ -2886,7 +2889,7 @@ def test_hisparse_kv_update_writes_resident_cache():
         row_width=row_width,
         block_size=block_size,
     )
-    resident_slots = torch.tensor([4, 5, -1], dtype=torch.int64, device=device)
+    device_slots = torch.tensor([4, 5, -1], dtype=torch.int64, device=device)
     cache_handle.bind_cache(
         cache_handle.runtime.hot.cache.view(torch.int8),
         byte_offset=0,
@@ -2894,7 +2897,7 @@ def test_hisparse_kv_update_writes_resident_cache():
         num_blocks=cache_handle.runtime.hot.cache.shape[0],
         block_size=block_size,
         block_table=torch.tensor([[1]], dtype=torch.int32, device=device),
-        slot_mapping=resident_slots,
+        slot_mapping=device_slots,
     )
     assert cache_handle.view is not None
     slots = torch.tensor([3, 7, -1], dtype=torch.int64, device=device)
@@ -2924,7 +2927,7 @@ def test_hisparse_kv_update_writes_resident_cache():
 
     expected = torch.cat([kv_c[:2], k_pe[:2, 0]], dim=-1).cpu()
     torch.testing.assert_close(
-        cache_handle.view.cache.view(-1, row_width)[resident_slots[:2]],
+        cache_handle.view.cache.view(-1, row_width)[device_slots[:2]],
         expected.to(device),
     )
     torch.testing.assert_close(source_cache, torch.zeros_like(source_cache))
@@ -2936,7 +2939,7 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
     block_size = 4
     row_width = 8
     num_rows = 16
-    resident_caches = tuple(
+    device_caches = tuple(
         (
             torch.arange(num_rows * row_width, dtype=torch.uint8, device=device)
             .add_(layer_index * 17)
@@ -2946,19 +2949,19 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
     )
     host_caches = tuple(
         torch.zeros((num_rows, row_width), dtype=torch.uint8, pin_memory=True)
-        for _ in resident_caches
+        for _ in device_caches
     )
     worker = object.__new__(HiSparseConnectorWorker)
     worker.is_host_writer = True
     worker.kernel_block_size = block_size
-    worker.resident_caches = resident_caches
+    worker.device_caches = device_caches
     worker.host_caches = host_caches
     worker.cache_handles = [
         _StubHiSparseCacheHandle(
             decode_batch=True,
-            runtime=SimpleNamespace(resident_source_index=0),
+            runtime=SimpleNamespace(device_group_index=0),
         )
-        for _ in resident_caches
+        for _ in device_caches
     ]
     worker.dma_stream = torch.cuda.Stream(device=device)
     worker.host_write_event = torch.Event()
@@ -2969,8 +2972,8 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
     worker._dma_submitted = False
     worker._set_row_mirrors(
         (
-            SparseKVRowMirror((1,), 5, 2),
-            SparseKVRowMirror((8,), 10, 4),
+            HiSparseRowMirror((1,), 5, 2),
+            HiSparseRowMirror((8,), 10, 4),
         )
     )
 
@@ -2978,10 +2981,10 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
     current_stream().wait_event(worker.host_write_event)
     torch.accelerator.synchronize()
 
-    for resident, host in zip(resident_caches, host_caches):
-        flat_resident = resident.view(num_rows, row_width).cpu()
-        torch.testing.assert_close(host[5:7], flat_resident[1:3])
-        torch.testing.assert_close(host[10:14], flat_resident[8:12])
+    for device_cache, host in zip(device_caches, host_caches):
+        flat_device = device_cache.view(num_rows, row_width).cpu()
+        torch.testing.assert_close(host[5:7], flat_device[1:3])
+        torch.testing.assert_close(host[10:14], flat_device[8:12])
 
 
 @requires_hisparse_ops
@@ -3015,9 +3018,9 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
     )
     runtime.bind_source_cache(source)
     cache = HiSparseCacheHandle(runtime)
-    cache.all_context_pages_resident = False
+    cache.all_context_pages_on_device = False
     runtime.begin_forward()
-    attention_indices = cache.swap_in(
+    attention_indices = cache.resolve_residency(
         req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
         block_table=torch.arange(1, 9, dtype=torch.int32, device=device).view(1, 8),
         logical_topk_indices=torch.tensor(
@@ -3110,7 +3113,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     cache_handle.runtime.eager_host_mirror = True
 
     block_table = torch.tensor([[2, 0, 4]], dtype=torch.int32, device=device)
-    resident_slots = torch.tensor([4, -1], dtype=torch.int64, device=device)
+    device_slots = torch.tensor([4, -1], dtype=torch.int64, device=device)
     cache_handle.bind_cache(
         cache_handle.runtime.hot.cache.view(torch.int8),
         byte_offset=0,
@@ -3118,7 +3121,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
         num_blocks=cache_handle.runtime.hot.cache.shape[0],
         block_size=block_size,
         block_table=torch.tensor([[0, 0, 1]], dtype=torch.int32, device=device),
-        slot_mapping=resident_slots,
+        slot_mapping=device_slots,
     )
     assert cache_handle.view is not None
     req_ids = torch.tensor([0], dtype=torch.int32, device=device)
@@ -3139,7 +3142,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
         kv_c[:1],
         k_pe[:1, 0],
         cache_handle.view.cache,
-        resident_slots[:1],
+        device_slots[:1],
         kv_cache_dtype="auto",
         scale=torch.tensor(1.0, device=device),
     )
@@ -3149,12 +3152,12 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     torch.testing.assert_close(flat_pool[newest_global], expected_row)
     torch.testing.assert_close(flat_pool[padded_global], padded_row)
     flat_hot = cache_handle.runtime.hot.cache.view(-1, row_width)
-    torch.testing.assert_close(flat_hot[resident_slots[0]].cpu(), expected_row)
+    torch.testing.assert_close(flat_hot[device_slots[0]].cpu(), expected_row)
 
     topk = torch.tensor([[0, -1, -1, -1]], dtype=torch.int32, device=device)
-    cache_handle.all_context_pages_resident = False
+    cache_handle.all_context_pages_on_device = False
     cache_handle.runtime.begin_forward()
-    hot_indices = cache_handle.swap_in(
+    hot_indices = cache_handle.resolve_residency(
         req_id_per_token=req_ids,
         block_table=block_table,
         logical_topk_indices=topk,
@@ -3171,7 +3174,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
         torch.tensor([8], dtype=torch.int64, device=device), req_ids
     )
     cache_handle.runtime.begin_forward()
-    hot_indices = cache_handle.swap_in(
+    hot_indices = cache_handle.resolve_residency(
         req_id_per_token=req_ids,
         block_table=block_table,
         logical_topk_indices=topk,
@@ -3393,7 +3396,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
     )
     impl.prepare_for_batch(metadata)
 
-    # Device-resident reference: the whole batch converted against the full
+    # On-device reference: the whole batch converted against the full
     # block table and run as one kernel call over the GPU cache.
     ref_topk, ref_topk_length = triton_convert_req_index_to_global_index(
         metadata.req_id_per_token,
@@ -3409,13 +3412,13 @@ def test_hisparse_mixed_batch_bf16_row_split(
     kv_pool = kv_cache.squeeze(1).cpu().pin_memory()
     cache_handle.runtime.bind_source_cache(kv_pool)
     cache_handle.source_block_table = metadata.block_table
-    cache_handle.all_context_pages_resident = False
+    cache_handle.all_context_pages_on_device = False
 
     staging_calls = []
     original_gather = cache_handle.runtime.gather_prefill_cache
 
-    def spy_gather(self, kv, plan, resident_cache=None):
-        staged = original_gather(kv, plan, resident_cache)
+    def spy_gather(self, kv, plan, device_cache=None):
+        staged = original_gather(kv, plan, device_cache)
         staging_calls.append((plan, staged.shape))
         return staged
 
@@ -3482,22 +3485,22 @@ def test_hisparse_prefill_staging_plan_masks_unused_blocks():
             assert int(valid_rows[staged_block * 4]) == host_block * 4
 
 
-def test_hisparse_prefill_staging_plan_resolves_resident_sources():
-    """Per-page resident hits become device sources; misses stay host DMAs."""
+def test_hisparse_prefill_staging_plan_resolves_device_sources():
+    """Per-page device hits become device sources; misses stay host DMAs."""
     block_size = 4
-    resident_block_size = 2
+    device_block_size = 2
     block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32)
     seq_lens = torch.tensor([5, 8], dtype=torch.int32)
     plan = build_hisparse_prefill_staging_plan(
         block_table, seq_lens, block_size, staging_block_capacity=4
     )
-    # Two resident pages per host block; 0 entries are null (not resident).
-    resident_table = torch.tensor(
+    # Two device pages per host block; 0 entries are null (not on device).
+    device_table = torch.tensor(
         [[11, 12, 0, 13, 0, 0], [21, 0, 22, 23, 0, 0]], dtype=torch.int32
     )
 
     state_indices = torch.arange(2, dtype=torch.int32)
-    plan.ensure_gpu_sources(resident_table, state_indices, resident_block_size)
+    plan.ensure_gpu_sources(device_table, state_indices, device_block_size)
 
     assert plan.gpu_row_ids is not None
     unique_hosts = (plan.row_ids[0].view(-1, block_size)[:, 0] // block_size).tolist()
@@ -3512,10 +3515,10 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
                 assert int(gpu_rows[u, t]) == -1
                 continue
             row, col = reps[host_id]
-            page = t // resident_block_size
-            res_block = int(resident_table[row, col * 2 + page])
+            page = t // device_block_size
+            res_block = int(device_table[row, col * 2 + page])
             expected = (
-                res_block * resident_block_size + t % resident_block_size
+                res_block * device_block_size + t % device_block_size
                 if res_block > 0
                 else -1
             )
@@ -3528,18 +3531,18 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
     )
 
     plan.ensure_gpu_sources(
-        torch.zeros_like(resident_table), state_indices, resident_block_size
+        torch.zeros_like(device_table), state_indices, device_block_size
     )
 
     assert plan.gpu_row_ids is not None
     assert (plan.gpu_row_ids == -1).all()
 
 
-def test_hisparse_prefill_resident_sources_follow_each_resident_group():
-    """Layers of different resident groups share one batch staging plan.
+def test_hisparse_prefill_device_sources_follow_each_device_group():
+    """Layers of different device groups share one batch staging plan.
 
-    Each group's layers must stage from that group's resident blocks. Keying
-    the plan's cached resident sources on a per-call batch gather let a later
+    Each group's layers must stage from that group's device blocks. Keying
+    the plan's cached device sources on a per-call batch gather let a later
     group's gather reuse the freed address of an earlier one, so its layers
     read the earlier group's block ids.
     """
@@ -3573,26 +3576,26 @@ def test_hisparse_prefill_resident_sources_follow_each_resident_group():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_hisparse_gather_prefill_cache_prefers_resident_rows():
-    """Staged rows come from the resident cache when a shadow page exists."""
+def test_hisparse_gather_prefill_cache_prefers_device_rows():
+    """Staged rows come from the device cache when a GPU copy exists."""
     if not _has_hisparse_ops():
         pytest.skip("hisparse CUDA ops unavailable")
     device = torch.device("cuda")
-    block_size, resident_block_size, row_width = 4, 2, 16
+    block_size, device_block_size, row_width = 4, 2, 16
     block_table = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32, device=device)
     seq_lens = torch.tensor([5, 8], dtype=torch.int32, device=device)
     plan = build_hisparse_prefill_staging_plan(
         block_table, seq_lens, block_size, staging_block_capacity=4
     )
-    resident_table = torch.tensor(
+    device_table = torch.tensor(
         [[11, 12, 0, 13, 0, 0], [21, 0, 22, 23, 0, 0]],
         dtype=torch.int32,
         device=device,
     )
     plan.ensure_gpu_sources(
-        resident_table,
+        device_table,
         torch.arange(2, dtype=torch.int32, device=device),
-        resident_block_size,
+        device_block_size,
     )
 
     num_host_blocks, num_res_blocks = 10, 24
@@ -3601,24 +3604,24 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
         .view(num_host_blocks, block_size, row_width)
         .pin_memory()
     )
-    resident_cache = (
+    device_cache = (
         (
             -torch.arange(
-                num_res_blocks * resident_block_size * row_width, dtype=torch.float32
+                num_res_blocks * device_block_size * row_width, dtype=torch.float32
             )
             - 1.0
         )
-        .view(num_res_blocks, resident_block_size, row_width)
+        .view(num_res_blocks, device_block_size, row_width)
         .to(device)
     )
 
     staged = HiSparseRuntime.gather_prefill_cache(
-        None, host_cache, plan, resident_cache=resident_cache
+        None, host_cache, plan, device_cache=device_cache
     )
 
     staged_flat = staged.view(-1, row_width).cpu()
     host_flat = host_cache.view(-1, row_width)
-    resident_flat = resident_cache.reshape(-1, row_width).cpu()
+    device_flat = device_cache.reshape(-1, row_width).cpu()
     assert plan.gpu_row_ids is not None
     gpu_rows = plan.gpu_row_ids[0].cpu()
     host_rows = plan.row_ids[0].cpu()
@@ -3627,7 +3630,7 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
             assert int(plan.miss_mask[0, i]) == 0
             continue
         expected = (
-            resident_flat[int(gpu_rows[i])]
+            device_flat[int(gpu_rows[i])]
             if int(gpu_rows[i]) >= 0
             else host_flat[int(host_rows[i])]
         )
@@ -3635,7 +3638,7 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
 
 
 def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
-    """Verification rows resolve in one swap_in; FP8 attention sees them batched."""
+    """Verification rows resolve in one fetch; FP8 attention sees them batched."""
     device = torch.device("cpu")
     num_decodes = 2
     query_len = 3
@@ -3648,14 +3651,14 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
     )
     kernel_shapes: list[torch.Size] = []
 
-    def swap_in(req_ids, *, logical_topk_indices, **kwargs):  # noqa: ARG001
+    def resolve_residency(req_ids, *, logical_topk_indices, **kwargs):  # noqa: ARG001
         return logical_topk_indices + 10
 
     def run_kernel(self, *, q, **kwargs):  # noqa: ARG001
         kernel_shapes.append(q.shape)
         return q[..., :1], None
 
-    swap_in_mock = MagicMock(side_effect=swap_in)
+    resolve_residency_mock = MagicMock(side_effect=resolve_residency)
     cache = _StubHiSparseCacheHandle(
         runtime=SimpleNamespace(
             hot=SimpleNamespace(attention_cache=torch.empty(1, device=device)),
@@ -3664,8 +3667,8 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         source_block_table=torch.empty(
             num_decodes, 1, dtype=torch.int32, device=device
         ),
-        swap_in=swap_in_mock,
-        all_context_pages_resident=True,
+        resolve_residency=resolve_residency_mock,
+        all_context_pages_on_device=True,
         num_decode_tokens=num_tokens,
         num_actual_tokens=num_tokens,
     )
@@ -3694,12 +3697,12 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         impl, q, topk, metadata, SimpleNamespace(), num_decodes
     )
 
-    swap_in_mock.assert_called_once()
+    resolve_residency_mock.assert_called_once()
     torch.testing.assert_close(
-        swap_in_mock.call_args.args[0], metadata.req_id_per_token
+        resolve_residency_mock.call_args.args[0], metadata.req_id_per_token
     )
     torch.testing.assert_close(
-        swap_in_mock.call_args.kwargs["logical_topk_indices"], topk
+        resolve_residency_mock.call_args.kwargs["logical_topk_indices"], topk
     )
     assert kernel_shapes == [(num_decodes, query_len, 2, 4)]
     assert output.shape == (num_tokens, 2, 1)
@@ -3931,19 +3934,17 @@ def test_sparse_mqa_plain_lane_wiring(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "num_decode_tokens,all_resident,split_q",
+    "num_decode_tokens,all_device,split_q",
     [
-        pytest.param(0, True, False, id="resident"),
+        pytest.param(0, True, False, id="device"),
         pytest.param(0, False, False, id="staged"),
-        pytest.param(2, True, True, id="mixed_resident"),
+        pytest.param(2, True, True, id="mixed_device"),
         pytest.param(2, False, True, id="mixed_staged"),
         pytest.param(5, True, False, id="decode"),
     ],
 )
-def test_sparse_mqa_hisparse_lanes(
-    monkeypatch, num_decode_tokens, all_resident, split_q
-):
-    """HiSparse runs all-resident and decode-only batches in one call against the
+def test_sparse_mqa_hisparse_lanes(monkeypatch, num_decode_tokens, all_device, split_q):
+    """HiSparse runs fully on-device and decode-only batches in one call against the
     hot cache, and otherwise splits into one decode and one staged-prefill call."""
     import vllm.model_executor.layers.attention.sparse_mla_attention as sparse_mla
 
@@ -3967,7 +3968,7 @@ def test_sparse_mqa_hisparse_lanes(
     index_group = object.__new__(HiSparseMLAIndexGroup)
     monkeypatch.setattr(index_group, "physical_kv_cache", MagicMock(return_value=hot))
     cache_lookup = MagicMock(
-        return_value=SimpleNamespace(all_context_pages_resident=all_resident)
+        return_value=SimpleNamespace(all_context_pages_on_device=all_device)
     )
     monkeypatch.setattr(index_group, "cache", cache_lookup)
     # The fill value names the converter that produced a call's indices.
@@ -4016,7 +4017,7 @@ def test_sparse_mqa_hisparse_lanes(
     expected = []
     if not num_prefill:
         expected.append((q_rows, hot.shape[0], 1))
-    elif all_resident:
+    elif all_device:
         # Decode and prefill rows read the hot cache in one call.
         expected.append((q_rows, hot.shape[0], 2))
     else:
@@ -4029,7 +4030,7 @@ def test_sparse_mqa_hisparse_lanes(
         cache_lookup.assert_not_called()
     assert lse is None
     num_decode_rows = num_tokens if not num_prefill else 0
-    if num_prefill and not all_resident:
+    if num_prefill and not all_device:
         num_decode_rows = num_decode_tokens
     assert out.flatten().tolist() == [1.0] * num_decode_rows + [2.0] * (
         num_tokens - num_decode_rows
@@ -4037,14 +4038,14 @@ def test_sparse_mqa_hisparse_lanes(
 
 
 @pytest.mark.parametrize("max_swap_rows", [1, 4], ids=["over_capacity", "mixed"])
-def test_hisparse_resident_prefill_uses_attention_block_stride(
+def test_hisparse_device_prefill_uses_attention_block_stride(
     monkeypatch, max_swap_rows
 ):
-    """Resident batches with prefill rows read resident pages directly, whether
+    """Device batches with prefill rows read device pages directly, whether
     they exceed the swap-row capacity or fit it."""
     expected = torch.tensor([[19]], dtype=torch.int32)
     cache_handle = _StubHiSparseCacheHandle(
-        all_context_pages_resident=True,
+        all_context_pages_on_device=True,
         num_decode_tokens=1,
         num_actual_tokens=2,
         view=SimpleNamespace(block_size=64, attention_block_stride=832),
@@ -4733,19 +4734,19 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     staged = torch.empty((1, 1, 8))
     calls = []
 
-    def gather(kv_cache, staging_plan, resident_cache=None):
-        calls.append((kv_cache, staging_plan, resident_cache))
+    def gather(kv_cache, staging_plan, device_cache=None):
+        calls.append((kv_cache, staging_plan, device_cache))
         return staged
 
-    resident_cache = torch.empty((1, 1, 8))
-    resident_block_table = torch.tensor([[1]], dtype=torch.int32)
+    device_cache = torch.empty((1, 1, 8))
+    device_block_table = torch.tensor([[1]], dtype=torch.int32)
     cache = _StubHiSparseCacheHandle(
         runtime=SimpleNamespace(
             gather_prefill_cache=gather,
             request_state_indices=torch.tensor([0], dtype=torch.int32),
         ),
-        view=SimpleNamespace(cache=resident_cache, block_size=1),
-        block_table=resident_block_table,
+        view=SimpleNamespace(cache=device_cache, block_size=1),
+        block_table=device_block_table,
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
@@ -4765,7 +4766,7 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     assert result is staged
     assert block_table is plan.block_table
     torch.testing.assert_close(request_ids, metadata.req_id_per_token)
-    assert calls == [(source, plan, resident_cache)]
+    assert calls == [(source, plan, device_cache)]
 
 
 def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
@@ -4777,10 +4778,10 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
         index_group_module.ops, "cp_gather_and_upconvert_fp8_kv_cache", gather
     )
 
-    resident_cache = torch.empty((2, 4, 656), dtype=torch.uint8)
+    device_cache = torch.empty((2, 4, 656), dtype=torch.uint8)
     ready = MagicMock()
     cache = _StubHiSparseCacheHandle(
-        view=SimpleNamespace(cache=resident_cache, block_size=4),
+        view=SimpleNamespace(cache=device_cache, block_size=4),
         block_table=torch.tensor([[2, 3]], dtype=torch.int32),
         runtime=SimpleNamespace(
             request_state_indices=torch.tensor([0], dtype=torch.int32)
@@ -4821,7 +4822,7 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     assert result is ready
     gather.assert_called_once()
     args = gather.call_args
-    assert args.args[0] is resident_cache
+    assert args.args[0] is device_cache
     assert args.args[1] is dst
     torch.testing.assert_close(args.args[2], plan.block_table)
     assert args.args[3] is workspace_starts

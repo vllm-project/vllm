@@ -10,8 +10,8 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.v1.hisparse.layout import (
+    HISPARSE_DEVICE_SUFFIX,
     HISPARSE_HOT_SUFFIX,
-    HISPARSE_RESIDENT_SUFFIX,
     get_hisparse_kv_cache_groups,
 )
 from vllm.v1.hisparse.runtime import (
@@ -23,8 +23,8 @@ from vllm.v1.hisparse.runtime import (
     release_pinned_state,
 )
 from vllm.v1.kv_cache_interface import (
+    HiSparseDeviceSpec,
     HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheLayout,
     KVCacheSpec,
@@ -45,7 +45,7 @@ def resolve_hisparse_specs(
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheSpec]:
     """Resolve a common kernel block size for HiSparse MLA specs, and add the
-    resident/hot specs HiSparse derives from them."""
+    device/hot specs HiSparse derives from them."""
     mla_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
@@ -74,7 +74,7 @@ def resolve_hisparse_specs(
     return kv_cache_spec | {
         layer_name: group.kv_cache_spec
         for group in groups
-        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        if isinstance(group.kv_cache_spec, (HiSparseDeviceSpec, HiSparseHotSpec))
         for layer_name in group.layer_names
     }
 
@@ -196,29 +196,29 @@ def bind_hisparse_kv_caches(
         for tensor_config in kv_cache_config.kv_cache_tensors
         for layer_index, name in enumerate(tensor_config.layers)
     }
-    resident_groups = [
+    device_groups = [
         (group_id, group)
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+        if isinstance(group.kv_cache_spec, HiSparseDeviceSpec)
     ]
     residency: torch.Tensor | None = None
-    if resident_groups:
+    if device_groups:
         table_shapes = {
             block_tables.input_block_tables[group_id].shape
-            for group_id, _ in resident_groups
+            for group_id, _ in device_groups
         }
         assert len(table_shapes) == 1
         max_num_reqs, max_num_pages = table_shapes.pop()
         residency = torch.zeros(
-            (max_num_reqs, len(resident_groups), max_num_pages),
+            (max_num_reqs, len(device_groups), max_num_pages),
             dtype=torch.int32,
-            device=block_tables.input_block_tables[resident_groups[0][0]].device,
+            device=block_tables.input_block_tables[device_groups[0][0]].device,
         )
-    for resident_source_index, (group_id, group) in enumerate(resident_groups):
+    for device_group_index, (group_id, group) in enumerate(device_groups):
         assert residency is not None
         for cache_name in group.layer_names:
-            assert cache_name.endswith(HISPARSE_RESIDENT_SUFFIX)
-            layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
+            assert cache_name.endswith(HISPARSE_DEVICE_SUFFIX)
+            layer_name = cache_name[: -len(HISPARSE_DEVICE_SUFFIX)]
             tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
@@ -228,13 +228,13 @@ def bind_hisparse_kv_caches(
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
-                block_table=residency[:, resident_source_index],
+                block_table=residency[:, device_group_index],
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
             cache_handle.residency = residency
             assert cache_handle.view is not None
             kv_caches[cache_name] = cache_handle.view.cache
-            cache_handle.runtime.resident_source_index = resident_source_index
+            cache_handle.runtime.device_group_index = device_group_index
 
     hot_backing: torch.Tensor | None = None
     cache_handles: list[HiSparseCacheHandle] = []
@@ -262,16 +262,16 @@ def bind_hisparse_kv_caches(
                 block_size=group.kv_cache_spec.block_size,
                 block_table=block_tables.input_block_tables[group_id],
             )
-            resident = cache_handle.view
+            device_view = cache_handle.view
             hot = cache_handle.runtime.hot
-            assert resident is not None
+            assert device_view is not None
             if (
-                resident.cache.untyped_storage().data_ptr()
+                device_view.cache.untyped_storage().data_ptr()
                 != hot.cache.untyped_storage().data_ptr()
-                or resident.cache.data_ptr() != hot.cache.data_ptr()
-                or resident.cache.stride() != hot.cache.stride()
+                or device_view.cache.data_ptr() != hot.cache.data_ptr()
+                or device_view.cache.stride() != hot.cache.stride()
             ):
-                raise RuntimeError("HiSparse resident and hot layouts must match.")
+                raise RuntimeError("HiSparse device and hot layouts must match.")
             source_cache = kv_caches[layer_name]
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()

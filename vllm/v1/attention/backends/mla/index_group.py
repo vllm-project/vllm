@@ -234,12 +234,12 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         num_tokens = logical_topk_indices.shape[0]
         req_id_per_token = attn_metadata.req_id_per_token[:num_tokens]
         if num_tokens > cache.runtime.max_swap_rows or (
-            cache.all_context_pages_resident
+            cache.all_context_pages_on_device
             and cache.num_decode_tokens < cache.num_actual_tokens
         ):
             # Prefill-sized batches do not fit the decode residency workspace.
-            # Non-resident prefills are staged before reaching this path.
-            assert cache.all_context_pages_resident
+            # Prefills that read from host are staged before reaching this path.
+            assert cache.all_context_pages_on_device
             leader = self.cache(0)
             assert leader.view is not None and leader.block_table is not None
             return self._convert_once(
@@ -253,7 +253,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             )
         source_block_table = cache.source_block_table
         assert source_block_table is not None
-        return cache.swap_in(
+        return cache.resolve_residency(
             req_id_per_token,
             block_table=source_block_table,
             logical_topk_indices=logical_topk_indices,
@@ -269,7 +269,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill = attn_metadata.prefill
         staging_plan = prefill.host_staging_plan if prefill is not None else None
         assert staging_plan is not None
-        resident_cache = None
+        device_cache = None
         if cache.view is not None and cache.block_table is not None:
             state_indices = cache.runtime.request_state_indices
             assert state_indices is not None
@@ -278,11 +278,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 state_indices[attn_metadata.num_decodes :],
                 cache.view.block_size,
             )
-            resident_cache = cache.view.cache
+            device_cache = cache.view.cache
         staged_cache = cache.runtime.gather_prefill_cache(
             kv_cache,
             staging_plan,
-            resident_cache=resident_cache,
+            device_cache=device_cache,
         )
         req_ids = attn_metadata.req_id_per_token[attn_metadata.num_decode_tokens :]
         if attn_metadata.num_decodes > 0:

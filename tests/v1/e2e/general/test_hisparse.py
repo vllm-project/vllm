@@ -48,13 +48,13 @@ def _shrink_config(config):
     return config
 
 
-def _num_hisparse_spills(runner: VllmRunner) -> int:
+def _num_hisparse_transfers(runner: VllmRunner) -> int:
     client = runner.llm.llm_engine.engine_core
     assert isinstance(client, InprocClient)
     scheduler = client.engine_core.scheduler
     assert isinstance(scheduler, Scheduler)
     coordinator = get_hisparse_coordinator(scheduler.kv_cache_manager)
-    return coordinator.next_spill_id
+    return coordinator.next_transfer_id
 
 
 def _offload_load_bytes() -> float:
@@ -97,13 +97,13 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
     ],
 )
 @fork_new_process_for_each_test
-def test_hisparse_spill_and_prefix_restore(
+def test_hisparse_write_back_and_prefix_restore(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
     with_offloading: bool,
     attention_backend: str | None,
 ):
-    """Spilled prefixes restore and FULL-graph decode writes reach host KV.
+    """Written-back prefixes restore and FULL-graph decode writes reach host KV.
 
     A regression omitted attention metadata before FULL graph replay, so decode
     completed normally while its newly written KV rows were never copied to host.
@@ -206,7 +206,7 @@ def test_hisparse_spill_and_prefix_restore(
             assert worker._row_mirrors
             for layer_index in layer_indices:
                 cache = worker.cache_handles[layer_index]
-                source_index = cache.runtime.resident_source_index
+                source_index = cache.runtime.device_group_index
                 for mirror in worker._row_mirrors:
                     source_row = mirror.source_starts[source_index]
                     destination_row = mirror.destination_start
@@ -215,7 +215,7 @@ def test_hisparse_spill_and_prefix_restore(
                         source_row, worker.kernel_block_size
                     )
                     with gpu_sync_allowed():
-                        gpu_rows = worker.resident_caches[layer_index][
+                        gpu_rows = worker.device_caches[layer_index][
                             source_block, source_offset : source_offset + num_rows
                         ].cpu()
                     host_rows = worker.host_caches[layer_index][
@@ -256,7 +256,7 @@ def test_hisparse_spill_and_prefix_restore(
 
         runner.generate_greedy(pressure, max_tokens=8)
 
-        assert _num_hisparse_spills(runner) > 0
+        assert _num_hisparse_transfers(runner) > 0
         load_bytes = _offload_load_bytes()
         actual = runner.generate_greedy([target], max_tokens=8)
         runner.generate_greedy([[42]], max_tokens=1)
@@ -318,7 +318,7 @@ def test_hisparse_host_exhaustion_defers_requests(
             num_pressure * host.block_size,
             num_pressure * host.block_size,
         )
-        original_plan = coordinator.plan_prefix_materialization
+        original_plan = coordinator.plan_write_backs
         original_count = host.get_num_blocks_to_allocate
         checked_steps = 0
         refusals = 0
@@ -335,7 +335,7 @@ def test_hisparse_host_exhaustion_defers_requests(
             refusals += int(required > 0)
             return required
 
-        monkeypatch.setattr(coordinator, "plan_prefix_materialization", plan)
+        monkeypatch.setattr(coordinator, "plan_write_backs", plan)
         monkeypatch.setattr(host, "get_num_blocks_to_allocate", count)
         actual = runner.generate_greedy(prompts, max_tokens=16)
 
@@ -390,7 +390,7 @@ def test_hisparse_terminal_prefix_reuse(
         original_free = coordinator.free
         held_completions: list[int] = []
         update_calls = 0
-        terminal_pending_pages = 0
+        terminal_pages_in_transfer = 0
 
         def take_updates():
             nonlocal update_calls
@@ -406,10 +406,10 @@ def test_hisparse_terminal_prefix_reuse(
             return enqueued, completed
 
         def free(request_id):
-            nonlocal terminal_pending_pages
+            nonlocal terminal_pages_in_transfer
             state = coordinator.request_states.get(request_id)
             if state is not None:
-                terminal_pending_pages += len(state.pending_pages)
+                terminal_pages_in_transfer += len(state.in_flight_transfers)
             original_free(request_id)
 
         def drain_pending_work():
@@ -423,7 +423,7 @@ def test_hisparse_terminal_prefix_reuse(
         [first] = runner.llm.generate(
             [{"prompt_token_ids": target}], sampling, use_tqdm=False
         )
-        assert terminal_pending_pages == 4
+        assert terminal_pages_in_transfer == 4
         assert first.num_cached_tokens == 0
         assert coordinator.has_pending_work()
         drain_pending_work()

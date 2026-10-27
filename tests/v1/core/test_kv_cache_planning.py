@@ -46,8 +46,8 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseDeviceSpec,
     HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -148,12 +148,12 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     assert indexer_group.kv_cache_spec.prefix_cacheable
     assert host_group.enable_kv_transfer
     auxiliary_specs = [group.kv_cache_spec for group in auxiliary_groups]
-    assert any(isinstance(spec, HiSparseResidentSpec) for spec in auxiliary_specs)
+    assert any(isinstance(spec, HiSparseDeviceSpec) for spec in auxiliary_specs)
     assert any(isinstance(spec, HiSparseHotSpec) for spec in auxiliary_specs)
     assert all(
         spec.block_size == gpu_block_size
         for spec in auxiliary_specs
-        if isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        if isinstance(spec, (HiSparseDeviceSpec, HiSparseHotSpec))
     )
     scheduler_block_size, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(
         cache_config,
@@ -183,10 +183,10 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
 def test_hisparse_pool_must_fit_max_model_len(
     monkeypatch, max_model_len, num_gpu_blocks, ok
 ):
-    """Each resident group takes its own blocks from HiSparse's shared GPU pool,
+    """Each device group takes its own blocks from HiSparse's shared GPU pool,
     so a pool that fits only the indexer pages must be rejected at startup.
-    Resident pages are capped at the in-flight window: at 32768 tokens with 2048
-    in flight, one request needs 512 indexer + 4 x 32 resident + 16 hot blocks,
+    Device pages are capped at the in-flight window: at 32768 tokens with 2048
+    in flight, one request needs 512 indexer + 4 x 32 device + 16 hot blocks,
     plus the null block. Auto-fit (-1) must pick a length that passes the same
     check."""
     monkeypatch.setattr(
@@ -219,11 +219,11 @@ def test_hisparse_pool_must_fit_max_model_len(
     config.model_config.hf_config.index_topk = 128
     config.cache_config.num_gpu_blocks_override = num_gpu_blocks
     config.cache_config.kv_cache_layout = "BLHNC"
-    # Workers report the resident/hot caches HiSparse derives.
+    # Workers report the device/hot caches HiSparse derives.
     specs |= {
         name: group.kv_cache_spec
         for group in get_hisparse_kv_cache_groups(config, specs) or []
-        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        if isinstance(group.kv_cache_spec, (HiSparseDeviceSpec, HiSparseHotSpec))
         for name in group.layer_names
     }
 
