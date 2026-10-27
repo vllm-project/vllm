@@ -62,6 +62,14 @@ and compares the disaggregated outputs against it. Set `MODEL` to use another mo
 or `MOONCAKE_EC_PROTOCOL=rdma` to use RDMA on supported hardware. See the script for
 additional configuration options.
 
+### Vision inputs
+
+GLM-5.3-Flash accepts metadata-only image and video inputs through the Python
+EPD proxy. The encoder publishes `image_grid_thw` for each image, and
+`video_grid_thw` plus one timestamp per temporal patch for each video. The
+consumer rebuilds the placeholders from those fields and receives the
+embeddings through its EC connector, without repeating vision preprocessing.
+
 ### Audio inputs
 
 The Python EPD proxy also rewrites audio in `/v1/chat/completions` into

@@ -274,6 +274,74 @@ def test_audio_metadata_only_roundtrip(model_id, durations, monkeypatch):
         ordinary_processor.info.parse_mm_data({"audio": audio_data})
 
 
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_glm5_metadata_only_roundtrip(modality, monkeypatch):
+    """EC metadata preserves GLM-5.3-Flash prompts without vision preprocessing."""
+    model_id = "zai-org/GLM-5.3-Flash"
+    rng = np.random.RandomState(0)
+    if modality == "image":
+        mm_data = {"image": random_image(rng, 64, 65)}
+        limit = {"image": 1, "video": 0}
+        grid_key = "image_grid_thw"
+    else:
+        mm_data = add_video_metadata({"video": random_video(rng, 4, 5, 64, 65)})
+        limit = {"image": 0, "video": 1}
+        grid_key = "video_grid_thw"
+
+    ctx = build_model_context(model_id, limit_mm_per_prompt=limit)
+    mm_config = ctx.model_config.multimodal_config
+    mm_config.enable_mm_embeds = True
+    mm_config.allow_missing_mm_embeddings = True
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    prompt = processor.dummy_inputs.get_dummy_text({modality: 1})
+    raw = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
+    features = [
+        MultiModalFeatureSpec(
+            data=item,
+            modality=modality,
+            identifier=str(index),
+            mm_position=position,
+        )
+        for index, (item, position) in enumerate(
+            zip(raw["mm_kwargs"][modality], raw["mm_placeholders"][modality])
+        )
+    ]
+    published = collect_ec_item_metadata(
+        features, PlaceholderMetadataResolver(ctx.model_config)
+    )
+    metadata = json.loads(
+        json.dumps([entry["metadata"] for entry in published.values()])
+    )
+    assert len(metadata) == 1
+    assert grid_key in metadata[0]
+    if modality == "video":
+        assert metadata[0]["timestamps"]
+    mm_data_remote = _get_embeds_data(modality, metadata, processor)
+
+    def unexpected_preprocessing(*args, **kwargs):
+        pytest.fail("The EC consumer must not preprocess vision inputs")
+
+    monkeypatch.setattr(
+        processor.info.ctx, "call_hf_processor", unexpected_preprocessing
+    )
+    remote = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({modality: mm_data_remote}),
+        hf_processor_mm_kwargs={},
+    )
+    assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
+    assert remote["mm_placeholders"] == raw["mm_placeholders"]
+
+    mm_config.allow_missing_mm_embeddings = False
+    ordinary_processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    with pytest.raises(ValueError, match="should contain the fields"):
+        ordinary_processor.info.parse_mm_data({modality: mm_data_remote})
+
+
 def random_vision_chunk(
     rng: np.random.RandomState,
     min_wh: int,
