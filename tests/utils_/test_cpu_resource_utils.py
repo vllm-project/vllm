@@ -284,8 +284,10 @@ def test_cgroup_usage_reflects_headroom_of_every_limited_parent(monkeypatch):
     )
 
     limit = cru.get_cgroup_memory_limit()
+    usage = cru.get_cgroup_memory_usage()
     assert limit == 1 * GiB_bytes
-    assert limit - cru.get_cgroup_memory_usage() == GiB_bytes // 4
+    assert usage is not None
+    assert limit - usage == GiB_bytes // 4
 
 
 @pytest.mark.parametrize(
