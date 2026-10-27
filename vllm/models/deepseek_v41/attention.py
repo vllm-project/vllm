@@ -1463,10 +1463,12 @@ class DeepseekV4Indexer(nn.Module):
         )
         self.indexer_op: SparseAttnIndexer | SparseMQAIndexer | RocmSparseMQAIndexer
         if use_sparse_logits:
-            if not self.use_fp4_kv:
+            # DeepGEMM's sparse kernels (SM100) take either indexer cache;
+            # aiter's ROCm path is MXFP4-only.
+            if current_platform.is_rocm() and not self.use_fp4_kv:
                 raise ValueError(
-                    "attention_config.indexer_sparse_logits requires the MXFP4 "
-                    "indexer cache (attention_config.indexer_kv_dtype='mxfp4')."
+                    "attention_config.indexer_sparse_logits on ROCm requires the "
+                    "MXFP4 indexer cache (attention_config.indexer_kv_dtype='mxfp4')."
                 )
             assert candidate_block_buffer is not None
             assert topk_indices_buffer is not None
@@ -1497,9 +1499,13 @@ class DeepseekV4Indexer(nn.Module):
                 candidate_write=candidate_write,
             )
         # The fused Q kernel writes the per-head weights in the dtype the
-        # scoring kernels take, so no cast runs per step.
+        # scoring kernels take, so no cast runs per step. Its FP8 path emits
+        # fp32 only (the Q scale is folded in); the sparse layer casts those,
+        # as the dense SM100 path does.
         self.indexer_weights_dtype = (
-            self.mqa_cls.weights_dtype if use_sparse_logits else torch.float32
+            self.mqa_cls.weights_dtype
+            if use_sparse_logits and self.use_fp4_kv
+            else torch.float32
         )
 
     def _produce_k(

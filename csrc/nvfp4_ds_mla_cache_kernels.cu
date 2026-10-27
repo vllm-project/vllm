@@ -183,6 +183,7 @@ __global__ void cp_gather_and_upconvert_nvfp4_kv_cache_kernel(
     __nv_bfloat16* __restrict__ dst,          // [total_tokens, 576]
     const int32_t* __restrict__ block_table,  // [num_reqs, BLOCK_INDICES]
     const int32_t* __restrict__ workspace_starts,  // [num_reqs]
+    const int32_t* __restrict__ seq_starts,        // [num_reqs] or nullptr
     const int32_t num_reqs, const int32_t block_size,
     const int32_t total_tokens, const int64_t block_table_stride,
     const int64_t cache_block_stride, const int64_t cache_entry_stride,
@@ -203,7 +204,10 @@ __global__ void cp_gather_and_upconvert_nvfp4_kv_cache_kernel(
   const int req_id = lo;
 
   const int out_token_id = flat_warp_id;
-  const int token_offset = out_token_id - workspace_starts[req_id];
+  // seq_starts offsets the read into the request's context, so a chunk that
+  // continues a request reads from its start instead of the first token.
+  const int seq_start = seq_starts == nullptr ? 0 : seq_starts[req_id];
+  const int token_offset = out_token_id - workspace_starts[req_id] + seq_start;
   const int cache_block_idx = token_offset / block_size;
   const int offset_in_block = token_offset % block_size;
   const int physical_block =
@@ -254,18 +258,19 @@ void launch_concat_and_cache_nvfp4_ds_mla(const void* kv_c, const void* k_pe,
 
 void launch_cp_gather_and_upconvert_nvfp4_kv_cache(
     const uint8_t* src_cache, void* dst, const int32_t* block_table,
-    const int32_t* workspace_starts, int32_t num_reqs, int32_t block_size,
-    int32_t total_tokens, int64_t block_table_stride,
-    int64_t cache_block_stride, int64_t cache_entry_stride,
-    int64_t dst_entry_stride, cudaStream_t stream) {
+    const int32_t* workspace_starts, const int32_t* seq_starts,
+    int32_t num_reqs, int32_t block_size, int32_t total_tokens,
+    int64_t block_table_stride, int64_t cache_block_stride,
+    int64_t cache_entry_stride, int64_t dst_entry_stride, cudaStream_t stream) {
   constexpr int warps_per_block = 8;
   const int grid_size = (total_tokens + warps_per_block - 1) / warps_per_block;
   const int block_size_threads = warps_per_block * 32;  // 256 threads
   cp_gather_and_upconvert_nvfp4_kv_cache_kernel<<<grid_size, block_size_threads,
                                                   0, stream>>>(
       src_cache, reinterpret_cast<__nv_bfloat16*>(dst), block_table,
-      workspace_starts, num_reqs, block_size, total_tokens, block_table_stride,
-      cache_block_stride, cache_entry_stride, dst_entry_stride);
+      workspace_starts, seq_starts, num_reqs, block_size, total_tokens,
+      block_table_stride, cache_block_stride, cache_entry_stride,
+      dst_entry_stride);
 }
 
 }  // namespace vllm
