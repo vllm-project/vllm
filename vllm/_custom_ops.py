@@ -779,6 +779,40 @@ def moe_octw3_gemm_rdna3(
     )
 
 
+def octw3_rotate_rdna3(
+    x: torch.Tensor, y: torch.Tensor, silu_mul: bool, had: int
+) -> None:
+    torch.ops._rocm_C.octw3_rotate_rdna3(x, y, silu_mul, had)
+
+
+def moe_octw3_wmma_gemm_rdna3(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    w: torch.Tensor,
+    scales: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    a_div: int,
+    output_topk: int,
+    block_size_m: int,
+) -> None:
+    torch.ops._rocm_C.moe_octw3_wmma_gemm_rdna3(
+        a,
+        c,
+        w,
+        scales,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        a_div,
+        output_topk,
+        block_size_m,
+    )
+
+
 def skinny_wmma_f16(x: torch.Tensor, w: torch.Tensor, split: int) -> torch.Tensor:
     return torch.ops._rocm_C.skinny_wmma_f16(x, w, split)
 

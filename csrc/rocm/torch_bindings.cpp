@@ -89,6 +89,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "bool mul_topk_weight, int output_topk, int had) -> ()");
   rocm_ops.impl("moe_octw3_gemm_rdna3", torch::kCUDA, &moe_octw3_gemm_rdna3);
 
+  // Octave-W3 prefill path: rotate the input once, then a WMMA GEMM per
+  // expert token block.
+  rocm_ops.def(
+      "octw3_rotate_rdna3(Tensor x, Tensor! y, bool silu_mul, int had) -> ()");
+  rocm_ops.impl("octw3_rotate_rdna3", torch::kCUDA, &octw3_rotate_rdna3);
+  rocm_ops.def(
+      "moe_octw3_wmma_gemm_rdna3(Tensor a, Tensor! c, Tensor w, "
+      "Tensor scales, Tensor topk_weights, Tensor sorted_token_ids, "
+      "Tensor expert_ids, Tensor num_tokens_post_padded, int a_div, "
+      "int output_topk, int block_size_m) -> ()");
+  rocm_ops.impl("moe_octw3_wmma_gemm_rdna3", torch::kCUDA,
+                &moe_octw3_wmma_gemm_rdna3);
+
   // qwen4_exp HyperConnection combine_and_mix for decode (1 <= M <= 8).
   rocm_ops.def(
       "qwen4_hc_combine_mix(Tensor h, Tensor block_out, Tensor inj, "
