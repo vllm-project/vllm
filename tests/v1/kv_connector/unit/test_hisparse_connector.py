@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import ctypes
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -247,11 +246,8 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
 
     monkeypatch.setattr(torch, "Event", _FakeEvent)
     monkeypatch.setattr(torch, "Stream", lambda *args, **kwargs: MagicMock())
-    monkeypatch.setattr(torch.cuda, "Stream", lambda *args, **kwargs: MagicMock())
-    monkeypatch.setattr(torch.cuda, "stream", lambda _: contextlib.nullcontext())
     compute_stream = MagicMock()
-    monkeypatch.setattr(worker_module, "current_stream", lambda: compute_stream)
-    monkeypatch.setattr(worker_module.ops, "swap_blocks_batch", swap_blocks_batch)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: compute_stream)
     monkeypatch.setattr(
         runtime_module,
         "get_forward_context",
@@ -290,6 +286,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         ),
         MagicMock(),
     )
+    monkeypatch.setattr(worker.backend, "swap_blocks_batch", swap_blocks_batch)
     worker.initialize(
         handles,
         ["target", "draft"],
@@ -412,7 +409,7 @@ def test_zero_token_step_holds_tp_ranks_after_host_write_wait(
     compute_stream.wait_event.side_effect = lambda event: calls.append(("wait", event))
     tp_group = MagicMock()
     tp_group.barrier.side_effect = lambda: calls.append(("barrier", None))
-    monkeypatch.setattr(worker_module, "current_stream", lambda: compute_stream)
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda: compute_stream)
     monkeypatch.setattr(worker_module, "get_tp_group", lambda: tp_group)
 
     worker = object.__new__(HiSparseConnectorWorker)

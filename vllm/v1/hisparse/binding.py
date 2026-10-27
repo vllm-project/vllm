@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
@@ -126,8 +127,10 @@ def init_hisparse_kv_cache(
     vllm_config: VllmConfig,
     forward_context: dict[str, Any],
     block_tables: "BlockTables",
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Any]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
+    backend = get_hisparse_backend()
+    backend.validate_kv_cache_config(kv_cache_config)
     host_pool = get_hisparse_host_pool(vllm_config, kv_cache_config)
     try:
         kv_caches = allocate_hisparse_kv_caches(
@@ -137,6 +140,7 @@ def init_hisparse_kv_cache(
             kernel_block_sizes,
             host_pool,
         )
+        backend.prepare_kv_cache_views(kv_cache_config, kv_caches, forward_context)
         cache_handles = bind_hisparse_kv_caches(
             forward_context=forward_context,
             kv_cache_config=kv_cache_config,
@@ -150,10 +154,7 @@ def init_hisparse_kv_cache(
         )
         return kv_caches
     except Exception:
-        if host_pool.shared_region is not None:
-            host_pool.shared_region.cleanup()
-        elif host_pool.registered is not None:
-            release_pinned_state([], [host_pool.registered])
+        release_pinned_state([], host_pool.pinned, host_pool.shared_region)
         drop_hisparse_host_pool(vllm_config)
         raise
 
@@ -277,7 +278,7 @@ def bind_hisparse_kv_caches(
                 host_pool.registered.untyped_storage().data_ptr()
             )
             cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
-            cache_handle.runtime.shared_host_region = host_pool.shared_region
+            cache_handle.runtime.host_pool = host_pool
             cache_handle.runtime.bind_source_cache(
                 source_cache,
                 registered_host_pool=host_pool.registered,
