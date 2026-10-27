@@ -292,6 +292,82 @@ def _store_latent(pooled, t, norm_weight, latent, EPS: tl.constexpr):
     tl.store(latent + t.to(tl.int64) * 512 + d, normed.to(tl.bfloat16))
 
 
+def copy_pipeline_cache_rows(
+    cache: torch.Tensor,
+    rows: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    compress_ratio: int,
+    value_bytes: int,
+    *,
+    scatter: bool,
+) -> None:
+    assert cache.dtype == rows.dtype == torch.uint8
+    assert cache.ndim == 3 and cache.stride(-1) == 1
+    assert rows.shape == (positions.numel(), cache.shape[-1])
+    assert rows.is_contiguous() and positions.is_contiguous()
+    assert slot_mapping.is_contiguous() and slot_mapping.numel() <= rows.shape[0]
+    assert 0 < value_bytes <= cache.shape[-1] and compress_ratio in (1, 2)
+    if rows.shape[0] == 0:
+        return
+    _copy_pipeline_cache_rows[(rows.shape[0],)](
+        cache,
+        rows,
+        positions,
+        slot_mapping,
+        slot_mapping.numel(),
+        CACHE_STRIDE=cache.stride(0),
+        CACHE_BLOCK=cache.shape[1],
+        ROW_BYTES=cache.shape[-1],
+        VALUE_BYTES=value_bytes,
+        COMPRESS_RATIO=compress_ratio,
+        SCATTER=scatter,
+        BLOCK=triton.next_power_of_2(cache.shape[-1]),
+        num_warps=4,
+        launch_pdl=False,
+    )
+
+
+@triton.jit(do_not_specialize=["num_slots"])
+def _copy_pipeline_cache_rows(
+    cache,
+    rows,
+    positions,
+    slots,
+    num_slots,
+    CACHE_STRIDE: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    ROW_BYTES: tl.constexpr,
+    VALUE_BYTES: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    SCATTER: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0)
+    slot = tl.load(slots + token, mask=token < num_slots, other=-1)
+    position = tl.load(positions + token)
+    valid = (slot >= 0) & ((position + 1) % COMPRESS_RATIO == 0)
+    byte = tl.arange(0, BLOCK)
+    row = slot % CACHE_BLOCK
+    # SM90 Main KV and indexer K segregate values and scales within each page.
+    offset = tl.where(
+        byte < VALUE_BYTES,
+        row * VALUE_BYTES + byte,
+        CACHE_BLOCK * VALUE_BYTES
+        + row * (ROW_BYTES - VALUE_BYTES)
+        + byte
+        - VALUE_BYTES,
+    )
+    cache_ptr = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE + offset
+    row_ptr = rows + token.to(tl.int64) * ROW_BYTES + byte
+    if SCATTER:
+        value = tl.load(row_ptr, mask=byte < ROW_BYTES, other=0)
+        tl.store(cache_ptr, value, mask=valid & (byte < ROW_BYTES))
+    else:
+        value = tl.load(cache_ptr, mask=valid & (byte < ROW_BYTES), other=0)
+        tl.store(row_ptr, value, mask=byte < ROW_BYTES)
+
+
 def rope_quant_insert(
     latent: torch.Tensor,
     positions: torch.Tensor,

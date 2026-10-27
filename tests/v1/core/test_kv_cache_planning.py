@@ -676,6 +676,36 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+def test_get_kv_cache_config_ignores_layers_outside_projected_uniform_group():
+    """An empty PP projection retains its group but allocates no remote layers."""
+    spec = new_kv_cache_spec()
+    global_groups = [
+        KVCacheGroupSpec(
+            ["remote.layer"],
+            UniformTypeKVCacheSpecs(
+                block_size=spec.block_size,
+                kv_cache_specs={"remote.layer": spec},
+            ),
+        ),
+        KVCacheGroupSpec(["local.layer"], spec),
+    ]
+    projected_groups = kv_cache_planning._project_kv_cache_groups_to_worker(
+        global_groups, {"local.layer": spec}
+    )
+    vllm_config = VllmConfig()
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config,
+        projected_groups,
+        available_memory=spec.page_size_bytes * 2,
+    )
+
+    assert len(config.kv_cache_groups) == 2
+    assert config.kv_cache_groups[0].layer_names == []
+    assert [tensor.layers for tensor in config.kv_cache_tensors] == [["local.layer"]]
+
+
 @pytest.mark.parametrize("with_draft", [False, True])
 @pytest.mark.parametrize("indexer_alignment", [None, 512])
 def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignment):
