@@ -249,9 +249,6 @@ class Worker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
         validate_worker_profiler_config(self.profiler_config)
 
-        # Device handles of the previous step's PP intermediate-tensor send.
-        self._pp_send_work: list[Handle] = []
-
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
 
@@ -650,6 +647,21 @@ class Worker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(*args, **kwargs)
 
+    def _pp_send_copy_bytes(self) -> int:
+        """Upper bound on the copies of PP outputs that are in flight at once
+        (see `execute_model`): one per concurrent batch, each sized for the
+        largest batch. They outlive the forward pass, so the profile run
+        does not see them."""
+        if get_pp_group().is_last_rank:
+            return 0
+        tensors = self.model_runner.get_model().make_empty_intermediate_tensors(
+            batch_size=self.scheduler_config.max_num_batched_tokens,
+            dtype=self.model_config.dtype,
+            device=torch.device("meta"),
+        )
+        per_batch = sum(t.nbytes for t in tensors.tensors.values())
+        return self.vllm_config.max_concurrent_batches * per_batch
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -711,6 +723,10 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+
+        pp_send_bytes = self._pp_send_copy_bytes()
+        profile_result.transient_peak_headroom += pp_send_bytes
+        profile_result.non_kv_cache_memory += pp_send_bytes
 
         # Profile CUDA graph memory if graphs will be captured. The V2 runner
         # decides itself, since encoder graphs don't depend on cudagraph_mode.
