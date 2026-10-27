@@ -381,8 +381,36 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     const int32_t request = request_ids[row];
     return row < valid_rows ? request : -1;
   };
-  // The first row of each contiguous run of a request's rows leads it.
   const int request_row = request_of(first_row);
+  const int state_row =
+      request_state_indices != nullptr && request_row >= 0 &&
+              request_row < request_state_count
+          ? request_state_indices[request_row]
+          : (request_state_indices == nullptr ? request_row : -1);
+  // V2 publishes -1 for CUDA-graph padding rows. They share no request state,
+  // so every block masks its own row.
+  if (state_row < 0) {
+    for (int i = tid; i < top_k; i += blockDim.x) {
+      const int64_t index = static_cast<int64_t>(first_row) * top_k + i;
+      hot_indices[index] = -1;
+      if (attention_indices != nullptr) {
+        attention_indices[static_cast<int64_t>(first_row) *
+                              attention_row_stride +
+                          i] = -1;
+      }
+      if (resolved_global_indices != nullptr) {
+        resolved_global_indices[index] = -1;
+      }
+    }
+    if (valid_counts != nullptr && tid == 0) {
+      valid_counts[static_cast<int64_t>(first_row) * valid_count_stride] = 0;
+    }
+    if (swap_counts != nullptr && tid == 0) {
+      swap_counts[first_row] = 0;
+    }
+    return;
+  }
+  // The first row of each contiguous run of a request's rows leads it.
   if (request_ids != nullptr && first_row > 0 &&
       request_of(first_row - 1) == request_row) {
     return;
@@ -393,34 +421,6 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
            request_of(end_row) == request_row) {
       ++end_row;
     }
-  }
-  const int state_row =
-      request_state_indices != nullptr && request_row >= 0 &&
-              request_row < request_state_count
-          ? request_state_indices[request_row]
-          : (request_state_indices == nullptr ? request_row : -1);
-  // V2 publishes -1 for CUDA-graph padding rows.
-  if (state_row < 0) {
-    for (int row = first_row; row < end_row; ++row) {
-      for (int i = threadIdx.x; i < top_k; i += blockDim.x) {
-        const int64_t index = static_cast<int64_t>(row) * top_k + i;
-        hot_indices[index] = -1;
-        if (attention_indices != nullptr) {
-          attention_indices[static_cast<int64_t>(row) * attention_row_stride +
-                            i] = -1;
-        }
-        if (resolved_global_indices != nullptr) {
-          resolved_global_indices[index] = -1;
-        }
-      }
-      if (valid_counts != nullptr && threadIdx.x == 0) {
-        valid_counts[static_cast<int64_t>(row) * valid_count_stride] = 0;
-      }
-      if (swap_counts != nullptr && threadIdx.x == 0) {
-        swap_counts[row] = 0;
-      }
-    }
-    return;
   }
 
   int32_t* row_dgi =
