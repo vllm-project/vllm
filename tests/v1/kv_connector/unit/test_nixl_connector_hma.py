@@ -1169,6 +1169,7 @@ def _make_mock_worker_for_desc_ids(
     worker._conv_decomp = None
     worker._is_csa_linear = False
     worker._ssm_region_indices = [0] if has_mamba else []
+    worker._group_region_indices = []
     worker._ple_group_index = None
     worker._ple_region_index = None
     if has_mamba:
@@ -1567,6 +1568,7 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
     scheduler = object.__new__(Scheduler)
     scheduler.connector = MagicMock()
+    scheduler.num_hash_lookahead_tokens = 0
     scheduler.needs_kv_cache_zeroing = True
     scheduler.kv_cache_manager = _make_fake_kv_cache_manager()
     scheduler.kv_cache_manager.cache_blocks = MagicMock()  # type: ignore[method-assign]
