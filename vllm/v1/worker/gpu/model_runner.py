@@ -64,6 +64,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
 )
+from vllm.multimodal.gpu_ipc_memory import release_cuda_ipc_proxies
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
@@ -1222,6 +1223,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pooling_runner is not None:
             # Preempted docs keep their query-use reservation until rescheduled.
             self.pooling_runner.on_requests_finished(finished_req_ids)
+        if self.encoder_cache is not None:
+            # Preempted requests are rescheduled with the same features, so
+            # only finished ones give up their pooled CUDA-IPC slices.
+            for req_id in finished_req_ids:
+                release_cuda_ipc_proxies(self.encoder_cache.mm_features.get(req_id, ()))
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)

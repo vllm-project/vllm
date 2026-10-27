@@ -12,7 +12,10 @@ topology).
 """
 
 import contextlib
+import copy
+import gc
 import multiprocessing as mp
+import time
 
 import pytest
 import torch
@@ -23,6 +26,14 @@ from vllm.multimodal.gpu_ipc_memory import (
     CudaIpcTensorSender,
     cuda_ipc_provider,
     is_cuda_ipc_proxy,
+    release_cuda_ipc_proxies,
+)
+from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
+    MultiModalFeatureSpec,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    PlaceholderRange,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -86,6 +97,21 @@ def _roundtrip_proxy(
     return sender, proxy
 
 
+def _deliver(proxy: CudaIpcPoolProxy) -> CudaIpcPoolProxy:
+    """A worker's copy, made through the pickle protocol like the broadcast."""
+    return copy.deepcopy(proxy)
+
+
+def _wait_for_recycle(sender: CudaIpcTensorSender, timeout: float = 2.0) -> bool:
+    """Whether the sender's recycler reclaims every slice within ``timeout``."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not sender._pool._occupied:
+            return True
+        time.sleep(0.02)
+    return False
+
+
 @pytest.mark.parametrize("device_index", [0])
 def test_roundtrip_same_device(device_index: int):
     """Deferred proxy reconstructs to an equal tensor in a worker process."""
@@ -104,6 +130,8 @@ def test_roundtrip_same_device(device_index: int):
     assert status == "ok", payload
     assert got_dev == device_index
     torch.testing.assert_close(payload, x.cpu())
+    # Reading does not release: the slice stays leased until the request ends.
+    assert not _wait_for_recycle(sender, timeout=0.2)
     sender._pool.close()
 
 
@@ -126,6 +154,84 @@ def test_roundtrip_cross_device_p2p():
     assert status == "ok", payload
     assert got_dev == 1
     torch.testing.assert_close(payload, x.cpu())
+    sender._pool.close()
+
+
+def test_slice_recycled_once_every_worker_releases():
+    """Each TP worker releases once, whether or not it read the slice."""
+    x = torch.arange(32, dtype=torch.bfloat16, device="cuda:0")
+    sender, proxy = _roundtrip_proxy(x, tp_size=2)
+    rank0, rank1 = _deliver(proxy), _deliver(proxy)
+
+    rank0.release(0)
+    rank0.release(0)
+    assert not _wait_for_recycle(sender, timeout=0.2)
+
+    rank1.release(1)
+    assert _wait_for_recycle(sender)
+    sender._pool.close()
+
+
+def test_released_slice_is_not_released_again_when_request_finishes():
+    """The finished-request fallback must not free a slice that was reused."""
+    sender, proxy = _roundtrip_proxy(torch.zeros(64, device="cuda:0"), tp_size=1)
+    worker_copy = _deliver(proxy)
+    worker_copy.release(0)  # what the encoder step does once it has read the slice
+    assert _wait_for_recycle(sender)
+    sender.new_message()
+    meta = sender(torch.ones(64, device="cuda:0"))
+    assert meta["cuda_ipc_pool"]["slot"] == proxy.slot
+    worker_copy.release(0)  # the finished-request fallback
+    assert not _wait_for_recycle(sender, timeout=0.2)
+    sender._pool.close()
+
+
+def test_undelivered_proxy_releases_slice_when_dropped():
+    """A proxy never handed to a worker (e.g. aborted while queued) frees it."""
+    sender, proxy = _roundtrip_proxy(torch.zeros(64, device="cuda:0"), tp_size=2)
+    del proxy
+    gc.collect()
+    assert _wait_for_recycle(sender)
+    sender._pool.close()
+
+
+def test_delivered_proxy_is_not_released_when_dropped():
+    """Once pickled to the workers, only their releases may free the slice."""
+    sender, proxy = _roundtrip_proxy(torch.zeros(64, device="cuda:0"), tp_size=2)
+    worker_copy = _deliver(proxy)
+    del proxy, worker_copy
+    gc.collect()
+    assert not _wait_for_recycle(sender, timeout=0.2)
+    sender._pool.close()
+
+
+def test_release_cuda_ipc_proxies_releases_every_pooled_field():
+    """A finished request releases each pooled field of each of its items."""
+    sender = CudaIpcTensorSender(pool_bytes=64 << 20, tp_size=1)
+    sender.new_message()
+    tensors = [torch.zeros(64, device="cuda:0"), torch.ones(32, device="cuda:0")]
+    proxies = [
+        _deliver(cuda_ipc_provider("float32", tuple(t.shape), sender(t)))
+        for t in tensors
+    ]
+    feature = MultiModalFeatureSpec(
+        data=MultiModalKwargsItem(
+            {
+                "pixel_values": MultiModalFieldElem(
+                    data=proxies[0], field=MultiModalBatchedField()
+                ),
+                "image_grid_thw": MultiModalFieldElem(
+                    data=[proxies[1], torch.zeros(3)], field=MultiModalBatchedField()
+                ),
+            }
+        ),
+        modality="image",
+        identifier="image-0",
+        mm_position=PlaceholderRange(offset=0, length=1),
+    )
+
+    release_cuda_ipc_proxies([feature])
+    assert _wait_for_recycle(sender)
     sender._pool.close()
 
 

@@ -34,7 +34,11 @@ API-server (frontend) process:
      other ranks read over NVLink/P2P.
    - Recycling: each in-flight slice owns a row of lock-free per-consumer flag
      cells in shared memory; the sender reclaims the slice once
-     ``tensor_parallel_size`` distinct cells are set.
+     ``tensor_parallel_size`` distinct cells are set. A worker sets its cell
+     once the step that encodes the item has copied it out, or when the request
+     finishes if the encoder never ran for it (e.g. an encoder-cache hit). A
+     proxy dropped before reaching the workers (e.g. its request was aborted
+     while queued) sets the cells itself.
 
    The transport requires the sender and all TP workers to share the same GPUs
    or have peer access enabled (true on NVLink systems; the v1
@@ -47,6 +51,7 @@ import contextlib
 import itertools
 import threading
 import time
+from collections.abc import Iterable
 from multiprocessing import shared_memory
 from typing import TYPE_CHECKING, Any
 
@@ -54,12 +59,14 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.jsontree import json_iter_leaves
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import format_gib
 from vllm.v1.serial_utils import OOBTensorConsumer
 
 if TYPE_CHECKING:
     from vllm.config.multimodal import MultiModalConfig
+    from vllm.multimodal.inputs import MultiModalFeatureSpec
 
 logger = init_logger(__name__)
 
@@ -333,7 +340,7 @@ class _SenderPool:
     """Persistent IPC-exported GPU pool (frontend side).
 
     A free-list allocator hands out slices; lock-free per-consumer cells drive
-    recycling once every worker has read a slice.
+    recycling once every worker has released a slice.
     """
 
     def __init__(self, device_index: int, pool_bytes: int, tp_size: int):
@@ -360,7 +367,7 @@ class _SenderPool:
         self._lock = threading.Lock()
 
         # Lock-free recycling cells: flags[slot, device] == 1 once the worker on
-        # ``device`` has copied the slice out. A slice is reclaimed once
+        # ``device`` has released the slice. A slice is reclaimed once
         # ``tp_size`` distinct cells in its row are set.
         self.flags_shm = shared_memory.SharedMemory(
             create=True, size=_NUM_SLOTS * _MAX_TP * 4
@@ -460,7 +467,8 @@ class _SenderPool:
 # Per-worker caches so the pool handle and flags segment are mapped once.
 _recv_storage_cache: dict[tuple, Any] = {}
 _recv_flags_cache: dict[str, Any] = {}
-_recv_lock = threading.Lock()
+# Re-entrant: a proxy's __del__ can run while this thread holds the lock.
+_recv_lock = threading.RLock()
 
 
 def _open_pool_storage(handle: tuple, device_index: int):
@@ -499,12 +507,11 @@ def _open_flags(name: str):
     return fl[1]
 
 
-def _signal_consumed(flags_shm_name: str, slot: int, device_index: int) -> None:
-    """Mark this consumer's cell for ``slot`` as read (lock-free, idempotent)."""
-    cell = device_index if 0 <= device_index < _MAX_TP else 0
+def _signal_consumed(flags_shm_name: str, slot: int, cells: int | slice) -> None:
+    """Mark ``cells`` of ``slot`` as released (lock-free, idempotent)."""
     # Flags segment may be gone if the sender is shutting down.
     with contextlib.suppress(FileNotFoundError):
-        _open_flags(flags_shm_name)[slot, cell] = 1
+        _open_flags(flags_shm_name)[slot, cells] = 1
 
 
 class CudaIpcPoolProxy:
@@ -512,7 +519,8 @@ class CudaIpcPoolProxy:
 
     Holds no CUDA tensor, so it pickles cheaply across the engine-core->worker
     boundary. :meth:`reconstruct` opens the (cached) pool handle and copies the
-    slice out on the target device.
+    slice out on the target device; :meth:`release` reports that this worker no
+    longer needs the slice.
     """
 
     __slots__ = (
@@ -523,6 +531,8 @@ class CudaIpcPoolProxy:
         "nbytes",
         "shape",
         "dtype",
+        "_delivered",
+        "_released",
     )
 
     def __init__(self, pool_handle, flags_shm, slot, offset, nbytes, shape, dtype):
@@ -533,6 +543,21 @@ class CudaIpcPoolProxy:
         self.nbytes = nbytes
         self.shape = shape
         self.dtype = dtype
+        self._delivered = False
+        self._released = False
+
+    def __getstate__(self):
+        # Pickling hands the proxy to the workers, which release the slice
+        # themselves, so this object must no longer release it when dropped.
+        self._delivered = True
+        return super().__getstate__()
+
+    def __del__(self) -> None:
+        # Never handed to a worker (e.g. its request was aborted while queued):
+        # no worker will release the slice, so release it on their behalf.
+        if self._delivered or self._released:
+            return
+        _signal_consumed(self.flags_shm, self.slot, slice(None))
 
     def reconstruct(self, device: int | None = None) -> torch.Tensor:
         dev = torch.accelerator.current_device_index() if device is None else device
@@ -541,19 +566,35 @@ class CudaIpcPoolProxy:
         slice_storage = storage[self.offset : self.offset + self.nbytes]
         view = torch.empty(0, dtype=dtype, device=f"cuda:{dev}")
         view.set_(slice_storage, 0, self.shape, _contiguous_stride(self.shape))
-        # Copy out so we own the memory; the pool slice can then be recycled.
-        # For a different device this is a P2P (device-to-device) copy.
+        # Copy out so we own the memory; the copy must land before this step
+        # releases the slice. For a different device this is a P2P
+        # (device-to-device) copy.
         out = view.clone()
         torch.accelerator.current_stream(dev).synchronize()
-        try:
-            _signal_consumed(self.flags_shm, self.slot, dev)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Multimodal CUDA-IPC recycle-signal failed: %s", e)
         return out
+
+    def release(self, device: int | None = None) -> None:
+        """Report that this worker no longer needs the slice."""
+        if self._released:
+            return
+        dev = torch.accelerator.current_device_index() if device is None else device
+        _signal_consumed(self.flags_shm, self.slot, dev if 0 <= dev < _MAX_TP else 0)
+        self._released = True
 
 
 def is_cuda_ipc_proxy(obj: Any) -> bool:
     return isinstance(obj, CudaIpcPoolProxy)
+
+
+def release_cuda_ipc_proxies(mm_features: Iterable["MultiModalFeatureSpec"]) -> None:
+    """Release the pooled slices referenced by ``mm_features`` on this worker."""
+    for feature in mm_features:
+        if feature.data is None:
+            continue
+        for elem in feature.data.values():
+            for leaf in json_iter_leaves(elem.data):
+                if isinstance(leaf, CudaIpcPoolProxy):
+                    leaf.release()
 
 
 class CudaIpcTensorSender(OOBTensorConsumer):

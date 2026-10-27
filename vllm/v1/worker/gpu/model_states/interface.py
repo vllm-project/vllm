@@ -12,6 +12,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
     supports_encoder_cudagraph,
 )
+from vllm.multimodal.gpu_ipc_memory import release_cuda_ipc_proxies
 from vllm.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
@@ -205,6 +206,11 @@ class ModelState(ABC):
             ):
                 encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
+        release_cuda_ipc_proxies(
+            self.encoder_cache.mm_features[req_id][mm_input_id]
+            for req_id, encoder_input_ids in scheduled_encoder_inputs.items()
+            for mm_input_id in encoder_input_ids
+        )
 
     def gather_mm_embeddings(
         self, input_batch: InputBatch, draft_lookahead: int = 0
