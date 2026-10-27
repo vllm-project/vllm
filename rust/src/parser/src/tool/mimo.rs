@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
+
 use super::qwen_coder::{Qwen3CoderToolParser, QwenCoderConfig};
 use super::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
@@ -19,17 +21,18 @@ pub struct MiMoToolParser {
 }
 
 impl ToolParser for MiMoToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>> {
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>> {
         Ok(Box::new(Self {
             inner: Qwen3CoderToolParser::with_config(tools, MIMO_CONFIG),
         }))
     }
 
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
-        self.inner.structural_tag_builder()
+        // MiMo's template emits compact tags without the newlines Qwen3-Coder uses.
+        Some(xgrammar_structural_tag::Model::Mimo.builder())
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
 
@@ -46,7 +49,7 @@ impl ToolParser for MiMoToolParser {
 mod tests {
     use super::*;
     use crate::tool::ToolParserTestExt as _;
-    use crate::tool::test_utils::{collect_stream, split_by_chars};
+    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tokenizer};
     use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use serde_json::{Value, json};
 
@@ -64,6 +67,7 @@ mod tests {
             name: "convert".into(),
             description: None,
             strict: None,
+            defer_loading: None,
             parameters: json!({"type": "object", "properties": {
                 "flag": {"type": "boolean"}, "empty": {"type": ["string", "null"]},
                 "text": {"type": "string"}, "literal": {"type": "string"}, "payload": {"type": "object"}
@@ -71,7 +75,10 @@ mod tests {
         }];
         let call = "<tool_call>\n<function=convert>\n<parameter=flag>True</parameter>\n<parameter=empty>None</parameter>\n<parameter=text>\n value\n</parameter>\n<parameter=literal>None</parameter>\n<parameter=payload>{\"city\":\"杭州\"}</parameter>\n</function>\n</tool_call>";
         let input = format!("answer\n\n{call}{call}");
-        let expected = MiMoToolParser::create(&tools).unwrap().parse_complete(&input).unwrap();
+        let expected = MiMoToolParser::create(&tools, test_tokenizer())
+            .unwrap()
+            .parse_complete(&input)
+            .unwrap();
         assert_eq!(expected.normal_text(), "answer\n\n");
         assert_eq!(expected.calls().len(), 2);
         for call in expected.calls() {
@@ -81,11 +88,39 @@ mod tests {
             );
         }
         for size in 1..=input.chars().count() {
-            let mut parser = MiMoToolParser::create(&tools).unwrap();
+            let mut parser = MiMoToolParser::create(&tools, test_tokenizer()).unwrap();
             assert_eq!(
                 collect_stream(parser.as_mut(), &split_by_chars(&input, size)),
                 expected
             );
         }
+    }
+
+    #[test]
+    fn structural_tag_uses_compact_mimo_tags() {
+        use xgrammar_structural_tag::builders::StructuralTagOptions;
+        use xgrammar_structural_tag::{
+            FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
+        };
+
+        let parser = MiMoToolParser::create(&[], test_tokenizer()).unwrap();
+        let builder = parser.structural_tag_builder().expect("MiMo exposes a builder");
+        let tools = [ToolParam::Function(FunctionToolParam::new(
+            FunctionDefinition::new("get_weather"),
+        ))];
+        let tag = build_structural_tag(
+            builder,
+            &tools,
+            ToolChoice::required(),
+            StructuralTagOptions::default().with_reasoning(false),
+        )
+        .unwrap();
+        let value = serde_json::to_value(tag).unwrap();
+        assert_eq!(value["format"]["triggers"], json!(["<tool_call>"]));
+        assert_eq!(
+            value["format"]["tags"][0]["begin"],
+            "<tool_call><function=get_weather>"
+        );
+        assert_eq!(value["format"]["tags"][0]["end"], "</function></tool_call>");
     }
 }

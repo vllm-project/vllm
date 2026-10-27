@@ -5,8 +5,9 @@
 The lightning indexer (``indexer.py``) selects the top-k KV blocks (written into
 the shared ``layer.topk_indices_buffer``); this module holds the main attention
 that attends only to those blocks: the paged K/V cache backend, its metadata +
-builder, and the impl that reads the indexer's top-k from that buffer. The Triton
-attend kernel lives here; the SM100 (MSA)
+builder, and the impl that reads the indexer's top-k from that buffer. The generic
+Triton attend kernel lives in ``common/ops``; Hopper uses the query-tiled prefill
+kernel in ``nvidia/ops``. The SM100 (MSA)
 ``build_k2q_csr`` + ``sparse_atten_func`` attend lives in
 ``nvidia/sparse_attention_msa.py``.
 
@@ -28,12 +29,20 @@ from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.platforms import current_platform
 
-# AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops;
+# AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops.
+# Hopper uses query-tiled NVIDIA prefill and the common split-K decode kernel;
 # every other platform uses the generic common.ops implementation.
 if current_platform.is_rocm():
     from vllm.models.minimax_m3.amd.ops.sparse_attn import (
         minimax_m3_sparse_attn,
         minimax_m3_sparse_attn_decode,
+    )
+elif current_platform.is_cuda() and current_platform.is_device_capability_family(90):
+    from vllm.models.minimax_m3.common.ops.sparse_attn import (
+        minimax_m3_sparse_attn_decode,
+    )
+    from vllm.models.minimax_m3.nvidia.ops.sparse_prefill import (
+        minimax_m3_sparse_attn,
     )
 else:
     from vllm.models.minimax_m3.common.ops.sparse_attn import (
@@ -56,6 +65,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
+    get_kv_quant_mode,
     is_quantized_kv_cache,
 )
 
@@ -124,7 +134,9 @@ def minimax_m3_use_aiter_sparse_pa(
         raise ValueError(
             "MiniMax M3 AITER sparse paged attention requires "
             f"num_kv_heads == 1 per tensor-parallel rank, got {num_kv_heads}, "
-            "unless the indexer emits the attend's page table."
+            "unless the AITER indexer emits the attend's page table. It is not "
+            "in use here; the 'MiniMax M3 indexer: AITER unavailable' log line "
+            "says why."
         )
     return requested
 
@@ -531,10 +543,10 @@ def select_main_backend_and_impl_cls(
     """Pick the main attention backend and implementation.
 
     Blackwell (SM100) uses the MSA attend for supported top-k block counts
-    when the KV cache is BF16 or FP8 E4M3; MI355 uses AITER sparse PA
+    when the KV cache is BF16, FP8 E4M3 or NVFP4; MI355 uses AITER sparse PA
     with shuffle KV cache layout; Other platforms and FP8 E5M2 fall
-    back to Triton. The MSA modules are imported lazily to avoid import errors
-    on unsupported platforms.
+    back to Triton. NVFP4 is MSA-only. The MSA modules are imported lazily to
+    avoid import errors on unsupported platforms.
     """
     use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
         num_kv_heads, emits_sparse_block_table=emits_sparse_block_table
@@ -545,6 +557,18 @@ def select_main_backend_and_impl_cls(
         and topk_blocks in (4, 8, 16, 32)
         and kv_cache_dtype != "fp8_e5m2"
     )
+    use_nvfp4 = get_kv_quant_mode(kv_cache_dtype).is_nvfp4
+    if use_nvfp4 and kv_cache_dtype != "nvfp4":
+        raise ValueError(
+            "MiniMax M3 sparse attention supports only the 'nvfp4' NVFP4 KV "
+            f"cache dtype, got {kv_cache_dtype}"
+        )
+    if use_nvfp4 and (use_aiter_sparse_pa or not use_msa):
+        raise ValueError(
+            "MiniMax M3 sparse attention supports an NVFP4 KV cache only with "
+            f"the SM100 MSA backend (kv_cache_dtype={kv_cache_dtype}, "
+            f"topk_blocks={topk_blocks})"
+        )
     selected = (
         "AITER_SPARSE_PA" if use_aiter_sparse_pa else ("MSA" if use_msa else "Triton")
     )
@@ -565,8 +589,11 @@ def select_main_backend_and_impl_cls(
         from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
             MiniMaxM3SparseMSABackend,
             MiniMaxM3SparseMSAImpl,
+            MiniMaxM3SparseMSANvfp4Backend,
         )
 
+        if use_nvfp4:
+            return MiniMaxM3SparseMSANvfp4Backend, MiniMaxM3SparseMSAImpl
         return MiniMaxM3SparseMSABackend, MiniMaxM3SparseMSAImpl
     return MiniMaxM3SparseBackend, MiniMaxM3SparseTritonImpl
 

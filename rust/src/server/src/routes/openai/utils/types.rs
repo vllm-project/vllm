@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
 use std::slice;
 
+use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -261,6 +261,20 @@ pub struct StreamOptions {
     pub continuous_usage_stats: Option<bool>,
 }
 
+impl StreamOptions {
+    /// Whether no option is set, as in `"stream_options": {}`.
+    ///
+    /// Python rejects `stream_options` without `stream=true` only when the
+    /// object is non-empty, so an empty object must pass that check.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            include_usage,
+            continuous_usage_stats,
+        } = self;
+        include_usage.is_none() && continuous_usage_stats.is_none()
+    }
+}
+
 // ============================================================================
 // Tools and Function Calling
 // ============================================================================
@@ -271,6 +285,10 @@ pub struct Tool {
     #[serde(default = "default_function_tool_type")]
     pub tool_type: String,
     pub function: Function,
+    /// Tool-level form of [`Function::defer_loading`]; the function-level value
+    /// takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_loading: Option<bool>,
 }
 
 fn default_function_tool_type() -> String {
@@ -286,6 +304,9 @@ pub struct Function {
     pub parameters: Value,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
+    /// Whether the schema is loaded on demand via tool search (vLLM extension,
+    /// mirroring the OpenAI Responses and Anthropic Messages field).
+    pub defer_loading: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -556,9 +577,7 @@ impl Usage {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: cached_tokens
-                .filter(|&c| c > 0)
-                .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
+            prompt_tokens_details: cached_tokens.map(|c| PromptTokenUsageInfo { cached_tokens: c }),
             completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
         }
     }
@@ -630,6 +649,20 @@ mod usage_tests {
     }
 
     #[test]
+    fn token_usage_serializes_zero_cached_tokens_when_enabled() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 8,
+                output_token_count: 2,
+                cached_token_count: 0,
+            },
+            true,
+        );
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["prompt_tokens_details"]["cached_tokens"], 0);
+    }
+
+    #[test]
     fn token_usage_includes_reasoning_token_details() {
         let usage = Usage::from_token_usage(
             ChatTokenUsage {
@@ -688,7 +721,9 @@ mod usage_tests {
 pub struct LogProbs {
     pub tokens: Vec<String>,
     pub token_logprobs: Vec<Option<f32>>,
-    pub top_logprobs: Vec<Option<HashMap<String, f32>>>,
+    /// Each position's candidates in the engine's order (the sampled token
+    /// first), serialized in that order like Python's dict.
+    pub top_logprobs: Vec<Option<IndexMap<String, f32>>>,
     pub text_offset: Vec<u32>,
 }
 
@@ -700,7 +735,9 @@ pub struct PromptLogprob {
     pub decoded_token: String,
 }
 
-pub type PromptLogprobs = Vec<Option<HashMap<u32, PromptLogprob>>>;
+/// Each scored position's candidates in the engine's order (the prompt token
+/// first), serialized in that order like Python's dict.
+pub type PromptLogprobs = Vec<Option<IndexMap<u32, PromptLogprob>>>;
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbs` class.
 #[derive(Debug, Clone, Serialize)]
@@ -734,13 +771,16 @@ pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
+/// Mirrors the Python vLLM `ErrorInfo` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorDetail {
     pub message: String,
+    /// The error class, such as `BadRequestError`.
     #[serde(rename = "type")]
     pub error_type: String,
     pub param: Option<String>,
-    pub code: Option<String>,
+    /// The HTTP status code.
+    pub code: u16,
 }
 
 // ============================================================================
