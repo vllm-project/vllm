@@ -18,6 +18,7 @@ from multiprocessing.queues import Queue
 from typing import Any, TypeVar, cast, get_args
 
 import msgspec
+import pydantic
 import zmq
 
 import vllm.envs as envs
@@ -1928,6 +1929,15 @@ class EngineCoreProc(EngineCore):
             coord_store_port=parallel_config._coord_store_port,
             coordinator_input_address=self.addresses.coordinator_input,
             coordinator_output_address=self.addresses.coordinator_output,
+            vllm_config=(
+                # fallback=str is needed to handle e.g. torch.dtype, as in the
+                # Python `/server_info`.
+                pydantic.TypeAdapter(VllmConfig).dump_python(
+                    self.vllm_config, mode="json", fallback=str
+                )
+                if envs.VLLM_SERVER_DEV_MODE
+                else None
+            ),
         )
 
     def process_input_sockets(
