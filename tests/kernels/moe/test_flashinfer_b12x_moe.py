@@ -30,6 +30,10 @@ from flashinfer.fp4_quantization import fp4_quantize
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
+from tests.kernels.quantization.nvfp4_utils import (
+    dequantize_nvfp4_to_dtype,
+    quant_nvfp4_tensor,
+)
 from tests.kernels.utils import torch_moe
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk
@@ -40,6 +44,11 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe import (
     FlashInferB12xExperts,
+)
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
+    convert_to_nvfp4_moe_kernel_format,
+    make_nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     reorder_w1w3_to_w3w1,
@@ -350,66 +359,128 @@ def test_flashinfer_b12x_moe_relu2(
         )
 
 
-@pytest.mark.parametrize(
-    "activation,configured_n,w13_rows,expected_n",
-    [
-        # Non-gated: w13 rows were padded 1856 -> 1920 by scale swizzling.
-        (MoEActivation.RELU2_NO_MUL, 1856, 1920, 1920),
-        # Non-gated, already a multiple of 128: no padding.
-        (MoEActivation.RELU2_NO_MUL, 1920, 1920, 1920),
-        # Gated: w13 holds [up, gate], so its rows are 2 * n.
-        (MoEActivation.SILU, 1856, 2 * 1856, 1856),
-        (MoEActivation.SILU, 1920, 2 * 1920, 1920),
-    ],
-)
-def test_flashinfer_b12x_wrapper_uses_padded_intermediate_size(
-    monkeypatch: pytest.MonkeyPatch,
-    activation: MoEActivation,
-    configured_n: int,
-    w13_rows: int,
-    expected_n: int,
-):
-    """B12xMoEWrapper must be built with the intermediate size present in
-    the prepared (possibly padded) weights, not the configured size."""
-    import flashinfer.fused_moe
+@pytest.mark.parametrize("m", [1, 8])
+@torch.inference_mode()
+def test_flashinfer_b12x_moe_relu2_padded_intermediate(m: int, workspace_init):
+    """Non-gated relu2 MoE whose intermediate size (1856, as in
+    Nemotron-3.5-Lightning-30B-A3B-NVFP4) is not a multiple of 128, run through
+    the real FLASHINFER_B12X weight preparation, which pads it to 1920.
 
-    captured: dict = {}
+    Before the fix, ``B12xMoEWrapper`` was built with 1856, re-padded the
+    already padded scales, and the first forward raised ``RuntimeError: shape
+    '[10752, 116]' is invalid for input of size 1290240``.
+    """
+    set_random_seed(7)
+    e, topk, n, k = 4, 2, 1856, 2688
+    dtype = torch.bfloat16
+    activation = MoEActivation.RELU2_NO_MUL
 
-    class FakeB12xMoEWrapper:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr(flashinfer.fused_moe, "B12xMoEWrapper", FakeB12xMoEWrapper)
-
-    e, k = 2, 256
-    w13_scale = torch.ones((e, w13_rows, k // 16), dtype=torch.float32)
-    w2_scale = torch.ones((e, k, expected_n // 16), dtype=torch.float32)
-    ones_e = torch.ones(e, dtype=torch.float32)
+    def quantize(w: torch.Tensor):
+        q, sf, gs = zip(
+            *(quant_nvfp4_tensor(x, is_sf_swizzled_layout=False) for x in w)
+        )
+        q, sf, gs = torch.stack(q), torch.stack(sf), torch.stack(gs)
+        dequant = torch.stack(
+            [
+                dequantize_nvfp4_to_dtype(
+                    q[i], sf[i], gs[i], dtype, q.device, is_sf_linear_layout=True
+                )
+                for i in range(len(w))
+            ]
+        )
+        return q, sf.view(torch.float8_e4m3fn), 1.0 / gs, dequant
 
     with set_current_vllm_config(
         VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
     ):
-        experts = FlashInferB12xExperts(
-            moe_config=make_dummy_moe_config(
-                num_experts=e,
-                experts_per_token=1,
-                hidden_dim=k,
-                intermediate_size=configured_n,
-                activation=activation,
-            ),
-            quant_config=nvfp4_moe_quant_config(
-                g1_alphas=ones_e,
-                g2_alphas=ones_e,
-                a1_gscale=ones_e,
-                a2_gscale=ones_e.clone(),
-                w1_scale=w13_scale,
-                w2_scale=w2_scale,
-            ),
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        w13_q, w13_sf, w13_sf2, w1_ref = quantize(
+            torch.randn((e, n, k), device="cuda", dtype=dtype) / 15
         )
-        _process_b12x_weights(experts, w13_scale, w2_scale, ones_e, ones_e)
-        experts._ensure_wrapper()
+        w2_q, w2_sf, w2_sf2, w2_ref = quantize(
+            torch.randn((e, k, n), device="cuda", dtype=dtype) / 15
+        )
+        ones_e = torch.ones(e, device="cuda", dtype=torch.float32)
 
-    assert captured["intermediate_size"] == expected_n
+        moe_config = make_dummy_moe_config(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            in_dtype=dtype,
+            activation=activation,
+        )
+        layer = SimpleNamespace(activation=activation, moe_config=moe_config)
+        (
+            w13,
+            w13_scale,
+            w13_scale_2,
+            a13_scale,
+            w2,
+            w2_scale,
+            w2_scale_2,
+            a2_scale,
+        ) = convert_to_nvfp4_moe_kernel_format(
+            nvfp4_backend=NvFp4MoeBackend.FLASHINFER_B12X,
+            layer=layer,
+            w13=w13_q,
+            w13_scale=w13_sf,
+            w13_scale_2=w13_sf2,
+            a13_scale=ones_e.clone(),
+            w2=w2_q,
+            w2_scale=w2_sf,
+            w2_scale_2=w2_sf2,
+            a2_scale=ones_e.clone(),
+            is_act_and_mul=moe_config.is_act_and_mul,
+        )
+        assert w13.shape[1] == 1920 and w2.shape[2] * 2 == 1920
+        layer.w13_weight = w13
+        layer.w13_weight_scale = w13_scale
+        layer.w13_weight_scale_2 = w13_scale_2
+        layer.w2_weight = w2
+        layer.w2_weight_scale = w2_scale
+        layer.w2_weight_scale_2 = w2_scale_2
+
+        quant_config = make_nvfp4_moe_quant_config(
+            backend=NvFp4MoeBackend.FLASHINFER_B12X,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
+            w13_scale_2=w13_scale_2,
+            w2_scale_2=w2_scale_2,
+            a13_scale=a13_scale,
+            a2_scale=a2_scale,
+        )
+        experts = FlashInferB12xExperts(
+            moe_config=moe_config, quant_config=quant_config
+        )
+        experts.process_weights_after_loading(layer)
+
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
+            experts,
+        )
+
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+        b12x_output = kernel.apply(
+            hidden_states=a,
+            w1=w13,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=e,
+            activation=activation,
+            apply_router_weight_on_input=False,
+            expert_map=None,
+        )
+
+        torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, activation=activation)
+        torch.testing.assert_close(b12x_output, torch_output, atol=2e-1, rtol=2e-1)
 
 
 if __name__ == "__main__":
