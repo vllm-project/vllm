@@ -6,7 +6,7 @@
 // `set_k_and_s_cpu`/`quant_to_nope_fp8_rope_bf16_pack_cpu` -- their
 // pool_kv/pool_score signature doesn't apply to vLLM's layout. This is the
 // CPU counterpart to vLLM's own CUDA kernel
-// (`fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu`); see
+// (`fused_deepseek_v4_qnorm_rope_kv_insert.py`, CuTe DSL); see
 // `DeepseekV4Attention._fused_qnorm_rope_kv_insert_cpu` (attention.py) for
 // the eager reference this replaces.
 //

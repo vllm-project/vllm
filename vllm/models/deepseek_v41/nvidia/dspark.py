@@ -302,6 +302,17 @@ def _insert_context_kv(
     slot_mapping: torch.Tensor,
 ) -> None:
     """Insert context KV (kv_norm fused into the op) without a query."""
+    from vllm.utils.import_utils import has_cutedsl
+
+    if not has_cutedsl():
+        raise RuntimeError(
+            "DeepseekV4 fused KV insert runs as a CuTe DSL kernel and "
+            "needs CUDA with nvidia-cutlass-dsl installed"
+        )
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_kv_rope_insert,
+    )
+
     # The bound cache already is [num_blocks, block_size, bytes_per_token], so
     # the record width needs no per-layer attribute -- one whose name the
     # attention layer is free to change (kv_bytes_per_token has to become
@@ -309,7 +320,7 @@ def _insert_context_kv(
     # differ). block_size stays the layer's, so the op's size(1) check still
     # cross-checks the two rather than restating the tensor.
     cache = attn.swa_cache_layer.kv_cache
-    torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+    fused_deepseek_v4_kv_rope_insert(
         kv,
         cache,
         slot_mapping,

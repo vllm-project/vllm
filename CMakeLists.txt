@@ -440,7 +440,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/custom_all_gather_reduce_scatter.cu"
     "csrc/custom_all_gather_reduce_scatter_ops.cpp"
     "csrc/custom_all_reduce.cu"
-    "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu"
     "csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")

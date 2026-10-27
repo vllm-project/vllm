@@ -256,30 +256,6 @@ void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
                         torch::stable::Tensor& position_ids,
                         int64_t forced_token_heads_per_warp);
 
-void fused_deepseek_v4_kv_rope_insert(
-    torch::stable::Tensor const& kv, torch::stable::Tensor& k_cache,
-    torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& position_ids,
-    torch::stable::Tensor const& cos_sin_cache, int64_t cache_block_size,
-    std::optional<torch::stable::Tensor> fp8_scale, bool kv_mxfp8,
-    std::optional<torch::stable::Tensor> kv_norm_weight = std::nullopt,
-    double kv_norm_eps = 1e-6);
-
-torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-    torch::stable::Tensor const& q_in, torch::stable::Tensor const& kv,
-    torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& position_ids,
-    torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
-    double eps, int64_t cache_block_size, bool apply_q_norm, bool kv_mxfp8,
-    bool apply_q_rope, bool is_q_interleaved);
-
-void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
-    torch::stable::Tensor& q, torch::stable::Tensor const& kv,
-    torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& position_ids,
-    torch::stable::Tensor const& cos_sin_cache, double eps,
-    int64_t cache_block_size, bool apply_q_norm);
-
 void fused_kimi_k3_mla_key_concat_kv_cache_insert(
     torch::stable::Tensor& q, torch::stable::Tensor const& k_nope,
     torch::stable::Tensor const& k_pe, torch::stable::Tensor const& kv_c_normed,
@@ -344,16 +320,6 @@ void fused_kimi_k3_mla_decode_q_concat_ds_mla_insert(
     torch::stable::Tensor const& slot_mapping, int64_t cache_block_size,
     std::optional<torch::stable::Tensor> position_ids,
     std::optional<torch::stable::Tensor> cos_sin_cache);
-
-void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
-    torch::stable::Tensor const& q, torch::stable::Tensor const& kv,
-    torch::stable::Tensor& q_fp8, torch::stable::Tensor& k_cache,
-    torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& position_ids,
-    torch::stable::Tensor const& cos_sin_cache,
-    torch::stable::Tensor const& fp8_scale,
-    torch::stable::Tensor const& q_fp8_scale_inv, double eps,
-    int64_t cache_block_size, bool apply_q_norm);
 
 #ifndef USE_ROCM
 std::tuple<torch::stable::Tensor, torch::stable::Tensor>

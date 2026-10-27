@@ -36,9 +36,10 @@ class _RocmKvInsert:
 
     def __init__(self, num_tokens: int):
         from vllm.models.deepseek_v41.attention import _use_v41_mxfp8_kv_record
+        from vllm.utils.import_utils import has_cutedsl
 
-        if not hasattr(torch.ops._C, "fused_deepseek_v4_kv_rope_insert"):
-            pytest.skip("fused DeepseekV4 KV insert op is not built")
+        if not has_cutedsl():
+            pytest.skip("CuTe DSL (cutlass) not installed for the fused KV insert")
 
         self.num_tokens = num_tokens
         self.kv_mxfp8 = _use_v41_mxfp8_kv_record()
@@ -112,7 +113,11 @@ class _RocmKvInsert:
         assert not torch.equal(written, self.poison)
         ref = self.poison.clone()
         meta = self.metadata[self.attn.swa_cache_layer.prefix]
-        torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+        from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+            fused_deepseek_v4_kv_rope_insert,
+        )
+
+        fused_deepseek_v4_kv_rope_insert(
             self.kv,
             ref,
             meta.slot_mapping,

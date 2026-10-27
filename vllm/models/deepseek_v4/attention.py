@@ -788,6 +788,19 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         assert swa_metadata is not None
 
+        from vllm.utils.import_utils import has_cutedsl
+
+        if not has_cutedsl():
+            raise RuntimeError(
+                "DeepseekV4 fused KV insert runs as a CuTe DSL kernel and "
+                "needs CUDA with nvidia-cutlass-dsl installed"
+            )
+        from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+            fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert,
+            fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert,
+            fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+        )
+
         swa_kv_cache = self.swa_cache_layer.kv_cache
         # The fused insert ops require int64 position_ids; the runner's positions
         # buffer is already int64, so no cast is needed.
@@ -803,7 +816,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             #            the padded q tensor.
             #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert.
             swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
-            return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            return fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 q,
                 kv,
                 swa_kv_cache_2d,
@@ -823,7 +836,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         assert swa_kv_cache.shape[1:] == (block_size, self.head_dim)
         swa_kv_cache_3d = swa_kv_cache
         if cache_dtype == torch.bfloat16:
-            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
+            fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
                 q,
                 kv,
                 swa_kv_cache_3d,
@@ -837,7 +850,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # per-tensor fp8 (torch.float8_e4m3fn)
         q_fp8 = torch.empty_like(q, dtype=torch.float8_e4m3fn)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+        fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
             q,
             kv,
             q_fp8,

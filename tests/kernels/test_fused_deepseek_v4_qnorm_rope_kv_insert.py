@@ -11,8 +11,8 @@ We compare against:
   - Existing Triton `quantize_and_insert_k_cache` + round-trip via
     `dequantize_and_gather_k_cache` for KV
 
-The kernel is imported via
-`torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert`.
+The kernel is imported from
+`vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert`.
 """
 
 import pytest
@@ -27,6 +27,7 @@ from vllm.models.deepseek_v4.common.ops import (
     quantize_and_insert_k_cache,
 )
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_cutedsl
 
 # ── Constants matching the kernel ────────────────────────────────────────────
 HEAD_DIM = 512
@@ -119,28 +120,24 @@ def rmsnorm_no_weight(x: torch.Tensor, eps: float) -> torch.Tensor:
     return xf * torch.rsqrt(variance + eps)
 
 
-# ── Dispatch to the CUDA op (skip test cleanly if it isn't built in) ─────────
+# ── Dispatch to the CuTe DSL kernel (skip cleanly without cutlass) ──────────
 
 
 def _op_available() -> bool:
-    return hasattr(torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert")
+    return has_cutedsl()
 
 
 def _full_cache_fp8_op_available() -> bool:
-    return hasattr(
-        torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert"
-    )
+    return has_cutedsl()
 
 
 def _full_cache_bf16_op_available() -> bool:
-    return hasattr(
-        torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert"
-    )
+    return has_cutedsl()
 
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or not _op_available(),
-    reason="CUDA not available or fused DeepseekV4 op not built in",
+    reason="CUDA not available or CuTe DSL (cutlass) not installed",
 )
 
 
@@ -156,6 +153,10 @@ def _call_fused(
     bs,
     apply_q_norm=None,
 ):
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+    )
+
     args = (
         q_in,
         kv,
@@ -168,10 +169,8 @@ def _call_fused(
         bs,
     )
     if apply_q_norm is None:
-        return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(*args)
-    return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-        *args, apply_q_norm
-    )
+        return fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(*args)
+    return fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(*args, apply_q_norm)
 
 
 def _as_stored_fp8(t: torch.Tensor) -> torch.Tensor:
@@ -450,6 +449,9 @@ def test_kv_path_mxfp8_record_matches_reference(num_tokens: int, block_size: int
     match the Triton encoder exactly apart from the documented 1-ULP bf16
     rounding split on the rotation itself.
     """
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+    )
     from vllm.models.deepseek_v41.common.ops import (
         dequantize_and_gather_k_cache as v41_dequantize_and_gather_k_cache,
     )
@@ -483,7 +485,7 @@ def test_kv_path_mxfp8_record_matches_reference(num_tokens: int, block_size: int
 
     k_cache_fused = torch.zeros_like(k_cache_ref)
     q_dummy = torch.zeros(num_tokens, 1, HEAD_DIM, dtype=dtype, device=device)
-    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+    fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
         q_dummy,
         kv,
         k_cache_fused,
@@ -544,6 +546,10 @@ def test_kv_insert_fused_norm_row_strided(
     """The KV-only insert with ``kv_norm_weight`` matches RMSNorm followed by
     the unfused insert, reading a row-strided kv (the layer's half of a merged
     multi-layer projection output)."""
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_kv_rope_insert,
+    )
+
     torch.manual_seed(3)
     device = "cuda"
     dtype = torch.bfloat16
@@ -571,7 +577,7 @@ def test_kv_insert_fused_norm_row_strided(
     )
 
     k_cache_fused = torch.zeros_like(k_cache_ref)
-    torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+    fused_deepseek_v4_kv_rope_insert(
         kv,
         k_cache_fused,
         slot_mapping,
@@ -622,6 +628,10 @@ def test_q_interleaved_pads_without_rope(
     zero. ``q_head_padded=0`` drops the Q pass entirely and returns nothing,
     for a shard already at the kernel's head count.
     """
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+    )
+
     torch.manual_seed(5)
     device = "cuda"
     dtype = torch.bfloat16
@@ -637,7 +647,7 @@ def test_q_interleaved_pads_without_rope(
         num_blocks, block_size * V41_HEAD_BYTES, dtype=torch.uint8, device=device
     )
 
-    q_out = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+    q_out = fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
         q,
         kv,
         k_cache,
@@ -675,6 +685,10 @@ def test_q_interleaved_survives_graph_replay(n_heads: int):
     input -- that is what lets the layer prepare Q inside the captured region
     rather than in ``forward_mqa``.
     """
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+    )
+
     torch.manual_seed(6)
     device = "cuda"
     dtype = torch.bfloat16
@@ -691,7 +705,7 @@ def test_q_interleaved_survives_graph_replay(n_heads: int):
     )
 
     def prepare():
-        return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        return fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q,
             kv,
             k_cache,
@@ -741,6 +755,9 @@ def test_q_interleaved_is_orthogonal_to_norm_and_rope(
     interleaved layout must equal running the interleaved path on a permuted
     input, bit for bit, for every norm/RoPE combination.
     """
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+    )
     from vllm.models.deepseek_v41.common.ops.fused_layout import permute_q_to_fused
 
     torch.manual_seed(7)
@@ -759,7 +776,7 @@ def test_q_interleaved_is_orthogonal_to_norm_and_rope(
         cache = torch.zeros(
             num_blocks, block_size * V41_HEAD_BYTES, dtype=torch.uint8, device=device
         )
-        out = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        out = fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q_in,
             kv,
             cache,
@@ -931,6 +948,10 @@ def _call_full_cache_fp8_fused(
     bs,
     apply_q_norm=None,
 ):
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert,
+    )
+
     args = (
         q,
         kv,
@@ -944,7 +965,7 @@ def _call_full_cache_fp8_fused(
         eps,
         bs,
     )
-    op = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert
+    op = fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert
     if apply_q_norm is None:
         op(*args)
     else:
@@ -962,6 +983,10 @@ def _call_full_cache_bf16_fused(
     bs,
     apply_q_norm=None,
 ):
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert,
+    )
+
     args = (
         q,
         kv,
@@ -972,7 +997,7 @@ def _call_full_cache_bf16_fused(
         eps,
         bs,
     )
-    op = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert
+    op = fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert
     if apply_q_norm is None:
         op(*args)
     else:

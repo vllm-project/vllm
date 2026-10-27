@@ -88,9 +88,15 @@ def test_dspark_context_kv_matches_query_insert(
     )
 
     def legacy_insert():
+        from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+            fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert,
+            fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert,
+            fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+        )
+
         q = torch.zeros(kv.shape[0], 8, 512, dtype=kv.dtype, device="cuda")
         if cache_dtype == torch.uint8:
-            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 q,
                 kv,
                 reference.view(num_blocks, -1),
@@ -104,7 +110,7 @@ def test_dspark_context_kv_matches_query_insert(
                 kv_mxfp8,
             )
         elif cache_dtype == torch.bfloat16:
-            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
+            fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
                 q,
                 kv,
                 reference,
@@ -116,7 +122,7 @@ def test_dspark_context_kv_matches_query_insert(
             )
         else:
             q_fp8 = torch.empty_like(q, dtype=cache_dtype)
-            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+            fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
                 q,
                 kv,
                 q_fp8,
@@ -201,7 +207,11 @@ def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
         device="cuda",
     )
 
-    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+    )
+
+    fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
         torch.zeros(num_tokens, num_heads, 512, dtype=torch.bfloat16, device="cuda"),
         gathered_kv,
         reference.view(num_blocks, -1),
@@ -808,6 +818,9 @@ def test_v41_cache_writers_match_flashmla_decode(record: str):
     """FlashMLA and vLLM's gathers read back the token a V4.1 writer put mid
     page in a padded block, so all agree on the interleaved record layout."""
     import vllm.v1.attention.ops.flashmla as fm
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_kv_rope_insert,
+    )
     from vllm.models.deepseek_v41.common.ops.cache_utils import (
         dequantize_and_gather_k_cache,
         dequantize_and_gather_k_cache_triton,
@@ -829,7 +842,7 @@ def test_v41_cache_writers_match_flashmla_decode(record: str):
     cache = torch.zeros(2, block_size + 32, bytes_per_token, dtype=torch.uint8)
     cache = cache.to(device)[:, :block_size]
     if record == "swa_fp8":
-        torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+        fused_deepseek_v4_kv_rope_insert(
             kv, cache, positions, positions, cos_sin, block_size, None, True
         )
     else:

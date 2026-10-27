@@ -231,6 +231,19 @@ def _insert_context_kv(
     query and discard it, since context tokens have no query). Mirrors
     ``DeepseekV4Attention._fused_qnorm_rope_kv_insert``.
     """
+    from vllm.utils.import_utils import has_cutedsl
+
+    if not has_cutedsl():
+        raise RuntimeError(
+            "DeepseekV4 fused KV insert runs as a CuTe DSL kernel and "
+            "needs CUDA with nvidia-cutlass-dsl installed"
+        )
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+        fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert,
+        fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert,
+        fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+    )
+
     swa_cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
     cos_sin_cache = attn.rotary_emb.cos_sin_cache
@@ -244,7 +257,7 @@ def _insert_context_kv(
     if cache_dtype == torch.uint8:
         # fp8_ds_mla UE8M0 paged layout (the gfx950 aiter SWA cache path).
         swa_2d = swa_cache.view(swa_cache.shape[0], -1)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             dummy_q,
             kv,
             swa_2d,
@@ -257,7 +270,7 @@ def _insert_context_kv(
         )
     elif cache_dtype == torch.bfloat16:
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
+        fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
             dummy_q,
             kv,
             swa_3d,
@@ -274,7 +287,7 @@ def _insert_context_kv(
         # not define; kept for parity with the nvidia path.
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
         dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+        fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
             dummy_q,
             kv,
             dummy_q_fp8,

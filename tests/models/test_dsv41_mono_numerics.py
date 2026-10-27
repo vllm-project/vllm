@@ -21,6 +21,7 @@ import ray
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_cutedsl
 
 from ..utils import (
     ensure_model_parallel_initialized,
@@ -462,7 +463,10 @@ def _check_layers(rank: int, tp: int, device) -> None:
         q8, qs = mxfp8_e4m3_quantize(qr)
         q = rocm_mxfp8_block32_gemm(q8, qs, wq_b, wq_b_s, bf).view(M, H, HEAD_DIM)
         swa2d = s["swa_cache"].view(s["swa_cache"].shape[0], -1)
-        q_roped = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+            fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+        )
+        q_roped = fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q, kv, swa2d, s["slot_mapping"], s["positions"], cos_sin, H,
             cfg.rms_norm_eps, SWA_BLOCK, False, False, True, False,
         )  # fmt: skip
@@ -561,7 +565,10 @@ def _check_layers(rank: int, tp: int, device) -> None:
             assert not bad, f"replay {i}: outputs {bad} differ from the first run"
 
 
-@pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
+@pytest.mark.skipif(
+    not _on_cdna4() or not has_cutedsl(),
+    reason="the mono kernels target CDNA4; the fused KV insert needs the CuTe DSL",
+)
 @pytest.mark.parametrize("tp", [2, 4])
 def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int):
     if torch.accelerator.device_count() < tp:
