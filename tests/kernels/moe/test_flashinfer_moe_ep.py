@@ -997,7 +997,7 @@ def test_adapter_kwargs_match_installed_flashinfer(
             else moe_ep.Sm107_Mxfp8_Mxfp4_Bf16_Cutedsl_MegaMoeConfig
         )
         assert isinstance(megakernel, expected_config)
-        assert megakernel.knobs is None
+        assert megakernel.knobs == ("cache" if weight_format == "nvfp4" else None)
         assert megakernel.apply_routing_weights_before_fc2 is (
             routing is RoutingMethodType.DeepseekV4
         )
