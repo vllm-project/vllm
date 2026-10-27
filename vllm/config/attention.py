@@ -121,13 +121,15 @@ class AttentionConfig:
     """Under tensor parallelism, shard sparse-MLA (DSA) prefill by token
     instead of by head: each TP rank runs the indexer and the sparse attention
     for its slice of the tokens with all heads, and all-to-all exchanges move
-    the query and the attention output between the layouts. Applies to
-    prefill-only steps of at least `sparse_mla_shard_q_min_tokens` tokens on
-    the FlashMLA sparse backend with an FP8 KV cache, without DCP or PCP."""
+    the query and the attention output between the layouts. Applies to steps
+    with at least `sparse_mla_shard_q_min_tokens` prefill tokens on the
+    FlashInfer sparse MLA backend, or on FlashMLA sparse with an FP8 DeepSeek
+    KV cache, without DCP, PCP or HiSparse. A mixed step's decode tokens stay
+    sharded by head."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=8192, ge=1)
-    """Minimum number of tokens in a prefill-only step for
-    `sparse_mla_shard_q` to apply."""
+    """Minimum number of prefill tokens in a step for `sparse_mla_shard_q` to
+    apply."""
 
     minimax_m3_indexer_cp: bool = False
     """MiniMax M3 on ROCm with tensor_parallel_size > 1: score the sparse

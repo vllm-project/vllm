@@ -283,15 +283,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         # Build ShardQ splits only when a layer consumes them.
         layers = vllm_config.compilation_config.static_forward_context
-        shardq_layers = [
-            layers[name]
-            for name in layer_names
-            if getattr(layers.get(name), "use_shardq", False)
-        ]
-        self.use_shardq = bool(shardq_layers)
-        # Mixed steps need every consuming impl to handle head-sharded decodes.
-        self.shardq_mixed = all(
-            layer.impl.supports_shardq_mixed for layer in shardq_layers
+        self.use_shardq = any(
+            getattr(layers.get(name), "use_shardq", False) for name in layer_names
         )
         self.shardq_min_tokens = (
             vllm_config.attention_config.sparse_mla_shard_q_min_tokens
@@ -468,7 +461,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         if (
             self.use_shardq
             and num_prefills > 0
-            and (num_decodes == 0 or self.shardq_mixed)
             and not (prefill is not None and prefill.use_dense_mha)
         ):
             # Split the prefill tokens; decode tokens stay head-sharded.
@@ -716,8 +708,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     group_conversion_decode_only: ClassVar[bool] = False
     # Whether forward_mqa_shardq is implemented and validated.
     supports_shardq: ClassVar[bool] = False
-    # Whether forward_mqa_shardq also handles a mixed step's decode tokens.
-    supports_shardq_mixed: ClassVar[bool] = True
 
     def __init__(
         self,
