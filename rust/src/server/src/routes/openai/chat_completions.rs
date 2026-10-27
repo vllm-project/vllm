@@ -1030,7 +1030,10 @@ mod tests {
         vllm_llm::TokenUsage {
             prompt_token_count: prompt_tokens,
             output_token_count: output_tokens,
-            cached_token_count: cached_tokens,
+            prompt_cache_usage: vllm_llm::PromptCacheUsage {
+                cached_token_count: cached_tokens,
+                cache_creation_token_count: 0,
+            },
         }
         .into()
     }
@@ -1804,7 +1807,7 @@ mod tests {
                     engine: vllm_llm::TokenUsage {
                         prompt_token_count: 3,
                         output_token_count: 3,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     reasoning_tokens: 2,
                 },
@@ -1876,7 +1879,7 @@ mod tests {
                     engine: vllm_llm::TokenUsage {
                         prompt_token_count: 1,
                         output_token_count: 2,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     reasoning_tokens: 2,
                 },

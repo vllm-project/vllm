@@ -407,8 +407,8 @@ pub struct SharedRuntimeArgs {
     #[serde(default = "default_enable_log_deltas")]
     pub enable_log_deltas: bool,
 
-    /// Include prompt_tokens_details in usage when cached prompt tokens are
-    /// present.
+    /// Include prompt_tokens_details in usage, including cached and newly
+    /// cached prompt tokens.
     #[arg(
         long,
         default_missing_value = "true",

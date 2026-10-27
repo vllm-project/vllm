@@ -411,7 +411,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
         ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
-        num_cached_tokens: Some(finished.usage.cached_token_count as u32),
+        num_cached_tokens: Some(finished.usage.prompt_cache_usage.cached_token_count as u32),
     })
 }
 
@@ -932,7 +932,7 @@ mod tests {
             usage: vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             finish_reason: reason,
             kv_transfer_params: None,
@@ -1040,7 +1040,7 @@ mod tests {
     fn to_sequence_output_threads_token_ids_into_eos_id() {
         let mut fin = finished(FinishReason::Stop(None));
         fin.usage.prompt_token_count = 8;
-        fin.usage.cached_token_count = 5;
+        fin.usage.prompt_cache_usage.cached_token_count = 5;
         let opts = ResponseOpts {
             output_text: true,
             output_token_ids: true,

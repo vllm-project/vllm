@@ -53,7 +53,7 @@ fn finished() -> Finished {
         usage: vllm_llm::TokenUsage {
             prompt_token_count: 0,
             output_token_count: 0,
-            cached_token_count: 0,
+            prompt_cache_usage: Default::default(),
         },
         finish_reason: FinishReason::stop_eos(),
         kv_transfer_params: None,
@@ -131,7 +131,7 @@ fn interrupted_final_message_is_preserved() {
             usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             }),
             timestamps: Default::default(),
             finish_reason: FinishReason::stop_eos(),
@@ -183,7 +183,7 @@ fn interrupted_analysis_message_is_preserved() {
             usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             }),
             timestamps: Default::default(),
             finish_reason: FinishReason::stop_eos(),

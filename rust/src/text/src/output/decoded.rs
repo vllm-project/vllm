@@ -10,7 +10,7 @@ use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-use vllm_llm::{FinishReason, GenerateOutput, RequestTimestamps, TokenUsage};
+use vllm_llm::{FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps, TokenUsage};
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
 use super::logprobs::{
@@ -169,7 +169,7 @@ pub async fn decoded_text_event_stream(
 ) -> crate::Result<()> {
     let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
     let mut prompt_token_count = 0_usize;
-    let mut cached_token_count = 0_usize;
+    let mut prompt_cache_usage = PromptCacheUsage::default();
     let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
@@ -178,7 +178,7 @@ pub async fn decoded_text_event_stream(
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
-        cached_token_count = cached_token_count.max(output.cached_token_count);
+        prompt_cache_usage.merge(output.prompt_cache_usage);
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
@@ -348,7 +348,7 @@ pub async fn decoded_text_event_stream(
                     usage: TokenUsage {
                         prompt_token_count,
                         output_token_count,
-                        cached_token_count,
+                        prompt_cache_usage,
                     },
                     finish_reason: reason,
                     kv_transfer_params,
@@ -610,7 +610,7 @@ mod tests {
                             usage: TokenUsage {
                                 prompt_token_count: 0,
                                 output_token_count: 3,
-                                cached_token_count: 0,
+                                prompt_cache_usage: Default::default(),
                             },
                             finish_reason: FinishReason::Length,
                             kv_transfer_params: None,
@@ -646,7 +646,7 @@ mod tests {
                             usage: TokenUsage {
                                 prompt_token_count: 0,
                                 output_token_count: 2,
-                                cached_token_count: 0,
+                                prompt_cache_usage: Default::default(),
                             },
                             finish_reason: FinishReason::Stop(Some(StopReason::TokenId(
                                 b'!' as u32,
