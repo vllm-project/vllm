@@ -29,7 +29,8 @@ use axum::body::Body;
 use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    DEFAULT_LOG_STATS_INTERVAL, HttpListenerMode, LoraModulePath, OutputLogging, TlsConfig,
+    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath,
+    OutputLogging, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -64,7 +65,6 @@ const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
 /// How long the server waits for a keepalive PING reply before dropping the gRPC
 /// connection. 20s matches the gRPC-core default.
 const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
-const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Resolve the public model names accepted by the frontend.
 fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
@@ -130,6 +130,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     })
     .await
     .context("failed to connect to engine core")?;
+    let server_info = ServerInfoSnapshot::new(config, &client);
 
     let llm = Llm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
@@ -149,7 +150,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         AppState::new(served_model_names, chat)
             .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
-            .with_server_info(ServerInfoSnapshot::from_config(config))
+            .with_server_info(server_info)
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_profiler(config.profiler.clone()),

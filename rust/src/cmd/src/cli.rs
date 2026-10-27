@@ -36,8 +36,8 @@ use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_arg
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
     CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    HttpListenerMode, LoraModulePath, OutputLogging, ParserSelection, RenderConfig,
-    RendererSelection,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogging,
+    ParserSelection, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -509,6 +509,18 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub disable_request_id_randomization: bool,
 
+    /// Maximum HTTP request body size in bytes (default 32 MiB); `0` removes
+    /// the limit, like the Python frontend, which has none. It is set only
+    /// through `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
+        value_parser = parse_byte_count
+    )]
+    #[serde(skip)]
+    pub http_max_request_body_size: Option<usize>,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -659,6 +671,11 @@ impl SharedRuntimeArgs {
             self.disable_request_id_randomization = parse_int_flag(&value).map_err(|error| {
                 format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
             })?;
+        }
+        if let Some(value) = lookup("VLLM_HTTP_MAX_REQUEST_BODY_SIZE") {
+            let size = parse_byte_count(&value)
+                .map_err(|error| format!("invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: {error}"))?;
+            self.http_max_request_body_size = Some(size);
         }
         Ok(())
     }
@@ -839,6 +856,11 @@ impl SharedRuntimeArgs {
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
+            request_body_limit_bytes: match self.http_max_request_body_size {
+                None => Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES),
+                Some(0) => None,
+                Some(limit) => Some(limit),
+            },
         }
     }
 
@@ -938,6 +960,11 @@ impl FromStr for LogStatsInterval {
 fn parse_int_flag(value: &str) -> Result<bool, String> {
     let value: i64 = value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))?;
     Ok(value != 0)
+}
+
+/// Parse a byte count environment variable as a non-negative decimal integer.
+fn parse_byte_count(value: &str) -> Result<usize, String> {
+    value.trim().parse().map_err(|_| format!("`{value}` is not a number of bytes"))
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
