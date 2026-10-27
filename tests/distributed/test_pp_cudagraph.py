@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from vllm.config.cache import CacheConfig
 from vllm.platforms import current_platform
 
 from ..utils import (
@@ -29,12 +28,9 @@ def test_pp_cudagraph(
     ATTN_BACKEND: str | None,
 ):
     if current_platform.is_rocm():
-        # Shared ROCm CI hosts can hand off a GPU before a just-exited
-        # process's VRAM is reclaimed, transiently failing vLLM's startup
-        # free-memory check.
-        RemoteOpenAIServer.wait_for_gpu_memory_available(
-            CacheConfig.gpu_memory_utilization
-        )
+        # Mitigates a shared-host flake where a just-exited process's
+        # VRAM isn't reclaimed yet, failing vLLM's startup memory check.
+        RemoteOpenAIServer.wait_for_idle_gpu(num_devices=PP_SIZE)
 
     cudagraph_args = [
         # use half precision for speed and memory savings in CI environment

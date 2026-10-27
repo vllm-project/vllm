@@ -595,58 +595,27 @@ class RemoteVLLMServer:
         return sum(total - free for free, total in per_device)
 
     @staticmethod
-    def wait_for_gpu_memory_available(
-        gpu_memory_utilization: float,
-        timeout: float = 60.0,
-        poll_interval: float = 5.0,
+    def wait_for_idle_gpu(
+        num_devices: int, timeout: float = 60.0, poll_interval: float = 5.0
     ) -> None:
-        """Wait for each visible device to pass vLLM's own startup check:
-        ``free >= total * gpu_memory_utilization``
-        (``vllm.v1.worker.utils.request_memory``).
-
-        Opt-in preflight for suites that have hit transient startup
-        failures from a just-exited process's VRAM not yet reclaimed on a
-        shared host; not called automatically by every test using this
-        class. Doesn't replace vLLM's check -- it just avoids paying for
-        a doomed engine start. If memory is still short at ``timeout``,
-        log the shortfall and let vLLM raise its own error.
+        """Opt-in preflight: give a just-exited process's VRAM a moment to
+        clear on a shared host before starting a server, so vLLM's own
+        startup free-memory check doesn't hit a stale reading. Only
+        checks the first ``num_devices`` devices the server will use, so
+        an unrelated job on another device isn't mistaken for contention.
+        Not a hard gate -- proceeds after ``timeout`` either way.
         """
-        start = time.time()
-        while True:
+        headroom_bytes = 4 * 1024**3 if current_platform.is_rocm() else 2 * 1024**3
+        deadline = time.time() + timeout
+        while time.time() < deadline:
             per_device = RemoteVLLMServer._get_gpu_memory_per_device()
-            if per_device is None:
-                return  # Can't query, nothing to do
-
-            shortfalls = []
-            for i, (free, total) in enumerate(per_device):
-                required = total * gpu_memory_utilization
-                if free < required:
-                    shortfalls.append((i, free, total, required))
-
-            if not shortfalls:
+            if per_device is None or all(
+                total - free <= headroom_bytes
+                for free, total in per_device[:num_devices]
+            ):
                 return
-
-            elapsed = time.time() - start
-            if elapsed >= timeout:
-                details = ", ".join(
-                    f"device {i}: {free / 1e9:.2f}/{total / 1e9:.2f} GiB free, "
-                    f"need {required / 1e9:.2f} GiB"
-                    for i, free, total, required in shortfalls
-                )
-                print(
-                    f"[GPU memory preflight] still insufficient after "
-                    f"{elapsed:.0f}s ({details}). This usually means a "
-                    "previous process on this host has not released its "
-                    "VRAM yet; proceeding and letting vLLM's own startup "
-                    "check raise."
-                )
-                return
-
-            print(
-                f"[GPU memory preflight] Waiting for GPU memory to free up "
-                f"before server start [{elapsed:.0f}s/{timeout:.0f}s]"
-            )
             time.sleep(poll_interval)
+        print(f"[GPU memory preflight] Still busy after {timeout:.0f}s; proceeding.")
 
     def _wait_for_gpu_memory_release(
         self, timeout: float = 120.0, log_interval: float = 10.0
