@@ -786,40 +786,15 @@ class Scheduler(SchedulerInterface):
 
         prefill_limits: dict[str, int] = {}
         reserved_waiting = False
-        if (
+        plan_prefills = (
             self.scheduler_config.residual_sjf_preempt_prefills
             and not defer_prefills
             and token_budget > 0
-        ):
-            queues = []
-            if not self._residual_sjf_retry_running:
-                queues.append(self.kv_holding_waiting)
-                if self._pause_state == PauseState.UNPAUSED:
-                    queues.append(self.waiting)
-            candidates = (
-                r
-                for queue in queues
-                for r in queue
-                if (
-                    r.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED)
-                    or r.request_id in self.finished_recving_kv_req_ids
-                )
-                and not (r.num_stale_output_tokens and not r.drop_stale_output)
-            )
-            prefill_limits, reserved_waiting = get_prefill_token_limits(
-                self.running,
-                candidates,
-                self._get_residual_sjf_cost,
-                self.block_size,
-                self.scheduler_config.residual_sjf_max_wait_ms,
-                token_budget,
-                input_budget,
-                long_prefill_token_threshold,
-                self.max_num_active_reqs
-                - len(self.running)
-                - self.num_waiting_for_streaming_input,
-                draft_slots,
-            )
+        )
+        if plan_prefills:
+            # Schedule decodes through the normal eligibility/allocation path
+            # before sharing the remaining budget among prefills.
+            self.running.sort(key=lambda r: r.is_prefill_chunk)
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -827,6 +802,38 @@ class Scheduler(SchedulerInterface):
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
+
+            if plan_prefills and request.is_prefill_chunk:
+                plan_prefills = False
+                queues = []
+                if not self._residual_sjf_retry_running:
+                    queues.append(self.kv_holding_waiting)
+                    if self._pause_state == PauseState.UNPAUSED:
+                        queues.append(self.waiting)
+                candidates = (
+                    r
+                    for queue in queues
+                    for r in queue
+                    if (
+                        r.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED)
+                        or r.request_id in self.finished_recving_kv_req_ids
+                    )
+                    and not (r.num_stale_output_tokens and not r.drop_stale_output)
+                )
+                prefill_limits, reserved_waiting = get_prefill_token_limits(
+                    self.running,
+                    candidates,
+                    self._get_residual_sjf_cost,
+                    self.block_size,
+                    self.scheduler_config.residual_sjf_max_wait_ms,
+                    token_budget,
+                    input_budget,
+                    long_prefill_token_threshold,
+                    self.max_num_active_reqs
+                    - len(self.running)
+                    - self.num_waiting_for_streaming_input,
+                    draft_slots,
+                )
 
             if (
                 request.num_output_placeholders > 0

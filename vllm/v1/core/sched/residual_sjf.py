@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from collections import deque
 from collections.abc import Callable, Iterable
 
 from vllm.v1.request import Request, RequestStatus
@@ -44,24 +45,22 @@ def get_prefill_token_limits(
     if not prefills:
         return {}, False
 
-    # Decodes keep their budget even if they occur later in the running list.
-    for request in running:
-        if not request.is_prefill_chunk:
-            demand = max(
-                0,
-                request.num_tokens_with_spec
-                + request.num_output_placeholders
-                - request.num_computed_tokens,
-            )
-            token_budget -= demand
-            input_budget -= demand + (draft_slots if demand else 0)
-
-    candidates = prefills + (list(waiting) if free_slots > 0 else [])
     now = time.time()
-    candidates.sort(key=lambda r: residual_sjf_key(r, cost_fn, now, max_wait_ms / 1000))
+    key = lambda r: residual_sjf_key(r, cost_fn, now, max_wait_ms / 1000)
+    prefills.sort(key=key)
+    running_prefills = deque(prefills)
+    # Preserve admission phases: KV holders precede ordinary waiting requests.
+    # Compare only the head of that stream with the next resident prefill.
+    pending = deque(waiting if free_slots > 0 else ())
     limits = {}
     reserved_waiting = False
-    for request in candidates:
+    while running_prefills or pending:
+        if pending and (
+            not running_prefills or key(pending[0]) < key(running_prefills[0])
+        ):
+            request = pending.popleft()
+        else:
+            request = running_prefills.popleft()
         is_running = request.status == RequestStatus.RUNNING
         if not is_running and free_slots <= 0:
             continue

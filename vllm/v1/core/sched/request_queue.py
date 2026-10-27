@@ -240,12 +240,6 @@ class ResidualSJFRequestQueue(RequestQueue):
             key=lambda item: item[1],
         )
 
-    def pin_request(self, request: Request) -> None:
-        """Pin a previously selected request until it is popped or removed."""
-        if request not in self._requests:
-            raise ValueError("Cannot pin a request that is not in the queue")
-        self._selected_request = request
-
     def _clear_selection(self) -> None:
         self._selected_request = None
 

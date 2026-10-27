@@ -12,6 +12,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.request_queue import ResidualSJFRequestQueue
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.request import RequestStatus
 
 from .utils import create_requests, create_scheduler, mock_kv
 
@@ -78,7 +79,7 @@ def test_residual_sjf_queue_supports_requeue_and_removal():
         queue.add_request(request)
 
     assert list(queue) == [requests[2], requests[1], requests[0]]
-    queue.pin_request(requests[2])
+    assert queue.peek_request() is requests[2]
     queue.remove_request(requests[2])
     assert queue.pop_request() is requests[1]
     queue.prepend_request(requests[1])
@@ -284,6 +285,52 @@ def _finish_step(scheduler, output, finished_recving=None):
             kv_connector_output=KVConnectorOutput(finished_recving=finished_recving),
         ),
     )
+
+
+@pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
+def test_ineligible_async_decodes_leave_prefill_budget_available(
+    pipeline_parallel_size,
+):
+    scheduler = create_scheduler(
+        scheduling_policy="residual_sjf",
+        residual_sjf_preempt_prefills=True,
+        async_scheduling=True,
+        pipeline_parallel_size=pipeline_parallel_size,
+        use_v2_model_runner=pipeline_parallel_size > 1,
+        max_num_batched_tokens=32,
+        max_num_seqs=32,
+    )
+    scheduler.add_request(create_requests(1, num_tokens=129, req_ids=["long"])[0])
+    _finish_step(scheduler, scheduler.schedule())
+    shorts = create_requests(
+        31, num_tokens=1, max_tokens=1 if pipeline_parallel_size == 1 else 32
+    )
+    for request in shorts:
+        scheduler.add_request(request)
+    scheduler.schedule()  # Leave terminal or PP-cadence-gated outputs in flight.
+    assert all(request.num_output_placeholders == 1 for request in shorts)
+    assert scheduler.schedule().num_scheduled_tokens == {"long": 32}
+
+
+def test_kv_holder_reservation_precedes_ordinary_preempted_request():
+    scheduler = create_scheduler(
+        scheduling_policy="residual_sjf",
+        residual_sjf_preempt_prefills=True,
+        max_num_batched_tokens=32,
+        max_num_seqs=2,
+    )
+    scheduler.add_request(create_requests(1, num_tokens=129, req_ids=["resident"])[0])
+    _finish_step(scheduler, scheduler.schedule())
+    holder = create_requests(1, num_tokens=64, req_ids=["holder"])[0]
+    assert scheduler.kv_cache_manager.allocate_slots(holder, 32) is not None
+    holder.num_computed_tokens = 32
+    scheduler.add_request(holder)
+    ordinary = create_requests(1, num_tokens=1, req_ids=["ordinary"])[0]
+    ordinary.status = RequestStatus.PREEMPTED
+    ordinary.num_preemptions = 1
+    ordinary.arrival_time = holder.arrival_time - 0.01
+    scheduler.add_request(ordinary)
+    assert scheduler.schedule().num_scheduled_tokens == {"holder": 32}
 
 
 @pytest.mark.parametrize("enabled", [False, True])

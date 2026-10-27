@@ -101,8 +101,11 @@ and `--enable-chunked-prefill` to let running prefill chunks yield budget to
 shorter remaining prefills (prefill SRPT). This option is disabled by default.
 Waiting and running prefills share the block-quantized residual cost and
 max-wait aging; running requests use their actual computed progress. This
-does not predict generation length. Resident KV stays allocated, and decode
-token demand is reserved before prefills share the budget.
+does not predict generation length. Resident KV stays allocated. Eligible decodes
+are scheduled first, then prefills share the remaining budget. The running list
+keeps decodes ahead of prefill chunks, so the existing tail-based KV preemption
+considers prefills first when allocation runs out of space. KV-holding waiting
+requests retain admission priority over ordinary waiting requests.
 
 Only requests that fit in free running slots reserve waiting budget. Free slots
 exclude slots held by streaming sessions. Pending KV transfers do not reserve
