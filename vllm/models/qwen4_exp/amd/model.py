@@ -43,6 +43,10 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
     _require_is_multimodal,
 )
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5Model,
+)
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
     Qwen3NextSparseMoeBlock,
@@ -65,10 +69,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.common.ops.sequence_parallel import sp_all_gather
-from vllm.models.qwen3_5.amd.model import (
-    Qwen3_5ForConditionalGeneration,
-    Qwen3_5Model,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors

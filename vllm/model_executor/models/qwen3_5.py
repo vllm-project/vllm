@@ -25,7 +25,6 @@
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from itertools import islice
 from typing import ClassVar
 
 import torch
@@ -37,10 +36,10 @@ from transformers import (
     Qwen3_5TextConfig,
 )
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
-    tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -62,8 +61,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.interfaces import (
-    EagleModelMixin,
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.sequence import IntermediateTensors
+from vllm.tokenizers.registry import cached_tokenizer_from_config
+
+from .interfaces import (
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
@@ -74,22 +77,23 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
     _require_is_multimodal,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
-from vllm.model_executor.models.qwen3_next import (
+from .qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
+from .qwen3_next import (
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,
     Qwen3NextModel,
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
 )
-from vllm.model_executor.models.qwen3_vl import (
+from .qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLDummyInputsBuilder,
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
+    Qwen3VLProcessingInfo,
     mrope_positions_factor,
 )
-from vllm.model_executor.models.utils import (
+from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
@@ -100,34 +104,22 @@ from vllm.model_executor.models.utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
-from vllm.models.qwen3_5.common.mm_preprocess import (
-    Qwen3_5MoeProcessingInfo,
-    Qwen3_5ProcessingInfo,
-)
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.sequence import IntermediateTensors
-from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 logger = init_logger(__name__)
 
 
-def _all_gather_hidden_and_residual(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor | None,
-    full_num_tokens: int,
-    hidden_size: int,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if residual is None:
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-        hidden_states = hidden_states[:full_num_tokens]
-        return hidden_states, None
+class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
+    def get_hf_config(self):
+        return self.ctx.get_hf_config(Qwen3_5Config)
 
-    combined_states = torch.cat([hidden_states, residual], dim=-1)
-    combined_states = tensor_model_parallel_all_gather(combined_states, 0)
-    combined_states = combined_states[:full_num_tokens]
-    hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
-    return hidden_states, residual
+
+class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
+    def get_hf_config(self):
+        # transformers 5.x renames the top-level Qwen3.5-MoE config class to
+        # Qwen3_5MoeTextConfig for text-only models, while transformers ≤4.x
+        # returns Qwen3_5MoeConfig (the multimodal wrapper).  Accept both so
+        # that vLLM works regardless of which transformers version is installed.
+        return self.ctx.get_hf_config((Qwen3_5MoeConfig, Qwen3_5MoeTextConfig))
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
@@ -218,7 +210,17 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             )
 
 
-class Qwen3_5Model(nn.Module, EagleModelMixin):
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        # positions is of shape (3, seq_len) if mrope is enabled for qwen2-vl,
+        # otherwise (seq_len, ).
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
+class Qwen3_5Model(Qwen3NextModel):
     # Qwen3.5 ships the GDN in_proj checkpoints separately (qwen3-next
     # pre-fuses them); fuse them on top of the qwen3-next QKV/gate_up mapping.
     hf_to_vllm_mapper = Qwen3NextModel.hf_to_vllm_mapper | WeightsMapper(
@@ -231,7 +233,7 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+        super(Qwen3NextModel, self).__init__()
 
         config: Qwen3_5TextConfig | Qwen3_5MoeTextConfig = (
             vllm_config.model_config.hf_text_config
@@ -276,77 +278,6 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.embed_input_ids(input_ids)
-            residual = None
-        else:
-            assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
-
-        full_num_tokens = positions.shape[-1]
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for layer_idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer),
-            start=self.start_layer,
-        ):
-            if (
-                hidden_states.shape[0] != full_num_tokens
-                and not layer.use_attn_reduce_scatter_for_moe
-            ):
-                hidden_states, residual = _all_gather_hidden_and_residual(
-                    hidden_states,
-                    residual,
-                    full_num_tokens,
-                    self.config.hidden_size,
-                )
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-            )
-            if (layer_idx + 1) in self.aux_hidden_state_layers and hidden_states.shape[
-                0
-            ] != full_num_tokens:
-                hidden_states, residual = _all_gather_hidden_and_residual(
-                    hidden_states,
-                    residual,
-                    full_num_tokens,
-                    self.config.hidden_size,
-                )
-            self._maybe_add_hidden_state(
-                aux_hidden_states, layer_idx + 1, hidden_states, residual
-            )
-
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
-        if hidden_states.shape[0] != full_num_tokens:
-            hidden_states, residual = _all_gather_hidden_and_residual(
-                hidden_states,
-                residual,
-                full_num_tokens,
-                self.config.hidden_size,
-            )
-        hidden_states, _ = self.norm(hidden_states, residual)
-        if aux_hidden_states:
-            return hidden_states, aux_hidden_states
-        return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # FSE must match construction (Qwen3NextSparseMoeBlock): reroute the
@@ -425,7 +356,7 @@ class Qwen3_5ForCausalLMBase(
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
+        self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
 
@@ -593,7 +524,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                 vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
-        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
+        self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
 
@@ -718,7 +649,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
 
 class Qwen3_5_MoeMixtureOfExperts(MixtureOfExperts):
-    language_model: Qwen3_5MoeForCausalLM
+    language_model: Qwen3_5ForCausalLM
     num_local_physical_experts: int
 
     def update_physical_experts_metadata(
@@ -816,7 +747,7 @@ class Qwen3_5MoeForConditionalGeneration(
                 vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
             )
 
-        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
+        self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
 

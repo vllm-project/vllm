@@ -485,7 +485,7 @@ def test_online_quantization(
             deepseek_v32_model, "DeepseekV32MLAAttention", _StubAttention
         )
     elif architecture == "Qwen3_5MoeForCausalLM":
-        from vllm.models.qwen3_5.amd import model as qwen3_5_model
+        from vllm.model_executor.models import qwen3_5 as qwen3_5_model
 
         monkeypatch.setattr(qwen3_5_model, "Qwen3NextAttention", _StubAttention)
     elif architecture == "Qwen4ExpForCausalLM":

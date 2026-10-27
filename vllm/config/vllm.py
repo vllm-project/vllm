@@ -135,6 +135,12 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # graphs are on. Enable this architecture so the published AMD
         # recipe can start.
         return frozenset({"DeepseekV41ForCausalLM"})
+    if not current_platform.is_cuda():
+        # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
+        # platforms keep the torch.compile path.
+        return frozenset(
+            a for a in DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES if "Qwen3_5" not in a
+        )
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
