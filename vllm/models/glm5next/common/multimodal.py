@@ -3,7 +3,7 @@
 """GLM-5.3-Flash vision tower and multimodal processor."""
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
@@ -36,7 +36,6 @@ from vllm.model_executor.models.glm4_1v import (
     Glm4vMultiModalProcessor,
     Glm4vProcessingInfo,
 )
-from vllm.model_executor.models.qwen2_vl import _create_qwen2vl_field_factory
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -46,19 +45,7 @@ from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
 )
 from vllm.models.common.ops import fused_q_kv_rmsnorm
-from vllm.multimodal.inputs import MultiModalKwargsItems
-from vllm.multimodal.parse import (
-    DictEmbeddingItems,
-    ImageSize,
-    MultiModalDataItems,
-    MultiModalDataParser,
-)
-from vllm.multimodal.processing import (
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-    cached_encode,
-)
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -634,52 +621,6 @@ class Glm5NextVisionTransformer(nn.Module):
 _MAX_VIDEO_TOKENS = 30000
 
 
-class Glm5NextMultiModalDataParser(MultiModalDataParser):
-    """Placeholder metadata for EPD consumers.
-
-    The patch grid sizes image placeholders. Video placeholders also embed one
-    timestamp string per temporal patch, so those timestamps travel with the
-    grid when embeddings arrive through the EC connector.
-    """
-
-    embedding_fields = {
-        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
-        "video": {
-            "video_embeds": "values",
-            "video_grid_thw": "metadata",
-            "timestamps": "metadata",
-        },
-    }
-
-    def __init__(self, spatial_merge_size: int, *args, **kwargs):
-        self._spatial_merge_size = spatial_merge_size
-        super().__init__(*args, **kwargs)
-
-    def _parse_image_data(self, data):
-        if isinstance(data, dict):
-            required, optional = self.embedding_field_sets("image")
-            return DictEmbeddingItems(
-                data,
-                modality="image",
-                required_fields=required,
-                optional_fields=optional,
-                fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
-            )
-        return super()._parse_image_data(data)
-
-    def _parse_video_data(self, data):
-        if isinstance(data, dict):
-            required, optional = self.embedding_field_sets("video")
-            return DictEmbeddingItems(
-                data,
-                modality="video",
-                required_fields=required,
-                optional_fields=optional,
-                fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
-            )
-        return super()._parse_video_data(data)
-
-
 class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     """Token-budget geometry for the multimodal checkpoint.
 
@@ -696,50 +637,6 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
             video_processor.max_image_tokens, _MAX_VIDEO_TOKENS
         )
         return processor
-
-    def get_data_parser(self):
-        return Glm5NextMultiModalDataParser(
-            self.get_hf_config().vision_config.spatial_merge_size,
-            video_needs_metadata=True,
-            expected_hidden_size=self._get_expected_hidden_size(),
-            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
-        )
-
-    def _published_video_timestamps(self, video_item) -> list[int]:
-        """Timestamps the encoder publishes so a consumer can skip sampling."""
-        video, metadata = video_item
-        return self._get_video_second_idx_glm46v(metadata, len(video))
-
-    def _placeholder_from_timestamps(
-        self,
-        timestamps: Sequence[float] | torch.Tensor,
-        grid_thw: torch.Tensor,
-    ) -> list[int]:
-        """Video placeholder from a grid and the timestamps that size it."""
-        hf_processor = self.get_hf_processor()
-        tokenizer = self.get_tokenizer()
-        hf_config = self.get_hf_config()
-        merge_length = hf_processor.image_processor.merge_size**2
-        if isinstance(timestamps, torch.Tensor):
-            timestamp_values = timestamps.flatten().tolist()
-        else:
-            timestamp_values = list(timestamps)
-
-        frames_idx_token = [
-            tokenizer.encode(f"{float(ts):.1f} seconds", add_special_tokens=False)
-            for ts in timestamp_values
-        ]
-        _, height, width = grid_thw
-        num_tokens_per_frame = int(height * width) // merge_length
-        frame_embed_token_id = hf_processor.image_token_id
-        placeholder = [hf_config.video_start_token_id]
-        for frame_idx in frames_idx_token:
-            placeholder.append(hf_config.image_start_token_id)
-            placeholder.extend([frame_embed_token_id] * num_tokens_per_frame)
-            placeholder.append(hf_config.image_end_token_id)
-            placeholder.extend(frame_idx)
-        placeholder.append(hf_config.video_end_token_id)
-        return placeholder
 
     @staticmethod
     def _alignment_factor(proc) -> int:
@@ -923,15 +820,7 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
 class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
     """``Glm5NextProcessor`` extracts image/video features
     only and passes the prompt text through unchanged, so prompt expansion
-    (image token repeat, video frame/timestamp structure) is owned by vLLM's
-    prompt-update machinery. ``_get_prompt_updates`` builds the replacement
-    from ``image_grid_thw`` / ``video_grid_thw`` and video timestamps, which is
-    also what an EPD consumer receives when embeddings arrive out of band."""
-
-    def _glm_info(self) -> Glm5NextProcessingInfo:
-        info = object.__getattribute__(self, "info")
-        assert isinstance(info, Glm5NextProcessingInfo)
-        return info
+    is owned by the inherited GLM-4V prompt-update machinery."""
 
     def _hf_processor_applies_updates(
         self,
@@ -941,74 +830,3 @@ class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
         tokenization_kwargs: Mapping[str, object],
     ) -> bool:
         return False
-
-    def _apply_hf_processor_main(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_kwargs: Mapping[str, object],
-    ):
-        processed = super()._apply_hf_processor_main(mm_items, hf_kwargs)
-        video_items = mm_items.get("video")
-        if (
-            video_items is not None
-            and video_items.get_count() > 0
-            and not isinstance(video_items, DictEmbeddingItems)
-            and "timestamps" not in processed
-        ):
-            # Publish the same timestamps the prompt replacement encodes, so an
-            # EC consumer can rebuild the placeholder without the frames.
-            processed["timestamps"] = [
-                self._glm_info()._published_video_timestamps(video_items.get(i))
-                for i in range(video_items.get_count())
-            ]
-        return processed
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-        merge_length = image_processor.merge_size**2
-
-        def get_image_replacement(item_idx: int):
-            grid_thw = out_mm_kwargs["image"][item_idx]["image_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-            num_tokens = int(grid_thw.prod()) // merge_length
-            return [hf_processor.image_token_id] * num_tokens
-
-        def get_video_replacement(item_idx: int):
-            out_item = out_mm_kwargs["video"][item_idx]
-            grid_thw = out_item["video_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-            placeholder = self._glm_info()._placeholder_from_timestamps(
-                out_item["timestamps"].data,
-                grid_thw,
-            )
-            return PromptUpdateDetails.select_token_id(
-                placeholder,
-                embed_token_id=hf_processor.image_token_id,
-            )
-
-        return [
-            PromptReplacement(
-                modality="image",
-                target=cached_encode(
-                    tokenizer, hf_processor.image_token, add_special_tokens=False
-                ),
-                replacement=get_image_replacement,
-            ),
-            PromptReplacement(
-                modality="video",
-                target=[
-                    vocab["<|begin_of_video|>"],
-                    vocab["<|video|>"],
-                    vocab["<|end_of_video|>"],
-                ],
-                replacement=get_video_replacement,
-            ),
-        ]

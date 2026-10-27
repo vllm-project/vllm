@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash EPD metadata-only parser contract."""
+"""EPD metadata-only parser contract shared by GLM-4V and GLM-5.3-Flash."""
 
 import pytest
 import torch
 
-from vllm.models.glm5next.common.multimodal import Glm5NextMultiModalDataParser
+from vllm.model_executor.models.glm4_1v import Glm4vMultiModalDataParser
 
 
 @pytest.mark.parametrize("allow_missing", [False, True])
 def test_glm5_image_metadata_requires_ec_consumer(allow_missing):
-    parser = Glm5NextMultiModalDataParser(
+    parser = Glm4vMultiModalDataParser(
         spatial_merge_size=2,
         allow_missing_mm_embeddings=allow_missing,
     )
@@ -33,7 +33,7 @@ def test_glm5_image_metadata_requires_ec_consumer(allow_missing):
 
 @pytest.mark.parametrize("allow_missing", [False, True])
 def test_glm5_video_metadata_requires_timestamps(allow_missing):
-    parser = Glm5NextMultiModalDataParser(
+    parser = Glm4vMultiModalDataParser(
         spatial_merge_size=2,
         video_needs_metadata=True,
         allow_missing_mm_embeddings=allow_missing,

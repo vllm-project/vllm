@@ -89,7 +89,12 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
     VideoItem,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import (
+    DictEmbeddingItems,
+    ImageSize,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -963,6 +968,52 @@ class Glm4vVisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class Glm4vMultiModalDataParser(MultiModalDataParser):
+    """Placeholder metadata shared by GLM-4V and GLM-5.3-Flash.
+
+    The patch grid sizes image placeholders. Video placeholders also embed one
+    timestamp string per temporal patch, so those timestamps travel with the
+    grid when embeddings arrive through the EC connector.
+    """
+
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
+        "video": {
+            "video_embeds": "values",
+            "video_grid_thw": "metadata",
+            "timestamps": "metadata",
+        },
+    }
+
+    def __init__(self, spatial_merge_size: int, *args, **kwargs):
+        self._spatial_merge_size = spatial_merge_size
+        super().__init__(*args, **kwargs)
+
+    def _parse_image_data(self, data):
+        if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
+            return DictEmbeddingItems(
+                data,
+                modality="image",
+                required_fields=required,
+                optional_fields=optional,
+                fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
+            )
+        return super()._parse_image_data(data)
+
+    def _parse_video_data(self, data):
+        if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("video")
+            return DictEmbeddingItems(
+                data,
+                modality="video",
+                required_fields=required,
+                optional_fields=optional,
+                fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
+            )
+        return super()._parse_video_data(data)
+
+
 class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": 1}
@@ -1036,9 +1087,11 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         return result
 
     def get_data_parser(self):
-        return MultiModalDataParser(
+        return Glm4vMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def _get_vision_info(
@@ -1391,52 +1444,57 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         timestamps_list = full_second_idxs[::2]
         return list(timestamps_list)
 
+    def _video_timestamps(self, video_array: np.ndarray, metadata: dict[str, Any]):
+        hf_processor = self.get_hf_processor()
+        n_frames = len(video_array)
+        if isinstance(hf_processor, Glm4vProcessor):
+            return self._get_video_second_idx_glm4v(metadata, n_frames)
+        if self._is_glmga_model(hf_processor):
+            return self._get_video_second_idx_glmga(metadata, n_frames)
+        return self._get_video_second_idx_glm46v(metadata, n_frames)
+
+    def _placeholder_from_timestamps(
+        self,
+        timestamps: torch.Tensor | list,
+        grid_thw: torch.Tensor,
+    ) -> list[int]:
+        hf_processor = self.get_hf_processor()
+        tokenizer = self.get_tokenizer()
+        hf_config = self.get_hf_config()
+        merge_length = hf_processor.image_processor.merge_size**2
+        if isinstance(timestamps, torch.Tensor):
+            timestamp_values = timestamps.flatten().tolist()
+        else:
+            timestamp_values = list(timestamps)
+        timestamp_format = (
+            "{}" if isinstance(hf_processor, Glm4vProcessor) else "{:.1f} seconds"
+        )
+        frames_idx_token = [
+            tokenizer.encode(timestamp_format.format(ts), add_special_tokens=False)
+            for ts in timestamp_values
+        ]
+        _, height, width = grid_thw
+        num_tokens_per_frame = int(height * width) // merge_length
+        frame_embed_token_id = hf_processor.image_token_id
+        placeholder = [hf_config.video_start_token_id]
+        for frame_idx in frames_idx_token:
+            placeholder.append(hf_config.image_start_token_id)
+            placeholder.extend([frame_embed_token_id] * num_tokens_per_frame)
+            placeholder.append(hf_config.image_end_token_id)
+            placeholder.extend(frame_idx)
+        placeholder.append(hf_config.video_end_token_id)
+        return placeholder
+
     def _construct_video_placeholder(
         self,
         video_array: np.ndarray,
         metadata: dict[str, Any],
         grid_thw: torch.Tensor,
     ) -> list[int]:
-        hf_processor = self.get_hf_processor()
-        tokenizer = self.get_tokenizer()
-        image_processor = hf_processor.image_processor
-
-        hf_config = self.get_hf_config()
-        boi_token_id = hf_config.image_start_token_id
-        eoi_token_id = hf_config.image_end_token_id
-        bov_token_id = hf_config.video_start_token_id
-        eov_token_id = hf_config.video_end_token_id
-        merge_length = image_processor.merge_size**2
-
-        assert isinstance(grid_thw, torch.Tensor)
-
-        if isinstance(hf_processor, Glm4vProcessor):
-            timestamps = self._get_video_second_idx_glm4v(metadata, len(video_array))
-        elif self._is_glmga_model(hf_processor):
-            timestamps = self._get_video_second_idx_glmga(metadata, len(video_array))
-        else:
-            timestamps = self._get_video_second_idx_glm46v(metadata, len(video_array))
-
-        timestamp_format = (
-            "{}" if isinstance(hf_processor, Glm4vProcessor) else "{:.1f} seconds"
+        return self._placeholder_from_timestamps(
+            self._video_timestamps(video_array, metadata),
+            grid_thw,
         )
-        frames_idx_token = [
-            tokenizer.encode(timestamp_format.format(i), add_special_tokens=False)
-            for i in timestamps
-        ]
-        T, H, W = grid_thw
-        num_tokens_per_frame = int(H * W) // merge_length
-        placeholder = []
-        placeholder.append(bov_token_id)
-        frame_embed_token_id = hf_processor.image_token_id
-        for frame_idx in frames_idx_token:
-            placeholder.append(boi_token_id)
-            placeholder.extend([frame_embed_token_id] * num_tokens_per_frame)
-            placeholder.append(eoi_token_id)
-            placeholder.extend(frame_idx)
-        placeholder.append(eov_token_id)
-
-        return placeholder
 
 
 class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
@@ -1578,7 +1636,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         )
 
         if not hf_data:
-            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
+            return self._with_video_timestamps(
+                self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data),
+                mm_items,
+            )
 
         prompt_text = hf_data.pop("text")
         assert isinstance(prompt_text, str)
@@ -1594,8 +1655,11 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 dict(text=prompt_text, **prepared_data),
                 prepared_kwargs,
             )
-            return self._finalize_hf_mm_data(
-                hf_data, hf_kwargs, passthrough_data, processed_data
+            return self._with_video_timestamps(
+                self._finalize_hf_mm_data(
+                    hf_data, hf_kwargs, passthrough_data, processed_data
+                ),
+                mm_items,
             )
 
         if (
@@ -1660,9 +1724,26 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         processed_data["input_ids"] = input_ids
 
         processed_data.update(video_outputs)
-        return self._finalize_hf_mm_data(
-            hf_data, hf_kwargs, passthrough_data, processed_data
+        return self._with_video_timestamps(
+            self._finalize_hf_mm_data(
+                hf_data, hf_kwargs, passthrough_data, processed_data
+            ),
+            mm_items,
         )
+
+    def _with_video_timestamps(self, processed, mm_items: MultiModalDataItems):
+        video_items = mm_items.get("video")
+        if (
+            video_items is not None
+            and video_items.get_count() > 0
+            and not isinstance(video_items, DictEmbeddingItems)
+            and "timestamps" not in processed
+        ):
+            processed["timestamps"] = [
+                self.info._video_timestamps(*video_items.get(i))
+                for i in range(video_items.get_count())
+            ]
+        return processed
 
     def _get_mm_fields_config(
         self,
@@ -1698,11 +1779,16 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             out_item = out_mm_kwargs["video"][item_idx]
             grid_thw = out_item["video_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
-
-            video, metadata = mm_items["video"][item_idx]
-            placeholder = self.info._construct_video_placeholder(
-                video, metadata, grid_thw
-            )
+            timestamps = out_item.get("timestamps")
+            if timestamps is not None:
+                placeholder = self.info._placeholder_from_timestamps(
+                    timestamps.data, grid_thw
+                )
+            else:
+                video, metadata = mm_items["video"][item_idx]
+                placeholder = self.info._construct_video_placeholder(
+                    video, metadata, grid_thw
+                )
             return PromptUpdateDetails.select_token_id(
                 placeholder,
                 embed_token_id=hf_processor.image_token_id,
