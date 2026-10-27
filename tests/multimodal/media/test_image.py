@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -452,3 +453,31 @@ showpage
 def test_open_image_does_not_accept_format_override():
     """The allowlist helper must not expose a formats override."""
     assert "formats" not in inspect.signature(open_image).parameters
+
+
+def _make_exif_jpeg(orientation: int) -> bytes:
+    """Build a 40x20 JPEG whose EXIF orientation tag is `orientation`."""
+    image = Image.new("RGB", (40, 20), (255, 0, 0))
+    exif = image.getexif()
+    exif[274] = orientation
+    with BytesIO() as buf:
+        image.save(buf, format="JPEG", exif=exif.tobytes())
+        return buf.getvalue()
+
+
+def test_image_media_io_normalizes_exif_orientation_by_default():
+    data = _make_exif_jpeg(6)
+
+    media = ImageMediaIO().load_bytes(data).media
+
+    assert media.size == (20, 40)
+
+
+def test_image_media_io_normalize_orientation_false_keeps_stored_pixels():
+    """Needed for the Mistral path: its chat template re-decodes the image
+    bytes without EXIF normalization, so the loader must match it."""
+    data = _make_exif_jpeg(6)
+
+    media = ImageMediaIO(normalize_orientation=False).load_bytes(data).media
+
+    assert media.size == (40, 20)

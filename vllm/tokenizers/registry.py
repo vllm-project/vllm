@@ -202,6 +202,14 @@ def tokenizer_args_from_config(config: "ModelConfig", **kwargs):
     )
 
 
+def uses_mistral_tokenizer(config: "ModelConfig", **kwargs) -> bool:
+    """Whether the tokenizer for `config` resolves to the Mistral one
+    (mistral_common), whose chat template decodes multimodal media from
+    their source bytes itself."""
+    tokenizer_mode, *_ = tokenizer_args_from_config(config, **kwargs)
+    return tokenizer_mode == "mistral"
+
+
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
 

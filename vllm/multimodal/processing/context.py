@@ -563,6 +563,9 @@ class BaseProcessingInfo:
         return MultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
             allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
+            # Match the Mistral chat template, which decodes images from
+            # their source bytes without EXIF normalization.
+            normalize_image_orientation=not is_mistral_tokenizer(self.ctx.tokenizer),
         )
 
     @cached_property
