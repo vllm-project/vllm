@@ -65,6 +65,19 @@ class KvHintsEnvelope(msgspec.Struct, frozen=True):
     actions: list[KvHintAction]
 
 
+class LoRARequest(
+    msgspec.Struct,
+    omit_defaults=True,
+    array_like=True,
+):
+    lora_name: str
+    lora_int_id: int
+    lora_path: str = ""
+    base_model_name: str | None = None
+    load_inplace: bool = False
+    is_3d_lora_weight: bool = False
+
+
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,
@@ -76,7 +89,7 @@ class EngineCoreRequest(
     sampling_params: EngineCoreSamplingParams | None
     pooling_params: object | None
     arrival_time: float
-    lora_request: object | None = None
+    lora_request: LoRARequest | None = None
     cache_salt: str | None = None
     data_parallel_rank: int | None = None
     prompt_embeds: object | None = None
@@ -199,6 +212,30 @@ defaults_request = EngineCoreRequest(
     sampling_params=EngineCoreSamplingParams(),
     pooling_params=None,
     arrival_time=1.0,
+)
+
+# Embedded in a full request so the fixture also pins the `lora_request` slot.
+lora_request = EngineCoreRequest(
+    request_id="req-lora",
+    prompt_token_ids=[5, 6, 7],
+    mm_features=None,
+    sampling_params=EngineCoreSamplingParams(),
+    pooling_params=None,
+    arrival_time=2.0,
+    lora_request=LoRARequest(
+        lora_name="adapter-a",
+        lora_int_id=3,
+        lora_path="/adapters/a",
+        base_model_name="base-model",
+        load_inplace=True,
+        is_3d_lora_weight=True,
+    ),
+)
+inplace_lora_request = LoRARequest(
+    lora_name="adapter-b",
+    lora_int_id=4,
+    lora_path="/adapters/b",
+    load_inplace=True,
 )
 
 multimodal_tensor = np.array([[1.0, 2.0], [3.5, 4.25]], dtype=np.float32)
@@ -487,6 +524,7 @@ class EngineCoreReadyResponse:
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
+    vllm_config: dict | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -521,6 +559,12 @@ ready_response = EngineCoreReadyResponse(
         max_queue_size=100_000,
         topic="kv",
     ),
+    vllm_config={
+        "model_config": {"model": "test-model", "max_model_len": 32768},
+        "cache_config": {"num_gpu_blocks": 1000, "gpu_memory_utilization": 0.9},
+        "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
+        "speculative_config": None,
+    },
 )
 
 nixl_stats = {
@@ -529,8 +573,10 @@ nixl_stats = {
     "bytes_transferred": [4096, 8192],
     "num_descriptors": [2, 4],
     "num_failed_transfers": [],
-    "num_failed_notifications": [],
+    "num_failed_notifications": [1],
+    "num_failed_handshakes": [1],
     "num_kv_expired_reqs": [1],
+    "num_notifications_after_expiry": [2],
 }
 mooncake_stats = {
     "load_get": [
@@ -583,3 +629,5 @@ print(msgspec.msgpack.encode(mooncake_transfer_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
+print(msgspec.msgpack.encode(lora_request).hex())
+print(msgspec.msgpack.encode(inplace_lora_request).hex())
