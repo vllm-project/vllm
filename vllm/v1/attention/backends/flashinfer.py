@@ -677,15 +677,21 @@ class FlashInferBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        # has_sink+nvfp4 is served by the plain fa2 prefill wrapper plus an
-        # LSE-based sink epilogue (see FlashInferImpl.forward).
+        # has_sink+nvfp4 is served on SM12x by the plain fa2 prefill wrapper
+        # plus an LSE-based sink epilogue (see FlashInferImpl.forward). SM12x
+        # decode runs XQA and applies sinks natively, but on SM8x/SM90 decode
+        # falls back to the plain fa2 decode wrapper, whose run() ignores the
+        # sinks argument in flashinfer 0.7.2 — keep rejecting the combination
+        # there until a sink-capable decode wrapper ships and is validated.
         if (
             kv_cache_dtype is not None
             and kv_cache_dtype.startswith("nvfp4")
             and device_capability.major in (8, 9, 12)
-            and head_size == 64
         ):
-            return "fa2 prefill misreads an NVFP4 KV cache at head_size 64"
+            if head_size == 64:
+                return "fa2 prefill misreads an NVFP4 KV cache at head_size 64"
+            if has_sink and device_capability.major != 12:
+                return "sinks with an NVFP4 KV cache are only supported on SM12x"
         return None
 
     @classmethod
@@ -1091,10 +1097,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.use_trtllm_dcp_prefill:
             logger.info_once("Using the trtllm-gen context kernel for DCP prefill.")
         self.has_sinks = self.global_hyperparameters.has_sinks
-        if (
-            self.has_sinks
-            and not self.nvfp4_fa2
-            and not FlashInferBackend.supports_sink()
+        # The fa2 NVFP4 sink route is SM12x-only: on SM8x/SM90 decode falls
+        # back to the plain fa2 wrapper, which ignores sinks in flashinfer
+        # 0.7.2 (see supports_combination).
+        nvfp4_fa2_off_sm12x = self.nvfp4_fa2 and not (
+            current_platform.is_device_capability_family(120)
+        )
+        if self.has_sinks and (
+            nvfp4_fa2_off_sm12x or not FlashInferBackend.supports_sink()
         ):
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
@@ -2451,21 +2461,21 @@ class FlashInferImpl(AttentionImpl):
                         # The plain fa2 JIT kernel reads the NVFP4 KV cache and
                         # returns row-wise LSE in the log2 domain; apply the
                         # attention sink exactly as an epilogue rescale:
-                        # out / (1 + exp(sink - ln2 * lse)).
+                        # out / (1 + exp(sink - ln2 * lse)). The correction is
+                        # fp32; mul_ promotes, so the result rounds once.
                         assert self.sinks is not None
-                        out_pre, lse = prefill_wrapper.run(
+                        _, lse = prefill_wrapper.run(
                             prefill_query,
                             kv_cache_for_fi,
                             q_scale=1.0,
                             k_scale=layer._k_scale_float,
                             v_scale=layer._v_scale_float,
                             kv_cache_sf=kv_cache_sf,
+                            out=out_prefill,
                             return_lse=True,
                         )
                         sink_corr = torch.sigmoid(math.log(2.0) * lse - self.sinks)
-                        out_prefill.copy_(
-                            out_pre * sink_corr.unsqueeze(-1).to(out_pre.dtype)
-                        )
+                        out_prefill.mul_(sink_corr.unsqueeze(-1))
                     elif isinstance(
                         prefill_wrapper, BatchAttentionWithAttentionSinkWrapper
                     ):

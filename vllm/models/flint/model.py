@@ -320,15 +320,18 @@ class FlintAttention(nn.Module):
         self._metadata_cls = FlashInferMetadata
         self._decode_cls = FlashInferTrtllmAPIDecode
         assert get_current_vllm_config().model_config.dtype == torch.bfloat16
-        assert self.attn.kv_cache_dtype in ("auto", "bfloat16", "nvfp4")
         assert impl.kv_sharing_target_layer_name is None
         self.impl = impl
-        # Flint decode attention and the fused low-latency decode path. These
-        # kernels read/write the KV cache as bf16 pages, so they do not apply
-        # to the packed NVFP4 cache (written by impl.do_kv_cache_update).
-        self.flint_decode = (
-            _flint_kernels(quant_config) and self.attn.kv_cache_dtype != "nvfp4"
+        # The fused qk_norm_rope kernel writes the KV cache itself as raw bf16
+        # pages. Any other cache dtype (fp8, nvfp4, ...) is quantized while
+        # stored, so the cache write goes through the attention impl
+        # (do_kv_cache_update), and the flint decode attention / fused
+        # low-latency kernels — which also read bf16 pages — are disabled.
+        self.impl_owns_kv_cache = self.attn.kv_cache_dtype not in (
+            "auto",
+            "bfloat16",
         )
+        self.flint_decode = _flint_kernels(quant_config) and not self.impl_owns_kv_cache
         # Largest pure-decode batch served by the Flint kernel; beyond it
         # FlashInfer is faster on the full-attention layers at long context.
         self.max_decode_batch = 64 if is_sliding else 8
@@ -370,10 +373,10 @@ class FlintAttention(nn.Module):
             k = k.view(num_tokens, self.num_kv_heads, self.head_dim)
             v = v.view(num_tokens, self.num_kv_heads, self.head_dim)
             kv_cache_dummy_dep = None
-            if self.impl.is_kvcache_nvfp4:
-                # The fused kernel skips its write for the packed NVFP4 cache
-                # (see _cache_views); let impl.do_kv_cache_update store the
-                # normed/rotated K and V into it instead.
+            if self.impl_owns_kv_cache:
+                # The fused kernel skips its write for non-bf16 caches (see
+                # _cache_views); impl.do_kv_cache_update quantizes and stores
+                # the normed/rotated K and V instead.
                 kv_cache_dummy_dep = unified_kv_cache_update(k, v, self.attn.layer_name)
             unified_attention_with_output(
                 q.view(num_tokens, self.num_heads, self.head_dim),
@@ -396,9 +399,9 @@ class FlintAttention(nn.Module):
         caches as [blocks, block_size, kv_heads, head_dim] views; all None while
         the KV cache is unallocated (memory profiling)."""
         kv_cache = self.attn.kv_cache
-        if kv_cache.numel() == 0 or self.attn.kv_cache_dtype == "nvfp4":
-            # NVFP4 pages hold packed fp4 data + scales and are written by the
-            # attention impl itself (do_kv_cache_update); the bf16 views do not
+        if kv_cache.numel() == 0 or self.impl_owns_kv_cache:
+            # Non-bf16 caches (fp8, nvfp4) are quantized and written by the
+            # attention impl (do_kv_cache_update); the raw bf16 views do not
             # apply. None caches tell qk_norm_rope_cache to skip its write.
             return None, None, None
         # As in FlashInferImpl.do_kv_cache_update: (B, H, N, 2D) -> (B, N, H, D)
