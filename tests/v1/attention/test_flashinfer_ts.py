@@ -129,10 +129,10 @@ def test_impl_accepts_the_arguments_the_attention_layer_passes():
 @requires_kernel
 def test_dense_plan_matches_flash_attention_non_causal():
     """A dense prims_ts plan is the non-causal draft block FA4 produces."""
+    from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
+
     pytest.importorskip("flashinfer.attention.prims_ts")
     from flashinfer.attention.prims_ts import BatchDecodePagedTSWrapper
-
-    from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
     torch.manual_seed(0)
     b, sq, hq, hkv, kv = 2, 3, 16, 1, PAGE

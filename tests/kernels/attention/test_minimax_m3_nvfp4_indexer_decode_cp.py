@@ -53,7 +53,6 @@ def _run(rank: int, port: int, query_len: int, seq_lens_list: list[int]) -> None
     from vllm.models.minimax_m3.nvidia.indexer_nvfp4_decode_cp import (
         Nvfp4IndexerDecodeCP,
     )
-    from vllm.third_party.fmha_sm100.sparse import BatchDecodeIndexerQ8KV4Wrapper
 
     torch.accelerator.set_device_index(rank)
     init_distributed_environment(
@@ -81,6 +80,8 @@ def _run(rank: int, port: int, query_len: int, seq_lens_list: list[int]) -> None
     cp = Nvfp4IndexerDecodeCP(max_reqs=num_reqs, device=torch.device("cuda", rank))
     layers = [cp.new_layer() for _ in range(2)]
     plan = cp.plan(block_table, seq_lens)
+
+    from vllm.third_party.fmha_sm100.sparse import BatchDecodeIndexerQ8KV4Wrapper
 
     full = BatchDecodeIndexerQ8KV4Wrapper(num_heads=H)
     full.plan(block_table, seq_lens)
