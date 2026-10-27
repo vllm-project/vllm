@@ -2237,8 +2237,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # With VLLM_ELASTIC_EP_SCALE_UP_LAUNCH, start the new rank without
     # contacting the running ranks: load the model, allocate the KV cache and
     # capture CUDA graphs locally, then join once this JSON file exists. It
-    # names the rank 0 address to join, so the rank can be checkpointed while
-    # it waits and restored elsewhere.
+    # names the rank 0 address to join and optionally the DP rank to join as,
+    # so the rank can be checkpointed while it waits and restored as any rank.
     "VLLM_ELASTIC_EP_JOIN_FILE": lambda: os.getenv("VLLM_ELASTIC_EP_JOIN_FILE"),
     # Whether to wait for all requests to drain before sending the
     # scaling command in elastic EP.

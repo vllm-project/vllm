@@ -460,6 +460,15 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         manager.support_fault_tolerance = True
         return manager
 
+    def rebind_rank(self, rank: int) -> None:
+        """Move a detached manager and its buffer to another EP rank. The
+        dispatch and combine kernels read the rank from device memory, so
+        CUDA graphs captured at the old rank stay valid."""
+        assert self.tcp_store_group is None, "only a detached rank can move"
+        if NixlEPAll2AllManager._buffer is not None:
+            NixlEPAll2AllManager._buffer.buffer.set_rank(rank)
+        self.rank = rank
+
     @property
     def max_num_ep_ranks(self) -> int:
         assert NixlEPAll2AllManager._buffer is not None
@@ -492,6 +501,11 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             "NIXL EP buffer already initialized"
         )
         detached = self.tcp_store_group is None
+        if detached and not hasattr(Buffer, "init_transport"):
+            raise RuntimeError(
+                "Parking an elastic EP rank needs a nixl_ep build with "
+                "Buffer.init_transport and Buffer.set_rank"
+            )
         buffer = Buffer(
             rank=self.rank,
             tcp_store_group=None if detached else self.tcp_store_group.store,

@@ -1259,6 +1259,7 @@ class EngineCoreProc(EngineCore):
                 self, vllm_config, executor_class, log_stats, executor_fail_callback
             )
             handshake_address = self._wait_to_join(join_file)
+            identity = self.engine_index.to_bytes(length=2, byteorder="little")
 
         with self._perform_handshakes(
             handshake_address,
@@ -1369,6 +1370,12 @@ class EngineCoreProc(EngineCore):
         parallel_config = self.vllm_config.parallel_config
         parallel_config.data_parallel_master_ip = join["data_parallel_master_ip"]
         parallel_config.data_parallel_rpc_port = join["data_parallel_rpc_port"]
+        # A parked rank can join as another DP rank. Its front-end adopts the
+        # rank from the handshake, and its workers move in join_parked.
+        if (rank := join.get("data_parallel_rank")) is not None:
+            self.engine_index = rank
+            parallel_config.data_parallel_rank = rank
+            parallel_config.data_parallel_index = rank
         return get_tcp_uri(
             parallel_config.data_parallel_master_ip,
             parallel_config.data_parallel_rpc_port,
@@ -1390,7 +1397,18 @@ class EngineCoreProc(EngineCore):
             ),
             coord_store_port=parallel_config._coord_store_port,
         )
-        self.collective_rpc("elastic_ep_execute", args=("join_parked", request))
+        # The workers were spawned before the handshake, so they still hold
+        # the launch values of the fields rank 0 sent.
+        self.collective_rpc(
+            "elastic_ep_execute",
+            args=(
+                "join_parked",
+                request,
+                parallel_config.elastic_ep_max_dp_size,
+                parallel_config.eplb_config.num_redundant_experts,
+                parallel_config.data_parallel_rank,
+            ),
+        )
         self._eep_scale_up_before_kv_init()
 
     @contextmanager
@@ -1502,6 +1520,14 @@ class EngineCoreProc(EngineCore):
                 )
                 ready_msg["num_redundant_experts"] = (
                     vllm_config.parallel_config.eplb_config.num_redundant_experts
+                )
+                # A parked rank learns these from rank 0 after its front-end
+                # started, and the front-end needs them for later scaling.
+                ready_msg["data_parallel_size"] = (
+                    vllm_config.parallel_config.data_parallel_size
+                )
+                ready_msg["data_parallel_master_ip"] = (
+                    vllm_config.parallel_config.data_parallel_master_ip
                 )
 
             handshake_socket.send(msgspec.msgpack.encode(ready_msg))

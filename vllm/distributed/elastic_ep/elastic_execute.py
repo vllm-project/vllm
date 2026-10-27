@@ -38,7 +38,10 @@ from vllm.distributed.parallel_state import (
     GroupCoordinator,
     _replace_active_groups,
 )
-from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+from vllm.distributed.stateless_coordinator import (
+    DetachedGroupCoordinator,
+    StatelessGroupCoordinator,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     get_ep_all2all_manager,
@@ -484,7 +487,6 @@ class ElasticEPScalingExecutor:
         reconfig_request = self.reconfig_request
         assert reconfig_request is not None
         new_dp_size = reconfig_request.new_data_parallel_size
-        new_ep_size = get_ep_group().world_size
 
         parallel_config.data_parallel_size = new_dp_size
         if (
@@ -506,7 +508,25 @@ class ElasticEPScalingExecutor:
             reconfig_request.new_data_parallel_master_port
         )
 
-        # Reconfigure MoE modules with new EP size
+        moe_modules = self._resize_moe_layers()
+        eplb_state = self.worker.model_runner.eplb_state
+        assert eplb_state is not None
+        model_config = self.worker.model_runner.model_config
+        with set_current_vllm_config(self.worker.vllm_config):
+            self._commit_staged_moe_quant_methods()
+            get_ep_all2all_manager().commit_ep_size()
+            # Legacy modular methods need to be recreated for the new EP size.
+            for module in moe_modules:
+                if getattr(module._quant_method, "wraps_legacy_quant_method", False):
+                    module._replace_quant_method(module._quant_method.old_quant_method)
+
+        assert self._prepared_eplb_communicator is not None
+        eplb_state.update_communicator(model_config, self._prepared_eplb_communicator)
+        self._prepared_eplb_communicator = None
+
+        return retired_groups
+
+    def _moe_layers(self) -> list[torch.nn.Module]:
         moe_modules = [
             module
             for module in self.worker.model_runner.model.modules()
@@ -517,21 +537,30 @@ class ElasticEPScalingExecutor:
             module.moe_config.num_local_experts == num_local_experts
             for module in moe_modules
         ), "All MoE modules must have the same number of experts"
+        return moe_modules
+
+    def _resize_moe_layers(self) -> list[torch.nn.Module]:
+        """Size the MoE layers and the EPLB state for the active EP group.
+
+        Every buffer that CUDA graphs read is sized for the maximum EP size
+        and updated in place, so captured graphs stay valid.
+        """
+        moe_modules = self._moe_layers()
+        num_local_experts = moe_modules[0].moe_config.num_local_experts
         dp_group = get_dp_group()
         ep_group = get_ep_group()
         for module in moe_modules:
             new_moe_config = self._make_eep_moe_config(module, dp_group, ep_group)
             module._set_moe_config(new_moe_config)
 
-        # Update EPLB state
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
         model_config = self.worker.model_runner.model_config
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
 
-        num_physical_experts = num_local_experts * new_ep_size
+        num_physical_experts = num_local_experts * ep_group.world_size
         num_logical_experts = eplb_model_state.logical_replica_count.shape[1]
-        parallel_config.eplb_config.num_redundant_experts = (
+        self.worker.vllm_config.parallel_config.eplb_config.num_redundant_experts = (
             num_physical_experts - num_logical_experts
         )
         eplb_state.reconfigure_physical_expert_slots(model_config, num_physical_experts)
@@ -551,18 +580,7 @@ class ElasticEPScalingExecutor:
                 num_physical_experts=num_physical_experts,
                 num_local_physical_experts=num_local_experts,
             )
-            self._commit_staged_moe_quant_methods()
-            get_ep_all2all_manager().commit_ep_size()
-            # Legacy modular methods need to be recreated for the new EP size.
-            for module in moe_modules:
-                if getattr(module._quant_method, "wraps_legacy_quant_method", False):
-                    module._replace_quant_method(module._quant_method.old_quant_method)
-
-        assert self._prepared_eplb_communicator is not None
-        eplb_state.update_communicator(model_config, self._prepared_eplb_communicator)
-        self._prepared_eplb_communicator = None
-
-        return retired_groups
+        return moe_modules
 
     def _perform_eplb_reshuffle(
         self,
@@ -704,19 +722,39 @@ class ElasticEPScalingExecutor:
         self.warmup_new_worker()
         self._captured_parked = True
 
-    def join_parked(self, reconfig_request: ReconfigureDistributedRequest) -> None:
+    def join_parked(
+        self,
+        reconfig_request: ReconfigureDistributedRequest,
+        max_dp_size: int,
+        num_redundant_experts: int,
+        data_parallel_rank: int,
+    ) -> None:
         """Replace the detached groups of a parked rank with the world's
-        groups, then connect NIXL EP and the EPLB communicator. This matches
-        the startup of a scale-up launch step for step, so the running ranks
-        need no change."""
+        groups, size the MoE layers for that world, then connect NIXL EP and
+        the EPLB communicator. This matches the startup of a scale-up launch
+        step for step, so the running ranks need no change.
+
+        The world may differ in size from the one the rank was started with,
+        and the rank may join as another DP rank. Its maximum DP size and
+        experts per rank must match, because the NIXL EP buffers and the EPLB
+        maps are laid out for them."""
         self.reconfig_request = reconfig_request
         parallel_config = self.worker.vllm_config.parallel_config
+        if max_dp_size != parallel_config.elastic_ep_max_dp_size:
+            raise ValueError(
+                "Parked rank was built for elastic_ep_max_dp_size "
+                f"{parallel_config.elastic_ep_max_dp_size}, the world uses "
+                f"{max_dp_size}"
+            )
+        if data_parallel_rank != parallel_config.data_parallel_rank:
+            self._rebind_parked_rank(data_parallel_rank)
         new_dp_size = reconfig_request.new_data_parallel_size
-        assert new_dp_size == parallel_config.data_parallel_size, (
-            "A parked rank joins a world of the size it was started with"
-        )
+        parallel_config.data_parallel_size = new_dp_size
         parallel_config.data_parallel_master_ip = (
             reconfig_request.new_data_parallel_master_ip
+        )
+        parallel_config.data_parallel_master_port = (
+            reconfig_request.new_data_parallel_master_port
         )
         parallel_config._coord_store_port = reconfig_request.coord_store_port
         with set_current_vllm_config(self.worker.vllm_config):
@@ -730,6 +768,14 @@ class ElasticEPScalingExecutor:
             )
             # The detached groups hold no resources to destroy.
             _replace_active_groups(**pop_standby_groups())
+            self._resize_moe_layers()
+            eplb_config = parallel_config.eplb_config
+            if eplb_config.num_redundant_experts != num_redundant_experts:
+                raise ValueError(
+                    "Parked rank holds a different number of experts per rank "
+                    f"than the world: {num_redundant_experts} redundant experts "
+                    f"expected, {eplb_config.num_redundant_experts} here"
+                )
             get_ep_all2all_manager().commit_ep_size()
             self._prepare_eplb_communicator(get_eplb_group())
         model_config = self.worker.model_runner.model_config
@@ -737,6 +783,27 @@ class ElasticEPScalingExecutor:
             model_config, self._prepared_eplb_communicator
         )
         self._prepared_eplb_communicator = None
+
+    def _rebind_parked_rank(self, data_parallel_rank: int) -> None:
+        """Move a parked rank to another DP rank before it joins.
+
+        The groups created at join take their rank from the placeholder world
+        group, the MoE layers take theirs from those groups, and the NIXL EP
+        kernels read theirs from device memory, so captured CUDA graphs stay
+        valid."""
+        parallel_config = self.worker.vllm_config.parallel_config
+        world = get_world_group()
+        assert isinstance(world, DetachedGroupCoordinator)
+        world_size = parallel_config.world_size
+        new_rank = data_parallel_rank * world_size + world.rank % world_size
+        logger.info(
+            "[Elastic EP] Parked rank %d joins as rank %d", world.rank, new_rank
+        )
+        world.rebind(new_rank)
+        parallel_config.data_parallel_rank = data_parallel_rank
+        parallel_config.data_parallel_index = data_parallel_rank
+        if parallel_config.use_all2all:
+            get_ep_all2all_manager().rebind_rank(new_rank)
 
     def warmup_new_worker(self) -> None:
         if self._captured_parked:

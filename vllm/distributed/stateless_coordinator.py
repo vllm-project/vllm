@@ -478,5 +478,15 @@ class DetachedGroupCoordinator(StatelessGroupCoordinator):
         self.use_custom_op_call = True
         self.use_cpu_custom_send_recv = False
 
+    def rebind(self, global_rank: int) -> None:
+        """Move this placeholder to another rank of the same group."""
+        assert global_rank in self.ranks, (
+            f"Rank {global_rank} is outside the group the rank was started for"
+        )
+        self.rank = global_rank
+        self.rank_in_group = self.ranks.index(global_rank)
+        self.cpu_group = _DetachedProcessGroup(self.rank_in_group, self.world_size)
+        self.device_group = self.cpu_group
+
     def destroy(self):
         pass
