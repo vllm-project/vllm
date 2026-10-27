@@ -148,6 +148,29 @@ def _fp8_mla_prefill_supported() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
+def _fused_mla_prefill_qkv_supported() -> bool:
+    """Gate ``fused_mla_prefill_qkv_fp8`` to CDNA4 (gfx950).
+
+    Older AITER builds without the kernel fall back to the eager concat/cast.
+    """
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import get_cdna_version
+
+    if get_cdna_version() != 4:
+        return False
+    try:
+        from aiter.ops.triton.fusions.fused_mla_prefill_qkv_fp8 import (  # noqa: F401
+            fused_mla_prefill_qkv_fp8,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+@functools.lru_cache(maxsize=1)
 def _aiter_mla_native_h24_reducer_supported() -> bool:
     """Whether AITER's JIT reducer supports the native H24/512 shape."""
     try:
@@ -768,14 +791,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
-        verify_route = envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY.lower()
-        asm_dcp_verify_config = (
-            _asm_dcp_verify_configured(
-                parallel_config.decode_context_parallel_size,
-                parallel_config.cp_kv_cache_interleave_size,
-                multi_token_decode=vllm_config.speculative_config is not None,
-            )
-            and verify_route != "segmented"
+        asm_dcp_verify_config = _asm_dcp_verify_configured(
+            parallel_config.decode_context_parallel_size,
+            parallel_config.cp_kv_cache_interleave_size,
+            multi_token_decode=vllm_config.speculative_config is not None,
         )
         super().__init__(
             kv_cache_spec,
@@ -799,17 +818,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             if self._asm_dcp_verify_heads:
                 self._asm_dcp_verify = True
-            elif verify_route == "asm" or not supports_segmented_dcp_verify:
+            elif not supports_segmented_dcp_verify:
                 raise ValueError(
-                    f"VLLM_ROCM_AITER_MLA_DCP_VERIFY={verify_route}, but the "
-                    "round-robin asm decode has no kernel for "
-                    f"{self.num_heads * self.dcp_world_size} DCP-gathered heads "
-                    f"(native counts: {_NATIVE_CPRR_HEADS}). "
-                    + (
-                        "Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented."
-                        if supports_segmented_dcp_verify
-                        else "This AITER build also lacks segmented MLA decode."
-                    )
+                    "ROCM_AITER_MLA DCP multi-token verify has no kernel for "
+                    f"{self.num_heads * self.dcp_world_size} DCP-gathered heads: "
+                    "the round-robin asm decode only has native counts "
+                    f"{_NATIVE_CPRR_HEADS}, and this AITER build lacks segmented "
+                    "MLA decode."
                 )
         self._supports_segmented_dcp_verify = (
             supports_segmented_dcp_verify
@@ -2076,8 +2091,12 @@ class AiterMLAHelper:
         )
         if num_heads == m:
             return q
+        if q.shape[1] == m:
+            return q
         if m % num_heads == 0:
             return q.repeat_interleave(m // num_heads, dim=1)
+        if q.stride(0) == m * q.stride(1):
+            return q.as_strided((q.shape[0], m, q.shape[2]), q.stride())
         # Non-divisor head counts cannot be padded by repeat_interleave. Tile
         # the query heads and slice to exactly m. MLA attention is independent
         # per query head over the shared KV, so padding heads cannot affect
@@ -2274,11 +2293,19 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             is_quantized_kv_cache(kv_cache_dtype)
             and AiterMLAHelper.is_valid_num_heads(self.num_heads)
         )
+        self._fused_prefill_qkv = False
         if self._fp8_prefill_enabled:
             from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
 
             self._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
             self._mla_reduce_v1 = mla_reduce_v1
+            self._fp8_prefill_one_scale: torch.Tensor | None = None
+            head_dims = (self.qk_nope_head_dim, self.qk_rope_head_dim, self.v_head_dim)
+            self._fused_prefill_qkv = (
+                rocm_aiter_ops.is_enabled()
+                and _fused_mla_prefill_qkv_supported()
+                and not any(d & (d - 1) for d in head_dims)
+            )
 
     def _context_parallel_compute_prefill_context(
         self,
@@ -2455,7 +2482,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         if v.dtype != fp8_dtype:
             v = v.to(fp8_dtype)
 
-        one_scale = torch.ones((), dtype=torch.float32, device=q.device)
+        if self._fp8_prefill_one_scale is None:
+            self._fp8_prefill_one_scale = torch.ones(
+                (), dtype=torch.float32, device=q.device
+            )
+        one_scale = self._fp8_prefill_one_scale
 
         # num_partial_tiles is resolved during metadata build to avoid an
         # in-forward .item() sync that would prevent CUDA Graph capture.
@@ -2591,7 +2622,24 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = self._concat_k_nope_k_pe(k_nope, k_pe)
+        if self._fused_prefill_qkv:
+            from aiter.ops.triton.fusions.fused_mla_prefill_qkv_fp8 import (
+                fused_mla_prefill_qkv_fp8,
+            )
+
+            from vllm.platforms import current_platform
+
+            # The k_pe concat, the head padding and the FP8 cast in one launch.
+            q, k, v = fused_mla_prefill_qkv_fp8(
+                q,
+                k_nope,
+                v,
+                k_pe,
+                AiterMLAHelper.get_fp8_prefill_num_heads(self.num_heads),
+                current_platform.fp8_dtype(),
+            )
+        else:
+            k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
         self._mla_fp8_prefill_attn(q, k, v, attn_metadata, output)
 
