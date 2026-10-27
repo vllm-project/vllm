@@ -29,6 +29,9 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import 
     is_valid_flashinfer_cutlass_fused_moe,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    MoEPrepareAndFinalizeNoDPEPModular,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_type,
 )
@@ -70,6 +73,7 @@ MNK_FACTORS = [
     [(32, 1, None, 8192), (32, 2, None, 8192), (4096, 2, 4, 16384)],
 )
 @pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
+@pytest.mark.parametrize("quant_dtype", [None, "nvfp4"])
 @torch.inference_mode()
 def test_flashinfer_workspace_reused_after_lock(
     max_num_tokens,
@@ -77,10 +81,11 @@ def test_flashinfer_workspace_reused_after_lock(
     elastic_ep_max_dp_size,
     workspace_rows,
     activation,
+    quant_dtype,
     workspace_init,
     monkeypatch,
 ):
-    """Locked reuse must cover gathered inputs, autotuning and elastic DP."""
+    """Framework scratch must survive locking and graph replay without aliasing."""
     parallel = FusedMoEParallelConfig.make_no_parallel()
     parallel.dp_size = dp_size
     config = FusedMoEConfig(
@@ -98,7 +103,6 @@ def test_flashinfer_workspace_reused_after_lock(
         max_num_tokens=max_num_tokens,
         elastic_ep_max_dp_size=elastic_ep_max_dp_size,
     )
-    layers = [FlashInferExperts(config, FusedMoEQuantConfig.make()) for _ in range(2)]
     max_rows = max_num_tokens * dp_size
     x = torch.randn(max_rows, 256, device="cuda", dtype=torch.bfloat16) / 10
     w1 = (
@@ -112,6 +116,25 @@ def test_flashinfer_workspace_reused_after_lock(
         / 10
     )
     w2 = torch.randn(8, 256, 512, device="cuda", dtype=torch.bfloat16) / 10
+    quant_config = FusedMoEQuantConfig.make()
+    if quant_dtype is not None:
+        w1, w2, quant_config = make_test_quant_config(
+            8,
+            512,
+            256,
+            in_dtype=x.dtype,
+            quant_dtype=quant_dtype,
+            block_shape=None,
+            per_act_token_quant=False,
+            make_gate=activation.is_gated,
+        )
+    layers = [
+        FusedMoEKernel(
+            MoEPrepareAndFinalizeNoDPEPModular(),
+            FlashInferExperts(config, quant_config),
+        )
+        for _ in range(2)
+    ]
     ids = torch.tensor([0, 1], device="cuda").expand(max_rows, 2)
     weights = torch.full((max_rows, 2), 0.5, device="cuda")
     expected_nbytes = fi_moe.flashinfer_cutlass_fused_moe_workspace_size(
@@ -120,30 +143,35 @@ def test_flashinfer_workspace_reused_after_lock(
         512,
         8,
         2,
-        x_dtype=x.dtype,
-        weight_dtype=w1.dtype,
+        x_dtype=torch.uint8 if quant_dtype == "nvfp4" else x.dtype,
+        weight_dtype=torch.long if quant_dtype == "nvfp4" else w1.dtype,
         output_dtype=x.dtype,
         activation_type=activation_to_flashinfer_type(activation),
         device=x.device,
     )
     buffers = []
+    call_args: dict = {}
     kernel = fi_moe.flashinfer_cutlass_fused_moe
 
-    def compare_with_unbuffered(**kwargs):
-        # Assert that the new path really ran, then compare the same kernel
-        # with and without caller-owned scratch.
-        buffers.append(kwargs["workspace_buffer"])
-        assert buffers[-1].nbytes >= expected_nbytes
-        result = kernel(**kwargs)
-        reference = torch.empty_like(kwargs["output"])
-        kernel(**{**kwargs, "workspace_buffer": None, "output": reference})
-        torch.testing.assert_close(kwargs["output"], reference)
-        return result
+    def record_workspace(**kwargs):
+        call_args.clear()
+        call_args.update(kwargs)
+        scratch = kwargs["workspace_buffer"]
+        output = kwargs["output"]
+        buffers.append(scratch)
+        assert scratch.dtype == torch.uint8 and scratch.ndim == 1
+        assert scratch.nbytes >= expected_nbytes
+        # The common workspace reserves the output before workspace2, even
+        # when prepare/finalize supplies an external output allocation.
+        assert scratch.storage_offset() >= output.nbytes
+        assert (
+            scratch.data_ptr() + scratch.nbytes <= output.data_ptr()
+            or output.data_ptr() + output.nbytes <= scratch.data_ptr()
+        )
+        return kernel(**kwargs)
 
-    monkeypatch.setattr(fi_moe, "flashinfer_cutlass_fused_moe", compare_with_unbuffered)
-    for layer, rows in [(layers[0], 1), (layers[1], max_rows), (layers[0], 16)]:
-        layer.apply(
-            output=torch.empty_like(x[:rows]),
+    def run(layer, rows):
+        return layer.apply(
             hidden_states=x[:rows],
             w1=w1,
             w2=w2,
@@ -152,15 +180,36 @@ def test_flashinfer_workspace_reused_after_lock(
             activation=activation,
             global_num_experts=8,
             expert_map=None,
-            a1q_scale=None,
-            a2_scale=None,
-            workspace13=None,
-            workspace2=None,
-            expert_tokens_meta=None,
             apply_router_weight_on_input=False,
         )
-        current_workspace_manager().lock()
-    assert all(buffer is buffers[0] for buffer in buffers)
+
+    def check_reference(output):
+        reference = torch.empty_like(output)
+        kernel(**{**call_args, "workspace_buffer": None, "output": reference})
+        torch.testing.assert_close(output, reference)
+
+    monkeypatch.setattr(fi_moe, "flashinfer_cutlass_fused_moe", record_workspace)
+    with set_current_vllm_config(VllmConfig()):
+        check_reference(run(layers[0], max_rows))
+        manager = current_workspace_manager()
+        manager.lock()
+        storage_ptr = manager.get_simultaneous(((1,), torch.uint8))[0].data_ptr()
+        for layer, rows in [(layers[1], 1), (layers[0], 17), (layers[1], max_rows)]:
+            check_reference(run(layer, rows))
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run(layers[0], 16)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output = run(layers[0], 16)
+        for _ in range(2):
+            x[:16].normal_(std=0.1)
+            graph.replay()
+            check_reference(output)
+        assert all(b.untyped_storage().data_ptr() == storage_ptr for b in buffers)
 
 
 @pytest.mark.parametrize(

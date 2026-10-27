@@ -34,10 +34,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_cutlass_fused_moe,
     has_flashinfer_cutlass_fused_moe_workspace,
 )
-from vllm.v1.worker.workspace import (
-    current_workspace_manager,
-    is_workspace_manager_initialized,
-)
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -225,135 +222,90 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # We use global_num_experts due to how moe_align_block_size handles
-        # expert_maps.
-        """Compute the shapes for the temporary and final outputs of the two gemms
-        and activation in the fused expert function.  Since the gemms are
-        independent, the workspace for the first gemm can be shared with the
-        workspace for the last gemm.
+        # K is packed for NVFP4 activations; N is always the logical fc1 width.
+        hidden_size = K * 2 if self.quant_dtype == "nvfp4" else K
+        output_shape = (M, hidden_size)
+        workspace2: tuple[int, ...] = (0,)
+        if M and has_flashinfer_cutlass_fused_moe_workspace():
+            nbytes = self._workspace_size_bytes(
+                max(M, self._max_workspace_rows),
+                hidden_size,
+                self.adjust_N_for_activation(N, activation),
+                local_num_experts * self.ep_size,
+                topk,
+                activation,
+            )
+            workspace2 = (M, cdiv(nbytes, M * self.out_dtype.itemsize))
+        # workspace13 aliases the output, which must not overlap CUTLASS scratch.
+        return (0,), workspace2, output_shape
 
-        Returns a tuple of:
-        - workspace13 shape tuple: must be large enough to hold the
-          result of either expert gemm.
-        - workspace2 shape tuple: must be large enough to hold the
-          result of the activation function.
-        - output shape tuple: must be exact size of the final gemm output.
-        - Workspace type: The dtype to use for the workspace tensors.
-        - Note: in order for activation chunking to work, the first dimension
-          of each tuple must be the number of tokens.
-        """
-        workspace1 = (M, K)
-        workspace2 = (0,)
-        # For NVFP4, the output is stored in a packed int8 format,
-        # so the actual hidden dim is 2x the size of K here.
-        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" else K)
-        # The workspace is determined by `aq`, since it comes after any
-        # potential communication op and is involved in the expert computation.
-        return (workspace1, workspace2, output_shape)
-
-    def _get_workspace_buffer(
+    def _workspace_size_bytes(
         self,
-        hidden_states: torch.Tensor,
-        fc1_expert_weights: torch.Tensor,
-        fc2_expert_weights: torch.Tensor,
+        rows: int,
+        hidden_size: int,
+        inter_size: int,
+        num_experts_total: int,
         top_k: int,
         activation: MoEActivation,
-        use_mxfp8_act_scaling: bool,
-        use_w4_group_scaling: bool,
-    ) -> torch.Tensor | None:
-        """Return a persistent FlashInfer CUTLASS MoE workspace, or None.
+    ) -> int:
+        size_key = (rows, hidden_size, inter_size, num_experts_total, top_k, activation)
+        if size_key in self._workspace_nbytes:
+            return self._workspace_nbytes[size_key]
 
-        Without a caller-owned workspace, FlashInfer allocates and frees its
-        GEMM scratch (about 20 GiB for 16k tokens with DP=8) through the
-        PyTorch caching allocator on every MoE layer call, which fragments the
-        allocator during large prefills. Size one buffer for the largest batch
-        once, during memory profiling, and share it across all MoE layers that
-        run sequentially in the current ubatch and lane.
-        """
-        if (
-            not has_flashinfer_cutlass_fused_moe_workspace()
-            or not is_workspace_manager_initialized()
-            # Unexpectedly large batches keep the per-call allocation rather
-            # than pinning one more persistent buffer per distinct size.
-            or hidden_states.size(0) > self._max_workspace_rows
-        ):
-            return None
+        x_dtype = self.quant_dtype
+        if self.expects_unquantized_inputs or x_dtype is None:
+            x_dtype = self.out_dtype
+        elif x_dtype == "nvfp4":
+            x_dtype = torch.uint8
+        elif x_dtype == "mxfp8":
+            x_dtype = torch.float8_e4m3fn
 
-        # Always size for the maximum so every call shares a single buffer.
-        rows = self._max_workspace_rows
-        hidden_size = fc2_expert_weights.size(1)
-        # fc1 rows are logical (unpacked): inter_size, times 2 if gated.
-        inter_size = fc1_expert_weights.size(1) // (2 if activation.is_gated else 1)
-        num_experts_total = fc2_expert_weights.size(0) * self.ep_size
-        size_key = (
-            rows,
-            hidden_size,
-            inter_size,
-            num_experts_total,
-            top_k,
-            hidden_states.dtype,
-            fc1_expert_weights.dtype,
-            activation,
-            use_mxfp8_act_scaling,
-            use_w4_group_scaling,
+        use_mxfp8_act_scaling = (
+            self.weight_quant_dtype == "mxfp4" and self.quant_dtype == "mxfp8"
         )
-        nbytes = self._workspace_nbytes.get(size_key)
-        if nbytes is None:
-            try:
-                nbytes = int(
-                    flashinfer_cutlass_fused_moe_workspace_size(
-                        rows,
-                        hidden_size,
-                        inter_size,
-                        num_experts_total,
-                        top_k,
-                        x_dtype=hidden_states.dtype,
-                        weight_dtype=fc1_expert_weights.dtype,
-                        output_dtype=self.out_dtype,
-                        activation_type=activation_to_flashinfer_type(activation),
-                        tp_size=self.tp_size,
-                        tp_rank=self.tp_rank,
-                        ep_size=self.ep_size,
-                        ep_rank=self.ep_rank,
-                        use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
-                        use_w4_group_scaling=use_w4_group_scaling,
-                        use_mxfp8_act_scaling=use_mxfp8_act_scaling,
-                        device=hidden_states.device,
-                    )
-                )
-            except (RuntimeError, ValueError) as e:
-                logger.warning_once(
-                    "FlashInfer CUTLASS MoE workspace sizing failed (%s); "
-                    "falling back to per-call workspace allocation.",
-                    e,
-                )
-                nbytes = 0
-            self._workspace_nbytes[size_key] = nbytes
-        if nbytes <= 0:
-            return None
-
-        device = hidden_states.device
-        key = ("flashinfer_cutlass_fused_moe_workspace", device, nbytes)
-
-        def _allocate() -> torch.Tensor:
-            logger.info_once(
-                "Reserving a persistent %.2f GiB FlashInfer CUTLASS MoE "
-                "workspace for up to %d tokens.",
-                nbytes / (1 << 30),
-                rows,
-            )
-            return torch.empty((nbytes,), dtype=torch.uint8, device=device)
+        use_w4_group_scaling = (
+            self.weight_quant_dtype == "mxfp4" and not use_mxfp8_act_scaling
+        )
+        weight_dtype = self.weight_quant_dtype
+        if self.quant_dtype == "nvfp4" or use_mxfp8_act_scaling:
+            # Match the packed weight views passed to FlashInfer in apply().
+            weight_dtype = torch.long
+        elif use_w4_group_scaling:
+            weight_dtype = torch.uint8
+        elif weight_dtype is None:
+            weight_dtype = self.out_dtype
 
         try:
-            return current_workspace_manager().get_persistent_resource(key, _allocate)
-        except AssertionError:
-            # The workspace is locked and this size was not reserved in warmup.
-            logger.warning_once(
-                "FlashInfer CUTLASS MoE workspace of %d bytes was not reserved "
-                "during warmup; falling back to per-call allocation.",
-                nbytes,
+            nbytes = int(
+                flashinfer_cutlass_fused_moe_workspace_size(
+                    rows,
+                    hidden_size,
+                    inter_size,
+                    num_experts_total,
+                    top_k,
+                    x_dtype=x_dtype,
+                    weight_dtype=weight_dtype,
+                    output_dtype=self.out_dtype,
+                    activation_type=activation_to_flashinfer_type(activation),
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                    ep_size=self.ep_size,
+                    ep_rank=self.ep_rank,
+                    use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
+                    use_w4_group_scaling=use_w4_group_scaling,
+                    use_mxfp8_act_scaling=use_mxfp8_act_scaling,
+                    device=self.device,
+                )
             )
-            return None
+        except (RuntimeError, ValueError) as e:
+            logger.warning_once(
+                "FlashInfer CUTLASS MoE workspace sizing failed (%s); "
+                "falling back to per-call workspace allocation.",
+                e,
+            )
+            nbytes = 0
+        self._workspace_nbytes[size_key] = nbytes
+        return nbytes
 
     def apply(
         self,
@@ -476,17 +428,8 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             fc2_expert_weights = w2
 
         workspace_kwargs = {}
-        workspace = self._get_workspace_buffer(
-            hidden_states,
-            fc1_expert_weights,
-            fc2_expert_weights,
-            topk_ids.size(1),
-            activation,
-            use_mxfp8_act_scaling,
-            use_w4_group_scaling,
-        )
-        if workspace is not None:
-            workspace_kwargs["workspace_buffer"] = workspace
+        if workspace2 is not None and workspace2.numel():
+            workspace_kwargs["workspace_buffer"] = workspace2.view(torch.uint8).view(-1)
 
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,
