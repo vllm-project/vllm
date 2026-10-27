@@ -179,7 +179,7 @@ def test_fast_inc_detok_invalid_utf8_err_case():
         detokenizer.update([token_id], False)
 
         finished = i == len(test_tokens) - 1
-        output += detokenizer.get_next_output_text(finished, delta=True)
+        output += detokenizer.get_next_output(finished, delta=True)[0]
 
     assert (
         output
