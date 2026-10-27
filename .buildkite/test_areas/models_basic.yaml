@@ -26,9 +26,10 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization)"
   device: h200_35gb
   key: basic-models-tests-extra-initialization
+  automatic_shard: true
   timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -38,15 +39,14 @@ steps:
     # Only when vLLM model source is modified - test initialization of a large
     # subset of supported models (the complement of the small subset in the above
     # test.) Also run if model initialization test file is modified
-    - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 14
+    - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset'
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Basic Models (Extra Initialization) Shard %N"
+      label: ":amd: (MI355 DPX) Basic Models (Extra Initialization)"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
-      parallelism: 10
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd
@@ -101,6 +101,7 @@ steps:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
       dind: false
+      automatic_shard: true
       device: mi355_1
       timeout_in_minutes: 65
       depends_on:
@@ -245,7 +246,7 @@ steps:
       # The ROCm KDA/AttnRes kernels are gated on gfx950, so this has to be MI355.
       # The kernels/ file the NVIDIA job adds is CUDA-only (it imports
       # cuda.bindings.driver), so it is deliberately left out here.
-      - pytest -v -s models/kimi_k3
+      - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py
 
 # Disabled until the KV connectors installation is locked.
 # - label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
@@ -271,6 +272,21 @@ steps:
 #   commands:
 #   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
 #   - pytest -v -s models/kimi_k3/test_prefix_cache.py
+#   mirror:
+#     amd:
+#       label: ":amd: (MI355) Kimi K3 Prefix Cache"
+#       dind: false
+#       device: mi355_4
+#       timeout_in_minutes: 60
+#       working_dir: "/vllm-workspace/tests"
+#       env:
+#         VLLM_ROCM_USE_AITER: "1"
+#         MOONCAKE_PROTOCOL: "tcp"
+#       depends_on:
+#       - image-build-amd
+#       source_file_dependencies:
+#       - vllm/platforms/rocm.py
+#       - requirements/kv_connectors_rocm.txt
 
 - label: ":nvidia: (H200) Step5"
   key: step5-unit-tests

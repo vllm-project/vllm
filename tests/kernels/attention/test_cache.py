@@ -1454,6 +1454,49 @@ def test_gather_and_maybe_dequant_cache_mla_with_seq_starts(
     torch.testing.assert_close(dst, expected)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="nvfp4_ds_mla requires SM100",
+)
+@torch.inference_mode()
+def test_cp_gather_and_upconvert_nvfp4_kv_cache_with_seq_starts():
+    block_size, num_blocks = 16, 32
+    cache = torch.randint(
+        0, 256, (num_blocks, block_size, NVFP4_DS_MLA_ENTRY_SIZE), dtype=torch.uint8
+    ).cuda()
+    # Gathering every slot in order gives the per-slot reference values.
+    ref = torch.empty(num_blocks * block_size, 576, dtype=torch.bfloat16).cuda()
+    ops.cp_gather_and_upconvert_nvfp4_kv_cache(
+        cache,
+        ref,
+        torch.arange(num_blocks, dtype=torch.int32).cuda()[None],
+        torch.zeros(1, dtype=torch.int32).cuda(),
+        1,
+    )
+
+    seq_starts = torch.tensor([3, 32, 0], dtype=torch.int32)
+    seq_lens = torch.tensor([20, 10, 16], dtype=torch.int32)
+    block_table = torch.stack(
+        [torch.randperm(num_blocks, dtype=torch.int32) for _ in seq_lens]
+    )
+    slots = []
+    for bt, start, n in zip(block_table, seq_starts.tolist(), seq_lens.tolist()):
+        pos = torch.arange(start, start + n)
+        slots.append(bt[pos // block_size] * block_size + pos % block_size)
+    dst = torch.empty(int(seq_lens.sum()), 576, dtype=torch.bfloat16).cuda()
+    ops.cp_gather_and_upconvert_nvfp4_kv_cache(
+        cache,
+        dst,
+        block_table.cuda(),
+        (seq_lens.cumsum(0) - seq_lens).int().cuda(),
+        len(seq_lens),
+        seq_starts.cuda(),
+    )
+    torch.testing.assert_close(
+        dst, ref[torch.cat(slots).cuda()], atol=0, rtol=0, equal_nan=True
+    )
+
+
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("use_seq_starts", [False, True])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
