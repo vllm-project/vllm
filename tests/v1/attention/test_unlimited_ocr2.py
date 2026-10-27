@@ -91,8 +91,6 @@ def test_page_filter_excludes_other_page_remote_values():
 @pytest.mark.parametrize(
     "dtype,backend",
     [
-        (torch.float32, "TRITON_ATTN"),
-        (torch.bfloat16, "TRITON_ATTN"),
         (torch.bfloat16, "FLASH_ATTN"),
         (torch.bfloat16, "FLASHINFER"),
     ],
@@ -105,7 +103,7 @@ def test_paged_decode_graph_replay_tracks_requests_and_page_markers(
     _check_paged_decode_graph(dtype, backend, block_size, rswa, high_cache=False)
 
 
-@pytest.mark.parametrize("backend", ["TRITON_ATTN", "FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 def test_paged_decode_large_physical_cache_offsets(backend):
     """Read/write offsets beyond int32 while replaying the real paged kernels."""
     _check_paged_decode_graph(torch.bfloat16, backend, 16, True, high_cache=True)

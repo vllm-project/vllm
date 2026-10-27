@@ -311,63 +311,6 @@ def _scores(
     tl.store(Candidate + row * NB + block_id, candidate)
 
 
-@triton.jit
-def _attend(
-    C,
-    T,
-    Lens,
-    Prefix,
-    Slots,
-    Q,
-    Indices,
-    Bias,
-    Valid,
-    Out,
-    CB: tl.constexpr,
-    CH: tl.constexpr,
-    CT: tl.constexpr,
-    TS: tl.constexpr,
-    QS: tl.constexpr,
-    QH: tl.constexpr,
-    B: tl.constexpr,
-    H: tl.constexpr,
-    NH: tl.constexpr,
-    D: tl.constexpr,
-    BS: tl.constexpr,
-    LOCAL: tl.constexpr,
-    K: tl.constexpr,
-    READ: tl.constexpr,
-    RSWA: tl.constexpr,
-):
-    row, head = tl.program_id(0), tl.program_id(1)
-    pos = tl.load(Lens + row) - 1
-    active = (pos >= 0) & (tl.load(Slots + row) >= 0)
-    s = tl.arange(0, READ)
-    d = tl.arange(0, D)
-    remote = s < K * BS
-    block_id = tl.load(Indices + row * K + s // BS, remote, 0)
-    rvalid = tl.load(Valid + row * K + s // BS, remote, 0)
-    bias = tl.load(Bias + row * K + s // BS, remote, 0)
-    p = tl.where(remote, block_id * BS + s % BS, pos - LOCAL + 1 + s - K * BS)
-    keep = active & (s < K * BS + LOCAL) & (p >= 0) & (p <= pos)
-    keep &= tl.where(remote, rvalid & (p <= pos - LOCAL), True)
-    if RSWA:
-        prefix = tl.load(Prefix + row)
-        keep &= (p < prefix) | (p > pos - LOCAL)
-    block = tl.load(T + row * TS + p // B, keep, 0).to(tl.int64)
-    ptr = C + block * CB + (head // (NH // H)) * CH + p % B * CT
-    keys = tl.load(ptr[:, None] + d[None, :], keep[:, None], 0).to(tl.float32)
-    q = tl.load(Q + row * QS + head * QH + d).to(tl.float32)
-    logits = tl.sum(keys * q[None, :], 1) * (1.0 / math.sqrt(D))
-    logits += tl.where(remote, bias, 0)
-    logits = tl.where(keep, logits, -float("inf"))
-    probs = tl.where(keep, tl.exp(logits - tl.max(logits, 0)), 0)
-    probs /= tl.maximum(tl.sum(probs, 0), 1e-10)
-    values = tl.load(ptr[:, None] + D + d[None, :], keep[:, None], 0).to(tl.float32)
-    result = tl.sum(probs[:, None] * values, 0)
-    tl.store(Out + row * NH * D + head * D + d, result)
-
-
 def cache_dash_prefill(k, v, ik, roles, slots, cache, sp, head_cls=None):
     """Store rotated keys and integer page state in one auxiliary KV head."""
     tok, page, _, query_page = page_coordinates(roles)
@@ -484,7 +427,7 @@ def paged_dash_decode(
     layer_idx,
     max_model_len,
     prefix_lens=None,
-    backend="TRITON_ATTN",
+    backend="FLASH_ATTN",
     cached_summaries=False,
 ):
     """One query per request; all sequence-dependent decisions stay on GPU."""
@@ -567,66 +510,35 @@ def paged_dash_decode(
     indices = indices.contiguous()
     local = int(sp["sparse_local_block"]) * bs
     topk = indices.shape[-1]
-    if backend != "TRITON_ATTN":
-        from vllm.v1.attention.ops.unlimited_ocr2_flash import flash_dash_attention
+    from vllm.v1.attention.ops.unlimited_ocr2_flash import flash_dash_attention
 
-        keys = torch.empty(
-            (n * (topk * bs + local), h, dim), device=q.device, dtype=q.dtype
-        )
-        values = torch.empty_like(keys)
-        used = torch.empty(n * (topk + 1), device=q.device, dtype=torch.int32)
-        _gather_segments[(n, topk + 1, h)](
-            cache,
-            block_table,
-            seq_lens,
-            prefix_lens if prefix_lens is not None else seq_lens,
-            slots,
-            indices,
-            valid,
-            keys,
-            values,
-            used,
-            cb,
-            ch,
-            ct,
-            ts,
-            b,
-            h,
-            dim,
-            bs,
-            local,
-            topk,
-            triton.next_power_of_2(max(bs, local)),
-            prefix_lens is not None,
-        )
-        return flash_dash_attention(q, keys, values, used, bias, backend, bs, local)
-    output = torch.empty_like(q)
-    _attend[(n, nh)](
+    keys = torch.empty(
+        (n * (topk * bs + local), h, dim), device=q.device, dtype=q.dtype
+    )
+    values = torch.empty_like(keys)
+    used = torch.empty(n * (topk + 1), device=q.device, dtype=torch.int32)
+    _gather_segments[(n, topk + 1, h)](
         cache,
         block_table,
         seq_lens,
         prefix_lens if prefix_lens is not None else seq_lens,
         slots,
-        q,
         indices,
-        bias,
         valid,
-        output,
+        keys,
+        values,
+        used,
         cb,
         ch,
         ct,
         ts,
-        q.stride(0),
-        q.stride(1),
         b,
         h,
-        nh,
         dim,
         bs,
         local,
         topk,
-        triton.next_power_of_2(topk * bs + local),
+        triton.next_power_of_2(max(bs, local)),
         prefix_lens is not None,
-        num_warps=8,
     )
-    return output
+    return flash_dash_attention(q, keys, values, used, bias, backend, bs, local)

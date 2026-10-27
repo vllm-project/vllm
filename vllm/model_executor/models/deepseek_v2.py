@@ -1654,8 +1654,9 @@ class DeepseekV2Model(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if getattr(self.config, "unlimited_ocr2", False) and any(
-                part in name for part in (".dash_router.", ".indexer.")
+            if (
+                getattr(self.config, "unlimited_ocr2", False)
+                and ".dash_router." in name
             ):
                 # These replicated projections are not the main QKV shards.
                 param = params_dict[name]

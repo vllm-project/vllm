@@ -372,40 +372,32 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 )
         if vllm_config.scheduler_config.enable_chunked_prefill:
             raise ValueError("Unlimited-OCR-2 requires --no-enable-chunked-prefill")
-        if vllm_config.parallel_config.pipeline_parallel_size != 1:
-            raise ValueError(
-                "Unlimited-OCR-2 currently requires pipeline_parallel_size=1"
-            )
         parallel = vllm_config.parallel_config
-        if (
-            parallel.decode_context_parallel_size != 1
-            or parallel.prefill_context_parallel_size != 1
-        ):
-            raise ValueError("Unlimited-OCR-2 does not support context parallelism")
-        if parallel.enable_dbo:
-            raise ValueError("Unlimited-OCR-2 does not support dual batch overlap")
-        if vllm_config.lora_config is not None:
-            raise ValueError("Unlimited-OCR-2 does not support LoRA")
-        if vllm_config.speculative_config is not None:
-            raise ValueError("Unlimited-OCR-2 does not support speculative decoding")
-        if vllm_config.quant_config is not None:
-            raise ValueError("Unlimited-OCR-2 currently requires unquantized weights")
-        if vllm_config.cache_config.cache_dtype != "auto":
-            raise ValueError("Unlimited-OCR-2 currently requires kv_cache_dtype=auto")
-        if vllm_config.kv_transfer_config is not None:
-            raise ValueError("Unlimited-OCR-2 does not support KV transfer")
+        unsupported = {
+            "pipeline parallelism": parallel.pipeline_parallel_size != 1,
+            "context parallelism": (
+                parallel.decode_context_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+            ),
+            "dual batch overlap": parallel.enable_dbo,
+            "LoRA": vllm_config.lora_config is not None,
+            "speculative decoding": vllm_config.speculative_config is not None,
+            "quantized weights": vllm_config.quant_config is not None,
+            "non-default KV dtype": vllm_config.cache_config.cache_dtype != "auto",
+            "KV transfer": vllm_config.kv_transfer_config is not None,
+        }
+        for feature, enabled in unsupported.items():
+            if enabled:
+                raise ValueError(f"Unlimited-OCR-2 does not support {feature}")
         vllm_config.cache_config.enable_prefix_caching = False
         backend = (
             vllm_config.attention_config.backend or AttentionBackendEnum.FLASH_ATTN
         )
         if backend not in (
-            AttentionBackendEnum.TRITON_ATTN,
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.FLASHINFER,
         ):
-            raise ValueError(
-                "Unlimited-OCR-2 supports FLASH_ATTN, FLASHINFER or TRITON_ATTN"
-            )
+            raise ValueError("Unlimited-OCR-2 supports FLASH_ATTN or FLASHINFER")
         text_config = vllm_config.model_config.hf_config.text_config
         text_config.unlimited_ocr2_attention_backend = backend.name
         if backend == AttentionBackendEnum.FLASHINFER:
@@ -413,7 +405,7 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 1, compilation.cudagraph_num_of_warmups
             )
         # DASH owns sparse selection and compute. Reuse Triton's paged-cache
-        # metadata, including R-SWA reclamation, for all three compute backends.
+        # metadata, including R-SWA reclamation, for both compute backends.
         vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
         logger.info("Unlimited-OCR-2 DASH compute backend: %s", backend.name)
         mm_config = vllm_config.model_config.multimodal_config

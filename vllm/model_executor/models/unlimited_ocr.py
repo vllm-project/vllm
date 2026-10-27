@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Unlimited-OCR model compatible with HuggingFace weights.
+Unlimited-OCR-2 uses DASH attention, 16 crops and independent per-page cropping.
+The processor behavior described below applies to Unlimited-OCR v1.
 
 Unlimited-OCR (``baidu/Unlimited-OCR``) shares
 the exact DeepSeek-OCR (gundam, ``base_size=1024`` / ``image_size=640`` / crop)
@@ -45,12 +47,11 @@ this module (same request-level processor as DeepSeek-OCR) with::
 
 Image processing
 ----------------
-Unlimited-OCR v1 supports up to 32 local crops. Unlimited-OCR-2 uses the
-checkpoint's 16-crop preset; the crop limit affects aspect-ratio selection.
+Unlimited-OCR supports up to 32 local crops (vs 6 for DeepSeek-OCR), i.e.
+``dynamic_preprocess`` runs with ``max_num=32``.
 
-Unlimited-OCR v1 falls back to non-crop mode for multi-image requests.
-Unlimited-OCR-2 uses crop ("gundam") mode for every page, matching its official
-evaluation preprocessing.
+Multi-image requests fall back to non-crop mode: crop ("gundam") mode is only
+used for single-image input. DeepSeek-OCR does *not* have this restriction.
 
 Because that fallback makes the per-image processor output depend on *how many*
 images are in the request, it breaks the assumption behind vLLM's per-item
@@ -109,7 +110,10 @@ _UNLIMITED_OCR2_MAX_CROPS = 16
 
 
 class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
-    """Version-specific cropping: v1 uses up to 32 tiles, v2 up to 16."""
+    """ProcessingInfo for Unlimited-OCR: same as DeepSeek-OCR but with
+    max_crops=32 instead of 6.  The higher crop count allows tiling very large
+    document pages into up to 32 640×640 patches (dynamic_preprocess max_num=32).
+    """
 
     def get_hf_config(self):
         from vllm.transformers_utils.configs.unlimited_ocr import UnlimitedOCRConfig
@@ -187,9 +191,13 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
 class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
     """Multimodal processor for Unlimited-OCR.
 
-    Applies the v1 multi-image crop fallback and the v2 per-page crop policy.
-    Multi-image requests bypass the per-item processing cache so the v1
-    request-dependent fallback remains consistent.
+    Disables crop mode for multi-image requests (to stay consistent with
+    ``UnlimitedOCRProcessor.tokenize_with_images``), and -- since that makes the
+    per-image output depend on the request's image count -- bypasses the
+    per-item processing cache for multi-image requests, exactly like
+    ``DeepseekVL2MultiModalProcessor``.
+
+    DeepSeek-OCR does *not* apply either of these.
     """
 
     def _get_prompt_updates(
@@ -291,12 +299,12 @@ class UnlimitedOCRForCausalLM(DeepseekOCRForCausalLM):
 
     def load_weights(self, weights):
         if getattr(self.text_config, "unlimited_ocr2", False):
-            # Transformers 4 exported this deterministic CLIP buffer; vLLM
-            # constructs the positions and has no corresponding parameter.
+            # Skip the unused warmup indexer and deterministic CLIP positions.
             weights = (
                 (name, weight)
                 for name, weight in weights
-                if name != "model.vision_model.embeddings.position_ids"
+                if ".indexer." not in name
+                and name != "model.vision_model.embeddings.position_ids"
             )
         return super().load_weights(weights)
 

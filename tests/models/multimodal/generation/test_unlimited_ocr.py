@@ -4,7 +4,6 @@
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from examples.generate.unlimited_ocr2 import document_pages, page_windows
 from vllm import SamplingParams
 
 
@@ -50,7 +49,7 @@ def _prefill_graph_segments(worker):
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("crop_mode", [False, True])
-@pytest.mark.parametrize("backend", ["TRITON_ATTN", "FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 @pytest.mark.parametrize("graph_mode", ["eager", "decode", "prefill"])
 def test_unlimited_ocr2_batched_pages(
     vllm_runner, graph_mode, backend, crop_mode, monkeypatch
@@ -120,21 +119,6 @@ def test_unlimited_ocr2_batched_pages(
         result = runner.llm.generate(requests[:1], sampling)[0].outputs[0].text
         assert texts[1] in result
         assert "ORANGE" not in result
-
-        # Three document pages traverse two bounded windows with one overlap.
-        emitted = []
-        image_map = {"first": pages[0], "second": pages[1]}
-        for paths, context in page_windows(["first", "second", "first"], 2, 1):
-            images = [image_map[path] for path in paths]
-            request = {
-                "prompt": "<PAGE><image>" * len(images) + "Multi page parsing.",
-                "multi_modal_data": {"image": images},
-            }
-            output = runner.llm.generate([request], sampling)[0].outputs[0].text
-            emitted.extend(document_pages(output, len(images), context))
-        assert len(emitted) == 3
-        for page, text in zip(emitted, [texts[0], texts[1], texts[0]]):
-            assert text in page
 
         # Decode beyond the 128-token output window through the real scheduler.
         long_output = runner.llm.generate(

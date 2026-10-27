@@ -12,10 +12,8 @@ from vllm.model_executor.layers.attention.rswa_attention import RSWAAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.unlimited_ocr2 import (
     DashRouter,
-    RouterNorm,
     dash_attention,
 )
-from vllm.model_executor.models.deepseek_v2 import DeepseekAttention
 from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionBackend,
     TritonAttentionMetadata,
@@ -25,7 +23,7 @@ from vllm.v1.attention.ops.unlimited_ocr2 import cache_dash_prefill, paged_dash_
 TOKEN_ROLES_KEY = "unlimited_ocr2_token_roles"
 
 
-class UnlimitedOCR2Attention(DeepseekAttention):
+class UnlimitedOCR2Attention(nn.Module):
     def __init__(
         self,
         vllm_config,
@@ -39,7 +37,7 @@ class UnlimitedOCR2Attention(DeepseekAttention):
         **kwargs,
     ):
         # Keep main KV and one shared router/metadata head per TP rank.
-        nn.Module.__init__(self)
+        super().__init__()
         from vllm.distributed import get_tensor_model_parallel_world_size
 
         tp = get_tensor_model_parallel_world_size()
@@ -69,13 +67,6 @@ class UnlimitedOCR2Attention(DeepseekAttention):
             quant_config=quant_config,
         )
         self.dash_router = DashRouter(hidden_size, index_dim, config.rms_norm_eps)
-        # The checkpoint also carries the warmup indexer. DASH uses only its
-        # coordinate conventions; load its parameters without using its scores.
-        self.indexer = nn.Module()
-        self.indexer.q_proj = nn.Linear(hidden_size, index_dim, bias=False)
-        self.indexer.k_proj = nn.Linear(hidden_size, index_dim, bias=False)
-        self.indexer.q_norm = RouterNorm(index_dim, config.rms_norm_eps)
-        self.indexer.k_norm = RouterNorm(index_dim, config.rms_norm_eps)
         window = vllm_config.model_config.rswa_window
         attention_cls = RSWAAttention if window is not None else Attention
         attention_kwargs = {"rswa_window": window} if window is not None else {}
