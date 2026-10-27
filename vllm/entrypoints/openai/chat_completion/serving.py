@@ -79,6 +79,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
+from vllm.v1.kv_hints import kv_hints_from_wire
 
 logger = init_logger(__name__)
 
@@ -484,6 +485,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    kv_hints=kv_hints_from_wire(request.kv_hints),
                     **self._engine_reasoning_kwargs(
                         request, parser, chat_template_kwargs, prompt_token_ids
                     ),

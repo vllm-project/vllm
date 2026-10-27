@@ -84,6 +84,7 @@ steps:
     - vllm/utils/
     - vllm/v1/
     - tests/v1/core
+    - tests/v1/kv_hints
     - tests/v1/executor
     - tests/v1/kv_offload
     - tests/v1/simple_kv_offload
@@ -96,6 +97,7 @@ steps:
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -m 'not cpu_test' v1/core
+    - pytest -v -s -m 'not cpu_test' v1/kv_hints
   mirror:
     amd:
       label: ":amd: (MI355 DPX) V1 Core"
