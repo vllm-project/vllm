@@ -96,9 +96,8 @@ KP = 72  # LDS row stride of a K / V tile (bf16)
 KPW = KP // 2
 NEG = float("-inf")
 PGMAX = 512  # page ids a CTA staged in one round (128 tiles)
-VLLM_MAX_KEYS = (
-    1 << 20
-)  # keys a request the page staging covers (max_position_embeddings)
+# keys a request the page staging covers (max_position_embeddings)
+VLLM_MAX_KEYS = 1 << 20
 REGION_IDS = {"aseg": 40}
 DESC_WORDS = 10
 TABLE_ROWS = 64
@@ -127,15 +126,13 @@ def default_cpg(NR, swa):
 def make(NR, swa, maxk=VLLM_MAX_KEYS):
     """The fragment for NR requests; swa = SWA (window 2048) or full attention. It stages enough
     page ids a CTA for maxk keys a request (PGN)."""
-    KCM = (
-        0 if swa else CM_NT
-    )  # K / V load cache policy: cached for SWA, nontemporal for full
+    # K / V load cache policy: cached for SWA, nontemporal for full
+    KCM = 0 if swa else CM_NT
 
     G = NR * HKV
     CPG = default_cpg(NR, swa)
-    NST = -(
-        -(-(-(34 if swa else 512) // CPG)) // 2
-    )  # steps a CTA at the window / at 32k context
+    # steps a CTA at the window / at 32k context
+    NST = -(-(-(-(34 if swa else 512) // CPG)) // 2)
     PD = max(1, min(4, NST))  # K / V steps in flight
     assert G * CPG <= BLOCKS
     NI = NR * NQ * NH  # output rows
@@ -159,13 +156,11 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
     @fx.struct
     class Lds:
         kv: fx.Array[fx.Int32, 2 * 2 * 64 * KPW, 16]  # [tile lane][K | V][key][KP bf16]
-        mrg: fx.Array[
-            fx.Float32, 4 * 64 * 18, 16
-        ]  # tile lane 1 -> 0: [quarter][lane][m, l, acc 16]
+        # tile lane 1 -> 0: [quarter][lane][m, l, acc 16]
+        mrg: fx.Array[fx.Float32, 4 * 64 * 18, 16]
         mg2: fx.Array[fx.Float32, 8 * 16 * 6, 16]  # merge: [wave][d quad][M, L, A 4]
-        pg: fx.Array[
-            fx.Int32, PGN, 16
-        ]  # the CTA's page ids, staged once (off the K / V vmcnt chain)
+        # the CTA's page ids, staged once (off the K / V vmcnt chain)
+        pg: fx.Array[fx.Int32, PGN, 16]
 
     def fmax(a, b):
         return (a > b).select(a, b)
@@ -225,15 +220,13 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
             pgl + fx.min((2 * step + ltl) * (TILE // BS) + lkey // BS, PGN - 1)
         )
         if const_expr(swa):
-            ok = ok & (
-                kg >= wlo
-            )  # keys before the window: no access (vLLM frees their blocks)
+            # keys before the window: no access (vLLM frees their blocks)
+            ok = ok & (kg >= wlo)
         base = d.k + (
             fx.Int64(uniform(pg)) * d.v + fx.Int64(kvh * (BS * 2 * HD))
         ) * fx.Int64(2)
-        off = (
-            (kg % BS) * HD + 8 * lch
-        )  # dwords: row (kg % 16) of 128 bf16, channels [16 lch, 16 lch + 16)
+        # dwords: row (kg % 16) of 128 bf16, channels [16 lch, 16 lch + 16)
+        off = (kg % BS) * HD + 8 * lch
         kv = [
             ld_vec_if(ok, base, off + o, 4, OOB_BOUND, KCM)
             for o in (0, 4, HD // 2, HD // 2 + 4)
@@ -380,9 +373,8 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
                     for c in range(2)
                 ]
                 pgl = L.pg.ptr
-                for r in range_constexpr(
-                    1, PGN // THREADS
-                ):  # full attention past 128 tiles a CTA
+                # full attention past 128 tiles a CTA
+                for r in range_constexpr(1, PGN // THREADS):
                     tr = tid + r * THREADS
                     pk = t0 * (TILE // BS) + tr
                     pok = (tr < (t1 - t0) * (TILE // BS)) & (pk * BS < seq_len)
@@ -392,16 +384,14 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
                 pk = t0 * (TILE // BS) + tid  # page tid of the CTA's range
                 pok = (tid < (t1 - t0) * (TILE // BS)) & (pk * BS < seq_len)
                 if const_expr(swa):
-                    pok = pok & (
-                        (pk + 1) * BS > wlo
-                    )  # blocks before the window: stale ids, not read
+                    # blocks before the window: stale ids, not read
+                    pok = pok & ((pk + 1) * BS > wlo)
                 pgv = ld_i32_if(pok, d.pt, req * d.pts + pk, OOB_BOUND)
                 fx.ptr_store(pgv, pgl + fx.min(tid, PGMAX - 1))
                 gpu.barrier()
                 kvq = []
-                for i in range_constexpr(
-                    PD
-                ):  # in step order: the scheduler must not move slot 0 behind the others
+                # in step order: the scheduler must not move slot 0 behind the others
+                for i in range_constexpr(PD):
                     kvq.append(
                         kv_load(d, t0, t1, seq_len, kvh, i, pgl, ltl, lkey, lch, wlo)
                     )

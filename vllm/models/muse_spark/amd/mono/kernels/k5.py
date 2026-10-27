@@ -162,9 +162,8 @@ REGION_IDS = {
 class Build:
     S: int = 32  # rows (32 / 64 / 96 / 128)
     next_rope: bool = True  # the next layer has RoPE (SWA) or not (full, NoPE)
-    attn: str = (
-        ""  # this layer's verify attention fused at the HA head ("swa" / "full")
-    )
+    # this layer's verify attention fused at the HA head ("swa" / "full")
+    attn: str = ""
 
     @property
     def bnd(self):
@@ -182,10 +181,8 @@ def scratch_layout(S, world=W, bnd=0):
         []
         if not bnd
         else [
-            (
-                "smidb",
-                S * HID * 4,
-            ),  # the mid stream, replicated [t][col] fp32 (each CTA its 32 columns)
+            # the mid stream, replicated [t][col] fp32 (each CTA its 32 columns)
+            ("smidb", S * HID * 4),
             ("xinb", S * HID * 2),
             ("xinbf", BLOCKS * 8),  # ffn_in [t][col] bf16 + a flag a CTA
             ("xnb", S * HID * 2),
@@ -193,10 +190,8 @@ def scratch_layout(S, world=W, bnd=0):
             ("ssa4", (4 * S * BLOCKS + 2 * S) * 8),
             ("ssg4", (4 * S * BLOCKS + 2 * S) * 8),  # partials, rstd
             ("gpa", BLOCKS * 16 * 8),
-            (
-                "gpg",
-                BLOCKS * 16 * 8,
-            ),  # [CTA][4 tokens][4] partials of the AB / G
+            # [CTA][4 tokens][4] partials of the AB / G
+            ("gpg", BLOCKS * 16 * 8),
         ]
     )
     return _lay(
@@ -207,10 +202,8 @@ def scratch_layout(S, world=W, bnd=0):
             ("px", EL * KQ * 16 * S * 8),
             ("m", S * DM * 2),
             ("mmf", BLOCKS * 8),
-            (
-                "py",
-                max(128, (KSP - 1) * NTILES) * 16 * S * 8,
-            ),  # [K part - 1][tile][row][t]
+            # [K part - 1][tile][row][t]
+            ("py", max(128, (KSP - 1) * NTILES) * 16 * S * 8),
             ("qx", 32 * 8 * NQT * 16 * S * 8),
             ("qkv", S * (QKV_ROWS // 2) * 8),
         ]
@@ -225,18 +218,12 @@ def peer_layout(S, world=W, bnd=0):
         []
         if not bnd
         else [
-            (
-                "opb",
-                2 * W * S * (BLOCKS // W) * 16 * 8,
-            ),  # o_proj partials to the block owner [par][src][t][own blk][pair]
-            (
-                "orb",
-                2 * S * (HID // 2) * 8,
-            ),  # the owner's reduced o, all-gathered [par][t][pair] tagged
-            (
-                "yb",
-                2 * S * (HID // 2) * 8,
-            ),  # stage F's y, all-gathered [par][t][pair] tagged
+            # o_proj partials to the block owner [par][src][t][own blk][pair]
+            ("opb", 2 * W * S * (BLOCKS // W) * 16 * 8),
+            # the owner's reduced o, all-gathered [par][t][pair] tagged
+            ("orb", 2 * S * (HID // 2) * 8),
+            # stage F's y, all-gathered [par][t][pair] tagged
+            ("yb", 2 * S * (HID // 2) * 8),
         ]
     )
     # the bnd regions go last: HM (k5m) addresses moep / mf with the layout of the plain build
@@ -315,9 +302,8 @@ def build(key: Build):
         assert key.attn in ("swa", "full"), key
         FA = attn_frag.make(S // 8, key.attn == "swa")
         FaLds = FA.Lds
-        _KEYSTR = (
-            _KEYSTR + FA.key
-        )  # the fragment's source hash: the disk cache does not follow FA.run
+        # the fragment's source hash: the disk cache does not follow FA.run
+        _KEYSTR = _KEYSTR + FA.key
 
     @fx.union
     class HaLds:
@@ -343,12 +329,10 @@ def build(key: Build):
     @fx.struct
     class Misc:
         pad: fx.Array[fx.Int64, TL_POINTS, 16]  # unused: keeps the tuned LDS offsets
-        rs: fx.Array[
-            fx.Float32, 2 * S + (32 if BND else 8), 16
-        ]  # bnd: tok_rstd2 uses rs[2S .. 2S + 32)
-        pr: fx.Array[
-            fx.Float32, 512 + 64 if BND else 8, 16
-        ]  # bnd: the polled group partials + wave sums
+        # bnd: tok_rstd2 uses rs[2S .. 2S + 32)
+        rs: fx.Array[fx.Float32, 2 * S + (32 if BND else 8), 16]
+        # bnd: the polled group partials + wave sums
+        pr: fx.Array[fx.Float32, 512 + 64 if BND else 8, 16]
         red4: fx.Array[fx.Float32, 32, 16]
 
     name_a = f"muse_k5a_s{S}" + (f"_fa{key.attn}" if key.attn else "")
@@ -389,9 +373,8 @@ def build(key: Build):
         if item < S * HQ:
             t = item // HQ
             kk = (item % HQ) * HD + (gt % 8) * 8
-            tl_ = fx.min(
-                t, nrows - 1
-            )  # padded rows (t >= nrows) repeat the last real row
+            # padded rows (t >= nrows) repeat the last real row
+            tl_ = fx.min(t, nrows - 1)
             if const_expr(ao is None):
                 xv = ld_vec(attn_o, (tl_ * OK_K + kk) // 2, 4)
             else:  # the fused attention: the merged rows as tagged pairs
@@ -589,9 +572,8 @@ def build(key: Build):
         par = tag_par(tag)
         j = bid
         t = W * j + rank
-        srow = (s_full != 0).select(
-            fx.min(t, nrows - 1), j
-        )  # replicated [rows, 8192] or token-sharded
+        # replicated [rows, 8192] or token-sharded
+        srow = (s_full != 0).select(fx.min(t, nrows - 1), j)
         st, al, be, wfs = [], [], [], []
         for h in range_constexpr(2):
             cq = 8 * (tid + THREADS * h)
@@ -613,9 +595,8 @@ def build(key: Build):
         a = [fx.Float32(0.0) for _ in range(16)]
         for src in range_constexpr(W):
             for h in range_constexpr(2):
-                q = (
-                    tid + THREADS * h
-                )  # 8-column chunk: columns 8q .. 8q + 8 (block q / 4)
+                # 8-column chunk: columns 8q .. 8q + 8 (block q / 4)
+                q = tid + THREADS * h
                 wv = ld_vec(
                     own_peer + fx.Int64(play["op"][0]),
                     (((par * W + src) * BLOCKS + q // 4) * TS + j) * 16 + 4 * (q % 4),
@@ -720,9 +701,8 @@ def build(key: Build):
         t = lane % 16
         kq = bid % KQ
         rb = bid // KQ
-        if const_expr(
-            BND
-        ):  # ffn_in is local; the 32 CTAs of this K part wrote its columns
+        # ffn_in is local; the 32 CTAs of this K part wrote its columns
+        if const_expr(BND):
             if tid < 32:
                 fa = (tid // 4) * 32 + 4 * kq + tid % 4
                 mb_poll(
@@ -813,9 +793,8 @@ def build(key: Build):
             for w in range_constexpr(WAVES):
                 v = v + fx.ptr_load(tok + (w * 16 + t16))
             if tid < 16:
-                fx.ptr_store(
-                    v, tok + (WAVES * 16 + 8 + rt * 16 + t16)
-                )  # logits of the CTA's expert, pushed after the loop
+                # logits of the CTA's expert, pushed after the loop
+                fx.ptr_store(v, tok + (WAVES * 16 + 8 + rt * 16 + t16))
             rp = (tid // 16) % 8
             tt = tid % 16
             for h2 in range_constexpr(2):
@@ -1022,9 +1001,8 @@ def build(key: Build):
             for k in range_constexpr(4):
                 fx.ptr_store(qs[k], pr + (512 + wave * 4 + k))
         gpu.barrier()
-        if (
-            tid < 16
-        ):  # token tq = tid / 4, partial k = tid % 4: the token's 2 waves in order
+        # token tq = tid / 4, partial k = tid % 4: the token's 2 waves in order
+        if tid < 16:
             v = fx.ptr_load(pr + (512 + (2 * (tid // 4)) * 4 + tid % 4)) + fx.ptr_load(
                 pr + (512 + (2 * (tid // 4) + 1) * 4 + tid % 4)
             )
@@ -1848,9 +1826,8 @@ def build(key: Build):
         t = lane % 16
         k8 = bid % 8
         gq = bid // 8
-        if const_expr(
-            BND
-        ):  # xn is local; the 32 CTAs of this K eighth wrote its columns
+        # xn is local; the 32 CTAs of this K eighth wrote its columns
+        if const_expr(BND):
             if tid < 32:
                 fq = (tid // 4) * 32 + 4 * k8 + tid % 4
                 mb_poll(

@@ -331,19 +331,13 @@ def scratch_layout(S, world=W):
             ("ssa2", (S * BLOCKS + S) * 8),
             ("xn", S * HID * 2),  # next layer's attention input (bf16 plain)
             ("xnf", BLOCKS * 8),
-            (
-                "ssa4",
-                (4 * S * BLOCKS + 2 * S) * 8,
-            ),  # AB: 4 partials [t][CTA][4], then (r1, r2)[t]
+            # AB: 4 partials [t][CTA][4], then (r1, r2)[t]
+            ("ssa4", (4 * S * BLOCKS + 2 * S) * 8),
             ("ssg4", (4 * S * BLOCKS + 2 * S) * 8),  # G
-            (
-                "qx",
-                32 * 8 * NQT * 16 * S * 8,
-            ),  # qkvg K-eighth partials [group][src][tile row][t]
-            (
-                "qkv",
-                S * (QKV_ROWS // 2) * 8,
-            ),  # q / k / v rows (tagged bf16 pairs)
+            # qkvg K-eighth partials [group][src][tile row][t]
+            ("qx", 32 * 8 * NQT * 16 * S * 8),
+            # q / k / v rows (tagged bf16 pairs)
+            ("qkv", S * (QKV_ROWS // 2) * 8),
         ]
     )
 
@@ -358,22 +352,14 @@ def peer_layout(S, world=W):
             ("hf", 2 * W * BLOCKS * 8),  # [par][src][CTA] tagged flags
             ("moep", 2 * W * S * (DM // 2) * 8),  # [par][src][t][pair] tagged
             ("y", 2 * S * (HID // 2) * 8),  # [par][t][pair] tagged
-            (
-                "op",
-                2 * W * S * (HID // 2) * 8,
-            ),  # o_proj partials [par][src][t][pair] tagged
-            (
-                "orr",
-                2 * S * (HID // 2) * 8,
-            ),  # the owner's reduced o_proj [par][t][pair] tagged (all-gather)
-            (
-                "mrr",
-                2 * S * (DM // 2) * 8,
-            ),  # the owner's reduced EP sum [par][t][pair] tagged (all-gather)
-            (
-                "ssa4p",
-                2 * 4 * S * BLOCKS * 8,
-            ),  # the AB owners' norm partials [par][t][CTA][4] tagged (all-gather)
+            # o_proj partials [par][src][t][pair] tagged
+            ("op", 2 * W * S * (HID // 2) * 8),
+            # the owner's reduced o_proj [par][t][pair] tagged (all-gather)
+            ("orr", 2 * S * (HID // 2) * 8),
+            # the owner's reduced EP sum [par][t][pair] tagged (all-gather)
+            ("mrr", 2 * S * (DM // 2) * 8),
+            # the AB owners' norm partials [par][t][CTA][4] tagged (all-gather)
+            ("ssa4p", 2 * 4 * S * BLOCKS * 8),
         ]
     )
 
@@ -401,9 +387,8 @@ def build(key: Build):
     play, _ = peer_layout(S)
     PF_GU = 2 if S == 8 else 1  # gate_up tasks in flight
     PF_DN = 2  # down tasks in flight
-    GUSPLIT = (
-        S == 16
-    )  # gate_up: the two 16-row halves of a task in separate MFMA passes
+    # gate_up: the two 16-row halves of a task in separate MFMA passes
+    GUSPLIT = S == 16
     W13_BYTES = EL * 2 * INTER * (DM // 2)
     W13S_BYTES = EL * 2 * INTER * (DM // 32)
     W2_BYTES = EL * DM * (INTER // 2)
@@ -496,9 +481,8 @@ def build(key: Build):
         assert key.attn in ("swa", "full"), key
         FA = attn_frag.make(S // 8, key.attn == "swa")
         FaLds = FA.Lds
-        _KEYSTR = (
-            _KEYSTR + FA.key
-        )  # the fragment's source hash: the disk cache does not follow FA.run
+        # the fragment's source hash: the disk cache does not follow FA.run
+        _KEYSTR = _KEYSTR + FA.key
 
     @fx.union
     class StageLds:
@@ -1302,9 +1286,8 @@ def build(key: Build):
         """The W ranks' slots of this CTA's columns, summed in rank order (fp32) ->
         bf16 m (local, plain) -> drain -> this CTA's MF flag."""
         par = tag_par(tag)
-        if (tid < 8 * S) & (
-            (bid // CPRX) == rank
-        ):  # the block owner: W slots in rank order -> every rank
+        # the block owner: W slots in rank order -> every rank
+        if (tid < 8 * S) & ((bid // CPRX) == rank):
             rp = tid % 8
             tt = tid // 8
             specs = [
@@ -1497,9 +1480,8 @@ def build(key: Build):
         fixed order: r1 = rsqrt(P1 / HID + eps1), r2 = rsqrt((P2 + 2 r1 P3 + r1^2 P4) / HID + eps2)
         (r2 from the unrounded o r1). rs_out[t] = r1, rs_out[S + t] = r2 on every CTA."""
         rbase = scratch + fx.Int64(lay[region][0])
-        prb = (
-            rbase if pbase is None else pbase
-        )  # stage AB: the partials come from the own peer buffer (the block owners)
+        # stage AB: the partials come from the own peer buffer (the block owners)
+        prb = rbase if pbase is None else pbase
         tred = bid >= BLOCKS - S
         if tred:
             t = BLOCKS - 1 - bid
@@ -1812,9 +1794,8 @@ def build(key: Build):
         wf = ld_i32(w_pffn, c // 2)
         o0 = fx.Float32(0.0)
         o1 = fx.Float32(0.0)
-        if live & (
-            (bid // CPRX) == rank
-        ):  # the block owner: W partials in rank order -> bf16 -> every rank
+        # the block owner: W partials in rank order -> bf16 -> every rank
+        if live & ((bid // CPRX) == rank):
             specs = [
                 (
                     peer + fx.Int64(play["op"][0]),
@@ -2005,9 +1986,8 @@ def build(key: Build):
             bo.buffer_store(bf16_pair(o0, o1), rsrc(q_out), (tt * QROWS) // 2 + row0)
         else:
             kv = hh - HQ - isv.select(fx.Int32(HKV), fx.Int32(0))
-            slot = uniform(
-                ld_i32(slots, tt * 2)
-            )  # int64 slot_mapping: low word (-1 = padding)
+            # int64 slot_mapping: low word (-1 = padding)
+            slot = uniform(ld_i32(slots, tt * 2))
             if slot >= 0:
                 eoff = fx.Int64(slot >> 4) * v_cache + fx.Int64(
                     (kv * 16 + (slot & 15)) * 128
