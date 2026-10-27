@@ -2,26 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MuseSpark1x decode monokernel: layers 1-60 of a verify step as FlyDSL launches.
 
-Per eligible step (1-16 requests x 8 verify tokens, TP8 with expert
-parallelism; see README.md):
-
-- layer 0: stock.
-- layer 1: stock attention input and attention front (QKV, QK-norm, RoPE, KV
-  insert), then vLLM's attention op.
-- layers 1-60: from layer i's attention output to layer i+1's q, o-gate and
-  KV insert: o-norm/gate, o_proj, the attention boundary, the MoE with its EP
-  all-reduce, the FFN boundary, layer i+1's QKV+O-gate GEMV, QK-norm and RoPE.
-  8 / 16 rows: one K3 launch; 24-128 rows: HA, HM (the experts) and HB.
-  vLLM's attention op on that q is layer i+1's attention.
-- layer 61: vLLM's attention op, then the stock tail.
-- fused attention (8, 16 and 24-32 rows): layer i's attention (i > 1) runs at
-  the head of K3_i / HA_i instead of vLLM's op,
-  from the previous launch's q and the layer's KV cache, block table and
-  seq_lens (``kernels/attn_frag.py``).
-
-Every rank must take the same path (the kernel waits on its peers), so the
-decision uses only rank-invariant data: the static deployment checked at
-attach, the batch shape and the attention metadata counts.
+See README.md. Every rank must take the same path (the kernel waits on its
+peers), so the decision uses only rank-invariant data: the static deployment
+checked at attach, the batch shape and the attention metadata counts.
 """
 
 import dataclasses
@@ -171,29 +154,18 @@ class LayerWeights:
     w_qkvg: torch.Tensor
     next_rope: bool
 
-    def _ptrs(self, *names: str) -> tuple[int, ...]:
-        return tuple(getattr(self, n).data_ptr() for n in names)
+    def __post_init__(self) -> None:
+        def ptrs(names: str) -> tuple[int, ...]:
+            return tuple(getattr(self, n).data_ptr() for n in names.split())
 
-    def ha_pointers(self) -> tuple[int, ...]:
-        """Attention boundary, router and pre-expert projection (HA, K3)."""
-        return self._ptrs(
-            "w_o", "alpha_a", "beta_a", "w_pffn", "w_r", "bias", "w_pre", "w_pren"
-        )
-
-    def hm_pointers(self) -> tuple[int, ...]:
-        """The local experts (HM, K3)."""
-        return self._ptrs("w13", "w13s", "w2", "w2s", "w_post")
-
-    def hb_pointers(self) -> tuple[int, ...]:
-        """Post-expert projection, FFN boundary and the next QKV (HB, K3)."""
-        return self._ptrs("w_pp", "w_pff", "alpha", "beta", "w_in", "w_qkvg")
-
-    def k3_pointers(self) -> tuple[int, ...]:
-        return self.ha_pointers() + self.hm_pointers() + self.hb_pointers()
-
-    def expert_replica_pointers(self) -> tuple[int, ...]:
-        """The EPLB replica arguments; without replicas, the own experts."""
-        return self._ptrs("w13", "w13s", "w2", "w2s", "w13")
+        # HA (and K3): attention boundary, router and pre-expert projection;
+        # HM: the local experts; HB: post-expert projection, FFN boundary and
+        # the next QKV. Without EPLB replicas, the replica arguments are the
+        # own experts.
+        self.ha = ptrs("w_o alpha_a beta_a w_pffn w_r bias w_pre w_pren")
+        self.hm = ptrs("w13 w13s w2 w2s w_post")
+        self.hb = ptrs("w_pp w_pff alpha beta w_in w_qkvg")
+        self.replicas = ptrs("w13 w13s w2 w2s w13")
 
 
 def effective_norm_weight(norm: nn.Module) -> torch.Tensor:
@@ -319,10 +291,15 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
     layers = model.layers
     if len(layers) != LAST_LAYER + 2:
         return reasons + [f"{len(layers)} layers"]
-    bf16 = torch.bfloat16
+    bad = reasons.append
+    h, p = dims.hidden_size, dims.pooled_size
+
+    def check_bf16(i: int, name: str, w: torch.Tensor, shape: tuple) -> None:
+        if _shape(w) != shape or w.dtype != torch.bfloat16 or not w.is_contiguous():
+            bad(f"layer {i}: {name} {_shape(w)} {w.dtype}")
+
     for i in range(FIRST_LAYER, LAST_LAYER + 2):
         layer, attn = layers[i], layers[i].self_attn
-        bad = reasons.append
         if not (
             attn.use_qk_norm
             and attn.use_o_norm
@@ -334,11 +311,7 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
         backend = getattr(getattr(attn.attn, "attn_backend", None), "__name__", None)
         if backend != "AiterFlashAttentionBackend":
             bad(f"layer {i}: attention backend {backend}")
-        w = attn.qkv_proj.weight
-        if _shape(w) != (dims.qkvg_rows, dims.hidden_size) or w.dtype != bf16:
-            bad(f"layer {i}: qkv_proj {_shape(w)} {w.dtype}")
-        elif not w.is_contiguous():
-            bad(f"layer {i}: qkv_proj not contiguous")
+        check_bf16(i, "qkv_proj", attn.qkv_proj.weight, (dims.qkvg_rows, h))
         rope = attn.rotary_emb
         if rope is not None and (
             rope.cos_sin_cache.dtype != torch.float32
@@ -351,11 +324,7 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
             bad(f"layer {i}: weightless pre_qkv_proj_norm")
         if i > LAST_LAYER:
             continue
-        w = attn.o_proj.weight
-        if _shape(w) != (dims.hidden_size, dims.q_rows) or w.dtype != bf16:
-            bad(f"layer {i}: o_proj {_shape(w)} {w.dtype}")
-        elif not w.is_contiguous():
-            bad(f"layer {i}: o_proj not contiguous")
+        check_bf16(i, "o_proj", attn.o_proj.weight, (h, dims.q_rows))
         for name in ("add_attn", "add_ffn"):
             conn = getattr(layer, name)
             if not isinstance(
@@ -371,21 +340,14 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
             continue
         moe = layer.feed_forward
         r = moe.router.weight
-        if _shape(r) != (dims.num_experts, dims.hidden_size) or r.dtype != (
-            torch.float32
-        ):
+        if _shape(r) != (dims.num_experts, h) or r.dtype != torch.float32:
             bad(f"layer {i}: router {_shape(r)} {r.dtype}")
         if moe.router_output_multiplier is not None and not getattr(
             moe, "_router_multiplier_folded", False
         ):
             bad(f"layer {i}: router multiplier not folded")
-        for name, shape in (
-            ("pooler", (dims.pooled_size, dims.hidden_size)),
-            ("unpooler", (dims.hidden_size, dims.pooled_size)),
-        ):
-            w = getattr(moe, name).weight
-            if _shape(w) != shape or w.dtype != bf16 or not w.is_contiguous():
-                bad(f"layer {i}: {name} {_shape(w)} {w.dtype}")
+        check_bf16(i, "pooler", moe.pooler.weight, (p, h))
+        check_bf16(i, "unpooler", moe.unpooler.weight, (h, p))
         experts = _routed_experts(layer)
         if experts is None or not isinstance(
             getattr(experts, "quant_method", None), MuseSparkQuarkOCPMXFusedMoE
@@ -499,15 +461,6 @@ class MonoKernels:
     attn_frag: ModuleType
 
 
-@dataclass(frozen=True)
-class _LayerArgs:
-    ha: tuple[int, ...]
-    hm: tuple[int, ...]
-    hb: tuple[int, ...]
-    replicas: tuple[int, ...]
-    next_rope: bool
-
-
 class _FusedAttention:
     """The fused attention of one build: its output, scratch and descriptor
     tables (``kernels/attn_frag.py``; row i = layer i).
@@ -539,9 +492,9 @@ class _FusedAttention:
         self.tables: dict[tuple, torch.Tensor] = {}
         # Pinned sources of the table copies captured in CUDA graphs: a pinned
         # allocation is not allowed while a stream captures.
-        pin = device.type == "cuda"
         self._pinned = [
-            torch.zeros(self.words, dtype=torch.int64, pin_memory=pin) for _ in range(8)
+            torch.zeros(self.words, dtype=torch.int64, pin_memory=True)
+            for _ in range(8)
         ]
         self._keep: list[torch.Tensor] = []
 
@@ -573,10 +526,7 @@ class _FusedAttention:
         for i, w in rows.items():
             host[i * n : (i + 1) * n] = torch.tensor(w, dtype=torch.int64)
         table = torch.zeros(self.words, dtype=torch.int64, device=self.device)
-        capturing = self.device.type == "cuda" and (
-            torch.cuda.is_current_stream_capturing()
-        )
-        if capturing:
+        if torch.cuda.is_current_stream_capturing():
             if not self._pinned:
                 raise RuntimeError(
                     "Muse Spark monokernel: more fused-attention tables than "
@@ -598,16 +548,16 @@ class _FusedAttention:
 class _Bucket:
     """Launchers and persistent buffers of one kernel build (row count)."""
 
+    q: list[torch.Tensor]
+
     def __init__(
         self,
         kernel: ModuleType,
-        rows: int,
         peer_bytes: int,
         dims: MonoDims,
         device: torch.device,
         group: Any,
     ) -> None:
-        self.rows = rows
         self.dims = dims
         self.blocks = kernel.BLOCKS
         self.peers = PeerBuffer(peer_bytes + 256, group)
@@ -627,18 +577,34 @@ class _Bucket:
             *self.peers.pointers,
         )
 
-    def run(
-        self,
-        mono: "MuseSparkMono",
-        layers: Sequence[nn.Module],
-        positions: torch.Tensor,
-        o: torch.Tensor,
-        g: torch.Tensor,
-        stream: torch.Tensor,
-        aux_layers: Sequence[int],
-        aux_hidden_states: list[torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def run(self, mono, layers, positions, o, g, stream, aux_layers, aux_hidden_states):
         """Layers FIRST_LAYER..LAST_LAYER; returns layer 61's (stream, q, g)."""
+        q, fa, table = o, self.fa, None
+        if fa is not None:
+            nreq = stream.shape[0] // ROWS_PER_REQUEST
+            table = fa.table(layers, lambda i: self.q[(i - 1) % 2], nreq)
+        for i in range(FIRST_LAYER, LAST_LAYER + 1):
+            kind = fa.layers.get(i) if fa is not None else None
+            if fa is not None and kind is not None:
+                attn_o = fa.row(table, i)
+            else:
+                if i > FIRST_LAYER:
+                    o = layers[i].self_attn.attn(q, None, None)
+                attn_o = o.data_ptr()
+            nxt = layers[i + 1].self_attn
+            _, _, kv_cache, slots = get_attention_context(nxt.attn.layer_name)
+            rope = nxt.rotary_emb
+            cos_sin = rope.cos_sin_cache if rope is not None else self.no_rope
+            ptrs = (slots.data_ptr(), cos_sin.data_ptr(), positions.data_ptr())
+            # The kernels take the block stride (elements) in the V slot.
+            kv = (kv_cache.data_ptr(), kv_cache.stride(0), *ptrs)
+            stream, q, g = self.layer(mono, i, kind, attn_o, g, stream, kv, aux_layers)
+            if i + 1 in aux_layers:
+                aux_hidden_states.append(stream.clone())
+        return stream, q, g
+
+    def layer(self, mono, i, kind, attn_o, g, stream, kv, aux_layers):
+        """Layer i's launches; returns layer i + 1's (stream, q, g)."""
         raise NotImplementedError
 
 
@@ -656,7 +622,7 @@ class _K3Bucket(_Bucket):
         fused_kinds: Sequence[tuple[bool, str]] = (),
     ) -> None:
         w = dims.world_size
-        super().__init__(k3, rows, k3.peer_layout(rows, w)[1], dims, device, group)
+        super().__init__(k3, k3.peer_layout(rows, w)[1], dims, device, group)
         self.launchers = {
             next_rope: k3.build(k3.build_vllm(S=rows, W=w, next_rope=next_rope))
             for next_rope in (True, False)
@@ -684,63 +650,37 @@ class _K3Bucket(_Bucket):
             }
             for _ in range(2)
         ]
+        self.q = [out["q"] for out in self.outs]
 
-    def run(self, mono, layers, positions, o, g, stream, aux_layers, aux_hidden_states):
-        q = o
-        fa = self.fa
-        table = None
-        if fa is not None:
-            table = fa.table(
-                layers,
-                lambda i: self.outs[(i - 1) % 2]["q"],
-                self.rows // ROWS_PER_REQUEST,
-            )
-        for i in range(FIRST_LAYER, LAST_LAYER + 1):
-            kind = fa.layers.get(i) if fa is not None else None
-            if fa is not None and kind is not None:
-                attn_o = fa.row(table, i)
-            else:
-                if i > FIRST_LAYER:
-                    o = layers[i].self_attn.attn(q, None, None)
-                attn_o = o.data_ptr()
-            kv_cache, slots, cos_sin = mono.next_kv(layers[i + 1], self.no_rope)
-            a = mono.layer_args[i]
-            out = self.outs[i % 2]
-            launch = (
-                self.launchers[a.next_rope]
-                if kind is None
-                else self.fused_launchers[(a.next_rope, kind)]
-            )
-            launch(
-                attn_o,
-                g.data_ptr(),
-                stream.data_ptr(),
-                *a.ha,
-                *a.hm,
-                *a.hb,
-                out["stream"].data_ptr(),
-                out["xn"].data_ptr(),
-                out["part"].data_ptr(),
-                out["q"].data_ptr(),
-                out["g"].data_ptr(),
-                kv_cache.data_ptr(),
-                # The kernel takes the block stride (elements) in the V slot.
-                kv_cache.stride(0),
-                slots.data_ptr(),
-                cos_sin.data_ptr(),
-                positions.data_ptr(),
-                self.scratch.data_ptr(),
-                *self._common(),
-                i,
-                mono.rank,
-                g.stride(0),
-                *a.replicas,
-                stream=torch.cuda.current_stream(),
-            )
-            stream, q, g = out["stream"], out["q"], out["g"]
-            if i + 1 in aux_layers:
-                aux_hidden_states.append(stream.clone())
-        return stream, q, g
+    def layer(self, mono, i, kind, attn_o, g, stream, kv, aux_layers):
+        a, out = mono.weights[i], self.outs[i % 2]
+        launch = (
+            self.launchers[a.next_rope]
+            if kind is None
+            else self.fused_launchers[(a.next_rope, kind)]
+        )
+        launch(
+            attn_o,
+            g.data_ptr(),
+            stream.data_ptr(),
+            *a.ha,
+            *a.hm,
+            *a.hb,
+            out["stream"].data_ptr(),
+            out["xn"].data_ptr(),
+            out["part"].data_ptr(),
+            out["q"].data_ptr(),
+            out["g"].data_ptr(),
+            *kv,
+            self.scratch.data_ptr(),
+            *self._common(),
+            i,
+            mono.rank,
+            g.stride(0),
+            *a.replicas,
+            stream=torch.cuda.current_stream(),
+        )
+        return out["stream"], out["q"], out["g"]
 
 
 class _K5Bucket(_Bucket):
@@ -762,9 +702,7 @@ class _K5Bucket(_Bucket):
     ) -> None:
         w = dims.world_size
         key = k5.build_vllm(S=rows, W=w, next_rope=True)
-        super().__init__(
-            k5, rows, k5.peer_layout(rows, w, key.bnd)[1], dims, device, group
-        )
+        super().__init__(k5, k5.peer_layout(rows, w, key.bnd)[1], dims, device, group)
         self.bnd = key.bnd
         self.launch_a, launch_b = k5.build(key)
         self.launch_b = {
@@ -796,6 +734,7 @@ class _K5Bucket(_Bucket):
             for _ in range(2)
         ]
         self.sfull = torch.zeros(rows, dims.hidden_size, dtype=f32, device=device)
+        self.next_in: tuple[torch.Tensor, int] = (self.sfull, 1)
         self.q = [
             torch.zeros(rows, dims.q_rows, dtype=bf16, device=device) for _ in range(2)
         ]
@@ -803,95 +742,66 @@ class _K5Bucket(_Bucket):
             torch.zeros(rows, dims.q_rows, dtype=bf16, device=device) for _ in range(2)
         ]
 
-    def run(self, mono, layers, positions, o, g, stream, aux_layers, aux_hidden_states):
-        nrows = stream.shape[0]
-        hidden = self.dims.hidden_size
-        cur = torch.cuda.current_stream()
-        s_in, s_full = stream, 1
-        q = o
-        fa = self.fa
-        table = None
-        if fa is not None:
-            table = fa.table(
-                layers, lambda i: self.q[(i - 1) % 2], nrows // ROWS_PER_REQUEST
-            )
-        for i in range(FIRST_LAYER, LAST_LAYER + 1):
-            kind = fa.layers.get(i) if fa is not None else None
-            if fa is not None and kind is not None:
-                attn_o = fa.row(table, i)
-            else:
-                if i > FIRST_LAYER:
-                    o = layers[i].self_attn.attn(q, None, None)
-                attn_o = o.data_ptr()
-            kv_cache, slots, cos_sin = mono.next_kv(layers[i + 1], self.no_rope)
-            a = mono.layer_args[i]
-            launch_a = self.launch_a if kind is None else self.fused_launch_a[kind]
-            launch_a(
-                attn_o,
-                g.data_ptr(),
-                s_in.data_ptr(),
-                *a.ha,
-                self.h.data_ptr(),
-                self.ids.data_ptr(),
-                self.scores.data_ptr(),
-                self.scratch.data_ptr(),
-                *self._common(),
-                i,
-                mono.rank,
-                g.stride(0),
-                s_full,
-                nrows,
-                stream=cur,
-            )
-            self.launch_m(
-                self.h.data_ptr(),
-                self.ids.data_ptr(),
-                self.scores.data_ptr(),
-                *a.hm,
-                self.part.data_ptr(),
-                self.scratch_m.data_ptr(),
-                self.epoch.data_ptr(),
-                self.health.data_ptr(),
-                self.timeline_m.data_ptr(),
-                *self.peers.pointers,
-                i,
-                mono.rank,
-                nrows,
-                *a.replicas,
-                stream=cur,
-            )
-            gather = int(i == LAST_LAYER or i + 1 in aux_layers or self.bnd == 1)
-            ts, q_out, g_out = self.ts[i % 2], self.q[i % 2], self.g[i % 2]
-            self.launch_b[a.next_rope](
-                self.part.data_ptr(),
-                *a.hb,
-                ts.data_ptr(),
-                self.sfull.data_ptr(),
-                q_out.data_ptr(),
-                g_out.data_ptr(),
-                kv_cache.data_ptr(),
-                kv_cache.stride(0),
-                slots.data_ptr(),
-                cos_sin.data_ptr(),
-                positions.data_ptr(),
-                self.scratch.data_ptr(),
-                *self._common(),
-                i,
-                mono.rank,
-                hidden,
-                0,
-                gather,
-                nrows,
-                stream=cur,
-            )
-            if self.bnd == 1:
-                s_in, s_full = self.sfull, 1
-            else:
-                s_in, s_full = ts, int(self.bnd >= 2)
-            q, g = q_out[:nrows], g_out[:nrows]
-            if i + 1 in aux_layers:
-                aux_hidden_states.append(self.sfull[:nrows].clone())
-        return self.sfull[:nrows], q, g
+    def layer(self, mono, i, kind, attn_o, g, stream, kv, aux_layers):
+        nrows, a, cur = stream.shape[0], mono.weights[i], torch.cuda.current_stream()
+        s_in, s_full = (stream, 1) if i == FIRST_LAYER else self.next_in
+        launch_a = self.launch_a if kind is None else self.fused_launch_a[kind]
+        launch_a(
+            attn_o,
+            g.data_ptr(),
+            s_in.data_ptr(),
+            *a.ha,
+            self.h.data_ptr(),
+            self.ids.data_ptr(),
+            self.scores.data_ptr(),
+            self.scratch.data_ptr(),
+            *self._common(),
+            i,
+            mono.rank,
+            g.stride(0),
+            s_full,
+            nrows,
+            stream=cur,
+        )
+        self.launch_m(
+            self.h.data_ptr(),
+            self.ids.data_ptr(),
+            self.scores.data_ptr(),
+            *a.hm,
+            self.part.data_ptr(),
+            self.scratch_m.data_ptr(),
+            self.epoch.data_ptr(),
+            self.health.data_ptr(),
+            self.timeline_m.data_ptr(),
+            *self.peers.pointers,
+            i,
+            mono.rank,
+            nrows,
+            *a.replicas,
+            stream=cur,
+        )
+        gather = int(i == LAST_LAYER or i + 1 in aux_layers or self.bnd == 1)
+        ts, q_out, g_out = self.ts[i % 2], self.q[i % 2], self.g[i % 2]
+        self.launch_b[a.next_rope](
+            self.part.data_ptr(),
+            *a.hb,
+            ts.data_ptr(),
+            self.sfull.data_ptr(),
+            q_out.data_ptr(),
+            g_out.data_ptr(),
+            *kv,
+            self.scratch.data_ptr(),
+            *self._common(),
+            i,
+            mono.rank,
+            self.dims.hidden_size,
+            0,
+            gather,
+            nrows,
+            stream=cur,
+        )
+        self.next_in = (self.sfull, 1) if self.bnd == 1 else (ts, int(self.bnd >= 2))
+        return self.sfull[:nrows], q_out[:nrows], g_out[:nrows]
 
 
 def built_buckets(max_num_seqs: int) -> list[int]:
@@ -918,13 +828,11 @@ class MuseSparkMono:
         device: torch.device,
         dims: MonoDims,
         buckets: Sequence[int],
-        fused_attention: dict[int, str] | None = None,
+        fused_attention: dict[int, str],
     ) -> None:
         self.rank = rank
         self.dims = dims
-        self.device = device
         self.refresh_weights(model)
-        fused_attention = fused_attention or {}
         self.buckets: dict[int, _Bucket] = {}
         for b in buckets:
             kinds = FUSED_ATTENTION.get(b, ())
@@ -937,7 +845,7 @@ class MuseSparkMono:
                 fa = _FusedAttention(kernels.attn_frag, layers, scales, b, dims, device)
             if b in K3_ROWS:
                 k3_kinds = sorted(
-                    {(self.layer_args[i].next_rope, t) for i, t in layers.items()}
+                    {(self.weights[i].next_rope, t) for i, t in layers.items()}
                 )
                 self.buckets[b] = _K3Bucket(
                     kernels.k3, b, dims, device, group, fa, k3_kinds
@@ -969,37 +877,6 @@ class MuseSparkMono:
             i: collect_layer_weights(model.layers, i, self.rank, self.dims)
             for i in range(FIRST_LAYER, LAST_LAYER + 1)
         }
-        self.layer_args = {
-            i: _LayerArgs(
-                ha=w.ha_pointers(),
-                hm=w.hm_pointers(),
-                hb=w.hb_pointers(),
-                replicas=w.expert_replica_pointers(),
-                next_rope=w.next_rope,
-            )
-            for i, w in self.weights.items()
-        }
-
-    def _layer_names(self, model: nn.Module) -> list[str]:
-        return [
-            model.layers[i].self_attn.attn.layer_name
-            for i in range(FIRST_LAYER, LAST_LAYER + 2)
-        ]
-
-    def next_kv(
-        self, layer: nn.Module, no_rope: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """The KV cache, slots and RoPE table the kernels write ``layer``'s KV with."""
-        kv_cache, slots = self._kv_of(layer)
-        assert slots is not None
-        rope = layer.self_attn.rotary_emb
-        return kv_cache, slots, rope.cos_sin_cache if rope is not None else no_rope
-
-    def _kv_of(self, layer: nn.Module) -> tuple[torch.Tensor, torch.Tensor | None]:
-        _, _, kv_cache, slot_mapping = get_attention_context(
-            layer.self_attn.attn.layer_name
-        )
-        return kv_cache, slot_mapping
 
     def _step_refusal(
         self, model: nn.Module, positions: torch.Tensor, x: Any
@@ -1007,15 +884,19 @@ class MuseSparkMono:
         if not isinstance(x, torch.Tensor):
             return "input"
         rows = x.shape[0]
-        reason = batch_refusal(rows, get_forward_context(), self._layer_names(model))
+        names = [
+            model.layers[i].self_attn.attn.layer_name
+            for i in range(FIRST_LAYER, LAST_LAYER + 2)
+        ]
+        reason = batch_refusal(rows, get_forward_context(), names)
         if reason is not None:
             return reason
         if bucket_of(rows) not in self.buckets:
             return f"rows:{rows}"
         if positions.dtype != torch.int64 or positions.shape != (rows,):
             return "positions"
-        for i in range(FIRST_LAYER + 1, LAST_LAYER + 2):
-            kv_cache, slots = self._kv_of(model.layers[i])
+        for name in names[1:]:
+            _, _, kv_cache, slots = get_attention_context(name)
             reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads)
             if reason is not None:
                 return reason
@@ -1042,62 +923,15 @@ class MuseSparkMono:
                 self._fallbacks.add(reason)
                 logger.debug("Muse Spark monokernel: stock step (%s)", reason)
             return None
-        rows = x.shape[0]
-        if rows not in self._engaged:
-            self._engaged.add(rows)
-            bucket = bucket_of(rows)
-            logger.info(
-                "Muse Spark monokernel engaged for %d rows (%s, layers %d-%d)%s",
-                rows,
-                f"K3 S={bucket}" if bucket in K3_ROWS else f"HA+HM+HB S={bucket}",
-                FIRST_LAYER,
-                LAST_LAYER,
-                " in CUDA graph capture"
-                if torch.cuda.is_current_stream_capturing()
-                else "",
-            )
-        return self._forward(model, positions, x, aux_hidden_states)
-
-    def _validate(
-        self, attn_o: torch.Tensor, attn_g: torch.Tensor, stream: torch.Tensor
-    ) -> None:
-        """Check the stock layer-1 tensors the kernels read, once a row count."""
-        rows = stream.shape[0]
-        if rows in self._validated:
-            return
-        bf16, d = torch.bfloat16, self.dims
-        checks = (
-            ("attn_o", attn_o, bf16, (rows, d.q_rows)),
-            ("stream", stream, torch.float32, (rows, d.hidden_size)),
-        )
-        for name, t, dtype, shape in checks:
-            if t.dtype != dtype or tuple(t.shape) != shape or not t.is_contiguous():
-                raise RuntimeError(
-                    f"Muse Spark monokernel: {name} is {t.dtype} "
-                    f"{tuple(t.shape)} {t.stride()}, expected {dtype} {shape}"
-                )
-        if (
-            attn_g.dtype != bf16
-            or tuple(attn_g.shape) != (rows, d.q_rows)
-            or attn_g.stride(1) != 1
-        ):
-            raise RuntimeError(
-                f"Muse Spark monokernel: o-gate is {attn_g.dtype} "
-                f"{tuple(attn_g.shape)} {attn_g.stride()}"
-            )
-        self._validated.add(rows)
-
-    def _forward(
-        self,
-        model: nn.Module,
-        positions: torch.Tensor,
-        x: torch.Tensor,
-        aux_hidden_states: list[torch.Tensor],
-    ) -> Any:
-        layers = model.layers
-        aux_layers = model.aux_hidden_state_layers
-        rows = bucket_of(x.shape[0])
+        n, rows = x.shape[0], bucket_of(x.shape[0])
         assert rows is not None
+        if n not in self._engaged:
+            self._engaged.add(n)
+            kernel = "K3" if rows in K3_ROWS else "HA+HM+HB"
+            logger.info(
+                "Muse Spark monokernel engaged: %d rows, %s S=%d", n, kernel, rows
+            )
+        layers, aux_layers = model.layers, model.aux_hidden_state_layers
         bucket = self.buckets[rows]
         bucket.epoch.add_(1)
 
@@ -1124,6 +958,30 @@ class MuseSparkMono:
         if LAST_LAYER + 2 in aux_layers:
             aux_hidden_states.append(norm_then_gated_residual(y))
         return y
+
+    def _validate(
+        self, attn_o: torch.Tensor, attn_g: torch.Tensor, stream: torch.Tensor
+    ) -> None:
+        """Check the stock layer-1 tensors the kernels read, once a row count."""
+        rows, d = stream.shape[0], self.dims
+        if rows in self._validated:
+            return
+        for name, t, dtype, cols in (
+            ("attn_o", attn_o, torch.bfloat16, d.q_rows),
+            ("o-gate", attn_g, torch.bfloat16, d.q_rows),
+            ("stream", stream, torch.float32, d.hidden_size),
+        ):
+            # The o-gate is a column slice of the QKV + O-gate output.
+            if (
+                t.dtype != dtype
+                or tuple(t.shape) != (rows, cols)
+                or not (t.stride(1) == 1 if t is attn_g else t.is_contiguous())
+            ):
+                raise RuntimeError(
+                    f"Muse Spark monokernel: {name} is {t.dtype} "
+                    f"{tuple(t.shape)} {t.stride()}, expected {dtype} {(rows, cols)}"
+                )
+        self._validated.add(rows)
 
     def poll_health(self) -> None:
         """Raise if a launch timed out waiting for a peer rank.

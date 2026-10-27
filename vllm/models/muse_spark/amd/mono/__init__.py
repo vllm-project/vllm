@@ -57,31 +57,28 @@ def _load_kernels() -> tuple[MonoKernels | None, str | None]:
 
 def static_refusals(lm: nn.Module, tp_rank: int, tp_size: int) -> list[str]:
     """Every reason this deployment cannot run the monokernel; empty = supported."""
-    reasons: list[str] = []
     if not current_platform.is_rocm():
         return ["not ROCm"]
     from vllm.platforms.rocm import on_gfx950
 
-    if not on_gfx950():
-        reasons.append("not gfx950")
+    reasons = [] if on_gfx950() else ["not gfx950"]
     cus = torch.cuda.get_device_properties(
         torch.accelerator.current_device_index()
     ).multi_processor_count
     if cus != NUM_CUS:
         reasons.append(f"{cus} CUs (kernel: {NUM_CUS})")
-    model = lm.model
     text_config = lm.vllm_config.model_config.hf_text_config
     reasons += config_refusals(text_config)
     if reasons:
         return reasons
-    experts = _routed_experts(model.layers[FIRST_LAYER])
+    experts = _routed_experts(lm.model.layers[FIRST_LAYER])
     moe_parallel = getattr(
         getattr(experts, "moe_config", None), "moe_parallel_config", None
     )
-    reasons += deployment_refusals(lm.vllm_config, tp_rank, tp_size, moe_parallel)
-    if reasons:
-        return reasons
-    return layer_refusals(model, MonoDims.from_config(text_config, tp_size))
+    reasons = deployment_refusals(lm.vllm_config, tp_rank, tp_size, moe_parallel)
+    return reasons or layer_refusals(
+        lm.model, MonoDims.from_config(text_config, tp_size)
+    )
 
 
 def maybe_attach_mono(lm: nn.Module) -> None:
