@@ -37,23 +37,31 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from .test_mooncake_connector import patch_worker_dependencies
-from .utils import create_request, create_vllm_config, maybe_update_block_size
+from .utils import (
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+    maybe_update_block_size,
+)
 
 
 def noop_shutdown():
     pass
 
 
-def make_hybrid_gdn_kv_cache_config(block_size: int) -> KVCacheConfig:
+def make_hybrid_gdn_kv_cache_config(
+    block_size: int, num_blocks: int = 16, mamba_cache_mode: str = "none"
+) -> KVCacheConfig:
     gdn_spec = MambaSpec(
         block_size=block_size,
         shapes=((6, 3), (1, 2, 2)),
         dtypes=(torch.float16, torch.float16),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        mamba_cache_mode=mamba_cache_mode,
     )
     assert gdn_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
     return KVCacheConfig(
-        num_blocks=16,
+        num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -99,6 +107,67 @@ def test_hybrid_gdn_remote_prefill_uses_mamba_n_minus_one():
 
     assert num_new_tokens == request.num_prompt_tokens - 1
     assert is_async is True
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "kv_role,expected_attn_pull_blocks",
+    [
+        # The local attention prefix is kept; only the suffix and GDN state move.
+        ("kv_consumer", 2),
+        # Roles that prefill locally keep the reconciled lookup: no local hit.
+        ("kv_both", 6),
+    ],
+)
+def test_hybrid_gdn_remote_prefill_keeps_local_attention_prefix(
+    kv_role: str, expected_attn_pull_blocks: int
+):
+    vllm_config = create_vllm_config(kv_connector="MooncakeConnector", kv_role=kv_role)
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    vllm_config.cache_config.mamba_cache_mode = "align"
+    block_size = vllm_config.cache_config.block_size
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(
+        block_size, num_blocks=64, mamba_cache_mode="align"
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=kv_cache_config.num_blocks,
+        kv_cache_config=kv_cache_config,
+    )
+    manager = scheduler.kv_cache_manager
+
+    # Cache a 4-block prefix, then evict its GDN states: the attention blocks
+    # stay hit while no block boundary has a local recurrent state.
+    prefix_len = 4 * block_size
+    fill = create_request(num_tokens=prefix_len, common_prefix_len=prefix_len)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
+    assert num_computed == 0
+    gdn_ids = []
+    for i in range(4):
+        manager.allocate_slots(
+            fill, block_size, new_computed_blocks=computed_blocks if i == 0 else None
+        )
+        fill.num_computed_tokens += block_size
+        gdn_ids.append(manager.get_block_ids(fill.request_id)[1][i])
+    manager.free(fill)
+    manager.block_pool.evict_blocks(set(gdn_ids))
+
+    replay = create_request(
+        num_tokens=6 * block_size, common_prefix_len=prefix_len, max_tokens=1
+    )
+    replay.kv_transfer_params = dict(
+        do_remote_prefill=True,
+        remote_engine_id="prefill-engine",
+        remote_bootstrap_addr="prefill-host:8998",
+        transfer_id="xfer-0",
+    )
+    scheduler.add_request(replay)
+    output = scheduler.schedule()
+
+    [pull] = output.kv_connector_metadata.reqs_to_recv["prefill-engine"].values()
+    attn_pull, gdn_pull = pull.local_block_ids
+    assert len(attn_pull) == expected_attn_pull_blocks
+    assert len(gdn_pull) == 1
 
 
 @pytest.mark.cpu_test
