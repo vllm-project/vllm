@@ -1091,8 +1091,8 @@ def schema_admits_any_value(schema: Any, *, _depth: int = 0) -> bool:
     every present ``anyOf``/``oneOf`` must have an untyped branch, and
     every ``allOf`` branch must be untyped.  ``type``/``enum``/``const``
     narrow the schema, and an unresolved ``$ref`` is unknown rather than
-    untyped.  Nesting beyond :data:`MAX_NESTING_DEPTH` is treated as
-    constrained, so callers keep coercing.
+    untyped.  Nesting beyond :data:`MAX_NESTING_DEPTH` returns ``False``;
+    coercion callers then resolve no types and leave the value verbatim.
     """
     if schema is True:
         return True
@@ -1358,17 +1358,22 @@ def sanitize_non_finite(value: Any) -> Any:
 
     ``json.dumps`` renders ``NaN``/``Infinity`` as invalid JSON, so values
     headed for serialization are sanitized first. Containers are updated in
-    place.
+    place. The walk is iterative: ``json.loads`` accepts model output nested
+    past the interpreter's recursion limit, so a recursive walk would raise
+    ``RecursionError`` on JSON that parsed fine.
     """
     if isinstance(value, float):
         # Spell it the way json.dumps spells it ("NaN"/"Infinity").
         return value if math.isfinite(value) else json.dumps(value)
-    if isinstance(value, dict):
-        for key, item in value.items():
-            value[key] = sanitize_non_finite(item)
-    elif isinstance(value, list):
-        for i, item in enumerate(value):
-            value[i] = sanitize_non_finite(item)
+    stack: list[Any] = [value] if isinstance(value, (dict, list)) else []
+    while stack:
+        node = stack.pop()
+        items = node.items() if isinstance(node, dict) else enumerate(node)
+        for key, item in items:
+            if isinstance(item, (dict, list)):
+                stack.append(item)
+            elif isinstance(item, float) and not math.isfinite(item):
+                node[key] = json.dumps(item)
     return value
 
 

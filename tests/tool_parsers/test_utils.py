@@ -358,6 +358,24 @@ class TestSanitizeNonFinite:
         assert sanitize_non_finite(value) is value
         assert value == {"x": [1, {"y": 2.5}]}
 
+    def test_deep_nesting_does_not_recurse(self):
+        # json.loads accepts output nested past the interpreter's recursion
+        # limit, so sanitizing it must not raise RecursionError.
+        depth = 5000
+        root: list = []
+        node = root
+        for _ in range(depth):
+            child: list = []
+            node.append(child)
+            node = child
+        node.append(float("nan"))
+
+        assert sanitize_non_finite(root) is root
+        node = root
+        for _ in range(depth):
+            node = node[0]
+        assert node == ["NaN"]
+
 
 class TestExtractTypesFromSchema:
     def test_direct_type_string(self):

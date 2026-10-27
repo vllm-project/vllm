@@ -395,6 +395,48 @@ def test_json_untyped_nonfinite_param_keeps_calls(tokenizer):
     }
 
 
+def test_json_deeply_nested_param_keeps_calls(tokenizer):
+    # Nesting can exceed the interpreter's recursion limit while remaining
+    # valid JSON; sanitizing must not raise RecursionError and drop the group.
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "payload": {"description": "Any JSON value."},
+                    },
+                },
+            },
+        }
+    ]
+    request = ChatCompletionRequest(
+        model="k2-horizon",
+        messages=[{"role": "user", "content": "test"}],
+        tools=tools,
+        chat_template_kwargs={"tool_call_format": "json"},
+    )
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    depth = 2000
+    nested: list = [float("nan")]
+    for _ in range(depth):
+        nested = [nested]
+    result = parser.extract_tool_calls(
+        _group(_json_call("lookup", {"query": "x", "payload": nested})),
+        request,
+    )
+
+    assert result.tools_called
+    payload = json.loads(result.tool_calls[0].function.arguments)["payload"]
+    for _ in range(depth):
+        payload = payload[0]
+    assert payload == ["NaN"]
+
+
 @pytest.mark.parametrize(
     "tool_format",
     ["yaml", "python", "xml_untyped", "", None, 1],
