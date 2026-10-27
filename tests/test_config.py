@@ -1089,6 +1089,7 @@ def test_cpu_no_triton_v2_rejects_unsupported_features(monkeypatch):
     config.parallel_config.prefill_context_parallel_size = 2
     config.parallel_config.enable_batch_sharded_sampling = True
     config.parallel_config.enable_eplb = True
+    config.aux_output_config.enable_return_routed_experts = True
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", False)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
 
@@ -1098,7 +1099,8 @@ def test_cpu_no_triton_v2_rejects_unsupported_features(monkeypatch):
         "CPU Model Runner V2 without Triton does not yet support: "
         "speculative decoding, prompt embeddings, diffusion models, "
         "decode context parallelism, prefill context parallelism, "
-        "batch-sharded sampling, expert parallel load balancing"
+        "batch-sharded sampling, expert parallel load balancing, "
+        "routed-expert auxiliary outputs"
     )
 
 

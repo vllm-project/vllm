@@ -3131,6 +3131,9 @@ class VllmConfig:
         if self.parallel_config.enable_eplb:
             unsupported.append("expert parallel load balancing")
 
+        if self.aux_output_config.enabled:
+            unsupported.append("routed-expert auxiliary outputs")
+
         return unsupported
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
