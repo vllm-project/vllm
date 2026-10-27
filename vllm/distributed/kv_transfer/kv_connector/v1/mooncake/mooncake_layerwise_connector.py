@@ -28,9 +28,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.layerwise_mapping import (
-    plan_append_blocks,
-    plan_final_state,
-    plan_final_window,
+    map_pending_blocks,
+    map_state_blocks,
+    map_window_blocks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     _MAX_PEER_LAYOUTS,
@@ -185,7 +185,7 @@ class MooncakeLayerwiseMetadata(MooncakeConnectorMetadata):
 class MooncakeLayerwiseScheduler(MooncakeConnectorScheduler):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._prefills: dict[str, Request] = {}
+        self._prefill_requests: dict[str, Request] = {}
         for index, group in enumerate(self.kv_cache_config.transfer_groups):
             specs = list(iter_layer_specs(group.kv_cache_spec))
             windows = {getattr(spec, "sliding_window", None) for spec in specs}
@@ -238,7 +238,7 @@ class MooncakeLayerwiseScheduler(MooncakeConnectorScheduler):
             and params.get("do_remote_decode")
             and params.get("transfer_id")
         ):
-            self._prefills[request.request_id] = request
+            self._prefill_requests[request.request_id] = request
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -252,10 +252,10 @@ class MooncakeLayerwiseScheduler(MooncakeConnectorScheduler):
         meta.finished_req_ids = set(scheduler_output.finished_req_ids)
         meta.preempted_req_ids = set(scheduler_output.preempted_req_ids or ())
         for req_id in meta.finished_req_ids:
-            self._prefills.pop(req_id, None)
+            self._prefill_requests.pop(req_id, None)
         snapshots = []
         for req_id, scheduled in scheduler_output.num_scheduled_tokens.items():
-            request = self._prefills.get(req_id)
+            request = self._prefill_requests.get(req_id)
             if request is None:
                 continue
             computed = request.num_computed_tokens
@@ -822,7 +822,7 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
             # Retire worker state; KV block release belongs to the scheduler.
             self._retire_request(transfer_id)
         self.prefilling_transfer_ids = ids
-        # No-forward steps skip wait_for_save; drain transfers here instead.
+        # Steps without prefill work drain transfers here.
         if not ids:
             self._process_pending_transfers(wait=True)
 
@@ -946,14 +946,14 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
         ):
             return None
         if is_state:
-            plan = plan_final_state(
+            block_mapping = map_state_blocks(
                 state.block_ids[local_group_index],
                 remote_group_block_ids,
                 token_end=state.num_prompt_tokens,
                 null_block=NULL_BLOCK_ID,
             )
         elif is_window:
-            plan = plan_final_window(
+            block_mapping = map_window_blocks(
                 state.block_ids[local_group_index],
                 remote_group_block_ids,
                 token_end=state.num_prompt_tokens,
@@ -961,7 +961,7 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
                 null_block=NULL_BLOCK_ID,
             )
         else:
-            plan = plan_append_blocks(
+            block_mapping = map_pending_blocks(
                 state.block_ids[local_group_index],
                 remote_group_block_ids,
                 token_end=state.num_prompt_tokens,
@@ -970,12 +970,12 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
                 block_size=block_size,
                 final=final_layer_ready,
             )
-        if plan is None:
+        if block_mapping is None:
             return None
         local_groups = [()] * len(state.block_ids)
         remote_groups = [()] * len(state.block_ids)
-        local_groups[local_group_index] = plan.source
-        remote_groups[local_group_index] = plan.destination
+        local_groups[local_group_index] = block_mapping.source
+        remote_groups[local_group_index] = block_mapping.destination
         return LayerwiseSendTask(
             transfer_id=state.transfer_id,
             req_id=cast(str, state.req_id),
@@ -983,7 +983,7 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
             kv_cache_name=kv_cache_name,
             block_ids=tuple(local_groups),
             remote_block_ids=tuple(remote_groups),
-            end_tokens=plan.end_tokens,
+            end_tokens=block_mapping.end_tokens,
         )
 
     def _submit_available_layers(self) -> None:
@@ -1141,10 +1141,7 @@ class MooncakeLayerwiseWorker(MooncakeConnectorWorker):
         self._process_pending_transfers()
 
     def wait_for_save(self) -> None:
-        if not self.is_kv_producer:
-            return
-        if not self.prefilling_transfer_ids:
-            self._process_pending_transfers(wait=True)
+        if not self.is_kv_producer or not self.prefilling_transfer_ids:
             return
         # Retain the final fence for D-ready arriving without another forward.
         self._ready_event = self._record_event()

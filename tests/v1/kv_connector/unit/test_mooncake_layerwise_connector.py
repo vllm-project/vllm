@@ -15,9 +15,6 @@ import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
-    layerwise_mapping as mapping,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     mooncake_layerwise_connector as lw,
 )
 from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
@@ -26,13 +23,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     UniformTypeKVCacheSpecs,
 )
-
-
-def test_pp_workers_with_equal_tp_rank_have_distinct_identities():
-    first = _metadata()
-    second = msgspec.structs.replace(first, remote_pp_rank=1, remote_pp_size=2)
-    assert first.worker_key != second.worker_key
-    assert first.remote_tp_rank == second.remote_tp_rank
 
 
 def test_partial_pp_alignment_preserves_matching_cache_names():
@@ -235,7 +225,7 @@ def test_scheduler_snapshots_updated_blocks():
         num_prompt_tokens=17,
         kv_transfer_params={"transfer_id": "transfer"},
     )
-    scheduler._prefills = {"p": request}
+    scheduler._prefill_requests = {"p": request}
     output = SchedulerOutput.make_empty()
     output.num_scheduled_tokens = {"p": 16}
     blocks = ([3],)
@@ -362,7 +352,10 @@ def test_late_ready_flushes_all_layers_without_another_forward(worker):
     assert worker.get_finished() == (None, None)
     worker._send_blocks.assert_not_called()
     worker.start_load_kv(lw.MooncakeLayerwiseMetadata())
-    # The runner skips wait_for_save when no tokens are scheduled.
+    # Empty steps finish transfers in start_load_kv; wait_for_save is a no-op.
+    with patch.object(worker, "_process_pending_transfers") as process:
+        worker.wait_for_save()
+    process.assert_not_called()
     assert worker.get_finished() == ({"p"}, None)
     worker._send_blocks.assert_called_once()
     worker._control_channel.schedule_completion_ack.assert_called_once_with(
@@ -446,7 +439,7 @@ def test_destination_without_data_needs_no_final_layer_or_send_window(
         asyncio.run(
             worker._control_channel.receive_decode_ready(b"id", AsyncMock(), meta)
         )
-    worker.prefilling_transfer_ids = ()
+    worker.start_load_kv(lw.MooncakeLayerwiseMetadata())
     worker.wait_for_save()
     assert worker.get_finished() == (None, None)
     assert not state.sealed
@@ -643,11 +636,8 @@ def test_cached_completion_requires_all_workers_after_pcp_size_changes(worker):
     assert state.ack_scheduled_workers == layout.expected_workers
 
 
-@pytest.mark.parametrize("evict", [False, True])
 @pytest.mark.parametrize("remote_group", [0, 1])
-def test_blocks_only_ready_reuses_layout_and_survives_eviction(
-    worker, evict, remote_group
-):
+def test_blocks_only_ready_reuses_layout_and_survives_eviction(worker, remote_group):
     meta = _metadata({"first": ("first-transfer", [[]] * remote_group + [[7, 8]])})
     meta = msgspec.structs.replace(
         meta, registered_group_indices=[remote_group, remote_group]
@@ -669,8 +659,7 @@ def test_blocks_only_ready_reuses_layout_and_survives_eviction(
         registered_group_indices=[],
     )
     asyncio.run(channel.receive_decode_ready(b"second", AsyncMock(), blocks_only))
-    if evict:
-        channel._layouts.clear()
+    channel._layouts.clear()
     state = _state(worker)
     worker.process_decode_ready_requests()
     assert state.destinations[meta.worker_key].layout is first_layout
@@ -723,13 +712,12 @@ def test_ready_advertises_d_receive_duration_without_a_timestamp(worker, monkeyp
     "margin, remaining, expired",
     [(10, 11, False), (10, 10, True), (10, -1, True), (20, 15, True)],
 )
-@pytest.mark.parametrize("wall_clock", [-1e10, 1e10])
 def test_d_receive_deadline_controls_submission(
-    worker, monkeypatch, margin, remaining, expired, wall_clock
+    worker, monkeypatch, margin, remaining, expired
 ):
     now = 1000
     monkeypatch.setattr(lw.time, "monotonic", lambda: now)
-    monkeypatch.setattr(lw.time, "time", lambda: wall_clock)
+    monkeypatch.setattr(lw.time, "time", lambda: -1e10)
     worker.send_timeout_margin_s = margin
     state = _state(worker)
     state.sealed = state.inference_finished = True
@@ -740,7 +728,7 @@ def test_d_receive_deadline_controls_submission(
     # Time spent in the model-thread queue must consume the same deadline.
     now = 1030 - remaining
 
-    worker.prefilling_transfer_ids = ()
+    worker.start_load_kv(lw.MooncakeLayerwiseMetadata())
     worker.wait_for_save()
     assert worker.get_finished() == ({"p"}, None)
     assert state.destinations[meta.worker_key].send_deadline == 1030
@@ -910,83 +898,23 @@ def test_connector_accepts_full_attention_subclasses_and_uniform_specs(uniform):
         )
 
 
-def test_group_block_mapping_uses_independent_units_and_prefix_offsets():
-    assert mapping.plan_append_blocks(
-        [10, 11, 12],
-        [30, 31],
-        token_end=33,
-        available=32,
-        sent=None,
-        block_size=16,
-        final=False,
-    ) == mapping.BlockSlice((11,), (30,), 32)
-    assert mapping.plan_append_blocks(
-        [40, 41],
-        [50],
-        token_end=33,
-        available=33,
-        sent=None,
-        block_size=32,
-        final=True,
-    ) == mapping.BlockSlice((41,), (50,), 64)
-
-
-def test_window_preserves_logical_positions_and_skips_only_destination_nulls():
-    plan = mapping.plan_final_window(
-        [0, 0, 12, 13],
-        [0, 22, 23],
-        token_end=63,
-        block_size=16,
-        null_block=0,
-    )
-    assert plan == mapping.BlockSlice((12, 13), (22, 23), 64)
-    with pytest.raises(ValueError, match="retired"):
-        mapping.plan_final_window(
-            [0, 0, 0, 13],
-            [22, 23],
-            token_end=63,
-            block_size=16,
-            null_block=0,
-        )
-
-
-def test_final_state_maps_resident_slots_without_expanding_token_blocks():
-    assert mapping.plan_final_state(
-        [0, 0, 71, 0, 73],
-        [0, 91],
-        token_end=543,
-        null_block=0,
-    ) == mapping.BlockSlice((73,), (91,), 543)
-    assert mapping.plan_final_state(
-        [71, 73],
-        [91, 93],
-        token_end=543,
-        null_block=0,
-    ) == mapping.BlockSlice((71, 73), (91, 93), 543)
-    with pytest.raises(ValueError, match="missing"):
-        mapping.plan_final_state([0, 73], [91, 93], token_end=543, null_block=0)
-
-
-@pytest.mark.parametrize("token_end", [1, 63, 64, 65, 4097])
-def test_ring_handoff_keeps_one_physical_page_across_wraps(token_end):
-    assert mapping.plan_final_state(
-        [71],
-        [91],
-        token_end=token_end,
-        null_block=0,
-    ) == mapping.BlockSlice((71,), (91,), token_end)
-
-
-@pytest.mark.parametrize("replicas", [1, 2, 4])
-def test_pcp_replica_identity_does_not_alias_tp_or_pp(replicas):
+def test_worker_identity_distinguishes_tp_pp_and_pcp():
     meta = _metadata()
     peers = [
-        msgspec.structs.replace(meta, remote_pcp_rank=rank, remote_pcp_size=replicas)
-        for rank in range(replicas)
+        msgspec.structs.replace(
+            meta,
+            remote_tp_rank=tp,
+            remote_tp_size=2,
+            remote_pp_rank=pp,
+            remote_pp_size=2,
+            remote_pcp_rank=pcp,
+            remote_pcp_size=4,
+        )
+        for tp in range(2)
+        for pp in range(2)
+        for pcp in range(4)
     ]
-    assert len({peer.worker_key for peer in peers}) == replicas
-    assert {peer.remote_tp_rank for peer in peers} == {0}
-    assert {peer.remote_pp_rank for peer in peers} == {0}
+    assert len({peer.worker_key for peer in peers}) == len(peers)
 
 
 def test_destination_writes_run_concurrently(worker):

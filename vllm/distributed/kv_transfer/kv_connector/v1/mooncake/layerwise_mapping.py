@@ -13,7 +13,7 @@ class BlockSlice:
     end_tokens: int
 
 
-def plan_append_blocks(
+def map_pending_blocks(
     source: Sequence[int],
     destination: Sequence[int],
     *,
@@ -41,7 +41,7 @@ def plan_append_blocks(
     return BlockSlice(src, dst, end * block_size)
 
 
-def plan_final_window(
+def map_window_blocks(
     source: Sequence[int],
     destination: Sequence[int],
     *,
@@ -65,7 +65,7 @@ def plan_final_window(
     return BlockSlice(tuple(src), tuple(dst), target * block_size)
 
 
-def plan_final_state(
+def map_state_blocks(
     source: Sequence[int],
     destination: Sequence[int],
     *,
