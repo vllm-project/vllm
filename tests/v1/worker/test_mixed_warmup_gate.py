@@ -63,7 +63,10 @@ def test_mixed_warmup_disables_watermarking():
         for request in output.scheduled_new_reqs
     ]
     assert len(sampling_params) == 2
-    assert all(params.watermarking is False for params in sampling_params)
+    assert all(
+        params is not None and params.watermarking is False
+        for params in sampling_params
+    )
 
 
 @pytest.mark.parametrize("fail_warmup", [False, True])
@@ -75,6 +78,10 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
         adaptive_verification=manager,
         rejection_sampler=rejection_sampler,
         speculative_config=SimpleNamespace(),
+    )
+    budget_warmups = []
+    manager.warmup_budget_kernel = lambda: budget_warmups.append(
+        runner.adaptive_verification
     )
 
     def run_steps(model_runner, execute, sample, greedy=False):
@@ -92,6 +99,8 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     assert runner.adaptive_verification is manager
     assert manager.cost_tables is None
     assert rejection_sampler.enable_adaptive_verification
+    # The budget kernel is warmed once, after the manager is restored.
+    assert budget_warmups == ([] if fail_warmup else [manager])
 
 
 @pytest.mark.parametrize("speculative", [False, True])

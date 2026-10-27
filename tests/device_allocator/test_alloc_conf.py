@@ -128,3 +128,18 @@ def test_expandable_segments_enabled_returns_none_when_unreadable(monkeypatch):
 
     monkeypatch.setattr(alloc_conf.torch.cuda, "memory", _NoSnapshot)
     assert alloc_conf.expandable_segments_enabled() is None
+
+
+def test_non_expandable_allocations(monkeypatch):
+    conf = "max_split_size_mb:512,expandable_segments:True"
+    writes: list[str] = []
+    monkeypatch.setattr(
+        alloc_conf, "current_alloc_conf", lambda: writes[-1] if writes else conf
+    )
+    monkeypatch.setattr(alloc_conf, "set_alloc_conf", writes.append)
+    with pytest.raises(RuntimeError), alloc_conf.non_expandable_allocations():
+        assert writes == ["max_split_size_mb:512,expandable_segments:False"]
+        with alloc_conf.non_expandable_allocations():  # already off: no-op
+            pass
+        raise RuntimeError("capture failed")
+    assert writes == ["max_split_size_mb:512,expandable_segments:False", conf]
