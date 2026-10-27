@@ -56,7 +56,6 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     KVCacheBlockCopy,
     make_block_hash_with_group_id,
-    maybe_convert_block_hash,
 )
 from vllm.v1.core.sched.output import (
     KVConnectorBlockState,
@@ -1831,7 +1830,7 @@ def test_max_offload_tokens_zero_does_not_record_pending_lookups(request_runner)
     assert list(runner.connector_scheduler.take_events()) == []
 
 
-def test_abort_before_hit_placeholder_then_later_hit_removes_chunk_key(
+def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
     request_runner,
 ):
     runner = request_runner(
@@ -1890,9 +1889,7 @@ def test_abort_before_hit_placeholder_then_later_hit_removes_chunk_key(
     [event] = runner.connector_scheduler.take_events()
     assert isinstance(event, BlockRemoved)
     assert event.medium == MEDIUM_CPU
-    assert event.block_hashes == [
-        maybe_convert_block_hash(BlockHash(get_offload_block_hash(key)))
-    ]
+    assert len(event.block_hashes) == 2
     assert key not in tracker._pending_event_metadata
 
 

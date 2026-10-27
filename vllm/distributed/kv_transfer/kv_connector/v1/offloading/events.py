@@ -5,10 +5,12 @@
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size.
 :class:`OffloadingEventsTracker` snapshots each chunk's full ``BlockStored``
-payload while the ``Request`` is alive. ``BlockStored`` lists a chunk's
-constituent block hashes, while ``BlockRemoved`` carries only its OffloadKey
-(the final hash). Consumers map each chunk key to its member blocks.
-Self-describing stores are opt-in via
+payload while the ``Request`` is alive and publishes stores as block-granular
+payloads: a chunk event may carry multiple constituent per-block hashes, and
+evictions fan out to the same hashes. Chunks overlapping a non-chunk-aligned
+shared prefix re-announce the shared hashes once per chunk; consumers are
+expected to deduplicate (reference-count) repeated store/remove announcements
+of the same hash. Opt-in via
 ``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
 KV cache events are enabled. See the PR description for the full design.
 """
@@ -380,7 +382,8 @@ class OffloadingEventsTracker:
         )
 
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
-        # Metadata survives while later tier stores may still need the payload.
+        # Metadata is read, NOT popped: the entry must survive until the
+        # eviction event so BlockRemoved can fan out to the same hashes.
         # Events are self-contained (own parent), so key order is free.
         locality = event.locality.value if event.locality is not None else None
         for key in event.keys:
@@ -432,14 +435,29 @@ class OffloadingEventsTracker:
         by_group: dict[int, list] = {}
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
-            if meta is not None:
-                meta.active_residencies.discard((event.medium, event.ownership))
             if event.metadata_only:
+                if meta is not None:
+                    meta.active_residencies.discard((event.medium, event.ownership))
                 continue
-            group_idx = get_offload_group_idx(key)
-            by_group.setdefault(group_idx, []).append(
-                maybe_convert_block_hash(BlockHash(get_offload_block_hash(key)))
-            )
+            if meta is not None:
+                group_idx = meta.group_idx
+                by_group.setdefault(group_idx, []).extend(
+                    maybe_convert_block_hash(h) for h in meta.block_hashes
+                )
+                meta.active_residencies.discard((event.medium, event.ownership))
+            else:
+                if self.self_describing_enabled:
+                    logger.warning_once(
+                        "OffloadingEventsTracker: no event metadata for "
+                        "offload key during BlockRemoved emission; emitting a "
+                        "placeholder removal. Expected if the matching store "
+                        "used the legacy placeholder payload; otherwise "
+                        "indicates missing store metadata."
+                    )
+                group_idx = get_offload_group_idx(key)
+                by_group.setdefault(group_idx, []).append(
+                    maybe_convert_block_hash(BlockHash(get_offload_block_hash(key)))
+                )
 
         for group_idx, hashes in by_group.items():
             yield BlockRemoved(
