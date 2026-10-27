@@ -220,7 +220,7 @@ def moe_scratch_layout(key: MoeBuild) -> dict:
             "rlog": s * E // 2,
             "sgate": s,
             "route": s * 2 * TOPK,
-            "inter": s * KT * lay.RI,
+            "inter": s * KT * moe.inter_pairs(lay.moe),
         }.items()
     )
 
