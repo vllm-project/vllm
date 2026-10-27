@@ -218,6 +218,7 @@ _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
 _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
+_ON_GFX115X = "gfx115" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
@@ -319,6 +320,10 @@ def on_gfx1151() -> bool:
     return _ON_GFX1151
 
 
+def on_gfx115x() -> bool:
+    return _ON_GFX115X
+
+
 def on_gfx12x() -> bool:
     return _ON_GFX12X and not _ON_CDNA
 
@@ -371,6 +376,48 @@ def get_cdna_version() -> int:
     return 0
 
 
+def get_rdna_version() -> int:
+    if on_rdna4():
+        return 4
+    if on_gfx11():
+        return 3
+    return 0
+
+
+def _maybe_default_dsv4_mxfp4_indexer(vllm_config: "VllmConfig") -> None:
+    """Default DeepSeek-V4's sparse indexer K cache to MXFP4 on CDNA4.
+
+    aiter's paged MXFP4 indexer is faster than FP8 on MI350/MI355 (lower
+    TTFT/TPOT, ~9% more KV cache) with near-lossless accuracy. Only rewrite
+    "auto" and fall back to FP8 silently when the MXFP4 path can't run, so
+    configs that worked before never start failing.
+    """
+    hf_config = getattr(vllm_config.model_config, "hf_config", None)
+    if getattr(hf_config, "model_type", None) != "deepseek_v4":
+        return
+    attention_config = vllm_config.attention_config
+    parallel_config = vllm_config.parallel_config
+    if (
+        attention_config.indexer_kv_dtype != "auto"
+        or attention_config.indexer_sparse_logits
+        or get_cdna_version() != 4
+        # The MXFP4 indexer metadata builder rejects DCP/PCP.
+        or parallel_config.decode_context_parallel_size > 1
+        or parallel_config.prefill_context_parallel_size > 1
+    ):
+        return
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_enabled():
+        return
+    attention_config.indexer_kv_dtype = "mxfp4"
+    logger.info_once(
+        "DeepSeek-V4 on ROCm CDNA4: using aiter's paged MXFP4 sparse indexer "
+        "K cache by default. Pass --attention-config "
+        '\'{"indexer_kv_dtype": "fp8"}\' to use the FP8 indexer cache.'
+    )
+
+
 @cache
 def get_rocm_version() -> tuple[int, ...] | None:
     """Return the installed ROCm release as (major, minor, patch), or None."""
@@ -399,6 +446,12 @@ if (
     and get_cdna_version() > 2
 ):
     os.environ["HIP_ONLINE_TUNING"] = "1"
+
+# RCCL 2.30's RAS thread can abort the process at exit ("terminate called
+# without an active exception") when its shutdown notification fails.
+# https://github.com/ROCm/rocm-systems/issues/13572
+if torch.version.hip:
+    os.environ.setdefault("NCCL_RAS_ENABLE", "0")
 
 
 @cache
@@ -510,6 +563,7 @@ def _get_backend_priorities(
         backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
+    backends.append(AttentionBackendEnum.ROCM_OCTAVE)
     backends.append(AttentionBackendEnum.ULTRAQUANT)
 
     return backends
@@ -882,7 +936,11 @@ class RocmPlatform(Platform):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if rocm_aiter_ops.is_mha_enabled() and on_cdna():
+        if (
+            rocm_aiter_ops.is_mha_enabled()
+            and on_cdna()
+            and (dtype == torch.float16 or dtype == torch.bfloat16)
+        ):
             logger.info_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
@@ -1068,6 +1126,15 @@ class RocmPlatform(Platform):
         if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
             compilation_config.custom_ops.append("+quant_fp8")
 
+        # Only RMSNorm's custom op reaches rms_norm_batch_invariant. Inductor
+        # lowers the native one to a reduction whose block size it picks by
+        # benchmarking, so the summation order varies with the batch and run.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and "-rms_norm" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rms_norm")
+
         if use_aiter_fused_se and "-grouped_topk" in compilation_config.custom_ops:
             logger.warning_once(
                 "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled, which "
@@ -1086,6 +1153,17 @@ class RocmPlatform(Platform):
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
+
+        # Default the gated RMSNorm custom op on for unquantized models. Quantized
+        # is untested in serving.
+        model_config = vllm_config.model_config
+        if (
+            model_config is not None
+            and model_config.quantization is None
+            and "+rms_norm_gated" not in compilation_config.custom_ops
+            and "-rms_norm_gated" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rms_norm_gated")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -1123,6 +1201,8 @@ class RocmPlatform(Platform):
                 "with multimodal-bidirectional attention."
             )
             scheduler_config.disable_chunked_mm_input = True
+
+        _maybe_default_dsv4_mxfp4_indexer(vllm_config)
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -1173,7 +1253,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return on_cdna() or on_rdna4()
+        return on_cdna() or on_rdna()
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
@@ -1336,12 +1416,14 @@ class RocmPlatform(Platform):
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
-        # TODO(luka/TJ) remove env vars completely
+        # TODO(Rohan138/dllehr-amd/rasmith) Change this to be an inclusive
+        # check instead of exclusive check in the future.
         if (
             cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
             and not on_rdna4()
+            and not on_gfx90a()  # AITER not built for gfx90a, rmsnorm -> SEGV.
         ):
             rms_norm = ["aiter"] + default
         else:

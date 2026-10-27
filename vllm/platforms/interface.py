@@ -737,14 +737,14 @@ class Platform:
             for candidate in candidates:
                 if all(b.supports_block_size(candidate) for b in backend_classes):
                     return candidate
-        raise ValueError(
-            "The attention backends share no supported KV cache block size ("
-            + "; ".join(
-                f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}"
-                for b in backend_classes
+            raise ValueError(
+                "The attention backends share no supported KV cache block size ("
+                + "; ".join(
+                    f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}"
+                    for b in backend_classes
+                )
+                + ")."
             )
-            + ")."
-        )
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -869,7 +869,8 @@ class Platform:
                 kv_quant_mode=get_kv_quant_mode(cache_dtype),
             )
             # The backend owns its packing
-            return backend_cls.customize_spec(spec).page_size_bytes
+            with set_current_vllm_config(vllm_config):
+                return backend_cls.customize_spec(spec).page_size_bytes
 
         primary_dtype = (
             STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
@@ -936,17 +937,6 @@ class Platform:
             cache_config.mamba_page_size_padded = shared_page
 
     @classmethod
-    def _get_indexer_block_alignment(cls, vllm_config: "VllmConfig") -> int | None:
-        """Extra ``block_size`` multiple a sparse indexer needs, else ``None``.
-
-        The CUDA kpool paged-MQA indexer virtually splits each storage block
-        into pool pages, so ``block_size`` must be a multiple of
-        ``index_kpool * min(PAGED_MQA_PAGE_SIZES)`` — implemented in the CUDA
-        platform override. Other platforms impose no extra constraint.
-        """
-        return None
-
-    @classmethod
     def _align_hybrid_block_size(
         cls,
         vllm_config: "VllmConfig",
@@ -958,6 +948,9 @@ class Platform:
         from math import lcm
 
         from vllm.config.vllm import set_current_vllm_config
+        from vllm.model_executor.layers.mamba.abstract import (
+            get_mamba_prefill_checkpoint_alignment,
+        )
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -1043,9 +1036,11 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            attn_page_size_1_token = backend_cls.customize_spec(
-                attn_spec
-            ).page_size_bytes
+            # customize_spec may read the model config (e.g. Octave's rotary dim).
+            with set_current_vllm_config(vllm_config):
+                attn_page_size_1_token = backend_cls.customize_spec(
+                    attn_spec
+                ).page_size_bytes
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
@@ -1077,12 +1072,26 @@ class Platform:
                 ),
                 cache_config.block_size,
             )
+            # Also a multiple of every backend's smallest kernel block.
+            backend_block_alignment = lcm(
+                *(
+                    min(s.base if isinstance(s, MultipleOf) else s for s in sizes)
+                    for b in cls._find_non_ssm_backends(vllm_config)
+                    if (sizes := b.get_supported_kernel_block_sizes())
+                )
+            )
             if model_config.use_mla:
                 # TRTLLM/FlashInfer MLA decode kernels require the physical
                 # number of kernel blocks to be aligned to 128 / kernel_block_size.
                 # For hybrid MLA/Mamba models, make the manager block size a
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
+        if cache_config.mamba_cache_mode == "align":
+            # Internal prefill checkpoints land on block boundaries.
+            kernel_block_alignment_size = lcm(
+                kernel_block_alignment_size,
+                get_mamba_prefill_checkpoint_alignment(vllm_config) or 1,
+            )
 
         # Use minimum block size that satisfies both backend alignment and
         # mamba page size compatibility
@@ -1090,9 +1099,9 @@ class Platform:
             mamba_page_size,
             kernel_block_alignment_size * attn_page_size_1_token,
         )
-        indexer_align = cls._get_indexer_block_alignment(vllm_config)
-        if indexer_align:
-            attn_block_size = indexer_align * cdiv(attn_block_size, indexer_align)
+        attn_block_size = backend_block_alignment * cdiv(
+            attn_block_size, backend_block_alignment
+        )
 
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
@@ -1460,6 +1469,28 @@ class Platform:
                     logger.warning(
                         "Unknown vLLM environment variable detected: %s", env
                     )
+
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: "VllmConfig") -> str:
+        """Resolve the fully-qualified class path of the platform's KV cache
+        config builder.
+
+        .. note::
+            Experimental, like the ``KVCacheConfigBuilder`` interface it selects.
+
+        The builder supplies grouping (``get_kv_cache_groups``) and tensor
+        placement (``get_kv_cache_config_from_groups``). Vendors may override
+        this to return a platform-specific builder. The default builder honors a
+        model implementing
+        :class:`~vllm.model_executor.models.interfaces.SupportsKVCacheGrouping`;
+        a builder that overrides ``get_kv_cache_groups`` owns grouping and
+        bypasses that model hook unless it calls ``super()``.
+
+        Returns:
+            Fully-qualified class path of a ``KVCacheConfigBuilder`` subclass.
+
+        """
+        return "vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder"
 
 
 class UnspecifiedPlatform(Platform):

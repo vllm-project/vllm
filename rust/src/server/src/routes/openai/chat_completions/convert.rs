@@ -54,8 +54,9 @@ pub(super) struct ResponseOptions {
     pub echo: Option<String>,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
-    /// Whether to format logprob tokens as `token_id:{id}`.
-    pub return_tokens_as_token_ids: bool,
+    /// The request's `return_tokens_as_token_ids`; `None` falls back to the
+    /// server's `--return-tokens-as-token-ids`.
+    pub return_tokens_as_token_ids: Option<bool>,
     /// Whether the request forces one named function tool.
     pub is_named_tool_choice: bool,
 }
@@ -126,6 +127,13 @@ pub(super) fn prepare_chat_request(
         .prompt_logprobs
         .or((request.echo && !request.stream).then_some(top_logprobs));
     let include_prompt_logprobs = prompt_logprobs.is_some();
+    let logprob_token_ids = request.logprob_token_ids.filter(|ids| !ids.is_empty());
+    let logprobs = (request.logprobs && logprob_token_ids.is_none()).then_some(top_logprobs);
+    let output_top_logprobs = if logprob_token_ids.is_some() {
+        -1
+    } else {
+        top_logprobs
+    };
 
     let structured_outputs = convert_from_response_format(
         request.response_format.as_ref(),
@@ -157,7 +165,7 @@ pub(super) fn prepare_chat_request(
             max_tokens: request.max_completion_tokens,
             min_tokens: request.min_tokens,
             thinking_token_budget: request.thinking_token_budget,
-            logprobs: request.logprobs.then_some(top_logprobs),
+            logprobs,
             prompt_logprobs,
             prompt_logprob_token_ids: None,
             prompt_logprob_start: None,
@@ -172,13 +180,15 @@ pub(super) fn prepare_chat_request(
             allowed_token_ids: request.allowed_token_ids,
             bad_words: request.bad_words,
             bad_words_token_ids: None,
-            logprob_token_ids: None,
+            logprob_token_ids,
             structured_outputs,
             skip_reading_prefix_cache: None,
+            routed_experts_prompt_start: None,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
+            stream_interval: request.stream_interval,
         },
         chat_options: ChatOptions {
             generation_prompt_mode,
@@ -212,12 +222,12 @@ pub(super) fn prepare_chat_request(
             include_usage,
             include_continuous_usage,
             requested_logprobs,
-            output_top_logprobs: top_logprobs,
+            output_top_logprobs,
             include_prompt_logprobs,
             include_reasoning,
             echo,
             return_token_ids: request.return_token_ids.unwrap_or(false),
-            return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+            return_tokens_as_token_ids: request.return_tokens_as_token_ids,
             is_named_tool_choice,
         },
         chat_request,
@@ -391,7 +401,14 @@ fn convert_assistant_tool_calls(
             Ok(AssistantContentBlock::ToolCall(AssistantToolCall {
                 id: tool_call.id,
                 name: tool_call.function.name,
-                arguments: tool_call.function.arguments.unwrap_or_else(|| "{}".to_string()),
+                // Like Python, an empty `arguments` string means no arguments,
+                // the same as an absent one: clients send it for calls to tools
+                // without parameters.
+                arguments: tool_call
+                    .function
+                    .arguments
+                    .filter(|arguments| !arguments.is_empty())
+                    .unwrap_or_else(|| "{}".to_string()),
             }))
         })
         .collect()
@@ -443,6 +460,7 @@ fn convert_tool_choice(tool_choice: &ToolChoice) -> Result<ChatToolChoice, ApiEr
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::num::NonZeroU32;
     use std::sync::Arc;
 
     use axum::http::{HeaderMap, StatusCode};
@@ -538,6 +556,15 @@ mod tests {
             });
             assert!(serde_json::from_value::<ChatCompletionRequest>(request).is_err());
         }
+    }
+
+    #[test]
+    fn chat_http_request_rejects_zero_stream_interval() {
+        let request = json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream_interval": 0,
+        });
+        assert!(serde_json::from_value::<ChatCompletionRequest>(request).is_err());
     }
 
     #[test]
@@ -662,6 +689,39 @@ mod tests {
                 .error
                 .message
                 .contains("json cannot be an empty string")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_deeply_nested_json_schema() {
+        let schema = (1..65).fold(
+            json!({"type": "string"}),
+            |items, _| json!({"type": "array", "items": items}),
+        );
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": schema},
+            },
+        }))
+        .expect("parse response_format");
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_error_response()
+                .error
+                .message
+                .contains("The JSON schema is nested too deeply")
         );
     }
 
@@ -922,7 +982,7 @@ mod tests {
 
         assert!(prepared.options.include_usage);
         assert!(prepared.options.include_continuous_usage);
-        assert!(prepared.options.return_tokens_as_token_ids);
+        assert_eq!(prepared.options.return_tokens_as_token_ids, Some(true));
     }
 
     #[test]
@@ -1004,6 +1064,7 @@ mod tests {
             frequency_penalty: Some(0.3),
             presence_penalty: Some(0.4),
             repetition_penalty: Some(1.1),
+            stream_interval: NonZeroU32::new(4),
             ..base_request()
         };
 
@@ -1019,6 +1080,7 @@ mod tests {
             frequency_penalty: Some(0.3),
             presence_penalty: Some(0.4),
             repetition_penalty: Some(1.1),
+            stream_interval: NonZeroU32::new(4),
             ..VllmSamplingParams::default()
         };
         assert_eq!(prepared.chat_request.sampling_params, expected);
@@ -1323,6 +1385,10 @@ mod tests {
         let message = ChatCompletionMessage {
             role: AssistantRole,
             content: Some("answer".to_string()),
+            refusal: None,
+            annotations: None,
+            audio: None,
+            function_call: None,
             tool_calls: Vec::new(),
             reasoning: Some("inner".to_string()),
         };
@@ -1467,6 +1533,46 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_lowers_empty_tool_call_arguments_as_absent() {
+        let tool_call_arguments = |arguments: serde_json::Value| {
+            let request: ChatCompletionRequest = serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_current_time", "arguments": arguments},
+                    }],
+                }],
+            }))
+            .expect("parse request");
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid");
+            let [VllmChatMessage::Assistant { content }] =
+                prepared.chat_request.messages.as_slice()
+            else {
+                panic!("expected one assistant message");
+            };
+            let [AssistantContentBlock::ToolCall(call)] = content.as_slice() else {
+                panic!("expected one tool call");
+            };
+            call.arguments.clone()
+        };
+
+        assert_eq!(tool_call_arguments(json!("")), "{}");
+        assert_eq!(tool_call_arguments(json!(null)), "{}");
+        assert_eq!(
+            tool_call_arguments(json!(r#"{"tz":"UTC"}"#)),
+            r#"{"tz":"UTC"}"#
+        );
+    }
+
+    #[test]
     fn prepare_chat_request_lowers_required_tool_choice() {
         let request = ChatCompletionRequest {
             tools: Some(vec![Tool {
@@ -1541,6 +1647,31 @@ mod tests {
             }
         );
         assert!(prepared.options.is_named_tool_choice);
+    }
+
+    #[test]
+    fn selected_logprobs_override_chat_top_k_unless_empty() {
+        for ids in [vec![10, 20], vec![]] {
+            let request = serde_json::from_value(json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "logprobs": true, "top_logprobs": 1, "logprob_token_ids": ids,
+            }))
+            .unwrap();
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+            )
+            .unwrap();
+            let params = prepared.chat_request.sampling_params;
+            let selected = !ids.is_empty();
+            assert_eq!(params.logprob_token_ids, selected.then_some(ids));
+            assert_eq!(params.logprobs, (!selected).then_some(1));
+            assert_eq!(
+                prepared.options.output_top_logprobs,
+                if selected { -1 } else { 1 }
+            );
+        }
     }
 
     #[test]
