@@ -372,6 +372,34 @@ def test_replace_parameter_with_own_parameter_keeps_layout(single_rank_tp) -> No
     assert torch.equal(layer.weight, torch.ones(4, 4))
 
 
+def test_kept_param_ops_skip_python_torch_function(single_rank_tp: None) -> None:
+    """Kept vLLM params must dispatch eager ops like a plain Parameter: a Python
+    `__torch_function__` would put every op on them through the interpreter."""
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight",
+        ModelWeightParameter(
+            data=torch.zeros(4, 4),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=lambda param, loaded_weight: None,
+        ),
+    )
+    replace_parameter(layer, "weight", torch.ones(4, 4))
+
+    assert type(layer.weight) is ModelWeightParameter
+    # A kept param must dispatch like a plain Parameter. Compare against a
+    # plain Parameter rather than asserting an absolute False: on ROCm,
+    # has_torch_function can return True for plain Parameters too.
+    plain = torch.nn.Parameter(torch.ones(4, 4))
+    assert torch.overrides.has_torch_function(
+        (layer.weight,)
+    ) == torch.overrides.has_torch_function((plain,))
+    out = layer.weight + 1
+    assert type(out) is torch.Tensor
+    assert torch.equal(out, torch.full((4, 4), 2.0))
+
+
 def test_transposed_kept_param_keeps_checkpoint_dims(single_rank_tp: None) -> None:
     """The loader shards a kept param by its dims on reload, so a kernel transform
     that transposes it must not leave the post-transform dims on it."""
