@@ -1096,15 +1096,13 @@ class Worker(WorkerBase):
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,
             )
-            # Random values: only the shape matters (as in V1's dummy sampler run).
-            hidden_states = torch.rand(
-                max_num_reqs,
-                self.model_config.get_hidden_size(),
-                dtype=self.model_config.dtype,
-                device=self.device,
+            # Take the hidden states from a dummy forward pass, as V1 does, so they
+            # have the LM head's input size (e.g. OPT projects to a smaller size).
+            _, sample_hidden_states = self.model_runner._dummy_run(
+                num_tokens=max_num_reqs, skip_eplb=True
             )
-            self.model_runner._dummy_sampler_run(hidden_states=hidden_states)
-            del hidden_states
+            self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
+            del sample_hidden_states
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
