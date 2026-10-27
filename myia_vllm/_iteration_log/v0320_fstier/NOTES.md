@@ -3649,3 +3649,81 @@ Pruneur **09:50:02Z** : `mode=apply`, tier 269,1 Go → cap, **24 fichiers/630 M
 
 **Registre** : Q41 seule — le relevé de ce cycle (22 505 MiB) est le plus haut du jour mais
 reste sous la ligne 23 500 ; critère d'échec toujours non rempli.
+
+## 27/10 12:11Z — hit marginal 96,85 %, VRAM à 417 MiB de la ligne, attribution claudish câblée mais VIDE
+
+Moteur `StartedAt` **02:15:05Z inchangé (10 h)** : health 200 @4,9 ms, RC=0, 3 conteneurs,
+OOM 0, 0 signature d'erreur sur 20 000 lignes, `/dev/shm` **24G/63G (39 %)**. **Dernier WEDGE
+03:11:31Z (9 h)**, tous `fail 1/2`, **jamais 2/2**, aucun restart ; 3 826 sondes OK.
+
+**VRAM GPU 0 = 22 583 MiB**, nouveau plus haut du jour. Échantillonnée **6× en 1 min =
+22 568→22 583 MiB** (plate, aucune pente en intra-minute). La série inter-cycles monte
+cependant sans discontinuer : 22 076 (04:20Z) → 22 354 → 22 358 (08:11Z) → 22 505 (10:11Z)
+→ **22 583** (12:11Z), soit +507 MiB en 6 h. **Il reste 417 MiB sous la ligne d'alerte
+23 000** — c'est le point à surveiller, pas encore une alerte : la charge varie entre les
+relevés et l'intra-minute est stable. GPU 1 21 650, GPU 2 45 (libre).
+
+**★ Amortissement en nette hausse** : prefix hit **92,26 %** cumulé (116,91 M / 126,72 M)
+contre 90,11 % au cycle précédent. Surtout, le taux **marginal sur les 2 h = 96,85 %**
+(39,10 M hits sur 40,37 M queries) — il était à **90,2 %** à 10:11Z. L'amortissement ne se
+contente pas de tenir, il **s'améliore** : les sessions récurrentes retrouvent leurs préfixes
+sans re-prefill. Prefill **5 607 tok/s** soutenus (+40,4 M prompt en 2 h) pour 1,12 M tokens
+générés au total ⇒ profil condensation confirmé (gros préfixes, sorties courtes).
+**Préemptions 0** (discriminant de saturation KV, plus fiable que la VRAM). Requêtes :
+2 719 succès (1 525 `stop` + 1 194 `length`), 0 `abort`, 0 `error`, 0 `repetition`.
+
+**Tiers** : offload **290,3 Go GPU→CPU** (10 437 transferts) / **90,4 Go CPU→GPU** (284
+transferts), ratio de relecture **31 %** — le tier RAM recycle beaucoup (24 GiB, écritures en
+place) tandis que le fs n'absorbe que les évictions. Tier fs **44,2 %** du cap 250 GiB.
+
+**★ Datapoint claudish du 10:44Z (timeout 90 s sur le frontal) — NON corrélé au moteur.**
+Leur auto-condensation po-2025 a rendu « TIMEOUT après 90 s, socket ouverte, ni completion ni
+erreur HTTP ». Mesures de la fenêtre 10:41-10:50Z : sondes watchdog **OK health=200
+decode=200 à 10:44:17Z et 10:44:48Z**, trafic Bun en 200 continu (`10:44:11Z` 592 485 o,
+`10:44:42Z` 596 710 o), **préemptions 0 sur tout le cycle**. Surtout, sur les 133 requêtes de
+10:30-11:05Z, **aucune n'est attribuable à leur appel** (les seules `OpenAI/JS` sont à
+10:36:02, 10:37:14, 10:38:16, 10:39:19, 11:01:19 et 11:02:23 — aucune à 10:44Z ; les entrées
+`?` sont toutes `curl/8.22.0` 166 o = nos sondes). ⇒ **la requête n'a pas atteint le moteur** ;
+le blocage est sur le chemin externe (hairpin `api.medium…:443` → IIS), pas dans l'inférence.
+Classe « condensation seule / chemin externe », à verser au dossier Porte R de #704.
+
+**★ Attribution machine:workspace de claudish : CÂBLÉE DANS LE MIDDLEWARE, VIDE EN PRATIQUE.**
+Le middleware `error_source_capture` émet désormais les champs `x_claudish_machine` et
+`x_claudish_client` (plus `x_real_ip`, `referer`, `x_forwarded_host`). Or sur
+**24 456 lignes de journal — l'intégralité du fichier — les deux champs sont vides à 100 %**
+(0 non-vide), et `referer`/`x_real_ip` aussi. La demande user du **25/10** (« identifier le
+poste machine:workspace de toutes nos requêtes, vois avec claudish ») n'est donc **pas
+effective au niveau du moteur** : soit le hub ne les envoie pas encore, soit il les retire.
+L'attribution reste donc **indirecte** (taille de corps + IP + UA), avec la limite connue —
+la clé MEDIUM ne distingue pas les clients. À relayer à po-2025:claudish comme une demande
+précise et vérifiable (un seul champ à peupler), pas comme un reproche.
+
+**#431** : aucun nouveau 400 depuis 09:30:12Z (2 h 40) ; le seul 400 de la fenêtre 3 h est
+celui-là, corps 953 523 o, non re-tenté (analyse du cycle 10:11Z confirmée). 3 h :
+**1 211×200 / 30×401 / 1×400**.
+
+**Sécurité — aucune IP inconnue avec un 200.** 7 h : `?` 1 691 (interne sans XFF),
+`90.65.170.144` 631 (hairpin, connue), `82.66.89.184` 6 (poste Paris, connue). L'IP
+`108.165.33.236` relevée à 10:47:47Z **n'est pas nouvelle** : 858 requêtes sur tout le
+journal, **0 × 200**, UA `Go-http-client/1.1`, `/v1/models` toutes les ~6 min depuis le 23/10,
+empreinte `1f7f6080cb65` — c'est le sondeur à clé morte déjà connu. Empreintes 3 h : MEDIUM
+`be312daf7c1c` 1 212, `1f7f6080cb65` 28, NONE 1, `b72157f4bb61` 1.
+
+**Condensation RSM** : aucun timeout depuis 06:00:53Z, aucun breaker rouvert depuis
+06:01:22Z. Trois `Fallback chat client built` (11:02:23, 11:14:09, 12:02:37) **sans aucun
+« primary skipped »** alentour ⇒ client de repli construit, **usage non démontré** ; lu avec
+±3 lignes de contexte comme la leçon du 21/10 l'exige.
+
+**Hôte / tâches** : commit **77,7 %** (298,8/384,4 Go, 85,6 Go libres — sous le seuil 85 %) ·
+G: 85 % / 592 Go libres, **écriture OK** · pruneur **11:50:02Z** `mode=apply`, tier au cap
+(268,4 Go) · nbaudit `ok:true` **12:06:30Z**, `subpath Image/`, 5 séries, 0 échec consécutif.
+
+**Hors lane (RSM, relayé, aucun geste)** : 17× `Recent heartbeat found for myia-ai-01 (0s ago)
+— concurrent instance possible but not blocking` (le process le signale lui-même comme non
+bloquant) · 2× `Status contradictions detected after LLM generation (#1502/#3329)`, les deux
+juste après une condensation terminée, entourés de `statusOutcome: "ok"` /
+`summaryOutcome: "ok"` · 6× `Message not found: ai01-c2711-*` (messages inbox absents).
+
+**Registre** : Q41 seule, ouverte. Le relevé de ce cycle (**22 583 MiB**) réduit la marge sous
+la ligne d'alerte à **417 MiB** — c'est le plus haut jamais mesuré hors du pic 23 600
+d'avant reboot, et la série est monotone sur 6 h. Critère d'échec toujours non rempli.
