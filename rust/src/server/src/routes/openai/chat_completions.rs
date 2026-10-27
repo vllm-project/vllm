@@ -167,6 +167,7 @@ async fn collect_chat_completion(
         token_ids,
         usage,
         timestamps,
+        spec_decode_metrics,
         finish_reason,
         kv_transfer_params,
         ec_transfer_params,
@@ -211,8 +212,12 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let metrics = enable_per_request_metrics
-        .then(|| PerRequestMetrics::from_timestamps(timestamps, usage.output_token_count));
+    let metrics = PerRequestMetrics::from_request(
+        enable_per_request_metrics,
+        timestamps,
+        usage.output_token_count,
+        spec_decode_metrics,
+    );
     let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
@@ -487,6 +492,7 @@ async fn chat_completion_chunk_stream(
                 message,
                 usage: final_usage,
                 timestamps,
+                spec_decode_metrics,
                 finish_reason,
                 kv_transfer_params,
                 ..
@@ -552,12 +558,12 @@ async fn chat_completion_chunk_stream(
                 }
 
                 if include_usage {
-                    let metrics = enable_per_request_metrics.then(|| {
-                        PerRequestMetrics::from_timestamps(
-                            timestamps,
-                            final_usage.output_token_count,
-                        )
-                    });
+                    let metrics = PerRequestMetrics::from_request(
+                        enable_per_request_metrics,
+                        timestamps,
+                        final_usage.output_token_count,
+                        spec_decode_metrics,
+                    );
                     y.yield_ok(usage_chunk(
                         &envelope,
                         Usage::from_token_usage(final_usage, enable_prompt_tokens_details),
@@ -1013,7 +1019,7 @@ mod tests {
         AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, ChatTokenUsage,
         FinishReason,
     };
-    use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
     use super::{
@@ -1030,7 +1036,10 @@ mod tests {
         vllm_llm::TokenUsage {
             prompt_token_count: prompt_tokens,
             output_token_count: output_tokens,
-            cached_token_count: cached_tokens,
+            prompt_cache_usage: vllm_llm::PromptCacheUsage {
+                cached_token_count: cached_tokens,
+                cache_creation_token_count: 0,
+            },
         }
         .into()
     }
@@ -1179,6 +1188,12 @@ mod tests {
                     first_token_ts: 10.5,
                     last_token_ts: 11.0,
                 },
+                spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                    num_spec_tokens: 3,
+                    histogram: vec![0, 1, 1, 0],
+                    num_draft_tokens: 6,
+                    ..Default::default()
+                }),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1228,6 +1243,14 @@ mod tests {
         let metrics = chunks[3].metrics.as_ref().expect("per-request metrics");
         assert!((metrics.time_to_first_token_ms.unwrap() - 300.0).abs() < 1e-9);
         assert!((metrics.tokens_per_second.unwrap() - 1.25).abs() < 1e-9);
+        assert_eq!(
+            metrics
+                .speculative_decoding
+                .as_ref()
+                .expect("speculative decoding metrics")
+                .num_draft_tokens,
+            6
+        );
     }
 
     #[tokio::test]
@@ -1264,6 +1287,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1313,6 +1337,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: Some(Box::new(json!({"remote_block_ids": [1, 2]}))),
                 ec_transfer_params: None,
@@ -1375,6 +1400,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1456,6 +1482,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1589,6 +1616,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 4, 0),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1668,6 +1696,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1730,6 +1759,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(3, 1, 0),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1804,11 +1834,12 @@ mod tests {
                     engine: vllm_llm::TokenUsage {
                         prompt_token_count: 3,
                         output_token_count: 3,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1876,11 +1907,12 @@ mod tests {
                     engine: vllm_llm::TokenUsage {
                         prompt_token_count: 1,
                         output_token_count: 2,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1936,6 +1968,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
