@@ -197,6 +197,7 @@ class CrossAttention(Attention):
         scale: float,
         cache_config: CacheConfig | None = None,
         attn_type: str | None = None,
+        underlying_attn_backend: type[AttentionBackend] | None = None,
         **kwargs,
     ):
         dtype = torch.get_default_dtype()
@@ -211,12 +212,13 @@ class CrossAttention(Attention):
                 "CrossAttention only supports AttentionType.ENCODER_DECODER"
             )
 
-        underlying_attn_backend = get_attn_backend(
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            attn_type=AttentionType.ENCODER_DECODER,
-        )
+        if underlying_attn_backend is None:
+            underlying_attn_backend = get_attn_backend(
+                head_size,
+                dtype,
+                kv_cache_dtype,
+                attn_type=AttentionType.ENCODER_DECODER,
+            )
         attn_backend = create_cross_attention_backend(underlying_attn_backend)
 
         super().__init__(
