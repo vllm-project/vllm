@@ -216,3 +216,39 @@ def test_residual_sjf_config_and_cli_validation():
     )
     assert args.scheduling_policy == "residual_sjf"
     assert args.residual_sjf_max_wait_ms == 1234
+
+
+def test_connector_estimate_changes_order_but_does_not_replace_admission():
+    scheduler = create_scheduler(
+        scheduling_policy="residual_sjf",
+        max_num_seqs=1,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    long_req = create_requests(1, num_tokens=97, req_ids=["long"])[0]
+    short_req = create_requests(1, num_tokens=33, req_ids=["short"])[0]
+    long_req.kv_transfer_params = {"cached_tokens": 96}
+    scheduler.add_request(short_req)
+    scheduler.add_request(long_req)
+    assert scheduler.waiting.peek_request() is long_req
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["long"]
+    # The actual connector misses, so the estimate must not skip computation.
+    assert output.num_scheduled_tokens[long_req.request_id] == 97
+
+
+def test_local_estimate_refreshes_after_cache_reset():
+    scheduler = create_scheduler(
+        scheduling_policy="residual_sjf",
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    warm, waiting = create_requests(2, num_tokens=33, same_prompt=True)
+    manager = scheduler.kv_cache_manager
+    assert manager.allocate_slots(warm, 32) is not None
+    manager.cache_blocks(warm, 32)
+    manager.free(warm)
+    scheduler.add_request(waiting)
+    assert scheduler._get_residual_sjf_cost(waiting) == 1
+    assert scheduler._get_residual_sjf_cost(waiting) == 1
+    assert scheduler.reset_prefix_cache()
+    assert scheduler._get_residual_sjf_cost(waiting) == 3

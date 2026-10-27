@@ -497,6 +497,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         with self._child_preschedule_handle(request, index):
             return self._connectors[index].get_loaded_kv_cache_group_ids(request)
 
+    def get_num_cached_tokens(
+        self, request: "Request", num_computed_tokens: int
+    ) -> int | None:
+        for i, connector in enumerate(self._connectors):
+            with self._child_preschedule_handle(request, i):
+                hit = connector.get_num_cached_tokens(request, num_computed_tokens)
+            # A later child's larger hit may not be the one admission can load.
+            if hit is None or hit > num_computed_tokens:
+                return hit
+        return 0
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",

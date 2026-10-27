@@ -233,6 +233,20 @@ class MooncakeStoreScheduler:
             request.kv_preschedule_handle = None
             prefetched.future.cancel()
 
+    def get_num_cached_tokens(self, request: Request) -> int | None:
+        if (
+            not self.enable_lookup
+            or request.skip_reading_prefix_cache
+            or request.num_tokens < self._lookup_align()
+        ):
+            return 0
+        return self.client.peek_hit_length(
+            request.request_id,
+            request.num_tokens,
+            request.block_hashes,
+            request.kv_preschedule_handle,
+        )
+
     def get_num_new_matched_tokens(
         self,
         request: Request,

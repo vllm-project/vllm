@@ -2530,6 +2530,33 @@ class LookupKeyClient:
         state.future.add_done_callback(lambda _: slots.release())
         return state
 
+    def peek_hit_length(
+        self,
+        req_id: str,
+        num_tokens: int,
+        block_hashes: list[BlockHash],
+        prefetched: LookupState | None = None,
+    ) -> int | None:
+        """Read a valid, completed lookup without adopting or consuming it."""
+        state = self._lookups.get(req_id, prefetched)
+        if state is None or state.signature != _lookup_signature(
+            num_tokens, block_hashes
+        ):
+            return None
+        now = time.monotonic()
+        if (
+            (state.prefetched and now - state.submitted_at > self._lookup_ttl_s)
+            or (
+                state.cached_at is not None
+                and now - state.cached_at > self._lookup_ttl_s
+            )
+            or not state.future.done()
+            or state.future.cancelled()
+            or state.future.exception() is not None
+        ):
+            return None
+        return state.future.result().hit_length
+
     def adopt(self, req_id: str, state: LookupState) -> None:
         """Register a prefetched lookup; a later lookup(req_id) reuses it."""
         if state.generation != self._generation or req_id in self._lookups:

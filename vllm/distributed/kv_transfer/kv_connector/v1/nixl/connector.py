@@ -350,6 +350,16 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
 class NixlPullConnector(NixlBaseConnector):
     """Pull-based (READ) NIXL KV transfer connector."""
 
+    def get_num_cached_tokens(
+        self, request: "Request", num_computed_tokens: int
+    ) -> int | None:
+        assert self.connector_scheduler is not None
+        # Pull admission computes this count solely from request metadata.
+        count, _ = self.connector_scheduler.get_num_new_matched_tokens(
+            request, num_computed_tokens
+        )
+        return num_computed_tokens + count if count > 0 else 0
+
     def __init__(
         self,
         vllm_config: VllmConfig,

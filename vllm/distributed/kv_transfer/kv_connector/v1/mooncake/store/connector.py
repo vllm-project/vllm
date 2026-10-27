@@ -216,9 +216,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def __del__(self):
         self.shutdown()
 
-    # ============================================================
+    # =====================================================
     # Scheduler-side methods
-    # ============================================================
+    # =====================================================
 
     def on_preschedule_request(self, request: Request) -> object | None:
         assert self.connector_scheduler is not None
@@ -227,6 +227,12 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def cancel_preschedule_request(self, request: Request) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.cancel_lookup_prefetch(request)
+
+    def get_num_cached_tokens(
+        self, request: Request, num_computed_tokens: int
+    ) -> int | None:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_num_cached_tokens(request)
 
     def get_num_new_matched_tokens(
         self,
@@ -337,9 +343,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 self._kv_cache_events = None
             yield from events
 
-    # ============================================================
+    # =====================================================
     # Worker-side methods
-    # ============================================================
+    # =====================================================
 
     def get_mem_pool_context(self) -> AbstractContextManager | None:
         """Return a context manager for the custom MemPool, or None.

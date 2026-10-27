@@ -440,6 +440,10 @@ class MockKVConnector(KVConnectorBase_V1):
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return self.config.supports_divergent_local_hybrid_hits
 
+    def get_num_cached_tokens(self, request, num_computed_tokens):
+        params = request.kv_transfer_params or {}
+        return params.get("cached_tokens")
+
     def get_num_new_matched_tokens(
         self,
         request: Request,

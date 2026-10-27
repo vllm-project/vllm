@@ -641,9 +641,9 @@ def test_store_events_persist_across_polls():
     assert connector._kv_cache_events is None
 
 
-# ============================================================
+# =====================================================
 # reset_cache() — RL hard-reset path via typed LookupKey protocol
-# ============================================================
+# =====================================================
 
 
 def test_reset_cache_scheduler_role_delegates_to_reset_store():
@@ -940,6 +940,48 @@ def test_lookup_close_stops_running_rpc_and_cancels_unadopted_work():
             running.future.result(timeout=5)
         assert queued.future.cancelled()
         assert all(c.prefetch(48, []) is None for c in clients)
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_cached_token_estimate_preserves_first_hit_and_pending(nested):
+    with _multi_store_lookup(nested=nested) as (connector, _, sockets, gates, started):
+        gates[0].clear()
+        request = create_request(num_tokens=64)
+        request.kv_preschedule_handle = connector.on_preschedule_request(request)
+        states = list(_lookup_states(request))
+        assert started[0].wait(timeout=5)
+        assert states[1].future.result(timeout=5).hit_length == 32
+        assert connector.get_num_cached_tokens(request, 0) is None
+        gates[0].set()
+        assert states[0].future.result(timeout=5).hit_length == 16
+        assert connector.get_num_cached_tokens(request, 0) == 16
+        assert connector.get_num_cached_tokens(request, 16) == 32
+        assert request.kv_preschedule_handle is not None
+        assert connector.get_num_new_matched_tokens(request, 16) == (16, True)
+        assert connector.get_num_cached_tokens(request, 16) == 32
+        assert [sock.send_multipart.call_count for sock in sockets] == [1, 1]
+
+
+def test_lookup_estimate_obeys_signature_expiry_and_discard(monkeypatch):
+    client, sock = _make_lookup_client({"lookup_prefetch_limit": 1})
+    sock.recv.return_value = (32).to_bytes(4, "big")
+    clock = [0.0]
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
+    try:
+        state = client.prefetch(48, [b"hash"])
+        assert state.future.result(timeout=5).hit_length == 32
+        assert client.peek_hit_length("req", 48, [b"hash"], state) == 32
+        assert client.peek_hit_length("req", 64, [b"hash"], state) is None
+        assert client.peek_hit_length("req", 48, [b"changed"], state) is None
+        client.adopt("req", state)
+        assert client.lookup("req", 48, [b"hash"], non_block=True).hit_length == 32
+        assert client.peek_hit_length("req", 48, [b"hash"]) == 32
+        clock[0] = 3.0
+        assert client.peek_hit_length("req", 48, [b"hash"]) is None
+        client.discard("req")
+        assert client.peek_hit_length("req", 48, [b"hash"]) is None
+        assert sock.send_multipart.call_count == 1
+    finally:
+        client.close()
 
 
 @pytest.mark.parametrize("limit", [None, 0, 1])

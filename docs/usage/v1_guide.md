@@ -80,12 +80,21 @@ The V1 scheduler supports multiple scheduling policies, including First-Come,
 First-Served (FCFS), priority-based scheduling (where requests are processed
 based on assigned priority, with FCFS as a tie-breaker), and `residual_sjf`.
 `residual_sjf` is for decoder-only text generation: it orders waiting requests
-by their remaining local prefill work after local prefix-cache hits. A
+by their estimated remaining prefill work after prefix-cache hits. A
 request that waits for `--residual-sjf-max-wait-ms` (10,000 by default) is
-promoted in FCFS order. It does not query remote KV connectors while ranking
-candidates, so remote cache-transfer cost is not part of this policy. The exact
-dynamic ranking scans current waiting candidates on every admission; measure
-scheduler CPU overhead separately from model throughput for deep queues.
+promoted in FCFS order. KV-holding requests retain their admission priority.
+Ranking uses nonblocking connector estimates when available, including completed
+Mooncake lookups started by `lookup_async` and `lookup_prefetch_limit`. It does
+not start lookups or reserve transfers. MultiConnector follows its first-hit
+order; an unknown earlier child prevents using a later child's estimate.
+
+Local hit estimates are cached while waiting and refreshed after admission
+attempts, request-content/progress changes, preemption, and cache reset. They
+may become stale when other requests populate or evict KV; actual admission
+always revalidates available blocks. An unknown external estimate preserves
+the local estimate. Ranking estimates compute work, not network transfer time.
+Queue selection still scans waiting candidates; measure scheduler CPU time
+separately for deep queues.
 
 The max-wait value controls the mean/tail tradeoff: smaller values behave
 closer to FCFS (flatter tail), larger values improve mean TTFT/E2E at the
