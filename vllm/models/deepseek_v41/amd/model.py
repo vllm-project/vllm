@@ -59,6 +59,11 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
+from vllm.models.deepseek_v41.amd.engram_ahead import (
+    ENGRAM_WKV_AHEAD_MIN_TOKENS,
+    EngramWkvAhead,
+    engram_wkv_ahead_supported,
+)
 from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -635,6 +640,24 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 )
                 self.engram_swa_prefix = swa_cache_module.prefix
 
+        self.engram_ahead: EngramWkvAhead | None = None
+        for idx in range(self.start_layer, self.end_layer):
+            engram = typing.cast(DeepseekV4DecoderLayer, self.layers[idx]).engram
+            if engram is not None and engram_wkv_ahead_supported(
+                vllm_config, engram, idx, self.decoder_replay_start
+            ):
+                self.engram_ahead = EngramWkvAhead(
+                    engram,
+                    idx,
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    max(
+                        ENGRAM_WKV_AHEAD_MIN_TOKENS,
+                        (vllm_config.compilation_config.max_cudagraph_capture_size or 0)
+                        + 1,
+                    ),
+                )
+                break
+
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, self.rms_norm_eps)
         else:
@@ -766,6 +789,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         engram.prepare_embeddings(
                             gathered_hashes[:, engram.layer_hash_index]
                         )
+                if self.engram_ahead is not None:
+                    self.engram_ahead.start(engram_hashes.shape[0])
 
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:
@@ -882,6 +907,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         ran_layers = False
         for idx in layer_ids:
             ran_layers = True
+            if self.engram_ahead is not None:
+                self.engram_ahead.before_layer(idx)
             hidden_states, residual, post_mix, res_mix, pre_mix = self.layers[idx](
                 hidden_states,
                 positions,

@@ -144,6 +144,100 @@ def test_fused_engram_post_wkv_matches_reference(
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="GPU required")
+@pytest.mark.parametrize("num_tokens,hc_mult,dim", [(1, 4, 5120), (37, 4, 96)])
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
+@pytest.mark.parametrize("use_mask", [False, True])
+def test_fused_engram_post_wkv_reads_rank_major_kv(
+    num_tokens, hc_mult, dim, tp_size, use_mask
+):
+    """A WKV chain run ahead leaves its output in the all-gather's rank-major
+    layout, which `forward` must read like the gathered row-major output."""
+    torch.manual_seed(0)
+    device = "cuda"
+    cols = (hc_mult + 1) * dim
+    hidden_states = torch.randn(
+        num_tokens, hc_mult, dim, dtype=torch.bfloat16, device=device
+    )
+    kv = torch.randn(num_tokens, cols, dtype=torch.bfloat16, device=device)
+    q_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device=device)
+    k_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device=device)
+    token_mask = None
+    if use_mask:
+        token_mask = torch.arange(num_tokens, device=device) % 3 != 0
+    eps = 1e-20
+    clamp_value = 1e-6
+    expected = _reference_engram_post_wkv(
+        hidden_states, kv, q_weight, k_weight, token_mask, eps, clamp_value, 0
+    )
+
+    module = Engram.__new__(Engram)
+    torch.nn.Module.__init__(module)
+    module.dim = dim
+    module.hc_mult = hc_mult
+    module.eps = eps
+    module.clamp_value = clamp_value
+    module.use_sequence_parallel = False
+    module.q_weight = torch.nn.Parameter(q_weight, requires_grad=False)
+    module.k_weight = torch.nn.Parameter(k_weight, requires_grad=False)
+    rank_major = kv.view(num_tokens, tp_size, cols // tp_size).movedim(1, 0)
+    module._ahead_kv = rank_major.contiguous()
+
+    actual = module(hidden_states, kv.new_empty(num_tokens, 1), token_mask)
+
+    assert module._ahead_kv is None
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+@pytest.mark.parametrize("num_rows,num_cols", [(1, 1536), (37, 6400), (300, 100)])
+@pytest.mark.parametrize("num_peers", [2, 4])
+@pytest.mark.parametrize("rank_major", [False, True])
+def test_engram_ahead_push_rows(num_rows, num_cols, num_peers, rank_major):
+    """Each rank stores its rows into every peer's buffer: as a column slice of
+    token-major rows (heads), or as its block of a rank-major buffer (WKV)."""
+    from vllm.models.deepseek_v41.amd.engram_ahead import _push_rows_kernel
+    from vllm.triton_utils import triton
+
+    torch.manual_seed(0)
+    device = "cuda"
+    rank, max_rows, base = num_peers - 1, num_rows + 3, 8
+    src = torch.randn(num_rows, 2 * num_cols, dtype=torch.bfloat16, device=device)
+    src = src[:, :num_cols]
+    numel = num_peers * max_rows * num_cols
+    bufs = [
+        torch.zeros(base + numel, dtype=torch.bfloat16, device=device)
+        for _ in range(num_peers)
+    ]
+    addresses = torch.tensor(
+        [buf.data_ptr() for buf in bufs], dtype=torch.int64, device=device
+    )
+    if rank_major:
+        offset, stride = base + rank * max_rows * num_cols, num_cols
+    else:
+        offset, stride = base + rank * num_cols, num_peers * num_cols
+    _push_rows_kernel[(min(num_rows, 7), triton.cdiv(num_cols, 1024))](
+        src,
+        src.stride(0),
+        num_rows,
+        addresses,
+        offset,
+        stride,
+        NUM_COLS=num_cols,
+        NUM_PEERS=num_peers,
+        BLOCK=1024,
+    )
+
+    for buf in bufs:
+        expected = torch.zeros(numel, dtype=torch.bfloat16, device=device)
+        if rank_major:
+            expected.view(num_peers, max_rows, num_cols)[rank, :num_rows] = src
+        else:
+            expected.view(max_rows, num_peers, num_cols)[:num_rows, rank] = src
+        assert torch.equal(buf[:base], torch.zeros_like(buf[:base]))
+        assert torch.equal(buf[base:], expected)
+
+
 def _hash_state(use_slot_cache: bool) -> NgramHashState:
     state = NgramHashState.__new__(NgramHashState)
     torch.nn.Module.__init__(state)
