@@ -1,3 +1,6 @@
+# Overridden by --build-context kernel-wheel=... in kernel nightly CI.
+FROM scratch AS kernel-wheel
+
 ######################### RUST BUILD IMAGE #########################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main image
 # doesn't need the rust toolchain. Runs in parallel with vllm-base.
@@ -144,6 +147,7 @@ FROM vllm-base AS vllm-build
 ARG GIT_REPO_CHECK=0
 
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=kernel-wheel,target=/opt/kernel-wheels \
     --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
     uv pip install grpcio-tools protobuf nanobind && \
@@ -241,6 +245,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
     --mount=type=bind,src=requirements/test/xpu.txt,target=/workspace/vllm/requirements/test/xpu.txt \
+    --mount=type=bind,from=kernel-wheel,target=/opt/kernel-wheels \
     uv pip install grpcio-tools protobuf nanobind && \
     uv pip install -r /workspace/vllm/requirements/xpu.txt && \
     uv pip install --no-build-isolation -r /workspace/vllm/requirements/test/xpu.txt
