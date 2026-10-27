@@ -3,7 +3,10 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed.localization import get_localized_resources
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -29,6 +32,18 @@ from vllm.utils.flashinfer import (
     flashinfer_cute_dsl_fused_moe_nvfp4,
     has_flashinfer_cutedsl_moe_nvfp4,
 )
+
+logger = init_logger(__name__)
+
+
+def _one_sm_count(res) -> int:
+    """Return the common SM count required by FlashInfer's scalar interface."""
+    counts = res.split_sm_counts
+    assert counts and len(set(counts)) == 1, (
+        "localized_sm_count requires nonempty, equally sized partitions. "
+        "Widen localized_sm_count to a list in FlashInfer before allowing this."
+    )
+    return counts[0]
 
 
 class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
@@ -65,6 +80,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.gemm1_alpha = quant_config.gemm1_alpha
         self.gemm1_beta = quant_config.gemm1_beta
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        # FlashInfer selects SiTU via its beta parameters.
         self.situ_beta = moe_config.activation_situ_beta
         self.situ_linear_beta = moe_config.activation_situ_linear_beta
         self.per_token_activation = per_token_activation
@@ -75,10 +91,53 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
                 (1,),
                 NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
             )
+        self.autotune_use_cuda_graph = moe_config.max_capture_size > 0
+        self._localized_kwargs: dict = {}
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        self._localized_kwargs = {}
+        res = get_localized_resources()
+        shards = getattr(layer, "localized_shards", None)
+        if res is None or not shards:
+            if res is not None:
+                logger.warning(
+                    "[locality domains] localization enabled but this layer has "
+                    "no per-die shards; falling back to the full-width MoE path"
+                )
+            return
+
+        logger.info_once("[locality domains] localized MoE shards wired")
+
+        assert len(res.split_streams) == len(shards), (
+            "split streams and weight shards must have a one-to-one correspondence"
+        )
+        self._localized_kwargs = {
+            "localized_weights": [
+                {
+                    "w1_weight": sh["w13_weight"],
+                    "w1_weight_sf": sh["w13_weight_scale"],
+                    "w2_weight": sh["w2_weight"],
+                    "w2_weight_sf": sh["w2_weight_scale"],
+                }
+                for sh in shards
+            ],
+            # Compute streams only; the auxiliary stream is reserved for memset.
+            "localized_streams": res.split_streams,
+            # FlashInfer expects one shared per-domain SM count.
+            "localized_sm_count": _one_sm_count(res),
+            # Retained full weights let autotuning compare both paths.
+            "localized_allow_nonlocalized": (
+                not envs.VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_FREE_FULL_WEIGHTS
+            ),
+            # Optionally overlap output zeroing on the auxiliary stream.
+            **(
+                {"localized_memset_stream": res.aux_stream}
+                if envs.VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP
+                else {}
+            ),
+        }
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -237,10 +296,16 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             top_k=self.topk,
             num_local_experts=self.local_num_experts,
             local_expert_offset=self.local_expert_offset,
+            output_dtype=output.dtype,
             moe_output=output,
+            autotune_use_cuda_graph=self.autotune_use_cuda_graph,
+            # normalize_cute_dsl_moe_activation_type rejects ActivationType.Situ,
+            # so SiTU is expressed as the SILU base type plus the betas below.
             activation_type=activation_to_flashinfer_int(
                 MoEActivation.SILU if activation == MoEActivation.SITU else activation
             ),
             **swiglu_kwargs,
             **per_token_kwargs,
+            # Full-width weight metadata is retained even when storage is released.
+            **self._localized_kwargs,
         )

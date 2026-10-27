@@ -19,7 +19,11 @@ from flashinfer import (
 )
 from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
-from flashinfer.utils import FP4Tensor
+from flashinfer.utils import (
+    FP4Tensor,
+    get_device_sm_count,
+    get_trtllm_gen_multi_ctas_kv_counter_bytes,
+)
 from typing_extensions import override
 
 from vllm import _custom_ops as custom_ops
@@ -149,6 +153,24 @@ def _get_trtllm_workspace_buffer():
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
     return trtllm_workspace_buffer
+
+
+_fi_multi_ctas_kv_counter: torch.Tensor | None = None
+
+
+def _get_multi_ctas_kv_counter_buffer(
+    min_bytes: int, device: torch.device
+) -> torch.Tensor:
+    """Shared multi-CTA-KV counter buffer; the kernels re-zero it after each launch."""
+    global _fi_multi_ctas_kv_counter
+    if (
+        _fi_multi_ctas_kv_counter is None
+        or _fi_multi_ctas_kv_counter.numel() < min_bytes
+    ):
+        _fi_multi_ctas_kv_counter = torch.zeros(
+            min_bytes, dtype=torch.uint8, device=device
+        )
+    return _fi_multi_ctas_kv_counter
 
 
 def _pack_draft_block_bool_mask(
@@ -530,6 +552,8 @@ class BatchDCPPrefillWrapper:
 
 
 class FlashInferBackend(AttentionBackend):
+    supports_kv_cache_update_bypass: bool = True
+
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """NVFP4 stores K and V as separate per-head slots of packed fp4 data
@@ -2059,6 +2083,20 @@ class FlashInferImpl(AttentionImpl):
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
 
+        # Allocated eagerly to stay out of CUDA-graph capture; DCP all-gathers
+        # the decode query over heads.
+        self._multi_ctas_kv_counter_buffer: torch.Tensor | None = None
+        if vllm_config is not None:
+            _sched = vllm_config.scheduler_config
+            self._multi_ctas_kv_counter_buffer = _get_multi_ctas_kv_counter_buffer(
+                get_trtllm_gen_multi_ctas_kv_counter_bytes(
+                    _sched.max_num_batched_tokens or _sched.max_num_seqs,
+                    num_heads * self.dcp_world_size,
+                    get_device_sm_count(torch.device("cuda")),
+                ),
+                torch.device("cuda"),
+            )
+
         # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
         if self.nvfp4_trtllm and vllm_config is not None:
             max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -2516,6 +2554,7 @@ class FlashInferImpl(AttentionImpl):
                     o_sf_scale=self.o_sf_scale,
                     out=out,
                     kv_cache_sf=prefill_kv_block_scales,
+                    multi_ctas_kv_counter_buffer=self._multi_ctas_kv_counter_buffer,
                 )
 
                 if needs_fp8_out:
@@ -2743,6 +2782,7 @@ class FlashInferImpl(AttentionImpl):
                     ),
                     lse=lse,
                     return_lse=self.need_to_return_lse_for_decode,
+                    multi_ctas_kv_counter_buffer=self._multi_ctas_kv_counter_buffer,
                 )
 
                 if use_dcp:
