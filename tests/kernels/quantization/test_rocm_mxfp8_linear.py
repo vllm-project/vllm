@@ -36,6 +36,13 @@ V41_ATTN_SHAPES = [
     ("wo_b", 5120, 8192 // 4),
 ]
 
+M31_TP4_SHAPES = [
+    ("fused_qkv", 2560, 6144),
+    ("o_proj", 6144, 2048),
+    ("shared_gate_up", 1536, 6144),
+    ("shared_down", 6144, 768),
+]
+
 
 def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
     weight_bf16 = torch.randn(n, k, device=device, dtype=torch.bfloat16) * 0.05
@@ -46,8 +53,46 @@ def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
     return layer
 
 
-@pytest.mark.parametrize("name,n,k", V41_ATTN_SHAPES, ids=lambda v: str(v))
-@pytest.mark.parametrize("num_tokens", [1, 2, 7, 16, 31, 32, 128, 1024])
+@pytest.mark.parametrize(
+    "n,k,selected,fallback",
+    [
+        (2560, 6144, (16, 16, 1024, 2, 3), (16, 16, 1024, 2, 2)),
+        (1536, 6144, (16, 16, 1024, 2, 3), (16, 16, 1024, 2, 2)),
+        (6144, 768, (16, 16, 256, 2, 3), (16, 32, 256, 4, 3)),
+    ],
+)
+def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, selected, fallback):
+    """The gfx950 small-M tuning is shape-scoped and ends after M=16."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("MiniMax-M3.1 small-M tuning requires gfx950")
+    for num_tokens in (1, 8, 16):
+        assert rocm_native._select_cfg(num_tokens, n, k) == selected
+    assert rocm_native._select_cfg(17, n, k) == fallback
+
+
+@pytest.mark.parametrize(
+    "n,k,fallback",
+    [
+        (2560, 6144, (16, 16, 1024, 2, 2)),
+        (1536, 6144, (16, 16, 1024, 2, 2)),
+        (6144, 768, (16, 32, 256, 4, 3)),
+    ],
+)
+def test_rocm_mxfp8_linear_preserves_non_gfx950_tiles(monkeypatch, n, k, fallback):
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    monkeypatch.setattr(rocm_native, "_ON_GFX950", False)
+    for num_tokens in (1, 8, 16, 17):
+        assert rocm_native._select_cfg(num_tokens, n, k) == fallback
+
+
+@pytest.mark.parametrize(
+    "name,n,k", V41_ATTN_SHAPES + M31_TP4_SHAPES, ids=lambda v: str(v)
+)
+@pytest.mark.parametrize("num_tokens", [1, 2, 7, 8, 16, 31, 32, 128, 1024])
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     """Output is finite and matches an exact MXFP8 GEMM of the same inputs.
