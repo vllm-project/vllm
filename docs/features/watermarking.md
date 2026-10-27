@@ -42,11 +42,8 @@ same optional `watermarking` request field. The Rust token API accepts it in
 `sampling_params`, and the Rust gRPC `GenerateRequest` accepts it directly.
 Omitting the field requests watermarking by default.
 
-`enforce` defaults to `false`; `--watermark-config '{"key":42,"enforce":true}'`
-overrides supported request and internal opt-outs. Overrides emit a secret-free
-flag warning once per emitting process, not a per-request or caller-intent audit.
-Enforcement controls the flag, not output coverage: deployments requiring
-guaranteed watermarking must restrict unsupported decoding modes at ingress.
+`--watermark-config '{"key":42,"enforce":true}'` overrides supported opt-outs;
+`enforce` defaults to `false`. Unsupported decoding modes remain unwatermarked.
 
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to
@@ -64,16 +61,14 @@ weaker detectability. See
 When `watermark_config` is set, the Prometheus counter
 `vllm:watermark_requests_total` counts finished requests by `status`:
 
-- `watermarked`: the Python frontend resolved the flag to on, including
-  supported opt-outs under enforcement.
+- `watermarked`: the Python frontend resolved watermarking on, including enforced opt-outs.
 - `skipped`: the request asked for the watermark (omitted or `true`) but could
   not use it, such as `temperature=0` and trace replay requests. A beam search
   request that asks for the watermark runs without it and logs a warning. Its
   beam steps count as `not_watermarked`, not `skipped`, when enforcement is off.
 - `not_watermarked`: all other finished requests. This includes explicit
   opt-outs, pooling requests, and the internal requests of beam search (one
-  per beam step), generative scoring and language detection when enforcement
-  is off; enforced internal requests follow the same decoding-mode checks.
+  per beam step), generative scoring and language detection, unless enforced.
 
 Each finished request has exactly one status, so the sum over `status` equals
 `vllm:request_success_total` on the same instance. Requests that the client
@@ -87,9 +82,7 @@ The status is per request, not per token. A `watermarked` request can contain
 tokens without the watermark: accepted draft tokens with
 `allow_target_only_watermarking`, tokens whose context repeats
 (`deduplicate_contexts`), the first `context_width` generated tokens with
-`deduplicate_contexts: "all"`, and tokens that a grammar forces. `top_k=1` can
-count as `watermarked` without a signal. Status reflects frontend resolution,
-not detection or later core overrides; Rust does not expose this counter.
+`deduplicate_contexts: "all"`, and tokens that a grammar forces.
 
 ## Architecture
 
@@ -114,8 +107,7 @@ generation.
   to apply the configured watermark.
 - `top_k=1` cannot embed a watermark, even with enforcement and nonzero temperature.
 - Beam search cannot apply a watermark. The first watermarked beam request emits
-  a server-side warning and runs without watermarking: enforcement can override
-  internal flags but does not change ranking by log probabilities.
+  a server-side warning and runs without watermarking.
 - Trace replay replaces the sampled token and therefore cannot apply a
   watermark. The first watermarked trace replay request emits a server-side
   warning and runs without watermarking.
@@ -125,9 +117,9 @@ generation.
   Restrictive constraints can reduce the statistical evidence available to a
   detector.
 - Automatic language detection and generative scoring use unwatermarked
-  auxiliary generations unless enforcement overrides their supported opt-outs.
-  Language-detection tokens are not returned; scoring returns unchanged log
-  probabilities rather than generated text.
+  auxiliary generations unless enforced. Language-detection tokens are not part of the returned
+  transcription, and generative scoring returns scores rather than generated
+  text.
 - Speculative decoding has additional requirements and partial-watermarking
   modes described in [Speculative decoding](#speculative-decoding).
 
