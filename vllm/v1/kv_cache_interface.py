@@ -61,6 +61,7 @@ class KVQuantMode(IntEnum):
     OCTAVE_K3V4 = 12
     OCTAVE_K3V3 = 13
     OCTAVE_K3V3_COMPACT = 14
+    MXFP4_DS_MLA = 15  # opaque-bytes MXFP4 DS-MLA compressed record (ROCm gfx950)
 
     # Backend self-manages kernel dispatch. Reads as quantized but matches no
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
@@ -136,6 +137,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         # Page size is keyed on cache_dtype_str in the MLA specs, not
         # nvfp4_kv_cache_full_dim.
         return KVQuantMode.NVFP4_DS_MLA
+    if kv_cache_dtype == "mxfp4_ds_mla":
+        return KVQuantMode.MXFP4_DS_MLA
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):

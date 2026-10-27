@@ -46,6 +46,8 @@ from vllm.utils.math_utils import cdiv, next_power_of_2
 #   V4.1 NVFP4 (288 B): 512 e2m1 values packed two per byte (even element in
 #                 the low nibble), then 32 e4m3 scales of 16 dims each.
 #                 FlashMLA's ``ModelType::V41_FP4``, compressed cache only.
+#   V4.1 MXFP4 (272 B): the same e2m1 pairs, then 16 UE8M0 scales of 32 dims
+#                 each. ROCm gfx950 (``mxfp4_ds_mla``), compressed cache only.
 # The V4.1 records are interleaved: each token's scales follow its own data.
 V4_BYTES_PER_TOKEN = 584
 V41_BYTES_PER_TOKEN = 528
@@ -54,6 +56,10 @@ V41_NUM_SCALES = 512 // V41_QUANT_BLOCK  # 16
 V41_NVFP4_BYTES_PER_TOKEN = 288
 V41_NVFP4_QUANT_BLOCK = 16
 V41_NVFP4_NUM_SCALES = 512 // V41_NVFP4_QUANT_BLOCK  # 32
+V41_MXFP4_BYTES_PER_TOKEN = 272
+V41_MXFP4_QUANT_BLOCK = 32
+V41_MXFP4_NUM_SCALES = 512 // V41_MXFP4_QUANT_BLOCK  # 16
+_V41_FP4_BYTES_PER_TOKEN = (V41_NVFP4_BYTES_PER_TOKEN, V41_MXFP4_BYTES_PER_TOKEN)
 
 
 @triton.jit
@@ -598,12 +604,14 @@ def _dequantize_and_gather_k_nvfp4_kernel(
     gather_lens_ptr,
     max_blocks_per_seq: tl.constexpr,
     head_dim: tl.constexpr,  # 512
-    scale_dim: tl.constexpr,  # 32
-    quant_block: tl.constexpr,  # 16
+    scale_dim: tl.constexpr,  # 32 (NVFP4) / 16 (MXFP4)
+    quant_block: tl.constexpr,  # 16 (NVFP4) / 32 (MXFP4)
     cache_block_size: tl.constexpr,
     block_stride: tl.constexpr,
+    ue8m0_scales: tl.constexpr = False,
 ):
-    """Gather and dequantize V4.1 NVFP4 rows into a bf16 workspace."""
+    """Gather and dequantize V4.1 NVFP4 (e4m3 scales) or MXFP4 (UE8M0 scales)
+    rows into a bf16 workspace."""
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
     num_workers = tl.num_programs(1)
@@ -639,7 +647,12 @@ def _dequantize_and_gather_k_nvfp4_kernel(
         vals = tl.where(codes >= 8, -mag, mag)
 
         sf = tl.load(token_ptr + packed_bytes + tl.arange(0, scale_dim))
-        scale = sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        if ue8m0_scales:
+            scale_bits = sf.to(tl.int32) << 23
+            scale_bits = tl.where(sf == 0, 1 << 22, scale_bits)
+            scale = scale_bits.to(tl.float32, bitcast=True)
+        else:
+            scale = sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
         tiles = tl.reshape(vals, (scale_dim, quant_block))
         dequant = tl.reshape(tiles * tl.reshape(scale, (scale_dim, 1)), (head_dim,))
 
@@ -681,7 +694,8 @@ def dequantize_and_gather_k_cache_triton(
 ) -> None:
     num_reqs = seq_lens.shape[0]
     NUM_WORKERS = 128
-    if k_cache.shape[-1] == V41_NVFP4_BYTES_PER_TOKEN:
+    if k_cache.shape[-1] in _V41_FP4_BYTES_PER_TOKEN:
+        mxfp4 = k_cache.shape[-1] == V41_MXFP4_BYTES_PER_TOKEN
         # Keep short gathers unchanged; cap total workers for multi-request chunks.
         num_workers = min(
             max(128, 2048 // max(1, num_reqs)), max(128, out.shape[1] - offset)
@@ -697,10 +711,11 @@ def dequantize_and_gather_k_cache_triton(
             gather_lens,
             max_blocks_per_seq=block_table.shape[-1],
             head_dim=512,
-            scale_dim=V41_NVFP4_NUM_SCALES,
-            quant_block=V41_NVFP4_QUANT_BLOCK,
+            scale_dim=V41_MXFP4_NUM_SCALES if mxfp4 else V41_NVFP4_NUM_SCALES,
+            quant_block=V41_MXFP4_QUANT_BLOCK if mxfp4 else V41_NVFP4_QUANT_BLOCK,
             cache_block_size=block_size,
             block_stride=k_cache.stride(0),
+            ue8m0_scales=mxfp4,
         )
         return
 
@@ -780,15 +795,15 @@ def dequantize_and_gather_k_cache(
     """Dequantize and gather a paged DSv4 K cache.
 
     The record is read off ``k_cache.shape[-1]``; see the module header. Only
-    the fp8 records have a CuteDSL gather, so NVFP4 always takes the Triton
-    path.
+    the fp8 records have a CuteDSL gather, so NVFP4 and MXFP4 always take the
+    Triton path.
 
     ``use_fnuz`` MUST match the encoder of the specific cache being read:
     ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
     ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
-    if has_cutedsl() and k_cache.shape[-1] != V41_NVFP4_BYTES_PER_TOKEN:
+    if has_cutedsl() and k_cache.shape[-1] not in _V41_FP4_BYTES_PER_TOKEN:
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
             _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,

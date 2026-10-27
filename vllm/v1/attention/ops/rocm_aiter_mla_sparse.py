@@ -2518,6 +2518,48 @@ def _load_v41_nvfp4_gfx950_chunk(
 
 
 @triton.jit
+def _load_v41_mxfp4_gfx950_chunk(
+    token_data_ptr,
+    token_scale_ptr,
+    valid,
+    CHUNK_START: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """One chunk of an MXFP4 row: e2m1 pairs plus a UE8M0 scale per 32 dims.
+    An e2m1 value times a power of two is exact in bf16.
+    """
+    byte_offsets = CHUNK_START // 2 + tl.arange(0, CHUNK_SIZE // 2)
+    packed = tl.load(
+        token_data_ptr[:, None] + byte_offsets[None, :],
+        mask=valid[:, None],
+        other=0,
+    )
+    scale_offsets = CHUNK_START // 32 + tl.arange(0, CHUNK_SIZE // 32)
+    encoded_scales = tl.load(
+        token_scale_ptr[:, None] + scale_offsets[None, :],
+        mask=valid[:, None],
+        other=127,
+    )
+    scales = _decode_e8m0_scales_triton(encoded_scales)
+    scales = tl.broadcast_to(scales[:, :, None], (BLOCK_K, CHUNK_SIZE // 32, 16))
+    scales = tl.reshape(scales, (BLOCK_K, CHUNK_SIZE // 2))
+    converted = tl.inline_asm_elementwise(
+        "v_cvt_scalef32_pk_f32_fp4 $0, $1, $2",
+        "=v,v,v",
+        [packed.to(tl.int32), tl.full(packed.shape, 1.0, tl.float32)],
+        dtype=tl.int64,
+        is_pure=True,
+        pack=1,
+    )
+    even = (converted & 0xFFFFFFFF).to(tl.int32).to(tl.float32, bitcast=True)
+    odd = (converted >> 32).to(tl.int32).to(tl.float32, bitcast=True)
+    value = tl.interleave(even * scales, odd * scales).to(tl.bfloat16)
+    zero = tl.zeros((BLOCK_K, CHUNK_SIZE), dtype=tl.bfloat16)
+    return tl.where(valid[:, None], value, zero)
+
+
+@triton.jit
 def _sparse_attn_decode_ragged_kernel(
     q_ptr,
     main_cache_ptr,
@@ -3033,6 +3075,21 @@ def _sparse_attn_decode_gfx950_partial_loaded_tile(
             token_data_ptr, token_scale_ptr, valid, 256, 128, BLOCK_K
         )
         k_tail = _load_v41_nvfp4_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 384, 128, BLOCK_K
+        )
+    elif RECORD == 272:
+        token_data_ptr = cache_block_ptr + pos_in_block * 272
+        token_scale_ptr = token_data_ptr + 256
+        k_nope_0a = _load_v41_mxfp4_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 0, 128, BLOCK_K
+        )
+        k_nope_0b = _load_v41_mxfp4_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 128, 128, BLOCK_K
+        )
+        k_nope_1 = _load_v41_mxfp4_gfx950_chunk(
+            token_data_ptr, token_scale_ptr, valid, 256, 128, BLOCK_K
+        )
+        k_tail = _load_v41_mxfp4_gfx950_chunk(
             token_data_ptr, token_scale_ptr, valid, 384, 128, BLOCK_K
         )
     else:

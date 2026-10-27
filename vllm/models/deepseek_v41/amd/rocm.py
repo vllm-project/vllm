@@ -78,16 +78,28 @@ def _trust_dsv4_extra_cache_nan_free(
 ) -> bool:
     return (
         _ON_GFX950
-        and kv_cache_dtype == "fp8_ds_mla"
+        # The MXFP4 writer can emit no NaN: E2M1 has none and it clamps the
+        # UE8M0 scale code to [1, 254].
+        and kv_cache_dtype in ("fp8_ds_mla", "mxfp4_ds_mla")
         and not has_kv_transfer
         and has_extra_cache
     )
 
 
-def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
+def _aiter_sparse_mla_enabled(
+    has_kv_transfer: bool, kv_cache_dtype: str = "fp8_ds_mla"
+) -> bool:
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_triton_sparse_mla_enabled():
+        return False
+    if kv_cache_dtype in ("mxfp4_ds_mla", "nvfp4_ds_mla"):
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with an FP4 "
+            "compressed KV cache (%s); DeepSeek V4 keeps the Triton sparse "
+            "attention.",
+            kv_cache_dtype,
+        )
         return False
     # The aiter kernel does not scrub NaNs, so like the trust check above it
     # needs a cache only the canonical writer has touched.
@@ -371,7 +383,8 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
             device=self.device,
         )
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
-            self.vllm_config.kv_transfer_config is not None
+            self.vllm_config.kv_transfer_config is not None,
+            self.vllm_config.cache_config.cache_dtype,
         )
 
     def build(
@@ -529,6 +542,7 @@ class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
         "auto",
         "fp8_ds_mla",
         "fp8",  # alias for fp8_ds_mla
+        "mxfp4_ds_mla",  # fp8 SWA cache + MXFP4 compressed cache (gfx950)
         "nvfp4_ds_mla",  # V4.1 fp8 SWA cache + NVFP4 compressed cache
     ]
 
@@ -559,6 +573,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     _use_aiter_sparse_mla = False
     # Only the gfx950 sparse decode tile reads the NVFP4 compressed record.
     reads_nvfp4_compressed_cache: ClassVar[bool] = _ON_GFX950
+    reads_mxfp4_compressed_cache: ClassVar[bool] = _ON_GFX950
 
     def _indexer_cls(
         self, k_cache: DeepseekV4IndexerCache | None
@@ -604,7 +619,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "this rank; PP splits inside a v4.1 index-sharing group "
                     "are not supported."
                 )
-        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
+            self._has_kv_transfer, self.kv_cache_dtype
+        )
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None

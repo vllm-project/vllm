@@ -329,3 +329,13 @@ def test_aiter_sparse_mla_stays_off_with_kv_connector(monkeypatch, model) -> Non
     monkeypatch.setattr(rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True)
     assert rocm._aiter_sparse_mla_enabled(has_kv_transfer=False)
     assert not rocm._aiter_sparse_mla_enabled(has_kv_transfer=True)
+
+
+def test_aiter_sparse_mla_stays_off_with_fp4_compressed_cache(monkeypatch) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v41.amd import rocm
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True)
+    assert rocm._aiter_sparse_mla_enabled(False, "fp8_ds_mla")
+    assert not rocm._aiter_sparse_mla_enabled(False, "mxfp4_ds_mla")
+    assert not rocm._aiter_sparse_mla_enabled(False, "nvfp4_ds_mla")

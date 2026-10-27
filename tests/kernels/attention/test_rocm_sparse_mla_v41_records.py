@@ -85,7 +85,31 @@ def _pack_v41_mxfp8(
     )
 
 
-_PACKERS = {288: _pack_nvfp4, 528: _pack_v41_mxfp8, 584: _pack_v4}
+def _pack_mxfp4(rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``[N, 512]`` to the 272 B record: 256 bytes of e2m1 pairs, even element
+    in the low nibble, then 16 UE8M0 scales of 32 dims each."""
+    levels = torch.tensor(E2M1, device=rows.device)
+    tiles = rows.reshape(-1, 16, 32)
+    exponents = torch.ceil(torch.log2((tiles.abs().amax(-1) / 6.0).clamp_min(2**-126)))
+    encoded = (exponents + 127.0).clamp(1, 254)
+    factors = torch.exp2(encoded - 127.0)
+    scaled = (tiles / factors[..., None]).reshape(rows.shape[0], -1)
+    codes = (scaled.abs().unsqueeze(-1) - levels).abs().argmin(-1)
+    nibbles = (codes | (scaled < 0).to(torch.int64) * 8).to(torch.uint8)
+    stored = (levels[codes] * torch.sign(scaled)).reshape(-1, 16, 32)
+    return (
+        nibbles[:, 0::2] | (nibbles[:, 1::2] << 4),
+        encoded.to(torch.uint8),
+        (stored * factors[..., None]).reshape(rows.shape[0], -1),
+    )
+
+
+_PACKERS = {
+    272: _pack_mxfp4,
+    288: _pack_nvfp4,
+    528: _pack_v41_mxfp8,
+    584: _pack_v4,
+}
 
 
 def _paged(data: torch.Tensor, scales: torch.Tensor, block_size: int) -> torch.Tensor:
@@ -109,11 +133,18 @@ def _paged(data: torch.Tensor, scales: torch.Tensor, block_size: int) -> torch.T
 )
 @pytest.mark.parametrize("num_tokens", [1, 4])
 @pytest.mark.parametrize("num_heads", [16, 128])
-# The record pairs the model actually allocates: the V4 layout, NVFP4 beside a
-# V4 sliding-window record, the V4.1 MXFP8 layout, and NVFP4 beside that one.
+# The record pairs the model actually allocates: the V4 layout, the V4.1 MXFP8
+# layout, and an FP4 compressed record (NVFP4 or MXFP4) beside each.
 @pytest.mark.parametrize(
     ("swa_record", "compressed_record"),
-    [(584, 584), (584, 288), (528, 528), (528, 288)],
+    [
+        (584, 584),
+        (584, 288),
+        (584, 272),
+        (528, 528),
+        (528, 288),
+        (528, 272),
+    ],
 )
 def test_compressed_record_matches_reference(
     num_tokens: int, num_heads: int, swa_record: int, compressed_record: int
