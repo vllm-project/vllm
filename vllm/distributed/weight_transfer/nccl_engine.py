@@ -179,6 +179,9 @@ class NCCLWeightTransferEngine(
         )
 
         finalize_layerwise_reload(self.model, self.model_config)
+        # The next update's NCCL group allocates outside torch's caching
+        # allocator: hand it the receive buffers and post-load temporaries.
+        torch.accelerator.empty_cache()
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """Receive weights from trainer via NCCL broadcast.
