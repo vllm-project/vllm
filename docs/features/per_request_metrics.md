@@ -132,6 +132,16 @@ model-generation turns, such as built-in tool-call workflows, because the
 response retains timing data for only one generation turn while token usage is
 accumulated across all turns.
 
+## Anthropic Messages API
+
+Per-request metrics are available on `/v1/messages` with
+`--enable-per-request-metrics`. Non-streaming responses include the common
+`metrics` object at the top level, alongside `usage`. Streaming responses include
+it at the top level of the final `message_delta` event carrying `usage`; earlier
+events do not include metrics. Anthropic streams always include this usage event,
+so no additional client-side stream options are needed. Metrics are omitted when
+the flag is disabled.
+
 ## Relationship to Prometheus Metrics
 
 The `metrics` response field provides per-request values for a single request.
