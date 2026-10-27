@@ -377,10 +377,33 @@ COMPRESSED_FP8_CASE = ModelCase(
 )
 
 
-def test_ipc_cache_compressed_fp8(vllm_runner, tmp_path, monkeypatch):
+COMPRESSED_BLOCK_FP8_CASE = replace(
+    COMPRESSED_FP8_CASE,
+    model="RedHatAI/Qwen3-0.6B-FP8-BLOCK",
+    llm_kwargs={
+        **COMPRESSED_FP8_CASE.llm_kwargs,
+        "revision": "5def00c475640c0527e3a7067b1a26b94decefb5",
+        "gpu_memory_utilization": 0.2,
+    },
+    daemon_args=[
+        *COMPRESSED_FP8_CASE.daemon_args,
+        "--revision",
+        "5def00c475640c0527e3a7067b1a26b94decefb5",
+    ],
+)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(COMPRESSED_FP8_CASE, id="tensor-channel"),
+        pytest.param(COMPRESSED_BLOCK_FP8_CASE, id="block"),
+    ],
+)
+def test_ipc_cache_compressed_fp8(vllm_runner, case, tmp_path, monkeypatch):
     """Reuse serialized FP8 weights without transposing or scaling them again."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    run_cold_start_and_warm_restart(vllm_runner, COMPRESSED_FP8_CASE, tmp_path)
+    run_cold_start_and_warm_restart(vllm_runner, case, tmp_path)
 
 
 NVFP4_CASE = ModelCase(

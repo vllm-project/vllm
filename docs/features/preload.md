@@ -264,9 +264,12 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   per-tensor and per-channel weights with static per-tensor or dynamic
   per-token activations when both processes select the CUTLASS linear
   backend. Engines retain the processed tensor layout and scales and rebuild
-  attention scale metadata from the cached scale buffers. Other
-  compressed-tensors schemes, transform wrappers, block FP8 and MoE are
-  not enabled by this support.
+  attention scale metadata from the cached scale buffers. CUTLASS also
+  supports serialized W8A8 FP8 weights with 128×128 blocks and dynamic
+  per-token group-128 activations on GPUs supported by its block-FP8 kernel.
+  These weights retain their untransposed layout when attached over IPC.
+  Other compressed-tensors schemes, transform wrappers, block sizes, linear
+  backends and MoE are not enabled by this support.
   ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.

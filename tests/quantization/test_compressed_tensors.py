@@ -5,6 +5,7 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
+from itertools import product
 from unittest.mock import Mock
 
 import pytest
@@ -26,6 +27,9 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
@@ -55,6 +59,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
     kFp8Dynamic128Sym,
+)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    CUTLASS_BLOCK_FP8_SUPPORTED,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
@@ -1168,9 +1175,21 @@ def test_mxfp4_moe_with_mxfp4_inputs_keeps_w4a4_method(monkeypatch):
     not current_platform.is_cuda() or not current_platform.has_device_capability(89),
     reason="Requires CUDA CUTLASS FP8 kernels",
 )
-@pytest.mark.parametrize("strategy", ["tensor", "channel"])
-@pytest.mark.parametrize("static_input", [False, True])
-@pytest.mark.parametrize("output_sizes", [[32, 32], [17, 32]])
+@pytest.mark.parametrize(
+    "strategy,static_input,output_sizes",
+    list(product(["tensor", "channel"], [False, True], [[32, 32], [17, 32]]))
+    + [
+        pytest.param(
+            "block",
+            False,
+            [128, 256],
+            marks=pytest.mark.skipif(
+                not CUTLASS_BLOCK_FP8_SUPPORTED,
+                reason="Requires CUDA CUTLASS block-FP8 kernels",
+            ),
+        )
+    ],
+)
 @torch.inference_mode()
 def test_compressed_fp8_preprocessed_shared_weights(
     strategy, static_input, output_sizes, dist_init, workspace_init, monkeypatch
@@ -1187,6 +1206,8 @@ def test_compressed_fp8_preprocessed_shared_weights(
         model_config=ModelConfig(model="facebook/opt-125m", dtype="bfloat16"),
         kernel_config=KernelConfig(linear_backend="cutlass"),
     )
+    block = strategy == "block"
+    input_size = 256 if block else 64
     quant_config = CompressedTensorsConfig.from_config(
         {
             "format": "float-quantized",
@@ -1197,13 +1218,17 @@ def test_compressed_fp8_preprocessed_shared_weights(
                         "num_bits": 8,
                         "type": "float",
                         "strategy": strategy,
+                        "block_structure": [128, 128] if block else None,
                         "symmetric": True,
                         "dynamic": False,
                     },
                     "input_activations": {
                         "num_bits": 8,
                         "type": "float",
-                        "strategy": "tensor" if static_input else "token",
+                        "strategy": "group"
+                        if block
+                        else ("tensor" if static_input else "token"),
+                        "group_size": 128 if block else None,
                         "symmetric": True,
                         "dynamic": not static_input,
                     },
@@ -1218,12 +1243,14 @@ def test_compressed_fp8_preprocessed_shared_weights(
         torch.device("cuda"),
     ):
         source = MergedColumnParallelLinear(
-            64,
+            input_size,
             output_sizes,
             bias=False,
             params_dtype=torch.bfloat16,
             quant_config=quant_config,
         )
+        if block:
+            assert isinstance(source.scheme.fp8_linear, CutlassFp8BlockScaledMMKernel)
         torch.manual_seed(0)
         source.weight.copy_(torch.randn(source.weight.shape).to(source.weight.dtype))
         source.weight_scale.copy_(
@@ -1234,14 +1261,14 @@ def test_compressed_fp8_preprocessed_shared_weights(
         if static_input:
             source.input_scale.copy_(torch.tensor([0.01, 0.02]))
         process_weights_after_loading(source, config.model_config, torch.device("cuda"))
-        x = torch.randn(3, 64, dtype=torch.bfloat16)
+        x = torch.randn(3, input_size, dtype=torch.bfloat16)
         expected, _ = source(x)
         shared = dict(source.named_parameters())
         snapshots = {name: param.detach().clone() for name, param in shared.items()}
         for _ in range(2):
             with torch.device("meta"):
                 attached = MergedColumnParallelLinear(
-                    64,
+                    input_size,
                     output_sizes,
                     bias=False,
                     params_dtype=torch.bfloat16,
@@ -1256,6 +1283,9 @@ def test_compressed_fp8_preprocessed_shared_weights(
             actual, _ = attached(x)
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
             assert actual.shape == (3, sum(output_sizes))
+            assert getattr(attached, "processed_weight_dims", None) == getattr(
+                source, "processed_weight_dims", None
+            )
             for name, param in attached.named_parameters():
                 assert param.data_ptr() == shared[name].data_ptr()
                 torch.testing.assert_close(
