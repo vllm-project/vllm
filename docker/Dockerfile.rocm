@@ -548,10 +548,16 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
     fi; \
     if [ -n "$spec" ]; then \
         pip install --no-cache-dir --pre --no-deps --force-reinstall "$spec" || exit 1; \
-        # Locate aiter without importing it: import needs a GPU, which a build has not. A wheel built
-        # against a newer glibc or libstdc++ than this image installs fine but fails every test that
-        # loads its modules; fail here instead.
+        # The nightlies are built on Ubuntu 24.04: drop the JIT modules that need a newer glibc or
+        # libstdc++ than this image so aiter rebuilds them from the wheel's sources on first use.
+        # Importing aiter rebuilds module_aiter_core, but older nightlies then need a GPU to finish
+        # the import, so check that the rebuilt module loads on its own instead. Any other .so
+        # the image cannot load still fails the build.
         aiter="$(python3 -c 'import importlib.util as u; print(u.find_spec("aiter").origin)')"; \
+        find "${aiter%/*}/jit" -maxdepth 1 -name '*.so' -exec ldd {} + 2>&1 \
+            | sed -n "s|.*version .* not found (required by \(${aiter%/*}/jit/[^/]*\))\$|\1|p" | sort -u | xargs -r rm -v; \
+        GPU_ARCHS="$AITER_ROCM_ARCH" python3 -c 'import aiter' || python3 -c \
+            'import sys, torch; sys.path[0] = sys.argv[1]; import module_aiter_core' "${aiter%/*}/jit"; \
         ! find "${aiter%/*}" -name '*.so' -exec ldd {} + 2>&1 | grep "version .* not found"; \
     fi
 
