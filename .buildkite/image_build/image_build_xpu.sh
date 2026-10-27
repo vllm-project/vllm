@@ -23,7 +23,7 @@ esac
 if [[ "$nightly" == "1" ]]; then
   : "${BUILDKITE_JOB_ID:?Kernel nightly requires a Buildkite job}"
   # Invalidate a previous successful attempt before retrying this step.
-  buildkite-agent meta-data set xpu-kernel-nightly-image ""
+  buildkite-agent meta-data set xpu-kernel-nightly-image pending
   bash .buildkite/image_build/build_xpu_kernel.sh
 
   kernel_dir="build/xpu-kernel-wheel"
