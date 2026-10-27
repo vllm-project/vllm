@@ -99,7 +99,6 @@ def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
     worker._load_handler = load_handler
     worker._expedited_load_handler = expedited_load_handler
     worker._mmap_region = mmap_region
-    worker._private_cpu_tensors = None
 
     worker.shutdown()
 
@@ -156,7 +155,6 @@ def test_worker_logs_handler_error_and_cleans_region(
     worker._load_handler = load_handler
     worker._expedited_load_handler = MagicMock()
     worker._mmap_region = mmap_region
-    worker._private_cpu_tensors = None
 
     with caplog_vllm.at_level(
         logging.ERROR, logger="vllm.v1.kv_offload.cpu.gpu_worker"
@@ -235,7 +233,6 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
     worker._load_handler = load_handler
     worker._expedited_load_handler = MagicMock()
     worker._mmap_region = mmap_region
-    worker._private_cpu_tensors = None
 
     with caplog_vllm.at_level(
         logging.WARNING, logger="vllm.v1.kv_offload.cpu.gpu_worker"
@@ -245,60 +242,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
     assert calls == ["sync", "region"]
     mmap_region.cleanup.assert_called_once_with()
     if device_sync_fails:
-        assert "retaining private CPU tensors" in caplog_vllm.text
-
-
-def test_private_worker_retains_tensors_when_device_sync_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)
-    private_tensor = MagicMock()
-    cpu_tensors = [private_tensor]
-    worker._private_cpu_tensors = tuple(cpu_tensors)
-    worker._mmap_region = None
-
-    store_handler = MagicMock()
-
-    def store_shutdown() -> None:
-        cpu_tensors.clear()
-        raise RuntimeError("event did not drain")
-
-    store_handler.shutdown.side_effect = store_shutdown
-    load_handler = MagicMock()
-    expedited_load_handler = MagicMock()
-
-    def device_sync() -> None:
-        raise RuntimeError("device did not drain")
-
-    monkeypatch.setattr(torch.accelerator, "synchronize", device_sync)
-    worker._store_handler = store_handler
-    worker._load_handler = load_handler
-    worker._expedited_load_handler = expedited_load_handler
-
-    worker.shutdown()
-
-    assert worker._private_cpu_tensors == (private_tensor,)
-    store_handler.shutdown.assert_called_once_with()
-    load_handler.shutdown.assert_called_once_with()
-    expedited_load_handler.shutdown.assert_called_once_with()
-
-
-def test_private_worker_releases_tensors_after_normal_shutdown(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)
-    worker._private_cpu_tensors = (MagicMock(),)
-    worker._mmap_region = None
-    worker._store_handler = MagicMock()
-    worker._load_handler = MagicMock()
-    worker._expedited_load_handler = MagicMock()
-    device_sync = MagicMock()
-    monkeypatch.setattr(torch.accelerator, "synchronize", device_sync)
-
-    worker.shutdown()
-
-    assert worker._private_cpu_tensors is None
-    device_sync.assert_not_called()
+        assert "Device sync before mmap cleanup failed" in caplog_vllm.text
 
 
 @pytest.mark.parametrize("gpu_to_cpu", [True, False])
