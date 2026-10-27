@@ -128,15 +128,6 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
-from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
-    finalize_allreduce_gemma_rms_norm_mxfp8,
-    init_fused_moe_finalize,
-    supports_fused_moe_finalize,
-)
-from vllm.models.minimax_m3.nvidia.ops.qkv_index_fused_epilogue import (
-    minimax_m3_qkv_index_fused_epilogue,
-    register_qkv_index_fused_epilogue_warmup,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -906,6 +897,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         self.use_qkv_fused_epilogue = _supports_qkv_fused_epilogue(self)
         if self.use_qkv_fused_epilogue:
+            from vllm.models.minimax_m3.nvidia.ops.qkv_index_fused_epilogue import (
+                register_qkv_index_fused_epilogue_warmup,
+            )
+
             logger.info_once("MiniMax-M3: QKV+indexer GEMM with fused epilogue enabled")
             block_size = vllm_config.cache_config.block_size
             # The query is E4M3-only when CUTLASS decode serves the layer.
@@ -945,6 +940,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     ) -> None:
         """qkv_proj + QK-norm/RoPE + KV/index-cache insert as one MXFP8 kernel,
         writing q (bf16 or E4M3, as allocated) and index_q."""
+        from vllm.models.minimax_m3.nvidia.ops.qkv_index_fused_epilogue import (
+            minimax_m3_qkv_index_fused_epilogue,
+        )
+
         weight = self.qkv_proj.weight
         if weight.shape[1] != self.hidden_size:
             weight = weight.t()  # the CuTe-DSL kernel keeps a [K, N] view
@@ -1207,6 +1206,10 @@ class MiniMaxM3DecoderLayer(nn.Module):
             # The preceding MoE left a small batch unfinalized: finalize,
             # all-reduce, norm and MXFP8-quantize the qkv_proj input at once.
             assert residual is not None
+            from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
+                finalize_allreduce_gemma_rms_norm_mxfp8,
+            )
+
             return finalize_allreduce_gemma_rms_norm_mxfp8(
                 hidden_states,
                 residual,
@@ -1331,10 +1334,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             layer.fuse_input_allreduce = idx > 0 and prev_defers
             prev_defers = layer.ffn_all_reduce_deferred
         self.fuse_final_norm_allreduce = prev_defers
-        if supports_fused_moe_finalize(vllm_config):
-            self._init_fused_moe_finalize()
+        if current_platform.is_cuda():
+            self._init_fused_moe_finalize(vllm_config)
 
-    def _init_fused_moe_finalize(self) -> None:
+    def _init_fused_moe_finalize(self, vllm_config: VllmConfig) -> None:
         """Let small batches leave a MoE's top-k finalize to the next layer's
         input norm, which already fuses the TP all-reduce, and have it quantize
         the normed rows to the MXFP8 its qkv_proj reads.
@@ -1344,6 +1347,13 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         in BF16, so the last layer keeps its own finalize. Builds a collective
         kernel: every TP rank decides alike.
         """
+        from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
+            init_fused_moe_finalize,
+            supports_fused_moe_finalize,
+        )
+
+        if not supports_fused_moe_finalize(vllm_config):
+            return
         layers = self.layers[self.start_layer : self.end_layer]
         deferring = [
             layer.block_sparse_moe

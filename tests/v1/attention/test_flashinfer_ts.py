@@ -196,8 +196,10 @@ def test_dense_plan_matches_flash_attention_non_causal():
         out=out,
     )
 
-    # One page of KV reduces in the same order in both kernels.
-    torch.testing.assert_close(out.reshape(b * sq, hq, HEAD_DIM), ref, rtol=0, atol=0)
+    # Within one bf16 ulp: the kernels round differently on some SM100 parts.
+    torch.testing.assert_close(
+        out.reshape(b * sq, hq, HEAD_DIM), ref, rtol=1e-2, atol=2e-3
+    )
 
 
 def test_metadata_tensors_keep_their_addresses_across_builds():

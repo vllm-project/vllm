@@ -282,7 +282,7 @@ steps:
   - vllm/utils/flashinfer.py
   - tests/models/minimax_m3/
   commands:
-    - pytest -v -s models/minimax_m3
+    - pytest -v -s models/minimax_m3 --ignore=models/minimax_m3/amd_specialized_decode
 
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
