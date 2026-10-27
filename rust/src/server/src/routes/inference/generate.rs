@@ -43,6 +43,7 @@ use crate::error::{ApiError, bail_server_error, engine_error, server_error, text
 use crate::routes::openai::utils::logprobs::clamp_logprob;
 use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::routes::output_log::{LoggedOutput, log_output};
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, sse_response};
 
@@ -132,13 +133,16 @@ pub async fn generate(
         }
     };
 
-    let response = match collect_generate(
-        collected,
-        prepared.request_id,
-        api_server_options,
-        prepared.options,
-        mm_placeholders,
-    ) {
+    // Inside the request span, so the logs it emits carry the request ID.
+    let response = match request_span.in_scope(|| {
+        collect_generate(
+            collected,
+            prepared.request_id,
+            api_server_options,
+            prepared.options,
+            mm_placeholders,
+        )
+    }) {
         Ok(response) => response,
         Err(error) => return error.into_response(),
     };
@@ -285,6 +289,7 @@ fn collect_generate(
     request_id: String,
     ApiServerOptions {
         enable_log_requests,
+        log_outputs,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -338,6 +343,15 @@ fn collect_generate(
             output_tokens = collected.token_ids.len(),
             %finish_reason,
             "generate finished"
+        );
+    }
+    // Like Python, raw generate logs only the output token IDs.
+    if log_outputs.logs_complete() && !collected.token_ids.is_empty() {
+        log_output(
+            LoggedOutput::Response,
+            "",
+            Some(&collected.token_ids),
+            Some(&finish_reason),
         );
     }
 
