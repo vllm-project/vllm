@@ -28,7 +28,7 @@ use crate::renderer::{
     HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
 };
 use crate::request::ChatRequest;
-use crate::{DynChatOutputProcessor, RendererSelection};
+use crate::{DynChatOutputProcessor, ParserSelection, RendererSelection};
 
 /// [`ChatBackend`] implementation built on Hugging Face model files.
 pub struct HfChatBackend {
@@ -117,6 +117,10 @@ impl HfChatBackend {
             response_template,
         })
     }
+
+    fn uses_harmony(&self) -> bool {
+        self.model_type == "gpt_oss"
+    }
 }
 
 /// Load and compile the checkpoint's `response_template`, if any.
@@ -157,7 +161,7 @@ impl ChatBackend for HfChatBackend {
         request: &mut ChatRequest,
         options: NewChatOutputProcessorOptions<'_>,
     ) -> Result<DynChatOutputProcessor> {
-        if self.model_type == "gpt_oss" {
+        if self.uses_harmony() {
             validate_harmony_parser_overrides(options.tool_call_parser, options.reasoning_parser)?;
             return Ok(Box::new(HarmonyChatOutputProcessor::new(request)?));
         }
@@ -173,6 +177,12 @@ impl ChatBackend for HfChatBackend {
                 options.tool_strict_level,
             )?,
         ))
+    }
+
+    fn auto_tool_parser_unresolved(&self, selection: &ParserSelection) -> bool {
+        !self.uses_harmony()
+            && matches!(selection, ParserSelection::Auto)
+            && selection.resolve_tool_name(&self.model_id).is_none()
     }
 }
 
@@ -432,6 +442,55 @@ mod tests {
             error.to_report_string(),
             "gpt_oss uses native Harmony output parsing; generic tool parser override `json` is not supported"
         );
+    }
+
+    #[test]
+    fn auto_tool_parser_unresolved_is_false_when_auto_finds_a_parser() {
+        let backend = HfChatBackend::from_resolved_model_files(
+            resolved_files(
+                r#"{"model_type":"qwen3"}"#,
+                r#"{"chat_template":"{{ messages[0].content }}"}"#,
+            ),
+            "Qwen/Qwen3-0.6B".to_string(),
+            LoadModelBackendsOptions::default(),
+            test_tokenizer(),
+        )
+        .unwrap();
+
+        assert!(!backend.auto_tool_parser_unresolved(&ParserSelection::Auto));
+    }
+
+    #[test]
+    fn auto_tool_parser_unresolved_when_auto_finds_no_parser() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"qwen2"}"#,
+            r#"{"chat_template":"{{ messages[0].content }}"}"#,
+        );
+
+        assert!(backend.auto_tool_parser_unresolved(&ParserSelection::Auto));
+    }
+
+    #[test]
+    fn auto_tool_parser_unresolved_is_false_for_harmony_models() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"gpt_oss"}"#,
+            r#"{"chat_template":"{{ messages[0].content }}"}"#,
+        );
+
+        assert!(!backend.auto_tool_parser_unresolved(&ParserSelection::Auto));
+    }
+
+    #[test]
+    fn auto_tool_parser_unresolved_is_false_when_disabled() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"qwen2"}"#,
+            r#"{"chat_template":"{{ messages[0].content }}"}"#,
+        );
+
+        assert!(!backend.auto_tool_parser_unresolved(&ParserSelection::None));
     }
 
     #[test]

@@ -114,6 +114,15 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let text_backend = loaded.text_backend;
     let chat_backend = loaded.chat_backend;
 
+    if chat_backend.auto_tool_parser_unresolved(&config.tool_call_parser) {
+        warn!(
+            model = %config.model,
+            "`--tool-call-parser auto` found no tool parser for this model, so requests \
+            with `tools` will be rejected; pass `--tool-call-parser <name>` to enable \
+            tool calling, or `--tool-call-parser none` to disable it explicitly"
+        );
+    }
+
     let coordinator_mode = config.effective_coordinator_mode(text_backend.is_moe());
     info!(
         engine_count = config.engine_count(),
