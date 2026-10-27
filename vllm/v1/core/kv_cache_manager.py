@@ -24,7 +24,13 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
 )
-from vllm.v1.metrics.stats import PrefixCacheStats
+from vllm.v1.metrics.stats import (
+    ADMISSION_REFUSAL_EXCEEDS_POOL_CAPACITY,
+    ADMISSION_REFUSAL_INFLIGHT_LOAD_RESERVE,
+    ADMISSION_REFUSAL_INSUFFICIENT_FREE_BLOCKS,
+    ADMISSION_REFUSAL_WATERMARK,
+    PrefixCacheStats,
+)
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
@@ -207,6 +213,8 @@ class KVCacheManager:
         # admitting waiting/preempted requests, to avoid frequent preemptions.
         assert watermark >= 0.0, "watermark must be non-negative"
         self.watermark_blocks = int(watermark * kv_cache_config.num_blocks)
+        # Why the last `allocate_slots` call returned None, if it did.
+        self.last_refusal_reason: str | None = None
         self.kv_cache_event_metadata = tuple(
             (
                 get_kv_cache_kind(group.manager_config, group.distinct_specs).value,
@@ -535,6 +543,7 @@ class KVCacheManager:
             self.max_model_len,
         )
 
+        self.last_refusal_reason = None
         watermark_blocks = 0
         # The watermark is applied to waiting/preempted requests only, and only
         # when there's at least one request already scheduled.
@@ -565,6 +574,9 @@ class KVCacheManager:
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
+                self.last_refusal_reason = self._refusal_reason(
+                    num_blocks_to_allocate, watermark_blocks
+                )
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -605,6 +617,9 @@ class KVCacheManager:
         required_blocks = num_blocks_to_allocate + watermark_blocks
         if required_blocks > available_blocks:
             # Cannot allocate new blocks
+            self.last_refusal_reason = self._refusal_reason(
+                num_blocks_to_allocate, watermark_blocks, reserved_blocks
+            )
             return None
 
         if (
@@ -645,6 +660,26 @@ class KVCacheManager:
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
+
+    def _refusal_reason(
+        self, num_blocks: int, watermark_blocks: int, reserved_blocks: int = 0
+    ) -> str:
+        """Why `allocate_slots` refused `num_blocks`, most fundamental first:
+        a request refused for the watermark would fit without it, and one
+        refused for the in-flight load reserve (`reserved_blocks`) would fit
+        without that."""
+        num_free_blocks = self.block_pool.get_num_free_blocks()
+        if num_blocks > self.block_pool.num_gpu_blocks - 1:  # null block
+            return ADMISSION_REFUSAL_EXCEEDS_POOL_CAPACITY
+        if num_blocks > num_free_blocks:
+            return ADMISSION_REFUSAL_INSUFFICIENT_FREE_BLOCKS
+        if num_blocks + watermark_blocks > num_free_blocks:
+            return ADMISSION_REFUSAL_WATERMARK
+        if reserved_blocks > 0:
+            return ADMISSION_REFUSAL_INFLIGHT_LOAD_RESERVE
+        # Unreachable from allocate_slots, which only asks after a refusal; a
+        # refusal without reserved blocks is caught by the checks above.
+        return ADMISSION_REFUSAL_INSUFFICIENT_FREE_BLOCKS
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
