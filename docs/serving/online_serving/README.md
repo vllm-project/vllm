@@ -265,6 +265,11 @@ the detected format, which can be one of:
 If the result is not what you expect, you can set the `--chat-template-content-format` CLI argument
 to override which format to use.
 
+For HF string templates, a user message containing only text parts is flattened
+by joining its non-empty parts with `\n` in both the Python and Rust frontends.
+For example, `[{"type": "text", "text": "First"}, {"type": "text", "text": "Second"}]`
+becomes `"First\nSecond"`. OpenAI-format templates receive the content parts as a list.
+
 ## Ray Serve LLM
 
 Ray Serve LLM enables scalable, production-grade serving of the vLLM engine. It integrates tightly with vLLM and extends it with features such as auto-scaling, load balancing, and back-pressure.

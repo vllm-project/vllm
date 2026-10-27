@@ -520,10 +520,16 @@ fn to_template_string_content(
     match content {
         ChatContent::Text(text) => Ok(text.clone()),
         ChatContent::Parts(parts) => {
+            let text_only = parts.iter().all(|part| matches!(part, ChatContentPart::Text { .. }));
             let mut out = String::new();
             for part in parts {
                 match part {
-                    ChatContentPart::Text { text } => out.push_str(text),
+                    ChatContentPart::Text { text } => {
+                        if text_only && !out.is_empty() && !text.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str(text);
+                    }
                     ChatContentPart::ImageUrl { .. } => {
                         let image_token = multimodal
                             .and_then(|multimodal| multimodal.image_token.as_ref())
@@ -1028,14 +1034,19 @@ mod tests {
 
     #[test]
     fn chat_template_flattens_text_parts_for_string_templates() {
-        let request = sample_request(vec![ChatMessage::user(vec![
-            ChatContentPart::text("hello"),
-            ChatContentPart::text(" world"),
-        ])]);
-
-        let rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
-
-        assert_eq!(rendered, "hello world");
+        for (parts, expected) in [
+            (vec!["hello", " world"], "hello\n world"),
+            (vec!["", "hello", "", "world", ""], "hello\nworld"),
+            (vec!["hello\n", "world"], "hello\n\nworld"),
+            (vec!["hello"], "hello"),
+            (vec![""], ""),
+        ] {
+            let request = sample_request(vec![ChatMessage::user(
+                parts.into_iter().map(ChatContentPart::text).collect::<Vec<_>>(),
+            )]);
+            let rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
+            assert_eq!(rendered, expected);
+        }
     }
 
     #[test]
@@ -1243,7 +1254,7 @@ mod tests {
         .unwrap()
         .prompt;
 
-        assert_eq!(rendered, Prompt::Text("hello world".to_string()));
+        assert_eq!(rendered, Prompt::Text("hello\n world".to_string()));
     }
 
     #[test]

@@ -1549,6 +1549,56 @@ fn metric_delta(
 }
 
 #[tokio::test]
+async fn render_chat_hf_separates_text_parts_like_python() {
+    use vllm_chat::{HfChatBackend, LoadModelBackendsOptions};
+    use vllm_text::backend::hf::ResolvedModelFiles;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("tokenizer.json"), "{}").unwrap();
+    let files = ResolvedModelFiles::new(dir.path().to_str().unwrap(), None).await.unwrap();
+    let backend = HfChatBackend::from_resolved_model_files(
+        files,
+        "test-model".to_string(),
+        LoadModelBackendsOptions {
+            chat_template: Some(
+                include_str!("../../../chat/tests/templates/qwen3.jinja").to_string(),
+            ),
+            ..Default::default()
+        },
+        Arc::new(fake_chat_tokenizer()),
+    )
+    .unwrap();
+    let mut app = build_render_router(Arc::new(RenderState {
+        model: "test-model".to_string(),
+        served_model_names: vec!["test-model".to_string()],
+        max_model_len: Some(512),
+        text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 512),
+        chat: ChatRequestProcessor::render_only(Arc::new(backend)),
+    }));
+
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/chat/completions/render",
+        json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "Part one. "},
+                {"type": "text", "text": "Part two."},
+            ]}],
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let expected = "<|im_start|>user\nPart one. \nPart two.<|im_end|>\n<|im_start|>assistant\n";
+    assert_eq!(
+        body["token_ids"],
+        json!(fake_chat_tokenizer().encode(expected, false).unwrap())
+    );
+}
+
+#[tokio::test]
 async fn render_chat_returns_generate_request_with_header_request_id() {
     let mut app = test_render_app();
     let response = app
