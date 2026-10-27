@@ -14,7 +14,6 @@ from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
-    discard_weight_parts,
     finalize_model_weights,
 )
 
@@ -101,7 +100,6 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
-    discard_weight_parts(model)
 
     for layer in model.modules():
         info = get_layerwise_info(layer)

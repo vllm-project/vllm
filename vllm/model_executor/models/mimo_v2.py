@@ -49,7 +49,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     make_attention_sink,
     maybe_remap_kv_scale_name,
-    stash_weight_part,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
@@ -880,6 +879,14 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
+        # Pro-format fused qkv_proj arrives as two tensors (weight and
+        # weight_scale_inv). Store them per-layer so that they can be
+        # sharded together. The state must outlive this call: AutoWeightsLoader
+        # delegates per contiguous group of names, so a pair can straddle two
+        # calls and would otherwise be dropped silently.
+        pending_fp8_qkv_proj = getattr(self, "_pending_fp8_qkv_proj", None)
+        if pending_fp8_qkv_proj is None:
+            self._pending_fp8_qkv_proj = pending_fp8_qkv_proj = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -926,6 +933,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             if self._try_load_fp8_qkv_proj(
                 name,
                 loaded_weight,
+                pending_fp8_qkv_proj,
                 params_dict,
                 loaded_params,
                 tp_rank,
@@ -983,6 +991,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         self,
         name: str,
         tensor: torch.Tensor,
+        fp8_qkv_proj_dict: dict[str, dict[str, torch.Tensor]],
         params_dict: dict[str, torch.nn.Parameter],
         loaded_params: set[str],
         tp_rank: int,
@@ -1014,12 +1023,12 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         if f"{prefix}.weight" not in params_dict:
             # Layer absent from this instance, e.g. truncated num_hidden_layers.
             return True
-        entry = stash_weight_part(
-            self, prefix, qkv_kind, tensor, ("weight", "weight_scale_inv")
-        )
-        if entry is None:
+        entry = fp8_qkv_proj_dict.setdefault(prefix, {})
+        entry[qkv_kind] = tensor
+        if "weight" not in entry or "weight_scale_inv" not in entry:
             # Still waiting for the other param.
             return True
+        del fp8_qkv_proj_dict[prefix]
 
         # Get self_attn module, which is a parent of qkv_proj.
         attn = self.get_submodule(prefix.rsplit(".", 1)[0])

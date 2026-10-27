@@ -46,7 +46,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import stash_weight_part
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -1446,8 +1445,9 @@ class MolmoForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
-        weights = _get_weights_with_merged_embedding(self, weights)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded: set[str] = set()
+        weights = _load_split_embedding(self.model.embed_tokens, weights, loaded)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper) | loaded
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix in multimodal models."""
@@ -1458,24 +1458,29 @@ class MolmoForCausalLM(
         )
 
 
-def _get_weights_with_merged_embedding(
-    module: nn.Module,
+def _load_split_embedding(
+    embed_tokens: VocabParallelEmbedding,
     weights: Iterable[tuple[str, torch.Tensor]],
+    loaded: set[str],
 ) -> Iterable[tuple[str, torch.Tensor]]:
+    """``wte.embedding`` holds the first rows of ``embed_tokens`` and
+    ``wte.new_embedding`` the rows after them. Each is written straight into
+    this rank's vocab shard, so the two may arrive in any order and in
+    different ``load_weights`` calls; the other weights pass through."""
     for name, weight in weights:
         if "wte.embedding" in name:
-            part = "embedding"
+            offset = 0
         elif "wte.new_embedding" in name:
-            part = "new_embedding"
+            offset = embed_tokens.org_vocab_size - weight.shape[0]
         else:
-            yield (name, weight)
+            yield name, weight
             continue
-        parts = stash_weight_part(
-            module, "wte", part, weight, ("embedding", "new_embedding")
-        )
-        # Quantization leaves embed_tokens unquantized, so the concat is safe.
-        if parts is not None:
-            yield (
-                "model.embed_tokens.weight",
-                torch.cat([parts["embedding"], parts["new_embedding"]], dim=0),
-            )
+        # Quantization leaves embed_tokens unquantized, so rows map 1:1.
+        idx = embed_tokens.shard_indices
+        start, end = idx.org_vocab_start_index, idx.org_vocab_end_index
+        lo, hi = max(start, offset), min(end, offset + weight.shape[0])
+        param = embed_tokens.weight
+        if lo < hi:
+            param.data[lo - start : hi - start].copy_(weight[lo - offset : hi - offset])
+        param.data[end - start :].fill_(0)  # vocab padding, as the default loader
+        loaded.add("model.embed_tokens.weight")

@@ -1526,63 +1526,8 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
-def stash_weight_part(
-    module: torch.nn.Module,
-    key: str,
-    part: str,
-    tensor: torch.Tensor,
-    parts: tuple[str, ...] = ("weight", "scale"),
-) -> dict[str, torch.Tensor] | None:
-    """Buffer one part of a multi-tensor checkpoint weight on ``module``, so the
-    parts may arrive in different ``load_weights`` calls. Returns all parts once
-    complete; ``finalize_model_weights`` raises on parts left unpaired.
-
-    The calls may run on different streams (packed NCCL alternates streams
-    between buckets), so a parked part carries an event recorded on the stream
-    that parked it, which the stream pairing it waits on."""
-    pending = module.__dict__.setdefault("_pending_weight_parts", {})
-    entry = pending.setdefault(key, {})
-    entry[part] = (tensor, None)
-    if all(p in entry for p in parts):
-        del pending[key]
-        return {p: _claim_weight_part(t, ready) for p, (t, ready) in entry.items()}
-    # Weight-transfer buckets reuse their buffers between calls.
-    parked = tensor.clone()
-    ready = None
-    if parked.device.type != "cpu":
-        ready = torch.Event(device=parked.device)
-        ready.record(torch.accelerator.current_stream(parked.device))
-    entry[part] = (parked, ready)
-    return None
-
-
-def _claim_weight_part(tensor: torch.Tensor, ready: torch.Event | None) -> torch.Tensor:
-    """Order the current stream after the stream that parked ``tensor``, and
-    keep the allocator from reusing its memory before this stream is done."""
-    if ready is not None:
-        stream = torch.accelerator.current_stream(tensor.device)
-        stream.wait_event(ready)
-        tensor.record_stream(stream)
-    return tensor
-
-
-def discard_weight_parts(model: torch.nn.Module) -> None:
-    """Drop parts parked by an update that never finished, so they cannot pair
-    with the next update's parts. Called when a reload starts."""
-    for module in model.modules():
-        module.__dict__.pop("_pending_weight_parts", None)
-
-
 def finalize_model_weights(model: torch.nn.Module) -> None:
-    """Run once after a full load or reload: reject multi-tensor weights whose
-    parts never all arrived, then run the model-level post-load hook."""
-    incomplete = [
-        f"{key} (has {sorted(entry)})"
-        for module in model.modules()
-        for key, entry in module.__dict__.pop("_pending_weight_parts", {}).items()
-    ]
-    if incomplete:
-        raise ValueError(f"Incomplete multi-tensor weights: {incomplete}")
+    """Run once after a full load or reload: the model-level post-load hook."""
     if hasattr(model, "process_weights_after_loading"):
         model.process_weights_after_loading()
 
