@@ -517,7 +517,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return True
+        return False
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -677,6 +677,10 @@ class AiterMxfp4Experts(AiterExperts):
     """MXFP4-quantized weights, with either unquantized (bf16/fp16) or
     MXFP4-quantized dynamic activations. gfx950-only (not gfx1250), except for
     Kimi-K3's MXFP4 experts requantized to packed int4 at load on gfx942."""
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
