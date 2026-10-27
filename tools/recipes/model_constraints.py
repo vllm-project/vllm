@@ -44,28 +44,47 @@ def extract_head_constraints(
         return tuple(constraints)
 
     text = hf_config.get_text_config()
-    heads = _positive_int(getattr(text, "num_attention_heads", None), "attention heads")
-    kv = getattr(text, "num_key_value_heads", None)
-    if kv is None:
-        kv = heads
-    kv = _positive_int(kv, "KV heads")
-    constraints.append(HeadConstraint("text", heads, kv))
-
-    global_kv = getattr(text, "num_global_key_value_heads", None)
-    if global_kv is not None:
-        constraints.append(
-            HeadConstraint(
-                "global attention", heads, _positive_int(global_kv, "global KV")
-            )
+    # Prefer resolved per-layer values for heterogeneous attention. Accessing
+    # global KV-head attributes may raise on recent Transformers configurations.
+    per_layer = getattr(text, "per_layer_config", None)
+    if per_layer is not None:
+        layers = (
+            per_layer.items() if hasattr(per_layer, "items") else enumerate(per_layer)
         )
+    else:
+        layers = (("text", text),)
 
-    # Hybrid layers have separate head counts; use conservative divisibility
-    # rather than assuming they support standard attention's KV replication.
-    for field in ("linear_num_key_heads", "linear_num_value_heads"):
-        count = getattr(text, field, None)
-        if count is not None:
-            count = _positive_int(count, field)
-            constraints.append(HeadConstraint(field, count, count))
+    text_constraint_count = 0
+    for name, layer in layers:
+        heads_value = getattr(layer, "num_attention_heads", None)
+        kv_value = getattr(layer, "num_key_value_heads", None)
+        # Non-attention layers may not specify either value.
+        if per_layer is not None and heads_value is None and kv_value is None:
+            continue
+        heads = _positive_int(heads_value, f"{name} attention heads")
+        kv = _positive_int(heads if kv_value is None else kv_value, f"{name} KV heads")
+        constraints.append(HeadConstraint(str(name), heads, kv))
+        text_constraint_count += 1
+
+        global_kv = getattr(layer, "num_global_key_value_heads", None)
+        if global_kv is not None:
+            constraints.append(
+                HeadConstraint(
+                    f"{name} global attention",
+                    heads,
+                    _positive_int(global_kv, f"{name} global KV"),
+                )
+            )
+
+        # Hybrid linear-attention layers can impose additional head constraints.
+        for field in ("linear_num_key_heads", "linear_num_value_heads"):
+            count = getattr(layer, field, None)
+            if count is not None:
+                count = _positive_int(count, f"{name} {field}")
+                constraints.append(HeadConstraint(f"{name} {field}", count, count))
+
+    if not text_constraint_count:
+        raise ValueError("No attention-head constraints found in model layers")
 
     vision = getattr(hf_config, "vision_config", None)
     if include_vision and vision is not None:
