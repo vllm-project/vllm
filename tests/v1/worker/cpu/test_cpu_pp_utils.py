@@ -14,12 +14,18 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.worker.cpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.cpu.pp_utils import PPHandler, compute_need_sampled_mask
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cpu()
+    or HAS_TRITON
+    or current_platform.get_cpu_architecture() == CpuArchEnum.X86,
+    reason="requires a non-x86 CPU platform without Triton",
+)
 
 
 def _batch(

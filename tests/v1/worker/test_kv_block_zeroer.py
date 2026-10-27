@@ -496,14 +496,3 @@ def test_cpu_zeroes_every_kernel_block_in_a_logical_block():
 
     assert (cache[[2, 3, 6, 7]] == 0).all()
     assert (cache[[0, 1, 4, 5]].view(torch.int8) == 1).all()
-
-
-@pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
-def test_cpu_runner_selects_zeroer_only_without_triton():
-    from vllm.v1.worker.cpu import model_runner as cpu_model_runner
-
-    triton_runner = object.__new__(cpu_model_runner.CPUModelRunner)
-    no_triton_runner = object.__new__(cpu_model_runner.NoTritonCPUModelRunner)
-
-    assert triton_runner.kv_block_zeroer_cls is KVBlockZeroer
-    assert no_triton_runner.kv_block_zeroer_cls is CPUKVBlockZeroer

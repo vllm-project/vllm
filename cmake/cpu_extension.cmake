@@ -590,8 +590,6 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/cpu_wna16.cpp"
         "csrc/cpu/cpu_fused_moe.cpp"
         "csrc/cpu/utils.cpp"
-        "csrc/cpu/block_table.cpp"
-        "csrc/cpu/input_batch.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/cpu_isa.cpp"
@@ -611,8 +609,6 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/fla.cpp"
         "csrc/cpu/cpu_fused_moe.cpp"
         "csrc/cpu/utils.cpp"
-        "csrc/cpu/block_table.cpp"
-        "csrc/cpu/input_batch.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/cpu_isa.cpp"
@@ -699,6 +695,7 @@ else()
         USE_SABI 3
         WITH_SOABI
     )
+    target_compile_definitions(_C PRIVATE VLLM_CPU_NO_TRITON_MRV2)
     if (VLLM_OPENBLAS_LIB)
         target_compile_definitions(_C PRIVATE VLLM_HAS_OPENBLAS)
     endif()

@@ -5,10 +5,16 @@ import numpy as np
 import pytest
 
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.cpu.lora_utils import LoraState
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cpu()
+    or HAS_TRITON
+    or current_platform.get_cpu_architecture() == CpuArchEnum.X86,
+    reason="requires a non-x86 CPU platform without Triton",
+)
 
 
 def test_cpu_lora_state_maps_each_logits_row_to_its_request() -> None:

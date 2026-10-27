@@ -13,7 +13,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
@@ -24,8 +24,10 @@ from vllm.v1.worker.cpu.ec_connector import (
 )
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cpu() or HAS_TRITON,
-    reason="requires a CPU platform without Triton",
+    not current_platform.is_cpu()
+    or HAS_TRITON
+    or current_platform.get_cpu_architecture() == CpuArchEnum.X86,
+    reason="requires a non-x86 CPU platform without Triton",
 )
 
 WORKER_META = object()

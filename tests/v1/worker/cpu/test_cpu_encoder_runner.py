@@ -15,7 +15,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.core.sched.output import NewRequestData
@@ -27,8 +27,10 @@ from vllm.v1.worker.cpu.model_states.encoder_only import EncoderOnlyModelState
 from vllm.v1.worker.cpu.states import CPURequestState
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cpu() or HAS_TRITON,
-    reason="requires a CPU platform without Triton",
+    not current_platform.is_cpu()
+    or HAS_TRITON
+    or current_platform.get_cpu_architecture() == CpuArchEnum.X86,
+    reason="requires a non-x86 CPU platform without Triton",
 )
 
 HIDDEN_SIZE = 4

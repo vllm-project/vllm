@@ -10,8 +10,9 @@ from transformers import LlamaConfig
 import vllm.config.reasoning as reasoning_config_module
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.reasoning import ReasoningConfig as VllmReasoningConfig
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.sampling_params import SamplingParams
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.watermarking.gumbel import (
     DualKeyGumbelWatermarker,
     GumbelWatermarker,
@@ -27,7 +28,12 @@ from vllm.v1.worker.cpu.sampler import (
 )
 from vllm.v1.worker.cpu.states import CPURequestState
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cpu()
+    or HAS_TRITON
+    or current_platform.get_cpu_architecture() == CpuArchEnum.X86,
+    reason="requires a non-x86 CPU platform without Triton",
+)
 
 START = 90
 END = 91

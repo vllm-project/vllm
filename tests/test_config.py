@@ -50,7 +50,7 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.platforms import Platform, PlatformEnum, current_platform
+from vllm.platforms import CpuArchEnum, Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
@@ -573,6 +573,7 @@ def test_model_runner_default_preserves_backend_fallback(
 ):
     platform = Platform()
     platform._enum = platform_enum
+    monkeypatch.setattr(platform, "get_cpu_architecture", lambda: CpuArchEnum.X86)
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "current_platform", platform)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", has_triton)
@@ -1071,43 +1072,84 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
-def test_cpu_no_triton_v2_rejects_unsupported_features(monkeypatch):
+_CPU_NO_TRITON_UNSUPPORTED_CASES = [
+    ("speculative_decoding", "speculative decoding"),
+    ("diffusion", "diffusion models"),
+    ("custom_logits_processors", "custom logits processors"),
+    ("decode_context_parallelism", "decode context parallelism"),
+    ("prefill_context_parallelism", "prefill context parallelism"),
+    ("batch_sharded_sampling", "batch-sharded sampling"),
+    ("microbatching", "microbatching"),
+    ("eplb", "expert parallel load balancing"),
+    ("routed_expert_outputs", "routed-expert auxiliary outputs"),
+    ("multimodal_lora", "multimodal tower and connector LoRA"),
+]
+
+
+def _enable_cpu_no_triton_unsupported_feature(
+    config: VllmConfig, unsupported_feature: str, tmp_path: Path
+) -> None:
+    if unsupported_feature == "speculative_decoding":
+        config.speculative_config = SpeculativeConfig(
+            num_speculative_tokens=1, method="ngram"
+        )
+    elif unsupported_feature in ("diffusion", "custom_logits_processors"):
+        from transformers import LlamaConfig
+
+        LlamaConfig(
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            max_position_embeddings=64,
+            vocab_size=32,
+            architectures=["LlamaForCausalLM"],
+        ).save_pretrained(tmp_path)
+        config.model_config = ModelConfig(
+            str(tmp_path), max_model_len=64, skip_tokenizer_init=True
+        )
+        if unsupported_feature == "diffusion":
+            config.model_config.is_diffusion = True
+        else:
+            config.model_config.logits_processors = ["custom"]
+    elif unsupported_feature == "decode_context_parallelism":
+        config.parallel_config.decode_context_parallel_size = 2
+    elif unsupported_feature == "prefill_context_parallelism":
+        config.parallel_config.prefill_context_parallel_size = 2
+    elif unsupported_feature == "batch_sharded_sampling":
+        config.parallel_config.enable_batch_sharded_sampling = True
+    elif unsupported_feature == "microbatching":
+        config.parallel_config.ubatch_size = 2
+    elif unsupported_feature == "eplb":
+        config.parallel_config.enable_eplb = True
+    elif unsupported_feature == "routed_expert_outputs":
+        config.aux_output_config.enable_return_routed_experts = True
+    else:
+        assert unsupported_feature == "multimodal_lora"
+        config.lora_config = LoRAConfig(enable_tower_connector_lora=True)
+
+
+@pytest.mark.parametrize(
+    ("unsupported_feature", "message"), _CPU_NO_TRITON_UNSUPPORTED_CASES
+)
+def test_cpu_no_triton_v2_rejects_unsupported_feature(
+    tmp_path, monkeypatch, unsupported_feature, message
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     config = VllmConfig()
-    config.speculative_config = cast(
-        SpeculativeConfig,
-        SimpleNamespace(
-            method="ngram",
-            parallel_drafting=False,
-            use_heterogeneous_vocab=False,
-        ),
-    )
-    config.model_config = cast(
-        ModelConfig,
-        SimpleNamespace(
-            enable_prompt_embeds=True,
-            is_diffusion=True,
-            logits_processors=["a.b:C"],
-        ),
-    )
-    config.parallel_config.decode_context_parallel_size = 2
-    config.parallel_config.prefill_context_parallel_size = 2
-    config.parallel_config.enable_batch_sharded_sampling = True
-    config.parallel_config.enable_eplb = True
-    config.aux_output_config.enable_return_routed_experts = True
-    config.lora_config = SimpleNamespace(enable_tower_connector_lora=True)
+    _enable_cpu_no_triton_unsupported_feature(config, unsupported_feature, tmp_path)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", False)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
-
-    with pytest.raises(ValueError) as exc_info:
-        config._validate_v2_model_runner()
-    assert str(exc_info.value) == (
-        "CPU Model Runner V2 without Triton does not yet support: "
-        "speculative decoding, prompt embeddings, diffusion models, "
-        "custom logits processors, "
-        "decode context parallelism, prefill context parallelism, "
-        "batch-sharded sampling, expert parallel load balancing, "
-        "routed-expert auxiliary outputs, multimodal tower and connector LoRA"
+    monkeypatch.setattr(
+        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.ARM
     )
+
+    with pytest.raises(
+        ValueError,
+        match=message,
+    ):
+        config._validate_v2_model_runner()
 
 
 @pytest.mark.parametrize(
@@ -1536,13 +1578,78 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     assert VllmConfig.use_v2_model_runner.fget(config) is expected
 
 
-def test_cpu_without_triton_defaults_to_v2_model_runner(monkeypatch):
+@pytest.mark.parametrize(
+    ("cpu_arch", "expected"),
+    [(CpuArchEnum.ARM, True), (CpuArchEnum.X86, False)],
+)
+def test_cpu_without_triton_default_model_runner(monkeypatch, cpu_arch, expected):
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", False)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
-    config = SimpleNamespace(attention_config=AttentionConfig())
+    monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
+    config = VllmConfig()
 
-    assert VllmConfig.use_v2_model_runner.fget(config)
+    assert config.use_v2_model_runner is expected
+
+
+@pytest.mark.parametrize(
+    "unsupported_feature",
+    [case[0] for case in _CPU_NO_TRITON_UNSUPPORTED_CASES],
+)
+def test_cpu_without_triton_unsupported_feature_defaults_to_v1(
+    tmp_path, monkeypatch, unsupported_feature
+):
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.ARM
+    )
+    config = VllmConfig()
+    _enable_cpu_no_triton_unsupported_feature(config, unsupported_feature, tmp_path)
+
+    assert not config.use_v2_model_runner
+
+
+@pytest.mark.parametrize("force_v2", [False, True])
+def test_cpu_without_triton_prompt_embeddings_model_runner_selection(
+    tmp_path, monkeypatch, force_v2
+):
+    from transformers import LlamaConfig
+
+    from vllm.engine.arg_utils import EngineArgs
+
+    LlamaConfig(
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        max_position_embeddings=64,
+        vocab_size=32,
+        architectures=["LlamaForCausalLM"],
+    ).save_pretrained(tmp_path)
+    if force_v2:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    else:
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.ARM
+    )
+    engine_args = EngineArgs(
+        model=str(tmp_path),
+        max_model_len=64,
+        skip_tokenizer_init=True,
+        enable_prompt_embeds=True,
+    )
+
+    if force_v2:
+        with pytest.raises(ValueError, match="prompt embeddings"):
+            engine_args.create_engine_config()
+    else:
+        assert not engine_args.create_engine_config().use_v2_model_runner
 
 
 def test_v1_model_runner_rejects_v2_only_features():

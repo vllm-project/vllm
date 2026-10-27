@@ -5,14 +5,16 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.cpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cpu() or HAS_TRITON,
-    reason="requires a CPU platform without Triton",
+    not current_platform.is_cpu()
+    or HAS_TRITON
+    or current_platform.get_cpu_architecture() == CpuArchEnum.X86,
+    reason="requires a non-x86 CPU platform without Triton",
 )
 
 

@@ -394,10 +394,6 @@ void mamba_chunk_scan_fwd_cpu_impl(at::Tensor& out, at::Tensor& final_states,
                                    const c10::optional<at::Tensor>& z,
                                    const at::Tensor& cu_seqlens);
 
-void update_num_accepted_tokens_cpu(
-    const at::Tensor& idx_mapping, const c10::optional<at::Tensor>& num_sampled,
-    at::Tensor& num_accepted_tokens, int64_t num_sampled_value);
-
 torch::Tensor fused_gumbel_argmax(const torch::Tensor& logits,
                                   const torch::Tensor& seeds);
 
@@ -430,6 +426,8 @@ void apply_logit_bias_cpu(
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
+// Kernels used only by no-Triton CPU MRV2.
+#ifdef VLLM_CPU_NO_TRITON_MRV2
 void gather_block_table_cpu(const torch::Tensor& block_table,
                             torch::Tensor& output,
                             const torch::Tensor& idx_mapping,
@@ -478,6 +476,7 @@ void post_update_cpu(const torch::Tensor& idx_mapping,
                      const torch::Tensor& num_rejected,
                      const c10::optional<torch::Tensor>& query_start_loc,
                      torch::Tensor& all_token_ids, torch::Tensor& total_len);
+#endif
 void eagle_prepare_inputs_padded_kernel_impl(
     const torch::Tensor& cu_num_draft_tokens,
     const torch::Tensor& valid_sampled_tokens_count,
@@ -1066,14 +1065,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? D, Tensor? z, Tensor cu_seqlens) -> ()",
       &mamba_chunk_scan_fwd_cpu_impl);
 
-  ops.def(
-      "update_num_accepted_tokens_cpu("
-      "Tensor idx_mapping, Tensor? num_sampled, "
-      "Tensor(a2!) num_accepted_tokens, int num_sampled_value) -> ()",
-      &update_num_accepted_tokens_cpu);
-
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
 
+#ifdef VLLM_CPU_NO_TRITON_MRV2
   ops.def(
       "gather_block_table_cpu(Tensor block_table, Tensor(a1!) output, "
       "Tensor idx_mapping, Tensor num_blocks, SymInt num_reqs_padded) -> ()",
@@ -1127,6 +1121,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor num_sampled, Tensor num_rejected, Tensor? query_start_loc, "
       "Tensor(a8!) all_token_ids, Tensor(a9!) total_len) -> ()",
       &cpu_utils::post_update_cpu);
+#endif
 
   // Fused sampling kernels
   ops.def("fused_gumbel_argmax(Tensor logits, Tensor seeds) -> Tensor");

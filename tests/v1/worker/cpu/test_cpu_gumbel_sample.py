@@ -2,17 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from types import SimpleNamespace
 
 import pytest
 import torch
 import vllm._C  # noqa: F401
 
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.cpu.gumbel import gumbel_sample
 from vllm.v1.worker.cpu.sampler import CPUSamplingStates
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cpu()
+    or HAS_TRITON
+    or current_platform.get_cpu_architecture() == CpuArchEnum.X86,
+    reason="requires a non-x86 CPU platform without Triton",
+)
 
 _UINT32_MASK = (1 << 32) - 1
 _UINT64_MASK = (1 << 64) - 1
@@ -285,9 +290,9 @@ def test_pre_scaled_logits_match_temperature_application() -> None:
 
 
 def test_sampling_states_apply_temperature() -> None:
-    states = CPUSamplingStates.__new__(CPUSamplingStates)
+    states = CPUSamplingStates(4, 17, torch.device("cpu"))
     temperatures = torch.tensor([0.5, 0.0, 2.0, 1.0])
-    states.temperature = SimpleNamespace(np=temperatures.numpy(), gpu=temperatures)
+    states.temperature.copy_(temperatures)
 
     logits = torch.arange(1, 69, dtype=torch.float32).reshape(4, 17)
     expanded_idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int64)
@@ -299,9 +304,9 @@ def test_sampling_states_apply_temperature() -> None:
 
 
 def test_sampling_states_apply_min_p() -> None:
-    states = CPUSamplingStates.__new__(CPUSamplingStates)
+    states = CPUSamplingStates(4, 4, torch.device("cpu"))
     min_p = torch.tensor([0.0, 0.25, 0.5, 1.0])
-    states.min_p = SimpleNamespace(np=min_p.numpy(), gpu=min_p)
+    states.min_p.copy_(min_p)
 
     logits = torch.tensor(
         [

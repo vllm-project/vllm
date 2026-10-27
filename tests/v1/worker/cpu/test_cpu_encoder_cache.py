@@ -14,11 +14,17 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     PlaceholderRange,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.cpu.encoder_cache import EncoderCache
 from vllm.v1.worker.cpu.encoder_runner import EncoderRunner
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cpu()
+    or HAS_TRITON
+    or current_platform.get_cpu_architecture() == CpuArchEnum.X86,
+    reason="requires a non-x86 CPU platform without Triton",
+)
 
 HIDDEN_SIZE = 4
 

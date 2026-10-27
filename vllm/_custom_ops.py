@@ -2337,20 +2337,6 @@ def mamba_chunk_scan_fwd_cpu(
     )
 
 
-def update_num_accepted_tokens_cpu(
-    idx_mapping: torch.Tensor,
-    num_sampled: torch.Tensor | None,
-    num_accepted_tokens: torch.Tensor,
-    num_sampled_value: int,
-) -> None:
-    torch.ops._C.update_num_accepted_tokens_cpu(
-        idx_mapping,
-        num_sampled,
-        num_accepted_tokens,
-        num_sampled_value,
-    )
-
-
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)

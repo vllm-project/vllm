@@ -22,7 +22,7 @@ from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
@@ -764,15 +764,24 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        if not HAS_TRITON and not current_platform.is_unspecified():
-            if current_platform.is_cpu():
-                return True
-            logger.warning_once(
-                "Model Runner V2 requires Triton; using the V1 model runner instead."
-            )
-            return False
-
         unsupported = self._get_v2_model_runner_unsupported_features()
+
+        if not HAS_TRITON and not current_platform.is_unspecified():
+            # Only non-x86 CPUs have a standalone no-Triton MRV2 runner.
+            if (
+                current_platform.is_cpu()
+                and current_platform.get_cpu_architecture() != CpuArchEnum.X86
+            ):
+                unsupported.extend(self._get_cpu_no_triton_v2_unsupported_features())
+                if not unsupported:
+                    return True
+            else:
+                logger.warning_once(
+                    "Model Runner V2 requires Triton; using the V1 model "
+                    "runner instead."
+                )
+                return False
+
         if unsupported:
             logger.warning_once(
                 "Model Runner V2 does not yet support %s; using the V1 model "
@@ -3130,6 +3139,9 @@ class VllmConfig:
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
 
+        if self.parallel_config.use_ubatching:
+            unsupported.append("microbatching")
+
         if self.parallel_config.enable_eplb:
             unsupported.append("expert parallel load balancing")
 
@@ -3405,7 +3417,10 @@ class VllmConfig:
         if not HAS_TRITON:
             from vllm.platforms import current_platform
 
-            if current_platform.is_cpu():
+            if (
+                current_platform.is_cpu()
+                and current_platform.get_cpu_architecture() != CpuArchEnum.X86
+            ):
                 unsupported = self._get_cpu_no_triton_v2_unsupported_features()
                 if unsupported:
                     raise ValueError(
