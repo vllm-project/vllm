@@ -26,6 +26,9 @@ from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.models.glm5next.nvidia.ops.fused_eh_norm import fused_eh_norm
+from vllm.models.glm5next.nvidia.specialized_decode.runtime import (
+    specialized_decode_config,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -40,6 +43,9 @@ from .model import (
     get_sparse_topk_buffer_width,
     get_spec_layer_idx_from_weight_name,
 )
+
+if typing.TYPE_CHECKING:
+    from ..nvidia.specialized_decode.runtime.draft import SpecializedDraft
 
 
 class Glm5NextMultiTokenPredictorLayer(nn.Module):
@@ -137,6 +143,31 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             assert isinstance(self_attn, Glm5NextMLAAttention)
             self._mtp_mla_attns.append(self_attn.mla_attn)
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        # decode_backend=latency_specialized: the draft layer's specialized decode,
+        # built on the first eager forward (after the weights are processed).
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        spec = vllm_config.speculative_config
+        self.greedy_draft = spec is not None and spec.use_local_argmax_reduction
+        self.specialized_decode: SpecializedDraft | None = None
+        self.prefill_rows: torch.Tensor | None = None
+
+    def _specialized_draft(self) -> "SpecializedDraft | None":
+        if self.specialized_decode_config is None:
+            return None
+        if (
+            self.specialized_decode is None
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from ..nvidia.specialized_decode.runtime.draft import SpecializedDraft
+
+            self.specialized_decode = SpecializedDraft(
+                self, self.specialized_decode_config, self.greedy_draft
+            )
+        return self.specialized_decode
+
+    def set_prefill_rows(self, rows: torch.Tensor) -> None:
+        """The speculator's [max_num_reqs] last-token rows of a draft prefill."""
+        self.prefill_rows = rows
 
     def set_skip_topk(self, skip: bool):
         # index_share_for_mtp_iteration: step 0 computes top-k, steps 1+ reuse.
@@ -162,9 +193,21 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        decode = self._specialized_draft()
+        if decode is not None:
+            step = decode.plan(positions)
+            if step is not None:
+                return decode.run(
+                    self._mtp_layers[current_step_idx],
+                    step,
+                    input_ids,
+                    inputs_embeds,
+                    previous_hidden_states,
+                    self.prefill_rows,
+                )
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        current_step_idx = spec_step_idx % self.num_mtp_layers
         return self._mtp_layers[current_step_idx](
             input_ids,
             positions,
@@ -192,6 +235,13 @@ class Glm5NextMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self._mtp_layers[current_step_idx]
+        decode = self.specialized_decode
+        if decode is not None:
+            tokens = decode.top_tokens(
+                mtp_layer.shared_head.head, self.logits_processor, hidden_states
+            )
+            if tokens is not None:
+                return tokens
         # Vocab-parallel argmax for the greedy draft: per-rank head projection
         # + local argmax + a [batch, 2*tp] (value, index) reduce, instead of
         # materializing and all-gathering full [N, vocab] logits per draft
