@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
@@ -17,11 +16,26 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp8Dynamic,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils import flashinfer as vllm_flashinfer
 from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutedsl
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
+
+
+def _check_mm_mxfp8_shape(weight_shape: tuple[int, int]) -> tuple[bool, str | None]:
+    N, K = weight_shape
+    if K < 128:
+        return False, f"mm_mxfp8 requires K >= 128, got K={K}."
+    if K % MXFP8_BLOCK_SIZE != 0:
+        return (
+            False,
+            f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, got K={K}.",
+        )
+    if N < 128:
+        return False, f"mm_mxfp8 requires N >= 128, got N={N}."
+    return True, None
 
 
 class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
@@ -43,6 +57,15 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
+        can_implement, reason = _check_mm_mxfp8_shape(c.weight_shape)
+        if not can_implement:
+            return False, reason
+        N, _ = c.weight_shape
+        if current_platform.is_device_capability_family(120) and N % 32 != 0:
+            return (
+                False,
+                f"mm_mxfp8 on SM12x requires N to be divisible by 32, got N={N}.",
+            )
         return True, None
 
     def input_quant_key(self) -> QuantKey:
@@ -57,10 +80,8 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         weight_scale_2d = layer.weight_scale.data[:N, :scale_k].contiguous()
         weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
 
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(
-            weight_scale_swizzled.contiguous(), requires_grad=False
-        )
+        replace_parameter(layer, "weight", weight.contiguous())
+        replace_parameter(layer, "weight_scale", weight_scale_swizzled.contiguous())
 
     def apply_weights(
         self,
@@ -71,20 +92,6 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         weight = layer.weight
         weight_scale = layer.weight_scale
         N, K = weight.shape
-
-        min_dim = 128
-
-        assert min_dim <= K, (
-            f"mm_mxfp8 requires K >= {min_dim}, got K={K}. "
-            f"in_features is too small for mm_mxfp8."
-        )
-        assert K % MXFP8_BLOCK_SIZE == 0, (
-            f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, got K={K}."
-        )
-        assert min_dim <= N, (
-            f"mm_mxfp8 requires N >= {min_dim}, got N={N}. "
-            f"out_features is too small for mm_mxfp8."
-        )
 
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
@@ -136,7 +143,7 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
-        return True, None
+        return _check_mm_mxfp8_shape(c.weight_shape)
 
     def input_quant_key(self) -> QuantKey:
         # Activations use FlashInfer's F8_128x4 swizzled scale layout.
@@ -151,10 +158,8 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
         weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
 
         # Store weight column-major [K, N] as mm_mxfp8 expects for operand B.
-        layer.weight = Parameter(weight.contiguous().t(), requires_grad=False)
-        layer.weight_scale = Parameter(
-            weight_scale_swizzled.contiguous(), requires_grad=False
-        )
+        replace_parameter(layer, "weight", weight.contiguous().t())
+        replace_parameter(layer, "weight_scale", weight_scale_swizzled.contiguous())
 
     def apply_weights(
         self,
@@ -165,20 +170,6 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
         weight = layer.weight  # [K, N], column-major
         weight_scale = layer.weight_scale
         K, N = weight.shape
-
-        min_dim = 128
-
-        assert min_dim <= K, (
-            f"mm_mxfp8 requires K >= {min_dim}, got K={K}. "
-            f"in_features is too small for mm_mxfp8."
-        )
-        assert K % MXFP8_BLOCK_SIZE == 0, (
-            f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, got K={K}."
-        )
-        assert min_dim <= N, (
-            f"mm_mxfp8 requires N >= {min_dim}, got N={N}. "
-            f"out_features is too small for mm_mxfp8."
-        )
 
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
@@ -254,17 +245,19 @@ class FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearKernel):
         else:
             weight = weight.contiguous()
 
-        layer.weight = Parameter(
+        replace_parameter(
+            layer,
+            "weight",
             shuffle_matrix_a(weight, 128).reshape(padded_n, K),
-            requires_grad=False,
         )
-        layer.weight_scale = Parameter(
+        replace_parameter(
+            layer,
+            "weight_scale",
             shuffle_matrix_sf_a(
                 weight_scale,
                 128,
                 num_elts_per_sf=MXFP8_BLOCK_SIZE,
             ).reshape(-1),
-            requires_grad=False,
         )
         layer._mxfp8_trtllm_output_size = N
 

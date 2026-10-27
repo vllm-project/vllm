@@ -606,6 +606,7 @@ class LMCacheConnectorV1Impl:
 
         self.async_loading = config.enable_async_loading
         self.layerwise_retrievers: list[Generator[torch.Tensor | None, None, None]] = []
+        self.layerwise_storers: list[Generator[Any, None, None]] = []
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
@@ -798,6 +799,7 @@ class LMCacheConnectorV1Impl:
         """
         self.current_layer = 0
         self.layerwise_retrievers = []
+        self.layerwise_storers = []
 
     @_lmcache_nvtx_annotate
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):

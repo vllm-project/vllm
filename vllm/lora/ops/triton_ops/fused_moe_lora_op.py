@@ -106,14 +106,18 @@ def _get_c_ptrs(
 
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
+# The one-shot kernel keeps the rank-dimension intermediate in registers.
+# Larger ranks require rank tiling, so route them through the two-kernel path.
+_FUSED_MOE_LORA_ONE_SHOT_MAX_RANK = 128
+
 
 # ---------------------------------------------------------------------------
 # Fully-fused MoE-LoRA kernel (one-shot): shrink + expand combined into a single
 # launch with the rank-dim intermediate kept in registers. Used by the fast
-# path of `_fused_moe_lora` for `fully_sharded=False`. The legacy two-kernel
-# path (`_fused_moe_lora_kernel` above) is retained for `fully_sharded=True`
-# because that path needs to materialise the intermediate cache for an
-# all_reduce / all_gather between shrink and expand.
+# path of `_fused_moe_lora` for supported ranks with `fully_sharded=False`.
+# The legacy two-kernel path (`_fused_moe_lora_kernel` above) is retained for
+# larger ranks and for `fully_sharded=True`, where the intermediate cache must
+# be materialised for an all_reduce / all_gather between shrink and expand.
 # ---------------------------------------------------------------------------
 
 
@@ -349,8 +353,9 @@ def _run_fused_moe_lora_one_shot(
     # regressed across all M (+8 to +40%): the (64,32) fp32 accumulator +
     # widened B tile pushed register count past spill threshold, lowering
     # occupancy by more than the MMA gain saved.
-    assert rank <= 128, (
-        f"fused_moe_lora_one_shot supports max_lora_rank<=128; got rank={rank}"
+    assert rank <= _FUSED_MOE_LORA_ONE_SHOT_MAX_RANK, (
+        "fused_moe_lora_one_shot supports "
+        f"max_lora_rank<={_FUSED_MOE_LORA_ONE_SHOT_MAX_RANK}; got rank={rank}"
     )
     BLOCK_R = max(triton.next_power_of_2(rank), 16)
 
@@ -419,6 +424,10 @@ def _run_fused_moe_lora_one_shot(
         npid_occ = max(1, min(16, (target + base_programs - 1) // base_programs))
         npid = min(npid_occ, max_npid_by_budget)
     npid = max(1, min(npid, max(1, N_per_slice // 128)))
+
+    # see issue: https://github.com/intel/intel-xpu-backend-for-triton/issues/8121
+    if current_platform.is_xpu():
+        npid = 1
 
     # Robust defaults across the prefill regime (H100/H200/B200, bf16/fp16).
     # NPID > 1 is the small-M / under-saturated path -- more warps help
@@ -954,6 +963,7 @@ def _fused_moe_lora_kernel(
     USE_GDC: tl.constexpr,
     launch_pdl: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
+    FP32_ADD_INPUTS: tl.constexpr,
     USE_TMA: tl.constexpr,
     # sort_c determines whether tokens are stored in C in the order determined
     # by sorted_token_ids to enable later TMA loads from this tensor.
@@ -1122,16 +1132,19 @@ def _fused_moe_lora_kernel(
             )
             a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
 
-        # Cast operands to matching dtype for tl.dot. On ROCm, Triton's
-        # compiler may infer different types for a and b when merging
-        # if/else branches (TMA desc path returns fp32, tl.load returns
-        # the pointer's element type).
-        accumulator += tl.dot(a.to(tl.bfloat16), b.to(tl.bfloat16))
+        # Cast operands to the input dtype for tl.dot. On ROCm, Triton's
+        # compiler may infer different types for a and b when merging if/else
+        # branches (TMA desc path returns fp32, tl.load returns the pointer's
+        # element type). Casting to bfloat16 here silently changes fp16 LoRA
+        # operands and can produce incorrect results.
+        dot_dtype = a_ptr.dtype.element_ty
+        accumulator += tl.dot(a.to(dot_dtype), b.to(dot_dtype))
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
         accumulator = accumulator * moe_weight[:, None]
-    accumulator = accumulator.to(c_ptr.dtype.element_ty)
+    if not FP32_ADD_INPUTS:
+        accumulator = accumulator.to(c_ptr.dtype.element_ty)
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = _get_c_ptrs(
@@ -1152,6 +1165,8 @@ def _fused_moe_lora_kernel(
     if SPLIT_K == 1:
         if ADD_INPUTS:
             prev = tl.load(c_ptrs, mask=c_mask, other=0.0)
+            if FP32_ADD_INPUTS:
+                prev = prev.to(tl.float32)
             tl.store(c_ptrs, prev + accumulator, mask=c_mask)
         else:
             tl.store(c_ptrs, accumulator, mask=c_mask)
@@ -1207,6 +1222,7 @@ def _fused_moe_lora_shrink(
         "SPLIT_K": split_k,
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
+        "FP32_ADD_INPUTS": False,
         "USE_TMA": use_tma,
     }
 
@@ -1314,6 +1330,7 @@ def _fused_moe_lora_expand(
     offset: int = 0,
     use_gdc: bool = False,
     use_tma: bool = False,
+    add_inputs: bool = True,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
@@ -1335,6 +1352,7 @@ def _fused_moe_lora_expand(
         "SPLIT_K": 1,  # Set split_k = 1 for expand calls
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
+        "FP32_ADD_INPUTS": device.type == "xpu",
         "USE_TMA": use_tma,
     }
 
@@ -1404,7 +1422,7 @@ def _fused_moe_lora_expand(
         token_mapping_factor=1,
         naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
-        ADD_INPUTS=True,
+        ADD_INPUTS=add_inputs,
         USE_B_L2_CACHE=True,
         sort_c=False,
         IS_PRIMARY=False,
@@ -1474,7 +1492,7 @@ def _fused_moe_lora(
     assert top_k_num == topk_weights.shape[1]
 
     # Fast path: single fused kernel
-    if not fully_sharded:
+    if not fully_sharded and max_lora_rank <= _FUSED_MOE_LORA_ONE_SHOT_MAX_RANK:
         M_pairs = topk_weights.numel()
         if (
             sorted_token_ids is None
@@ -1520,9 +1538,8 @@ def _fused_moe_lora(
         )
         return
 
-    assert add_inputs, (
-        "fused_moe_lora(add_inputs=False) is only supported on the "
-        "fully_sharded=False fast path"
+    assert add_inputs or not fully_sharded, (
+        "fused_moe_lora(add_inputs=False) is not supported with fully_sharded=True"
     )
 
     device = qcurr_hidden_states.device
@@ -1656,6 +1673,7 @@ def _fused_moe_lora(
         offset,
         use_gdc=use_gdc,
         use_tma=use_tma,
+        add_inputs=add_inputs,
     )
 
 

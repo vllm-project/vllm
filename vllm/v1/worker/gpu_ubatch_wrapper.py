@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -8,7 +9,6 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
@@ -89,7 +89,7 @@ class UBatchWrapper:
 
         self.sm_control = create_sm_control_context(vllm_config.parallel_config)
         self.device = device
-        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.is_debugging_mode = logger.isEnabledFor(logging.DEBUG)
         self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
     @property
@@ -213,6 +213,7 @@ class UBatchWrapper:
     def _run_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
         @torch.inference_mode()
         def _ubatch_thread(results, model, ubatch_metadata):
+            torch.accelerator.set_device_index(self.device)
             with ubatch_metadata.context:
                 model_output = model(
                     input_ids=ubatch_metadata.input_ids,
@@ -291,6 +292,7 @@ class UBatchWrapper:
             compute_stream=compute_stream,
             forward_contexts=forward_contexts,
             ready_barrier=self.ready_barrier,
+            token_offsets=[s.token_slice.start for s in ubatch_slices],
         )
 
         ubatch_metadata: list[UbatchMetadata] = []

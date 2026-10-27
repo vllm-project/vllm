@@ -3,22 +3,22 @@
 
 import os
 
-from transformers import AutoConfig, DeepseekV2Config, PretrainedConfig
+from transformers import AutoConfig, DeepseekV2Config, PreTrainedConfig
 
 from vllm.transformers_utils.utils import without_trust_remote_code
 
 
-class EAGLEConfig(PretrainedConfig):
+class EAGLEConfig(PreTrainedConfig):
     model_type = "eagle"
 
     def __init__(
         self,
-        model: PretrainedConfig | dict | None = None,
+        model: PreTrainedConfig | dict | None = None,
         truncated_vocab_size: int | None = None,
         method: str | None = "eagle",
         **kwargs,
     ):
-        model_config: PretrainedConfig | DeepseekV2Config | None
+        model_config: PreTrainedConfig | DeepseekV2Config | None
         if isinstance(model, dict):
             model_config = AutoConfig.for_model(**model)
         else:
@@ -68,7 +68,9 @@ class EAGLEConfig(PretrainedConfig):
             )
             kwargs["architectures"] = [
                 arch
-                if arch.startswith("DFlash") or arch.endswith("DFlash")
+                if arch.startswith("DFlash")
+                or arch.endswith("DFlash")
+                or arch == "LiLiCorrDraftModel"
                 else f"DFlash{arch}"
                 for arch in self.model.architectures
             ]

@@ -257,6 +257,7 @@ def do_shrink_kernel(
     output_d0_stride,
     output_d1_stride,
     output_d2_stride,
+    output_split_stride,
     scaling,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -265,6 +266,7 @@ def do_shrink_kernel(
     SPLIT_K: tl.constexpr,
     SLICE_NUM: tl.constexpr,
     USE_GDC: tl.constexpr,
+    STORE_PARTIALS: tl.constexpr,
 ):
     """Given an array of integers that identifies the rows of A, ram,
     a lora index that identifies which LoRA to use from lora_ptr, lora_index,
@@ -324,17 +326,31 @@ def do_shrink_kernel(
     # Identify the C output pointers to store the results of the accumulator.
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
     offset_cm = tl.arange(0, BLOCK_M)
-    cur_out_ptr = out_ptr if SLICE_NUM == 1 else out_ptr + slice_id * output_d0_stride
+    if STORE_PARTIALS:
+        cur_out_ptr = (
+            out_ptr
+            + slice_id.to(tl.int64) * output_d0_stride
+            + pid_sk.to(tl.int64) * output_split_stride
+        )
+    else:
+        cur_out_ptr = (
+            out_ptr if SLICE_NUM == 1 else out_ptr + slice_id * output_d0_stride
+        )
     c_ptr = (
         cur_out_ptr
         + ram[:, None] * output_d1_stride
         + offset_cn[None, :] * output_d2_stride
     )
     c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :] < N)
-    accumulator *= scaling
 
-    # handles write-back with reduction-splitting
-    if SPLIT_K == 1:
+    if STORE_PARTIALS:
+        # Unscaled FP32 partial per K split; the reducer adds the splits in a
+        # fixed order and applies scaling once.
         tl.store(c_ptr, accumulator, mask=c_mask)
     else:
-        tl.atomic_add(c_ptr, accumulator, mask=c_mask, sem="relaxed")
+        accumulator *= scaling
+        # handles write-back with reduction-splitting
+        if SPLIT_K == 1:
+            tl.store(c_ptr, accumulator, mask=c_mask)
+        else:
+            tl.atomic_add(c_ptr, accumulator, mask=c_mask, sem="relaxed")

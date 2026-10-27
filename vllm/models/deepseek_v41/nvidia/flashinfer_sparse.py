@@ -9,14 +9,15 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
-from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
-    compute_fp8_einsum_recipe,
-    deep_gemm_fp8_o_proj,
-)
+from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.common.ops import (
     build_flashinfer_mixed_sparse_indices,
     compute_global_topk_indices_and_lens,
+)
+from vllm.models.deepseek_v41.nvidia.ops.o_proj import (
+    dsv41_o_proj,
+    register_dsv41_o_proj_warmup,
 )
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
@@ -30,11 +31,13 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -113,7 +116,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
 
     @staticmethod
@@ -177,15 +180,35 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
 
 
 class DeepseekV4FlashInferSparseMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
-    """Varlen-capable metadata builder for the FlashInfer sparse MLA backend."""
+    """Varlen-decode-capable metadata builder for the FlashInfer sparse MLA backend."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode replays use device request boundaries; prefill metadata is
+        # not graph-safe.
+        return max_decode_query_len(vllm_config)
 
 
 class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekV41SparseSWAMetadataBuilder):
     """SWA metadata for the FlashInfer sparse decode path (varlen decode)."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode replays use device request boundaries; prefill metadata is
+        # not graph-safe.
+        return max_decode_query_len(vllm_config)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -205,23 +228,35 @@ class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekV41SparseSWAMetadataBui
         metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build, replay_start
         )
-        num_tokens = metadata.num_decode_tokens
-        if not common_attn_metadata.causal and num_tokens > 0:
-            assert metadata.decode_swa_lens is not None
-            assert metadata.seq_lens is not None
-            assert metadata.token_to_req_indices is not None
-            topk_lens = self._decode_topk_lens[:num_tokens]
-            seq_lens = self._decode_seq_lens[:num_tokens]
-            torch.clamp(metadata.decode_swa_lens, min=self.window_size, out=topk_lens)
-            torch.index_select(
-                metadata.seq_lens,
-                0,
-                metadata.token_to_req_indices[:num_tokens],
-                out=seq_lens,
-            )
-            metadata.flashinfer_decode_topk_lens = topk_lens
-            metadata.flashinfer_decode_seq_lens = seq_lens
+        if not common_attn_metadata.causal and metadata.num_decode_tokens > 0:
+            self._fill_noncausal_decode_lens(metadata)
         return metadata
+
+    def update_draft_decode_metadata(
+        self, metadata: "DeepseekSparseSWAMetadata"
+    ) -> None:
+        super().update_draft_decode_metadata(metadata)
+        if metadata.flashinfer_decode_topk_lens is not None:
+            self._fill_noncausal_decode_lens(metadata)
+
+    def _fill_noncausal_decode_lens(
+        self, metadata: "DeepseekSparseSWAMetadata"
+    ) -> None:
+        num_tokens = metadata.num_decode_tokens
+        assert metadata.decode_swa_lens is not None
+        assert metadata.seq_lens is not None
+        assert metadata.token_to_req_indices is not None
+        topk_lens = self._decode_topk_lens[:num_tokens]
+        seq_lens = self._decode_seq_lens[:num_tokens]
+        torch.clamp(metadata.decode_swa_lens, min=self.window_size, out=topk_lens)
+        torch.index_select(
+            metadata.seq_lens,
+            0,
+            metadata.token_to_req_indices[:num_tokens],
+            out=seq_lens,
+        )
+        metadata.flashinfer_decode_topk_lens = topk_lens
+        metadata.flashinfer_decode_seq_lens = seq_lens
 
 
 class DeepseekSparseSWAFlashInferBackend(DeepseekSparseSWABackend):
@@ -242,27 +277,14 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         return _pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        o = attn_out[:, : self.n_local_heads, :]
-        return deep_gemm_fp8_o_proj(
-            o,
-            positions,
-            self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self._wo_b_proj,
-            n_groups=self.n_local_groups,
-            heads_per_group=self.n_local_heads // self.n_local_groups,
-            nope_dim=self.nope_head_dim,
-            rope_dim=self.rope_head_dim,
-            o_lora_rank=self.o_lora_rank,
-            einsum_recipe=self._einsum_recipe,
-            tma_aligned_scales=self._tma_aligned_scales,
-        )
+        return dsv41_o_proj(self, attn_out, positions)
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe(
             self._o_proj_block_size
         )
+        register_dsv41_o_proj_warmup(self)
         # Per-tensor FP8 scale buffers + precomputed scalar BMM scales. Only the
         # per-tensor FP8 cache path consumes these; bf16 reads ``self.scale``.
         if self.kv_cache_torch_dtype != torch.float8_e4m3fn:
@@ -560,6 +582,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 swa_kv_cache=swa_k_cache,
                 workspace_buffer=workspace,
                 sparse_indices=sparse_indices[:num_decode_tokens],
+                sparse_indices_are_storage_offsets=True,
                 compressed_kv_cache=compressed_kv_cache,
                 sparse_topk_lens=decode_topk_lens,
                 seq_lens=decode_seq_lens,
@@ -585,6 +608,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 swa_kv_cache=swa_k_cache,
                 workspace_buffer=workspace,
                 sparse_indices=sparse_indices[num_decode_tokens:num_tokens],
+                sparse_indices_are_storage_offsets=True,
                 compressed_kv_cache=compressed_kv_cache,
                 sparse_topk_lens=sparse_topk_lens[num_decode_tokens:num_tokens],
                 seq_lens=seq_lens[num_decodes:num_reqs],
@@ -621,21 +645,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         return _pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        o = attn_out[:, : self.n_local_heads, :]
-        return deep_gemm_fp8_o_proj(
-            o,
-            positions,
-            self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self._wo_b_proj,
-            n_groups=self.n_local_groups,
-            heads_per_group=self.n_local_heads // self.n_local_groups,
-            nope_dim=self.nope_head_dim,
-            rope_dim=self.rope_head_dim,
-            o_lora_rank=self.o_lora_rank,
-            einsum_recipe=self._einsum_recipe,
-            tma_aligned_scales=self._tma_aligned_scales,
-        )
+        return dsv41_o_proj(self, attn_out, positions)
 
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
