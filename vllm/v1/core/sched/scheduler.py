@@ -480,6 +480,11 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+        # Waiting requests refused KV cache blocks: the reasons each has been
+        # counted for while waiting, and the refusals by reason since the last
+        # stats.
+        self._kv_refusal_reasons: dict[str, set[str]] = {}
+        self._num_kv_admission_refusals: dict[str, int] = {}
 
         # Requests with an async KV load, by stage (KV_FETCH_STAGES).
         # None when not tracked (stats disabled or no KV connector).
@@ -1442,12 +1447,14 @@ class Scheduler(SchedulerInterface):
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
+                    self._record_kv_refusal(request)
 
                     # NOTE: we need to untouch the request from the encode cache
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
+                self._kv_refusal_reasons.pop(request.request_id, None)
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -3007,6 +3014,7 @@ class Scheduler(SchedulerInterface):
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
         self._inflight_prefills.discard(request)
+        self._kv_refusal_reasons.pop(request.request_id, None)
         self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
@@ -3231,6 +3239,8 @@ class Scheduler(SchedulerInterface):
         )
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
+        kv_admission_refusals = self._num_kv_admission_refusals
+        self._num_kv_admission_refusals = {}
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
@@ -3240,6 +3250,7 @@ class Scheduler(SchedulerInterface):
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
+            kv_admission_refusals=kv_admission_refusals,
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
@@ -3373,6 +3384,21 @@ class Scheduler(SchedulerInterface):
             if stage is not None:
                 kv_fetch_stages[request] = stage
                 self._kv_fetch_counts[stage] += 1
+
+    def _record_kv_refusal(self, request: Request) -> None:
+        """Count a refused admission at most once per request and reason while
+        the request waits: the queue head is retried every step, and its reason
+        can flip as free blocks hover around a threshold."""
+        reason = self.kv_cache_manager.last_refusal_reason
+        if reason is None:
+            return
+        counted = self._kv_refusal_reasons.setdefault(request.request_id, set())
+        if reason in counted:
+            return
+        counted.add(reason)
+        self._num_kv_admission_refusals[reason] = (
+            self._num_kv_admission_refusals.get(reason, 0) + 1
+        )
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""

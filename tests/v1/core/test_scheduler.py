@@ -3440,6 +3440,103 @@ def test_pause_new_drains_async_kv_loads(load_done_before_pause: bool):
     assert queued.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
+def test_stats_report_kv_admission_refusals():
+    """SchedulerStats count waiting requests refused KV cache blocks, by the
+    reason allocate_slots refused them, once per request and reason."""
+    block_size = 16
+    # 6 usable blocks (+ the null block).
+    scheduler = create_scheduler(num_blocks=7, block_size=block_size)
+    manager = scheduler.kv_cache_manager
+    manager.watermark_blocks = 2
+    first, second, third = create_requests(
+        num_requests=3, num_tokens=3 * block_size, block_size=block_size
+    )
+
+    # `first` takes 3 blocks. With it running, `second` needs 3 of the 3 free
+    # blocks plus the 2-block watermark.
+    scheduler.add_request(first)
+    scheduler.add_request(second)
+    scheduler.schedule()
+    assert first.status == RequestStatus.RUNNING
+    assert second.status == RequestStatus.WAITING
+    # Retried every step, but counted once.
+    scheduler.schedule()
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.kv_admission_refusals == {"watermark": 1}
+
+    # Without the watermark `second` fits; `third` then finds no free blocks.
+    manager.watermark_blocks = 0
+    scheduler.add_request(third)
+    scheduler.schedule()
+    assert second.status == RequestStatus.RUNNING
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.kv_admission_refusals == {"insufficient_free_blocks": 1}
+    assert set(scheduler._kv_refusal_reasons) == {third.request_id}
+
+    # A finished request is forgotten.
+    scheduler.finish_requests(third.request_id, RequestStatus.FINISHED_ABORTED)
+    assert not scheduler._kv_refusal_reasons
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.kv_admission_refusals == {}
+
+
+def test_kv_refusal_reason_inflight_load_reserve():
+    """A request that would fit without the in-flight load reserve is refused
+    for it."""
+    block_size = 16
+    scheduler = create_scheduler(num_blocks=7, block_size=block_size)
+    manager = scheduler.kv_cache_manager
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3 * block_size, block_size=block_size
+    )
+    assert manager.allocate_slots(request, 3 * block_size, reserved_blocks=4) is None
+    assert manager.last_refusal_reason == "inflight_load_reserve"
+    big = create_requests(
+        num_requests=1, num_tokens=7 * block_size, block_size=block_size
+    )[0]
+    assert manager.allocate_slots(big, 7 * block_size) is None
+    assert manager.last_refusal_reason == "exceeds_pool_capacity"
+    # A successful allocation clears the reason.
+    assert manager.allocate_slots(request, 3 * block_size) is not None
+    assert manager.last_refusal_reason is None
+
+
+def test_kv_refusal_counted_once_per_reason_while_waiting():
+    """A waiting request whose refusal reason flips as free blocks hover
+    around the watermark is counted at most once per reason."""
+    block_size = 16
+    # 6 usable blocks (+ the null block).
+    scheduler = create_scheduler(num_blocks=7, block_size=block_size)
+    manager = scheduler.kv_cache_manager
+    manager.watermark_blocks = 4
+    waiting, other = create_requests(
+        num_requests=2, num_tokens=4 * block_size, block_size=block_size
+    )
+    # The watermark applies to waiting requests only.
+    other.status = RequestStatus.RUNNING
+    reasons = []
+    for other_holds_blocks in (False, True, False, True):
+        if other_holds_blocks:
+            assert manager.allocate_slots(other, 4 * block_size) is not None
+        # `waiting` needs 3 blocks: 6 free fit only without the 4-block
+        # watermark, and the 2 left while `other` holds 4 don't fit at all.
+        assert manager.allocate_slots(waiting, 3 * block_size) is None
+        reasons.append(manager.last_refusal_reason)
+        scheduler._record_kv_refusal(waiting)
+        if other_holds_blocks:
+            manager.free(other)
+    assert reasons == ["watermark", "insufficient_free_blocks"] * 2
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.kv_admission_refusals == {
+        "watermark": 1,
+        "insufficient_free_blocks": 1,
+    }
+
+
 def test_pause_new_ignores_streaming_session_waiting_for_input():
     """A session idle in WAITING_FOR_STREAMING_REQ cannot progress, so it must
     not keep a PAUSED_NEW drain from completing."""

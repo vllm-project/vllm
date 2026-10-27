@@ -19,6 +19,7 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import ADMISSION_REFUSAL_REASONS, SchedulerStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -329,5 +330,33 @@ def test_watermark_requests_counter_registration(with_config: bool):
         PrometheusStatLogger(config)
         names = {m.name for m in prometheus_client.REGISTRY.collect()}
         assert ("vllm:watermark_requests" in names) == with_config
+    finally:
+        unregister_vllm_metrics()
+
+
+def test_kv_admission_refusals_counter():
+    """Every reason is exported per engine from startup at 0, and each engine's
+    SchedulerStats increment only that engine's counters."""
+    config = build_logger_config(ObservabilityConfig())
+    stats = SchedulerStats(
+        kv_admission_refusals={"watermark": 2, "insufficient_free_blocks": 1}
+    )
+    try:
+        logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
+        logger.record(scheduler_stats=stats, iteration_stats=None, engine_idx=1)
+        # An unknown reason is ignored rather than breaking stat logging.
+        logger.record(
+            scheduler_stats=SchedulerStats(kv_admission_refusals={"unknown": 1}),
+            iteration_stats=None,
+            engine_idx=1,
+        )
+        for engine in (0, 1):
+            for reason in ADMISSION_REFUSAL_REASONS:
+                expected = stats.kv_admission_refusals.get(reason, 0) * engine
+                value = prometheus_client.REGISTRY.get_sample_value(
+                    "vllm:kv_admission_refusals_total",
+                    {"model_name": TEST_MODEL, "engine": str(engine), "reason": reason},
+                )
+                assert value == expected, (engine, reason)
     finally:
         unregister_vllm_metrics()
