@@ -3370,3 +3370,118 @@ de boucle, dedup à l'émission. PRs = P5, pas avant. Q42 close au registre.
 **Registre** : Q41 (VRAM/0.73) reste ouverte — mesure du cycle : 22 076 MiB en
 charge, sous la ligne d'alerte ; le pic à re-mesurer reste le critère. Q42 close
 (poursuite du travail + v2).
+
+## 27/10 06:1xZ — hairpin RÉTABLI, breaker condensation = récurrence client connue, clé inconnue en 401, nbaudit toujours 0 picked
+
+**Moteur sain, 4 h sans restart.** health **200 @3,8 ms**, RC=0, `StartedAt`
+02:15:05Z inchangé (aucun restart depuis le boot), 3 conteneurs Up, OOM 0,
+`/dev/shm` **24G/63G (39 %)** = le tier lui-même, aucun orphelin. **VRAM GPU 0
+22 347 → 22 354 MiB en charge** (GPU 1 21 650, GPU 2 98 libre) : sous la ligne
+23 500, donc Q41 reste non tranchée — le pic de 23 600 mesuré avant reboot n'est
+pas reproduit ce cycle.
+
+**Amortissement** : prefix **90,6 %** (40,58 M / 44,78 M), **external tier hit
+29,4-33,0 %**, tier fs **lu 11,52 Go** / soumis 13,41 Go (rappel : `write_bytes`
+compte les octets SOUMIS), **439 chunk-hits fs** vs 2 137 primary. **Préemptions
+0**. Watchdog **3 801 sondes OK**, **aucun WEDGE depuis 03:11Z** ; les deux
+`fail 1/2` de 03:03/03:11 sont ceux de la famine de re-prefill post-boot déjà
+documentée, jamais 2/2.
+
+**Hôte** : marge commit **73,5 %** (102 Go libres, seuil 85 % non franchi),
+G: écriture OK (579 Go libres), pruneur **05:50:02Z** (76 fichiers / 1,99 Go
+supprimés, 0 erreur, tier ramené au cap), census `ok:true` 05:25Z — les deux
+tâches du hotfix VBS toujours vivantes après le reboot.
+
+### ★ Hairpin 443 : RÉTABLI, et cible LAN désignée
+
+Mesure depuis ai-01 06:28Z : `https://api.medium.…myia.io/v1/models` →
+**401 en 0,030 / 0,007 / 0,017 s**, contre **000 en 21,1 s ×3** hier 03:50Z
+(aucun TCP). po-2025:claudish mesure la même résorption de son côté (entrée
+`models.myia.io` 200 en 0,53 s ; endpoint swift 401 en 0,3 s depuis l'hôte,
+401 immédiat depuis le conteneur hub). **Les deux extrémités concordent ⇒ classe
+ECONNRESET close, moteur exonéré des deux côtés**, porte R de #704 reprenable.
+Claudish a reclassé le durcissement en « optionnel structurel », pas en « fix
+d'une panne active » — d'accord, et tracé dans la réponse.
+
+**Cible LAN garantie livrée** : `http://192.168.0.47:5002/v1`
+(`/health` → 200 en 3,9 ms ; le port écoute **`0.0.0.0:5002`**, donc toute la
+LAN). **Piège mesuré, à ne pas manquer** : `myia-ai-01.home` résout en **4
+adresses** — 2 IPv6 globales, l'IPv4 `192.168.0.47`, **et une APIPA
+`169.254.227.197`** — alors que le moteur **n'écoute qu'en IPv4** (`netstat` :
+`0.0.0.0:5002`, aucune ligne `[::]:5002`). Un client qui préfère IPv6 ou tombe
+sur l'APIPA échoue sur un service sain ⇒ **littéral IPv4**, ou nom avec
+préférence IPv4 forcée. Reste non vérifiable d'ici : que `.47` soit une
+réservation DHCP (si non, le littéral se périmera en silence).
+
+### Breaker condensation ouvert 2× — récurrence d'un défaut CLIENT connu, pas un fait neuf
+
+`Condensation circuit breaker OPENED` à **04:35:40Z** et **06:01:22Z**
+(`consecutiveFailures: 3`, reset 30 min) → repli cloud, **dégradation
+gracieuse**. Déclencheur lu avec son contexte : `LLM status update timeout:
+89 781 ms` à 06:00:53Z. **Le moteur n'est pas en cause et je le montre** : sur
+la fenêtre du timeout (05:56-06:01) KV **14-27 %**, `Running` 1-4, `Waiting` 0
+sauf une fois `Deferred: 1`, aucun empilement ; à 06:2xZ deux petites
+complétions répondent **0,21 s / 0,35 s**. Et la cause est **déjà diagnostiquée
+au dashboard** : budget de génération côté client ~4,1 K tokens = 100-200 s >
+timeout 90 s, résumé 0,5-1 K = 12-50 s passe, **moteur disculpé (file p90
+0,8 s, TTFT p90 20 s)**, suivi po-2028 [#3962].
+
+⇒ **Ce n'est donc pas un fait nouveau et je ne l'escalade pas.** La leçon du
+21/10 s'applique exactement : sans lire le contexte, ce WARN se serait relayé
+comme une panne prod, alors qu'il est la signature attendue d'un défaut client
+en cours de correction ailleurs.
+
+### Observation à instruire : JIT Triton pendant l'inférence (récurrent)
+
+**21 warnings `jit_monitor` depuis le 25/10**, dont ce cycle
+`_fused_mm_input_norm_kernel` à **05:47:38** et `_topp_sb_{stats,step,mask}`
+à **03:50:30**. Le moniteur est en `jit_monitor_mode=warn` et le message est
+explicite : « This causes a latency spike ». `enable_jit_warmup=True` est
+pourtant armé — **il ne couvre donc pas ces formes** (sampling top-p, fused
+mm+norm). Piste concrète et non engageante : étendre le warmup à ces
+shapes/configs au boot, plutôt que de compiler la première fois sous trafic.
+Non instruit plus loin ce cycle (aucune preuve que ces JIT soient la cause du
+timeout de 06:00 — l'écart est de 13 min).
+
+### Sécurité — une empreinte de clé inconnue, en 401 seulement
+
+1 295 requêtes / 6 h : **1 234×200, 59×401, 2×400**. Clés : MEDIUM
+`be312daf7c1c` **96 %** ; clé morte connue `1f7f6080cb65` 44 ; `NONE` 13 ;
+**★ nouvelle empreinte `b72157f4bb61` = 2 requêtes**, toutes deux **401** sur
+`/v1/models` en `curl`, **locales** (aucun `x_forwarded_for`), à 03:27:13Z et
+05:45:09Z.
+
+Attribution : la formule du middleware est
+`auth_prefix = authorization[:24] + "..."` ⇒ `sha256("Bearer " + clé)[:12]`.
+Recalculée sur `.env`, elle redonne bien `be312daf7c1c` pour **MEDIUM** (formule
+confirmée) et **aucune** des trois clés (`MEDIUM`, `MINI`, `MICRO`) ne produit
+`b72157f4bb61`. ⇒ **consommateur local détenant une clé morte**, très
+probablement l'ancienne clé MEDIUM d'avant la rotation du 30/09. Rejeté, **pas
+une intrusion** ; profil = sonde `/v1/models`, pas de trafic d'inférence. À
+surveiller s'il passe en rafale (ce serait alors un process à reconfigurer).
+
+**IP externes avec 200** : `90.65.170.144` (486 — hairpin/site, **connue**) et
+`82.66.89.184` (2 — poste Paris du user, **connue**). **Aucune IP inconnue.**
+Corps : **420 / 1 295 en 100K-1M** (32 %), 0 au-delà de 1 Mo ⇒ le long contexte
+domine toujours.
+
+### nbaudit : périmètre `Image/` armé, et toujours 0 picked
+
+`last-result.json` 06:05:59Z `ok:true`, rc 0, **`subpath: ["19451:Image/"]`**.
+Mais le log horaire dit, à chaque passage :
+`#19451 NanoClaw: 83 to audit (129 audited in comments), 6 fresh ahead, 0 picked`
+— et les 8 records régénérés sont **jetés** (`record(s) superseded, already
+audited by the bot`). Les 4 autres séries sont à 0 (périmètre épuisé). Bilan :
+**sain, et toujours improductif** ⇒ confirmation directe du diagnostic de
+[#228](https://github.com/jsboige/vllm/issues/228) : le `subpath` n'est pas le
+levier, c'est **l'unité de travail** qui doit changer (finding vérifiable +
+tapis roulant). Le « 83 to audit → 0 picked » reste le point à comprendre au
+moment d'écrire P1/P4, pas avant.
+
+**Ouverture (hors lane)** : po-2023 a son Docker Desktop briqué (session 0,
+00:17Z) — service embeddings public en 502. Rien à faire depuis vllm (infra d'un
+autre workspace : demander, pas appliquer).
+
+**Registre** : Q41 (VRAM/0.73) toujours ouverte seule — aucun critère d'échec
+rempli ce cycle (22 354 MiB en charge, sous 23 500), risque non démontré mais
+non levé. Cron réarmé 2 h, un seul job.
