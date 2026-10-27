@@ -249,7 +249,8 @@ class QuarkOCP_MX(QuarkScheme):
             self.ocp_mx_linear = init_mxfp8_linear_kernel(
                 weight_shape=layer.weight.shape
             )
-            expose_input_quant_key(layer, self.ocp_mx_linear)
+            if current_platform.is_rocm():
+                expose_input_quant_key(layer, self.ocp_mx_linear)
         else:
             raise NotImplementedError(
                 "No OCP MX linear kernel for weight_quant_key="
