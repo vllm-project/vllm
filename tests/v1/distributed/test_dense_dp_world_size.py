@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import pytest
 import requests
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -155,7 +155,13 @@ def test_pcp_dp_with_auto_numa():
     with RemoteOpenAIServer(
         "deepseek-ai/DeepSeek-V2-Lite-Chat",
         server_args,
-        env_dict={"VLLM_SERVER_DEV_MODE": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
+        env_dict={
+            "VLLM_SERVER_DEV_MODE": "1",
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+            "PYTHONPATH": os.pathsep.join(
+                filter(None, [str(VLLM_PATH), os.environ.get("PYTHONPATH")])
+            ),
+        },
         max_wait_seconds=1200,
     ) as server:
         completion = server.get_client().completions.create(
