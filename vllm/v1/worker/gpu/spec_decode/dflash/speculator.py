@@ -44,23 +44,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         parallel_config = vllm_config.parallel_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
-        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_sliding
-
-        draft_model_config = speculative_config.draft_model_config
-        # Windowed draft layers cannot shard over DCP, so any of them keeps the
-        # whole draft at DCP=1 (replicated cache).
-        draft_has_window = draft_model_config.get_sliding_window() is not None or (
-            dflash_has_any_sliding(draft_model_config.hf_config)
-        )
         vllm_config = copy.copy(vllm_config)
         vllm_config.parallel_config = replace(
             parallel_config,
             prefill_context_parallel_size=1,
-            decode_context_parallel_size=(
-                parallel_config.decode_context_parallel_size
-                if draft_model_config.use_mla and not draft_has_window
-                else 1
-            ),
+            decode_context_parallel_size=speculative_config.draft_decode_context_parallel_size,
         )
         super().__init__(vllm_config, device)
 

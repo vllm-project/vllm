@@ -2070,6 +2070,29 @@ def test_draft_parallel_config_preserves_ep_without_model(
     assert target_parallel_config.enable_expert_parallel is target_ep
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [(None, 4), (1, 1), (4, 4), (2, ValueError)],
+)
+def test_draft_decode_context_parallel_size(configured, expected):
+    """The draft defaults to the target's DCP; an explicit value must be 1 or
+    the target's."""
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=4, decode_context_parallel_size=4
+    )
+    if expected is ValueError:
+        with pytest.raises(ValueError, match="draft_dcp"):
+            SpeculativeConfig._verify_and_get_draft_dcp(
+                target_parallel_config, configured
+            )
+        return
+    assert (
+        SpeculativeConfig._verify_and_get_draft_dcp(target_parallel_config, configured)
+        == expected
+    )
+
+
 @pytest.mark.parametrize(
     ("method", "expected_slots"),
     [

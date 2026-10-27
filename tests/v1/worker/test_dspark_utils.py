@@ -92,18 +92,8 @@ def test_dspark_parallel_config_eplb_by_model_type(
 @pytest.mark.parametrize("pcp_size", [1, 4])
 @pytest.mark.parametrize("dcp_size", [1, 4])
 @pytest.mark.parametrize("use_mla", [False, True])
-@pytest.mark.parametrize(
-    "window_config",
-    [
-        {},
-        {"sliding_window": 2051},
-        # Windowed layers resolved from the DFlash config alone.
-        {"dflash_config": {"use_swa": True, "swa_window_size": 2051}},
-        {"layer_types": ["full_attention", "sliding_attention"]},
-    ],
-)
 def test_draft_context_parallelism_without_changing_target(
-    monkeypatch, pcp_size, dcp_size, use_mla, window_config
+    monkeypatch, pcp_size, dcp_size, use_mla
 ):
     target_parallel = ParallelConfig(
         tensor_parallel_size=4,
@@ -115,11 +105,7 @@ def test_draft_context_parallelism_without_changing_target(
     target_config = SimpleNamespace(
         parallel_config=target_parallel,
         speculative_config=SimpleNamespace(
-            draft_model_config=SimpleNamespace(
-                use_mla=use_mla,
-                hf_config=SimpleNamespace(**window_config),
-                get_sliding_window=lambda: window_config.get("sliding_window"),
-            )
+            draft_decode_context_parallel_size=dcp_size if use_mla else 1
         ),
     )
 
@@ -135,9 +121,7 @@ def test_draft_context_parallelism_without_changing_target(
     draft_parallel = captured.value.args[0].parallel_config
     assert draft_parallel.tensor_parallel_size == 4
     assert draft_parallel.prefill_context_parallel_size == 1
-    # Only full-attention MLA drafts shard their cache with the target.
-    draft_dcp = dcp_size if use_mla and not window_config else 1
-    assert draft_parallel.decode_context_parallel_size == draft_dcp
+    assert draft_parallel.decode_context_parallel_size == (dcp_size if use_mla else 1)
     assert draft_parallel.cp_kv_cache_interleave_size == 16
     assert target_parallel.prefill_context_parallel_size == pcp_size
     assert target_parallel.decode_context_parallel_size == dcp_size

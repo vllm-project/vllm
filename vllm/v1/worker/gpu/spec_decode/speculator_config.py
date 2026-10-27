@@ -247,6 +247,11 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         spec.draft_tensor_parallel_size = SpeculativeConfig._verify_and_get_draft_tp(
             spec.target_parallel_config, spec.draft_tensor_parallel_size
         )
+        spec.draft_decode_context_parallel_size = (
+            SpeculativeConfig._verify_and_get_draft_dcp(
+                spec.target_parallel_config, spec.draft_decode_context_parallel_size
+            )
+        )
         spec.draft_model_config.max_model_len = (
             SpeculativeConfig._maybe_override_draft_max_model_len(
                 spec.max_model_len,
