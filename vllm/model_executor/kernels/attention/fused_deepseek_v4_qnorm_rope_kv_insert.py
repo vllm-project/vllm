@@ -334,7 +334,7 @@ def _check_common(
             f"{op_name}: the CuTe DSL port is CUDA-only; this platform has "
             "no implementation"
         )
-    if not kv.is_cuda():
+    if not kv.is_cuda:
         raise ValueError(f"{op_name}: kv must be a CUDA tensor")
     if kv.dtype == torch.float16:
         raise NotImplementedError(
