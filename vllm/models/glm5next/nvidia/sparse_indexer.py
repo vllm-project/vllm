@@ -259,13 +259,17 @@ def sparse_attn_indexer_kpool(
                 "mxfp8" if mqa_logits_use_mx_scales() else scale_fmt,
             )
 
-    # ShardQ step: score only this rank's tokens and write their top-k
-    # compactly to the first rows, as the token-sharded attention reads them.
+    # ShardQ step: score MLA decode rows and this rank's prefill tokens, with
+    # the prefill top-k compactly after the decode rows, as the token-sharded
+    # attention reads them.
     shardq = None
     if shardq_layer_name:
         mla_shardq = getattr(attn_metadata.get(shardq_layer_name), "shardq", None)
         if mla_shardq is not None:
-            shardq = mla_shardq.split
+            shardq = mla_shardq
+            # See sparse_attn_indexer: MLA decodes the indexer treats as
+            # prefill stay in place.
+            assert num_decode_tokens <= shardq.num_decode_tokens
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
@@ -335,10 +339,10 @@ def sparse_attn_indexer_kpool(
             if shardq is not None:
                 # KV gathers above stay unconditional for continuation chunks
                 # that reuse the workspace.
-                lo, hi = np.searchsorted(shardq.local_idx_cpu, (row_start, row_end))
+                lo, hi = np.searchsorted(shardq.indexer_rows_cpu, (row_start, row_end))
                 if lo == hi:
                     continue
-                q_rows = shardq.local_idx[lo:hi]
+                q_rows = shardq.indexer_rows[lo:hi]
                 topk_rows = slice(int(lo), int(hi))
                 chunk_rows = q_rows - row_start
                 cu_seqlen_ks = cu_seqlen_ks[chunk_rows]

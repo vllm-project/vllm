@@ -122,6 +122,30 @@ def maybe_build_shardq_split(
     return make_shardq_split(qsl, tp.world_size, tp.rank_in_group, device)
 
 
+def indexer_rows(
+    split: ShardQSplit, num_decode_tokens: int
+) -> tuple[np.ndarray, torch.Tensor]:
+    """Rows the indexer scores for a step whose prefill tokens follow
+    ``num_decode_tokens`` head-sharded decode tokens, ascending on the host and
+    on ``split``'s device.
+
+    Every rank scores every decode row and its own prefill rows, and writes
+    the top-k of the p-th row to buffer row p: decode rows stay in place, and
+    this rank's prefill rows follow them compactly.
+    """
+    host = np.concatenate(
+        (np.arange(num_decode_tokens), split.local_idx_cpu + num_decode_tokens)
+    )
+    device = split.local_idx.device
+    rows = torch.cat(
+        (
+            torch.arange(num_decode_tokens, device=device),
+            split.local_idx + num_decode_tokens,
+        )
+    )
+    return host, rows
+
+
 def reserve_shardq_buffers(
     max_tokens: int,
     max_reqs: int,

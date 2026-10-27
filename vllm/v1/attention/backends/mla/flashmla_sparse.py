@@ -712,6 +712,8 @@ class FlashMLASparseMetadataBuilder(
 
 class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     supports_shardq: ClassVar[bool] = True
+    # The fp8 mixed-batch kernel metadata covers prefill-only ShardQ steps.
+    supports_shardq_mixed: ClassVar[bool] = False
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True

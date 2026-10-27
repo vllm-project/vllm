@@ -524,9 +524,10 @@ def sparse_attn_indexer(
     if shardq_layer_name:
         mla_shardq = getattr(attn_metadata.get(shardq_layer_name), "shardq", None)
         if mla_shardq is not None:
-            shardq = mla_shardq.split
-            # The MLA decode threshold is at least the indexer's.
-            assert num_decode_tokens == 0
+            shardq = mla_shardq
+            # The MLA decode threshold is at least the indexer's, so rows the
+            # indexer treats as prefill may be MLA decodes; those stay in place.
+            assert num_decode_tokens <= shardq.num_decode_tokens
 
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
@@ -605,14 +606,14 @@ def sparse_attn_indexer(
             q_rows: slice | torch.Tensor = slice(chunk.token_start, chunk.token_end)
             topk_rows = q_rows
             if shardq is not None:
-                # Score only this rank's tokens. KV gathers above stay
-                # unconditional for continuation chunks that reuse the
-                # workspace. The top-k is written compactly, in token order,
-                # for the token-sharded attention.
+                # Score MLA decode rows and this rank's prefill tokens. KV
+                # gathers above stay unconditional for continuation chunks
+                # that reuse the workspace. The top-k is written compactly, in
+                # token order, for the token-sharded attention.
                 lo, hi = np.searchsorted(
-                    shardq.local_idx_cpu, (chunk.token_start, chunk.token_end)
+                    shardq.indexer_rows_cpu, (chunk.token_start, chunk.token_end)
                 )
-                q_rows = shardq.local_idx[lo:hi]
+                q_rows = shardq.indexer_rows[lo:hi]
                 topk_rows = slice(int(lo), int(hi))
                 chunk_rows = q_rows - chunk.token_start
                 cu_seqlen_ks = cu_seqlen_ks[chunk_rows]

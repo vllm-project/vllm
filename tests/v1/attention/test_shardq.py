@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.ops.shardq import (
     fold_split,
+    indexer_rows,
     make_shardq_split,
     shard_q,
     unshard_out,
@@ -36,6 +37,34 @@ def test_fold_split_partitions_tokens(world, lens):
         for idx in per_rank
     ]
     assert max(positions) - min(positions) <= sum(4 * n for n in lens)
+
+
+@pytest.mark.parametrize("num_decode_tokens", [0, 1, 37])
+def test_indexer_rows_cover_decodes_then_local_prefill(num_decode_tokens):
+    """Mixed steps: every rank scores the decode rows in place, then its own
+    prefill tokens compactly; across ranks each prefill row is scored once."""
+    world, lens = 4, [700, 64, 3001]
+    qsl = np.r_[0, np.cumsum(lens)]
+    num_prefill = int(qsl[-1])
+    prefill_rows = []
+    for rank in range(world):
+        split = make_shardq_split(qsl, world, rank, torch.device("cpu"))
+        host, rows = indexer_rows(split, num_decode_tokens)
+        np.testing.assert_array_equal(host, rows.numpy())
+        assert np.all(np.diff(host) > 0)
+        np.testing.assert_array_equal(
+            host[:num_decode_tokens], np.arange(num_decode_tokens)
+        )
+        # Row p of the buffer holds the p-th scored row: this rank's prefill
+        # tokens follow the decode rows in the order the attention reads them.
+        np.testing.assert_array_equal(
+            host[num_decode_tokens:] - num_decode_tokens, split.local_idx_cpu
+        )
+        prefill_rows.append(host[num_decode_tokens:])
+    np.testing.assert_array_equal(
+        np.sort(np.concatenate(prefill_rows)),
+        np.arange(num_decode_tokens, num_decode_tokens + num_prefill),
+    )
 
 
 def _round_trip(rank, world, port, use_sm, q_dtype):

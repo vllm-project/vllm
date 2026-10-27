@@ -52,6 +52,7 @@ from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.shardq import (
     ShardQSplit,
+    indexer_rows,
     maybe_build_shardq_split,
     shard_q,
     unshard_out,
@@ -157,11 +158,20 @@ class SparseMLAPrefillMetadata(MLACommonPrefillMetadata):
 
 @dataclass
 class SparseMLAShardQ:
-    """Token-sharded TP prefill step (see vllm.v1.attention.ops.shardq)."""
+    """Token-sharded TP prefill step (see vllm.v1.attention.ops.shardq).
+
+    In a mixed step the leading decode tokens stay head-sharded; the split
+    covers the prefill tokens, relative to the first of them.
+    """
 
     split: ShardQSplit
-    # Request of each of this rank's tokens.
+    # Request of each of this rank's prefill tokens.
     req_id_per_token: torch.Tensor
+    num_decode_tokens: int
+    # Rows the indexer scores, ascending, on the host and the device
+    # (see vllm.v1.attention.ops.shardq.indexer_rows).
+    indexer_rows_cpu: np.ndarray
+    indexer_rows: torch.Tensor
 
 
 @dataclass(kw_only=True)
@@ -273,8 +283,15 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         # Build ShardQ splits only when a layer consumes them.
         layers = vllm_config.compilation_config.static_forward_context
-        self.use_shardq = any(
-            getattr(layers.get(name), "use_shardq", False) for name in layer_names
+        shardq_layers = [
+            layers[name]
+            for name in layer_names
+            if getattr(layers.get(name), "use_shardq", False)
+        ]
+        self.use_shardq = bool(shardq_layers)
+        # Mixed steps need every consuming impl to handle head-sharded decodes.
+        self.shardq_mixed = all(
+            layer.impl.supports_shardq_mixed for layer in shardq_layers
         )
         self.shardq_min_tokens = (
             vllm_config.attention_config.sparse_mla_shard_q_min_tokens
@@ -450,18 +467,29 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         shardq = None
         if (
             self.use_shardq
-            and num_decodes == 0
+            and num_prefills > 0
+            and (num_decodes == 0 or self.shardq_mixed)
             and not (prefill is not None and prefill.use_dense_mha)
         ):
+            # Split the prefill tokens; decode tokens stay head-sharded.
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
             split = maybe_build_shardq_split(
-                common_attn_metadata.query_start_loc_cpu,
-                common_attn_metadata.num_reqs,
-                common_attn_metadata.num_actual_tokens,
+                query_start_loc_cpu[num_decodes : common_attn_metadata.num_reqs + 1]
+                - num_decode_tokens,
+                num_prefills,
+                common_attn_metadata.num_actual_tokens - num_decode_tokens,
                 self.shardq_min_tokens,
                 self.device,
             )
             if split is not None:
-                shardq = SparseMLAShardQ(split, req_id_per_token[split.local_idx])
+                rows_cpu, rows = indexer_rows(split, num_decode_tokens)
+                shardq = SparseMLAShardQ(
+                    split,
+                    req_id_per_token[split.local_idx + num_decode_tokens],
+                    num_decode_tokens,
+                    rows_cpu,
+                    rows,
+                )
 
         return self.metadata_cls(  # type: ignore[call-arg]
             num_reqs=common_attn_metadata.num_reqs,
@@ -688,6 +716,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     group_conversion_decode_only: ClassVar[bool] = False
     # Whether forward_mqa_shardq is implemented and validated.
     supports_shardq: ClassVar[bool] = False
+    # Whether forward_mqa_shardq also handles a mixed step's decode tokens.
+    supports_shardq_mixed: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -961,11 +991,35 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         assert shardq is not None and self.topk_indices_buffer is not None
         if isinstance(q, tuple):
             q = torch.cat(q, dim=-1)
-        q = shard_q(q, shardq.split)
-        # The indexer wrote this rank's top-k compactly to the first rows.
-        topk = self.topk_indices_buffer[: q.shape[0]]
         block_size = attn_metadata.block_size
         _, block_stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, block_size)
+        num_decode_tokens = shardq.num_decode_tokens
+        decode_out = None
+        if num_decode_tokens:
+            # Decode tokens stay head-sharded; their top-k rows are in place.
+            physical_topk, valid_counts = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_decode_tokens],
+                attn_metadata.block_table,
+                self.topk_indices_buffer[:num_decode_tokens],
+                BLOCK_SIZE=block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=self.topk_indices_buffer.shape[1],
+                return_valid_counts=True,
+            )
+            decode_out, _ = self._forward_mqa_kernel(
+                q[:num_decode_tokens],
+                kv_c_and_k_pe_cache,
+                physical_topk,
+                valid_counts,
+                layer=layer,
+                block_size=block_size,
+                is_decode=True,
+            )
+        q = shard_q(q[num_decode_tokens:], shardq.split)
+        # The indexer wrote this rank's top-k compactly after the decode rows.
+        topk = self.topk_indices_buffer[
+            num_decode_tokens : num_decode_tokens + q.shape[0]
+        ]
         physical_topk, valid_counts = triton_convert_req_index_to_global_index(
             shardq.req_id_per_token,
             attn_metadata.block_table,
@@ -984,7 +1038,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             block_size=block_size,
             is_decode=False,
         )
-        return unshard_out(out, shardq.split)
+        out = unshard_out(out, shardq.split)
+        if decode_out is None:
+            return out
+        return torch.cat((decode_out, out))
 
     def _forward_mqa_kernel(
         self,
