@@ -443,6 +443,7 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                 8 * lane + w
             )
 
+        @cute.jit
         def process_slot(
             token: Int32,
             slot: Int32,
