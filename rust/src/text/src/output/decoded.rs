@@ -14,7 +14,7 @@ use vllm_llm::{FinishReason, GenerateOutput, RequestTimestamps, TokenUsage};
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
 use super::logprobs::{
-    DecodedLogprobs, DecodedPromptLogprobs, decode_logprobs, decode_prompt_logprobs,
+    DecodedLogprobs, DecodedPromptLogprobs, SampledContext, decode_logprobs, decode_prompt_logprobs,
 };
 use crate::error::Error;
 
@@ -127,6 +127,7 @@ pub async fn decoded_text_event_stream(
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
     let mut sampling_mask: Option<SamplingMask> = None;
+    let mut logprob_context = SampledContext::default();
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
@@ -161,12 +162,7 @@ pub async fn decoded_text_event_stream(
                 prompt_logprobs: output
                     .prompt_logprobs()
                     .map(|logprobs| {
-                        decode_prompt_logprobs(
-                            tokenizer.as_ref(),
-                            prompt_token_ids,
-                            logprobs,
-                            decode_options.skip_special_tokens,
-                        )
+                        decode_prompt_logprobs(tokenizer.as_ref(), prompt_token_ids, logprobs)
                     })
                     .transpose()?,
             })
@@ -240,13 +236,7 @@ pub async fn decoded_text_event_stream(
 
         let decoded_logprobs = new_logprobs
             .as_ref()
-            .map(|logprobs| {
-                decode_logprobs(
-                    tokenizer.as_ref(),
-                    logprobs,
-                    decode_options.skip_special_tokens,
-                )
-            })
+            .map(|logprobs| decode_logprobs(tokenizer.as_ref(), logprobs, &mut logprob_context))
             .transpose()?;
 
         if !intermediate {
