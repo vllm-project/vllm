@@ -8,7 +8,8 @@ from typing import TypeVar
 _KernelT = TypeVar("_KernelT", bound=type | Enum)
 
 # Compute capabilities where Humming outranks Marlin.
-_HUMMING_PREFERRED_CAPABILITIES = frozenset({90})
+# SM90 (H100) and SM100 (Blackwell/B200) prefer Humming for int4 g128.
+_HUMMING_PREFERRED_CAPABILITIES = frozenset({90, 100})
 
 
 def prefers_humming(compute_capability: int | None = None) -> bool:
