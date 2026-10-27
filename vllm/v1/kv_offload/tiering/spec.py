@@ -159,7 +159,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.READ_TIME] = OffloadingCounterMetadata(
             documentation=(
                 "Total time spent reading from secondary tiers into the primary "
-                "tier, in seconds, labeled by tier."
+                "tier, in seconds, labeled by tier. Tiers that do not report "
+                "per-job transfer time have no series here. Use "
+                "vllm:kv_offload_tiering_promotion_latency_seconds for "
+                "tier-independent promotion timing."
             ),
             labelnames=(TIER_LABEL,),
         )
@@ -173,7 +176,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.WRITE_TIME] = OffloadingCounterMetadata(
             documentation=(
                 "Total time spent writing from the primary tier to secondary "
-                "tiers, in seconds, labeled by tier."
+                "tiers, in seconds, labeled by tier. Tiers that do not report "
+                "per-job transfer time have no series here."
             ),
             labelnames=(TIER_LABEL,),
         )
@@ -242,6 +246,33 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 "Number of active secondary-tier cascade jobs, labeled by tier."
             ),
             labelnames=(TIER_LABEL,),
+        )
+        metrics[TieringOffloadingMetrics.PROMOTION_LATENCY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of per-job latency for secondary-tier promotion "
+                    "attempts, measured from job creation until the tiering "
+                    "manager observes completion so that tier queueing is "
+                    "included, labeled by tier and result, in seconds. Includes "
+                    "failed attempts."
+                ),
+                labelnames=(TIER_LABEL, "result"),
+                buckets=(
+                    0.005,
+                    0.01,
+                    0.025,
+                    0.05,
+                    0.1,
+                    0.25,
+                    0.5,
+                    1,
+                    2.5,
+                    5,
+                    10,
+                    30,
+                    60,
+                ),
+            )
         )
 
         for tier_config, tier_cls in cls._get_secondary_tiers(extra_config):
@@ -372,6 +403,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     cache_policy_module_path=self.cache_policy_module_path,
                     enable_events=self.kv_events_config.enable_kv_cache_events,
                     mmap_region=scheduler_mmap,
+                    info=self.cpu_info,
                 )
 
                 # Create secondary tiers

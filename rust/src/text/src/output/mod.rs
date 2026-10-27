@@ -90,7 +90,7 @@ impl<T: TextOutputStream> T {
                                 prompt_logprobs: prompt_logprobs.take(),
                                 logprobs: delta_logprobs,
                                 token_ids: delta_token_ids,
-                                finish_reason: FinishReason::Error,
+                                finish_reason: FinishReason::Error(None),
                                 usage: vllm_llm::TokenUsage::default(),
                                 timestamps: vllm_llm::RequestTimestamps::default(),
                                 kv_transfer_params: None,
@@ -178,7 +178,7 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 2,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
@@ -302,7 +302,7 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 5,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,

@@ -58,6 +58,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v4.cpu.cpu_sparse import DeepseekV4CPUAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -216,14 +217,6 @@ class DeepseekV4MoE(nn.Module):
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
         )
-        if is_hash_moe:
-            # apply_monolithic() never sees hash_indices_table via the
-            # router path (modular-only) -- stash it on RoutedExperts
-            # directly. object.__setattr__ avoids nn.Module re-registering
-            # (and duplicating in the state_dict) this alias.
-            object.__setattr__(
-                self.experts.routed_experts, "hash_indices_table", self.gate.tid2eid
-            )
 
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
@@ -532,10 +525,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         self.hc_head_op = HCHeadOp()
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
-        )
-        if get_pp_group().is_last_rank and needs_mtp_hidden_states:
+        if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
