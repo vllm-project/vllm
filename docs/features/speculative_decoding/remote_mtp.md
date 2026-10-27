@@ -28,6 +28,10 @@ or topology in each family. A target with hybrid attention or recurrent layers
 can have a conventional attention-only MTP head. The target's architecture name
 alone does not determine the draft's cache layout.
 
+Exaone MTP modules use the draft checkpoint's module count, attention types and
+sliding windows, including when the draft checkpoint is published separately
+from the target.
+
 The standalone allocator accepts one homogeneous, unquantized full-attention,
 dense MLA, or sliding-window group. It uses the shared vLLM KV allocator and
 retains a null block. Sliding-window attention conservatively reserves the full
