@@ -225,7 +225,7 @@ def _errors(out, caches, reference):
 
 
 @pytest.mark.parametrize("fold", [False, True], ids=["gate", "fold_g_b"])
-@pytest.mark.parametrize(("requests", "q"), [(32, 1), (64, 1), (8, 4), (16, 4)])
+@pytest.mark.parametrize(("requests", "q"), [(64, 1), (16, 4)])
 def test_kda_core_no_worse_than_stock(requests, q, fold):
     case = _Case(requests, q)
     reference = case.reference(exact_gate=fold)

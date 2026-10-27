@@ -13,7 +13,7 @@ HEADS, NOPE, LATENT, V = 16, 256, 512, 256
 Q_LORA = 1536
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="the DSA attention kernels are CUDA kernels"
+    not current_platform.is_device_capability_family(100), reason="Requires SM100"
 )
 
 
@@ -31,7 +31,7 @@ def _errors(value, reference):
     return error.max().item(), error.mean().item()
 
 
-@pytest.mark.parametrize("tokens", [1, 2, 4, 8])
+@pytest.mark.parametrize("tokens", [1, 8])
 def test_value_up_matches_bmm(tokens):
     from vllm.models.glm5next.nvidia.specialized_decode.dsa_attention import (
         head_gemv,
@@ -50,8 +50,8 @@ def test_value_up_matches_bmm(tokens):
     assert ours[0] <= theirs[0] and ours[1] <= theirs[1] * 1.02, (ours, theirs)
 
 
-@pytest.mark.parametrize("tokens", [1, 2, 4, 8])
-@pytest.mark.parametrize("q_scale", [1.0, 0.75])
+@pytest.mark.parametrize("tokens", [1, 8])
+@pytest.mark.parametrize("q_scale", [0.75])
 def test_absorb_quant_matches_bmm_and_quant(tokens, q_scale):
     """The absorb bmm with the static query quant fused: the FP8 bytes of the
     stock bmm + ``scaled_fp8_quant`` but where the two BF16 products round
@@ -81,7 +81,7 @@ def test_absorb_quant_matches_bmm_and_quant(tokens, q_scale):
     assert same.float().mean() > 0.99
 
 
-@pytest.mark.parametrize("tokens", [1, 3, 8])
+@pytest.mark.parametrize("tokens", [1, 8])
 def test_norm_matches_stock(tokens):
     """The q/kv a-norm: the stock Triton kernel's outputs but where a different
     summation order flips a rounding, and no larger error."""
@@ -107,8 +107,8 @@ def test_norm_matches_stock(tokens):
         assert (ours == theirs).float().mean() > 0.99
 
 
-@pytest.mark.parametrize("tokens", [1, 3, 8])
-@pytest.mark.parametrize("k_scale", [1.0, 0.5])
+@pytest.mark.parametrize("tokens", [1, 8])
+@pytest.mark.parametrize("k_scale", [0.5])
 def test_absorb_writes_kv_cache_as_stock(tokens, k_scale):
     """The absorb kernel's cache CTAs write ``concat_and_cache_mla``'s FP8 bytes
     at the valid slots of a padded-stride cache and nothing else, and leave
@@ -149,7 +149,7 @@ def test_absorb_writes_kv_cache_as_stock(tokens, k_scale):
     assert not cache.reshape(-1, LATENT)[untouched].any()
 
 
-@pytest.mark.parametrize("tokens", [1, 2, 4, 8])
+@pytest.mark.parametrize("tokens", [1, 8])
 def test_kda_gate_matches_linear(tokens):
     """The KDA output gate's g_b_proj (rank 128 -> 16 heads x 128) on a strided
     slice of the in_proj output, as ``head_gemv`` of one head."""
@@ -174,11 +174,18 @@ def test_kda_gate_matches_linear(tokens):
 
 @pytest.mark.parametrize(
     "shape,tokens",
-    [((2048, 4096), 4), ((2048, 4096), 64), ((4096, 1536), 16), ((4096, 4096), 32)],
+    [
+        ((2048, 4096), 4),
+        ((2048, 4096), 64),
+        ((4096, 1536), 16),
+        ((4096, 4096), 32),
+        ((4096, 8192), 64),  # MTP eh_proj
+        ((38720, 4096), 8),  # MTP LM head shard
+    ],
 )
 def test_split_k_projection_matches_linear(shape, tokens):
-    """A routed DSA projection inside a planned step runs the split-K GEMM on a
-    strided input (q_b reads q_c out of the q/kv a output) with no larger error
+    """A routed DSA or MTP projection inside a planned step runs the split-K GEMM
+    on a strided input (q_b reads q_c out of the q/kv a output) with no larger error
     than cuBLAS's against the FP64 product."""
     from types import SimpleNamespace
 

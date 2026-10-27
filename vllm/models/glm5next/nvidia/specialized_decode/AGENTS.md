@@ -108,8 +108,9 @@ spec; do not move a crossover on a microbenchmark alone.
   query, kpool, KV cache bytes), match it bit for bit.
 - Tests live under `tests/models/glm5next/test_specialized_decode_*.py`, compare
   against FP64 or naive PyTorch references, and assert the error is no larger
-  than the stock kernel's. 4-GPU tests skip with fewer GPUs; CI has no GB300, so
-  run them locally.
+  than the stock kernel's. They skip off SM100 and the 4-GPU ones with fewer
+  GPUs; CI runs them nightly on 4xB200 (no CI agent has GB300), so run them
+  locally on GB300 before pushing.
 
 ## Validation
 

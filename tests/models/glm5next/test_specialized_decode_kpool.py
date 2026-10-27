@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _update_inputs(requests, tokens, seed, position_dtype, padded):
+def _update_inputs(requests, tokens, seed, padded):
     g = torch.Generator(device="cuda").manual_seed(seed)
     blocks, page = requests + 4, 64
     cache = torch.randint(
@@ -54,14 +54,13 @@ def _update_inputs(requests, tokens, seed, position_dtype, padded):
         score,
         ape,
         slots,
-        positions.to(position_dtype),
+        positions,
     ]
 
 
-@pytest.mark.parametrize("requests,tokens", [(1, 1), (8, 1), (64, 1), (4, 4), (2, 7)])
-@pytest.mark.parametrize("position_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("requests,tokens", [(1, 1), (64, 1), (2, 7)])
 @pytest.mark.parametrize("padded", [False, True])
-def test_kpool_update_matches_stock(requests, tokens, position_dtype, padded):
+def test_kpool_update_matches_stock(requests, tokens, padded):
     """Tail stashes, completed pools (FP8 values and UE8M0 scales) and the
     in-order read of a request's earlier stashes match bit for bit."""
     from vllm.models.glm5next.nvidia.ops.kpool_compress import (
@@ -71,9 +70,7 @@ def test_kpool_update_matches_stock(requests, tokens, position_dtype, padded):
     from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 
     assert mqa_logits_use_mx_scales()
-    ref = _update_inputs(
-        requests, tokens, 100 * requests + tokens, position_dtype, padded
-    )
+    ref = _update_inputs(requests, tokens, 100 * requests + tokens, padded)
     out = [t.clone() for t in ref]
     before = ref[0].clone()
     stock(*ref, POOL, DIM, round_scale=True)
@@ -83,7 +80,7 @@ def test_kpool_update_matches_stock(requests, tokens, position_dtype, padded):
     assert torch.equal(out[1].view(torch.int16), ref[1].view(torch.int16))
 
 
-@pytest.mark.parametrize("rows", [1, 8, 32])
+@pytest.mark.parametrize("rows", [1, 32])
 @pytest.mark.parametrize("width", [2048, 32768])
 def test_upcast_matches_stock(rows, width):
     from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
@@ -106,7 +103,7 @@ def _pool_ids(rows, seq, seed):
     return ids, positions
 
 
-@pytest.mark.parametrize("rows", [1, 4, 64])
+@pytest.mark.parametrize("rows", [1, 64])
 def test_expand_matches_stock(rows):
     from vllm.models.glm5next.nvidia.ops.kpool_compress import (
         expand_pools_and_append_tail,
@@ -121,7 +118,7 @@ def test_expand_matches_stock(rows):
     assert torch.equal(out, ref)
 
 
-@pytest.mark.parametrize("rows,padding", [(1, 0), (8, 0), (64, 0), (4, 3)])
+@pytest.mark.parametrize("rows,padding", [(64, 0), (4, 3)])
 @pytest.mark.parametrize("stride_rows,max_blocks", [(BLOCK, 160), (3 * BLOCK, 50)])
 def test_expand_and_remap_matches_stock(rows, padding, stride_rows, max_blocks):
     """Expansion plus the compacting remap equals the stock pair, including

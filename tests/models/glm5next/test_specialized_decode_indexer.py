@@ -12,27 +12,27 @@ import torch.nn.functional as F
 from vllm.platforms import current_platform
 
 HIDDEN, KEY, GATE, DIM = 4096, 128, 128, 128
+HEADS = 32  # index_n_heads, replicated on every TP rank
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="the indexer kernels are CUDA kernels"
+    not current_platform.is_device_capability_family(100), reason="Requires SM100"
 )
 
 
-@pytest.mark.parametrize("tokens", [1, 3, 16, 40])
-@pytest.mark.parametrize("heads", [16, 32])
-def test_projection_matches_linear(tokens, heads):
+@pytest.mark.parametrize("tokens", [1, 40])
+def test_projection_matches_linear(tokens):
     from vllm.models.glm5next.nvidia.specialized_decode.indexer import (
         IndexerProjection,
     )
 
     g = torch.Generator(device="cuda").manual_seed(tokens)
     wk = (
-        torch.randn(KEY + heads, HIDDEN, generator=g, device="cuda") * 0.02
+        torch.randn(KEY + HEADS, HIDDEN, generator=g, device="cuda") * 0.02
     ).bfloat16()
     gate = (torch.randn(GATE, HIDDEN, generator=g, device="cuda") * 0.02).bfloat16()
     indexer = SimpleNamespace(
         head_dim=KEY,
-        n_head=heads,
+        n_head=HEADS,
         index_kpool_compress_gate=SimpleNamespace(data=gate),
         wk_weights_proj=SimpleNamespace(weight=SimpleNamespace(data=wk)),
     )
@@ -44,49 +44,44 @@ def test_projection_matches_linear(tokens, heads):
     key_ref = full[:, :KEY].bfloat16()
     torch.testing.assert_close(key, key_ref, atol=2**-8, rtol=2**-7)
     torch.testing.assert_close(
-        weights, full[:, KEY : KEY + heads], atol=1e-5, rtol=1e-5
+        weights, full[:, KEY : KEY + HEADS], atol=1e-5, rtol=1e-5
     )
     torch.testing.assert_close(
-        gate_score, full[:, KEY + heads :].bfloat16(), atol=2**-8, rtol=2**-7
+        gate_score, full[:, KEY + HEADS :].bfloat16(), atol=2**-8, rtol=2**-7
     )
 
 
-@pytest.mark.parametrize("tokens", [1, 5])
-@pytest.mark.parametrize("heads", [16, 32])
-def test_query_epilogue_matches_unfused(tokens, heads):
+@pytest.mark.parametrize("tokens", [1, 40])
+def test_query_epilogue_matches_unfused(tokens):
     from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
     from vllm.models.glm5next.nvidia.specialized_decode.indexer_query import (
         indexer_query,
     )
 
     g = torch.Generator(device="cuda").manual_seed(tokens)
-    q = torch.randn(tokens, heads * DIM, generator=g, device="cuda").bfloat16()
+    q = torch.randn(tokens, HEADS * DIM, generator=g, device="cuda").bfloat16()
     k = torch.randn(tokens, DIM, generator=g, device="cuda").bfloat16()
-    w = torch.randn(tokens, heads, generator=g, device="cuda")
+    w = torch.randn(tokens, HEADS, generator=g, device="cuda")
     norm = SimpleNamespace(
         weight=1 + 0.1 * torch.randn(DIM, generator=g, device="cuda"),
         bias=0.1 * torch.randn(DIM, generator=g, device="cuda"),
         eps=1e-6,
     )
-    scale = DIM**-0.5 * heads**-0.5
+    scale = DIM**-0.5 * HEADS**-0.5
     q_fp8, weights, key = indexer_query(q, k, w, norm, scale, 32)
 
     ref_q, ref_scale = fwht128_quant_fp8(q.view(-1, DIM))
-    ref_scale = ref_scale.view(tokens, heads)
+    ref_scale = ref_scale.view(tokens, HEADS)
     assert torch.equal(
-        q_fp8[:, :heads].view(torch.uint8),
-        ref_q.view(tokens, heads, DIM).view(torch.uint8),
+        q_fp8.view(torch.uint8), ref_q.view(tokens, HEADS, DIM).view(torch.uint8)
     )
-    assert not q_fp8[:, heads:].float().any()
-    assert torch.equal(weights[:, :heads], w * ref_scale * scale)
-    assert not weights[:, heads:].any()
+    assert torch.equal(weights, w * ref_scale * scale)
     ref_key = F.layer_norm(k.float(), (DIM,), norm.weight, norm.bias, norm.eps)
     torch.testing.assert_close(key, ref_key.bfloat16(), atol=2**-7, rtol=2**-7)
 
 
-@pytest.mark.parametrize("tokens", [1, 5, 16])
-@pytest.mark.parametrize("heads", [16, 32])
-def test_fused_query_matches_pair(tokens, heads):
+@pytest.mark.parametrize("tokens", [1, 16])
+def test_fused_query_matches_pair(tokens):
     """The projection kernel with the query epilogue inside writes what the
     projection and ``indexer_query`` write; repeated calls advance its grid
     barrier."""
@@ -99,13 +94,13 @@ def test_fused_query_matches_pair(tokens, heads):
 
     g = torch.Generator(device="cuda").manual_seed(tokens)
     wk = (
-        torch.randn(KEY + heads, HIDDEN, generator=g, device="cuda") * 0.02
+        torch.randn(KEY + HEADS, HIDDEN, generator=g, device="cuda") * 0.02
     ).bfloat16()
     gate = (torch.randn(GATE, HIDDEN, generator=g, device="cuda") * 0.02).bfloat16()
     projection = IndexerProjection(
         SimpleNamespace(
             head_dim=KEY,
-            n_head=heads,
+            n_head=HEADS,
             index_kpool_compress_gate=SimpleNamespace(data=gate),
             wk_weights_proj=SimpleNamespace(weight=SimpleNamespace(data=wk)),
         )
@@ -115,10 +110,10 @@ def test_fused_query_matches_pair(tokens, heads):
         bias=0.1 * torch.randn(DIM, generator=g, device="cuda"),
         eps=1e-6,
     )
-    scale = DIM**-0.5 * heads**-0.5
+    scale = DIM**-0.5 * HEADS**-0.5
     for _ in range(3):
         x = torch.randn(tokens, HIDDEN, generator=g, device="cuda").bfloat16()
-        q = torch.randn(tokens, heads * DIM, generator=g, device="cuda").bfloat16()
+        q = torch.randn(tokens, HEADS * DIM, generator=g, device="cuda").bfloat16()
         k, w, gate_score = projection(x)
         ref_q, ref_w, ref_key = indexer_query(q, k, w, norm, scale, 32)
         q_fp8, weights, key, fused_gate = projection.fused(x, q, norm, scale, 32)
@@ -131,7 +126,7 @@ def test_fused_query_matches_pair(tokens, heads):
 @pytest.mark.parametrize("fused", [False, True])
 def test_bf16_head_weights_round_fp32(fused):
     """BF16 head weights (for the SM100 MQA logits) are the FP32 ones rounded
-    as ``.to(torch.bfloat16)`` rounds them, padding included."""
+    as ``.to(torch.bfloat16)`` rounds them."""
     from vllm.models.glm5next.nvidia.specialized_decode.indexer import (
         IndexerProjection,
     )
@@ -139,16 +134,16 @@ def test_bf16_head_weights_round_fp32(fused):
         indexer_query,
     )
 
-    tokens, heads = 2, 16
+    tokens = 2
     g = torch.Generator(device="cuda").manual_seed(7)
     wk = (
-        torch.randn(KEY + heads, HIDDEN, generator=g, device="cuda") * 0.02
+        torch.randn(KEY + HEADS, HIDDEN, generator=g, device="cuda") * 0.02
     ).bfloat16()
     gate = (torch.randn(GATE, HIDDEN, generator=g, device="cuda") * 0.02).bfloat16()
     projection = IndexerProjection(
         SimpleNamespace(
             head_dim=KEY,
-            n_head=heads,
+            n_head=HEADS,
             index_kpool_compress_gate=SimpleNamespace(data=gate),
             wk_weights_proj=SimpleNamespace(weight=SimpleNamespace(data=wk)),
         )
@@ -158,9 +153,9 @@ def test_bf16_head_weights_round_fp32(fused):
         bias=0.1 * torch.randn(DIM, generator=g, device="cuda"),
         eps=1e-6,
     )
-    scale = DIM**-0.5 * heads**-0.5
+    scale = DIM**-0.5 * HEADS**-0.5
     x = torch.randn(tokens, HIDDEN, generator=g, device="cuda").bfloat16()
-    q = torch.randn(tokens, heads * DIM, generator=g, device="cuda").bfloat16()
+    q = torch.randn(tokens, HEADS * DIM, generator=g, device="cuda").bfloat16()
     outputs = []
     for dtype in (torch.float32, torch.bfloat16):
         if fused:

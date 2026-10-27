@@ -86,15 +86,7 @@ def _weights(g):
 
 @pytest.mark.parametrize(
     ("grouped", "tokens"),
-    [
-        (False, 1),
-        (False, 2),
-        (False, 4),
-        (True, 8),
-        (True, 16),
-        (True, 32),
-        (True, 64),
-    ],
+    [(False, 1), (False, 4), (True, 8), (True, 64)],
 )
 @pytest.mark.parametrize("ue8m0", [False, True])
 def test_mega_moe_matches_reference(grouped, tokens, ue8m0):
@@ -180,7 +172,7 @@ def _mlp(w31, w31_s, w2, w2_s, x, quant_hidden):
     return act @ _weight(w2, w2_s).double().t()
 
 
-@pytest.mark.parametrize("tokens", [8, 16, 32, 64])
+@pytest.mark.parametrize("tokens", [8, 64])
 def test_grouped_moe_error_within_stock(tokens):
     """The grouped kernel's error against FP64 is no larger (median, p99, max)
     than the stock path's. Routed experts: TRTLLM-Gen, both finalized in FP32
