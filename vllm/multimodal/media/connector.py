@@ -57,6 +57,10 @@ MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
 }
 
 
+def derive_media_uuid(url: str) -> str:
+    return hashlib.sha256(url.encode()).hexdigest()
+
+
 def _wrap_media_fetch_error(
     url: str, exc: Exception
 ) -> VLLMUnprocessableEntityError | Exception:
@@ -244,11 +248,11 @@ class MediaConnector:
             decoded_budget=self.decoded_budget,
         )
 
-    def _get_cached_bytes(self, url: str) -> bytes | None:
-        """Return cached bytes for a URL, or None if not cached/expired."""
+    def _get_cached_bytes(self, cache_key: str) -> bytes | None:
+        """Return cached bytes for a key, or None if not cached/expired."""
         if not self._media_cache_dir:
             return None
-        cache_path = self._media_cache_path(url)
+        cache_path = self._media_cache_path(cache_key)
         # Check TTL
         try:
             age = time.time() - cache_path.stat().st_mtime
@@ -264,11 +268,11 @@ class MediaConnector:
         except OSError:
             return None
 
-    def _put_cached_bytes(self, url: str, data: bytes) -> None:
+    def _put_cached_bytes(self, cache_key: str, data: bytes) -> None:
         """Store downloaded bytes and evict if over budget."""
         if not self._media_cache_dir:
             return
-        cache_path = self._media_cache_path(url)
+        cache_path = self._media_cache_path(cache_key)
         # Atomic write via temp file + rename
         tmp_path = None
         try:
@@ -320,10 +324,10 @@ class MediaConnector:
         for f in expired:
             f.unlink(missing_ok=True)
 
-    def _media_cache_path(self, url: str) -> Path:
-        url_hash = hashlib.sha256(url.encode()).hexdigest()[:20]
-        ext = Path(url.split("?", 1)[0]).suffix or ""
-        return Path(self._media_cache_dir) / f"{url_hash}{ext}"  # type: ignore[arg-type]
+    def _media_cache_path(self, cache_key: str) -> Path:
+        key_hash = hashlib.sha256(cache_key.encode()).hexdigest()[:20]
+        ext = Path(cache_key.split("?", 1)[0]).suffix or ""
+        return Path(self._media_cache_dir) / f"{key_hash}{ext}"  # type: ignore[arg-type]
 
     def _load_data_url(
         self,
@@ -383,6 +387,7 @@ class MediaConnector:
         url: str,
         media_io: MediaIO[_M],
         *,
+        uuid: str | None = None,
         fetch_timeout: int | None = None,
     ) -> _M:  # type: ignore[type-var]
         if url[:5].lower() == "data:":
@@ -393,8 +398,9 @@ class MediaConnector:
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
             max_bytes = media_io.get_max_bytes()
+            cache_key = uuid if uuid is not None else url
 
-            cached = self._get_cached_bytes(url)
+            cached = self._get_cached_bytes(cache_key)
             if cached is not None:
                 return media_io.load_bytes(cached)
 
@@ -418,7 +424,7 @@ class MediaConnector:
                     raise wrapped from e
                 raise
 
-            self._put_cached_bytes(url, data)
+            self._put_cached_bytes(cache_key, data)
             return media_io.load_bytes(data)
 
         if url_spec.scheme == "file":
@@ -432,6 +438,7 @@ class MediaConnector:
         url: str,
         media_io: MediaIO[_M],
         *,
+        uuid: str | None = None,
         fetch_timeout: int | None = None,
     ) -> _M:
         loop = asyncio.get_running_loop()
@@ -447,9 +454,10 @@ class MediaConnector:
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
             max_bytes = media_io.get_max_bytes()
+            cache_key = uuid if uuid is not None else url
 
             cached = await loop.run_in_executor(
-                global_thread_pool, self._get_cached_bytes, url
+                global_thread_pool, self._get_cached_bytes, cache_key
             )
             if cached is not None:
                 future = loop.run_in_executor(
@@ -478,7 +486,7 @@ class MediaConnector:
                 raise
 
             await loop.run_in_executor(
-                global_thread_pool, self._put_cached_bytes, url, data
+                global_thread_pool, self._put_cached_bytes, cache_key, data
             )
             future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
             return await future
@@ -494,6 +502,8 @@ class MediaConnector:
     def fetch_audio(
         self,
         audio_url: str,
+        *,
+        uuid: str | None = None,
     ) -> tuple[np.ndarray, int | float]:
         """Load audio from a URL."""
         audio_io = AudioMediaIO(
@@ -503,12 +513,15 @@ class MediaConnector:
         return self.load_from_url(
             audio_url,
             audio_io,
+            uuid=uuid,
             fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
         )
 
     async def fetch_audio_async(
         self,
         audio_url: str,
+        *,
+        uuid: str | None = None,
     ) -> tuple[np.ndarray, int | float]:
         """Asynchronously fetch audio from a URL."""
         audio_io = AudioMediaIO(
@@ -518,6 +531,7 @@ class MediaConnector:
         return await self.load_from_url_async(
             audio_url,
             audio_io,
+            uuid=uuid,
             fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
         )
 
@@ -526,6 +540,7 @@ class MediaConnector:
         image_url: str,
         *,
         image_mode: str | None = "RGB",
+        uuid: str | None = None,
     ) -> Image.Image:
         """Load a PIL image from an HTTP or base64 data URL.
 
@@ -539,6 +554,7 @@ class MediaConnector:
             return self.load_from_url(
                 image_url,
                 image_io,
+                uuid=uuid,
                 fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
             )
         except UnidentifiedImageError as e:
@@ -550,6 +566,7 @@ class MediaConnector:
         image_url: str,
         *,
         image_mode: str | None = "RGB",
+        uuid: str | None = None,
     ) -> Image.Image:
         """Asynchronously load a PIL image from an HTTP or base64 data URL.
 
@@ -563,6 +580,7 @@ class MediaConnector:
             return await self.load_from_url_async(
                 image_url,
                 image_io,
+                uuid=uuid,
                 fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
             )
         except UnidentifiedImageError as e:
@@ -575,6 +593,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
+        uuid: str | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """Load video from an HTTP or base64 data URL."""
         image_io = self._image_io(image_mode)
@@ -588,6 +607,7 @@ class MediaConnector:
         return self.load_from_url(
             video_url,
             video_io,
+            uuid=uuid,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
         )
 
@@ -597,6 +617,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
+        uuid: str | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """Asynchronously load video from an HTTP or base64 data URL.
 
@@ -615,6 +636,7 @@ class MediaConnector:
         return await self.load_from_url_async(
             video_url,
             video_io,
+            uuid=uuid,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
         )
 
