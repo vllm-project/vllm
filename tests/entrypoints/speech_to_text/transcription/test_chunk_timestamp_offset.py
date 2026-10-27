@@ -84,8 +84,7 @@ async def test_chunk_offsets_are_cumulative_not_nominal():
 
     serving = _make_serving(audio)
     with patch("vllm.multimodal.audio.split_audio", return_value=chunks):
-        _, _, timings = await _preprocess(serving, _make_request(vad_enabled=False))
-    offsets = [timing.start_s for timing in timings]
+        _, _, offsets, _ = await _preprocess(serving, _make_request(vad_enabled=False))
 
     assert offsets == pytest.approx(expected_offsets, abs=1e-6)
     assert offsets != pytest.approx(wrong_offsets, abs=1e-6)

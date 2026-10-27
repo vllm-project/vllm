@@ -973,8 +973,7 @@ def test_split_audio_without_vad_keeps_silent_audio(max_audio_clip_s):
     )
 
     assert len(chunks) == 1
-    np.testing.assert_array_equal(chunks[0].audio, silence)
-    assert chunks[0].start_s == 0.0
+    np.testing.assert_array_equal(chunks[0], silence)
 
 
 def _fake_vad(speech_spans_s: list[tuple[float, float]], sample_rate: int):
@@ -986,31 +985,22 @@ def _fake_vad(speech_spans_s: list[tuple[float, float]], sample_rate: int):
     return vad
 
 
-def _assert_chunks_aligned(chunks, audio: np.ndarray, sample_rate: int) -> None:
-    """Each piece of each chunk must be the slice of the original audio that
-    its timing maps it to."""
-    for chunk in chunks:
-        pieces = chunk.timing.pieces_s
-        for i, (chunk_s, original_s) in enumerate(pieces):
-            chunk_start = round(chunk_s * sample_rate)
-            chunk_end = (
-                round(pieces[i + 1][0] * sample_rate)
-                if i + 1 < len(pieces)
-                else chunk.audio.shape[-1]
-            )
-            original_start = round(original_s * sample_rate)
-            np.testing.assert_array_equal(
-                chunk.audio[chunk_start:chunk_end],
-                audio[original_start : original_start + chunk_end - chunk_start],
-            )
+def _join_spans(
+    audio: np.ndarray, spans_s: list[tuple[float, float]], sample_rate: int
+) -> np.ndarray:
+    return np.concatenate(
+        [
+            audio[int(start * sample_rate) : int(end * sample_rate)]
+            for start, end in spans_s
+        ]
+    )
 
 
 @pytest.mark.cpu_test
-def test_split_audio_with_vad_splits_packs_and_maps_times():
-    """VAD spans longer than max_audio_clip_s are RMS split, the resulting
+def test_split_audio_with_vad_splits_and_packs_speech():
+    """VAD spans longer than max_audio_clip_s are RMS split, and the resulting
     pieces are packed into chunks of up to max_audio_clip_s with the
-    non-speech removed, and times within a chunk map back to the original
-    audio."""
+    non-speech removed."""
     sample_rate = 16000
     audio = np.random.default_rng(0).standard_normal(100 * sample_rate)
     audio = audio.astype(np.float32)
@@ -1034,32 +1024,14 @@ def test_split_audio_with_vad_splits_packs_and_maps_times():
 
     # Pieces of 3, 4, 29.5, 10.5 and 10 s: 3 + 4 fit, adding 29.5 doesn't;
     # 29.5 + 10.5 doesn't; the RMS remainder 10.5 + 10 does.
-    assert [chunk.timing.pieces_s for chunk in chunks] == [
-        ((0.0, 2.0), (3.0, 10.0)),
-        ((0.0, 20.0),),
-        ((0.0, 49.5), (10.5, 70.0)),
+    expected_chunks_s = [
+        [(2.0, 5.0), (10.0, 14.0)],
+        [(20.0, 49.5)],
+        [(49.5, 60.0), (70.0, 80.0)],
     ]
-    assert [chunk.audio.shape[-1] / sample_rate for chunk in chunks] == [
-        7.0,
-        29.5,
-        20.5,
-    ]
-    _assert_chunks_aligned(chunks, audio, sample_rate)
-
-    timing = chunks[0].timing
-    assert timing.to_original_time(1.0) == 3.0
-    assert timing.to_original_time(4.0) == 11.0
-    # A time on a piece boundary starts the next piece but ends the previous
-    # one, so segments don't stretch over the removed audio.
-    assert timing.to_original_time(3.0) == 10.0
-    assert timing.to_original_time(3.0, is_end=True) == 5.0
-
-    timing = chunks[2].timing
-    assert timing.to_original_time(5.0) == 54.5
-    assert timing.to_original_time(12.0) == 71.5
-    assert timing.to_original_time(10.5) == 70.0
-    assert timing.to_original_time(10.5, is_end=True) == 60.0
-    assert timing.to_original_time(20.5, is_end=True) == 80.0
+    assert len(chunks) == len(expected_chunks_s)
+    for chunk, spans_s in zip(chunks, expected_chunks_s):
+        np.testing.assert_array_equal(chunk, _join_spans(audio, spans_s, sample_rate))
 
 
 @pytest.mark.cpu_test
@@ -1082,11 +1054,11 @@ def test_split_audio_with_vad_chunk_count_is_bounded_by_speech():
     )
 
     assert len(chunks) == math.ceil(200 / 30)
-    assert all(chunk.audio.shape[-1] <= 30 * sample_rate for chunk in chunks)
+    assert all(chunk.shape[-1] <= 30 * sample_rate for chunk in chunks)
 
 
 @pytest.mark.cpu_test
-def test_split_audio_without_vad_start_times_are_cumulative():
+def test_split_audio_without_vad_covers_the_whole_audio():
     sample_rate = 16000
     audio = np.random.default_rng(0).standard_normal(65 * sample_rate)
     audio = audio.astype(np.float32)
@@ -1101,12 +1073,7 @@ def test_split_audio_without_vad_start_times_are_cumulative():
     )
 
     assert len(chunks) == 3
-    assert chunks[0].start_s == 0.0
-    for prev, cur in zip(chunks, chunks[1:]):
-        assert cur.start_s == pytest.approx(
-            prev.start_s + prev.audio.shape[-1] / sample_rate
-        )
-    _assert_chunks_aligned(chunks, audio, sample_rate)
+    np.testing.assert_array_equal(np.concatenate(chunks), audio)
 
 
 @pytest.mark.cpu_test
@@ -1126,13 +1093,6 @@ def test_split_audio_with_vad_only_starts_at_first_speech():
     )
 
     assert len(chunks) == 1
-    assert chunks[0].timing.pieces_s == ((0.0, 5.0), (5.0, 20.0))
     np.testing.assert_array_equal(
-        chunks[0].audio,
-        np.concatenate(
-            [
-                audio[5 * sample_rate : 10 * sample_rate],
-                audio[20 * sample_rate : 25 * sample_rate],
-            ]
-        ),
+        chunks[0], _join_spans(audio, speech_spans_s, sample_rate)
     )

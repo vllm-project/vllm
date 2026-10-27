@@ -32,9 +32,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
 from vllm.multimodal.audio import (
-    ChunkTiming,
     ThreadLocalVADProvider,
-    TimedAudioChunk,
     get_audio_duration,
     split_audio_with_vad,
 )
@@ -224,7 +222,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         sr: int,
         duration: float,
         request: SpeechToTextRequest,
-    ) -> list[TimedAudioChunk]:
+    ) -> list[np.ndarray]:
         vad_config = request.build_vad_config()
 
         vad = self._vad_provider.get() if vad_config.enabled else None
@@ -242,7 +240,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self,
         audio_data: bytes,
         request: SpeechToTextRequest,
-    ) -> tuple[list[TimedAudioChunk], float]:
+    ) -> tuple[list[np.ndarray], float]:
         y, sr, duration = self._decode_audio(audio_data)
         chunks = self._chunk_speech(y, sr, duration, request)
         return chunks, duration
@@ -304,7 +302,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[EngineInput], float, list[ChunkTiming]]:
+    ) -> tuple[list[EngineInput], float, list[float], float]:
+        """Returns the engine inputs, the audio duration, the start offset of
+        each chunk and the total duration of the chunks sent to the model,
+        which is shorter than the audio duration when VAD drops non-speech."""
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
         request.to_language = (
@@ -316,20 +317,25 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         # Run cpu intensive preprocess step in a separate thread pool executor.
         if self._vad_executor is not None and request.build_vad_config().enabled:
             y, sr, duration = await self._decode_audio_async(audio_data)
-            timed_chunks = await self._chunk_speech_async(y, sr, duration, request)
+            chunks = await self._chunk_speech_async(y, sr, duration, request)
         else:
-            timed_chunks, duration = await self._decode_and_chunk_speech_async(
+            chunks, duration = await self._decode_and_chunk_speech_async(
                 audio_data, request
             )
 
-        if not timed_chunks:
+        if not chunks:
             # VAD detected no speech.
-            return [], duration, []
+            return [], duration, [], 0.0
 
-        chunks = [chunk.audio for chunk in timed_chunks]
-        # Timings come from the chunker rather than summing chunk lengths,
-        # since VAD drops non-speech audio within and between chunks.
-        chunk_timings = [chunk.timing for chunk in timed_chunks]
+        chunk_start_offsets: list[float] = [0.0]
+
+        for chunk in chunks[:-1]:
+            chunk_start_offsets.append(
+                chunk_start_offsets[-1] + chunk.shape[-1] / self.asr_config.sample_rate
+            )
+        chunks_duration_s = (
+            sum(chunk.shape[-1] for chunk in chunks) / self.asr_config.sample_rate
+        )
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
@@ -360,7 +366,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_inputs, duration, chunk_timings
+        return engine_inputs, duration, chunk_start_offsets, chunks_duration_s
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -405,7 +411,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         log_probs: FlatLogprobs | list[dict[int, Logprob]],
         request: SpeechToTextRequest,
         segment_class: type[SpeechToTextSegment],
-        timing: ChunkTiming,
+        start_time: float = 0,
     ) -> list[SpeechToTextSegment]:
         """Convert tokens to verbose segments.
 
@@ -444,11 +450,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     SpeechToTextSegment,
                     segment_class(
                         id=len(segments),
-                        seek=int(timing.start_s),
-                        start=timing.to_original_time(BASE_OFFSET * start_timestamp),
-                        end=timing.to_original_time(
-                            BASE_OFFSET * end_timestamp, is_end=True
-                        ),
+                        seek=int(start_time),
+                        start=start_time + BASE_OFFSET * start_timestamp,
+                        end=start_time + BASE_OFFSET * end_timestamp,
                         temperature=request.temperature,
                         text=text,
                         # The compression ratio measures
@@ -490,33 +494,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 separator,
             )
 
-        # No speech means no language could be detected.
-        language = request.language or ""
         if self.task_type == "transcribe":
             usage = {"type": "duration", "seconds": int(math.ceil(duration_s))}
-            if request.response_format == "diarized_json":
-                return cast(
-                    T,
-                    TranscriptionResponseDiarized(
-                        duration=duration_s, text="", segments=[], usage=usage
-                    ),
-                )
-            if request.response_format == "verbose_json":
-                return cast(
-                    V,
-                    TranscriptionResponseVerbose(
-                        text="", language=language, duration=duration_s, segments=[]
-                    ),
-                )
             return cast(T, TranscriptionResponse(text="", usage=usage))
-
-        if request.response_format == "verbose_json":
-            return cast(
-                V,
-                TranslationResponseVerbose(
-                    text="", language=language, duration=duration_s, segments=[]
-                ),
-            )
         return cast(T, TranslationResponse(text=""))
 
     async def _create_speech_to_text(
@@ -587,6 +567,16 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             )
 
         if (
+            request.response_format == "verbose_json"
+            and request.build_vad_config().enabled
+        ):
+            # VAD drops non-speech audio, so segment timestamps would not refer
+            # to positions in the original audio.
+            return self.create_error_response(
+                "VAD is not supported with verbose_json yet"
+            )
+
+        if (
             request.response_format in {"verbose_json", "diarized_json"}
             and request.stream
         ):
@@ -604,7 +594,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         (
             engine_inputs,
             duration_s,
-            chunk_timings,
+            chunk_start_offsets,
+            chunks_duration_s,
         ) = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
@@ -712,9 +703,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         if request.stream:
             # VAD drops non-speech audio, so only count the audio the model sees.
             audio_duration_s = (
-                sum(timing.duration_s for timing in chunk_timings)
-                if request.build_vad_config().enabled
-                else duration_s
+                chunks_duration_s if request.build_vad_config().enabled else duration_s
             )
             return stream_generator_method(
                 request,
@@ -741,16 +730,17 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
-            assert len(chunk_timings) == len(list_result_generator)
+            assert len(chunk_start_offsets) == len(list_result_generator)
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
+                start_time = chunk_start_offsets[idx]
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
                         tokens=tuple(op.outputs[0].token_ids),
                         segment_class=segment_class,
                         request=request,
-                        timing=chunk_timings[idx],
+                        start_time=start_time,
                         log_probs=op.outputs[0].logprobs,
                     )
 

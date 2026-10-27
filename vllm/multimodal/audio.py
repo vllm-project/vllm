@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import bisect
 import math
 import threading
 from dataclasses import dataclass
@@ -483,115 +482,31 @@ class ThreadLocalVADProvider:
         return vad
 
 
-@dataclass(frozen=True)
-class ChunkTiming:
-    """Maps times within an audio chunk to times in the original audio.
-
-    A chunk is built from one or more pieces, each a contiguous range of the
-    original audio: a VAD speech span, or part of one that was RMS split
-    because it exceeded ``max_audio_clip_s``. Without VAD, a chunk is a single
-    piece.
-    """
-
-    pieces_s: tuple[tuple[float, float], ...]
-    """(start within the chunk, start in the original audio) of each piece,
-    in order."""
-
-    duration_s: float
-    """Length of the chunk audio."""
-
-    @classmethod
-    def contiguous(cls, start_s: float, duration_s: float) -> "ChunkTiming":
-        return cls(pieces_s=((0.0, start_s),), duration_s=duration_s)
-
-    @property
-    def start_s(self) -> float:
-        return self.pieces_s[0][1]
-
-    def to_original_time(self, t: float, *, is_end: bool = False) -> float:
-        """Map a time within the chunk to a time in the original audio.
-
-        An end time that falls exactly on a piece boundary belongs to the
-        earlier piece, so a segment ending there doesn't jump over the
-        audio removed between the pieces.
-        """
-        chunk_starts = [chunk_s for chunk_s, _ in self.pieces_s]
-        find = bisect.bisect_left if is_end else bisect.bisect_right
-        idx = max(find(chunk_starts, t) - 1, 0)
-        chunk_s, original_s = self.pieces_s[idx]
-        return original_s + (t - chunk_s)
-
-
-@dataclass
-class TimedAudioChunk:
-    """Audio sent to the model as one request, with the timing that maps it
-    back to the original audio. Produced by every chunking mode in
-    ``split_audio_with_vad``."""
-
-    audio: np.ndarray
-    timing: ChunkTiming
-
-    @property
-    def start_s(self) -> float:
-        return self.timing.start_s
-
-
-def _timed_chunks(
-    chunks: list[np.ndarray], start_sample: int, sample_rate: int
-) -> list[TimedAudioChunk]:
-    """Attach start times to contiguous chunks that begin at ``start_sample``."""
-    timed_chunks = []
-    offset = start_sample
-    for chunk in chunks:
-        timed_chunks.append(
-            TimedAudioChunk(
-                audio=chunk,
-                timing=ChunkTiming.contiguous(
-                    offset / sample_rate, chunk.shape[-1] / sample_rate
-                ),
-            )
-        )
-        offset += chunk.shape[-1]
-    return timed_chunks
-
-
-def _join_pieces(
-    audio_data: np.ndarray, pieces: list[tuple[int, int]], sample_rate: int
-) -> TimedAudioChunk:
+def _join_pieces(audio_data: np.ndarray, pieces: list[tuple[int, int]]) -> np.ndarray:
     """Join ``(start, end)`` sample ranges of the original audio into one chunk."""
-    pieces_s = []
-    chunk_offset = 0
-    for start, end in pieces:
-        pieces_s.append((chunk_offset / sample_rate, start / sample_rate))
-        chunk_offset += end - start
-    audio = np.concatenate(
+    return np.concatenate(
         [audio_data[..., start:end] for start, end in pieces], axis=-1
     )
-    timing = ChunkTiming(
-        pieces_s=tuple(pieces_s), duration_s=chunk_offset / sample_rate
-    )
-    return TimedAudioChunk(audio=audio, timing=timing)
 
 
 def _pack_pieces(
     audio_data: np.ndarray,
     pieces: list[tuple[int, int]],
-    sample_rate: int,
     max_chunk_samples: int,
-) -> list[TimedAudioChunk]:
+) -> list[np.ndarray]:
     """Greedily pack consecutive pieces into chunks of at most
     ``max_chunk_samples``, dropping the audio between pieces."""
-    chunks: list[TimedAudioChunk] = []
+    chunks: list[np.ndarray] = []
     current: list[tuple[int, int]] = []
     current_samples = 0
     for start, end in pieces:
         if current and current_samples + (end - start) > max_chunk_samples:
-            chunks.append(_join_pieces(audio_data, current, sample_rate))
+            chunks.append(_join_pieces(audio_data, current))
             current, current_samples = [], 0
         current.append((start, end))
         current_samples += end - start
     if current:
-        chunks.append(_join_pieces(audio_data, current, sample_rate))
+        chunks.append(_join_pieces(audio_data, current))
     return chunks
 
 
@@ -602,7 +517,7 @@ def split_audio_with_vad(
     vad_config: VADConfig,
     audio_data: np.ndarray,
     sample_rate: int,
-) -> list[TimedAudioChunk]:
+) -> list[np.ndarray]:
     """Split audio according to the configured VAD and chunking policy.
     * Silero VAD improves noise robustness and hallucination robustness.
     * RMS split is used to adhere to the max_clip_duration_s limit.
@@ -625,10 +540,7 @@ def split_audio_with_vad(
       request. If no speech is detected, return an empty list.
     * no chunking: return the original audio as a single chunk.
 
-    Each chunk carries a ``ChunkTiming`` that maps times within the chunk back
-    to the original audio, so timestamps stay aligned with the input even
-    when VAD drops non-speech audio. An empty list means the caller should
-    return an empty transcript.
+    An empty list means the caller should return an empty transcript.
     """
     if asr_config.allow_audio_chunking:
         assert asr_config.max_audio_clip_s is not None
@@ -663,7 +575,6 @@ def split_audio_with_vad(
             return _pack_pieces(
                 audio_data,
                 pieces,
-                sample_rate,
                 int(asr_config.max_audio_clip_s * sample_rate),
             )
         else:
@@ -676,14 +587,9 @@ def split_audio_with_vad(
                     asr_config.overlap_chunk_second,
                     asr_config.min_energy_split_window_size,
                 )
-                return _timed_chunks(partial_chunk_output, 0, sample_rate)
+                return partial_chunk_output
             else:
-                return [
-                    TimedAudioChunk(
-                        audio=audio_data,
-                        timing=ChunkTiming.contiguous(0.0, duration),
-                    )
-                ]
+                return [audio_data]
     else:
         if vad_config.enabled:
             # silero VAD only
@@ -697,15 +603,11 @@ def split_audio_with_vad(
                     (timestamp["start"], timestamp["end"])
                     for timestamp in speech_timestamps
                 ]
-                return [_join_pieces(audio_data, speech_pieces, sample_rate)]
+                return [_join_pieces(audio_data, speech_pieces)]
             else:
                 return []
         else:
-            return [
-                TimedAudioChunk(
-                    audio=audio_data, timing=ChunkTiming.contiguous(0.0, duration)
-                )
-            ]
+            return [audio_data]
 
 
 def split_audio(

@@ -64,6 +64,7 @@ async def test_non_streaming_cancel_aborts_engine_requests(
                 engine_inputs,
                 40.0,
                 [30.0 * i for i in range(len(engine_inputs))],
+                40.0,
             )
         ),
     )
@@ -141,7 +142,7 @@ async def test_non_streaming_cancel_advances_all_chunk_generators(monkeypatch):
     monkeypatch.setattr(
         server,
         "_preprocess_speech_to_text",
-        AsyncMock(return_value=(engine_inputs, 90.0, [0.0, 29.5, 29.5 + 29.7])),
+        AsyncMock(return_value=(engine_inputs, 90.0, [0.0, 29.5, 29.5 + 29.7], 90.0)),
     )
     monkeypatch.setattr(server, "_log_inputs", Mock())
 
