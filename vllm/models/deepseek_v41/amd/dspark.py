@@ -10,7 +10,6 @@ To implement non-causal attention, we leverage the sparse attention implementati
 include the future query tokens in the top-k indices for each query token.
 """
 
-import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -226,13 +225,6 @@ class DSparkDeepseekV4Model(nn.Module):
         return hidden_states
 
 
-def _draft_ctxkv_dummyq_disabled() -> bool:
-    """VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ=1 restores the stock dummy-Q
-    insert (read per call, so eager in-process A/B works; under CUDA graphs
-    the choice is baked at capture)."""
-    return os.environ.get("VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ", "0") == "1"
-
-
 def _insert_context_kv(
     attn: nn.Module,
     kv: torch.Tensor,
@@ -241,89 +233,25 @@ def _insert_context_kv(
 ) -> None:
     """RoPE + quant + paged-cache insert of (already kv_norm'd) context KV.
 
-    Uses the shared ``fused_deepseek_v4_kv_rope_insert`` with zero query
-    heads (context tokens have no query) -- the same call
+    The shared ``fused_deepseek_v4_kv_rope_insert`` with zero query heads
+    (context tokens have no query) -- the same call
     ``nvidia/dspark.py`` makes here. With zero query heads the op schedules
     only the KV branch, preserving its RoPE rounding and quantization, so
-    the dummy-Q allocation, its zero-fill and the quantized dummy-Q write
-    disappear with the cache contents identical by construction. The stock
-    dummy-Q dispatch below stays reachable through
-    ``VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ=1`` for A/B measurement.
+    the stock path's dummy-Q allocation, zero-fill and quantized write
+    disappear with the cache contents identical by construction.
     """
     swa_cache = attn.swa_cache_layer.kv_cache
-    block_size = attn.swa_cache_layer.block_size
-    cos_sin_cache = attn.rotary_emb.cos_sin_cache
     cache_dtype = swa_cache.dtype
-    n_ctx = kv.shape[0]
-    if not _draft_ctxkv_dummyq_disabled():
-        torch.ops._C.fused_deepseek_v4_kv_rope_insert(
-            kv,
-            swa_cache,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            block_size,
-            attn._flashinfer_fp8_kv_scale
-            if cache_dtype == torch.float8_e4m3fn
-            else None,
-            attn.kv_mxfp8,
-        )
-        logger.warning_once(
-            "draft context-KV dummy-Q removal engaged (KV-only "
-            "fused_deepseek_v4_kv_rope_insert; disable var "
-            "VLLM_DEBUG_DISABLE_DRAFT_CTXKV_DUMMYQ)"
-        )
-        return
-    dummy_q = torch.zeros(
-        (n_ctx, attn.n_local_heads, attn.head_dim),
-        dtype=kv.dtype,
-        device=kv.device,
+    torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+        kv,
+        swa_cache,
+        slot_mapping,
+        positions,
+        attn.rotary_emb.cos_sin_cache,
+        attn.swa_cache_layer.block_size,
+        attn._flashinfer_fp8_kv_scale if cache_dtype == torch.float8_e4m3fn else None,
+        attn.kv_mxfp8,
     )
-    if cache_dtype == torch.uint8:
-        # fp8_ds_mla UE8M0 paged layout
-        swa_2d = swa_cache.view(swa_cache.shape[0], -1)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            dummy_q,
-            kv,
-            swa_2d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn.padded_heads,
-            attn.eps,
-            block_size,
-            True,  # apply_q_norm (unused: the query is a discarded dummy)
-            attn.kv_mxfp8,
-        )
-    elif cache_dtype == torch.bfloat16:
-        swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
-            dummy_q,
-            kv,
-            swa_3d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn.eps,
-            block_size,
-        )
-    else:  # per-tensor fp8 (torch.float8_e4m3fn)
-        # TODO(ben): double-check if this is being dispatched correctly for FI backend
-        swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
-        dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
-            dummy_q,
-            kv,
-            dummy_q_fp8,
-            swa_3d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn._flashinfer_fp8_kv_scale,
-            attn._flashinfer_fp8_q_scale_inv,
-            attn.eps,
-            block_size,
-        )
 
 
 class DSparkDeepseekV4ForCausalLM(nn.Module):

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-import os
 from typing import Any
 
 import torch
@@ -37,54 +36,36 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
-# Draft-prepare fastpaths (shared-output dedup + parallel pad-tail fix),
-# validated on ROCm only (MI355X, DSV4.1-Flash serving): every other
-# platform keeps the stock prepare paths, silently.
+# Draft-prepare fastpaths, validated on ROCm only (MI355X, DSV4.1-Flash
+# serving): every other platform keeps the stock prepare paths, silently.
 def _draft_prepare_fastpaths_supported() -> bool:
     return current_platform.is_rocm()
 
 
-# Draft-prepare dedup: with multiple draft KV cache groups,
-# prepare_dflash_inputs runs once per group, but only the per-group outputs
-# (the query/context slot mappings against that group's block table, and the
-# per-group query-slot pad tail) differ between calls -- every other output
-# is a pure function of the same inputs and is recomputed identically on
-# each call. The dedup computes the shared outputs on the first call only
-# and skips them on calls 2..N: bit-exact by construction (the skipped
-# stores would rewrite identical values into the same shared buffers).
-# VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP=1 restores stock behavior.
+# With multiple draft KV cache groups, prepare_dflash_inputs runs once per
+# group, but only the per-group outputs (the query/context slot mappings
+# against that group's block table) differ between calls -- every other
+# output is recomputed identically on each call. The dedup computes the
+# shared outputs on the first call only: bit-exact by construction (the
+# skipped stores would rewrite identical values into the same buffers).
 def _draft_prepare_dedup_armed() -> bool:
-    return (
-        _draft_prepare_fastpaths_supported()
-        and os.environ.get("VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP", "0") != "1"
-    )
+    return _draft_prepare_fastpaths_supported()
 
 
-# dflash prepare pad-tail fix. The stock _prepare_dflash_inputs_kernel pads
-# [q_pad_start, max_num_tokens) of each draft group's query slot mapping
-# serially from one CTA, and it runs on every per-group call (the query slot
-# mapping is a per-group buffer, so the dedup above does not cover it). The
-# fix skips the in-kernel tail (PAD_TAIL=False) and pads [q_pad_start, HWM)
-# for all draft group rows in one parallel launch, HWM = min(max_num_reqs *
-# num_query_per_req, max_num_tokens); an empty range launches nothing.
-# Safety: the draft replay (eager or captured graph) only ever reads
-# slot_mappings up to num_tokens_padded <= max_num_reqs * num_query_per_req.
-# Eager steps read [0, num_reqs * num_query_per_req). Captured draft graphs
-# are uniform per-request, and the shared query_start_loc pad past num_reqs
-# points every padded row at last_query_end = num_reqs * num_query_per_req,
-# so a replay at a larger captured size reads PAD slots only up to
-# max_num_reqs * num_query_per_req. The region beyond HWM is never read by
-# any draft-path consumer and is PAD-initialized at capture time by
-# get_dummy_slot_mappings's full buffer fill, so the fix is bit-exact by
-# construction for every read-visible cell. The launch is eager (in
-# propose(), before graph replay), so no CUDA-graph capture constraints
-# apply to its grid or args.
-# VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX=1 restores the stock serial tail.
+# The stock kernel pads [q_pad_start, max_num_tokens) of every draft
+# group's query slot mapping serially from one CTA, on every per-group
+# call. The fix skips that tail (PAD_TAIL=False) and pads [q_pad_start,
+# HWM) for all draft group rows in one parallel launch, where
+# HWM = min(max_num_reqs * num_query_per_req, max_num_tokens) bounds what
+# any draft replay can read: eager steps read [0, num_reqs *
+# num_query_per_req), and a captured graph's query_start_loc pad past
+# num_reqs points every padded row at num_reqs * num_query_per_req, so PAD
+# slots are read only up to max_num_reqs * num_query_per_req. Beyond HWM
+# nothing reads the buffer (it is PAD-initialized at capture time), so the
+# fix is bit-exact for every read-visible cell. The launch is eager, in
+# propose(), so no CUDA-graph capture constraints apply.
 def _dflash_prepare_pad_fix_armed() -> bool:
-    return (
-        _draft_prepare_fastpaths_supported()
-        and os.environ.get("VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", "0") != "1"
-    )
+    return _draft_prepare_fastpaths_supported()
 
 
 class DFlashSpeculator(DraftModelSpeculator):
@@ -570,50 +551,28 @@ class DFlashSpeculator(DraftModelSpeculator):
         # calls 2..N skip the shared outputs computed by call 1 (bit-exact
         # by construction).
         n_groups = len(self.draft_kv_cache_group_ids)
-        fastpaths = _draft_prepare_fastpaths_supported()
         dedup = n_groups > 1 and _draft_prepare_dedup_armed()
-        if n_groups > 1 and fastpaths:
-            if dedup:
-                logger.warning_once(
-                    "draft prepare dedup engaged: shared prepare_dflash_inputs "
-                    "outputs computed once for draft KV group 0, skipped on "
-                    "calls 2..%d of %d",
-                    n_groups - 1,
-                    n_groups,
-                )
-            else:
-                logger.warning_once(
-                    "draft prepare dedup is DISABLED (env override "
-                    "VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP=1); recomputing "
-                    "shared prepare_dflash_inputs outputs for every draft KV "
-                    "group"
-                )
+        if dedup:
+            logger.warning_once(
+                "draft prepare dedup engaged: shared prepare_dflash_inputs "
+                "outputs computed once for draft KV group 0, skipped on "
+                "calls 2..%d of %d",
+                n_groups - 1,
+                n_groups,
+            )
         # Hoist the serial per-group query-slot PAD tail out of
         # prepare_dflash_inputs into one parallel launch bounded by the
         # draft replay read range (the module-level comment has the
         # read-bound proof).
         pad_fix = _dflash_prepare_pad_fix_armed()
-        if fastpaths:
-            if pad_fix:
-                logger.warning_once(
-                    "dflash prepare pad fix engaged: per-group query-slot PAD "
-                    "tail hoisted out of prepare_dflash_inputs into one "
-                    "parallel kernel bounded by the draft replay read range "
-                    "(set VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX=1 to "
-                    "disable)",
-                    # scope="process": print once on every TP rank (the
-                    # default "local" scope gates warning_once to the local
-                    # first rank only).
-                    scope="process",
-                )
-            else:
-                logger.warning_once(
-                    "dflash prepare pad fix is DISABLED (env override "
-                    "VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX=1); keeping "
-                    "the stock per-group serial query-slot PAD tail in "
-                    "prepare_dflash_inputs",
-                    scope="process",
-                )
+        if pad_fix:
+            # scope="process": print once on every TP rank (the default
+            # "local" scope gates warning_once to the local first rank only).
+            logger.warning_once(
+                "dflash prepare pad fix engaged: per-group query-slot PAD "
+                "tail hoisted into one parallel kernel",
+                scope="process",
+            )
         for i, gid in enumerate(self.draft_kv_cache_group_ids):
             prepare_dflash_inputs(
                 self.input_buffers,

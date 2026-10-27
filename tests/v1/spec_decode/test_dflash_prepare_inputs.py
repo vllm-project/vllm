@@ -186,10 +186,10 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix(
 ):
     # Positions 10/11 use physical block 7. Rejected positions 12/13 would use
     # block 8, but must be PAD context rather than contaminating draft KV.
-    if pad_fix:
-        monkeypatch.delenv("VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", "1")
+    if not pad_fix:
+        monkeypatch.setattr(
+            speculator_module, "_dflash_prepare_pad_fix_armed", lambda: False
+        )
     out = _run_prepare(
         target_positions=[10, 11, 12, 13],
         block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
@@ -235,14 +235,13 @@ def test_prepare_dflash_inputs_two_draft_groups_dedup_and_pad(monkeypatch):
     # group rows over [q_pad_start, HWM) -- never row 0.
     outs = {}
     for dedup_on in (True, False):
-        if dedup_on:
-            monkeypatch.delenv("VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP", raising=False)
-            monkeypatch.delenv(
-                "VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", raising=False
+        if not dedup_on:
+            monkeypatch.setattr(
+                speculator_module, "_draft_prepare_dedup_armed", lambda: False
             )
-        else:
-            monkeypatch.setenv("VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP", "1")
-            monkeypatch.setenv("VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", "1")
+            monkeypatch.setattr(
+                speculator_module, "_dflash_prepare_pad_fix_armed", lambda: False
+            )
         outs[dedup_on] = _run_prepare(
             target_positions=[10, 11, 12, 13],
             block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
@@ -292,8 +291,6 @@ def test_draft_prepare_fastpaths_off_platform_keeps_stock_paths(monkeypatch):
     monkeypatch.setattr(
         speculator_module, "_draft_prepare_fastpaths_supported", lambda: False
     )
-    monkeypatch.delenv("VLLM_DEBUG_DISABLE_DRAFT_PREPARE_DEDUP", raising=False)
-    monkeypatch.delenv("VLLM_DEBUG_DISABLE_DFLASH_PREPARE_PAD_FIX", raising=False)
     out = _run_prepare(
         target_positions=[10, 11, 12, 13],
         block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
