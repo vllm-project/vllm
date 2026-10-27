@@ -11,8 +11,8 @@ ROCm port of ``nvidia/dspark.py``. Follows the same nvidia->amd recipe used for
     tilelang / triton / torch) instead of calling the tilelang kernels directly,
     and gate the trailing ``mhc_post`` on ``use_fused_mhc`` (True when AITER
     or TileLang fused MHC is available; False only on the torch fallback);
-  * drop the mega-MoE weight path (``make_deepseek_v4_expert_params_mapping`` /
-    ``use_mega_moe`` / ``finalize_mega_moe_weights`` do not exist in amd/model.py).
+  * use the AITER MegaMoE path (``aiter_mega_moe``) instead of the DeepGEMM
+    mega-MoE path.
 
 Everything else — the semi-autoregressive drafting hooks, the Markov head, the
 sliding-window context-KV insert, and the checkpoint ``mtp.*`` weight remap — is
@@ -26,10 +26,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -45,6 +41,7 @@ from vllm.model_executor.models.qwen3_dspark import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
+from .mega_moe import finalize_mega_moe_weights
 from .model import (
     DeepseekV4DecoderLayer,
 )
@@ -376,14 +373,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         Non-mtp weights (embed/head/main layers) belong to the target model and
         are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
         """
-        # AMD DeepseekV4MoE has no mega-MoE path; always use the standard
-        # per-expert fused-MoE mapping (mirrors amd/mtp.py).
         expert_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
+            routed_experts_prefix=(
+                "" if self.model.layers[0].ffn.use_mega_moe else "routed_experts"
+            ),
         )
         expert_scale_suffix = (
             ".weight_scale"
@@ -402,12 +400,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         loaded_confidence_head = False
-
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_local_head = self.config.num_attention_heads // tp_size
-        head_start = n_local_head * tp_rank
-        head_end = n_local_head * (tp_rank + 1)
 
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
@@ -464,11 +456,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_params.add(name)
                 break
             else:
-                if "attn_sink" in name:
-                    narrow = loaded_weight[head_start:head_end]
-                    params_dict[name][: narrow.shape[0]].copy_(narrow)
-                    loaded_params.add(name)
-                    continue
                 if ".shared_experts.w2" in name:
                     name = name.replace(
                         ".shared_experts.w2", ".shared_experts.down_proj"
@@ -486,6 +473,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        finalize_mega_moe_weights(self)
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.

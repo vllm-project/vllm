@@ -196,23 +196,6 @@ def _create_random_top_token_test_matrix(
     return matrix, prompt_token_ranks
 
 
-def decode_token(
-    tok_id: int,
-    tokenizer: PythonBackend,
-) -> str:
-    """Reproduce the process of detokenizing a token for testing purposes.
-
-    Args:
-      tok_id: token id to detokenize
-      tokenizer: tokenizer to use for detokenization
-
-    Returns:
-      string representation of token
-
-    """
-    return tokenizer.convert_ids_to_tokens(tok_id)
-
-
 def generate_dummy_sample_logprobs(
     sampled_tokens_list: list,
     num_logprobs: int,

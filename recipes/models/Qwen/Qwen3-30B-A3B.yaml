@@ -1,0 +1,229 @@
+meta:
+  title: "Qwen3-30B-A3B"
+  slug: "qwen3-30b-a3b"
+  provider: "Qwen"
+  description: "Qwen3 MoE model with 30.5B total and 3.3B active parameters, validated for BF16 serving on Intel Xeon 6 and Intel Arc Pro B70 and W8A8 serving on Ascend A3."
+  date_added: 2026-08-14
+  date_updated: 2026-09-23
+  tasks:
+    - text
+  performance_headline: "Validated on Intel Xeon 6 (GNR), Ascend A3 W8A8 and 4x Intel Arc Pro B70 with BF16 serving"
+  related_recipes:
+    - "Qwen/Qwen3-235B-A22B-Instruct-2507"
+  hardware:
+    xeon6: verified
+    ascend_910c: verified
+    arc_pro_b70: verified
+
+model:
+  model_id: "Qwen/Qwen3-30B-A3B"
+  min_vllm_version: "0.8.5"
+  architecture: moe
+  parameter_count: "30.5B"
+  active_parameters: "3.3B"
+  context_length: 40960
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with the Hermes parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+  reasoning:
+    description: "Enable Qwen3 thinking mode with the Qwen3 reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  long_context:
+    description: "YaRN RoPE scaling to the model card's validated 131,072-token context. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts — it can cost quality below 32K."
+    args:
+      - "--hf-overrides"
+      - '{"max_position_embeddings":131072,"rope_parameters":{"rope_type":"yarn","rope_theta":1000000,"factor":4.0,"original_max_position_embeddings":32768}}'
+      - "--max-model-len"
+      - "131072"
+
+opt_in_features:
+  - long_context
+
+hardware_opt_in_features:
+  ascend_910c:
+    - tool_calling
+    - reasoning
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 74
+    description: "Full precision BF16"
+    supported_hardware: [xeon6, arc_pro_b70]
+  ascend_w8a8:
+    model_id: "Eco-Tech/Qwen3-30B-A3B-w8a8"
+    precision: int8
+    label: "W8A8 (Ascend A3)"
+    vram_minimum_gb: 37
+    description: "ModelSlim INT8 W8A8 checkpoint for Ascend 910C, verified with TP4 + expert parallelism."
+    supported_hardware: [ascend_910c]
+    tp: 4
+    min_vllm_version: "0.23.0"
+    extra_args:
+      - "--trust-remote-code"
+      - "--max-num-seqs"
+      - "100"
+      - "--max-model-len"
+      - "40960"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--enable-expert-parallel"
+      - "--quantization"
+      - "ascend"
+      - "--distributed_executor_backend"
+      - "mp"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_flashcomm1": true, "weight_nz_mode": 2}'
+      - "--gpu-memory-utilization"
+      - "0.95"
+    extra_env:
+      VLLM_USE_MODELSCOPE: "True"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "1024"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_RUST_FRONTEND: "1"
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides:
+  cpu:
+    extra_args:
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.8"
+  xpu:
+    extra_args:
+      - "--block-size"
+      - "64"
+      - "--enforce-eager"
+      - "--no-enable-prefix-caching"
+      - "--disable-sliding-window"
+      - "--max-model-len"
+      - "9472"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.9"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Qwen3-30B-A3B is a mixture-of-experts Qwen3 model with 30.5B total parameters
+  and 3.3B active parameters per token. This recipe includes an Intel Xeon 6 CPU
+  configuration validated with BF16 serving and an Ascend A3 W8A8 variant.
+
+  ## Prerequisites
+
+  - Hardware: 4x Xeon 6 CPUs, or 4x Intel Arc Pro B70 (32 GB per card).
+  - vLLM >= 0.8.5
+
+  ### pip (Intel Xeon 6 CPUs)
+
+  For Intel and AMD x86 CPUs, follow the
+  [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels)
+  installation instructions.
+
+  ### Docker (Intel Xeon 6 CPUs)
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64
+  ```
+
+  ### Docker (Intel Arc Pro B70)
+
+  ```bash
+  docker pull vllm/vllm-openai-xpu:latest
+  ```
+
+  ## Intel Xeon 6
+
+  Choose the tensor parallel size based on the system topology and deployment
+  requirements. Add `--tensor-parallel-size <N>` when needed; the recipe does
+  not prescribe a Xeon 6 TP value or hard-code NUMA node IDs.
+
+  ```bash
+  vllm serve Qwen/Qwen3-30B-A3B \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.8
+  ```
+
+  Docker:
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 Qwen/Qwen3-30B-A3B \
+    --tensor-parallel-size 1 \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --reasoning-parser qwen3
+  ```
+
+  ## Intel Arc Pro B70 (XPU)
+
+  Validated on 4x Intel Arc Pro B70 (32 GB per card) with the official vLLM XPU
+  image `vllm/vllm-openai-xpu:latest`, BF16, TP=4.
+
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    Qwen/Qwen3-30B-A3B \
+    --tensor-parallel-size 4 \
+    --block-size 64 \
+    --enforce-eager \
+    --no-enable-prefix-caching \
+    --disable-sliding-window \
+    --max-model-len 9472 \
+    --max-num-batched-tokens 8192 \
+    --gpu-memory-utilization 0.9
+  ```
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+  response = client.chat.completions.create(
+      model="Qwen/Qwen3-30B-A3B",
+      messages=[{"role": "user", "content": "Explain tensor parallelism briefly."}],
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-30B-A3B)
+  - [Ascend A3 W8A8 checkpoint](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8)
+  - [vLLM Ascend](https://github.com/vllm-project/vllm-ascend)
+  - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)

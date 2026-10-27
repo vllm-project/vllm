@@ -43,6 +43,7 @@ def prompt_embeds_processor():
         logits_processors=None,
         is_diffusion=False,
         return_sampling_mask=False,
+        supports_multimodal_inputs=False,
     )
     model_config.get_vocab_size.return_value = 32
     model_config.try_get_generation_config.return_value = {}
@@ -53,9 +54,7 @@ def prompt_embeds_processor():
     )
     renderer = Mock(tokenizer=None)
     renderer.get_eos_token_id.return_value = None
-    registry = Mock()
-    registry.supports_multimodal_inputs.return_value = False
-    return InputProcessor(config, renderer, mm_registry=registry)
+    return InputProcessor(config, renderer, mm_registry=Mock())
 
 
 @pytest.mark.parametrize("mask_len", [0, 1, 2, 4])
@@ -373,6 +372,43 @@ def test_chat_beam_conversion_accepts_n_at_sequence_cap(
     params = request.to_beam_search_params(max_tokens=1, default_sampling_params={})
 
     assert params.beam_width == 4
+
+
+@pytest.mark.parametrize("request_cls", [ChatCompletionRequest, CompletionRequest])
+@pytest.mark.parametrize("conversion", ["to_sampling_params", "to_beam_search_params"])
+@pytest.mark.parametrize("requested", [None, False, True])
+@pytest.mark.parametrize("default", [None, False, True])
+def test_skip_special_tokens_resolves_before_decoding(
+    request_cls, conversion, requested, default
+):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import TokenizersBackend
+
+    inputs = (
+        {"messages": [{"role": "user", "content": "hello"}]}
+        if request_cls is ChatCompletionRequest
+        else {"prompt": "hello"}
+    )
+    request = request_cls(model="test", skip_special_tokens=requested, **inputs)
+    defaults = {} if default is None else {"skip_special_tokens": default}
+    params = getattr(request, conversion)(
+        max_tokens=1, default_sampling_params=defaults
+    )
+    expected = (
+        requested
+        if requested is not None
+        else defaults.get("skip_special_tokens", True)
+    )
+    assert params.skip_special_tokens is expected
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "[EOS]": 1})),
+        unk_token="[UNK]",
+        eos_token="[EOS]",
+    )
+    assert tokenizer.decode([1], skip_special_tokens=params.skip_special_tokens) == (
+        "" if expected else "[EOS]"
+    )
 
 
 # --- DeepSeek encoders: the last-user scan runs once per conversation ------
