@@ -41,14 +41,19 @@ steps:
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
-    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
+    - >-
+      pytest -v -s
+      kernels/core
+      --ignore=kernels/core/test_minimax_reduce_rms.py
+      kernels/test_concat_mla_q.py
+      kernels/test_fused_qk_norm_rope_gate.py
   mirror:
     amd:
       label: ":amd: (MI300) Core Operation Kernels"
       dind: false
       automatic_shard: true
       device: mi300_1
-      timeout_in_minutes: 45
+      timeout_in_minutes: 90
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd
@@ -65,7 +70,14 @@ steps:
       - vllm/platforms/rocm.py
       - tests/kernels/test_fused_qk_norm_rope_gate.py
       commands:
-      - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py
+      - >-
+        pytest -v -s
+        kernels/core
+        --ignore=kernels/core/test_minimax_reduce_rms.py
+        kernels/test_fused_qk_norm_rope_gate.py
+        kernels/test_concat_mla_q.py
+        kernels/test_top_k_per_row.py
+        kernels/test_rocm_fp32_router_gemm.py
 
 - label: ":nvidia: (H100) MiniMax Reduce RMS Kernels"
   key: kernels-minimax-reduce-rms-test-2-gpus
@@ -129,6 +141,17 @@ steps:
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+
+- label: ":nvidia: (H100) BF16x3 Router GEMM Kernels"
+  key: kernels-bf16x3-router-gemm-h100
+  timeout_in_minutes: 20
+  device: h100
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm90.py
+  - vllm/model_executor/layers/fused_moe/router/gate_linear.py
+  - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
+  commands:
+    - pytest -v -s kernels/test_bf16x3_router_gemm_cutedsl.py
 
 - label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
@@ -235,8 +258,9 @@ steps:
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
 # Files with dedicated jobs elsewhere in this file are excluded via --ignore
-# (test_bf16x3_router_gemm_cutedsl runs in Kernels (B200); test_ll_bf16_gemm and
-# test_ll_fp32w_gemm run in Gate Linear CuTeDSL Kernels (B200)).
+# (test_bf16x3_router_gemm_cutedsl runs in Kernels (B200) and BF16x3 Router GEMM
+# Kernels (H100); test_ll_bf16_gemm and test_ll_fp32w_gemm run in Gate Linear
+# CuTeDSL Kernels (B200)).
 - label: ":nvidia: (B200) Miscellaneous Kernels"
   key: kernels-root-misc-test-b200
   automatic_shard: true
@@ -351,7 +375,15 @@ steps:
       - vllm/envs.py
       - vllm/platforms/rocm.py
       commands:
-      - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - >-
+        pytest -v -s
+        kernels/attention
+        --ignore=kernels/attention/test_triton_unified_attention_diffkv.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_decode.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+        --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
@@ -489,7 +521,11 @@ steps:
   - vllm/envs.py
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - >-
+      pytest -v -s
+      kernels/moe
+      --ignore=kernels/moe/test_modular_oai_triton_moe.py
+      --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 5
   mirror:
@@ -582,6 +618,18 @@ steps:
   - tests/kernels/attention/test_minimax_m3.py
   commands:
     - pytest -v -s tests/kernels/attention/test_minimax_m3.py
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) MiniMax-M3 Attention Kernels"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 30
+      working_dir: "/vllm-workspace/"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (B200) Kernels Shard %N"
   key: kernels-b200
@@ -611,7 +659,7 @@ steps:
   - vllm/platforms/cuda.py
   - vllm/cute_utils/
   - vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/
-  - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py
+  - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm100.py
   - cmake/external_projects/fmha_sm100.cmake
   - vllm/models/minimax_m3/common/sparse_attention.py
   - vllm/models/minimax_m3/nvidia/
@@ -742,7 +790,11 @@ steps:
       - tests/kernels/test_gate_linear_rocm_dispatch.py
       - tests/kernels/test_bf16x3_router_gemm_rocm.py
       commands:
-      - pytest -v -s tests/kernels/test_rocm_fp32_router_gemm.py tests/kernels/test_gate_linear_rocm_dispatch.py tests/kernels/test_bf16x3_router_gemm_rocm.py
+      - >-
+        pytest -v -s
+        tests/kernels/test_rocm_fp32_router_gemm.py
+        tests/kernels/test_gate_linear_rocm_dispatch.py
+        tests/kernels/test_bf16x3_router_gemm_rocm.py
 
 # Disabled until b12x transitive dependencies are locked.
 # - label: ":nvidia: (DGX Spark) [Nightly] b12x Linear Kernels"
@@ -1101,4 +1153,12 @@ steps:
   - tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
   - tests/kernels/models/amd/test_dsv41_mono_gfx942.py
   commands:
-  - pytest -v -s tests/kernels/models/amd/test_dsv41_gfx942_topk.py tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py tests/kernels/models/amd/test_dsv41_gfx942_sparse_indexer.py tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py tests/kernels/models/amd/test_dsv41_mono_gfx942.py
+  - >-
+    pytest -v -s
+    tests/kernels/models/amd/test_dsv41_gfx942_topk.py
+    tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py
+    tests/kernels/models/amd/test_dsv41_gfx942_sparse_indexer.py
+    tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
+    tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
+    tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
+    tests/kernels/models/amd/test_dsv41_mono_gfx942.py

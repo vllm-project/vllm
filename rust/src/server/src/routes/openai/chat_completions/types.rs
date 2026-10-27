@@ -443,7 +443,9 @@ pub(super) struct ChatCompletionStreamResponse {
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
-    pub prompt_token_ids: Option<Vec<u32>>,
+    /// Set only on the first chunk.
+    #[serde(flatten)]
+    pub prompt: Option<ChatCompletionStreamPrompt>,
 }
 
 impl ChatCompletionStreamResponse {
@@ -454,9 +456,19 @@ impl ChatCompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
-            prompt_token_ids: None,
+            prompt: None,
         }
     }
+}
+
+/// Prompt fields of the first stream chunk. Python sets both explicitly on
+/// that chunk, so unset values serialize as `null` there and are omitted from
+/// every later chunk.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ChatCompletionStreamPrompt {
+    pub prompt_token_ids: Option<Vec<u32>>,
+    /// Always `None` until `return_prompt_text` is supported.
+    pub prompt_text: Option<String>,
 }
 
 /// Mirrors the Python vLLM `ChatCompletionResponseStreamChoice` class.
