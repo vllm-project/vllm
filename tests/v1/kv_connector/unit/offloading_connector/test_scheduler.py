@@ -555,6 +555,7 @@ def _make_dcp_shaped_request(
     return request
 
 
+@pytest.mark.cpu_test
 def test_partial_tail_supported_with_mixed_block_sizes_under_dcp():
     scheduler = _make_dcp_shaped_hybrid_scheduler()
     assert scheduler.config.supports_partial_tail
@@ -677,13 +678,9 @@ def _dcp_partial_tail_store(
 
 
 @pytest.mark.cpu_test
-def test_partial_tail_store_keeps_only_the_longest_boundary_under_dcp():
-    # At request end the "align" manager offers the last full recurrent block
-    # (48) next to the prompt tail (56). At dcp == 1 the former is always a
-    # full-attention block multiple and gets filtered; under DCP it is not,
-    # and a single-boundary assumption would take the engine core down. Only
-    # the tail is stored: a consumer probes from its own prompt end downwards
-    # and reaches the tail first, and a second pair would copy block 12 twice.
+def test_partial_tail_store_uses_prompt_checkpoint_under_dcp():
+    # The request-end hand-off includes an aligned recurrent state at 48
+    # and the prompt checkpoint at 56. Only the latter pairs attention/state.
     scheduler = _make_dcp_shaped_hybrid_scheduler()
     jobs = _dcp_partial_tail_store(
         scheduler, [(1, 24, 48), (1, 25, 56)], recurrent_blocks=[0, 0, 24, 25]
