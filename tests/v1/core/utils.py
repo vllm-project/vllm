@@ -28,6 +28,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
+from vllm.v1.core import kv_cache_planning
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -91,6 +92,7 @@ def create_scheduler(
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
+    speculative_config: SpeculativeConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -174,8 +176,8 @@ def create_scheduler(
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
 
-    speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
+        assert speculative_config is None
         spec_kwargs: dict = dict(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )
@@ -413,4 +415,17 @@ def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
         head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
+    )
+
+
+def get_kv_cache_configs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+) -> list[KVCacheConfig]:
+    return kv_cache_planning.get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
+        available_memory,
+        kv_cache_planning.get_global_kv_cache_groups(vllm_config, kv_cache_specs),
     )

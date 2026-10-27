@@ -89,6 +89,7 @@ def _new_online_renderer() -> OnlineRenderer:
     renderer.exclude_tools_when_tool_choice_none = False
     renderer.parser = None
     renderer.trust_request_chat_template = True
+    renderer.reasoning_effort_map = {}
     return renderer
 
 
