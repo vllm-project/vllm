@@ -437,6 +437,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/models/deepseek_v41/amd/rocm.py
+      - vllm/models/deepseek_v41/amd/asm_sparse_mla.py
       - vllm/models/deepseek_v41/sparse_mla.py
       - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
       - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
@@ -455,6 +456,7 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
+      - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py -k flash_native_asm
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test

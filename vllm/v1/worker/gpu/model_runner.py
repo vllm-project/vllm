@@ -827,6 +827,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
         self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
+        if envs.VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA:
+            from vllm.models.deepseek_v41.amd.asm_sparse_mla import pool, reset_pool
+
+            reset_pool()
+            pool()
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:

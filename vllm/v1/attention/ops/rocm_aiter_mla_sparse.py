@@ -2295,6 +2295,7 @@ def _sparse_attn_decode_ragged_bf16_partial_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
+    native_rope_ptr=None,
 ):
     query_idx = tl.program_id(0)
     split_id = tl.program_id(1)
@@ -2338,13 +2339,29 @@ def _sparse_attn_decode_ragged_bf16_partial_kernel(
         valid = in_range & (slot >= 0) & (slot < num_kv)
         safe_slot = tl.where(valid, slot, 0)
 
-        kv = tl.load(
-            kv_ptr
-            + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
-            + dim_offsets[None, :] * kv_stride_d,
-            mask=valid[:, None] & dim_mask[None, :],
-            other=0.0,
-        )
+        if native_rope_ptr is not None:
+            addr = safe_slot[:, None].to(tl.int64)
+            d = dim_offsets[None, :]
+            raw = tl.load(kv_ptr + addr * 512 + d, valid[:, None] & (d < 448), 0)
+            code = tl.load(
+                kv_ptr + addr * 512 + 448 + (d // 64) * 2,
+                valid[:, None] & (d < 448),
+                127,
+            )
+            nope = raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+            nope *= tl.exp2(code.to(tl.float32) - 127.0)
+            rope = tl.load(
+                native_rope_ptr + addr * 64 + d - 448, valid[:, None] & (d >= 448), 0.0
+            )
+            kv = tl.where(d < 448, nope, rope).to(tl.bfloat16)
+        else:
+            kv = tl.load(
+                kv_ptr
+                + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
+                + dim_offsets[None, :] * kv_stride_d,
+                mask=valid[:, None] & dim_mask[None, :],
+                other=0.0,
+            )
 
         next_k_pos = k_start + BLOCK_K + k_offsets
         slot = tl.load(
@@ -3879,6 +3896,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
     rope_head_dim: int,
     num_splits: int,
     out: torch.Tensor | None = None,
+    native_rope: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Split-K decode over an bf16 ragged KV cache.
 
@@ -3896,6 +3914,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         rope_head_dim: RoPE width of ``d``.
         num_splits: Number of KV splits per query.
         out: Optional destination with ``d`` trailing elements.
+        native_rope: Optional BF16 side pool for native 512-byte FP8 KV rows.
 
     Returns:
         The attention output, ``out`` when provided.
@@ -3975,6 +3994,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         BLOCK_D=block_d,
         BLOCK_K=block_k,
         NUM_SPLITS=num_splits,
+        native_rope_ptr=native_rope,
         num_warps=4,
     )
 

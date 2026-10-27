@@ -241,3 +241,25 @@ default on NVIDIA is `FLASHINFER_MLA_SPARSE_DSV4` on SM12x and
 `FLASHMLA_SPARSE_DSV4` on other supported CUDA architectures.
 
 --8<-- "gen:table-mla-v4-decode"
+
+#### DeepSeek V4.1 Flash native ASM decode on MI355X
+
+`VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA=1` opts Flash into native AITER ASM
+attention for compressed-attention batches of at least 16 decode query rows
+per GPU. Smaller batches and sliding-window-only layers use Triton against
+the same native cache. Query rows include speculative verification rows;
+this threshold is not the server's request concurrency.
+
+This experimental path requires gfx950, model runner V2, attention TP1 with
+DP greater than one, 64 local query heads, and `fp8_ds_mla` KV. It supports
+both DP attention with tensor-parallel experts and expert-parallel deployments.
+Monolithic decode, PCP, KV connectors, and KV offloading are unsupported.
+Engram CPU offloading is independent of KV offloading and remains supported.
+
+Each cache row uses a 512-byte FP8 NoPE/scales record and a separate 128-byte
+BF16 RoPE record. Writers, prefill gathers, and both decode implementations
+use this layout directly. The planner reserves one fifth of the cache budget
+for the RoPE side pool, including padding and other state in the shared backing
+allocation. Check prefix-cache residency when comparing serving performance.
+ASM additionally quantizes query NoPE values to FP8; model-quality validation
+is required before relying on this experimental precision change.

@@ -150,6 +150,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
+    VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -1353,6 +1354,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
+    ),
+    # Experimental gfx950 DeepSeek V4.1 Flash ASM decode at >=16 query rows.
+    # Native FP8 NoPE plus a BF16 RoPE side pool; DP attention TP1 only.
+    # Small batches and SWA-only layers use the native-cache Triton reader.
+    "VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA", "0").lower() in ("true", "1")
     ),
     # Whether sparse MLA prefill and decode run on aiter's Triton kernel, which
     # reads the KV cache as stored (bf16 or fp8, paged or flat). Used by the

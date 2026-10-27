@@ -326,12 +326,21 @@ def rope_quant_insert(
     if kv_cache.dtype == torch.uint8:
         kernel = {
             584: _rope_quant_insert_kernel,
+            512: _rope_quant_insert_kernel,
             528: _rope_quant_insert_mxfp8_kernel,
             288: _rope_quant_insert_nvfp4_kernel,
         }.get(kv_cache.shape[-1])
         assert kernel is not None, (
             f"unsupported paged KV record width {kv_cache.shape[-1]}"
         )
+        native_kwargs = {}
+        if kv_cache.shape[-1] == 512:
+            from vllm.models.deepseek_v41.amd.asm_sparse_mla import rope_view
+
+            native_rope = rope_view(kv_cache)
+            native_kwargs = dict(
+                native_rope=native_rope, rope_stride=native_rope.stride(0)
+            )
         kernel[(num_tokens,)](
             latent,
             positions,
@@ -344,6 +353,7 @@ def rope_quant_insert(
             COMPRESS_RATIO=compress_ratio,
             SANITIZE_CACHE_NANS=_ON_GFX950,
             num_warps=4,
+            **native_kwargs,
             **launch_kwargs,
         )
         return
@@ -384,6 +394,8 @@ def _rope_quant_insert_kernel(
     CACHE_BLOCK: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     SANITIZE_CACHE_NANS: tl.constexpr,
+    native_rope=None,
+    rope_stride: tl.constexpr = 0,
 ):
     t = tl.program_id(0)
     slot = tl.load(cache_slots + t)
@@ -395,8 +407,12 @@ def _rope_quant_insert_kernel(
     d = tl.arange(0, 512)
     normed = tl.load(latent + t.to(tl.int64) * 512 + d).to(tl.float32)
     page = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE
-    values = page + (slot % CACHE_BLOCK) * 576
-    scales = page + CACHE_BLOCK * 576 + (slot % CACHE_BLOCK) * 8
+    if native_rope is not None:
+        values = page + (slot % CACHE_BLOCK) * 512
+        scales = values + 448
+    else:
+        values = page + (slot % CACHE_BLOCK) * 576
+        scales = page + CACHE_BLOCK * 576 + (slot % CACHE_BLOCK) * 8
 
     quant = tl.reshape(normed, (8, 64))
     amax = tl.maximum(tl.max(tl.abs(quant), 1), 1e-4)
@@ -408,8 +424,12 @@ def _rope_quant_insert_kernel(
     s = tl.arange(0, 8)
     max_encoded: tl.constexpr = 254.0 if SANITIZE_CACHE_NANS else 255.0
     encoded = tl.minimum(tl.maximum(exponent + 127.0, 0.0), max_encoded)
-    tl.store(scales + s, encoded.to(tl.uint8), s < 7)
-    tl.store(scales + 7, tl.full((), 0, tl.uint8))
+    if native_rope is not None:
+        tl.store(scales + s * 2, encoded.to(tl.uint8), s < 7)
+        tl.store(scales + s * 2 + 1, encoded.to(tl.uint8), s < 7)
+    else:
+        tl.store(scales + s, encoded.to(tl.uint8), s < 7)
+        tl.store(scales + 7, tl.full((), 0, tl.uint8))
 
     even, odd = tl.split(tl.reshape(normed, (256, 2)))
     pair = tl.arange(0, 256) - 224
@@ -419,7 +439,14 @@ def _rope_quant_insert_kernel(
     rotated = tl.interleave(even * c - odd * s, odd * c + even * s)
     if SANITIZE_CACHE_NANS:
         rotated = tl.where(rotated == rotated, rotated, 0.0)
-    rope_dst = (values + 448).to(tl.pointer_type(tl.bfloat16))
+    if native_rope is not None:
+        rope_dst = (
+            native_rope
+            + (slot // CACHE_BLOCK).to(tl.int64) * rope_stride
+            + (slot % CACHE_BLOCK) * 64
+        )
+    else:
+        rope_dst = (values + 448).to(tl.pointer_type(tl.bfloat16))
     tl.store(rope_dst + d - 448, rotated.to(tl.bfloat16), d >= 448)
 
 

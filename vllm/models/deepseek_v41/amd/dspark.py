@@ -237,6 +237,11 @@ def _insert_context_kv(
     query and discard it, since context tokens have no query). Mirrors
     ``DeepseekV4Attention._fused_qnorm_rope_kv_insert``.
     """
+    if getattr(attn, "_use_asm_sparse_mla", False):
+        from .asm_sparse_mla import insert_kv
+
+        insert_kv(attn, kv, positions, slot_mapping)
+        return
     swa_cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
     cos_sin_cache = attn.rotary_emb.cos_sin_cache

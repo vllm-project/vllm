@@ -1066,6 +1066,10 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     """Release the profiling KV cache and captured graphs while keeping model
     weights, so the real ``initialize_kv_cache`` starts from a clean slate."""
     torch.accelerator.synchronize()
+    from vllm.models.deepseek_v41.amd.asm_sparse_mla import enabled, reset_pool
+
+    if enabled():
+        reset_pool()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None
     # Invalidate the align-mode Mamba group metadata cached from the

@@ -2829,3 +2829,106 @@ def test_v41_rocm_combine_uses_shared_kernel() -> None:
     from vllm.models.deepseek_v41.common.ops import cache_utils
 
     assert rocm.combine_topk_swa_indices is cache_utils.combine_topk_swa_indices
+
+
+@requires_gfx950
+@pytest.mark.parametrize("rows", [4, 8, 16, 32])
+@pytest.mark.parametrize("ratio", [1, 2])
+@torch.inference_mode()
+def test_flash_native_asm_cache_and_decode(rows, ratio, monkeypatch):
+    """Native writes, prefill reads and graph replay share one paged cache."""
+    from vllm.models.deepseek_v41.amd import asm_sparse_mla as asm
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        dequantize_and_gather_k_cache,
+    )
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    torch.manual_seed(71)
+    device = "cuda"
+    # Two layer pages in each physical block; neither layer is contiguous.
+    storage = torch.zeros((8, 2, 128, 512), dtype=torch.uint8, device=device)
+    main, extra = storage[:, 0], storage[:, 1]
+    pool = asm.NativeCachePool([main, extra])
+    monkeypatch.setattr(asm, "_pool", pool)
+    kv = torch.randn((1024, 512), dtype=torch.bfloat16, device=device)
+    positions = torch.arange(1024, device=device, dtype=torch.int64)
+    slots = positions.clone()
+    phase = torch.randn((2048, 32), device=device)
+    cs = torch.cat((phase.cos(), phase.sin()), dim=1)
+    # Compress-ratio boundaries use only the completed compressed slots.
+    compressed_slots = slots // ratio
+    rope_quant_insert(kv, positions, cs, extra, compressed_slots, ratio)
+    rope_quant_insert(kv, positions, cs, main, slots, 1)
+    lengths = torch.tensor([1024 // ratio], dtype=torch.int32, device=device)
+    blocks = torch.arange(8, dtype=torch.int32, device=device).view(1, -1)
+    gathered = torch.empty((1, 1024 // ratio, 512), dtype=torch.bfloat16, device=device)
+    dequantize_and_gather_k_cache(gathered, extra, lengths, None, blocks, 128, 0)
+    raw = extra.reshape(-1, 512)
+    codes = raw[: 1024 // ratio, 448:462:2].float()
+    nope = raw[: 1024 // ratio, :448].contiguous().view(torch.float8_e4m3fn).float()
+    nope *= torch.exp2(codes - 127).repeat_interleave(64, dim=1)
+    expected_kv = torch.cat(
+        (nope, pool.rope_view(extra).reshape(-1, 64)[: 1024 // ratio].float()), dim=-1
+    )
+    torch.testing.assert_close(gathered[0].float(), expected_kv, atol=0, rtol=0)
+    q = torch.randn((rows, 64, 512), dtype=torch.bfloat16, device=device)
+    md = SimpleNamespace(num_decode_tokens=rows, slot_mapping=slots[:rows])
+    attn = SimpleNamespace(
+        swa_cache_layer=SimpleNamespace(kv_cache=main),
+        rotary_emb=SimpleNamespace(cos_sin_cache=cs),
+        compress_ratio=ratio,
+    )
+    # Last query has no KV: graph padding must overwrite previous output.
+    counts = torch.full((rows,), 64, dtype=torch.int32, device=device)
+    counts[-1] = 0
+    ptr = torch.cat((counts.new_zeros(1), counts.cumsum(0).int()))
+    idx = torch.arange(64, device=device, dtype=torch.int32).repeat(rows)
+    sink = torch.randn(64, device=device)
+    out = torch.empty_like(q)
+
+    def run():
+        prepared = asm.prepare_qk(attn, q, kv[:rows], positions[:rows], md)
+        asm.decode(
+            prepared,
+            main,
+            idx,
+            ptr,
+            extra,
+            idx,
+            ptr,
+            sink,
+            out,
+            128,
+            packed=attn._asm_q,
+        )
+        return prepared
+
+    prepared = run()
+    if rows >= 16:
+        qp, qr = attn._asm_q
+        qb = qp[..., :448].contiguous().view(torch.float8_e4m3fn).float()
+        qb *= torch.exp2(qp[..., 448:462:2].float() - 127).repeat_interleave(64, -1)
+        qref = torch.cat((qb, qr.float()), -1)
+    else:
+        qref = prepared.float()
+    # Gather the actual native keys after the overlapping SWA writes.
+    main_gather = torch.empty((1, 64, 512), dtype=torch.bfloat16, device=device)
+    dequantize_and_gather_k_cache(
+        main_gather, main, lengths.new_tensor([64]), None, blocks, 128, 0
+    )
+    keys = torch.cat((main_gather[0].float(), expected_kv[:64]), dim=0)
+    scores = qref @ keys.T * (512**-0.5)
+    probabilities = torch.softmax(
+        torch.cat((scores, sink[None, :, None].expand(rows, -1, 1)), -1), -1
+    )[..., :-1]
+    expected = (probabilities @ keys).bfloat16()
+    expected[-1] = 0
+    torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    out.fill_(float("nan"))
+    graph.replay()
+    torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)

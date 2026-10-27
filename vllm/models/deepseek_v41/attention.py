@@ -520,6 +520,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         self.kv_mxfp8 = _use_v41_mxfp8_kv_record()
         self.swa_bytes_per_token = 528 if self.kv_mxfp8 else 584
+        if envs.VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA:
+            self.swa_bytes_per_token = 512
         # nvfp4_ds_mla keeps the MXFP8 sliding-window record and stores the
         # compressed cache as NVFP4 (256 B of e2m1 pairs + 32 e4m3 scales).
         self.compressed_bytes_per_token = (
@@ -528,7 +530,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # One alignment for every page in the block: the block stride is their
         # sum. V4 needs its 576 B TMA stride; V4.1's is on the SWA block
         # stride, and 512 is free (its pages are already 512 B multiples).
-        self.kv_page_alignment = 512 if self.kv_mxfp8 else 576
+        self.kv_page_alignment = (
+            512 if self.kv_mxfp8 or envs.VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA else 576
+        )
         if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.kv_mxfp8:
             raise ValueError(
                 "nvfp4_ds_mla needs the V4.1 KV records, which FlashMLA "
@@ -719,18 +723,23 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 assert swa_metadata.cache_positions is not None
                 slot_mapping = swa_metadata.cache_slot_mapping
                 cache_positions = swa_metadata.cache_positions
-            torch.ops._C.fused_deepseek_v4_kv_rope_insert(
-                cache_kv,
-                cache,
-                slot_mapping,
-                cache_positions,
-                self.rotary_emb.cos_sin_cache,
-                self.swa_cache_layer.block_size,
-                self._flashinfer_fp8_kv_scale
-                if cache.dtype == torch.float8_e4m3fn
-                else None,
-                self.kv_mxfp8,
-            )
+            if envs.VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA:
+                from .amd.asm_sparse_mla import insert_kv
+
+                insert_kv(self, cache_kv, cache_positions, slot_mapping)
+            else:
+                torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+                    cache_kv,
+                    cache,
+                    slot_mapping,
+                    cache_positions,
+                    self.rotary_emb.cos_sin_cache,
+                    self.swa_cache_layer.block_size,
+                    self._flashinfer_fp8_kv_scale
+                    if cache.dtype == torch.float8_e4m3fn
+                    else None,
+                    self.kv_mxfp8,
+                )
         if self.compressor is not None:
             latent = self.compressor(kv_score, positions)
             if self.use_pcp and latent is not None:
@@ -1282,7 +1291,11 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             "nvfp4_ds_mla",
         )
         page_alignment = (
-            576 if uses_fp8_ds_mla_layout and not _use_v41_mxfp8_kv_record() else 512
+            576
+            if uses_fp8_ds_mla_layout
+            and not _use_v41_mxfp8_kv_record()
+            and not envs.VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA
+            else 512
         )
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,

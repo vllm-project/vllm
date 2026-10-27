@@ -459,6 +459,8 @@ def _dequantize_and_gather_k_one_pass_kernel(
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,  # 7 real blocks; the per-block form only
     use_fnuz: tl.constexpr = False,
+    native_rope=None,
+    rope_stride: tl.constexpr = 0,
 ):
     """``_dequantize_and_gather_k_kernel`` with the token read in one tile.
 
@@ -493,6 +495,8 @@ def _dequantize_and_gather_k_one_pass_kernel(
             + cache_block_size * token_data_size
             + pos_in_block * scale_dim
         )
+        if native_rope is not None:
+            token_scale_ptr = token_fp8_ptr + 448
         output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
 
         # The tile is scale_dim * quant_block = 512 against an fp8 region of
@@ -507,7 +511,14 @@ def _dequantize_and_gather_k_one_pass_kernel(
         else:
             x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
 
-        encoded_scale = tl.load(token_scale_ptr + tl.arange(0, scale_dim))
+        if native_rope is not None:
+            encoded_scale = tl.load(
+                token_scale_ptr + tl.arange(0, scale_dim) * 2,
+                tl.arange(0, scale_dim) < 7,
+                127,
+            )
+        else:
+            encoded_scale = tl.load(token_scale_ptr + tl.arange(0, scale_dim))
         scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)  # UE8M0
         tiles = tl.reshape(x_fp8.to(tl.float32), (scale_dim, quant_block))
         x_dequant = tl.reshape(tiles * tl.reshape(scale, (scale_dim, 1)), (tile_dim,))
@@ -517,7 +528,14 @@ def _dequantize_and_gather_k_one_pass_kernel(
             mask=fp8_offsets < fp8_dim,
         )
 
-        bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+        if native_rope is not None:
+            bf16_cache_ptr = (
+                native_rope
+                + physical_block_idx.to(tl.int64) * rope_stride
+                + pos_in_block * 64
+            )
+        else:
+            bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
         bf16_offsets = tl.arange(0, bf16_dim)
         tl.store(
             output_row_ptr + fp8_dim + bf16_offsets,
@@ -737,6 +755,13 @@ def dequantize_and_gather_k_cache_triton(
         if current_platform.is_rocm()
         else _dequantize_and_gather_k_kernel
     )
+    native_kwargs = {}
+    if k_cache.shape[-1] == 512:
+        from vllm.models.deepseek_v41.amd.asm_sparse_mla import rope_view
+
+        rope = rope_view(k_cache)
+        native_kwargs = dict(native_rope=rope, rope_stride=rope.stride(0))
+        TOKEN_DATA_SIZE = 512
     kernel[(num_reqs, gather_workers)](
         out,
         out.stride(0),
@@ -758,6 +783,7 @@ def dequantize_and_gather_k_cache_triton(
         fp8_max=FP8_MAX,
         n_quant_blocks=7,
         use_fnuz=use_fnuz,
+        **native_kwargs,
     )
 
 

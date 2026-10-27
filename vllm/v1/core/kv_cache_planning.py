@@ -9,6 +9,7 @@ from dataclasses import replace
 from functools import partial, reduce
 from typing import Any
 
+import vllm.envs as envs
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
@@ -1498,6 +1499,14 @@ def get_kv_cache_configs(
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 
     builder = get_kv_cache_config_builder(vllm_config)
+
+    if envs.VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA:
+        if vllm_config.model_config.hf_text_config.model_type != "deepseek_v41":
+            raise ValueError(
+                "ASM native KV caches are only supported for DeepSeek V4.1"
+            )
+        # Reserve the BF16 RoPE side pool outside per-block sizing probes.
+        available_memory = [m * 4 // 5 for m in available_memory]
 
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.

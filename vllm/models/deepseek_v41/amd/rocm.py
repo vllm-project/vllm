@@ -595,6 +595,23 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "are not supported."
                 )
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        from . import asm_sparse_mla
+
+        self._use_asm_sparse_mla = asm_sparse_mla.enabled()
+        if self._use_asm_sparse_mla:
+            asm_sparse_mla.configure(vllm_config)
+        if self._use_asm_sparse_mla and (
+            not _ON_GFX950
+            or self.kv_cache_dtype != "fp8_ds_mla"
+            or self.kv_mxfp8
+            or self._has_kv_transfer
+            or self.use_pcp
+            or self.n_local_heads != 64
+        ):
+            raise ValueError(
+                "ASM Flash MLA needs gfx950, fp8_ds_mla, "
+                "64 local heads, and no KV transfer or PCP"
+            )
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None
@@ -602,6 +619,14 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
+
+    def _fused_qnorm_rope_kv_insert(self, q, kv, positions, attn_metadata):
+        if self._use_asm_sparse_mla and isinstance(attn_metadata, dict):
+            from .asm_sparse_mla import prepare_qk
+
+            md = attn_metadata[self.swa_cache_layer.prefix]
+            return prepare_qk(self, q, kv, positions, md)
+        return super()._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
     def prepare_attn_preshuffle(self) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
@@ -998,7 +1023,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 M,
                 self.max_num_batched_tokens,
                 q,
-                gather=not self._use_aiter_sparse_mla,
+                gather=self._use_asm_sparse_mla or not self._use_aiter_sparse_mla,
             )
             if shapes:
                 current_workspace_manager().get_simultaneous(*shapes)
@@ -1160,7 +1185,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 num_decode_tokens=num_decode_tokens,
             )
 
-        if self._use_aiter_sparse_mla:
+        if self._use_aiter_sparse_mla or self._use_asm_sparse_mla:
             assert swa_metadata.decode_swa_ragged_indices is not None
             assert swa_metadata.decode_swa_ragged_indptr is not None
             out = output
@@ -1169,7 +1194,26 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 # rotate and quantize them as the decode reduce would have.
                 out = self._mxfp8_bf16_rows(q.shape[0], q)
             assert out is not None
-            self._aiter_sparse_mla(
+            mla = self._aiter_sparse_mla
+            if self._use_asm_sparse_mla:
+                from .asm_sparse_mla import decode
+
+                def mla(q, out, main, mi, mp, extra, ei, ep):
+                    decode(
+                        q,
+                        main,
+                        mi,
+                        mp,
+                        extra,
+                        ei,
+                        ep,
+                        self.attn_sink[: q.shape[1]],
+                        out,
+                        swa_metadata.decode_swa_width + (0 if swa_only else 512),
+                        packed=self._asm_q,
+                    )
+
+            mla(
                 q,
                 out,
                 self.swa_cache_layer.kv_cache,
@@ -1179,6 +1223,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 topk_ragged_indices,
                 topk_ragged_indptr,
             )
+            if self._use_asm_sparse_mla:
+                self._asm_q = None
             if output_mxfp8 is not None:
                 rocm_inverse_rope_mxfp8_rows(
                     out,
@@ -1237,7 +1283,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         With ``mxfp8_out`` the rows go to a bf16 workspace first and are then
         inverse-RoPE'd and quantized into it in one pass.
         """
-        if self._use_aiter_sparse_mla:
+        if self._use_aiter_sparse_mla and not self._use_asm_sparse_mla:
             self._forward_prefill_aiter(
                 q=q,
                 positions=positions,
