@@ -1356,10 +1356,14 @@ class VllmConfig:
                 )
             return False
         if self.speculative_config is not None:
-            if watermark_config.algorithm == "synthid_text":
+            if not (
+                watermark_config.supports_speculative_decoding
+                or watermark_config.supports_target_only_watermarking
+            ):
                 raise ValueError(
-                    "SynthID-Text watermarking does not support speculative decoding, "
-                    "even with allow_target_only_watermarking=true."
+                    f"The '{watermark_config.algorithm}' watermarking algorithm "
+                    "does not support speculative decoding, even with "
+                    "allow_target_only_watermarking=true."
                 )
             speculative_config = self.speculative_config
             if speculative_config.draft_sample_method != "probabilistic":

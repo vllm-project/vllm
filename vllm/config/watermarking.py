@@ -57,6 +57,10 @@ class WatermarkConfig:
     def supports_speculative_decoding(self) -> bool:
         return self.algorithm == "dual_key_gumbel"
 
+    @property
+    def supports_target_only_watermarking(self) -> bool:
+        return self.algorithm == "gumbel"
+
     @model_validator(mode="after")
     def validate_watermark_settings(self) -> Self:
         if self.key > 2**64 - 1:

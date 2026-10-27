@@ -3798,7 +3798,7 @@ def test_synthid_rejects_speculative_decoding(allow_target_only):
 
     with pytest.raises(
         ValueError,
-        match="SynthID-Text watermarking does not support speculative decoding",
+        match="'synthid_text' watermarking algorithm does not support speculative",
     ):
         config._check_supports_watermarking()
 
