@@ -386,6 +386,32 @@ def test_ipc_cache_modelopt_fp8(vllm_runner, tmp_path, monkeypatch):
     run_cold_start_and_warm_restart(vllm_runner, MODELOPT_FP8_CASE, tmp_path)
 
 
+MODELOPT_BLOCK_FP8_CASE = replace(
+    MODELOPT_FP8_CASE,
+    model="CedricHwang/qwen2.5-0.5b-modelopt-fp8-pb-wo",
+    llm_kwargs={
+        **MODELOPT_FP8_CASE.llm_kwargs,
+        "revision": "62bb490e7095973375c7b97b54b3af733d67c973",
+    },
+    daemon_args=[
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend":"cutlass"}',
+        "--revision",
+        "62bb490e7095973375c7b97b54b3af733d67c973",
+    ],
+)
+
+
+def test_ipc_cache_modelopt_block_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Repeated IPC restarts retain processed ModelOpt block weights and scales."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, MODELOPT_BLOCK_FP8_CASE, tmp_path)
+
+
 NVFP4_CASE = ModelCase(
     model="nvidia/Qwen3-30B-A3B-NVFP4",
     prompts=["The capital of France is", "Hello, my name is"],

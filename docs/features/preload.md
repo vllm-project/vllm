@@ -264,8 +264,12 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   linear layers also support CUDA IPC with the CUTLASS linear backend.
   Set the same `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon
   and engine. Engines reuse the processed weights and scales, including
-  fused-projection scales and output padding. This does not enable ModelOpt
-  block FP8, FP8 MoE, or other FP8 linear backends.
+  fused-projection scales and output padding. Serialized ModelOpt `FP8_PB_WO`
+  linear layers with 128×128 weight blocks and dynamic per-token group-128
+  activations also support IPC on GPUs supported by the CUTLASS block-FP8
+  kernel. Engines retain the untransposed weights and restore the logical
+  output width when the daemon padded a partial trailing block. This does
+  not enable ModelOpt FP8 MoE or other FP8 linear backends.
   ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.

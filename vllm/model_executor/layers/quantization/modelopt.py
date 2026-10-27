@@ -21,6 +21,9 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -2613,6 +2616,11 @@ class ModelOptLinearMethod(LinearMethodBase):
                 and type(self.fmt) is FormatScheme
             )
             or (
+                w == kFp8Static128BlockSym
+                and isinstance(self.kernel, CutlassFp8BlockScaledMMKernel)
+                and type(self.fmt) is _Fp8PbWoPartialBlock
+            )
+            or (
                 w == kMxfp8Static
                 and self.kernel is not None
                 and self.kernel.supports_pre_processed_weights
@@ -2664,6 +2672,10 @@ class ModelOptLinearMethod(LinearMethodBase):
             if self.spec.weight in (kFp8StaticTensorSym, kFp8StaticTokenSym):
                 # IPC restores transposed tensors, but not this Python metadata.
                 layer.processed_weight_dims = (0, 1)
+            elif self.spec.weight == kFp8Static128BlockSym:
+                logical_out = layer.output_size_per_partition
+                if logical_out % 128:
+                    layer._pbwo_logical_out = logical_out
             return
         self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)

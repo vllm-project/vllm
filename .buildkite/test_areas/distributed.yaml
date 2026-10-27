@@ -803,8 +803,10 @@ steps:
   - vllm/model_executor/kernels/linear/
   - vllm/entrypoints/cli/preload.py
   - tests/model_executor/model_loader/test_weight_cache.py
+  - tests/quantization/test_modelopt.py
   commands:
-  - pytest -v -s model_executor/model_loader/test_weight_cache.py -k 'online_blackwell or nvfp4_cutlass'
+  - pytest -v -s model_executor/model_loader/test_weight_cache.py -k 'online_blackwell or nvfp4_cutlass or modelopt_block_fp8'
+  - pytest -v -s quantization/test_modelopt.py -k "preprocessed_shared_weights or preprocessed_unsupported_backend"
 
 - label: ":nvidia: (L4) Distributed Preload"
   key: preload-2-gpus

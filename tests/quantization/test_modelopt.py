@@ -9,6 +9,7 @@ import json
 import os
 from contextlib import nullcontext
 from copy import deepcopy
+from itertools import product
 from types import SimpleNamespace
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
@@ -48,6 +49,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4DynamicToken,
     kNvfp4Static,
+)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    CUTLASS_BLOCK_FP8_SUPPORTED,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -1611,8 +1615,22 @@ def test_modelopt_block_quant_loads_expert_blocks_with_aligned_tp_slices(
     not current_platform.is_cuda() or not current_platform.has_device_capability(89),
     reason="Requires CUDA CUTLASS FP8 kernels",
 )
-@pytest.mark.parametrize("algorithm", ["FP8", "FP8_PER_CHANNEL_PER_TOKEN"])
-@pytest.mark.parametrize("output_sizes", [[32, 32], [17, 32]])
+@pytest.mark.parametrize(
+    "algorithm,output_sizes",
+    list(product(["FP8", "FP8_PER_CHANNEL_PER_TOKEN"], [[32, 32], [17, 32]]))
+    + [
+        pytest.param(
+            "FP8_PB_WO",
+            sizes,
+            id=name,
+            marks=pytest.mark.skipif(
+                not CUTLASS_BLOCK_FP8_SUPPORTED,
+                reason="Requires CUDA CUTLASS block-FP8 kernels",
+            ),
+        )
+        for sizes, name in [([128, 256], "block-aligned"), ([128, 129], "block-padded")]
+    ],
+)
 @torch.inference_mode()
 def test_modelopt_fp8_preprocessed_shared_weights(
     algorithm, output_sizes, dist_init, workspace_init, monkeypatch
@@ -1621,6 +1639,9 @@ def test_modelopt_fp8_preprocessed_shared_weights(
     from vllm.config import KernelConfig
     from vllm.model_executor.kernels.linear.scaled_mm import (
         CutlassFP8ScaledMMLinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+        CutlassFp8BlockScaledMMKernel,
     )
     from vllm.model_executor.layers.linear import MergedColumnParallelLinear
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -1632,6 +1653,8 @@ def test_modelopt_fp8_preprocessed_shared_weights(
         model_config=ModelConfig(model="facebook/opt-125m", dtype="bfloat16"),
         kernel_config=KernelConfig(linear_backend="cutlass"),
     )
+    block = algorithm == "FP8_PB_WO"
+    input_size = 256 if block else 64
     quant_config = ModelOptFp8Config(
         quant_method=algorithm,
         is_checkpoint_fp8_serialized=True,
@@ -1644,14 +1667,17 @@ def test_modelopt_fp8_preprocessed_shared_weights(
         torch.device("cuda"),
     ):
         source = MergedColumnParallelLinear(
-            64,
+            input_size,
             output_sizes,
             bias=False,
             params_dtype=torch.bfloat16,
             quant_config=quant_config,
         )
         assert isinstance(source.quant_method, ModelOptLinearMethod)
-        assert isinstance(source.quant_method.kernel, CutlassFP8ScaledMMLinearKernel)
+        expected_kernel = (
+            CutlassFp8BlockScaledMMKernel if block else CutlassFP8ScaledMMLinearKernel
+        )
+        assert isinstance(source.quant_method.kernel, expected_kernel)
         torch.manual_seed(0)
         source.weight.copy_(torch.randn(source.weight.shape).to(source.weight.dtype))
         source.weight_scale.copy_(
@@ -1662,14 +1688,14 @@ def test_modelopt_fp8_preprocessed_shared_weights(
         if algorithm == "FP8":
             source.input_scale.copy_(torch.tensor([0.01, 0.02]))
         process_weights_after_loading(source, config.model_config, torch.device("cuda"))
-        inputs = torch.randn(3, 64, dtype=torch.bfloat16)
+        inputs = torch.randn(3, input_size, dtype=torch.bfloat16)
         expected, _ = source(inputs)
         shared = dict(source.named_parameters())
         snapshots = {name: param.detach().clone() for name, param in shared.items()}
         for _ in range(2):
             with torch.device("meta"):
                 attached = MergedColumnParallelLinear(
-                    64,
+                    input_size,
                     output_sizes,
                     bias=False,
                     params_dtype=torch.bfloat16,
@@ -1684,7 +1710,12 @@ def test_modelopt_fp8_preprocessed_shared_weights(
             actual, _ = attached(inputs)
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
             assert actual.shape == (3, sum(output_sizes))
-            assert attached.processed_weight_dims == source.processed_weight_dims
+            assert getattr(attached, "processed_weight_dims", None) == getattr(
+                source, "processed_weight_dims", None
+            )
+            assert getattr(attached, "_pbwo_logical_out", None) == getattr(
+                source, "_pbwo_logical_out", None
+            )
             for name, param in attached.named_parameters():
                 assert param.data_ptr() == shared[name].data_ptr()
                 torch.testing.assert_close(
@@ -1696,8 +1727,11 @@ def test_modelopt_fp8_preprocessed_shared_weights(
     not current_platform.is_cuda() or not current_platform.has_device_capability(89),
     reason="Requires CUDA FP8 kernels",
 )
-@pytest.mark.parametrize("backend", ["torch", "triton"])
-def test_modelopt_fp8_preprocessed_unsupported_backend(backend, dist_init):
+@pytest.mark.parametrize(
+    "algorithm,backend",
+    [("FP8", "torch"), ("FP8", "triton"), ("FP8_PB_WO", "triton")],
+)
+def test_modelopt_fp8_preprocessed_unsupported_backend(algorithm, backend, dist_init):
     """An unvalidated backend must reject IPC weights before using them."""
     from vllm.config import KernelConfig
     from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -1708,11 +1742,12 @@ def test_modelopt_fp8_preprocessed_unsupported_backend(backend, dist_init):
         model_config=ModelConfig(model="facebook/opt-125m", dtype="bfloat16"),
         kernel_config=KernelConfig(linear_backend=backend),
     )
-    quant_config = ModelOptFp8Config("FP8", True, None, [])
+    quant_config = ModelOptFp8Config(algorithm, True, None, [])
+    size = 256 if algorithm == "FP8_PB_WO" else 64
     with set_current_vllm_config(config), torch.device("meta"):
         layer = ReplicatedLinear(
-            64,
-            64,
+            size,
+            size,
             bias=False,
             params_dtype=torch.bfloat16,
             quant_config=quant_config,
