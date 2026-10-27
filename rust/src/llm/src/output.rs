@@ -50,6 +50,8 @@ pub struct TokenUsage {
 pub struct PromptCacheUsage {
     /// Number of prompt tokens served from cache.
     pub cached_token_count: usize,
+    /// Number of prompt tokens newly written to the local prefix cache.
+    pub cache_creation_token_count: usize,
 }
 
 impl PromptCacheUsage {
@@ -59,6 +61,8 @@ impl PromptCacheUsage {
     /// zero, so each count keeps the largest value seen.
     pub fn merge(&mut self, later: Self) {
         self.cached_token_count = self.cached_token_count.max(later.cached_token_count);
+        self.cache_creation_token_count =
+            self.cache_creation_token_count.max(later.cache_creation_token_count);
     }
 }
 
@@ -425,6 +429,10 @@ impl GenerateOutputStream {
                     raw.prefill_stats.as_ref().map(|stats| stats.num_cached_tokens as usize)
                 })
                 .unwrap_or(0),
+            cache_creation_token_count: raw
+                .prefill_stats
+                .as_ref()
+                .map_or(0, |stats| stats.num_cache_creation_tokens as usize),
         };
 
         // An engine error means the request was rejected before it ran.

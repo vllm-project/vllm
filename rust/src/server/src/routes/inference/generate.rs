@@ -691,6 +691,7 @@ mod tests {
                 finish_reason: Some(FinishReason::stop_eos()),
                 prompt_cache_usage: PromptCacheUsage {
                     cached_token_count: 2,
+                    cache_creation_token_count: 0,
                 },
                 kv_transfer_params: None,
                 ec_transfer_params: None,
