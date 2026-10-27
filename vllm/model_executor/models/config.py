@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -786,6 +787,28 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 cache_config.mamba_block_size = model_config.max_model_len
 
 
+class MiniMaxM3SparseForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    INDEX_CACHE_KEYS = ("use_index_cache", "index_topk_freq", "index_skip_topk_offset")
+
+    @classmethod
+    def verify_and_update_model_config(cls, model_config: "ModelConfig") -> None:
+        """Reject IndexCache overrides set on the outer VL config, where the
+        ROCm text model never reads them."""
+        from vllm.platforms import current_platform
+
+        overrides = model_config.hf_overrides
+        if not current_platform.is_rocm() or not isinstance(overrides, dict):
+            return
+        misplaced = [key for key in cls.INDEX_CACHE_KEYS if key in overrides]
+        if misplaced:
+            suggested = {"text_config": {key: overrides[key] for key in misplaced}}
+            raise ValueError(
+                "MiniMax-M3 reads IndexCache settings from text_config, so "
+                f"top-level {', '.join(misplaced)} would be ignored. Pass them as "
+                f"--hf-overrides '{json.dumps(suggested)}'."
+            )
+
+
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
     DEFAULT_MAMBA_SSM_CACHE_DTYPE: "MambaDType" = "float32"
     """Only `float32` is known to have no accuracy issues by default."""
@@ -1013,14 +1036,6 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
             raise NotImplementedError(
                 "Qwen4Exp PLE/QSA does not support dual-batch overlap or microbatching"
             )
-        # Checked again in Qwen4ExpModelState; rejecting it here keeps the
-        # engine from loading weights first.
-        if text_config.ple_layer_ids and parallel_config.pipeline_parallel_size > 1:
-            raise NotImplementedError(
-                "Qwen4Exp N-gram PLE embedding requires pipeline_parallel_size=1 "
-                "because non-first pipeline ranks do not receive the raw input_ids "
-                "it needs. Please run with PP=1."
-            )
         multimodal_config = vllm_config.model_config.multimodal_config
         if multimodal_config is not None and multimodal_config.language_model_only:
             _strip_qwen4_exp_mrope(vllm_config.model_config)
@@ -1222,6 +1237,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
+    "MiniMaxM3SparseForConditionalGeneration": (
+        MiniMaxM3SparseForConditionalGenerationConfig
+    ),
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
