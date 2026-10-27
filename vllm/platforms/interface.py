@@ -201,11 +201,7 @@ class Platform:
     def get_sparse_mla_index_group_builder_cls(
         cls,
     ) -> type["SparseMLAIndexGroupBuilder"]:
-        from vllm.v1.attention.backends.mla.index_group import (
-            SparseMLAIndexGroupBuilder,
-        )
-
-        return SparseMLAIndexGroupBuilder
+        raise NotImplementedError
 
     @classmethod
     def get_hisparse_backend_cls(cls) -> str | None:

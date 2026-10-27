@@ -233,13 +233,14 @@ Without HiSparse, sparse attention keeps its normal stream and event path.
 ROCm does not currently provide a HiSparse backend.
 
 Sparse MLA index-group builders are selected by
-`Platform.get_sparse_mla_index_group_builder_cls()`. The default returns the
-existing `SparseMLAIndexGroupBuilder` class, which chooses ordinary or HiSparse
-groups from the attention configuration. Hardware plugins can override this
-method to return a subclass with the same constructor and `register_layer()`
-contract. Model and MTP initialization use this selection only when they have a
-top-K buffer. Attention implementations reuse a supplied builder and select a
-new one only when it is absent and a top-K buffer is available.
+`Platform.get_sparse_mla_index_group_builder_cls()`. The base platform declares
+the contract without choosing an implementation. CUDA and ROCm return the existing
+`SparseMLAIndexGroupBuilder` class, which chooses ordinary or HiSparse groups from
+the attention configuration. Hardware plugins using sparse MLA must implement
+this method and return a compatible builder class. Model and MTP initialization
+use this selection only when they have a top-K buffer. Attention implementations
+reuse a supplied builder and select a new one only when it is absent and a top-K
+buffer is available.
 
 ## Main classes
 

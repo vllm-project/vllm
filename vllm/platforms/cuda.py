@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from vllm.config.cache import CacheDType
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -234,6 +235,16 @@ class CudaPlatformBase(Platform):
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
+
+    @classmethod
+    def get_sparse_mla_index_group_builder_cls(
+        cls,
+    ) -> type[SparseMLAIndexGroupBuilder]:
+        from vllm.v1.attention.backends.mla.index_group import (
+            SparseMLAIndexGroupBuilder,
+        )
+
+        return SparseMLAIndexGroupBuilder
 
     @classmethod
     def get_hisparse_backend_cls(cls) -> str | None:
