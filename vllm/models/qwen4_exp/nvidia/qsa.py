@@ -22,7 +22,6 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
-    LinearBase,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
@@ -63,19 +62,6 @@ from vllm.v1.kv_cache_interface import (
 from ..common.qsa_cache import QSAForwardMetadata
 from . import model
 from .indexer_qsa import QSAIndexer
-
-
-def _same_quant_method(qkv_proj: LinearBase, index_qk_proj: LinearBase) -> bool:
-    """Whether the indexer can share the q/k/v GEMM, which uses the q/k/v quant
-    method and scheme."""
-
-    def kind(layer: LinearBase) -> tuple[type, type]:
-        method = layer.quant_method
-        # compressed-tensors keeps the scheme on the layer, INC on the method.
-        scheme = getattr(layer, "scheme", None) or getattr(method, "scheme", None)
-        return type(method), type(scheme)
-
-    return kind(qkv_proj) == kind(index_qk_proj)
 
 
 class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
@@ -520,11 +506,13 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             )
         )
         # Without a quant config here (BF16, or ModelOpt FP4, which keeps
-        # attention in BF16) the fused layer is unquantized.
+        # attention in BF16) the fused layer is unquantized. Otherwise the
+        # indexer shares the q/k/v GEMM only if it uses the same quant method.
         fused_quant_config = model.without_modelopt_fp4(quant_config)
+        projection_method = type(self.qkv_proj.quant_method)
         self.fuse_indexer_projection = vllm_config.lora_config is None and (
             fused_quant_config is None
-            or _same_quant_method(self.qkv_proj, self.indexer.index_qk_proj)
+            or projection_method is type(self.indexer.index_qk_proj.quant_method)
         )
         if self.fuse_indexer_projection:
             self.index_qk_size = self.indexer.index_qk_proj.output_size
