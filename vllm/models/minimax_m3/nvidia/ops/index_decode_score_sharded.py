@@ -386,60 +386,97 @@ class IndexDecodeScoreShardedKernel:
         rank,
     ):
         """Mask, reduce this warp's shard page to B128 maxima, and store them."""
-        MAX_DQL = self.max_decode_query_len
-        BLOCK_Q = self.num_heads * MAX_DQL
-        PAGES = self.PAGES
-        TP = self.world_size
-        ROWS = self.page_size // TP
-        MMA_N = 8
-        Q_TILES = cute.ceil_div(BLOCK_Q, MMA_N)
+        ROWS = self.page_size // self.world_size
+        Q_TILES = cute.ceil_div(self.num_heads * self.max_decode_query_len, 8)
+        k_base = self.page_k_base(super_id, warp_id, rank)
+        rMax = cute.make_rmem_tensor((2, Q_TILES), Float32)
+        rMax.fill(float("-inf"))
+        for m in cutlass.range_constexpr(ROWS // 16):
+            self.fold_tile_maxima(rC[None, m, None], rMax, m, lane_id, k_base, q_start)
+        self.store_maxima(
+            rMax,
+            epi_buffer,
+            scores,
+            batch_id,
+            super_id,
+            warp_id,
+            lane_id,
+            decode_query_len,
+        )
 
-        tile = super_id * PAGES + warp_id
+    @cute.jit
+    def page_k_base(self, super_id, warp_id, rank):
+        """Token position of this warp's first shard row."""
+        tile = super_id * self.PAGES + warp_id
         # P128 interleaves rows; P256 assigns contiguous rank slices.
         k_base = tile * self.page_size + rank
         if cutlass.const_expr(self.page_size == 256):
-            k_base = tile * self.page_size + rank * ROWS
+            k_base = tile * self.page_size + rank * (self.page_size // self.world_size)
+        return k_base
 
-        # causal mask
+    @cute.jit
+    def fold_tile_maxima(
+        self,
+        rC_m: cute.Tensor,  # [4, Q_TILES] m16n8 accumulators of rows 16m..16m+15
+        rMax: cute.Tensor,  # [2, Q_TILES] running maxima of this lane's columns
+        m: cutlass.Constexpr[int],
+        lane_id,
+        k_base,
+        q_start,
+    ):
+        """Causally mask a 16-row tile and fold it into the page maxima."""
+        MAX_DQL = self.max_decode_query_len
+        TP = self.world_size
+        Q_TILES = cute.ceil_div(self.num_heads * MAX_DQL, 8)
         for q in cutlass.range_constexpr(Q_TILES):
-            rC_q = rC[None, None, q]
-            for i in cutlass.range_constexpr(ROWS // 8):
-                for j in cutlass.range_constexpr(2):
-                    col = q * 8 + (lane_id % 4) * 2 + j
-                    q_local_pos = col % MAX_DQL
-                    q_pos = q_start + q_local_pos
-                    k_pos = k_base + (i * 8 + lane_id // 4) * TP
-                    if cutlass.const_expr(self.page_size == 256):
-                        k_pos = k_base + i * 8 + lane_id // 4
-                    rC_q[i * 2 + j] = (
-                        rC_q[i * 2 + j] if q_pos >= k_pos else float("-inf")
-                    )
+            for v in cutlass.range_constexpr(4):
+                # Accumulator v is row 8 * (v // 2) + lane // 4, column v % 2.
+                i = m * 2 + v // 2
+                j = v % 2
+                col = q * 8 + (lane_id % 4) * 2 + j
+                q_pos = q_start + col % MAX_DQL
+                k_pos = k_base + (i * 8 + lane_id // 4) * TP
+                if cutlass.const_expr(self.page_size == 256):
+                    k_pos = k_base + i * 8 + lane_id // 4
+                rC_m[v, q] = rC_m[v, q] if q_pos >= k_pos else float("-inf")
+                rMax[j, q] = cute.arch.fmax(rMax[j, q], rC_m[v, q])
+
+    @cute.jit
+    def store_maxima(
+        self,
+        rMax: cute.Tensor,  # [2, Q_TILES] per-lane page maxima
+        epi_buffer: cute.Tensor,
+        scores: cute.Tensor,
+        batch_id,
+        super_id,
+        warp_id,
+        lane_id,
+        decode_query_len,
+    ):
+        """Reduce page maxima across the warp's rows and store each B128 block."""
+        MAX_DQL = self.max_decode_query_len
+        BLOCK_Q = self.num_heads * MAX_DQL
+        PAGES = self.PAGES
+        MMA_N = 8
+        Q_TILES = cute.ceil_div(BLOCK_Q, MMA_N)
 
         for q in cutlass.range_constexpr(Q_TILES):
-            rC_q = rC[None, None, q]
-            # thread-reduction along the page's local rows
-            rScore = cute.make_rmem_tensor(2, Float32)
-            rScore.fill(float("-inf"))
-            for i in cutlass.range_constexpr(ROWS // 8):
-                rScore[0] = cute.arch.fmax(rScore[0], rC_q[i * 2 + 0])
-                rScore[1] = cute.arch.fmax(rScore[1], rC_q[i * 2 + 1])
-
             # warp-reduction among lanes 0,4,8,12,...
             for i in cutlass.range_constexpr(3):
                 offset = 4 << i
                 other0 = cute.arch.shuffle_sync_bfly(
-                    rScore[0], offset=offset, mask=-1, mask_and_clamp=31
+                    rMax[0, q], offset=offset, mask=-1, mask_and_clamp=31
                 )
                 other1 = cute.arch.shuffle_sync_bfly(
-                    rScore[1], offset=offset, mask=-1, mask_and_clamp=31
+                    rMax[1, q], offset=offset, mask=-1, mask_and_clamp=31
                 )
-                rScore[0] = cute.arch.fmax(rScore[0], other0)
-                rScore[1] = cute.arch.fmax(rScore[1], other1)
+                rMax[0, q] = cute.arch.fmax(rMax[0, q], other0)
+                rMax[1, q] = cute.arch.fmax(rMax[1, q], other1)
 
             # lanes 0..3 hold columns q * 8 + 2 * lane + {0, 1}
             if lane_id * 2 < MMA_N:
-                epi_buffer[q * MMA_N + lane_id * 2 + 0, warp_id] = rScore[0]
-                epi_buffer[q * MMA_N + lane_id * 2 + 1, warp_id] = rScore[1]
+                epi_buffer[q * MMA_N + lane_id * 2 + 0, warp_id] = rMax[0, q]
+                epi_buffer[q * MMA_N + lane_id * 2 + 1, warp_id] = rMax[1, q]
         cute.arch.barrier(barrier_id=self.BAR_MMA, number_of_threads=128)
 
         # Padded pages are -inf.
@@ -778,11 +815,18 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
                     ),
                 )
                 sK_warp = sK_pages[None, None, warp_id, None]
+                # A row's eight scales as two words, one per 32 B code span.
+                WORDS = SCALE // 4
                 sS_pages = cute.make_tensor(
-                    sS.iterator,
+                    cute.make_ptr(
+                        Uint32,
+                        sS.iterator.toint(),
+                        cute.AddressSpace.smem,
+                        assumed_align=16,
+                    ),
                     cute.make_layout(
-                        (ROWS, SCALE, PAGES, num_stages),
-                        stride=(SCALE, 1, ROWS * SCALE, PAGES * ROWS * SCALE),
+                        (ROWS, WORDS, PAGES, num_stages),
+                        stride=(WORDS, 1, ROWS * WORDS, PAGES * ROWS * WORDS),
                     ),
                 )
                 sS_warp = sS_pages[None, None, warp_id, None]
@@ -799,12 +843,17 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
                 ldsm_atom = cute.make_copy_atom(ldsm_op, Uint8)
 
                 SPANS = DATA // 32  # 32 B ldmatrix spans per row
-                rK = cute.make_rmem_tensor((16, ROWS // 16, SPANS), Uint8)
-                rC = cute.make_rmem_tensor((4, ROWS // 16, Q_TILES), Float32)
+                # One 16-row tile at a time, folded into the page maxima as it
+                # finishes, so the page's accumulators never all stay live.
+                rK = cute.make_rmem_tensor(16, Uint8)
+                rC = cute.make_rmem_tensor((4, Q_TILES), Float32)
+                rMax = cute.make_rmem_tensor((2, Q_TILES), Float32)
 
                 # Lane j of a quad owns codes [8j, 8j + 8) of every 32-code slice.
                 quad = lane_id % 4
                 row0 = lane_id // 4
+                # Span k's word holds groups 4k..4k+3; slice h uses byte 2h + j // 2.
+                scale_sel = Uint32(quad // 2) * 0x11 + 0x20
 
                 if warp_id == 0:
                     cute.arch.mbarrier_wait(tma_full_mbar, 0)
@@ -839,32 +888,30 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
                 rB_u32 = cute.recast_tensor(rB, Uint32)
 
                 for super_id in range(split_id, num_super, split_k):
-                    rC.fill(0.0)
-
                     if warp_id == 0:
                         cute.arch.mbarrier_wait(tma_full_mbar + tma_stage, tma_parity)
                     cute.arch.barrier(barrier_id=self.BAR_MMA, number_of_threads=128)
 
-                    for k in cutlass.range_constexpr(SPANS):
-                        cute.copy(
-                            ldsm_atom,
-                            sK_ldsm[None, (None, k, tma_stage)],
-                            rK[None, None, k],
-                        )
-                        for m in cutlass.range_constexpr(ROWS // 16):
+                    k_base = self.page_k_base(super_id, warp_id, rank)
+                    rMax.fill(float("-inf"))
+                    for m in cutlass.range_constexpr(ROWS // 16):
+                        rC.fill(0.0)
+                        for k in cutlass.range_constexpr(SPANS):
+                            cute.copy(ldsm_atom, sK_ldsm[None, (m, k, tma_stage)], rK)
                             # Words: rows {r, r + 8} of the low, then high 16 B.
-                            rK_u32 = cute.recast_tensor(rK[None, m, k], Uint32)
+                            rK_u32 = cute.recast_tensor(rK, Uint32)
+                            scales0 = cvt.e4m3x2_select_to_fp16x2(
+                                sS_warp[m * 16 + row0, k, tma_stage], scale_sel
+                            )
+                            scales1 = cvt.e4m3x2_select_to_fp16x2(
+                                sS_warp[m * 16 + 8 + row0, k, tma_stage], scale_sel
+                            )
                             for h in cutlass.range_constexpr(2):
                                 s = k * 2 + h
-                                group = s * 2 + quad // 2
-                                scale0 = cvt.e4m3_to_fp16x2(
-                                    Uint32(sS_warp[m * 16 + row0, group, tma_stage])
+                                k0 = cvt.nvfp4x8_to_fp16x8(rK_u32[h * 2], scales0[h])
+                                k1 = cvt.nvfp4x8_to_fp16x8(
+                                    rK_u32[h * 2 + 1], scales1[h]
                                 )
-                                scale1 = cvt.e4m3_to_fp16x2(
-                                    Uint32(sS_warp[m * 16 + 8 + row0, group, tma_stage])
-                                )
-                                k0 = cvt.nvfp4x8_to_fp16x8(rK_u32[h * 2], scale0)
-                                k1 = cvt.nvfp4x8_to_fp16x8(rK_u32[h * 2 + 1], scale1)
                                 # One m16n8k16 per four codes of each row.
                                 for half in cutlass.range_constexpr(2):
                                     rA_u32[0] = k0[half * 2]
@@ -874,23 +921,21 @@ class IndexDecodeScoreShardedNvfp4Kernel(IndexDecodeScoreShardedKernel):
                                     for n in cutlass.range_constexpr(Q_TILES):
                                         rB_u32[0] = rQ[half * 2, s, n]
                                         rB_u32[1] = rQ[half * 2 + 1, s, n]
-                                        rC[None, m, n] = mma_sync(
-                                            rA, rB, rC[None, m, n]
-                                        )
+                                        rC[None, n] = mma_sync(rA, rB, rC[None, n])
+                        if cutlass.const_expr(m == ROWS // 16 - 1):
+                            # The stage's last shared memory read is done.
+                            cute.arch.mbarrier_arrive(tma_empty_mbar + tma_stage)
+                        self.fold_tile_maxima(rC, rMax, m, lane_id, k_base, q_start)
 
-                    cute.arch.mbarrier_arrive(tma_empty_mbar + tma_stage)
-
-                    self.store_page_maxima(
-                        rC,
+                    self.store_maxima(
+                        rMax,
                         epi_buffer,
                         scores,
                         batch_id,
                         super_id,
                         warp_id,
                         lane_id,
-                        q_start,
                         decode_query_len,
-                        rank,
                     )
 
                     tma_stage = (tma_stage + 1) % self.num_stages

@@ -173,25 +173,32 @@ def nvfp4x8_to_fp16x8(x: Uint32, scale: Uint32, *, loc=None, ip=None) -> cute.Te
 
 
 @dsl_user_op
-def e4m3_to_fp16x2(x: Uint32, *, loc=None, ip=None) -> Uint32:
-    # The low byte of x as e4m3, broadcast to both f16x2 halves.
+def e4m3x2_select_to_fp16x2(
+    x: Uint32, sel: Uint32, *, loc=None, ip=None
+) -> tuple[Uint32, Uint32]:
+    # Bytes sel[3:0] and sel[7:4] of x as e4m3, each broadcast to an f16x2 pair.
     out = llvm.inline_asm(
-        T.i32(),
-        [x.ir_value(loc=loc, ip=ip)],
+        llvm.StructType.get_literal([T.i32(), T.i32()]),
+        [x.ir_value(loc=loc, ip=ip), sel.ir_value(loc=loc, ip=ip)],
         "{\n\t"
-        ".reg .b32 pair;\n\t"
+        ".reg .b32 pair, h;\n\t"
         ".reg .b16 lo, hi;\n\t"
-        "prmt.b32 pair, $1, $1, 0x0000;\n\t"
+        "prmt.b32 pair, $2, $2, $3;\n\t"
         "mov.b32 {lo, hi}, pair;\n\t"
-        "cvt.rn.f16x2.e4m3x2 $0, lo;\n\t"
+        "cvt.rn.f16x2.e4m3x2 h, lo;\n\t"
+        "prmt.b32 $0, h, h, 0x1010;\n\t"
+        "prmt.b32 $1, h, h, 0x3232;\n\t"
         "}\n",
-        "=r,r",
+        "=r,=r,r,r",
         has_side_effects=False,
         is_align_stack=False,
         loc=loc,
         ip=ip,
     )
-    return Uint32(out)
+    return (
+        Uint32(llvm.extractvalue(T.i32(), out, [0], loc=loc, ip=ip)),
+        Uint32(llvm.extractvalue(T.i32(), out, [1], loc=loc, ip=ip)),
+    )
 
 
 @dsl_user_op
