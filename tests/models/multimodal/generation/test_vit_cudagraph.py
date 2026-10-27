@@ -10,7 +10,7 @@ from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, VIDEO_ASSETS
-from ...utils import dummy_hf_overrides
+from ...utils import check_logprobs_close, dummy_hf_overrides
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 
@@ -672,3 +672,123 @@ def test_eonly_vit_cudagraph_outputs(
         for result in results:
             assert result["stats"][0]["token_budgets"] == token_budgets
         print(f"E-only {model_id}: {results}")
+
+
+def _check_pruned_image_encoder_outputs(worker, batches):
+    import torch
+
+    runner = worker.model_runner
+    manager = runner.model_state.encoder_runner.cudagraph_manager
+    assert manager is not None and manager.is_captured()
+    assert manager.supports_modality("image")
+    assert not manager.supports_modality("video")
+    hidden_size = runner.model.visual.out_hidden_size
+    assert manager.config.out_hidden_size == hidden_size + 5
+    retained: list[tuple[torch.Tensor, torch.Tensor]] = []
+    stats = []
+    with torch.inference_mode():
+        for batch in batches:
+            kwargs = {key: value.to(runner.device) for key, value in batch.items()}
+            actual = manager.execute(kwargs)
+            expected = runner.model.embed_multimodal(**kwargs)
+            assert len(actual) == len(expected)
+            for output, reference in zip(actual, expected):
+                assert output.shape == reference.shape
+                assert output.shape[-1] == hidden_size + 5
+                assert torch.isfinite(output).all()
+                torch.testing.assert_close(
+                    output[:, :-5], reference[:, :-5], rtol=0.016, atol=0.016
+                )
+                torch.testing.assert_close(
+                    output[:, -5:], reference[:, -5:], rtol=0, atol=0
+                )
+            for output, snapshot in retained:
+                torch.testing.assert_close(output, snapshot, rtol=0, atol=0)
+            retained.extend((output, output.clone()) for output in actual)
+            stats.append(manager.get_cumulative_stats())
+    assert stats[0]["graph_hits"] > 0
+    assert stats[1]["graph_hits"] > stats[0]["graph_hits"]
+    assert stats[2]["graph_misses"] > stats[1]["graph_misses"]
+    assert stats[3]["graph_hits"] > stats[2]["graph_hits"]
+    return stats
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("model_id", ["qwen3_vl", "qwen3_5"])
+@pytest.mark.parametrize("pruning_method", ["evs", "vidcom2"])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
+def test_pruned_image_encoder_cudagraph(
+    model_id, pruning_method, vllm_runner, image_assets, monkeypatch
+):
+    """Keep pruning metadata, DeepStack features and owned outputs across replay."""
+    from transformers import AutoProcessor
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    config = MODEL_CONFIGS[model_id]
+    processor = AutoProcessor.from_pretrained(config.model)
+    first, second = [asset.pil_image for asset in image_assets]
+    images = [first.resize((256, 256)), second.resize((256, 256))]
+    batches = [
+        [images[0]],
+        [images[1], images[0]],
+        [second.resize((512, 512))],
+        [images[1]],
+    ]
+    outputs = []
+    for encoder_cudagraph in (False, True):
+        with vllm_runner(
+            config.model,
+            dtype=config.dtype,
+            max_model_len=config.max_model_len,
+            max_num_seqs=1,
+            enable_prefix_caching=False,
+            mm_encoder_attn_backend="TRITON_ATTN",
+            mm_processor_kwargs={"max_pixels": 512 * 512},
+            video_pruning_rate=0.5,
+            video_pruning_method=pruning_method,
+            limit_mm_per_prompt={"image": 2, "video": int(model_id == "qwen3_vl")},
+            compilation_config={
+                "mode": 0,
+                "cudagraph_mode": "NONE",
+                "cudagraph_mm_encoder": encoder_cudagraph,
+                "encoder_cudagraph_token_budgets": [64, 128],
+                "encoder_cudagraph_max_vision_items_per_batch": 2,
+                "encoder_cudagraph_max_frames_per_batch": 1,
+            },
+        ) as model:
+            if encoder_cudagraph:
+                mm_config = (
+                    model.llm.llm_engine.vllm_config.model_config.multimodal_config
+                )
+                inputs = [
+                    dict(
+                        processor.image_processor(
+                            images=batch,
+                            return_tensors="pt",
+                            **mm_config.merge_mm_processor_kwargs({}),
+                        )
+                    )
+                    for batch in batches
+                ]
+                assert inputs[0]["image_grid_thw"].tolist() == [[1, 16, 16]]
+                assert inputs[1]["image_grid_thw"].tolist() == [[1, 16, 16]] * 2
+                model.llm.collective_rpc(
+                    partial(_check_pruned_image_encoder_outputs, batches=inputs)
+                )
+            outputs.append(
+                model.generate_greedy_logprobs(
+                    [config.image_prompt],
+                    max_tokens=16,
+                    num_logprobs=5,
+                    images=[[images[0]]],
+                )
+            )
+            assert outputs[-1][0][0]
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="eager",
+        name_1="encoder_cudagraph",
+        always_check_logprobs=True,
+    )

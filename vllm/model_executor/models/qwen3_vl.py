@@ -2125,12 +2125,14 @@ class Qwen3VLForConditionalGeneration(
             EncoderCudaGraphConfig,
         )
 
-        # When video pruning is enabled, embed_multimodal post-processes both
-        # image and video embeddings (mrope positions are appended for image,
-        # prune+append for video). The encoder CUDA graph path bypasses that
-        # post-process, producing inconsistent embedding formats vs eager. So
-        # disable CUDA graph for all modalities when pruning is on.
-        modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
+        modalities = ["image", "video"]
+        if self.is_multimodal_pruning_enabled:
+            image_limit = (
+                self.model_config.get_multimodal_config().get_limit_per_prompt("image")
+            )
+            modalities = (
+                ["image"] if not self.use_data_parallel and image_limit > 0 else []
+            )
 
         # Compute max_frames_per_video for budget sizing.
         max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
@@ -2146,7 +2148,8 @@ class Qwen3VLForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
-            out_hidden_size=self.visual.out_hidden_size,
+            out_hidden_size=self.visual.out_hidden_size
+            + (5 if self.is_multimodal_pruning_enabled else 0),
             max_frames_per_video=max_frames,
         )
 
@@ -2397,6 +2400,35 @@ class Qwen3VLForConditionalGeneration(
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
         return self.visual(pixel_values, grid_thw)
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.is_multimodal_pruning_enabled:
+            return super().postprocess_encoder_output(
+                outputs, indices, per_item_out_tokens, dest, clone, batch_mm_kwargs
+            )
+
+        assert batch_mm_kwargs is not None
+        assert self.get_input_modality(batch_mm_kwargs) == "image"
+        sizes = [per_item_out_tokens[i] for i in indices]
+        image_embeds = outputs["default"][: sum(sizes)].split(sizes)
+        image_input = Qwen2_5_VLImagePixelInputs(
+            type="pixel_values",
+            pixel_values=batch_mm_kwargs["pixel_values"],
+            image_grid_thw=torch.tensor(
+                self._get_grid_thw_by_modality(batch_mm_kwargs), device="cpu"
+            ),
+        )
+        image_embeds = self._postprocess_image_embeds_evs(image_embeds, image_input)
+        for index, embedding in zip(indices, image_embeds):
+            dest[index] = embedding
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
