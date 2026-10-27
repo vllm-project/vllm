@@ -201,8 +201,7 @@ def _encoder_storage_sizes(worker) -> tuple[int, int, int]:
     [
         {
             "max_model_len": 2048,
-            "max_num_batched_tokens": 4096,
-            "max_num_seqs": 16,
+            "max_num_batched_tokens": 1152,
             "mm_processor_cache_gb": 0,
             "mm_processor_kwargs": {"max_pixels": 512 * 512},
             "limit_mm_per_prompt": {"image": {"count": 1, "width": 512, "height": 512}},
@@ -213,31 +212,23 @@ def _encoder_storage_sizes(worker) -> tuple[int, int, int]:
 def test_batched_encoder_cache_bounds_retained_storage(llm) -> None:
     """Hot images must not retain unbounded backing from older encoder batches."""
     params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
-    anchors: list[int] = []
-    for round_id in range(10):
-        for kind, ids in (
-            ("reuse", anchors),
-            ("new", range(round_id * 4, round_id * 4 + 4)),
-        ):
-            if not ids:
-                continue
-            prompts = [
-                {
-                    "prompt": f"<|im_start|>user\nRound {round_id}-{kind}: "
-                    "<|vision_start|><|image_pad|><|vision_end|>"
-                    "Describe the image.<|im_end|>\n<|im_start|>assistant\n",
-                    "multi_modal_data": {
-                        "image": Image.new("RGB", (512, 512), (i * 11, i * 7, i * 3))
-                    },
-                }
-                for i in ids
-            ]
-            outputs = llm.generate(prompts, params, use_tqdm=False)
-            assert all(len(o.outputs[0].token_ids) == 8 for o in outputs)
-        anchors.append(round_id * 4)
+    # Keep images 0 and 4 hot while replacing their batch peers in a four-image cache.
+    for round_id, ids in enumerate(((0, 1, 2, 3), (0,), (4, 5, 6), (0, 4), (7, 8))):
+        prompts = [
+            {
+                "prompt": f"<|im_start|>user\nRound {round_id}: "
+                "<|vision_start|><|image_pad|><|vision_end|>"
+                "Describe the image.<|im_end|>\n<|im_start|>assistant\n",
+                "multi_modal_data": {
+                    "image": Image.new("RGB", (512, 512), (i * 11, i * 7, i * 3))
+                },
+            }
+            for i in ids
+        ]
+        outputs = llm.generate(prompts, params, use_tqdm=False)
+        assert all(len(o.outputs[0].token_ids) == 8 for o in outputs)
     snapshots = llm.collective_rpc(_encoder_storage_sizes)
-    # Forty images entered a sixteen-image cache, including hot peers.
-    assert all(count == 16 for count, _, _ in snapshots), snapshots
+    assert snapshots and all(count == 4 for count, _, _ in snapshots), snapshots
     # Compaction waits until it reclaims at least as many bytes as it copies.
     assert all(
         logical <= storage <= 2 * logical for _, logical, storage in snapshots

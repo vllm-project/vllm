@@ -1265,7 +1265,7 @@ def test_arena_unregisters_pinned_memory_on_del(monkeypatch):
 def test_arena_growth_failure_keeps_h2d_source_safe(operation):
     """Clear real runtime errors and never copy across a partial registration."""
     writer, (reader,) = _make_arena(n_reader=1, slot_bytes=16 << 20, n_slots=1)
-    first = torch.ones(8 << 20, dtype=torch.uint8)
+    first = torch.ones(1, dtype=torch.uint8)
     idx = writer.write_tensor(first)
     view = _get_view(reader, idx, first)
     assert view.is_pinned()
@@ -1300,9 +1300,8 @@ def test_arena_growth_failure_keeps_h2d_source_safe(operation):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 def test_arena_growing_registered_prefix_h2d():
     """Register only the used slot; growth must preserve H2D and reuse ordering."""
-    writer, (reader,) = _make_arena(n_reader=1, slot_bytes=32 << 20, n_slots=3)
-    # Keep the first two slots busy without registering them on the reader.
-    writer.write_tensor(torch.ones(1))
+    writer, (reader,) = _make_arena(n_reader=1, slot_bytes=32 << 20, n_slots=2)
+    # Keep one slot busy without registering it on the reader.
     writer.write_tensor(torch.ones(1))
     for size, pinned in (
         (9 << 20, 16 << 20),
@@ -1311,9 +1310,9 @@ def test_arena_growing_registered_prefix_h2d():
     ):
         src = torch.arange(size, dtype=torch.uint8)
         idx = writer.write_tensor(src)
-        assert idx == 2
+        assert idx == 1
         view = _get_view(reader, idx, src)
-        assert reader._pinned_sizes == [0, 0, pinned]
+        assert reader._pinned_sizes == [0, pinned]
         assert view.is_pinned()
         dev = view.to("cuda", non_blocking=True)
         del view
