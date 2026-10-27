@@ -463,10 +463,9 @@ class Scheduler(SchedulerInterface):
         # FIFO of (fence_seq, blocks): blocks become safe to free once
         # processed_step_seq >= fence_seq.
         self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
-        # Async KV loads registered with the connector once processed_step_seq
-        # >= fence_seq; see _load_must_wait_for_in_flight_steps. Request id ->
-        # (fence_seq, num_external_tokens, prefix cache queries, hits).
-        self.held_async_loads: dict[str, tuple[int, int, int, int]] = {}
+        # Request id -> (fence_seq, num_external_tokens): async KV loads started
+        # once processed_step_seq >= fence_seq.
+        self.held_async_loads: dict[str, tuple[int, int]] = {}
 
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -737,7 +736,6 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         self.kv_cache_manager.new_step_starts()
-        self._register_held_async_loads()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
@@ -1459,21 +1457,46 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
-                    if load_kv_async and self._load_must_wait_for_in_flight_steps(
-                        request
-                    ):
+                    hold_load = (
+                        load_kv_async
+                        and self.sched_step_seq > self.processed_step_seq
+                        and self.connector.load_must_wait_for_in_flight_steps(
+                            request,
+                            self.connector.get_loaded_kv_cache_group_ids(request),
+                        )
+                    )
+                    if hold_load:
+                        request.last_sched_seq = self.sched_step_seq
                         self.held_async_loads[request_id] = (
                             self.sched_step_seq,
                             num_external_computed_tokens,
-                            connector_prefix_cache_queries,
-                            connector_prefix_cache_hits,
                         )
                     else:
-                        self._register_kv_load(
+                        self.connector.update_state_after_alloc(
                             request,
+                            self.kv_cache_manager.get_blocks(request_id),
                             num_external_computed_tokens,
-                            connector_prefix_cache_queries,
-                            connector_prefix_cache_hits,
+                        )
+                    if (
+                        self.connector_prefix_cache_stats is not None
+                        and connector_prefix_cache_queries != 0
+                    ):
+                        preempted = request.num_preemptions > 0
+                        self.connector_prefix_cache_stats.record(
+                            num_tokens=connector_prefix_cache_queries,
+                            num_hits=connector_prefix_cache_hits,
+                            preempted=preempted,
+                            # The connector knows the tier only after the load
+                            # plan above exists.
+                            hits_by_source=(
+                                self.connector.get_external_cache_hit_sources(
+                                    request, connector_prefix_cache_hits
+                                )
+                                if connector_prefix_cache_hits
+                                and not preempted
+                                and not hold_load
+                                else None
+                            ),
                         )
 
                 # Record at admission so unscheduled lookups are not counted.
@@ -2250,6 +2273,7 @@ class Scheduler(SchedulerInterface):
         if self.defer_block_free and scheduler_output.total_num_scheduled_tokens > 0:
             self.processed_step_seq += 1
             self._drain_deferred_frees()
+            self._start_held_async_loads()
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -2986,10 +3010,6 @@ class Scheduler(SchedulerInterface):
             delay_free_blocks = False
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 held = self.held_async_loads.pop(request.request_id, None)
-                if held is not None:
-                    # No load was posted; free once the step that may still
-                    # read the reused blocks is processed.
-                    request.last_sched_seq = max(request.last_sched_seq, held[0])
                 delay_free_blocks = (
                     held is None
                     and request.request_id not in self.finished_recving_kv_req_ids
@@ -3077,51 +3097,19 @@ class Scheduler(SchedulerInterface):
             return
         self.deferred_frees.append((fence_seq, blocks[::-1]))
 
-    def _register_kv_load(
-        self,
-        request: Request,
-        num_external_tokens: int,
-        num_queries: int,
-        num_hits: int,
-    ) -> None:
+    def _start_held_async_loads(self) -> None:
+        if not self.held_async_loads:
+            return
         assert self.connector is not None
-        self.connector.update_state_after_alloc(
-            request,
-            self.kv_cache_manager.get_blocks(request.request_id),
-            num_external_tokens,
-        )
-        if self.connector_prefix_cache_stats is not None and num_queries != 0:
-            preempted = request.num_preemptions > 0
-            self.connector_prefix_cache_stats.record(
-                num_tokens=num_queries,
-                num_hits=num_hits,
-                preempted=preempted,
-                # The connector knows the tier only after the load plan exists.
-                hits_by_source=(
-                    self.connector.get_external_cache_hit_sources(request, num_hits)
-                    if num_hits and not preempted
-                    else None
-                ),
-            )
-
-    def _load_must_wait_for_in_flight_steps(self, request: Request) -> bool:
-        """Whether ``request``'s async load, posted from the host and unordered
-        with the steps in flight, must start only once they are processed."""
-        if self.sched_step_seq <= self.processed_step_seq:
-            return False
-        assert self.connector is not None
-        return self.connector.load_must_wait_for_in_flight_steps(
-            request, self.connector.get_loaded_kv_cache_group_ids(request)
-        )
-
-    def _register_held_async_loads(self) -> None:
-        # Fences are appended in order, so stop at the first pending one.
-        while self.held_async_loads:
-            request_id, (fence_seq, *load) = next(iter(self.held_async_loads.items()))
+        for request_id, (fence_seq, num_tokens) in list(self.held_async_loads.items()):
             if fence_seq > self.processed_step_seq:
                 break
             del self.held_async_loads[request_id]
-            self._register_kv_load(self.requests[request_id], *load)
+            self.connector.update_state_after_alloc(
+                self.requests[request_id],
+                self.kv_cache_manager.get_blocks(request_id),
+                num_tokens,
+            )
 
     def _drain_deferred_frees(self):
         """Return deferred blocks whose fence step has completed.
