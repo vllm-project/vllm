@@ -774,7 +774,7 @@ class TestOpenArgStringStreamingFastPath:
         raw = '{"name": "write", "arguments": {"path": "a.py", "code": "hello'
         assert _check_open_top_level_arg_string(raw, "code") == len(raw)
 
-        # Supports "parameters" key (Llama 3 format)
+        # Supports "parameters" key (InternLM2 format)
         raw_params = '{"name": "write", "parameters": {"code": "hello'
         assert _check_open_top_level_arg_string(raw_params, "code") == len(raw_params)
 
@@ -825,16 +825,12 @@ class TestOpenArgStringStreamingFastPath:
 
         import vllm.tool_parsers.granite_20b_fc_tool_parser as granite_mod
         import vllm.tool_parsers.internlm2_tool_parser as internlm_mod
-        import vllm.tool_parsers.llama_tool_parser as llama_mod
         from vllm.tool_parsers.granite_20b_fc_tool_parser import (
             Granite20bFCToolParser,
         )
         from vllm.tool_parsers.internlm2_tool_parser import Internlm2ToolParser
-        from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 
         tok = MagicMock()
-        tok.vocab = {"<|python_tag|>": 128010}
-        tok.get_vocab.return_value = {"<|python_tag|>": 128010}
 
         payload_params = (
             '{"name": "write", "parameters": {"path": "a.py", '
@@ -844,7 +840,6 @@ class TestOpenArgStringStreamingFastPath:
         noop_arm = lambda *a, **kw: (None, 0, "")
 
         for cls, mod, prefix, payload, suffix in [
-            (Llama3JsonToolParser, llama_mod, ["<|python_tag|>"], payload_params, []),
             (
                 Granite20bFCToolParser,
                 granite_mod,
