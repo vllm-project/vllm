@@ -117,12 +117,6 @@ class BasevLLMParameter(Parameter):
         assert shard_id in qkv_idxs
         return qkv_idxs[shard_id]
 
-    @classmethod
-    def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if kwargs is None:
-            kwargs = {}
-        return super().__torch_function__(func, types, args, kwargs)
-
 
 class _ColumnvLLMParameter(BasevLLMParameter):
     """Private class defining weight loading functionality
