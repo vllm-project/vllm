@@ -1877,7 +1877,12 @@ class OffloadingConnectorScheduler:
                 # Clamp to the GPU prefix cache's commit point. The final sampled
                 # token's slot is never committed (under spec decode it holds a
                 # rejected draft's KV), so a block ending there must not be stored.
-                num_tokens_after_batch = max(req.num_prompt_tokens, req.num_tokens - 1)
+                # A request that finished before its prefill completed (e.g. an
+                # error) has computed only num_computed_tokens of its prompt.
+                num_tokens_after_batch = min(
+                    req.num_computed_tokens,
+                    max(req.num_prompt_tokens, req.num_tokens - 1),
+                )
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
