@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from copy import deepcopy
 
@@ -15,6 +16,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -57,8 +59,9 @@ from vllm.v1.worker.cpu.pp_utils import PPHandler
 from vllm.v1.worker.cpu.sampler import CPUSampler, CPUWatermarkSampler
 from vllm.v1.worker.cpu.states import CPURequestState
 from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
-from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer
+from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer, free_before_shutdown
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.utils import clear_layer_kv_caches
 
 logger = init_logger(__name__)
 
@@ -275,6 +278,22 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
     def get_draft_model(self) -> torch.nn.Module | None:
         return None
 
+    def reload_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+    ) -> None:
+        """Reload weights in place."""
+        vllm_config = self.vllm_config
+        model = self.get_model()
+        reload_weights(
+            vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
+        )
+        self.reset_lora_state()
+        self.reset_encoder_cache()
+        self.reset_mm_cache()
+
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
         encoder_runner = getattr(self.model_state, "encoder_runner", None)
         return encoder_runner.get_encoder_timing_stats() if encoder_runner else {}
@@ -376,3 +395,46 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
             static_forward_context=self.compilation_config.static_forward_context,
             num_blocks=self.kv_cache_config.num_blocks,
         )
+
+    def reset_mm_cache(self) -> None:
+        if self.encoder_cache is not None:
+            self.encoder_cache.reset_mm_cache()
+
+    def reset_encoder_cache(self) -> None:
+        if self.encoder_cache is not None:
+            self.encoder_cache.reset_encoder_cache()
+        if self.pooling_runner is not None:
+            self.pooling_runner.clear()
+
+    def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
+        if self.pooling_runner is not None:
+            self.pooling_runner.release_late_interaction_query_cache(query_keys)
+
+    def shutdown(self) -> None:
+        """Release CPU tensors (model weights, KV caches, workspace) so that
+        memory is reclaimable when running in the same process."""
+        set_offloader(None)
+        self.fast_prefill = None
+        if self.pooling_runner is not None:
+            self.pooling_runner.clear()
+        self.pooling_runner = None
+        self.kv_block_zeroer = None
+        if hasattr(self, "kv_caches"):
+            self.kv_caches.clear()
+        if hasattr(self, "attn_groups"):
+            self.attn_groups.clear()
+        if hasattr(self, "kv_cache_config"):
+            del self.kv_cache_config
+        if self.encoder_cache is not None:
+            self.encoder_cache.reset_encoder_cache()
+        free_before_shutdown(self.vllm_config)
+        if hasattr(self, "model_state"):
+            del self.model_state
+        # Detach the layer-level KV/state cache tensors before dropping the
+        # model; the model object can outlive this runner.
+        if hasattr(self, "model"):
+            clear_layer_kv_caches(self.model.modules())
+            del self.model
+
+        gc.collect()
+        logger.debug("Cleaned up model weights, KV caches, and workspace")

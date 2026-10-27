@@ -6,11 +6,26 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import KVBlockZeroer
 
 if TYPE_CHECKING:
     from vllm.v1.worker.utils import AttentionGroup
+
+
+def free_before_shutdown(vllm_config: VllmConfig) -> None:
+    from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+    from vllm.v1.worker.workspace import reset_workspace_manager
+
+    cache_config = vllm_config.cache_config
+    cache_config.num_gpu_blocks = None
+
+    compilation_config = vllm_config.compilation_config
+    compilation_config.static_forward_context.clear()
+
+    _ROPE_DICT.clear()
+    reset_workspace_manager()
 
 
 class CPUKVBlockZeroer(KVBlockZeroer):
@@ -44,6 +59,10 @@ class CPUKVBlockZeroer(KVBlockZeroer):
                 kv_cache = static_forward_context[layer_name].kv_cache
                 if not isinstance(kv_cache, torch.Tensor):
                     continue
+                if group.kernel_block_stride:
+                    kv_cache = group.map_kv_cache_to_manager_blocks(
+                        kv_cache, num_blocks
+                    )
                 if kv_cache.device.type != self.device.type:
                     continue
                 assert kv_cache.shape[0] % num_blocks == 0, (
