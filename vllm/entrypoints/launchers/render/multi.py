@@ -14,6 +14,7 @@ from typing import Any
 
 import uvloop
 
+from vllm.entrypoints.common.cli_args import init_parser_plugin
 from vllm.logger import configure_logging_from_args, init_logger
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.utils import shutdown
@@ -37,6 +38,7 @@ def run_worker_proc(
 ) -> None:
     """Entrypoint for an individual API server worker process."""
     configure_logging_from_args(args)
+    init_parser_plugin(args)
 
     # Interrupt initialization if SIGTERM arrives before uvicorn installs
     # its own signal handlers. Once uvicorn is running it replaces this.
@@ -76,7 +78,11 @@ def run_worker_proc(
             try:
                 startup_barrier.wait(timeout=STARTUP_BARRIER_TIMEOUT)
             except Exception:
-                return
+                logger.exception(
+                    "API server worker %d failed to reach startup barrier",
+                    api_process_rank,
+                )
+                raise
 
         # ---- All peers ready, serve ---------------------------------- #
         uvloop.run(_serve())
@@ -89,18 +95,16 @@ def _wait_for_first_exit(processes: list[BaseProcess]) -> BaseProcess:
     first = sentinels[ready[0]]
     # join() populates exitcode; it returns immediately for a dead process.
     first.join()
-    if first.exitcode not in (0, None):
-        logger.error(
-            "API server worker %s exited unexpectedly with code %s",
-            first.name,
-            first.exitcode,
+    if first.exitcode != 0:
+        raise RuntimeError(
+            f"API server worker {first.name} (PID: {first.pid}) "
+            f"died with exit code {first.exitcode}"
         )
-    else:
-        logger.info(
-            "API server worker %s exited with code %s",
-            first.name,
-            first.exitcode,
-        )
+    logger.info(
+        "API server worker %s exited with code %s",
+        first.name,
+        first.exitcode,
+    )
     return first
 
 
@@ -110,7 +114,8 @@ def _run_multi_launch(
 ) -> None:
     """Spawn ``args.api_server_count`` workers on one shared listening socket."""
     num_api_servers: int = args.api_server_count
-    assert num_api_servers > 0
+    if num_api_servers <= 0:
+        raise ValueError(f"api_server_count must be > 0, got {num_api_servers}")
 
     spawn_context = multiprocessing.get_context("spawn")
     startup_barrier = (
@@ -118,10 +123,7 @@ def _run_multi_launch(
     )
 
     # Shared-fd mode: bind once in the launcher.
-    # NOTE: we deliberately do *not* use SO_REUSEPORT here. The peer_loads
-    # mechanism requires all workers to share the *same* listening socket,
-    # so that accept() can be arbitrated across processes.
-    listen_address, sock = setup_server(args, reuse_port=False)
+    listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
     exit_stack.callback(sock.close)
 
     # Shared per-worker load array. Each slot starts at _NOT_ACCEPTING so
