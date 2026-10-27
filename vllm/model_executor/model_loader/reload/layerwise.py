@@ -444,3 +444,8 @@ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
         layer.register_parameter(name, param)
     for name, buffer in buffers.items():
         layer.register_buffer(name, buffer, persistent=name not in non_persistent)
+
+    # Tensors kept live during reload (e.g. bias) carry the temporary loader too.
+    for tensor in get_layer_tensors(layer).values():
+        if _get_weight_loader(tensor).__name__ == "online_process_loader":
+            tensor.weight_loader = _get_original_loader(tensor)

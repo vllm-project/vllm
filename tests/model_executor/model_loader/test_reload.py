@@ -21,7 +21,7 @@ from vllm.config import ModelConfig
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
@@ -960,6 +960,30 @@ class _LateBiasLayer(torch.nn.Module):
         self.register_parameter("bias", bias)
 
 
+def test_skipped_reload_restores_bias_weight_loader(dist_init):
+    """A skipped layer's live bias must accept subsequent value-changing loads."""
+    layer = ReplicatedLinear(3, 2, params_dtype=torch.float32)
+    model = torch.nn.Sequential(layer)
+    original_params = dict(layer.named_parameters())
+    original_loaders = {
+        name: param.weight_loader for name, param in original_params.items()
+    }
+    for param in original_params.values():
+        param.weight_loader(param, torch.full_like(param, 1.0))
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    finalize_layerwise_reload(model, model_config=None)
+
+    for name, original_param in original_params.items():
+        param = getattr(layer, name)
+        assert param is original_param
+        updated = torch.full_like(param, 7.0)
+        param.weight_loader(param, updated)
+        assert torch.equal(param, updated), name
+        assert param.weight_loader == original_loaders[name]
+
+
 def test_online_processing_waits_for_late_registered_bias():
     # Regression test: `bias` is skipped by the meta device paths, but it is
     # still loaded by a weight loader. Excluding it from the processing trigger
@@ -1278,6 +1302,37 @@ def _moved_tensors(llm, ptrs: list[dict[str, int]]) -> list[list[str]]:
         sorted(n for n, p in old.items() if new.get(n) != p)
         for old, new in zip(ptrs, after)
     ]
+
+
+def _load_opt_bias_after_skipped_reload(worker):
+    model = worker.get_model()
+    name = "model.decoder.layers.0.fc1.bias"
+    original_bias = model.get_parameter(name)
+    original_ptr = original_bias.data_ptr()
+    before = original_bias.detach().cpu().clone()
+
+    worker.reload_weights(weights_iterator=iter(()))
+    updated = torch.full_like(original_bias, 7.0)
+    model.load_weights([(name, updated)])
+    bias = model.get_parameter(name)
+    return before, bias.detach().cpu(), updated.cpu(), original_ptr == bias.data_ptr()
+
+
+def test_reload_weights_skipped_layer_accepts_later_bias_load(vllm_runner, monkeypatch):
+    """A model's checkpoint loader still writes biases after an empty reload."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    with vllm_runner(
+        model_name="facebook/opt-125m",
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        [(before, after, expected, preserved_storage)] = llm.collective_rpc(
+            _load_opt_bias_after_skipped_reload
+        )
+        assert not torch.equal(before, expected)
+        assert torch.equal(after, expected)
+        assert preserved_storage
 
 
 @pytest.mark.parametrize(
