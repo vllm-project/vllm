@@ -153,6 +153,11 @@ class ZmqTransport(ControlTransport):
         self._zmq_ctx = zmq.Context()
         self._router: zmq.Socket = self._zmq_ctx.socket(zmq.ROUTER)
         _apply_heartbeat(self._router)
+        # A reconnecting peer reuses its routing id, and the ROUTER frees the
+        # old connection's id only after later recv calls finish its teardown,
+        # well after EVENT_DISCONNECTED. Without handover a reconnect landing
+        # before that is silently dropped and the peer's handshake is lost.
+        self._router.setsockopt(zmq.ROUTER_HANDOVER, 1)
         bind_addr = _tcp_addr(host, port)
         self._router.bind(bind_addr)
         logger.info("ZmqTransport %s: ROUTER bound on %s", self._local_id, bind_addr)
@@ -315,6 +320,15 @@ class ZmqTransport(ControlTransport):
                 continue
 
             identity, data = frames
+            # Routing ids starting with a zero byte are reserved by libzmq;
+            # handover gives one to the pipe of the replaced connection, whose
+            # unread messages the peer has already abandoned.
+            if identity.startswith(b"\x00"):
+                logger.debug(
+                    "ZmqTransport %s: dropping message from a replaced connection",
+                    self._local_id,
+                )
+                continue
             sender_id = identity.decode()
 
             logger.debug(
