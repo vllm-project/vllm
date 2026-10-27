@@ -144,13 +144,7 @@ guide: |
   ```
 
   #### CPU
-  For Intel and AMD x86 CPUs, follow the [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels) installation instructions.
-  ```bash
-  uv venv
-  source .venv/bin/activate
-  export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-  uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_x86_64.whl --torch-backend cpu
-  ```
+  For Intel and AMD x86 CPUs, pick **Xeon 6** in the command builder above: its Install block renders the CPU release-wheel command. See also the [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels) instructions.
 
   ### Docker
   ```bash
