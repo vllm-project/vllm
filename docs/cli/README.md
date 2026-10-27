@@ -145,6 +145,12 @@ vllm bench forward \
     --case mix=2048,32*1@4096
 ```
 
+For hybrid attention/recurrent models, verification reserves the recurrent
+state slots for all configured speculative tokens. Every replay restores these
+states and the attention blocks it can overwrite, including packed KV layouts.
+The snapshots consume extra GPU memory, but their restoration is outside the
+measured forward interval.
+
 PCP uses `--prefill-context-parallel-size` with the model runner's supported
 MLA models. Cases describe the global batch per DP rank, before PCP splits it;
 `num_local_tokens`, `num_tokens_after_padding`, and `batch_order` in each rank's
