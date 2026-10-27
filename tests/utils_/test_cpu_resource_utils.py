@@ -10,6 +10,8 @@ from unittest import mock
 import pytest
 
 from vllm.platforms import CpuArchEnum
+from vllm.platforms import interface as platform_interface
+from vllm.platforms.cpu import CpuPlatform
 from vllm.utils import cpu_resource_utils as cru
 from vllm.utils import ompmultiprocessing as omp
 from vllm.utils.mem_constants import GiB_bytes
@@ -221,6 +223,29 @@ def test_visible_memory_node_assigned_ids_are_limited_to_allowed_nodes(
 ):
     monkeypatch.setattr(cru, "get_memory_affinity", lambda: [0, 1])
     assert cru.get_visible_memory_node([1, 4]) == [1]
+
+
+def test_worker_memory_nodes_keep_available_assigned_nodes(six_numa_nodes):
+    assert cru.get_worker_memory_nodes([2, 3]) == [2, 3]
+
+
+def test_worker_memory_nodes_fall_back_when_assigned_nodes_are_missing(
+    six_numa_nodes, monkeypatch
+):
+    """DP=2 x TP=2 on a 2-node host assigns DP rank 1 nodes [2, 3]; the worker
+    must still get a memory node instead of an empty list."""
+    monkeypatch.setattr(cru, "get_memory_affinity", lambda: [0, 1])
+    assert cru.get_visible_memory_node([2, 3]) == []
+    assert cru.get_worker_memory_nodes([2, 3]) == [0, 1]
+
+
+def test_cpu_memory_usage_falls_back_when_assigned_nodes_are_missing(
+    six_numa_nodes, monkeypatch
+):
+    """DP rank 1 of DP=2 x TP=2 on a 2-node host must not report zero usage."""
+    monkeypatch.setattr(cru, "get_memory_affinity", lambda: [0, 1])
+    monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", [2, 3])
+    assert CpuPlatform.get_current_memory_usage() > 0
 
 
 def test_visible_memory_node_sim_multi_numa_ignores_assigned_ids(
