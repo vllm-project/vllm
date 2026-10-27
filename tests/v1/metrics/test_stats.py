@@ -25,18 +25,14 @@ from vllm.v1.spec_decode.metrics import (
 from vllm.v1.utils import compute_iteration_details
 
 
-@pytest.mark.parametrize("adaptive_verification", [True, False])
 @pytest.mark.parametrize(
     "verified_lengths, expected_per_pos",
     [([3, 0, None], [1, 1, 1, 0, 0]), ([1, 1, 1], [3, 0, 0, 0, 0])],
 )
-def test_adaptive_verified_budget_counter_differs_from_proposals(
-    adaptive_verification, verified_lengths, expected_per_pos
-):
+def test_verified_counter_differs_from_proposals(verified_lengths, expected_per_pos):
     registry = CollectorRegistry()
     config = SpeculativeConfig(
         method="ngram",  # no weights needed
-        enable_adaptive_verification=adaptive_verification,
         num_speculative_tokens=5,
     )
     prom = SpecDecodingProm(
@@ -66,36 +62,30 @@ def test_adaptive_verified_budget_counter_differs_from_proposals(
     assert samples["vllm:spec_decode_num_accepted_tokens_total"] == sum(
         min(verified or 0, 2) for verified in verified_lengths
     )
-    if adaptive_verification:
-        assert samples["vllm:spec_decode_num_verified_draft_tokens_total"] == 3
-    else:
-        assert "vllm:spec_decode_num_verified_draft_tokens_total" not in samples
+    assert samples["vllm:spec_decode_num_verified_tokens_total"] == 3
     for pos, expected in enumerate(expected_per_pos):
-        assert registry.get_sample_value(
-            "vllm:spec_decode_num_verified_draft_tokens_per_pos_total",
-            {"engine": "0", "position": str(pos)},
-        ) == (expected if adaptive_verification else None)
+        assert (
+            registry.get_sample_value(
+                "vllm:spec_decode_num_verified_tokens_per_pos_total",
+                {"engine": "0", "position": str(pos)},
+            )
+            == expected
+        )
 
 
-@pytest.mark.parametrize("adaptive_verification", [True, False])
-def test_adaptive_verified_budget_logging(adaptive_verification: bool):
+def test_verified_tokens_logging():
     stats = SpecDecodingStats.new(num_spec_tokens=5)
     stats.observe_draft_stats_per_req(
         num_draft_tokens=5, num_accepted_tokens=2, num_verified_draft_tokens=3
     )
 
-    spec_logging = SpecDecodingLogging(
-        enable_adaptive_verification=adaptive_verification
-    )
+    spec_logging = SpecDecodingLogging()
     spec_logging.observe(stats)
     messages: list[str] = []
     spec_logging.log(log_fn=lambda fmt, *args: messages.append(fmt % args))
 
     assert len(messages) == 1
-    if adaptive_verification:
-        assert "Verified:" in messages[0]
-    else:
-        assert "Verified:" not in messages[0]
+    assert "Verified: 3 tokens" in messages[0]
 
 
 def test_iteration_stats_repr():

@@ -60,6 +60,7 @@ def test_to_dict_summary_omits_per_step_arrays():
         "num_accepted_draft_tokens": 9,
         "num_draft_tokens": 15,
         "num_spec_tokens": 3,
+        "num_verified_tokens": 15,  # defaults to the drafted count
     }
 
 
@@ -67,6 +68,7 @@ def test_to_dict_detailed_appends_per_step_arrays():
     d = _metrics([(3, 3), (3, 2), (3, 0)], detailed=True).to_dict()
     assert d["per_step_accepted"] == [3, 2, 0]
     assert d["per_step_drafted"] == [3, 3, 3]
+    assert d["per_step_verified"] == [3, 3, 3]
     # summary fields still present in detailed mode
     assert d["num_spec_steps"] == 3
     assert d["num_accepted_draft_tokens"] == 5

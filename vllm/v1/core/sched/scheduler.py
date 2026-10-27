@@ -718,6 +718,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        num_proposed_spec_tokens: dict[str, int] = {}
         # Whether a request scheduled this step can use the drafts proposed after
         # it. Stays set if that request is preempted later in the step.
         drafts_needed = not self.can_skip_drafts
@@ -996,22 +997,32 @@ class Scheduler(SchedulerInterface):
             )
 
             # Speculative decode related.
-            if request.spec_token_ids:
+            if request.spec_token_ids or request.num_invalid_spec_tokens:
                 num_scheduled_spec_tokens = (
                     num_new_tokens
                     + request.num_computed_tokens
                     - request.num_tokens
                     - request.num_output_placeholders
                 )
-                if num_scheduled_spec_tokens > 0:
-                    spec_token_ids = request.spec_token_ids
+                spec_token_ids = request.spec_token_ids
+                if num_scheduled_spec_tokens > 0 and spec_token_ids:
                     if len(spec_token_ids) > num_scheduled_spec_tokens:
                         spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
                     scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
+                # Grammar-invalid draft tokens follow the valid ones, so they
+                # only count as proposed when the valid ones were not truncated.
+                if (
+                    request.num_invalid_spec_tokens
+                    and len(request.spec_token_ids) <= num_scheduled_spec_tokens
+                ):
+                    num_proposed_spec_tokens[request.request_id] = (
+                        len(request.spec_token_ids) + request.num_invalid_spec_tokens
+                    )
 
                 # New spec tokens will be set in `update_draft_token_ids` before the
                 # next step when applicable.
                 request.spec_token_ids = []
+                request.num_invalid_spec_tokens = 0
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -1702,6 +1713,7 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+            num_proposed_spec_tokens=num_proposed_spec_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
             preempted_req_ids=self.reset_preempted_req_ids,
@@ -1794,6 +1806,7 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        request.num_invalid_spec_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
@@ -2244,6 +2257,7 @@ class Scheduler(SchedulerInterface):
         )
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         num_verified_tokens = model_runner_output.num_verified_draft_tokens_per_req
+        num_proposed_spec_tokens = scheduler_output.num_proposed_spec_tokens or {}
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
@@ -2319,9 +2333,12 @@ class Scheduler(SchedulerInterface):
             )
 
             scheduled_spec_token_ids = (
-                scheduler_output.scheduled_spec_decode_tokens.get(req_id)
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
             )
-            if scheduled_spec_token_ids and (
+            num_proposed = num_proposed_spec_tokens.get(
+                req_id, len(scheduled_spec_token_ids)
+            )
+            if num_proposed and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
                 num_draft_tokens = len(scheduled_spec_token_ids)
@@ -2338,33 +2355,26 @@ class Scheduler(SchedulerInterface):
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
 
+                # Draft tokens the target ran a forward pass on: the adaptive
+                # verification budget if reported, else the scheduled draft
+                # tokens minus the -1 padding (e.g. from ngram_gpu).
                 num_verified = (
                     num_verified_tokens[req_index]
                     if num_verified_tokens is not None
-                    else None
+                    else min(num_draft_tokens, num_proposed)
                 )
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
-                    num_draft_tokens=num_draft_tokens,
+                    num_draft_tokens=num_proposed,
                     num_accepted_tokens=num_accepted,
-                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
-                    request_id=req_id,
                     num_verified_draft_tokens=num_verified,
                 )
                 if request.spec_decode_metrics is not None:
-                    # Exclude grammar-invalidated drafts from the proposed
-                    # count, mirroring make_spec_decoding_stats; the accepted
-                    # bucket (j) is unaffected.
-                    adj_draft_tokens = num_draft_tokens
-                    if scheduler_output.num_invalid_spec_tokens:
-                        adj_draft_tokens -= (
-                            scheduler_output.num_invalid_spec_tokens.get(req_id, 0)
-                        )
                     request.spec_decode_metrics.observe(
-                        num_draft_tokens=adj_draft_tokens,
+                        num_draft_tokens=num_proposed,
                         num_accepted=num_accepted,
                         detailed=self.spec_decode_metrics_level == "detailed",
-                        num_verified_draft_tokens=num_verified,
+                        num_verified_tokens=num_verified,
                     )
 
             # Free encoder inputs only after the step has actually executed.
@@ -2708,6 +2718,7 @@ class Scheduler(SchedulerInterface):
         assert safe_frontier >= 0
         request.num_computed_tokens = safe_frontier
         request.spec_token_ids = []
+        request.num_invalid_spec_tokens = 0
         request.drop_stale_output = True
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
@@ -2862,11 +2873,15 @@ class Scheduler(SchedulerInterface):
             request.spec_token_ids = self.structured_output_manager.trim_spec_tokens(
                 request, spec_token_ids
             )
+            if request.use_structured_output:
+                request.num_invalid_spec_tokens = len(
+                    strip_speculative_padding(spec_token_ids)
+                ) - len(request.spec_token_ids)
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
     ) -> None:
-        num_invalid_spec_tokens: dict[str, int] = {}
+        num_proposed_spec_tokens: dict[str, int] = {}
 
         sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id, spec_token_ids in zip(
@@ -2886,16 +2901,18 @@ class Scheduler(SchedulerInterface):
             # Trim drafts to scheduled number of spec tokens
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]
+            num_proposed = len(strip_speculative_padding(spec_token_ids))
+            if num_proposed != orig_num_spec_tokens:
+                num_proposed_spec_tokens[req_id] = num_proposed
             # Preserve draft slots; rejection sampling handles grammar violations.
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:
                 spec_token_ids.extend([-1] * num_invalid_tokens)
-                num_invalid_spec_tokens[req_id] = num_invalid_tokens
 
             sched_spec_tokens[req_id] = spec_token_ids
 
-        scheduler_output.num_invalid_spec_tokens = num_invalid_spec_tokens
+        scheduler_output.num_proposed_spec_tokens = num_proposed_spec_tokens
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
@@ -3259,16 +3276,12 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: SpecDecodingStats | None,
         num_draft_tokens: int,
         num_accepted_tokens: int,
-        num_invalid_spec_tokens: dict[str, int] | None,
-        request_id: str,
         num_verified_draft_tokens: int | None = None,
     ) -> SpecDecodingStats | None:
         if not self.log_stats or not num_draft_tokens:
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
-        if num_invalid_spec_tokens:
-            num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
         spec_decoding_stats.observe_draft_stats_per_req(
             num_draft_tokens=num_draft_tokens,
             num_accepted_tokens=num_accepted_tokens,

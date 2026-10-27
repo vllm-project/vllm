@@ -114,11 +114,11 @@ class SpeculativeDecodingMetrics(OpenAIBaseModel):
     num_accepted_draft_tokens: int
     num_draft_tokens: int
     num_spec_tokens: int
+    # Draft tokens the target model ran a forward pass on.
+    num_verified_tokens: int | None = None
     # Ordered per-verify-step arrays; populated only at the `detailed` level.
     per_step_accepted: list[int] | None = None
     per_step_drafted: list[int] | None = None
-    # Only populated with adaptive verification.
-    num_verified_draft_tokens: int | None = None
     per_step_verified: list[int] | None = None
 
 
