@@ -3485,3 +3485,98 @@ autre workspace : demander, pas appliquer).
 **Registre** : Q41 (VRAM/0.73) toujours ouverte seule — aucun critère d'échec
 rempli ce cycle (22 354 MiB en charge, sous 23 500), risque non démontré mais
 non levé. Cron réarmé 2 h, un seul job.
+
+## 27/10 08:1xZ — 6 h sans restart, JIT warmup = no-op mesuré, deux clés mortes identifiées, breaker auto-rétabli
+
+**Moteur** : `StartedAt` 02:15:05Z **inchangé** (6 h), health 200 @5,2 ms puis 2,8 ms,
+RC=0, 3 conteneurs Up, OOM 0, **0** signature d'erreur (Traceback/RuntimeError/
+AssertionError/CUDA error) sur 20 000 lignes, `/dev/shm` **24G/63G (39 %)** — le tier
+RAM lui-même, aucun orphelin. **VRAM échantillonnée 6× en 1 min** : GPU 0
+**22 343→22 358 MiB** (stable, pas de pente), GPU 1 21 650, GPU 2 98 (libre).
+
+### Amortissement des préfixes : 90,09 %, et le tier fs monte
+
+`prefix_cache_hits/queries` = **63 652 800 / 70 653 330 = 90,09 %**. Mieux : le taux
+**marginal** sur les 2 h écoulées depuis le cycle précédent (44,78 M → 70,65 M queries,
+40,58 M → 63,65 M hits) vaut **23,07/25,87 = 89,2 %** ⇒ l'amortissement ne se dégrade pas
+avec la charge, il est stationnaire.
+
+**Tier fs** : `external_prefix_cache_hits/queries` = 3 155 888 / 7 000 533 = **45,1 %**
+(contre 29,4-33,0 % à 06:15Z) ⇒ le disque prend une part croissante du service.
+**17 995 lookups** `tier=1:TouchOnHitFsTier` depuis le boot (890 à 02:35Z), latence
+p50 ≈ **20 µs** — la lecture de l'index fs ne coûte rien.
+Offload : GPU→CPU 163,6 Go écrits, CPU→GPU **65,4 Go relus**, 168 transferts.
+**Préemptions 0.**
+
+### ★ `enable_jit_warmup=True` chauffe 0,00 s — la cause des JIT sous inférence est mesurée
+
+Le log de boot le dit sans ambiguïté, deux fois (TP0 et TP1) :
+
+```
+[02:17:44] kernel_warmup.py:176 JIT kernel warmup starting.
+[02:17:44] kernel_warmup.py:189 JIT kernel warmup finished in 0.00s.
+```
+
+**Le warmup ne fait littéralement rien sur ce couple modèle/build.** C'est la
+démonstration du point laissé ouvert au cycle précédent (« le warmup ne couvre pas ces
+formes ») : il ne couvre **aucune** forme. Conséquence mesurée : 11 avertissements
+`jit_monitor` de compilation Triton **pendant l'inférence** depuis le boot
+(`_topp_sb_{stats,step,mask}_kernel` à 03:50:30, `_fused_mm_input_norm_kernel` à
+05:47:38), chacun « causes a latency spike ». **Aucun nouveau depuis 05:47:38** (2,5 h) :
+le jeu de formes rencontrées est stable, chaque kernel se paie une fois.
+Piste à instruire = peupler le warmup pour ces formes, ou accepter le coût unique.
+
+### Breaker de condensation : rétabli seul à 07:39:23Z
+
+Aucune nouvelle ouverture après 06:01:22Z (les lignes 06:04/06:07/06:12/06:16 sont des
+« primary skipped » dans la même fenêtre de refroidissement). **HALF-OPEN à 07:38:13Z →
+`LLM status update generated` à 07:39:23Z** ⇒ le disjoncteur se referme de lui-même dès
+que le moteur répond, sans intervention. Dernier timeout observé : 06:00:53Z.
+Confirme que la boucle est **gracieuse et auto-guérissante**, et que la cause reste
+côté client (budget 4,1 K tokens > timeout 90 s, po-2028 #3962).
+
+### Sécurité : deux empreintes mortes, aucune n'a jamais rendu 200
+
+Census 7 h — IP avec 200 : `?` (1 105, appels internes sans `X-Forwarded-For`),
+`90.65.170.144` (521, hairpin/site **connue**), `82.66.89.184` (3, poste Paris du user
+**connue**). **Aucune IP inconnue.** Fenêtre 3 h : 994 lignes, **5,5 req/min**,
+**955×200 / 39×401 / 0×400** (aucune signature #431).
+
+Empreintes (`sha256(auth_prefix)[:12]`) : MEDIUM `be312daf7c1c` 955 · clé morte connue
+`1f7f6080cb65` 22 · `NONE` 14 · **`2703beff17f8` 2 (nouvelle)** · `b72157f4bb61` 1.
+
+**★ Discriminant décisif, mesuré sur tout le fichier** : sur l'intégralité du journal
+(depuis le 23/10), ces trois empreintes n'ont **jamais** obtenu autre chose qu'un 401 —
+`1f7f6080cb65` 832×401, `b72157f4bb61` **3×401**, `2703beff17f8` **2×401**. Ce sont donc
+des **clés mortes pures**, pas des consommateurs légitimes dégradés : elles n'ont jamais
+eu d'accès. `2703beff17f8` a tiré ses 2 requêtes **dans la même seconde** (06:45:46Z)
+sur `/v1/models` en `curl/8.14.1`, local, corps 0 o — profil de **sonde de santé avec un
+jeton périmé**, pas d'inférence. Aucune n'est une intrusion, aucune n'expose de donnée
+(refus en 401 avant tout traitement).
+
+### Hôte, tâches, coordination
+
+Marge commit **76,1 %** (292,5/384,4 Go, 92 Go libres) — remontée depuis 73,5 % mais
+sous le seuil 85 %. G: 85 % utilisé / 592 Go libres, **écriture OK**. Pruneur
+**07:50:02Z** : `mode=apply`, tier ramené au cap (268,74 → 268,43 Go), **12 fichiers /
+315 Mo supprimés, 0 erreur** — le volume de réécriture reste très bas depuis le patch.
+nbaudit `ok:true` **08:05:44Z**, `subpath Image/` inchangé. **WEDGE** : dernier à
+**03:11:31Z** (5 h), tous en `fail 1/2`, **jamais 2/2**, aucun restart ; 3 803 sondes OK.
+
+**Coordination** : po-2025:claudish a **indépendamment confirmé la fermeture** de la
+classe ECONNRESET — sur `n=125` mesures `[ttft]` swift post-rétablissement : **0 échec de
+connexion, 0 UNEXPLAINED ENDING**, ttft p95 8 933 ms, p50 1 816 ms ; leurs 4 UNEXPLAINED
+sont tous dans la fenêtre wedge 03:40-04:08Z. Ils **ne retiennent pas la cible LAN cette
+nuit** (changement de baseUrl gelé pour l'arbitrage du matin) et s'engagent à me le dire
+dans le même cycle s'ils la retiennent ⇒ c'est à ce moment que je demande la réservation
+DHCP de `.47`. Le point est donc **clos des deux côtés**, sans action en attente de mon
+côté.
+
+**Hors lane (RSM, à relayer — ne pas traiter ici)** : `[PG-PRIMARY #4131] écriture PG
+primaire échouée — repli sur le chemin GDrive-first` (07:36:08Z) ; `[STALE-FILE #3230]
+copie locale en retard` (07:21:15Z) ; `[ERROR] Status contradictions detected after LLM
+generation (#1502/#3329)` (07:39:23Z).
+
+**Registre** : Q41 seule, toujours ouverte. Le pic de charge de ce cycle est
+**22 358 MiB** — 6 h de trafic soutenu à 0,73 ne reproduisent pas le plateau de
+23 600 MiB d'avant reboot. Critère d'échec toujours non rempli, risque non démontré.
