@@ -591,7 +591,7 @@ class VllmConfig:
         pp_size = self.parallel_config.pipeline_parallel_size
         if self.scheduler_config.async_scheduling:
             if self.use_v2_model_runner:
-                return pp_size + 1
+                return pp_size + self.scheduler_config.async_scheduling_depth - 1
             # V1 Model Runner does not fully support async scheduling with PP.
             if pp_size <= 1:
                 return 2

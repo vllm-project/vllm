@@ -843,6 +843,7 @@ class EngineArgs:
     """Custom logitproc types"""
 
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
+    async_scheduling_depth: int = SchedulerConfig.async_scheduling_depth
 
     stream_interval: int = SchedulerConfig.stream_interval
 
@@ -1816,6 +1817,9 @@ class EngineArgs:
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
         )
         scheduler_group.add_argument(
+            "--async-scheduling-depth", **scheduler_kwargs["async_scheduling_depth"]
+        )
+        scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
 
@@ -2685,6 +2689,7 @@ class EngineArgs:
             prefill_schedule_interval=self.prefill_schedule_interval,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            async_scheduling_depth=self.async_scheduling_depth,
             stream_interval=self.stream_interval,
         )
 

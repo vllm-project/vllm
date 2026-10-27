@@ -1663,6 +1663,38 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+@pytest.mark.parametrize(
+    ("pp", "depth", "expected"), [(1, 2, 2), (1, 6, 6), (2, 2, 3), (2, 4, 5)]
+)
+def test_async_scheduling_depth_sets_concurrent_batches(
+    monkeypatch, pp, depth, expected
+):
+    """Model Runner V2 keeps `async_scheduling_depth` steps in flight, plus one
+    per extra pipeline stage; the default depth 2 keeps the previous count."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    cfg = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            async_scheduling=True,
+            async_scheduling_depth=depth,
+        ),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=pp,
+            distributed_executor_backend="mp",
+            nnodes=pp,
+        ),
+    )
+    assert cfg.max_concurrent_batches == expected
+
+
+def test_async_scheduling_depth_below_two_is_rejected():
+    with pytest.raises(ValidationError):
+        SchedulerConfig(
+            max_model_len=8192, is_encoder_decoder=False, async_scheduling_depth=1
+        )
+
+
 def test_v1_model_runner_drops_async_scheduling_with_pipeline_parallelism(monkeypatch):
     """PP>1 must stay buildable whenever the V1 model runner is selected, such
     as the external_launcher fallback; async scheduling is dropped instead."""
