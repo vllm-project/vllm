@@ -207,6 +207,7 @@ def layout(
         ("poll_abort", 4),
         ("poll_err_addr", 8),
         ("poll_xrank_addr", 8),
+        ("trace_addr", 8),
     ]
     assert len({name for name, _ in items}) == len(items), "mailbox names"
     offset, scratch = 0, {}

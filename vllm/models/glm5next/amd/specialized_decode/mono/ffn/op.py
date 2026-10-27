@@ -15,9 +15,11 @@ from vllm.models.glm5next.amd.specialized_decode.mono.config import (
     KV_LORA,
 )
 from vllm.models.glm5next.amd.specialized_decode.mono.ffn.kernel import (
+    TRACE_MARKS,
     build_flash_ffn_kernel,
 )
 from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import (
+    BLOCKS,
     DSA_TAB,
     POLL_STAGES,
     ROW_WORDS,
@@ -167,6 +169,8 @@ class FlashFfnRuntime:
         dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
         kv_fp8: bool = False,
         kv_mxfp4: bool = False,
+        mxfp4_native: bool = True,
+        trace: bool = False,
     ) -> None:
         self.width, self.rank, self.npes = width, rank, npes
         self.kv_fp8, self.kv_mxfp4 = kv_fp8, kv_mxfp4
@@ -187,6 +191,8 @@ class FlashFfnRuntime:
             dsa_fp8=dsa_fp8,
             kv_fp8=kv_fp8,
             kv_mxfp4=kv_mxfp4,
+            mxfp4_native=mxfp4_native,
+            trace=trace,
         )
         dev = torch.device("cuda", torch.accelerator.current_device_index())
         self.peer = PeerBuffers(self.sy["_bytes"], rank, npes, group)
@@ -198,9 +204,16 @@ class FlashFfnRuntime:
         if own_flags:
             flag_addr = int(self.peer.addresses[0]) + self.sy["poll_xrank"] + 4 * rank
         self.flag_addr = flag_addr
+        # stage entry times of every CTA (``TRACE_MARKS``), from the last launch
+        self.trace = (
+            torch.zeros(BLOCKS, len(TRACE_MARKS), dtype=torch.int64, device=dev)
+            if trace
+            else None
+        )
         for name, addr in (
             ("poll_err_addr", self.words.data_ptr()),
             ("poll_xrank_addr", flag_addr),
+            ("trace_addr", 0 if self.trace is None else self.trace.data_ptr()),
         ):
             off = self.sc[name]
             self.scratch[off : off + 8].view(torch.int64).fill_(addr)
