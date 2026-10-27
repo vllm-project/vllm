@@ -137,6 +137,28 @@ def test_basic_cumem(monkeypatch):
     assert device_index in sync_devices
 
 
+@pytest.mark.parametrize("offload_tag", ["weights", "runtime"])
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_nested_pools_preserve_selected_contents(offload_tag):
+    """Nested pools and the resumed outer pool retain independent sleep policies."""
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("weights"):
+        before = torch.full((16,), 3, device=DEVICE_TYPE)
+        with allocator.use_memory_pool("runtime"):
+            runtime = torch.full((16,), 5, device=DEVICE_TYPE)
+        after = torch.full((16,), 7, device=DEVICE_TYPE)
+
+    torch.accelerator.synchronize()
+    allocator.sleep(offload_tags=(offload_tag,))
+    allocator.wake_up()
+
+    if offload_tag == "runtime":
+        assert torch.equal(runtime, torch.full_like(runtime, 5))
+    else:
+        assert torch.equal(before, torch.full_like(before, 3))
+        assert torch.equal(after, torch.full_like(after, 7))
+
+
 @pytest.mark.parametrize("full_sleep", [0, 1, 2], ids=["kv-only", "sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_release_kv_cache_memory_preserves_generation(full_sleep, monkeypatch):
