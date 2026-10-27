@@ -20,6 +20,9 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
     ROCM_VER=$(python3 -c "import torch; print(torch.version.hip.rsplit('.', 1)[0])")
+    # The image's own stack builds (TheRock torch, triton, amdsmi) are on no public index,
+    # download.pytorch.org's rocm<ver> one included.
+    LOCAL_BUILDS=1
     CANDIDATE_URL="https://download.pytorch.org/whl/rocm${ROCM_VER}"
     if curl -fsSL --head "${CANDIDATE_URL}/" >/dev/null 2>&1; then
         TORCH_INDEX_URL="${CANDIDATE_URL}"
@@ -27,8 +30,6 @@ if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
         echo ">>> WARNING: ROCm ${ROCM_VER} wheel index not found at ${CANDIDATE_URL}"
         echo ">>>          Falling back to default PyPI (resolution may be incomplete)"
         TORCH_INDEX_URL=""
-        # The image's own stack builds (TheRock torch, triton, amdsmi) are on no public index.
-        LOCAL_BUILDS=1
     fi
 else
     if [ "${TORCH_NIGHTLY:-0}" = "1" ]; then

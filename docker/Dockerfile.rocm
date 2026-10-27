@@ -353,7 +353,9 @@ FROM runtime AS test-deps
 COPY --from=rust-toolchain /root/.cargo /root/.cargo
 COPY --from=rust-toolchain /root/.rustup /root/.rustup
 ENV CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup PATH=/root/.cargo/bin:$PATH
-# DeepEP and the rdma-core its rocshmem needs: CI only, as before (see build_rdma_core).
+# DeepEP and the rdma-core its rocshmem needs: CI only, as before (see build_rdma_core). So RDMA
+# tests (NIXL, MoRI, UCX, DeepEP) run on rdma-core 62 and its upstream providers here, but the
+# shipped image on the distro's 39 and the vendor AINIC/bnxt_re ones; the pip check below misses it.
 COPY --from=build_rdma_core /out /
 RUN --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deepep \
     --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
@@ -560,6 +562,9 @@ COPY --link --exclude=vllm --exclude=.git . /vllm-workspace/
 # Source under src/ so it does not shadow the installed package in tests.
 COPY --link vllm /vllm-workspace/src/vllm
 WORKDIR /vllm-workspace
+# run-amd-test.sh's pytest plugin, in site-packages: commands that set PYTHONPATH still load it.
+RUN cp .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py \
+    "$(python3 -P -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/"
 # Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
 ENV VLLM_GPU_SYNC_CHECK=error
 
