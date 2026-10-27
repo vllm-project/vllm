@@ -119,7 +119,7 @@ class MonoBuild:
 
     @property
     def tuned_front(self) -> bool:
-        return self.tuned or (not GFX942 and not self.generic and self.tp == 4)
+        return self.tuned or (not GFX942 and not self.generic and self.tp in (4, 8))
 
 
 def _moe_key(key: MonoBuild) -> MoeBuild:
