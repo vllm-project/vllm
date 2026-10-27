@@ -692,6 +692,7 @@ class HiSparseIndexGroup:
             dtype=torch.int32,
             device=device,
         )
+        # NPU arange does not support int16 output, so generate int32 then cast.
         self.lru_init = torch.arange(
             region_stride, dtype=torch.int32, device=device
         ).to(torch.int16)
