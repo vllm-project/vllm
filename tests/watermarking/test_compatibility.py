@@ -415,17 +415,24 @@ def test_enforce_engine_core_backstop_warns_once(
     config = VllmConfig()
     config.watermark_config = WatermarkConfig(key=42, enforce=enforce)
     with caplog_vllm.at_level("WARNING"):
+        for params in (
+            SamplingParams(temperature=0, watermarking=False),
+            SamplingParams(trace_decode_token_ids=[1, 2], watermarking=False),
+        ):
+            params = _preprocess_in_engine_core(params, config.watermark_config)
+            assert params.watermarking is False
+        assert "overriding watermarking=False" not in caplog_vllm.text
+        params = _preprocess_in_engine_core(
+            SamplingParams(watermarking=False), config.watermark_config
+        )
+        assert params.watermarking is enforce
+        assert caplog_vllm.text.count("overriding watermarking=False") == int(enforce)
         for _ in range(2):
             config._check_supports_watermarking(SamplingParams(watermarking=False))
             params = _preprocess_in_engine_core(
                 SamplingParams(watermarking=False), config.watermark_config
             )
             assert params.watermarking is enforce
-        # Greedy cannot be watermarked, so EngineCore leaves its flag alone.
-        params = _preprocess_in_engine_core(
-            SamplingParams(temperature=0, watermarking=False), config.watermark_config
-        )
-        assert params.watermarking is False
     assert caplog_vllm.text.count("overriding watermarking=False") == int(enforce)
 
 
