@@ -310,7 +310,10 @@ def get_layer_transfer_geometry(
             kv_cache, shape[0] // (spec.num_states // shape[2])
         )
         slot_size_bytes = num_heads * content_dim * element_size
-        block_len = spec.num_states * slot_size_bytes
+        block_len = 1 + sum(
+            (s - 1) * st for s, st in zip(blocks.shape[1:], blocks.stride()[1:])
+        )
+        block_len *= element_size
         return LayerTransferGeometry(
             num_blocks=blocks.shape[0],
             block_size=spec.block_size,
