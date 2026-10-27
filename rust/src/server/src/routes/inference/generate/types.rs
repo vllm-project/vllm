@@ -13,10 +13,10 @@ use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::SamplingParams;
 
-use crate::routes::openai::utils::types::{Normalizable, StreamOptions, StringOrArray, Usage};
-use crate::routes::request_metrics::{
+use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
 };
+use crate::routes::openai::utils::types::{Normalizable, StreamOptions, StringOrArray, Usage};
 
 /// Sampling parameters for the token-in/token-out generate API.
 ///

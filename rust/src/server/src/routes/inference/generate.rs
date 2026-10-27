@@ -40,12 +40,12 @@ pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
+use crate::routes::openai::utils::metrics::{
+    SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
+};
 use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::{LoggedOutput, log_output};
-use crate::routes::request_metrics::{
-    SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
-};
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, sse_response};
 

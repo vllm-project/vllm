@@ -16,7 +16,6 @@ mod output_log;
 mod pause;
 mod profile;
 pub(super) mod render;
-mod request_metrics;
 mod server_info;
 mod sleep;
 mod tokenize;
