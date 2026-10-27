@@ -18,9 +18,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_fp8_moe_method_base import (
-    FusedFp8MoEMethodBase,
-)
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
@@ -52,9 +49,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
-class CompressedTensorsW8A8Fp8MoEMethod(
-    CompressedTensorsMoEMethod, FusedFp8MoEMethodBase
-):
+class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     """W8A8 FP8 MoE quantization using compressed tensors."""
 
     def __init__(
@@ -109,7 +104,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(
             activation_key = ct2vllm_act[self.input_quant.strategy]
 
         # Select Fp8 MoE backend
-        self.weight_quant_key = weight_key
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
             weight_key=weight_key,
@@ -301,9 +295,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(
                 is_act_and_mul=self.moe.is_act_and_mul,
             )
 
-        w13, w2, w13_scale, w2_scale = self.maybe_pad_weights(
-            w13, w2, w13_scale, w2_scale
-        )
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
             layer=layer,
