@@ -36,6 +36,7 @@ from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
     get_dcp_local_seq_lens,
     get_num_attention_heads_from_layers,
+    split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.dcp import (
     cp_lse_ag_out_rs,
@@ -547,6 +548,13 @@ class FlashAttentionMetadata:
     scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
 
+    # FA3 mixed batches: the leading num_split_decodes requests (one token
+    # each) run as a separate max_seqlen_q=1 call; the remaining requests use
+    # prefill_query_start_loc and scheduler_metadata.
+    num_split_decodes: int = 0
+    prefill_query_start_loc: torch.Tensor | None = None
+    decode_scheduler_metadata: torch.Tensor | None = None
+
     causal: bool | torch.Tensor = True
 
     # PrefixLM bidirectional range containing each scheduled query token.
@@ -740,6 +748,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         # fused path disabled until DCP gets a full replay-safe refresh model.
         self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
 
+        # FA3 bounds split-KV for a varlen call by max_seqlen_q, so a large
+        # prefill chunk in a mixed batch leaves every decode on one CTA per KV
+        # head. Run the decodes as a separate max_seqlen_q=1 call instead.
+        self.split_mixed_batch = fa_version == 3 and self.dcp_world_size == 1
+        if self.split_mixed_batch:
+            self._init_reorder_batch_threshold(1)
+
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
         )
@@ -853,11 +868,12 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     aot_schedule = False
 
         max_num_splits = 0  # 0 means use FA3's heuristics, not CG compatible
-        if (
+        cudagraph_eligible = (
             self.use_full_cuda_graph
             and self.max_cudagraph_size is not None
             and num_actual_tokens <= self.max_cudagraph_size
-        ):
+        )
+        if cudagraph_eligible:
             # NOTE(woosuk): Setting num_splits > 1 may increase the memory
             # usage, because the intermediate buffers of size [num_splits,
             # num_heads, num_tokens, head_size] are allocated. Therefore,
@@ -866,6 +882,21 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         if envs.VLLM_BATCH_INVARIANT:
             max_num_splits = 1
+
+        num_split_decodes = 0
+        prefill_query_start_loc = None
+        decode_scheduler_metadata = None
+        if (
+            self.split_mixed_batch
+            and not cudagraph_eligible
+            and max_num_splits == 0
+            and max_query_len > 1
+        ):
+            num_decodes, num_prefills, _, _ = split_decodes_and_prefills(
+                common_attn_metadata, decode_threshold=1
+            )
+            if num_decodes and num_prefills:
+                num_split_decodes = num_decodes
 
         max_dcp_context_kv_len = 0
         dcp_context_kv_lens = None
@@ -937,6 +968,30 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     causal=False,
                     max_num_splits=max_num_splits,
                 )
+        elif num_split_decodes:
+            prefill_query_start_loc = (
+                query_start_loc[num_split_decodes:] - num_split_decodes
+            )
+            decode_scheduler_metadata = self._get_scheduler_metadata(
+                aot_schedule=aot_schedule,
+                batch_size=num_split_decodes,
+                cu_query_lens=query_start_loc[: num_split_decodes + 1],
+                max_query_len=1,
+                seqlens=seq_lens[:num_split_decodes],
+                max_seq_len=max_seq_len,
+                causal=causal,
+                max_num_splits=max_num_splits,
+            )
+            scheduler_metadata = self._get_scheduler_metadata(
+                aot_schedule=aot_schedule,
+                batch_size=num_reqs - num_split_decodes,
+                cu_query_lens=prefill_query_start_loc,
+                max_query_len=max_query_len,
+                seqlens=seq_lens[num_split_decodes:],
+                max_seq_len=max_seq_len,
+                causal=causal,
+                max_num_splits=max_num_splits,
+            )
         else:
             scheduler_metadata = self._get_scheduler_metadata(
                 aot_schedule=aot_schedule,
@@ -973,6 +1028,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             num_prefill_tokens=num_prefill_tokens,
             scheduler_metadata=scheduler_metadata,
             max_num_splits=max_num_splits,
+            num_split_decodes=num_split_decodes,
+            prefill_query_start_loc=prefill_query_start_loc,
+            decode_scheduler_metadata=decode_scheduler_metadata,
             causal=causal,
         )
 
@@ -1401,31 +1459,68 @@ class FlashAttentionImpl(AttentionImpl):
                 block_table = block_table[:, :num_pages]
                 num_splits = 1
 
-            _FA4_DENSE_ATTENTION_KERNEL(
-                q=query[:num_actual_tokens],
+            run_attention = functools.partial(
+                _FA4_DENSE_ATTENTION_KERNEL,
                 k=key_cache,
                 v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.scale,
                 causal=causal,
                 alibi_slopes=self.alibi_slopes,
                 window_size=sliding_window_size,
-                block_table=block_table,
                 softcap=self.logits_soft_cap,
-                scheduler_metadata=scheduler_metadata,
                 fa_version=self.vllm_flash_attn_version,
-                q_descale=q_descale,
-                k_descale=k_descale,
-                v_descale=v_descale,
                 dynamic_causal=dynamic_causal,
                 num_splits=num_splits,
                 s_aux=self.sinks,
                 mask_mod=rswa_mask_mod_fn or mm_mask_mod,
                 aux_tensors=rswa_aux or mm_aux,
+            )
+            if num_decodes := attn_metadata.num_split_decodes:
+                # Mixed FA3 batch: decodes first as their own max_seqlen_q=1
+                # call, then the rest. See FlashAttentionMetadataBuilder.
+                assert attn_metadata.prefill_query_start_loc is not None
+                run_attention(
+                    q=query[:num_decodes],
+                    out=output[:num_decodes],
+                    cu_seqlens_q=cu_seqlens_q[: num_decodes + 1],
+                    max_seqlen_q=1,
+                    seqused_k=seqused_k[:num_decodes],
+                    block_table=block_table[:num_decodes],
+                    scheduler_metadata=attn_metadata.decode_scheduler_metadata,
+                    q_descale=(
+                        q_descale[:num_decodes] if q_descale is not None else None
+                    ),
+                    k_descale=k_descale[:num_decodes],
+                    v_descale=v_descale[:num_decodes],
+                )
+                run_attention(
+                    q=query[num_decodes:num_actual_tokens],
+                    out=output[num_decodes:num_actual_tokens],
+                    cu_seqlens_q=attn_metadata.prefill_query_start_loc,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k[num_decodes:],
+                    block_table=block_table[num_decodes:],
+                    scheduler_metadata=scheduler_metadata,
+                    q_descale=(
+                        q_descale[num_decodes:] if q_descale is not None else None
+                    ),
+                    k_descale=k_descale[num_decodes:],
+                    v_descale=v_descale[num_decodes:],
+                )
+                return output
+
+            run_attention(
+                q=query[:num_actual_tokens],
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                block_table=block_table,
+                scheduler_metadata=scheduler_metadata,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
             )
             return output
 
