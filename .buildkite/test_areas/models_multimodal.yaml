@@ -64,6 +64,17 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (H200 MIG 35GB) Unlimited-OCR-2"
+  device: h200_35gb
+  key: unlimited-ocr2-generation
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - vllm/
+  - examples/generate/unlimited_ocr2.py
+  - tests/models/multimodal/generation/test_unlimited_ocr.py
+  commands:
+    - pytest -v -s models/multimodal/generation/test_unlimited_ocr.py -m core_model
+
 - label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: other + whisper"
   device: h200_35gb
   key: multi-modal-models-standard-4-other-whisper

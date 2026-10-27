@@ -162,11 +162,13 @@ class DeepseekOCRProcessor(ProcessorMixin):
         base_size: int = BASE_SIZE,
         strategy: Literal["v1", "v2"] = "v1",
         max_crops: int = MAX_CROPS,
+        resize_before_padding: bool = True,
         **kwargs,
     ):
         self.image_size = image_size
         self.base_size = base_size
         self.max_crops = max_crops
+        self.resize_before_padding = resize_before_padding
 
         # image token calculation strategy for
         # Deepseek-OCR and Deepseek-OCR-2
@@ -341,7 +343,7 @@ class DeepseekOCRProcessor(ProcessorMixin):
             else:
                 crop_ratio = [1, 1]
 
-            if not cropping:
+            if not cropping and self.resize_before_padding:
                 image = image.resize((self.image_size, self.image_size))
 
             global_view = ImageOps.pad(

@@ -9,6 +9,7 @@ steps:
   device: h100
   source_file_dependencies:
     - vllm/config/attention.py
+    - vllm/model_executor/layers/unlimited_ocr2.py
     - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
@@ -37,6 +38,7 @@ steps:
         pytest -v -s
         v1/attention
         --ignore=v1/attention/test_sparse_mla_backends.py
+        --ignore=v1/attention/test_unlimited_ocr2.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_sparse_mla_backends.py
 
 - label: ":nvidia: (B200) V1 Attention"
@@ -75,6 +77,7 @@ steps:
         v1/attention
         --ignore=v1/attention/test_mla_backends.py
         --ignore=v1/attention/test_sparse_mla_backends.py
+        --ignore=v1/attention/test_unlimited_ocr2.py
       - >-
         VLLM_ROCM_USE_AITER=1 pytest -v -s
         v1/attention/test_mla_backends.py

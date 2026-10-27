@@ -8813,3 +8813,31 @@ def test_cpu_encoder_input_updates_preserve_shm_handles(use_v2_model_runner):
         {request.request_id: {1: None}} if use_v2_model_runner else {}
     )
     assert request.mm_features[0].data is handle
+
+
+@pytest.mark.parametrize("enable_chunked_prefill", [False, True])
+def test_encoder_cache_pressure_respects_complete_prefills(enable_chunked_prefill):
+    """A pinned encoder entry must not force an unsplittable prompt to split."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_model_len=4096,
+        max_num_batched_tokens=4096,
+        enable_chunked_prefill=enable_chunked_prefill,
+    )
+    held, request = create_requests(
+        num_requests=2,
+        num_tokens=3500,
+        mm_positions=[[PlaceholderRange(offset=100, length=3000)] for _ in range(2)],
+    )
+    scheduler.encoder_cache_manager.allocate(held, 0)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    expected = {request.request_id: 100} if enable_chunked_prefill else {}
+    assert output.num_scheduled_tokens == expected
+    assert not output.scheduled_encoder_inputs
+    scheduler.encoder_cache_manager.free(held)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == (
+        3400 if enable_chunked_prefill else 3500
+    )
+    assert output.scheduled_encoder_inputs == {request.request_id: [0]}

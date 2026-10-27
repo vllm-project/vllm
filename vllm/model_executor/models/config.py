@@ -193,6 +193,10 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+        if getattr(vllm_config.model_config.hf_text_config, "unlimited_ocr2", False):
+            UnlimitedOCRForCausalLMConfig._configure_v2(vllm_config)
+            return
+
         attn_config = vllm_config.attention_config
         fa4_available = is_fa_version_supported(4)
 
@@ -289,6 +293,45 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         text_config = model_config.hf_config.text_config
         text_config.architectures = ["DeepseekV2ForCausalLM"]
+        sparse = getattr(model_config.hf_config, "sparse_attention_config", None)
+        if sparse is not None:
+            required = {
+                "training_stage": "dash",
+                "dash_stage0": "head_cls",
+                "sparse_main_rope_mode": "page2d",
+                "sparse_rope_mode": "page2d",
+                "sparse_rope_page_span": 0,
+                "use_sparse_attention": True,
+                "image_bucket_constraint": True,
+                "dash_image_only": True,
+            }
+            for key, value in required.items():
+                if sparse.get(key) != value:
+                    raise ValueError(f"Unlimited-OCR-2 requires {key}={value!r}")
+            if (
+                sparse.get("sparse_attention_freq")
+                != [1] * text_config.num_hidden_layers
+            ):
+                raise ValueError("Unlimited-OCR-2 requires DASH in every decoder layer")
+            if (
+                sparse["sparse_index_dim"]
+                != text_config.hidden_size // text_config.num_attention_heads
+            ):
+                raise ValueError("Unlimited-OCR-2 requires index_dim == head_dim")
+            if sparse["dash_sigma"] <= 0 or sparse["dash_topk_blocks"] <= 0:
+                raise ValueError("Unlimited-OCR-2 requires positive sigma and top-K")
+            text_config.unlimited_ocr2 = True
+            text_config.sparse_attention_config = sparse
+            window = sparse["sparse_local_block"] * sparse["sparse_block_size"]
+            requested = getattr(model_config.hf_config, "rswa_window", None)
+            if requested not in (None, 0, window):
+                raise ValueError(
+                    f"Unlimited-OCR-2 requires rswa_window={window} or 0 (full KV)"
+                )
+            model_config.hf_config.rswa_window = None if requested == 0 else window
+            text_config.rswa_window = model_config.hf_config.rswa_window
+            model_config.model_arch_config.rswa_window = text_config.rswa_window
+            return
         if getattr(model_config.hf_config, "rswa_window", None) is None:
             model_config.hf_config.rswa_window = 128
         # Propagate rswa_window to text_config so that DeepseekAttention (which
@@ -296,6 +339,91 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         # init_vllm_registered_model) can read it and create RSWAAttention.
         rswa_window = model_config.hf_config.rswa_window
         text_config.rswa_window = rswa_window
+
+    @staticmethod
+    def _configure_v2(vllm_config: "VllmConfig") -> None:
+        from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
+        from vllm.config.compilation import CompilationMode, CUDAGraphMode
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        compilation = vllm_config.compilation_config
+        breakable = is_breakable_cudagraph_enabled()
+        if not vllm_config.model_config.enforce_eager:
+            if compilation.mode not in (None, CompilationMode.NONE):
+                raise ValueError("Unlimited-OCR-2 currently requires compile mode NONE")
+            compilation.mode = CompilationMode.NONE
+            if compilation.cudagraph_mode is None:
+                compilation.cudagraph_mode = (
+                    CUDAGraphMode.FULL_AND_PIECEWISE
+                    if breakable
+                    else CUDAGraphMode.FULL_DECODE_ONLY
+                )
+            allowed_modes = {CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY}
+            if breakable:
+                allowed_modes.update(
+                    {CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE}
+                )
+            if compilation.cudagraph_mode not in allowed_modes:
+                raise ValueError(
+                    "Unlimited-OCR-2 prefill graphs require "
+                    "VLLM_USE_BREAKABLE_CUDAGRAPH=1 and mode "
+                    "PIECEWISE or FULL_AND_PIECEWISE; full prefill graphs "
+                    "are not supported"
+                )
+        if vllm_config.scheduler_config.enable_chunked_prefill:
+            raise ValueError("Unlimited-OCR-2 requires --no-enable-chunked-prefill")
+        if vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise ValueError(
+                "Unlimited-OCR-2 currently requires pipeline_parallel_size=1"
+            )
+        parallel = vllm_config.parallel_config
+        if (
+            parallel.decode_context_parallel_size != 1
+            or parallel.prefill_context_parallel_size != 1
+        ):
+            raise ValueError("Unlimited-OCR-2 does not support context parallelism")
+        if parallel.enable_dbo:
+            raise ValueError("Unlimited-OCR-2 does not support dual batch overlap")
+        if vllm_config.lora_config is not None:
+            raise ValueError("Unlimited-OCR-2 does not support LoRA")
+        if vllm_config.speculative_config is not None:
+            raise ValueError("Unlimited-OCR-2 does not support speculative decoding")
+        if vllm_config.quant_config is not None:
+            raise ValueError("Unlimited-OCR-2 currently requires unquantized weights")
+        if vllm_config.cache_config.cache_dtype != "auto":
+            raise ValueError("Unlimited-OCR-2 currently requires kv_cache_dtype=auto")
+        if vllm_config.kv_transfer_config is not None:
+            raise ValueError("Unlimited-OCR-2 does not support KV transfer")
+        vllm_config.cache_config.enable_prefix_caching = False
+        backend = (
+            vllm_config.attention_config.backend or AttentionBackendEnum.FLASH_ATTN
+        )
+        if backend not in (
+            AttentionBackendEnum.TRITON_ATTN,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.FLASHINFER,
+        ):
+            raise ValueError(
+                "Unlimited-OCR-2 supports FLASH_ATTN, FLASHINFER or TRITON_ATTN"
+            )
+        text_config = vllm_config.model_config.hf_config.text_config
+        text_config.unlimited_ocr2_attention_backend = backend.name
+        if backend == AttentionBackendEnum.FLASHINFER:
+            compilation.cudagraph_num_of_warmups = max(
+                1, compilation.cudagraph_num_of_warmups
+            )
+        # DASH owns sparse selection and compute. Reuse Triton's paged-cache
+        # metadata, including R-SWA reclamation, for all three compute backends.
+        vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+        logger.info("Unlimited-OCR-2 DASH compute backend: %s", backend.name)
+        mm_config = vllm_config.model_config.multimodal_config
+        assert mm_config is not None
+        if mm_config.mm_encoder_attn_backend is None:
+            mm_config.mm_encoder_attn_backend = AttentionBackendEnum.FLASH_ATTN
+        logger.info(
+            "Unlimited-OCR-2: output KV window=%s; input KV is retained for DASH.",
+            vllm_config.model_config.rswa_window,
+        )
 
 
 class Gemma4Config(VerifyAndUpdateConfig):

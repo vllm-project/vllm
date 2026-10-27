@@ -45,11 +45,12 @@ this module (same request-level processor as DeepSeek-OCR) with::
 
 Image processing
 ----------------
-Unlimited-OCR supports up to 32 local crops (vs 6 for DeepSeek-OCR), i.e.
-``dynamic_preprocess`` runs with ``max_num=32``.
+Unlimited-OCR v1 supports up to 32 local crops. Unlimited-OCR-2 uses the
+checkpoint's 16-crop preset; the crop limit affects aspect-ratio selection.
 
-Multi-image requests fall back to non-crop mode: crop ("gundam") mode is only
-used for single-image input. DeepSeek-OCR does *not* have this restriction.
+Unlimited-OCR v1 falls back to non-crop mode for multi-image requests.
+Unlimited-OCR-2 uses crop ("gundam") mode for every page, matching its official
+evaluation preprocessing.
 
 Because that fallback makes the per-image processor output depend on *how many*
 images are in the request, it breaks the assumption behind vLLM's per-item
@@ -62,6 +63,8 @@ processing cache consistent (verified by ``test_processing_correctness``).
 
 import math
 from collections.abc import Mapping, Sequence
+
+import torch
 
 from vllm.config import VllmConfig
 from vllm.inputs import MultiModalHashes
@@ -78,10 +81,12 @@ from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import MultiModalProcessingResult
+from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
     IMAGE_SIZE,
+    DeepseekOCRProcessor,
     count_tiles,
 )
 
@@ -100,18 +105,21 @@ __all__ = [
 
 # Unlimited-OCR supports up to 32 local crops (vs 6 for DeepSeek-OCR).
 _UNLIMITED_OCR_MAX_CROPS = 32
+_UNLIMITED_OCR2_MAX_CROPS = 16
 
 
 class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
-    """ProcessingInfo for Unlimited-OCR: same as DeepSeek-OCR but with
-    max_crops=32 instead of 6.  The higher crop count allows tiling very large
-    document pages into up to 32 640×640 patches (dynamic_preprocess max_num=32).
-    """
+    """Version-specific cropping: v1 uses up to 32 tiles, v2 up to 16."""
 
     def get_hf_config(self):
         from vllm.transformers_utils.configs.unlimited_ocr import UnlimitedOCRConfig
 
         return self.ctx.get_hf_config(UnlimitedOCRConfig)
+
+    def _get_max_crops(self) -> int:
+        if getattr(self.get_hf_config().text_config, "unlimited_ocr2", False):
+            return _UNLIMITED_OCR2_MAX_CROPS
+        return _UNLIMITED_OCR_MAX_CROPS
 
     def get_hf_processor(self, **kwargs: object):
         from vllm.transformers_utils.processors.unlimited_ocr import (
@@ -123,10 +131,18 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
             base_size=BASE_SIZE,
             crop_mode=CROP_MODE,
             strategy="v1",
-            max_crops=_UNLIMITED_OCR_MAX_CROPS,
+            max_crops=self._get_max_crops(),
+            resize_before_padding=not getattr(
+                self.get_hf_config().text_config, "unlimited_ocr2", False
+            ),
+        )
+        processor_cls = (
+            DeepseekOCRProcessor
+            if getattr(self.get_hf_config().text_config, "unlimited_ocr2", False)
+            else UnlimitedOCRProcessor
         )
         return self.ctx.get_hf_processor(
-            UnlimitedOCRProcessor,
+            processor_cls,
             **{**v1_processor_config, **kwargs},
         )
 
@@ -145,7 +161,7 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
                 crop_ratio = count_tiles(
                     image_width,
                     image_height,
-                    max_num=_UNLIMITED_OCR_MAX_CROPS,
+                    max_num=self._get_max_crops(),
                     image_size=IMAGE_SIZE,
                 )
             num_width_tiles, num_height_tiles = crop_ratio
@@ -165,19 +181,15 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         # A vertical grid maximizes both crop count and newline tokens.
-        return ImageSize(width=IMAGE_SIZE, height=IMAGE_SIZE * _UNLIMITED_OCR_MAX_CROPS)
+        return ImageSize(width=IMAGE_SIZE, height=IMAGE_SIZE * self._get_max_crops())
 
 
 class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
     """Multimodal processor for Unlimited-OCR.
 
-    Disables crop mode for multi-image requests (to stay consistent with
-    ``UnlimitedOCRProcessor.tokenize_with_images``), and -- since that makes the
-    per-image output depend on the request's image count -- bypasses the
-    per-item processing cache for multi-image requests, exactly like
-    ``DeepseekVL2MultiModalProcessor``.
-
-    DeepSeek-OCR does *not* apply either of these.
+    Applies the v1 multi-image crop fallback and the v2 per-page crop policy.
+    Multi-image requests bypass the per-item processing cache so the v1
+    request-dependent fallback remains consistent.
     """
 
     def _get_prompt_updates(
@@ -205,10 +217,14 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
                 assert isinstance(images, ImageProcessorItems)
                 size = images.get_image_size(item_idx)
 
-                # Disable crop mode for multi-image input.
-                # UnlimitedOCRProcessor.tokenize_with_images applies the same
-                # fallback, so both paths must agree on the effective crop flag.
-                effective_cropping = bool(crop_mode) and len(images) == 1
+                # Only v1 disables cropping for multi-image input. Match the
+                # selected HF processor when expanding image placeholders.
+                effective_cropping = bool(crop_mode) and (
+                    len(images) == 1
+                    or getattr(
+                        self.info.get_hf_config().text_config, "unlimited_ocr2", False
+                    )
+                )
 
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=size.width,
@@ -232,7 +248,12 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
             mm_kwargs = self.info.ctx.get_merged_mm_kwargs(
                 inputs.hf_processor_mm_kwargs
             )
-            cropping = len(images) == 1 and bool(mm_kwargs.get("crop_mode", CROP_MODE))
+            cropping = bool(mm_kwargs.get("crop_mode", CROP_MODE)) and (
+                len(images) == 1
+                or getattr(
+                    self.info.get_hf_config().text_config, "unlimited_ocr2", False
+                )
+            )
             algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
             hashes["image"] = [
                 MultiModalHasher.hash_kwargs(
@@ -263,5 +284,50 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
     dummy_inputs=DeepseekOCRDummyInputsBuilder,
 )
 class UnlimitedOCRForCausalLM(DeepseekOCRForCausalLM):
+    requires_raw_input_tokens = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+    def load_weights(self, weights):
+        if getattr(self.text_config, "unlimited_ocr2", False):
+            # Transformers 4 exported this deterministic CLIP buffer; vLLM
+            # constructs the positions and has no corresponding parameter.
+            weights = (
+                (name, weight)
+                for name, weight in weights
+                if name != "model.vision_model.embeddings.position_ids"
+            )
+        return super().load_weights(weights)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ):
+        if not getattr(self.text_config, "unlimited_ocr2", False):
+            return super().forward(
+                input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+            )
+
+        from vllm.forward_context import get_forward_context
+
+        from .unlimited_ocr2 import TOKEN_ROLES_KEY
+
+        context = get_forward_context()
+        if context.attn_metadata is not None and input_ids is None:
+            raise ValueError("Unlimited-OCR-2 requires raw input token IDs")
+        sp = self.text_config.sparse_attention_config
+        if input_ids is not None:
+            roles = (input_ids == sp["image_token_id"]).long()
+            roles = roles + 2 * (input_ids == sp["page_token_id"]).long()
+            context.additional_kwargs[TOKEN_ROLES_KEY] = roles
+        try:
+            return super().forward(
+                input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+            )
+        finally:
+            context.additional_kwargs.pop(TOKEN_ROLES_KEY, None)
