@@ -1621,7 +1621,7 @@ class Scheduler(SchedulerInterface):
                 NewRequestData.from_request(
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
+                    req.prefill_token_ids,
                     uses_mrope=self.model_uses_mrope,
                 )
                 for req in scheduled_new_reqs

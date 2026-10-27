@@ -110,6 +110,15 @@ def test_token_ids_view_searches_in_place():
     assert list(view) == [1, 2] and rfind_tokens(view, (3,)) == -1
 
 
+def test_prefill_token_ids_shares_prompt_until_outputs():
+    request = Request("r", [1, 2, 3], SamplingParams(max_tokens=4), None)
+    # Same object, so NewRequestData pickles the prompt once.
+    assert request.prefill_token_ids is request.prompt_token_ids
+    request.append_output_token_ids(4)
+    assert request.prefill_token_ids is request._all_token_ids
+    assert request.prefill_token_ids == [1, 2, 3, 4]
+
+
 def test_token_buffer_pickles_out_of_band_snapshot():
     """With protocol 5 the ids go out of band, as a snapshot that can outlive the
     pickling (zmq sends without copying) while the buffer keeps growing."""

@@ -296,6 +296,19 @@ class Request:
         return self.structured_output_request is not None
 
     @property
+    def prefill_token_ids(self) -> list[int]:
+        """All token ids, as the prompt_token_ids object itself while they hold
+        the same tokens, so that pickling both sends them once."""
+        prompt = self.prompt_token_ids
+        if (
+            prompt is not None
+            and self.prompt_is_token_ids is None
+            and len(prompt) == len(self._all_token_ids)
+        ):
+            return prompt
+        return self._all_token_ids
+
+    @property
     def num_tokens(self) -> int:
         return len(self._all_token_ids)
 
