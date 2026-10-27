@@ -24,14 +24,14 @@ pub use output::{
 };
 pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
 use trait_set::trait_set;
-use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
-use vllm_llm::{GenerateOutputStream, Llm};
 use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
+mod engine_client;
 mod error;
+pub use engine_client::{EngineClient, TokenStream};
 mod lower;
 pub mod output;
 mod request;
@@ -180,27 +180,23 @@ impl TextRequestProcessor {
     }
 }
 
-/// Raw text facade above [`Llm`].
+/// Text processing over a token-generation backend.
 ///
 /// This layer stays below chat semantics: prompt text or prompt token IDs flow
 /// in, decoded text deltas and terminal metadata flow out.
 pub struct TextLlm {
-    /// Generate-only client owned by this text facade.
-    llm: Llm,
+    /// Engine interface owned by this text facade.
+    client: Box<dyn EngineClient>,
     /// Shared engine-free request preparation.
     processor: TextRequestProcessor,
 }
 
 impl TextLlm {
-    /// Create a new text-generation facade from a shared LLM client plus a text
-    /// backend.
-    pub fn new(llm: Llm, backend: DynTextBackend) -> Self {
-        // The engine-reported value reflects the post-profiling, auto-fitted
-        // KV cache limit used at runtime.
-        let max_model_len = llm.engine_core_client().max_model_len();
-
+    /// Create a text facade using the client's effective model context length.
+    pub fn new(client: impl EngineClient + 'static, backend: DynTextBackend) -> Self {
+        let max_model_len = client.max_model_len();
         Self {
-            llm,
+            client: Box::new(client),
             processor: TextRequestProcessor::new(backend, max_model_len),
         }
     }
@@ -222,10 +218,9 @@ impl TextLlm {
         self.processor.backend.model_id()
     }
 
-    /// Expose the underlying engine-core client for low-level utility/admin
-    /// calls.
-    pub fn engine_core_client(&self) -> &EngineCoreClient {
-        self.llm.engine_core_client()
+    /// Return the generation client.
+    pub fn engine_client(&self) -> &dyn EngineClient {
+        self.client.as_ref()
     }
 
     /// Return the text request processor.
@@ -252,7 +247,7 @@ impl TextLlm {
 
     /// Tokenize if needed, lower to a generate request, and return the raw
     /// token stream.
-    pub async fn generate_raw(&self, request: TextRequest) -> Result<GenerateOutputStream> {
+    pub async fn generate_raw(&self, request: TextRequest) -> Result<TokenStream> {
         let (_, raw_stream) = self.generate_inner(request).await?;
         Ok(raw_stream)
     }
@@ -273,28 +268,25 @@ impl TextLlm {
         Ok(decoded_stream)
     }
 
-    async fn generate_inner(
-        &self,
-        request: TextRequest,
-    ) -> Result<(TextRequest, GenerateOutputStream)> {
+    async fn generate_inner(&self, request: TextRequest) -> Result<(TextRequest, TokenStream)> {
         let PreparedTextRequest {
             text_request,
             generate_request,
         } = self.processor.prepare(request)?;
 
-        let raw_stream = self.llm.generate(generate_request).await?;
+        let raw_stream = self.client.generate(generate_request).await?;
         Ok((text_request, raw_stream))
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
     pub async fn abort(&self, external_ids: &[String]) -> Result<()> {
-        self.llm.abort(external_ids).await?;
+        self.client.abort(external_ids).await?;
         Ok(())
     }
 
     /// Shut down the underlying LLM client and its background tasks.
     pub async fn shutdown(self) -> Result<()> {
-        self.llm.shutdown().await?;
+        self.client.shutdown().await?;
         Ok(())
     }
 }

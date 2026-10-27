@@ -17,7 +17,7 @@ const OWNED_BY: &str = "vllm-frontend-rs";
 /// `root` = adapter path and `parent` = base model. LoRA cards follow load order.
 pub async fn list_models(State(state): State<Arc<AppState>>) -> Json<ListModelsResponse> {
     let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-    let max_model_len = state.chat.engine_core_client().max_model_len();
+    let max_model_len = state.chat.engine_client().max_model_len();
     let model_path = state.model_path().map(str::to_string);
 
     let base_cards = state.served_model_names().iter().map(|name| ModelObject {

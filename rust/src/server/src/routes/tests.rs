@@ -1223,6 +1223,21 @@ where
     )
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn native_engine_shuts_down_with_app_state() {
+    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
+        default_ready_response(),
+        |_dealer, _push| boxed_test_future(async {}),
+    )
+    .await;
+    assert!(state.chat.engine_client().as_engine_core_client().is_some());
+    state
+        .shutdown(tokio::time::Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+}
+
 /// Engine script that answers one `add_lora` utility call with `loaded` and
 /// hands the decoded LoRA request tuple to `check`.
 fn add_lora_script(
@@ -4192,7 +4207,7 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
     .await;
 
     tokio::time::timeout(Duration::from_secs(2), async {
-        while state.chat.engine_core_client().is_healthy() {
+        while state.engine_core_client().is_healthy() {
             tokio::task::yield_now().await;
         }
     })
@@ -4203,7 +4218,7 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(body.is_empty(), "expected empty body, got {:?}", body);
     assert!(matches!(
-        state.chat.engine_core_client().health_error().as_deref(),
+        state.engine_core_client().health_error().as_deref(),
         Some(vllm_engine_core_client::Error::EngineCoreDead)
     ));
 

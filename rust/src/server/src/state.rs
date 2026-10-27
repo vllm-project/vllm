@@ -224,17 +224,16 @@ impl AppState {
     }
 
     fn ensure_lora_enabled(&self) -> Result<(), LoraDisabledError> {
-        self.engine_core_client()
-            .ready_response()
-            .supports_lora
-            .then_some(())
-            .ok_or(LoraDisabledError)
+        self.chat.engine_client().supports_lora().then_some(()).ok_or(LoraDisabledError)
     }
 
     /// Return a reference to the underlying engine core client for utility
     /// calls.
     pub(crate) fn engine_core_client(&self) -> &EngineCoreClient {
-        self.chat.engine_core_client()
+        self.chat
+            .engine_client()
+            .as_engine_core_client()
+            .expect("engine control routes require a local engine client")
     }
 
     /// Runtime used by middleware to isolate heavyweight request handlers from

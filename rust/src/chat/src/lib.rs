@@ -63,7 +63,6 @@ mod request;
 mod stream;
 
 use tracing::warn;
-use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
@@ -94,12 +93,11 @@ pub struct ChatRequestProcessor {
 static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
 
 impl ChatRequestProcessor {
-    /// Create a processor with multimodal support using the effective model
-    /// dtype reported by the engine.
-    fn new(backend: DynChatBackend, model_dtype: ModelDtype, max_model_len: u32) -> Self {
+    /// Create a processor with the effective context limit and optional multimodal dtype.
+    fn new(backend: DynChatBackend, model_dtype: Option<ModelDtype>, max_model_len: u32) -> Self {
         Self {
             backend,
-            model_dtype: Some(model_dtype),
+            model_dtype,
             max_model_len: Some(max_model_len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
@@ -303,8 +301,8 @@ impl ChatLlm {
     /// Create a new chat facade from a text-generation facade plus a chat
     /// backend.
     pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
-        let model_dtype = text.engine_core_client().model_dtype();
-        let max_model_len = text.engine_core_client().max_model_len();
+        let model_dtype = text.engine_client().model_dtype();
+        let max_model_len = text.engine_client().max_model_len();
 
         Self {
             text,
@@ -377,10 +375,9 @@ impl ChatLlm {
         self.text.model_id()
     }
 
-    /// Expose the underlying engine-core client for low-level utility/admin
-    /// calls.
-    pub fn engine_core_client(&self) -> &EngineCoreClient {
-        self.text.engine_core_client()
+    /// Return the generation client shared by native and HTTP frontends.
+    pub fn engine_client(&self) -> &dyn vllm_text::EngineClient {
+        self.text.engine_client()
     }
 
     /// Whether the loaded backend has a registered multimodal processor.

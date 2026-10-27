@@ -57,7 +57,7 @@ pub async fn tokenize(
 ) -> Response {
     let request_id = tokenize_request_id(&headers);
     let tokenizer = state.chat.text().tokenizer();
-    let max_model_len = state.chat.engine_core_client().max_model_len();
+    let max_model_len = state.chat.engine_client().max_model_len();
 
     let result = match body {
         TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req),
