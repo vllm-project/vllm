@@ -1033,14 +1033,9 @@ class Worker(WorkerBase):
     def _measure_kv_cache_blocks(self) -> int:
         """Size an extensible KV cache from the memory free after warmup.
 
-        Transient activations are kept free in full: the larger of the profiled
-        peak and the peak the warmup steps allocated beyond the tensors that
-        outlive them. Allocated rather than reserved bytes: with the device
-        still mostly free, the caching allocator reserves opportunistically and
-        its reserved peak says little about what a step needs. Torch's cache is
-        emptied first so that peak is measured against truly free memory rather
-        than blocks the allocator happens to hold, which need not be reusable
-        for the large workspaces the first real steps allocate.
+        Keeps free the larger of the profiled peak and warmup's allocated (not
+        reserved) transient peak. Torch's cache is emptied first: its blocks may
+        not fit the large workspaces the first real steps allocate.
         """
         torch.accelerator.synchronize()
         gc.collect()

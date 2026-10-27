@@ -147,7 +147,7 @@ class KVTransferConfig:
 
     def uses_custom_mem_pool(self) -> bool:
         """Whether a connector allocates the KV cache from its own memory pool
-        (``custom_mem_pool``), directly or in MultiConnector."""
+        (custom_mem_pool), directly or in MultiConnector."""
         configs = [self.kv_connector_extra_config]
         if self.kv_connector == "MultiConnector":
             configs += [
@@ -159,7 +159,7 @@ class KVTransferConfig:
     def registers_kv_cache_memory(self) -> bool:
         """Whether a connector registers the device KV cache itself with UCX or
         RDMA (NIXL, Mooncake, MoRIIO), directly or in MultiConnector. NIXL with
-        a CPU ``kv_buffer_device`` registers only its host staging buffers."""
+        a CPU kv_buffer_device registers only its host staging buffers."""
         children = [{"kv_connector": self.kv_connector}]
         if self.kv_connector == "MultiConnector":
             children = self.kv_connector_extra_config.get("connectors", [])
