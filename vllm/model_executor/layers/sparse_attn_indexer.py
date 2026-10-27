@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import math
+
 import torch
 import torch.distributed as dist
 
@@ -506,19 +508,20 @@ def sparse_attn_indexer(
 
         # Dummy allocation for the peak logits memory during inference: the
         # prefill chunks' budget, or the decode logits, which eager and
-        # piecewise steps allocate outside the CUDA graph pools. On SM100
-        # DeepGEMM emits them in BF16 with rows padded to whole 384-column KV
-        # splits and 1024-byte strides (lcm 1536), and the FP32 copy keeps that
-        # stride; elsewhere they are FP32.
+        # piecewise steps allocate outside the CUDA graph pools. DeepGEMM emits
+        # them in BF16 on SM100 and FP32 elsewhere, each row holding whole KV
+        # splits at a 1024-byte stride; the FP32 copy keeps that stride.
         if current_platform.is_device_capability_family(100):
-            decode_row_bytes = round_up(max_model_len, 1536) * (
-                6 if fp32_decode_logits else 2
-            )
+            logits_dtype, split_kv = torch.bfloat16, 384
         else:
-            decode_row_bytes = round_up(max_model_len, 1024) * 4
+            logits_dtype, split_kv = torch.float32, 256
+        row_align = math.lcm(split_kv, 1024 // logits_dtype.itemsize)
+        elem_bytes = logits_dtype.itemsize
+        if logits_dtype != torch.float32 and fp32_decode_logits:
+            elem_bytes += torch.float32.itemsize
         max_logits_bytes = max(
             envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
-            max_decode_tokens * decode_row_bytes,
+            max_decode_tokens * round_up(max_model_len, row_align) * elem_bytes,
         )
         _ = torch.empty(
             max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
