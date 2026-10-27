@@ -200,6 +200,8 @@ class OffloadingEvent:
     removal_expected: bool = False
     # Failed allocations release metadata without announcing a public eviction.
     metadata_only: bool = False
+    # The request that produced a store, when carried by the local manager.
+    req_context: ReqContext | None = field(default=None, repr=False, compare=False)
 
 
 """

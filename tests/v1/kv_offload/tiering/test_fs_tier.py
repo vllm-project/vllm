@@ -55,6 +55,7 @@ _CTX = ReqContext(req_id="test")
 def _make_offloading_spec(
     enable_kv_cache_events: bool = False,
     *,
+    self_describing_kv_events: bool = False,
     tp_size: int = 1,
     rank: int = 0,
     world_size: int | None = None,
@@ -90,7 +91,7 @@ def _make_offloading_spec(
     spec.blocks_per_chunk = 1
     spec.kv_events_config = OffloadingKVEventsConfig(
         enable_kv_cache_events=enable_kv_cache_events,
-        self_describing_kv_events=False,
+        self_describing_kv_events=self_describing_kv_events,
     )
     return spec
 
@@ -824,6 +825,7 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     assert events[0].medium == Medium.STORAGE
     assert events[0].locality is Locality.LOCAL
     assert not events[0].removed
+    assert events[0].req_context is None
     # take_events drains the buffer.
     assert list(tier.take_events()) == []
 
@@ -920,7 +922,7 @@ def test_partially_failed_store_emits_no_event(fs_tier_with_events, monkeypatch)
     assert len(results) == 1
     assert not results[0].success
     assert list(tier.take_events()) == []
-    assert tier._store_job_keys == {}
+    assert tier._store_event_metadata == {}
 
 
 def test_events_disabled_by_default(fs_tier):
@@ -930,7 +932,7 @@ def test_events_disabled_by_default(fs_tier):
     assert len(results) == 1
     assert results[0].success
     assert tier.events is None
-    assert tier._store_job_keys == {}
+    assert tier._store_event_metadata == {}
     assert list(tier.take_events()) == []
 
 
@@ -951,7 +953,7 @@ def test_events_require_global_kv_events_flag(tmp_path):
         assert len(results) == 1
         assert results[0].success
         assert list(tier.take_events()) == []
-        assert tier._store_job_keys == {}
+        assert tier._store_event_metadata == {}
     finally:
         tier.shutdown()
 
@@ -970,7 +972,9 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     mock_region.create_kv_memoryview.return_value = view
     primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=mock_region)
     tier = FileSystemTierManager(
-        offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
+        offloading_spec=_make_offloading_spec(
+            enable_kv_cache_events=True, self_describing_kv_events=True
+        ),
         primary_kv_view=primary.get_kv_memoryview(),
         tier_type="fs",
         root_dir=str(tmp_path),
@@ -995,6 +999,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         assert len(fs_events) == 1
         assert set(fs_events[0].keys) == set(keys)
         assert not fs_events[0].removed
+        assert fs_events[0].req_context is _CTX
     finally:
         tier.shutdown()
 

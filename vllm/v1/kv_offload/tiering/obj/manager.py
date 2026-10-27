@@ -149,8 +149,13 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
-        # Keys of in-flight store jobs, tracked only when events are enabled.
-        self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        self._self_describing_kv_events = (
+            self.events is not None
+            and offloading_spec.kv_events_config.self_describing_kv_events
+        )
+        self._store_event_metadata: dict[
+            JobId, tuple[list[OffloadKey], ReqContext | None]
+        ] = {}
         # Keys of in-flight load (promotion) jobs, so a failed download can
         # mark its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
@@ -295,7 +300,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def submit_store(self, job_metadata: TransferJob) -> None:
         if self.events is not None:
-            self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
+            self._store_event_metadata[job_metadata.job_id] = (
+                list(job_metadata.keys),
+                job_metadata.req_context if self._self_describing_kv_events else None,
+            )
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
             job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_WRITE
@@ -380,7 +388,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._pending_results = []
         for result in results:
             if self.events is not None:
-                keys = self._store_job_keys.pop(result.job_id, None)
+                keys, req_context = self._store_event_metadata.pop(
+                    result.job_id, ([], None)
+                )
                 if result.success and keys:
                     self.events.append(
                         OffloadingEvent(
@@ -388,6 +398,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
+                            req_context=req_context,
                         )
                     )
             # Mark only the keys that did not load as a miss; the request

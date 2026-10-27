@@ -66,6 +66,7 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
         info: CPUOffloadingInfo | None = None,
+        self_describing_kv_events: bool = False,
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
@@ -75,6 +76,7 @@ class CPUOffloadingManager(OffloadingManager):
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
+        self._self_describing_kv_events = self_describing_kv_events
         policy_cls = CachePolicyFactory.get_cache_policy_cls(
             cache_policy, cache_policy_module_path
         )
@@ -415,6 +417,9 @@ class CPUOffloadingManager(OffloadingManager):
                     keys=stored_keys,
                     medium=self.medium,
                     removed=False,
+                    req_context=(
+                        req_context if self._self_describing_kv_events else None
+                    ),
                 )
             )
 
