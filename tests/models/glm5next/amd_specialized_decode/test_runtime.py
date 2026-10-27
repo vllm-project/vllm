@@ -59,7 +59,7 @@ def test_every_reason_is_reported_at_once():
         assert any(expected in r for r in reasons), (expected, reasons)
 
 
-@pytest.mark.parametrize("cache", ["auto", "bfloat16", "fp8", "fp8_e4m3"])
+@pytest.mark.parametrize("cache", ["auto", "bfloat16", "fp8", "fp8_e4m3", "mxfp4_mla"])
 def test_bf16_and_e4m3_kv_caches_pass(cache):
     assert _reasons(kit.make_vllm_config(cache=dict(cache_dtype=cache))) == []
 

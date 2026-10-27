@@ -91,6 +91,7 @@ def pack(model: nn.Module, ctx: MonoContext) -> dict[int, Any]:
     ctx.state["dsa_fp8"] = formats.pop() if formats else (True, True, True)
     # an e4m3 MLA cache and each layer's per-tensor scale (vLLM's _k_scale)
     ctx.state["kv_fp8"] = ctx.vllm_config.cache_config.cache_dtype.startswith("fp8")
+    ctx.state["kv_mxfp4"] = ctx.vllm_config.cache_config.cache_dtype == "mxfp4_mla"
     ctx.state["k_scales"] = {
         i: model.layers[i].self_attn.mla_attn.mla_attn._k_scale
         for i in sorted(packed)
@@ -100,14 +101,22 @@ def pack(model: nn.Module, ctx: MonoContext) -> dict[int, Any]:
 
 
 def _bind_dsa(
-    caches: Mapping[str, torch.Tensor], kv_fp8: bool, k_scales: Mapping[int, Any]
+    caches: Mapping[str, torch.Tensor],
+    kv_fp8: bool,
+    k_scales: Mapping[int, Any],
+    kv_mxfp4: bool = False,
 ) -> tuple[dict, list[str]]:
     """Each sparse-attention layer's MLA latent cache [blocks, tokens, 512] (bf16,
-    or e4m3 bytes with ``kv_fp8``), index cache [blocks, 16 n pools, 132] (16-pool
-    tiles) and kpool tail ring [blocks, 2, 4, 128]; the kernel addresses every
-    block with a 64-bit base."""
-    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import FlashDsaCaches
+    or e4m3 bytes with ``kv_fp8``) or [blocks, tokens, 272] (``mxfp4_mla`` rows
+    with ``kv_mxfp4``), index cache [blocks, 16 n pools, 132] (16-pool tiles) and
+    kpool tail ring [blocks, 2, 4, 128]; the kernel addresses every block with a
+    64-bit base."""
+    from vllm.models.glm5next.amd.specialized_decode.mono.ffn.op import (
+        MXFP4_ROW_BYTES,
+        FlashDsaCaches,
+    )
 
+    width = MXFP4_ROW_BYTES if kv_mxfp4 else KV_LORA
     reasons, out = [], {}
     for key, kv in caches.items():
         idx, name = key.split(".")
@@ -116,9 +125,11 @@ def _bind_dsa(
         ic, tail = caches[f"{idx}.icache"], caches[f"{idx}.tail"]
         if kv.dim() == 4 and kv.shape[1] == 1:
             kv = kv.squeeze(1)
-        if kv.dim() != 3 or kv.shape[2] != KV_LORA or kv.stride()[1:] != (KV_LORA, 1):
+        if kv.dim() != 3 or kv.shape[2] != width or kv.stride()[1:] != (width, 1):
             reasons.append(f"layer {idx}: MLA cache {tuple(kv.shape)} {kv.stride()}")
-        if (kv.element_size() == 1) != kv_fp8:
+        if kv_mxfp4 and kv.dtype != torch.uint8:
+            reasons.append(f"layer {idx}: {kv.dtype} MLA cache, kv_mxfp4")
+        elif not kv_mxfp4 and (kv.element_size() == 1) != kv_fp8:
             reasons.append(f"layer {idx}: {kv.dtype} MLA cache, kv_fp8={kv_fp8}")
         if (
             ic.dim() != 3
@@ -167,7 +178,10 @@ def bind(ctx: MonoContext, caches: Mapping[str, torch.Tensor]) -> list[str]:
             reasons.append(f"layer {idx}: {conv.shape[0]} conv, {rec.shape[0]} slots")
         states[int(idx)] = FlashKdaState(conv, rec)
     dsa, dsa_reasons = _bind_dsa(
-        caches, ctx.state.get("kv_fp8", False), ctx.state.get("k_scales", {})
+        caches,
+        ctx.state.get("kv_fp8", False),
+        ctx.state.get("k_scales", {}),
+        ctx.state.get("kv_mxfp4", False),
     )
     reasons += dsa_reasons
     if not reasons:
@@ -330,6 +344,7 @@ def _runtime(ctx: MonoContext, width: int, launches: int, kind: str):
             max_pools=max_pools(ctx) if kind == "dsa" else 0,
             dsa_fp8=ctx.state.get("dsa_fp8", (True, True, True)),
             kv_fp8=kind == "dsa" and ctx.state.get("kv_fp8", False),
+            kv_mxfp4=kind == "dsa" and ctx.state.get("kv_mxfp4", False),
         )
         widths[(width, kind)] = _Width(rt, width, ctx.device)
         if first is None and rt.flags is not None:

@@ -102,6 +102,15 @@ def test_dsa_layer_matches_vllm_ops(
     multi_process_parallel(monkeypatch, tp, 1, check)
 
 
+@pytest.mark.parametrize("tp, fmt", [(2, "mixed"), (4, "mixed"), (8, "mixed")])
+def test_dsa_layer_mxfp4_kv_cache(monkeypatch: pytest.MonkeyPatch, tp: int, fmt: str):
+    """An ``mxfp4_mla`` MLA cache (``--kv-cache-dtype mxfp4_mla``): rows written as
+    ``store_mxfp4_mla`` writes them, the attention over their unpacked values."""
+    _ready(tp)
+    check = _ffn._worker(_dsa._check, _dsa.FORMATS[fmt], False, True)
+    multi_process_parallel(monkeypatch, tp, 1, check)
+
+
 @pytest.mark.parametrize("tp", [2, 4, 8])
 def test_ffn_matches_glm5next_moe(monkeypatch: pytest.MonkeyPatch, tp: int):
     _ready(tp)

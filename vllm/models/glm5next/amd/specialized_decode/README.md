@@ -23,7 +23,8 @@ post contracts the streams) run vLLM's code.
 - Pure decode of 1, 2, 4 or 8 rows (widths 2/4/8; 2/4 at TP2), eager or
   replayed from a FULL CUDA graph. Prefill, mixed and larger steps and
   PIECEWISE replays run vLLM's layers.
-- KV cache bf16 or e4m3 (`--kv-cache-dtype fp8`); KDA recurrent state fp32.
+- KV cache bf16, e4m3 (`--kv-cache-dtype fp8`) or `mxfp4_mla`; KDA recurrent
+  state fp32.
 
 ## Layout
 

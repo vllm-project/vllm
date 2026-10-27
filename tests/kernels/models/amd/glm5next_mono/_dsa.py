@@ -27,6 +27,7 @@ MAX_LEN = 8192
 # tokens of each row including the new one (0: padding); 4100, 1500, 7000, 64 and
 # 6200 complete a pool, 2050 / 2049 / 3333 keep a 2 / 1 / 1-token tail
 LENS = (4100, 1500, 2050, 7000, 2049, 64, 3333)
+_E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 
 def _bf16(w):
@@ -173,6 +174,7 @@ class _Caches:
         kv_fp8: bool = False,
         max_len: int = MAX_LEN,
         lens: tuple[int, ...] = LENS,
+        kv_mxfp4: bool = False,
     ) -> None:
         from vllm.models.glm5next.amd.specialized_decode.mono.config import (
             INDEX_DIM,
@@ -194,6 +196,15 @@ class _Caches:
         if kv_fp8:
             self.k_scale = torch.tensor([0.5], device=device)
             self.kv = _e4m3(self.kv, self.k_scale)
+        if kv_mxfp4:
+            from vllm.v1.attention.ops.mxfp4_mla import row_bytes
+            from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
+
+            bf16 = self.kv.view(-1, KV_LORA)
+            self.kv = torch.zeros(
+                nb, BLOCK, row_bytes(KV_LORA), dtype=torch.uint8, device=device
+            )
+            store_mxfp4_mla(bf16, torch.arange(bf16.shape[0], device=device), self.kv)
         vals = (torch.randn(nb, ipb, INDEX_DIM, generator=g, device=device) * 64).clamp(
             -448, 448
         )
@@ -236,6 +247,8 @@ class _Caches:
 
     def deq(self, rows: torch.Tensor) -> torch.Tensor:
         """Cache rows as fp32 values."""
+        if rows.dtype == torch.uint8 and self.k_scale is None:
+            return _mxfp4_deq(rows)
         if self.k_scale is None:
             return rows.float()
         return rows.view(torch.float8_e4m3fn).float() * self.k_scale
@@ -269,7 +282,20 @@ def _e4m3(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     return e4m3.view(torch.uint8)
 
 
-def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
+def _mxfp4_deq(rows: torch.Tensor) -> torch.Tensor:
+    """mxfp4_mla rows [..., 272] as fp32 latent values [..., 512]."""
+    data = rows[..., :256]
+    codes = torch.stack([data & 0x0F, data >> 4], -1).flatten(-2)
+    e2m1 = torch.tensor(_E2M1, device=rows.device)
+    mag = e2m1[(codes & 0x07).long()]
+    values = torch.where(codes & 0x08 != 0, -mag, mag)
+    scales = torch.exp2(rows[..., 256:].float() - 127.0)
+    return values * scales.repeat_interleave(32, -1)
+
+
+def _check(
+    rank: int, tp: int, device, fp8, kv_fp8: bool = False, kv_mxfp4: bool = False
+) -> None:
     import torch.distributed as dist
     import torch.nn.functional as F
 
@@ -316,6 +342,7 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
             max_pools=max_pools,
             dsa_fp8=fp8,
             kv_fp8=kv_fp8,
+            kv_mxfp4=kv_mxfp4,
         )
         op = FlashFfnOp(rt, lay.weights(), 0, dsa=dsa.weights())
         g = lay.g
@@ -325,7 +352,7 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
         comb = torch.softmax(
             torch.randn(S, HC_MULT, HC_MULT, generator=g, device=device), -1
         )
-        cache = _Caches(S, device, seed=10 + S, kv_fp8=kv_fp8)
+        cache = _Caches(S, device, seed=10 + S, kv_fp8=kv_fp8, kv_mxfp4=kv_mxfp4)
         before = cache.clone()
         rows, live = cache.rows, S - 1
         pos = rows[:, 0].long()
@@ -378,19 +405,35 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
         q_an = _box(rt, "q_an", S * Q_LORA, packed=True).view(S, Q_LORA)
         assert _rel(q_an, _rms(qa, dsa.g_qa)) < 1e-2, f"S={S}: q_a norm"
         kv_want = _rms(kva, dsa.g_kv)
-        flat_kv = cache.kv.view(-1, KV_LORA)
-        for r in range(live):
-            got_row = cache.deq(flat_kv[int(rows[r, 1])])
-            if kv_fp8:
-                # the bytes vLLM's write makes of the same normed row; a bf16 ulp
-                # in the norm can move a value across an e4m3 rounding boundary
-                want8 = _e4m3(kv_want[r], cache.k_scale)
-                diff = (flat_kv[int(rows[r, 1])] != want8).float().mean()
-                assert diff < 0.02, f"S={S} row {r}: e4m3 bytes differ at {diff}"
-                assert _rel(got_row, kv_want[r]) < 6e-2, f"S={S} row {r}: KV row"
-            else:
-                assert _rel(got_row, kv_want[r]) < 1e-2, f"S={S} row {r}: KV cache row"
-        changed = before.kv.view(-1, KV_LORA).ne(flat_kv).any(-1)
+        flat_kv = cache.kv.view(-1, cache.kv.shape[-1])
+        if kv_mxfp4:
+            from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
+
+            # vLLM's store on the reference norm, which may differ from the
+            # kernel's in a last bf16 bit and so move a code across a midpoint
+            slots = rows[:live, 1].long()
+            ref_kv = before.clone()
+            store_mxfp4_mla(kv_want[:live], slots, ref_kv.kv)
+            want_rows = ref_kv.kv.view(-1, flat_kv.shape[-1])[slots]
+            got_rows = flat_kv[slots]
+            off = (got_rows != want_rows).float().mean().item()
+            assert off < 1e-2, f"S={S}: {off:.2%} mxfp4_mla bytes differ"
+            e = _rel(cache.deq(got_rows), cache.deq(want_rows))
+            assert e < 1e-2, f"S={S}: mxfp4_mla rows {e}"
+        else:
+            for r in range(live):
+                got_row = cache.deq(flat_kv[int(rows[r, 1])])
+                if kv_fp8:
+                    # the bytes vLLM's write makes of the same normed row; a bf16
+                    # ulp in the norm can move a value across an e4m3 boundary
+                    want8 = _e4m3(kv_want[r], cache.k_scale)
+                    diff = (flat_kv[int(rows[r, 1])] != want8).float().mean()
+                    assert diff < 0.02, f"S={S} row {r}: e4m3 bytes differ at {diff}"
+                    assert _rel(got_row, kv_want[r]) < 6e-2, f"S={S} row {r}: KV row"
+                else:
+                    e = _rel(got_row, kv_want[r])
+                    assert e < 1e-2, f"S={S} row {r}: KV cache row"
+        changed = before.kv.view(-1, flat_kv.shape[-1]).ne(flat_kv).any(-1)
         assert int(changed.sum()) <= live, f"S={S}: stray MLA cache writes"
 
         # index k LayerNorm + kpool: vLLM's decode kernel on the kernel's inputs

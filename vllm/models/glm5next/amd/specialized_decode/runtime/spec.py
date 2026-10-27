@@ -43,8 +43,9 @@ NUMERICS = (
         "and fp8 MFMA)"
     ),
 )
-# bf16, or e4m3 over a per-tensor scale as vLLM's ROCm sparse MLA stores it
-KV_DTYPES = ("auto", "bfloat16", "fp8", "fp8_e4m3")
+# bf16, e4m3 over a per-tensor scale as vLLM's ROCm sparse MLA stores it, or
+# mxfp4_mla's 272-byte rows
+KV_DTYPES = ("auto", "bfloat16", "fp8", "fp8_e4m3", "mxfp4_mla")
 GEOMETRY = {
     "hidden_size": 4096,
     "n_routed_experts": 288,
@@ -209,7 +210,8 @@ def refusal_reasons(vllm_config: VllmConfig) -> list[str]:
         reasons.append("sequence-parallel MoE")
     if vllm_config.cache_config.cache_dtype not in KV_DTYPES:
         reasons.append(
-            f"{vllm_config.cache_config.cache_dtype} KV cache (needs bf16 or e4m3)"
+            f"{vllm_config.cache_config.cache_dtype} KV cache "
+            "(needs bf16, e4m3 or mxfp4_mla)"
         )
     ssm = getattr(vllm_config.cache_config, "mamba_ssm_cache_dtype", "auto")
     if ssm not in ("auto", "float32"):

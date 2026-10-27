@@ -29,6 +29,26 @@ def test_eligible_caps_width_per_tp(tp: int, width: int):
     assert (reason is None) == (width <= cap), (tp, width, reason)
 
 
+def _dsa_caches(mla: torch.Tensor) -> dict[str, torch.Tensor]:
+    return {
+        "5.mla": mla,
+        "5.icache": torch.zeros(3, 16, 132, dtype=torch.uint8),
+        "5.tail": torch.zeros(3, 2, 4, 128, dtype=torch.bfloat16),
+    }
+
+
+def test_mxfp4_mla_cache_binds_by_dtype_and_row_width():
+    pytest.importorskip("flydsl")
+    mx = torch.zeros(3, 64, 272, dtype=torch.uint8)
+    bf = torch.zeros(3, 64, 512, dtype=torch.bfloat16)
+    out, reasons = layers._bind_dsa(_dsa_caches(mx), False, {}, kv_mxfp4=True)
+    assert not reasons and out[5].k_scale is None
+    _, reasons = layers._bind_dsa(_dsa_caches(bf), False, {}, kv_mxfp4=True)
+    assert any("MLA cache" in r for r in reasons), reasons
+    _, reasons = layers._bind_dsa(_dsa_caches(mx), False, {})
+    assert any("MLA cache" in r for r in reasons), reasons
+
+
 def test_layer_kinds():
     from types import SimpleNamespace
 
