@@ -380,6 +380,34 @@ class TestMakeValidPythonStringLiterals:
 
 
 class TestEscapeCtrlCharsInStrings:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "f(x=r'a\tb')",
+            "f(x=R'''line1\nline2''')",
+            "[f(x='''it's\n[ok]'''),\n f(x='done')]",
+            'f(x="""a\r\nb""")',
+            "f(x=r'\\n')",
+            "f(x='a\\\nb')",
+            "f(x='a\\\r\nb')",
+        ],
+    )
+    def test_valid_literals_keep_python_semantics(self, text):
+        escaped = escape_ctrl_chars_in_strings(text)
+        assert escaped == text
+        assert ast.dump(ast.parse(escaped)) == ast.dump(ast.parse(text))
+
+    def test_raw_literal_is_preserved_when_later_string_needs_repair(self):
+        text = "[f(x=r'a\tb'), f(x='c\nd')]"
+        escaped = escape_ctrl_chars_in_strings(text)
+        calls = ast.parse(escaped).body[0].value.elts
+        assert [_kwarg_constant(call) for call in calls] == ["a\tb", "c\nd"]
+
+    def test_triple_quoted_nul_is_repaired_without_escaping_newline(self):
+        text = "f(x='''it's\n\x00ok''')"
+        escaped = escape_ctrl_chars_in_strings(text)
+        assert _kwarg_constant(_bare_call(escaped)) == "it's\n\x00ok"
+
     def test_newline_inside_string_escaped(self):
         assert escape_ctrl_chars_in_strings("f(cmd='a\nb')") == "f(cmd='a\\nb')"
 

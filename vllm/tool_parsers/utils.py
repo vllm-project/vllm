@@ -6,7 +6,7 @@ import json
 import keyword as _python_keyword
 import math
 import warnings
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
@@ -642,6 +642,39 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
     )
 
 
+def _iter_python_string_literals(
+    text: str,
+) -> Iterator[tuple[int, int | None, str, bool]]:
+    """Yield quote offsets, delimiter and raw flag; a missing end is incomplete."""
+    index = 0
+    while index < len(text):
+        if text[index] not in {"'", '"'}:
+            index += 1
+            continue
+        start = index
+        quote = text[index]
+        if text.startswith(quote * 3, index):
+            quote *= 3
+        prefix_start = start
+        while prefix_start and (
+            text[prefix_start - 1].isalnum() or text[prefix_start - 1] == "_"
+        ):
+            prefix_start -= 1
+        raw = text[prefix_start:start].lower() in {"r", "br", "rb", "fr", "rf"}
+        index += len(quote)
+        while index < len(text):
+            if text[index] == "\\":
+                index += 2
+            elif text.startswith(quote, index):
+                index += len(quote)
+                yield start, index, quote, raw
+                break
+            else:
+                index += 1
+        else:
+            yield start, None, quote, raw
+
+
 def escape_ctrl_chars_in_strings(text: str) -> str:
     """Escape literal control chars inside string literals of pythonic text.
 
@@ -655,36 +688,29 @@ def escape_ctrl_chars_in_strings(text: str) -> str:
     argument value exactly (the escape sequences evaluate back to the original
     control chars).
 
-    Text outside string literals is returned unchanged.
+    Raw strings and legal control characters in triple-quoted strings are
+    unchanged, as is text outside string literals.
     """
     out: list[str] = []
-    quote: str | None = None
-    index, length = 0, len(text)
-    while index < length:
-        char = text[index]
-        if quote is None:
-            if char in {"'", '"'}:
-                quote = char
-            out.append(char)
-        elif char == "\\" and index + 1 < length:
-            out.append(char)
-            out.append(text[index + 1])
-            index += 2
-            continue
-        elif char == quote:
-            quote = None
-            out.append(char)
-        elif char == "\n":
-            out.append("\\n")
-        elif char == "\r":
-            out.append("\\r")
-        elif char == "\t":
-            out.append("\\t")
-        elif char == "\x00":
-            out.append("\\x00")
-        else:
-            out.append(char)
-        index += 1
+    cursor = 0
+    for start, end, quote, raw in _iter_python_string_literals(text):
+        out.append(text[cursor : start + len(quote)])
+        stop = len(text) if end is None else end - len(quote)
+        index = start + len(quote)
+        escapes = {"\x00": "\\x00"}
+        if len(quote) == 1:
+            escapes.update({"\n": "\\n", "\r": "\\r", "\t": "\\t"})
+        while index < stop:
+            char = text[index]
+            if char == "\\" and index + 1 < stop:
+                escape_end = index + (3 if text.startswith("\\\r\n", index) else 2)
+                out.append(text[index:escape_end])
+                index = escape_end
+                continue
+            out.append(char if raw else escapes.get(char, char))
+            index += 1
+        cursor = stop
+    out.append(text[cursor:])
     return "".join(out)
 
 
@@ -996,14 +1022,23 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
 
     """
     bracket_stack: list[str] = []
+    literals = iter(_iter_python_string_literals(text))
+    literal = next(literals, None)
+    skip_until = 0
     for index, char in enumerate(text):
-        # Inside a string literal only an unescaped matching quote is
-        # significant; brackets are literal text. Without this guard a bracket
-        # in a string argument (e.g. `cmd='grep -F "]"'`) corrupts the bracket
-        # stack and the whole tool call is rejected as mismatched.
-        if bracket_stack and bracket_stack[-1] in {"'", '"'}:
-            if char == bracket_stack[-1] and not _is_escaped(text, index):
-                bracket_stack.pop()
+        if index < skip_until:
+            continue
+        if literal is not None and index == literal[0]:
+            _, end, quote, raw = literal
+            if end is None:
+                # Their values can change while a delimiter, backslash or CRLF
+                # is split across chunks. Do not publish a speculative value.
+                if raw or len(quote) == 3:
+                    return None
+                bracket_stack.append(quote)
+                break
+            skip_until = end
+            literal = next(literals, None)
             continue
         if char in {"[", "(", "{"}:
             bracket_stack.append(char)
@@ -1013,11 +1048,8 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
         elif char == ")":
             if not bracket_stack or bracket_stack.pop() != "(":
                 raise UnexpectedAstError("Mismatched parentheses")
-        elif char == "}":
-            if not bracket_stack or bracket_stack.pop() != "{":
-                raise UnexpectedAstError("Mismatched curly braces")
-        elif char in {"'", '"'}:
-            bracket_stack.append(char)
+        elif char == "}" and (not bracket_stack or bracket_stack.pop() != "{"):
+            raise UnexpectedAstError("Mismatched curly braces")
 
     text = text.rstrip()
     if text.endswith("=") or text.endswith(":"):
