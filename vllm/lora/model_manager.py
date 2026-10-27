@@ -482,6 +482,9 @@ class LoRAModelManager:
             return module_name.rpartition(".")[0]
 
         wrapped_by_id: dict[int, BaseLayerWithLoRA] = {}
+        # Layers that share a suffix with a LoRA layer but are not wrapped,
+        # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
+        self.unsupported_lora_modules: set[str] = set()
 
         for module_name, module in self.model.named_modules(remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
@@ -495,6 +498,11 @@ class LoRAModelManager:
                     module,
                     self.supported_lora_modules,
                 ):
+                    if (
+                        module_name.rsplit(".", 1)[-1] in self.supported_lora_modules
+                        and self._get_punica_wrapper(module_name) is not None
+                    ):
+                        self.unsupported_lora_modules.add(module_name)
                     continue
             elif not self._match_target_modules(module_name) and not is_classifier_head:
                 # Full classification heads bypass the A/B LoRA target filter.
@@ -1321,33 +1329,6 @@ class LoRAModelManager:
                     "(--enable-mixed-moe-lora-format) and set "
                     "is_3d_lora_weight=True on the LoRA request."
                 )
-
-    def _validate_supported_lora_modules(self, lora_model: LoRAModel) -> None:
-        unsupported = []
-        for lora_name in lora_model.loras:
-            # PEFT stores the fused 3D MoE gate_up_proj under experts.base_layer.
-            module_name = lora_name.removesuffix(".base_layer")
-            try:
-                module = self.model.get_submodule(module_name)
-            except AttributeError:
-                continue
-            # Modules on other PP ranks, outside --lora-target-modules, or
-            # without a PunicaWrapper are skipped on purpose.
-            if (
-                not isinstance(module, PPMissingLayer)
-                and self._match_target_modules(module_name)
-                and self._get_punica_wrapper(module_name) is not None
-                and not is_supported_lora_module(
-                    module_name, module, self.supported_lora_modules
-                )
-            ):
-                unsupported.append(lora_name)
-        if unsupported:
-            raise ValueError(
-                f"LoRA adapter {lora_model.id} has LoRA weights for "
-                f"{sorted(unsupported)}, but {type(self.model).__name__} does "
-                "not support LoRA on these modules."
-            )
 
     def _validate_classification_head_lora(self, lora_model: LoRAModel) -> None:
         if self._classification_head is None:
