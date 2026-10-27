@@ -14,3 +14,7 @@ torchaudio==2.11.0.dev20261009+cu134
 cuda-python==13.5.0
 cuda-bindings==13.5.0
 nixl==1.5.2
+
+# Native SM107 MegaMoE needs the NVSHMEM Python bindings. Keep this CUDA 13
+# extra out of requirements/cuda.txt so CUDA 12 builds remain supported.
+flashinfer-python[sm107]==0.7.4
