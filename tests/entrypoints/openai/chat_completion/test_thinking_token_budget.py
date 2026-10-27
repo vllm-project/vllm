@@ -174,6 +174,7 @@ async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_per_request_metrics_report_first_content_boundary(server):
+    """Verify content timing with a real bounded reasoning phase."""
     async with server.get_async_client() as client:
         response = await client.chat.completions.create(
             model=MODEL_NAME,
