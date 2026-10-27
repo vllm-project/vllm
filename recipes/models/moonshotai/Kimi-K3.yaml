@@ -465,6 +465,8 @@ strategy_overrides:
           extra_args:
             - "--data-parallel-size"
             - "1"
+            - "--host"
+            - "0.0.0.0"
             - "--distributed-executor-backend"
             - mp
             - "--master-port"
@@ -538,6 +540,8 @@ strategy_overrides:
             - "--data-parallel-hybrid-lb"
             - "--no-enable-prefix-caching"
           extra_args:
+            - "--host"
+            - "0.0.0.0"
             - "--enable-prefix-caching"
             - "--enable-expert-parallel"
             - "--max-model-len"
@@ -1885,11 +1889,13 @@ guide: |
 
   1. **Scripts** downloads only `launch_online_dp.py` into the current directory.
   2. **Prefill** saves `run_dp_template.sh` on each prefill node with TP8/PP4.
-  3. **Decode** saves `run_dp_template.sh` on each decode node with DP4/TP8.
-  4. **Start_Server** launches this host's selected role and node. Set
-     `ASCEND_PD_ROLE=prefill` or `decode` and the host's `NIC_NAME`. It passes
-     `nic_name` and `local_ip` through the launcher's environment, and supplies
-     device, port, DP size, local rank, master address, RPC port, and TP size as
+     Manually replace `<NIC_NAME>` and `<LOCAL_IP>` in the template with this
+     node's communication interface and IP.
+  3. **Decode** saves its DP4/TP8 `run_dp_template.sh` on each decode node;
+     manually replace the same two placeholders with that node's values.
+  4. **Start_Server** provides separate Prefill and Decode launcher commands,
+     each with DP/TP size, group-local rank, master address, RPC port, and HTTP
+     port. Run only the matching command on each node. The launcher supplies
      the template's seven positional arguments. Repeat on all four group nodes.
   5. **Start_Proxy** starts the client-facing proxy after both pools are ready.
 
