@@ -980,6 +980,10 @@ def test_lookup_estimate_obeys_signature_expiry_and_discard(monkeypatch):
         client.discard("req")
         assert client.peek_hit_length("req", 48, [b"hash"]) is None
         assert sock.send_multipart.call_count == 1
+        clock[0] = 0.0
+        sock.recv.return_value = protocol.RESP_OK
+        assert client.reset()
+        assert client.peek_hit_length("req", 48, [b"hash"], state) is None
     finally:
         client.close()
 

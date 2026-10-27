@@ -806,7 +806,7 @@ class Scheduler(SchedulerInterface):
             if plan_prefills and request.is_prefill_chunk:
                 plan_prefills = False
                 queues = []
-                if not self._residual_sjf_retry_running:
+                if not preempted_reqs and not self._residual_sjf_retry_running:
                     queues.append(self.kv_holding_waiting)
                     if self._pause_state == PauseState.UNPAUSED:
                         queues.append(self.waiting)

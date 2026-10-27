@@ -2539,8 +2539,10 @@ class LookupKeyClient:
     ) -> int | None:
         """Read a valid, completed lookup without adopting or consuming it."""
         state = self._lookups.get(req_id, prefetched)
-        if state is None or state.signature != _lookup_signature(
-            num_tokens, block_hashes
+        if (
+            state is None
+            or state.generation != self._generation
+            or state.signature != _lookup_signature(num_tokens, block_hashes)
         ):
             return None
         now = time.monotonic()

@@ -312,6 +312,30 @@ def test_ineligible_async_decodes_leave_prefill_budget_available(
     assert scheduler.schedule().num_scheduled_tokens == {"long": 32}
 
 
+def test_decode_preemption_does_not_reserve_budget_for_blocked_admission():
+    scheduler = create_scheduler(
+        scheduling_policy="residual_sjf",
+        residual_sjf_preempt_prefills=True,
+        scheduler_reserve_full_isl=False,
+        max_num_batched_tokens=34,
+        num_blocks=9,
+        max_num_seqs=3,
+        max_model_len=128,
+    )
+    for name, prompt, output in [
+        ("decode", 30, 64),
+        ("resident", 114, 8),
+        ("victim", 65, 8),
+    ]:
+        scheduler.add_request(
+            create_requests(1, num_tokens=prompt, max_tokens=output, req_ids=[name])[0]
+        )
+        _finish_step(scheduler, scheduler.schedule())
+    assert scheduler.schedule().num_scheduled_tokens == {"decode": 1, "resident": 33}
+    assert scheduler.requests["victim"].num_preemptions == 1
+    assert scheduler.requests["resident"].num_preemptions == 0
+
+
 def test_kv_holder_reservation_precedes_ordinary_preempted_request():
     scheduler = create_scheduler(
         scheduling_policy="residual_sjf",

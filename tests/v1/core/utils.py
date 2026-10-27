@@ -92,6 +92,7 @@ def create_scheduler(
     residual_sjf_max_wait_ms: int = 10_000,
     residual_sjf_preempt_prefills: bool = False,
     diffusion_canvas_length: int | None = None,
+    scheduler_reserve_full_isl: bool = True,
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
@@ -131,6 +132,7 @@ def create_scheduler(
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
+        scheduler_reserve_full_isl=scheduler_reserve_full_isl,
         max_num_seqs=max_num_seqs,
         max_num_active_seqs=max_num_active_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
