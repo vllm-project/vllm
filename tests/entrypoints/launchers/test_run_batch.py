@@ -36,6 +36,11 @@ from vllm.entrypoints.launchers.run_batch import (
     validate_batch,
     validate_run_batch_args,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionRequest,
+    CompletionResponse,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -131,6 +136,32 @@ INPUT_BATCH = "\n".join(
                     {"role": "user", "content": "Hello world!"},
                 ],
                 "max_tokens": 1000,
+            },
+        },
+    ]
+)
+
+INPUT_COMPLETIONS_BATCH = "\n".join(
+    json.dumps(req)
+    for req in [
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/completions",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "prompt": "Hello world!",
+                "max_tokens": 10,
+            },
+        },
+        {
+            "custom_id": "request-2",
+            "method": "POST",
+            "url": "/v1/completions",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "prompt": ["The capital of France is", "One plus one is"],
+                "max_tokens": 10,
             },
         },
     ]
@@ -523,6 +554,40 @@ def test_completions():
             # Ensure that the output format conforms to the openai api.
             # Validation should throw if the schema is wrong.
             BatchRequestOutput.model_validate_json(line)
+
+
+def test_completions_endpoint():
+    with (
+        tempfile.NamedTemporaryFile("w") as input_file,
+        tempfile.NamedTemporaryFile("r") as output_file,
+    ):
+        input_file.write(INPUT_COMPLETIONS_BATCH)
+        input_file.flush()
+        proc = subprocess.Popen(
+            [
+                "vllm",
+                "run-batch",
+                "-i",
+                input_file.name,
+                "-o",
+                output_file.name,
+                "--model",
+                CHAT_MODEL_NAME,
+            ],
+        )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        lines = contents.strip().split("\n")
+        assert len(lines) == 2
+        for line in lines:
+            output = BatchRequestOutput.model_validate_json(line)
+            assert output.error is None
+            assert isinstance(output.response.body, CompletionResponse)
+        # A list prompt returns one choice per prompt.
+        assert len(output.response.body.choices) == 2
 
 
 def test_completions_invalid_input():
@@ -1696,3 +1761,39 @@ def test_url_matches_accepts_any_prefix_for_unversioned_endpoints():
     assert url_matches("/v1/embeddings", "/v1/embeddings")
     for url in ("/v2/embeddings", "/api/v1/embeddings"):
         assert not url_matches("/v1/embeddings", url), url
+
+
+@pytest.mark.asyncio
+async def test_chat_and_text_completions_reach_their_own_handlers(tmp_path):
+    """/v1/chat/completions and /v1/completions share their last URL segment."""
+    chat_handler = AsyncMock(side_effect=VLLMValidationError("chat"))
+    completion_handler = AsyncMock(side_effect=VLLMValidationError("completion"))
+    registry = {
+        "chat_completions": {
+            "url": "/v1/chat/completions",
+            "handler_getter": lambda: chat_handler,
+            "wrapper_fn": None,
+        },
+        "completions": {
+            "url": "/v1/completions",
+            "handler_getter": lambda: completion_handler,
+            "wrapper_fn": None,
+        },
+    }
+    chat_request = INPUT_BATCH.strip().split("\n")[0]
+    completion_request = INPUT_COMPLETIONS_BATCH.strip().split("\n")[0]
+    input_path = _write_batch(tmp_path, [chat_request, completion_request])
+    output_path = tmp_path / "output.jsonl"
+
+    with (
+        open(input_path, encoding="utf-8") as input_file,
+        open(output_path, "w", encoding="utf-8") as output_file,
+    ):
+        await dispatch_batch(
+            input_file, output_file, registry, BatchProgressTracker(), 4
+        )
+
+    chat_handler.assert_awaited_once()
+    assert isinstance(chat_handler.await_args.args[0], ChatCompletionRequest)
+    completion_handler.assert_awaited_once()
+    assert isinstance(completion_handler.await_args.args[0], CompletionRequest)
