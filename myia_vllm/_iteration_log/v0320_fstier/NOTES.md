@@ -3727,3 +3727,54 @@ juste après une condensation terminée, entourés de `statusOutcome: "ok"` /
 **Registre** : Q41 seule, ouverte. Le relevé de ce cycle (**22 583 MiB**) réduit la marge sous
 la ligne d'alerte à **417 MiB** — c'est le plus haut jamais mesuré hors du pic 23 600
 d'avant reboot, et la série est monotone sur 6 h. Critère d'échec toujours non rempli.
+
+## 27/10 14:11Z — la montée VRAM S'ARRÊTE (22 568, −15 MiB), ZOLTRAAK identifié, claudish #718
+
+Moteur `StartedAt` **02:15:05Z inchangé (12 h)** : health 200 @3,8 ms, RC=0, 3 conteneurs,
+OOM 0, 0 signature d'erreur, `/dev/shm` 24G/63G. **Deux WEDGE `fail 1/2`** à 13:52:54Z et
+14:01:43Z — premiers depuis 03:11Z, tous deux pendant un prefill lourd (snapshot p=155,9 M
+et 159,0 M tokens) = comportement documenté, **aucun restart** (3 835 sondes OK, StartedAt
+inchangé). GPU 1 21 650, GPU 2 45.
+
+**★ La montée VRAM S'ARRÊTE : GPU 0 = 22 568 MiB, soit −15 MiB vs 22 583 au cycle
+précédent.** La série devient 22 076 → 22 354 → 22 358 → 22 505 → 22 583 → **22 568** :
+après +507 MiB en 6 h, la courbe **plafonne** vers 22 500-22 600. C'est la signature d'un
+**high-water d'allocateur saturé** (les graphs atteignent leur forme max et n'élargissent
+plus), **pas d'une fuite et pas d'une marche continue**. Marge sous la ligne 23 000 :
+**432 MiB, stable**. Q41 : la reco rollback reste ouverte mais perd son argument d'urgence —
+la montée ne continue pas.
+
+**Amortissement** : prefix hit **92,25 %** cumulé (150,10 M/162,71 M) ; **marginal 2 h =
+92,22 %** (33,19/35,99 M) — redescend du pic de 96,85 % du cycle précédent, mais reste dans
+la bande haute (89-97 % sur 10 h). **Préemptions 0.** Prefill **4 999 tok/s** soutenus.
+1,45 M tokens générés au total. **Aucun 400 dans la fenêtre 3 h** (740×200 / 35×401 / 0×400)
+— la dernière signature #431 remonte à 09:30:12Z.
+
+**★ Les deux empreintes nouvelles du census = le scanner ZOLTRAAK déjà connu.**
+`64a6d7ec06fd` (17×401) et `ccd500f719e4` (9×401) : UA `ZOLTRAAK/0.2.0 (security-research)`,
+IP Hetzner `116.202.50.2`, `/v1/models` corps 0, rafales de ~15 s toutes les ~10 h depuis le
+23/10 19:40Z. **Sur tout le journal : uniquement des 401, jamais un 200** — ce sont les
+« 2 clés inconnues 401-only » déjà notées au dashboard le 26/10, ici résolues en
+empreintes. Clé morte connue `1f7f6080cb65` à 31 requêtes/3 h (le sondeur `108.165.33.236`,
+cadence ~6 min). **Aucune IP inconnue avec un 200** : 7 h = `?` 1 398 (interne sans XFF),
+`90.65.170.144` 634 (hairpin), `82.66.89.184` 4 (poste Paris).
+
+**Condensation RSM** : aucun événement breaker depuis le HALF-OPEN de 07:38:13Z, aucun
+timeout depuis 06:00:53Z. Deux `Fallback chat client built` (12:02:37, 13:04:01) **sans
+aucun « primary skipped »** ⇒ usage non démontré.
+
+**Coordination** : claudish a répondu au datapoint 10:44Z — classification « condensation
+seule / chemin externe » **adoptée**, non comptée contre Gate R. Les en-têtes
+`x_claudish_machine`/`x_claudish_client` sont suivis chez eux comme **claudish#718**
+(propagation des en-têtes de télémétrie vers les endpoints internes uniquement, défaut
+inerte, kill switch ; **design en attente d'arbitrage**, rien codé) — mon besoin
+d'attribution y est le cas d'usage moteur. Point clos de mon côté, à suivre au déploiement.
+
+**Hôte / tâches** : commit **78,6 %** (302,0/384,4 Go, 82,4 Go libres — sous le seuil 85 %) ·
+G: 85 % / 592 Go libres · pruneur **13:50:03Z** `mode=apply`, tier au cap **268,4 Go /
+10 227 fichiers**, **0 fichier supprimé** (régime établi : le LRU-on-hit fait que le pruner
+n'a plus rien à reprendre), 0 erreur · nbaudit `ok:true` **14:05:50Z**, `subpath Image/`,
+5 séries, 0 échec consécutif.
+
+**Registre** : Q41 seule, ouverte — **critère d'échec non rempli et urgence retombée** : la
+montée s'arrête à ~22 570, marge 432 MiB stable.
