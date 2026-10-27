@@ -45,6 +45,10 @@ def classify(bh):
             return 'claude-code'
         if 'opencode' in b[:800]:
             return 'opencode'
+        # Zoo passe AUSSI derriere l'injection d'identite claudish : ses modes
+        # (code-simple, orchestrator-simple, ...) divergent a ~186 o de l'identite.
+        if 'code-simple' in b[:800] or 'orchestrator' in b[:800] or '-simple,' in b[:600]:
+            return 'zoo-mode'
         return 'claude-code-other-shape'
     if 'claude code' in b[:800]:
         return 'claude-code'
@@ -88,7 +92,7 @@ def lcp(a, b):
     return i
 
 
-for cc_name in ('claude-code', 'claude-code-other-shape'):
+for cc_name in ('claude-code', 'claude-code-other-shape', 'zoo-mode'):
     cc = bycls.get(cc_name, [])
     if not cc:
         continue

@@ -33,6 +33,11 @@ tout ce qui suit, même si la fin est identique.
   **168 o** — juste après l'injection d'identité (« Identify yourself truthfully…\n\n »).
   C'est l'équivalent exact du « fork 143 o » de Zoo, mais pour la famille des harnais de
   code passant par claudish.
+- **Fork INTRA-Claude-Code mesuré (20:23Z)** : les deux top shapes CC (249 + 19 req/2 h)
+  divergent à **312 o** — variant A « interactive agent that helps users according to your
+  "Output Style" » vs variant B « agent for Claude Code, Anthropic's official CLI ».
+  C'est l'**empreinte mesurée du fork des output-styles** (claudish#640) : chaque style
+  paie SON harnais à partir de ~78 tokens.
 - **Leviers** : contenu des CLAUDE.md (nous) ; ordre d'injection (harnais Anthropic) ;
   **fork des output-styles = claudish#640, côté hub, OUVERT** ; l'injection d'identité
   claudish est le premier 168 o — la garder strictement identique pour tous les clients
@@ -52,7 +57,11 @@ tout ce qui suit, même si la fin est identique.
 
 ### 3. Zoo (modes ZooCode)
 
-- **Mesuré 27/10 21:00Z : 0 requête identifiable sur 6 h** — marginal, confirmé.
+- **Mesuré 27/10 20:23Z : ~39 req/2 h (≈1,6 %) — marginal, confirmé — mais PAS zéro.**
+  Correction du même jour : la première passe (« Zoo = 0 ») passait à côté du trafic Zoo
+  parce qu'il arrive **derrière l'injection d'identité claudish** comme le reste du hub —
+  les modes (`code-simple`, `orchestrator-simple`…) divergent de l'identité à **~186 o**.
+  Classifieur corrigé dans `prefix_probe.py` (classe `zoo-mode`).
 - Le fork des modes à ~143/18 o = roo-extensions#4334 ; **fix #4354 déployée ai-01 le
   27/10** (LCP roleDefinition 18 → 548 o, divergence repoussée en queue customInstructions).
   Relais vers les autres sièges en cours (un siège à la fois).
@@ -87,7 +96,12 @@ tout ce qui suit, même si la fin est identique.
 | Raw créatif (atelier Valmont) | 36 | 1,6 % | 143 | Socle scénario partagé (multi-tours sans conversation_id ?) |
 | Raw CoursIA Sudoku | 11 | 0,5 % | 63 | Génération de données, prompts distincts |
 | sk-agent presets EN | 5 | 0,2 % | 51-362 | Faible volume ce soir |
-| **Zoo** | **0** | 0 % | — | Marginal, confirmé |
+| **Zoo (modes)** | 39 | 1,6 % | 186 (modes entre eux) | Marginal — derrière l'injection d'identité, classifieur v2 |
+
+**Fait nouveau 20:23Z** : `external_prefix_cache_hits` **+337 K tokens en 12,5 min** (≈27 K
+tok/s) — le working set CC déborde le KV GPU et **les tiers RAM/fs le resservent
+activement** (première fenêtre où ce compteur bouge nettement ; marginal fenêtre 92,8 %,
+préemptions 0).
 
 Fait structural : le « marginal hit » global d'une fenêtre (92-96 % mesuré aux cycles)
 mélange ces classes — il est dominé par Claude Code (40 % du volume, socle partagé) ;
