@@ -160,13 +160,19 @@ class Executor(ABC):
             )
         return compilation_times
 
-    def resolve_extensible_kv_cache(
+    def extensible_kv_cache_unsupported_reason(
         self, kv_cache_specs: list[dict[str, KVCacheSpec]]
-    ) -> None:
-        """Disable the extensible KV cache, everywhere, where it cannot be used."""
-        reason = self._extensible_kv_cache_unsupported_reason(kv_cache_specs)
-        if reason is None:
-            return
+    ) -> str | None:
+        """Why the extensible KV cache cannot be used on some worker, if so."""
+        if not any(kv_cache_specs):
+            return "the model has no KV cache"
+        unsupported: list[str | None] = self.collective_rpc(
+            "extensible_kv_cache_unsupported_reason"
+        )
+        return next((r for r in unsupported if r), None)
+
+    def disable_extensible_kv_cache(self, reason: str) -> None:
+        """Turn the extensible KV cache off here and on every worker."""
         logger.warning(
             "Disabling the extensible KV cache: %s. The KV cache will be sized "
             "from profiling estimates instead of measured memory.",
@@ -174,16 +180,6 @@ class Executor(ABC):
         )
         self.vllm_config.cache_config.enable_extensible_kv_cache = False
         self.collective_rpc("disable_extensible_kv_cache")
-
-    def _extensible_kv_cache_unsupported_reason(
-        self, kv_cache_specs: list[dict[str, KVCacheSpec]]
-    ) -> str | None:
-        if not any(kv_cache_specs):
-            return "the model has no KV cache"
-        unsupported: list[str | None] = self.collective_rpc(
-            "extensible_kv_cache_unsupported_reason"
-        )
-        return next((r for r in unsupported if r), None)
 
     def extend_kv_cache(self, num_blocks: int) -> None:
         """Commit the final size of an extensible KV cache on the workers."""

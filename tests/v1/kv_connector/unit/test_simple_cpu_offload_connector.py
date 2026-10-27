@@ -189,8 +189,15 @@ def test_engine_queries_offload_blocks_only_when_enabled(
     executor = MagicMock()
     executor.get_kv_cache_specs.return_value = [{}]
     executor.get_simple_cpu_offload_num_blocks.return_value = worker_blocks
+    executor.initialize_from_config.return_value = 5 if extensible else None
     engine = object.__new__(engine_core_module.EngineCore)
     engine.model_executor = executor
+    # Data-parallel peers report fewer committable blocks.
+    monkeypatch.setattr(
+        engine_core_module.ParallelConfig,
+        "min_across_dp",
+        staticmethod(lambda group, value: value - 1),
+    )
     monkeypatch.setattr(
         engine_core_module, "get_kv_cache_configs", lambda *args: [kv_config]
     )
@@ -205,6 +212,7 @@ def test_engine_queries_offload_blocks_only_when_enabled(
         expected_blocks is not None
     )
     assert config.cache_config.simple_cpu_offload_num_blocks == expected_blocks
+    executor.compile_or_warm_up_model.assert_called_once_with(4 if extensible else None)
     calls = [name for name, _, _ in executor.mock_calls]
     assert ("extend_kv_cache" in calls) == extensible
     if extensible and expected_blocks is not None:
