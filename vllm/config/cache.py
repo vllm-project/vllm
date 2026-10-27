@@ -55,12 +55,16 @@ CacheDType = Literal[
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",
     "turboquant_3bit_nc",
+    "octave_k3v4",
+    "octave_k3v3",
+    "octave_k3v3_compact",
     "ultraquant_4bit",
     "int4_per_token_head",
     "int8_per_token_head",
     "fp8_per_token_head",
     "nvfp4",
     "nvfp4_4over6",
+    "mxfp4_mla",
 ]
 
 # Mutable mirror of the CacheDType Literal. Custom dtypes registered by

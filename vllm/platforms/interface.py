@@ -869,7 +869,8 @@ class Platform:
                 kv_quant_mode=get_kv_quant_mode(cache_dtype),
             )
             # The backend owns its packing
-            return backend_cls.customize_spec(spec).page_size_bytes
+            with set_current_vllm_config(vllm_config):
+                return backend_cls.customize_spec(spec).page_size_bytes
 
         primary_dtype = (
             STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
@@ -974,6 +975,8 @@ class Platform:
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
+            from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
+
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
@@ -981,6 +984,14 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                # Must match MLAAttention.get_kv_cache_spec, else the mamba
+                # state no longer fits the real (smaller) MLA page.
+                # test_hybrid_block_size_matches_the_layer_page checks both.
+                state_content_bytes=(
+                    mxfp4_row_bytes(model_config.get_head_size())
+                    if cache_config.cache_dtype == "mxfp4_mla"
+                    else None
+                ),
             ).page_size_bytes
         elif (
             cache_config.cache_dtype.startswith("turboquant_")
@@ -1035,9 +1046,11 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            attn_page_size_1_token = backend_cls.customize_spec(
-                attn_spec
-            ).page_size_bytes
+            # customize_spec may read the model config (e.g. Octave's rotary dim).
+            with set_current_vllm_config(vllm_config):
+                attn_page_size_1_token = backend_cls.customize_spec(
+                    attn_spec
+                ).page_size_bytes
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
