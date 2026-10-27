@@ -1211,11 +1211,10 @@ def share_replayssm_ring_trackers(
                     "ReplaySSM layers in one cache group must share cache capacity"
                 )
 
-        # Keep the trackers a previous bind created when they still cover the
-        # cache, as prefix views: CUDA graphs captured since then hold their
-        # addresses, and the kernels want the tracker length to match the
-        # cache. An extensible KV cache rebinds after capture with the same
-        # or fewer blocks.
+        # Keep the trackers a previous bind created when they still cover the cache,
+        # as prefix views: CUDA graphs captured since then hold their addresses,
+        # and the kernels want the tracker length to match the cache. An extensible
+        # KV cache rebinds after capture with the same or fewer blocks.
         trackers = (
             first_mixer._replayssm_ring_start,
             first_mixer._replayssm_prev_num_accepted,

@@ -50,10 +50,10 @@ KV_CACHE_WARMUP_RESERVE_FRACTION = 0.1
 class ExtensibleKVCache:
     """Growable backing allocation for the KV cache.
 
-    Reserves address space for ``kv_cache_config.num_blocks`` and commits a
+    Reserves address space for `kv_cache_config.num_blocks` and commits a
     prefix of blocks on demand. Blocks keep fixed offsets, so views over the
     reservation and captured CUDA graphs stay valid as more are committed. The
-    allocation splits into segments holding ``num_blocks`` blocks each: one per
+    allocation splits into segments holding num_blocks blocks each: one per
     layer for layer-outermost layouts (sized by that layer's block stride), one
     overall for block-outermost.
     """
@@ -91,7 +91,7 @@ class ExtensibleKVCache:
         """Segment offsets and block strides tiling the allocation.
 
         With one block stride the segments are implied by it; with several, each
-        tensor must give its layers contiguous ``num_blocks``-block regions.
+        tensor must give its layers contiguous num_blocks-block regions.
         """
         block_strides = {tensor.block_stride for tensor in tensors}
         if len(block_strides) == 1:
@@ -128,7 +128,7 @@ class ExtensibleKVCache:
         return offsets, strides
 
     def allocate(self, size: int) -> torch.Tensor:
-        """Allocator hook for ``allocate_kv_cache``; commits only the null block."""
+        """Allocator hook for allocate_kv_cache; commits only the null block."""
         assert size == self.size, f"Expected {self.size} bytes, got {size}."
         self.commit(1)
         return self.buffer.full_view()
@@ -136,10 +136,10 @@ class ExtensibleKVCache:
     def commit(
         self, num_blocks: int, defragment: bool = False, shrink: bool = False
     ) -> None:
-        """Back the first ``num_blocks`` blocks; new blocks are zeroed.
+        """Back the first num_blocks blocks; new blocks are zeroed.
 
-        Grow-only unless ``shrink`` is set, which remaps a smaller prefix and
-        discards contents. ``defragment`` remaps each segment as one driver
+        Grow-only unless shrink is set, which remaps a smaller prefix and
+        discards contents. defragment remaps each segment as one driver
         allocation (discarding contents): UCX cannot RDMA a range spanning
         several allocations.
         """
@@ -170,8 +170,8 @@ class ExtensibleKVCache:
     ) -> dict[str, torch.Tensor] | None:
         """Per-layer views whose storage spans exactly the committed blocks.
 
-        ``kv_cache_config.num_blocks`` must equal the committed count. Connectors
-        derive extents from ``untyped_storage().nbytes()``, so they must not see the
+        `kv_cache_config.num_blocks` must equal the committed count. Connectors
+        derive extents from `untyped_storage().nbytes()`, so they must not see the
         reservation. None for layouts whose layers span several segments.
         """
         if not layout.is_block_compact:
@@ -208,7 +208,7 @@ class ExtensibleKVCache:
         """Blocks that can be committed now without eating into the headroom.
 
         Bounds what warmup may commit: free memory plus the committed prefix,
-        less the sizing margin and the larger of ``reserved_headroom_bytes`` and
+        less the sizing margin and the larger of reserved_headroom_bytes and
         a share of the headroom, never below what is already committed nor
         above the capacity.
         """
@@ -230,7 +230,7 @@ class ExtensibleKVCache:
         return self.buffer.physical_bytes
 
     def physical_bytes_for(self, num_blocks: int) -> int:
-        """Bytes a commit of ``num_blocks`` maps, each segment rounded to granules."""
+        """Bytes a commit of num_blocks maps, each segment rounded to granules."""
         granule = self.buffer.granularity
         return sum(
             -(-num_blocks * stride // granule) * granule
@@ -243,9 +243,9 @@ class ExtensibleKVCache:
         return granule_block_alignment(self.segment_strides, self.buffer.granularity)
 
     def blocks_within(self, num_bytes: int, aligned: bool = False) -> int:
-        """Most blocks whose physical footprint fits in ``num_bytes``.
+        """Most blocks whose physical footprint fits in num_bytes.
 
-        ``aligned`` restricts the count to multiples of ``block_alignment``, so
+        aligned restricts the count to multiples of block_alignment, so
         that a defragmenting commit backs each segment with one chunk exactly.
         """
         num_blocks = min(num_bytes // self.bytes_per_block, self.capacity_blocks)
@@ -258,16 +258,16 @@ class ExtensibleKVCache:
         return num_blocks
 
     def _locate(self, start: int) -> tuple[int, int]:
-        """Segment index and offset within it of allocation byte ``start``."""
+        """Segment index and offset within it of allocation byte start."""
         segment = bisect_right(self.segment_offsets, start) - 1
         return segment, start - self.segment_offsets[segment]
 
     def committed_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig, layout: KVCacheLayout, num_blocks: int
     ) -> list[KVCacheTensor]:
-        """Tensor placements matching ``committed_views`` for ``num_blocks``.
+        """Tensor placements matching committed_views for num_blocks.
 
-        ``size`` is the committed total, as every tensor describes the one
+        size is the committed total, as every tensor describes the one
         allocation. Under block-outermost layouts the committed blocks are one
         prefix of it, so the capacity placements still hold. Under layer-outermost
         layouts each layer's view has its own storage over its committed prefix:
@@ -324,7 +324,7 @@ def num_committable_kv_blocks(runner: "GPUModelRunner") -> int:
 
 
 def ensure_kv_cache_blocks(runner: "GPUModelRunner", num_blocks: int) -> None:
-    """Commit enough of an extensible KV cache to address ``num_blocks``."""
+    """Commit enough of an extensible KV cache to address num_blocks."""
     kv_cache = getattr(runner, "extensible_kv_cache", None)
     if kv_cache is not None:
         kv_cache.commit(num_blocks)
@@ -333,7 +333,7 @@ def ensure_kv_cache_blocks(runner: "GPUModelRunner", num_blocks: int) -> None:
 def extend_kv_cache(runner: "GPUModelRunner", num_blocks: int) -> None:
     """Commit the final size once post-warmup memory is known.
 
-    Afterwards the runner matches one that allocated ``num_blocks`` up front:
+    Afterwards the runner matches one that allocated num_blocks up front:
     views are rebuilt over the committed bytes (same addresses) and the KV
     connector is created against final memory.
     """
@@ -406,8 +406,8 @@ def measure_kv_cache_bytes(
     Everything resident except the committed KV prefix is needed by the engine;
     the cache gets the rest of the budget, capped by the device headroom (free
     memory plus the committed prefix) less a margin of
-    ``max(margin_floor_bytes, margin_fraction * transient_peak_bytes)``. The
-    measured ``transient_peak_bytes`` are then kept free in full. The margin
+    `max(margin_floor_bytes, margin_fraction * transient_peak_bytes)`. The
+    measured transient_peak_bytes are then kept free in full. The margin
     guards physical memory, so it never reduces an explicit budget that already
     leaves that much free.
     """

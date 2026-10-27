@@ -575,7 +575,7 @@ def allocate_kv_cache(
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
     groups overlay each other, so tensors may address the same bytes.
 
-    ``allocate`` replaces the default zeroed backing allocation: it takes the
+    allocate replaces the default zeroed backing allocation: it takes the
     size in bytes and returns a one-byte-per-element tensor.
     """
     if not kv_cache_config.kv_cache_tensors:
@@ -613,7 +613,7 @@ def allocate_kv_cache(
 def layer_spec_for_tensor(
     kv_cache_config: KVCacheConfig, tensor: KVCacheTensor
 ) -> tuple[int, KVCacheSpec]:
-    """Cache group index and per-layer spec of the layers ``tensor`` places."""
+    """Cache group index and per-layer spec of the layers tensor places."""
     layer_name = tensor.layers[0]
     group_id, group = next(
         (group_id, group)
@@ -629,7 +629,7 @@ def layer_spec_for_tensor(
 def layer_kernel_block_size(
     spec: KVCacheSpec, group_id: int, kernel_block_sizes: list[int] | None
 ) -> int | None:
-    """Kernel block size to view ``spec``'s pages with, if it differs."""
+    """Kernel block size to view spec's pages with, if it differs."""
     kernel_block_size = None
     if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
         kernel_block_size = kernel_block_sizes[group_id]

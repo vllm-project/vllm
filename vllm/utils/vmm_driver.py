@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ctypes bindings for the CUDA (``cuMem*``) and HIP (``hipMem*``) virtual memory
+"""ctypes bindings for the CUDA (`cuMem*`) and HIP (`hipMem*`) virtual memory
 management APIs, used by :class:`vllm.utils.extensible_tensor.ExtensibleTensor`.
 """
 
@@ -58,8 +58,8 @@ class _MemAccessDesc(ctypes.Structure):
 def _find_loaded_library(
     lib_name: str, maps_lines: Iterable[str] | None = None
 ) -> str | None:
-    """Path of the mapped shared object named ``lib_name`` (e.g. ``libcuda``),
-    matched on the file name so that ``libcudart`` does not stand in for it."""
+    """Path of the mapped shared object named lib_name (e.g. libcuda),
+    matched on the file name so that libcudart does not stand in for it."""
     try:
         if maps_lines is None:
             with open("/proc/self/maps") as f:
@@ -290,7 +290,7 @@ class CudaVmmDriver(VmmDriver):
         return msg.value.decode() if msg.value else "unknown error"
 
     def ensure_context(self, device_index: int) -> None:
-        """Make the primary context of ``device_index`` current, as torch does
+        """Make the primary context of device_index current, as torch does
         for the device it runs on; usable before torch has touched the device."""
         lib = self._lib
         self._check(lib.cuInit(0))

@@ -32,10 +32,10 @@ def granule_block_alignment(block_strides: Iterable[int], granule: int) -> int:
 def granule_aligned_blocks(
     num_blocks: int, block_strides: Iterable[int], granule: int
 ) -> int:
-    """Largest count up to ``num_blocks`` at which, for every block stride, that
+    """Largest count up to num_blocks at which, for every block stride, that
     many blocks span a whole number of granules.
 
-    Segments hold ``num_blocks`` blocks of one stride each, so at such a count
+    Segments hold num_blocks blocks of one stride each, so at such a count
     every segment starts and ends on a granule boundary and one physical chunk
     can back it exactly, as RDMA registration of a segment requires.
     """
@@ -49,7 +49,7 @@ _MIN_GRANULARITY = 2 << 20
 
 
 def granule_size(device_index: int) -> int:
-    """Commit granule for ``device_index``: driver granularity, floored at 2 MiB."""
+    """Commit granule for device_index: driver granularity, floored at 2 MiB."""
     driver_granularity = get_vmm_driver().granularity(device_index)
     return _round_up(max(driver_granularity, _MIN_GRANULARITY), driver_granularity)
 
@@ -263,8 +263,8 @@ class ExtensibleTensor:
     """A device byte buffer that grows without moving its base pointer.
 
     The reservation is divided into contiguous segments whose committed bytes
-    form a prefix of each; ``num_segments`` equal segments by default, or the
-    explicit ``segment_capacities`` (in bytes, summing to ``max_num_bytes``).
+    form a prefix of each; num_segments equal segments by default, or the
+    explicit segment_capacities (in bytes, summing to max_num_bytes).
     """
 
     def __init__(
@@ -416,7 +416,7 @@ class ExtensibleTensor:
         return len(self._buffer._handles)
 
     def segments_backed_by_one_chunk(self, sizes: Sequence[int]) -> list[bool]:
-        """Whether each segment's first ``sizes[i]`` bytes lie within a single
+        """Whether each segment's first `sizes[i]` bytes lie within a single
         driver allocation, as RDMA registration of the segment requires."""
         chunks = [(offset, offset + size) for _, offset, size in self._buffer._handles]
         return [

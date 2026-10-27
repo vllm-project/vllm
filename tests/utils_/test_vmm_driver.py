@@ -50,7 +50,7 @@ print(driver.granularity(0))
 
 class _SetAccessModel:
     """Models HIP's set-access size check over a reservation's allocations,
-    kept in ``list_order`` (the runtime's internal order, which callers do not
+    kept in list_order (the runtime's internal order, which callers do not
     control)."""
 
     granule = 4096

@@ -1738,9 +1738,9 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
 def shrink_kv_cache_configs(
     vllm_config: VllmConfig, kv_cache_configs: list[KVCacheConfig], num_blocks: int
 ) -> None:
-    """Lower ``num_blocks`` of every config in place after measured sizing. The
-    tensors' ``size`` follows (their strides and offsets keep describing the
-    reservation). Raises if ``max_model_len`` no longer fits.
+    """Lower num_blocks of every config in place after measured sizing. The
+    tensors' size follows (their strides and offsets keep describing the
+    reservation). Raises if max_model_len no longer fits.
     """
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 
@@ -1773,8 +1773,8 @@ def shrink_kv_cache_configs(
 def granule_aligned_kv_cache_blocks(
     num_blocks: int, kv_cache_configs: list[KVCacheConfig], commit_granule: int
 ) -> int:
-    """Round ``num_blocks`` down so every worker's KV cache segments (one per
-    layer or one overall, ``num_blocks`` blocks of one tensor's block stride)
+    """Round num_blocks down so every worker's KV cache segments (one per
+    layer or one overall, num_blocks blocks of one tensor's block stride)
     span whole commit granules. A KV connector registers each committed
     segment for RDMA, which cannot span several physical chunks."""
     strides = {
@@ -1827,21 +1827,19 @@ def finalize_extensible_kv_cache(
     """Settle the KV cache size from the memory workers measured after warmup.
 
     Every rank must agree on one block count, so the minimum becomes the
-    scheduler's ``num_blocks``; the caller commits it on the workers. With
-    ``commit_granule`` (set when a KV connector is configured) the count is
+    scheduler's num_blocks; the caller commits it on the workers. With
+    commit_granule (set when a KV connector is configured) the count is
     also granule-aligned, see `granule_aligned_kv_cache_blocks`.
     """
     # No measurements: the elastic-EP scale-up path skips warmup. Elastic EP
     # leaves the extensible KV cache off, so this branch is not reached; it
     # keeps the capacity.
-    num_blocks = min(
-        (
-            times.num_kv_blocks
-            for times in compilation_times
-            if times.num_kv_blocks is not None
-        ),
-        default=scheduler_kv_cache_config.num_blocks,
+    block_counts = (
+        times.num_kv_blocks
+        for times in compilation_times
+        if times.num_kv_blocks is not None
     )
+    num_blocks = min(block_counts, default=scheduler_kv_cache_config.num_blocks)
     num_blocks = min(num_blocks, scheduler_kv_cache_config.num_blocks)
     if commit_granule is not None:
         num_blocks = granule_aligned_kv_cache_blocks(

@@ -646,9 +646,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> None:
         """Initialize the KV cache and everything that depends on its layout.
 
-        With ``extensible=True``, ``num_blocks`` is a capacity: address space is
-        reserved for it but only the null block is committed before capture; see
-        `vllm.v1.worker.extensible_kv_cache`.
+        With `extensible=True`, num_blocks is a capacity: address space is
+        reserved for it but only the null block is committed before capture.
         """
         # GPUWorker finalizes the PD interleave before KV cache initialization.
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
@@ -1050,8 +1049,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         try:
             self.sampler(logits, dummy_input_batch)
         finally:
+            default_params = SamplingParams()
             for req_idx in range(num_reqs):
-                self.sampler.add_request(req_idx, SamplingParams())
+                self.sampler.add_request(req_idx, default_params)
             self.sampler.apply_staged_writes()
 
     @torch.inference_mode()
