@@ -7,6 +7,7 @@ The tier manager writes KV cache blocks to disk and reads them back, verifying
 data integrity throughout the process.
 """
 
+import errno
 import mmap
 import os
 import threading
@@ -251,6 +252,52 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
     dest = tier.file_mapper.get_file_name(key(1))
     assert os.path.exists(dest), f"Expected file at {dest}"
+
+
+def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
+    """Losing the race to publish a block must not fail the store job.
+
+    Another engine instance sharing the same root_dir can publish the block
+    between the existence check and the rename, and some shared filesystems
+    report that as EEXIST instead of replacing. Block file names are content
+    hashes, so the file already in place holds the same data and the job has
+    nothing left to do.
+    """
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    # Python path only: EEXIST cannot be injected into the C extension.
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", False)
+    tier, tensor = fs_tier
+    dest = tier.file_mapper.get_file_name(key(1))
+
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    with open(dest, "rb") as f:
+        published = f.read()
+
+    real_exists = os.path.exists
+    real_replace = os.replace
+
+    def racing_replace(src: str, dst: str) -> None:
+        if dst == dest:
+            raise FileExistsError(errno.EEXIST, "File exists", dst)
+        real_replace(src, dst)
+
+    # Hide the published block from the check, then lose the rename to it.
+    monkeypatch.setattr(
+        io_mod.os.path, "exists", lambda p: False if p == dest else real_exists(p)
+    )
+    monkeypatch.setattr(io_mod.os, "replace", racing_replace)
+
+    # Distinct bytes, so the comparison below fails if the loser overwrites.
+    tensor[1] = 1.0
+    tier.submit_store(make_job(2, [key(1)], [1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert os.listdir(os.path.dirname(dest)) == [os.path.basename(dest)]
+    with open(dest, "rb") as f:
+        assert f.read() == published
 
 
 def test_store_then_load_roundtrip(fs_tier):

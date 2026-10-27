@@ -32,6 +32,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
+    TransferResult,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -136,13 +137,14 @@ def _store_metadata(job_id: int) -> OffloadingConnectorMetadata:
     )
 
 
-def _load_metadata(job_id: int) -> OffloadingConnectorMetadata:
+def _load_metadata(job_id: int, sync: bool = False) -> OffloadingConnectorMetadata:
     return OffloadingConnectorMetadata(
         load_jobs={
             job_id: TransferJob(
                 req_id="req",
                 src_spec=LoadStoreSpec(),
                 dst_spec=GPULoadStoreSpec([0], group_sizes=(1,), block_indices=(0,)),
+                sync=sync,
             )
         },
         store_jobs={},
@@ -277,6 +279,36 @@ def test_start_kv_transfers_non_writer_still_submits_load():
     assert worker.worker is not None
     worker.worker.submit_load.assert_called_once()
     assert worker.build_connector_worker_meta() is None
+
+
+@pytest.mark.parametrize("sync", [False, True])
+def test_load_completion(sync: bool):
+    """Sync loads are submitted expedited and waited on, skip
+    finished_recving, and count as loads."""
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+
+    worker.start_kv_transfers(_load_metadata(11, sync=sync))
+
+    assert worker.worker is not None
+    worker.worker.submit_load.assert_called_once()
+    expedited = worker.worker.submit_load.call_args.kwargs.get("expedited", False)
+    assert expedited == sync
+    if sync:
+        worker.worker.wait.assert_called_once_with({11})
+    else:
+        worker.worker.wait.assert_not_called()
+
+    worker.worker.get_finished.return_value = [
+        TransferResult(job_id=11, success=True, transfer_size=64, transfer_time=0.5)
+    ]
+    assert worker.get_finished(set()) == (set(), set() if sync else {"req"})
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {11: 1}
+    assert meta.transfer_stats.load.bytes == 64
+    assert meta.transfer_stats.store.is_empty()
 
 
 def test_offloading_connector_worker_accepts_plugin_spec_default_layout():

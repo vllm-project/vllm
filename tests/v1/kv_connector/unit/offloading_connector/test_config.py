@@ -13,7 +13,13 @@ import torch
 from transformers import CLIPVisionConfig, LlamaConfig, LlavaConfig, PreTrainedConfig
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
-from vllm.config import KVTransferConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    KVTransferConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
@@ -62,6 +68,7 @@ def _make_vllm_config(
     config.cache_config.cache_dtype = torch.float16
     config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "test-model"
+    config.model_config.max_model_len = 4096
     config.model_config.use_mla = False
     # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
     # requires the head shard to cover the model's KV heads exactly
@@ -262,10 +269,18 @@ def test_metadata_and_mapping_order_preserve_model_identity():
     assert get_kv_cache_model_config_hash(config.model_config) == expected
 
 
-def test_engine_propagates_snapshot_after_model_loading_and_auto_fit():
+def test_engine_propagates_snapshot_after_model_loading_and_auto_fit(
+    model_identity_config,
+):
     from vllm.v1.engine.core import EngineCore
 
-    config = _make_identity_config()
+    config = VllmConfig(
+        model_config=model_identity_config,
+        cache_config=CacheConfig(block_size=16),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector", kv_role="kv_both"
+        ),
+    )
     snapshot = get_kv_cache_model_config_hash(config.model_config)
     workers = [_make_kv_cache_config(), _make_kv_cache_config()]
     executor = MagicMock()
@@ -284,11 +299,9 @@ def test_engine_propagates_snapshot_after_model_loading_and_auto_fit():
     config.cache_config.kv_cache_layout = "LBNHC"
 
     # Model loading may rewrite RoPE types; auto-fit may shorten the context.
-    config.model_config.hf_text_config.rope_parameters["full_attention"][
-        "rope_type"
-    ] = "deepseek_yarn"
+    config.model_config.hf_text_config.rope_parameters["rope_type"] = "deepseek_yarn"
 
-    def auto_fit(vllm_config, specs, available_memory):
+    def auto_fit(vllm_config, specs, available_memory, global_kv_cache_groups):
         vllm_config.model_config.max_model_len = 8
         return workers
 
@@ -499,6 +512,23 @@ def _mla_spec(
         tokens_per_state=tokens_per_state,
     )
 
+
+def _swa_spec(sliding_window: int = 128) -> SlidingWindowSpec:
+    return SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=128,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+
+
+_HIDDEN_STATE_KWARGS: dict[str, Any] = {
+    "block_size": 16,
+    "num_kv_heads": 1,
+    "head_size": 512,
+    "dtype": torch.float32,
+}
 
 _MAMBA_SPEC = MambaSpec(
     block_size=16,
@@ -1055,6 +1085,74 @@ def test_dcp_scales_uniform_type_group_alongside_mamba(spec_kind, expected):
     )
 
 
+@pytest.mark.parametrize(
+    "kv_cache_spec,window_chunks",
+    [
+        (_full_attention_spec(), None),
+        (_mla_spec(), None),
+        (HiddenStateCacheSpec(**_HIDDEN_STATE_KWARGS), None),
+        (_MAMBA_SPEC, 1),
+        (_swa_spec(), 8),
+        (
+            UniformTypeKVCacheSpecs(
+                block_size=16,
+                kv_cache_specs={
+                    "mla": _mla_spec(),
+                    "hidden": HiddenStateCacheSpec(**_HIDDEN_STATE_KWARGS),
+                },
+            ),
+            None,
+        ),
+        (
+            UniformTypeKVCacheSpecs(
+                block_size=16,
+                kv_cache_specs={"swa0": _swa_spec(), "swa1": _swa_spec()},
+            ),
+            8,
+        ),
+    ],
+)
+def test_group_carries_the_chunks_the_tier_keeps_per_request(
+    kv_cache_spec: KVCacheSpec, window_chunks: int | None
+):
+    """The group reports how far back its attention reaches, counted in chunks.
+
+    A capacity estimate needs that bound: a windowed or recurrent group keeps a
+    fixed number of chunks however long the request grows, while an unbounded
+    group keeps one for every chunk of the request. A worker-side group hands
+    over an aggregate of its layers, which must resolve to the same bound as the
+    single layer it wraps.
+    """
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+    )
+
+    offloading_config = build_offloading_config(_make_vllm_config(), kv_cache_config)
+
+    assert offloading_config.groups[0].sliding_window_size_in_chunks == window_chunks
+
+
+def test_model_config_carries_the_longest_request():
+    """The capacity estimate of a tier holds at max_model_len, so it must travel.
+
+    CPUOffloadingInfo.from_config in vllm/v1/kv_offload/cpu/common.py reads it.
+    A model config without it leaves the estimate unknown.
+    """
+    vllm_config = _make_vllm_config()
+    vllm_config.model_config.max_model_len = 32768
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], _full_attention_spec())],
+    )
+
+    offloading_config = build_offloading_config(vllm_config, kv_cache_config)
+
+    assert offloading_config.model.max_model_len == 32768
+
+
 def test_preserves_data_parallel_config():
     config = _make_vllm_config()
     config.parallel_config.data_parallel_index = 2
@@ -1437,13 +1535,7 @@ def test_parallelism_agnostic_for_single_full_attention_group():
     )
 
 
-_SWA_SPEC = SlidingWindowSpec(
-    block_size=16,
-    num_kv_heads=4,
-    head_size=128,
-    dtype=torch.float32,
-    sliding_window=128,
-)
+_SWA_SPEC = _swa_spec()
 _SWA_MLA_SPEC = SlidingWindowMLASpec(
     block_size=16,
     num_kv_heads=1,

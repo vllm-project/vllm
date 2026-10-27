@@ -991,6 +991,7 @@ def resolve_cache_hit_alignment_tokens(
 def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
+    num_hash_lookahead_tokens: int = 0,
 ) -> Callable[[Request], list[BlockHash]]:
     """Returns a function which computes the list of un-computed block hashes
     of a request.
@@ -999,11 +1000,17 @@ def get_request_block_hasher(
     full prefix, so each hash uniquely fingerprints the prefix ending at its
     boundary. Coarser group block sizes and partial-cache boundaries reuse
     these hashes directly (see ``BlockHashListWithBlockSize``).
+
+    With ``num_hash_lookahead_tokens`` (L) > 0, each hash also covers the L
+    tokens after its block, which the drafter's KV at the block's last position
+    depends on, so it is emitted only once those tokens exist. The block tokens
+    stay the hashed tokens; the extra keys become ``(E, *tokens)``, where ``E``
+    covers the block and those tokens.
     """
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * hash_block_size
-        num_tokens = request.num_tokens
+        num_tokens = request.num_tokens - num_hash_lookahead_tokens
 
         if start_token_idx + hash_block_size > num_tokens:
             # Early stop when there no new full blocks created.
@@ -1031,9 +1038,26 @@ def get_request_block_hasher(
                 break
 
             # MM and LoRA requests need extra keys for block-hash computation.
-            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, start_token_idx, end_token_idx, curr_mm_idx
-            )
+            if num_hash_lookahead_tokens:
+                hash_end_token_idx = end_token_idx + num_hash_lookahead_tokens
+                extra_keys, curr_mm_idx = generate_lookahead_block_hash_extra_keys(
+                    request,
+                    start_token_idx,
+                    end_token_idx,
+                    hash_end_token_idx,
+                    curr_mm_idx,
+                )
+                if num_hash_lookahead_tokens == 1:
+                    extra_keys = (extra_keys, request.all_token_ids[end_token_idx])
+                else:
+                    extra_keys = (
+                        extra_keys,
+                        *request.all_token_ids[end_token_idx:hash_end_token_idx],
+                    )
+            else:
+                extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                    request, start_token_idx, end_token_idx, curr_mm_idx
+                )
 
             # Compute the hash of the current block
             block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
@@ -1048,6 +1072,28 @@ def get_request_block_hasher(
         return new_block_hashes
 
     return request_block_hasher
+
+
+def generate_lookahead_block_hash_extra_keys(
+    request: Request,
+    start_token_idx: int,
+    end_token_idx: int,
+    hash_end_token_idx: int,
+    start_mm_idx: int,
+) -> tuple[tuple[Any, ...] | None, int]:
+    """Generate extra keys for the block and its lookahead tokens.
+
+    Rewind the MM index to retain inputs overlapping the next block.
+    """
+    extra_keys, mm_idx = generate_block_hash_extra_keys(
+        request, start_token_idx, hash_end_token_idx, start_mm_idx
+    )
+    while mm_idx > 0:
+        mm_position = request.mm_features[mm_idx - 1].mm_position
+        if mm_position.offset + mm_position.length <= end_token_idx:
+            break
+        mm_idx -= 1
+    return extra_keys, mm_idx
 
 
 def get_max_concurrency_for_kv_cache_config(
