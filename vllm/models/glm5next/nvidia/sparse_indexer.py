@@ -355,6 +355,7 @@ def sparse_attn_indexer_kpool(
                 ).squeeze(-1)
 
             num_rows = q_slice.shape[0]
+            score_bits = 16 if mqa_logits_use_mx_scales() else 32
             if chunk.local_total_seq_lens == 0:
                 logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
             else:
@@ -363,17 +364,16 @@ def sparse_attn_indexer_kpool(
                 )
                 # Compressed: row i starts at K position cu_seqlen_ks[i].
                 row_ends = cu_seqlen_ke - cu_seqlen_ks
-                logits = as_fp32_logits(
-                    fp8_fp4_mqa_logits(
-                        (q_slice_cast, q_scale_slice),
-                        (k_quant_cast, k_scale_cast),
-                        chunk_weights,
-                        cu_seqlen_ks,
-                        cu_seqlen_ke,
-                        chunk.max_seqlen_k,
-                    ),
-                    row_ends,
+                logits = fp8_fp4_mqa_logits(
+                    (q_slice_cast, q_scale_slice),
+                    (k_quant_cast, k_scale_cast),
+                    chunk_weights,
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
+                    chunk.max_seqlen_k,
                 )
+                score_bits = 16 if logits.dtype == torch.bfloat16 else 32
+                logits = as_fp32_logits(logits, row_ends)
 
             # kpool: logits are pool-granular (compress_ratio == index_kpool),
             # so topk selects pools. We pick topk_tokens // kpool pools then
@@ -409,6 +409,8 @@ def sparse_attn_indexer_kpool(
                 dcp_world_size,
                 pool_cp_interleave,
                 row_starts=None,
+                score_bits=score_bits,
+                num_positions=max_pool_len,
             )
 
             if index_kpool > 1:
@@ -614,19 +616,18 @@ def sparse_attn_indexer_kpool(
             padded_q_quant_cast, padded_q_scale, padded_weights[:num_padded_tokens]
         )
         # SM100 decode is varlen: one row and context length per token.
-        logits = as_fp32_logits(
-            fp8_fp4_paged_mqa_logits(
-                (padded_q_quant_cast, padded_q_scale),
-                kv_cache,
-                decode_weights,
-                seq_lens,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_pool_len,
-                indices=decode_metadata.indices,
-            ),
-            seq_lens.view(-1),
+        logits = fp8_fp4_paged_mqa_logits(
+            (padded_q_quant_cast, padded_q_scale),
+            kv_cache,
+            decode_weights,
+            seq_lens,
+            decode_metadata.block_table,
+            decode_metadata.schedule_metadata,
+            max_model_len=max_pool_len,
+            indices=decode_metadata.indices,
         )
+        score_bits = 16 if logits.dtype == torch.bfloat16 else 32
+        logits = as_fp32_logits(logits, seq_lens.view(-1))
         num_rows = logits.shape[0]
         # kpool: logits are pool-granular -> select topk_tokens//kpool pools,
         # then expand each pool back to its kpool tokens.
@@ -658,6 +659,8 @@ def sparse_attn_indexer_kpool(
             dcp_rank,
             dcp_world_size,
             pool_cp_interleave,
+            score_bits=score_bits,
+            num_positions=max_pool_len,
         )
 
         # Resolve to token-level indices in the output buffer.

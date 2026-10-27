@@ -588,6 +588,58 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
         assert set(actual[row].cpu().tolist()) == set(expected[row].cpu().tolist())
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_cutedsl(),
+    reason="This test requires CUDA and CuteDSL",
+)
+@pytest.mark.parametrize("num_positions", [16384, 131072, 1 << 20])
+def test_cutedsl_gathered_select_compact_keys_match_reference(num_positions: int):
+    """BF16-valued scores (upcast SM100 MQA logits) tie at the top-k boundary.
+    Keying only their 16 high bits and the id bits below ``num_positions``
+    must select the same set as the full 64-bit key."""
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        dcp_topk_id_bits,
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    rows, world, topk = 5, 8, 2048
+    num_candidates = world * topk
+    scores = torch.randn((rows, num_candidates), device=device)
+    # Row 1: 64 distinct values, so the boundary tie spans hundreds of ids.
+    scores[1] = (scores[1] * 8).round().clamp(-32, 31)
+    # Row 2: all negative. Row 3: padding mixed in. Row 4: all tied.
+    scores[2] = -scores[2].abs()
+    scores[4] = 0.5
+    scores = scores.bfloat16().float()
+    ids = torch.stack(
+        [
+            torch.randperm(num_positions, device=device)[:num_candidates]
+            for _ in range(rows)
+        ]
+    ).to(torch.int32)
+    ids[:, 0] = num_positions - 1
+    ids[3, ::3] = -1
+    gathered = torch.stack((scores, ids.float()), dim=-1).contiguous()
+
+    expected = _ref_stable_topk_from_candidates_fp64(scores, ids, topk)
+    full = torch.empty((rows, topk), device=device, dtype=torch.int32)
+    stable_topk_from_gathered_candidates_cutedsl(gathered, topk, out=full)
+    compact = torch.empty_like(full)
+    stable_topk_from_gathered_candidates_cutedsl(
+        gathered,
+        topk,
+        out=compact,
+        score_bits=16,
+        id_bits=dcp_topk_id_bits(num_positions),
+    )
+    for row in range(rows):
+        want = sorted(expected[row].tolist())
+        assert sorted(full[row].tolist()) == want
+        assert sorted(compact[row].tolist()) == want
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
     device = torch.device("cuda")
