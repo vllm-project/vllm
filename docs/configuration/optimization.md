@@ -160,8 +160,9 @@ By default, vLLM binds automatically when the environment supports it:
 CUDA-alike platform, multiple NUMA nodes, `numactl` installed, permission to
 set NUMA memory policy, unrestricted CPU affinity, a default NUMA memory policy,
 the `spawn` multiprocessing start method (the CLI default), and a local `mp` or
-`uni` executor with multiprocessing DP. Ray, external launchers, `--device-ids`
-remapping, and prefill context parallelism (PCP) are excluded from automatic binding.
+`uni` executor with multiprocessing DP, including supported prefill context
+parallelism (PCP) launches. Ray, external launchers and `--device-ids` remapping
+are excluded from automatic binding.
 Otherwise vLLM starts unbound. Use
 `--numa-bind` to make a missing `numactl` or undetectable GPU-to-NUMA topology a
 startup error, or `--no-numa-bind` to disable binding. Passing
@@ -185,6 +186,8 @@ The mapping must cover all visible GPUs and local workers, and each mapped NUMA
 node must have CPUs. The resolved decision and mapping are passed to spawned
 children, so an already-bound EngineCore does not repeat detection under its
 restricted CPU affinity.
+PCP workers use the full TP × PCP × PP shard size for local DP GPU offsets;
+EngineCore's CPU affinity covers all workers in its shard.
 Multi-node multiprocessing launchers resolve their own host-local mapping;
 NUMA node IDs are never interpreted as cluster-wide IDs.
 

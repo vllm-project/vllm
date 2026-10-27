@@ -160,10 +160,6 @@ def _can_auto_bind(
     ):
         logger.debug("Automatic NUMA binding requires local mp/uni launchers.")
         return False
-    # Keep automatic PCP excluded until bound launches are validated.
-    if parallel_config.prefill_context_parallel_size > 1:
-        logger.debug("Automatic NUMA binding does not yet support PCP.")
-        return False
     # Topology is indexed in visible-device order, which --device-ids remaps.
     if parallel_config.assigned_physical_gpu_ids is not None:
         logger.debug("Automatic NUMA binding does not support --device-ids remapping.")

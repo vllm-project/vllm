@@ -696,6 +696,20 @@ def test_parallel_config_auto_policy_survives_copy_without_changing_hash():
         assert copied.compute_hash() == original_hash
 
 
+@pytest.mark.parametrize("dp_local_rank", [0, 1])
+def test_auto_numa_accepts_pcp_dp_topology(monkeypatch, dp_local_rank):
+    """Automatic eligibility must cover every PCP worker in both DP shards."""
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [0, 0, 1, 1], visible_gpus=4)
+    config = ParallelConfig(
+        distributed_executor_backend="mp",
+        prefill_context_parallel_size=2,
+        data_parallel_size=2,
+        data_parallel_size_local=2,
+    )
+    assert numa_utils._can_auto_bind(config, local_rank=0, dp_local_rank=dp_local_rank)
+    assert config.numa_bind_nodes == [0, 0, 1, 1]
+
+
 def test_auto_numa_redetects_when_visible_devices_change(monkeypatch):
     """Independent launchers must not reuse another visible GPU set's mapping."""
     _patch_auto_numa(
@@ -829,9 +843,8 @@ def test_configure_subprocess_auto_falls_back_to_unbound(
         {"distributed_executor_backend": "ray"},
         {"data_parallel_backend": "ray"},
         {"distributed_executor_backend": "external_launcher"},
-        {"prefill_context_parallel_size": 2},
     ],
-    ids=["ray-executor", "ray-dp", "external-launcher", "pcp"],
+    ids=["ray-executor", "ray-dp", "external-launcher"],
 )
 def test_auto_numa_skips_unsupported_launchers(monkeypatch, parallel_kwargs):
     detections = []

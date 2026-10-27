@@ -335,8 +335,8 @@ class ParallelConfig:
     If None (default), vLLM binds only when the environment supports it
     (multiple NUMA nodes, `numactl` installed, unrestricted CPU affinity,
     a default NUMA memory policy, and the `spawn` start method with an
-    mp/uni executor and mp DP).
-    Ray, external launchers, device-ID remapping, and PCP are excluded
+    mp/uni executor and mp DP, including PCP).
+    Ray, external launchers and device-ID remapping are excluded
     from automatic binding. Automatic mode prefers GPU-local memory but
     permits allocations on other nodes. Unsupported environments start
     unbound. With `True`, strict memory binding may override an existing
