@@ -120,7 +120,7 @@ ENV PYTHONPATH=${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi
 RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
     --extra-index-url https://pypi.org/simple \
     "torch[device-gfx1250]==${TORCH_VERSION}" \
-    "torchvision==${TORCHVISION_VERSION}" \
+    "torchvision[device-gfx1250]==${TORCHVISION_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
     "rocm[libraries,devel,device-gfx1250]==${ROCM_SDK_VERSION}" && \
     rocm-sdk init
