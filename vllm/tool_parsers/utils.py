@@ -901,7 +901,7 @@ def escape_nested_quotes_in_strings(text: str) -> tuple[str, bool]:
         for close in (j for j in quotes if is_closer(j)):
             interior: list[str] = []
             for j in range(index + 1, close):
-                if text[j] == char and not _is_escaped(text, j):
+                if text[j] == char and not is_escaped(text, j):
                     interior.append("\\")
                 interior.append(text[j])
             candidate = "".join(
@@ -962,7 +962,7 @@ def contains_broken_string_literal(text: str) -> bool:
     return False
 
 
-def _is_escaped(text: str, index: int) -> bool:
+def is_escaped(text: str, index: int) -> bool:
     """Whether the character at ``index`` is backslash-escaped.
 
     A character is escaped iff it is preceded by an *odd* number of consecutive
@@ -1002,7 +1002,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
         # in a string argument (e.g. `cmd='grep -F "]"'`) corrupts the bracket
         # stack and the whole tool call is rejected as mismatched.
         if bracket_stack and bracket_stack[-1] in {"'", '"'}:
-            if char == bracket_stack[-1] and not _is_escaped(text, index):
+            if char == bracket_stack[-1] and not is_escaped(text, index):
                 bracket_stack.pop()
             continue
         if char in {"[", "(", "{"}:

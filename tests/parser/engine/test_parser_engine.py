@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 import regex as re
 
-import vllm.parser.engine.parser_engine as parser_engine
+import vllm.parser.engine.arg_rewrite as arg_rewrite
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -32,13 +32,15 @@ from vllm.parser.engine.adapters import (
     ParserEngineToolAdapter,
     make_adapters,
 )
+from vllm.parser.engine.arg_rewrite import (
+    _ArgsRewriter,
+    _document_has_non_finite_literal,
+    _StreamingArgs,
+)
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import (
     ParserEngine,
     ReasoningEnd,
-    _ArgsRewriter,
-    _document_has_non_finite_literal,
-    _StreamingArgs,
 )
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
@@ -2346,7 +2348,7 @@ class TestIncrementalArgRewrite:
                 rewritten += len(self._text)
                 return super().rewrite()
 
-        monkeypatch.setattr(parser_engine, "_ArgsRewriter", CountingRewriter)
+        monkeypatch.setattr(arg_rewrite, "_ArgsRewriter", CountingRewriter)
         fields = {f"f{i}": {"type": "string"} for i in range(80)}
         doc = "{" + ", ".join(f'"f{i}": "v{i}"' for i in range(80)) + "}"
         tool = _make_tool("f", fields)
@@ -2396,7 +2398,7 @@ class TestIncrementalArgRewrite:
                 calls += 1
                 return super().rewrite()
 
-        monkeypatch.setattr(parser_engine, "_ArgsRewriter", CountingRewriter)
+        monkeypatch.setattr(arg_rewrite, "_ArgsRewriter", CountingRewriter)
         tool = _make_tool("f", {"body": {"type": "string"}})
         engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
         body = "x" * 4000
@@ -2417,7 +2419,7 @@ class TestIncrementalArgRewrite:
                 calls += 1
                 return super().rewrite()
 
-        monkeypatch.setattr(parser_engine, "_ArgsRewriter", CountingRewriter)
+        monkeypatch.setattr(arg_rewrite, "_ArgsRewriter", CountingRewriter)
         engine = _make_engine(_converter_config(_verbatim_converter))
         body = "Infinity " * 500
         chunks = ['{"body": "'] + [body[i : i + 8] for i in range(0, len(body), 8)]
@@ -2503,7 +2505,7 @@ class TestIncrementalArgRewrite:
                 rewritten += len(self._text)
                 return super().rewrite()
 
-        monkeypatch.setattr(parser_engine, "_ArgsRewriter", CountingRewriter)
+        monkeypatch.setattr(arg_rewrite, "_ArgsRewriter", CountingRewriter)
         tool = _make_tool("f", schema)
         engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
         chunks = [doc[i : i + 4] for i in range(0, len(doc), 4)]

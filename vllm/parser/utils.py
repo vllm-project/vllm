@@ -65,7 +65,7 @@ def count_history_tool_calls(
     return count_response_history_tool_calls(request_input)
 
 
-_JSON_WS = " \t\r\n"
+JSON_WS = " \t\r\n"
 
 
 def scan_json_object_end(raw: str, start: int) -> int | None:
@@ -133,7 +133,7 @@ def extract_json_member_object(raw: str, key: str) -> str | None:
             string_start = i
         elif ch == ":" and depth == 1 and last_string == key:
             value_start = i + 1
-            while value_start < len(raw) and raw[value_start] in _JSON_WS:
+            while value_start < len(raw) and raw[value_start] in JSON_WS:
                 value_start += 1
             if value_start >= len(raw):
                 return None
