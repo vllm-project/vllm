@@ -46,6 +46,26 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 
 ## Single Node Deployment
 
+### FlashInfer CuTeDSL MoE-EP on Rubin
+
+`--moe-backend flashinfer_moe_ep_cutedsl --enable-expert-parallel` supports
+SM100/SM103 and SM107 (Vera Rubin). On SM107, vLLM selects FlashInfer's native
+`Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig`; the legacy
+`Nvfp4CutedslMegaMoeConfig` alias targets SM100 and cannot be used on Rubin.
+Use a FlashInfer build exporting the SM107 config, CuTe DSL with native
+`sm_107a` and `cutlass.utils.rubin_helpers` support (4.8.0 or a compatible
+development build), and `nvshmem4py-cu13>=0.3.1`. Export
+`CUTE_DSL_ARCH=sm_107a` before starting Python to avoid an earlier CuTe import
+capturing a different target. The kernel uses NVSHMEM symmetric memory for EP;
+the optional FlashInfer NIXL-EP/NCCL-EP native extensions are not required for
+this backend. The separate `flashinfer_moe_ep_deep_gemm` backend remains
+restricted to SM100/SM103.
+
+The Rubin Docker build installs `flashinfer-python[sm107]==0.7.4` through
+`requirements/rubin-prerelease.txt` when `INSTALL_RUBIN_PRERELEASE=true`.
+The shared CUDA requirements keep the plain FlashInfer pin so CUDA 12 builds
+do not install CUDA 13 NVSHMEM bindings.
+
 ### Configuration
 
 Enable EP by setting the `--enable-expert-parallel` flag. The EP size is automatically calculated as:
@@ -137,6 +157,11 @@ EPv2 limitations:
 - Older MoRI builds leave a stale HIP error behind when the fabric-handle probe fails (e.g. on a single MI355X node), and the next PyTorch allocation raises `operation not supported`.
 
 ### FlashInfer MegaMoE on SM107
+
+The Rubin Docker build installs `flashinfer-python[sm107]==0.7.4` through
+`requirements/rubin-prerelease.txt` when `INSTALL_RUBIN_PRERELEASE=true`.
+The shared CUDA requirements retain the plain FlashInfer pin so CUDA 12
+builds do not install CUDA 13 NVSHMEM bindings.
 
 `--moe-backend flashinfer_moe_ep_cutedsl --enable-expert-parallel` runs FlashInfer's CuTeDSL MegaMoE on SM107 (compute capability 10.7, NVIDIA Rubin) GPUs for NVFP4 and MXFP4 expert checkpoints. MXFP4 weights are used as stored and run with MXFP8 activations, whatever activation scheme the checkpoint declares. ModelOpt NVFP4 and the MXFP4 experts of DeepSeek-V4.1 are validated; other checkpoints, for example compressed-tensors, have not yet been tested on SM107. It is never selected automatically.
 
