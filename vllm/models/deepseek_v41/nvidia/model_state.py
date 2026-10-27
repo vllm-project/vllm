@@ -311,6 +311,11 @@ class DeepseekV41ModelState(DefaultModelState):
         ubatch_idx: int = 0,
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
+        # A dummy run's early bracket is still open: its rows write the
+        # shared step buffers, so they must retire before anything in this
+        # build — the replay warmup and slot padding included — reads them.
+        if self._prologue_batch.open:
+            self._prologue_batch.flush()
         if self._replay is None:
             specs = [group.kv_cache_spec for group in kv_cache_config.kv_cache_groups]
             self._replay = (
@@ -406,6 +411,18 @@ class DeepseekV41ModelState(DefaultModelState):
         return self._replay_start_staging.copy_to_gpu(
             values, out=self._replay_start[:num_reqs]
         )
+
+    def begin_dummy_prologue(self) -> DecodePrologueBatch | None:
+        """Open the prologue batch before a dummy batch is built.
+
+        The dummy path's buffer builds stage into one launch, flushed at the
+        top of ``prepare_attn`` ahead of the attention phases' own launch.
+        Returns None on devices without the batched kernel.
+        """
+        if self.device.type != "cuda":
+            return None
+        self._prologue_batch.begin(decode_only=True)
+        return self._prologue_batch
 
     def _begin_prologue_batch(
         self,

@@ -67,6 +67,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -120,6 +121,7 @@ from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
+    _fill_is_padding_kernel,
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
     post_update,
@@ -1384,8 +1386,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert num_tokens > 0
         is_padding = self.input_buffers.is_padding[:num_tokens_after_padding]
         if envs.VLLM_MOE_SKIP_PADDING:
-            is_padding[:num_tokens].fill_(False)
-            is_padding[num_tokens:].fill_(True)
+            if is_padding.is_cuda:
+                _fill_is_padding_kernel[(cdiv(num_tokens_after_padding, 1024),)](
+                    is_padding,
+                    num_tokens,
+                    num_tokens_after_padding,
+                    BLOCK_SIZE=1024,  # type: ignore
+                )
+            else:
+                is_padding[:num_tokens].fill_(False)
+                is_padding[num_tokens:].fill_(True)
 
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
@@ -1597,19 +1607,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return block_tables, slot_mappings
 
     def prepare_dummy_attn(
-        self, input_batch: InputBatch, valid_state_slots: bool = False
+        self,
+        input_batch: InputBatch,
+        valid_state_slots: bool = False,
+        prologue: Any = None,
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        block_table_provider = self.pcp_manager or self.block_tables
-        block_tables = block_table_provider.get_dummy_block_tables(input_batch.num_reqs)
+        if self.pcp_manager is not None:
+            # Staging never reaches a PCP provider: the dummy branch gates the
+            # prologue on pcp_manager being None.
+            block_tables = self.pcp_manager.get_dummy_block_tables(input_batch.num_reqs)
+        else:
+            block_tables = self.block_tables.get_dummy_block_tables(
+                input_batch.num_reqs, prologue=prologue
+            )
         if valid_state_slots:
             state_slots = torch.arange(
                 1, input_batch.num_reqs + 1, dtype=torch.int32, device=self.device
             )
             for block_table in block_tables:
                 block_table[:, 0].copy_(state_slots)
-        slot_mappings = block_table_provider.get_dummy_slot_mappings(
-            input_batch.num_tokens
-        )
+        if self.pcp_manager is not None:
+            slot_mappings = self.pcp_manager.get_dummy_slot_mappings(
+                input_batch.num_tokens
+            )
+        else:
+            slot_mappings = self.block_tables.get_dummy_slot_mappings(
+                input_batch.num_tokens, prologue=prologue
+            )
         return block_tables, slot_mappings
 
     def sample(
@@ -1859,6 +1883,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
+            # The staging gates mirror every device-side touch of the dummy
+            # buffers between here and the flush at the top of
+            # model_state.prepare_attn: randomized inputs overwrite
+            # input_ids, PCP and DCP and the ubatch runner read the staged
+            # buffers, and a skipped attention build would leave the batch
+            # open past its bracket.
+            prologue = (
+                self.model_state.begin_dummy_prologue()
+                if (
+                    not skip_attn_for_dummy_run
+                    and not randomize_inputs
+                    and self.pcp_manager is None
+                    and self.dcp_size == 1
+                    and batch_desc.num_ubatches == 1
+                )
+                else None
+            )
             input_batch = InputBatch.make_dummy(
                 dummy_num_reqs,
                 batch_desc.num_tokens,
@@ -1867,6 +1908,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Profiling and warmup must route the dummy tokens to experts
                 # so MoE memory is measured and MoE kernels are exercised.
                 is_padding=not is_profile,
+                prologue=prologue,
             )
             if randomize_inputs:
                 # All-zero input_ids route every token to the same experts.
@@ -1882,8 +1924,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 block_tables, slot_mappings = None, None
             else:
+                # State slots and the dummy context populate the zeroed block
+                # tables before the flush would write them; they need the
+                # eager zero.
                 block_tables, slot_mappings = self.prepare_dummy_attn(
-                    input_batch, valid_dummy_state_slots
+                    input_batch,
+                    valid_dummy_state_slots,
+                    prologue=(
+                        None if (valid_dummy_state_slots or context_len) else prologue
+                    ),
                 )
                 if context_len:
                     set_dummy_context(

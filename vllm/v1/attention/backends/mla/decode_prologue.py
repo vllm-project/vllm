@@ -11,7 +11,7 @@ graph is recording, or when a step stages a single phase, the flush runs each
 phase's own kernel instead.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +45,9 @@ _KIND_NATIVE_LENS = 2
 _KIND_RING_SLOT = 3
 _KIND_SWA_INDEX = 4
 _KIND_LOOKBACK = 5
+_KIND_FILL_I64 = 6
+_KIND_ZERO_ROWS = 7
+_KIND_DUMMY_BATCH = 8
 
 
 @triton.jit
@@ -339,6 +342,74 @@ def _lookback_body(
     tl.store(lookback_ptr + batch_idx * DEPTH + offs, ids, mask=offs < DEPTH)
 
 
+@triton.jit
+def _fill_i64_body(output_ptr, value, num_elements, TRITON_BLOCK_SIZE: tl.constexpr):
+    offs = tl.program_id(0) * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)
+    tl.store(output_ptr + offs, value.to(tl.int64), mask=offs < num_elements)
+
+
+@triton.jit
+def _zero_rows_body(block_table_ptr, stride, TRITON_BLOCK_SIZE: tl.constexpr):
+    # pid is the block-table row; per-group column counts differ, hence the
+    # stride loop rather than a grid over columns.
+    row_ptr = block_table_ptr + tl.program_id(0).to(tl.int64) * stride
+    for i in tl.range(0, stride, TRITON_BLOCK_SIZE):
+        offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+        tl.store(row_ptr + offset, 0, mask=offset < stride)
+
+
+@triton.jit
+def _dummy_batch_body(
+    idx_mapping_ptr,  # [num_reqs] int64
+    expanded_local_pos_ptr,  # [num_reqs] int32
+    cu_num_logits_ptr,  # [num_reqs + 1] int32
+    logits_indices_ptr,  # [num_reqs] int32
+    seq_lens_ptr,  # [max_num_reqs] int32
+    query_start_loc_ptr,  # [max_num_reqs + 1] int32
+    input_ids_ptr,  # [num_tokens] int32
+    positions_ptr,  # [num_tokens] int64
+    is_padding_ptr,  # [num_tokens] int8
+    num_reqs,
+    num_tokens,
+    base_tokens,
+    num_extra,
+    max_num_reqs,
+    is_padding,
+    TRITON_BLOCK_SIZE: tl.constexpr,
+):
+    offs = tl.program_id(0) * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)
+
+    is_req = offs < num_reqs
+    zeros_i32 = tl.zeros([TRITON_BLOCK_SIZE], tl.int32)
+    tl.store(idx_mapping_ptr + offs, offs.to(tl.int64), mask=is_req)
+    tl.store(expanded_local_pos_ptr + offs, zeros_i32, mask=is_req)
+
+    # seq_len equals query_len; the last num_extra requests carry the remainder.
+    seq_len = base_tokens + tl.where(offs >= num_reqs - num_extra, 1, 0)
+    tl.store(
+        seq_lens_ptr + offs,
+        tl.where(is_req, seq_len, 0).to(tl.int32),
+        mask=offs < max_num_reqs,
+    )
+
+    # query_start_loc[k] = cumsum(seq_lens)[k] for k <= num_reqs, and the
+    # full-graph padding value num_tokens beyond that.
+    qsl = offs * base_tokens + tl.maximum(offs - (num_reqs - num_extra), 0)
+    qsl = tl.where(offs <= num_reqs, qsl, num_tokens)
+    tl.store(query_start_loc_ptr + offs, qsl.to(tl.int32), mask=offs < max_num_reqs + 1)
+
+    tl.store(cu_num_logits_ptr + offs, offs.to(tl.int32), mask=offs <= num_reqs)
+    next_qsl = (offs + 1) * base_tokens + tl.maximum(
+        offs + 1 - (num_reqs - num_extra), 0
+    )
+    tl.store(logits_indices_ptr + offs, (next_qsl - 1).to(tl.int32), mask=is_req)
+
+    is_tok = offs < num_tokens
+    tl.store(input_ids_ptr + offs, zeros_i32, mask=is_tok)
+    tl.store(positions_ptr + offs, tl.zeros([TRITON_BLOCK_SIZE], tl.int64), mask=is_tok)
+    tl.store(is_padding_ptr + offs, (is_padding != 0).to(tl.int8), mask=is_tok)
+
+
 @triton.jit(
     do_not_specialize=[
         "num_reqs_padded",
@@ -450,7 +521,7 @@ def _decode_prologue_kernel(
             num_mapped_tokens,
             TRITON_BLOCK_SIZE=TRITON_BLOCK_SIZE,
         )
-    else:
+    elif kind == 5:
         _lookback_body(
             _load_ptr(params + 2, tl.int32),
             _load_ptr(params + 3, tl.int64),
@@ -461,6 +532,38 @@ def _decode_prologue_kernel(
             _load_scalar(params, 12),
             DEPTH=DEPTH,
             BLOCK_DEPTH=BLOCK_DEPTH,
+        )
+    elif kind == 6:
+        _fill_i64_body(
+            _load_ptr(params + 2, tl.int64),
+            _load_scalar(params, 11),
+            _load_scalar(params, 12),
+            TRITON_BLOCK_SIZE=TRITON_BLOCK_SIZE,
+        )
+    elif kind == 7:
+        _zero_rows_body(
+            _load_ptr(params + 2, tl.int32),
+            _load_scalar(params, 11),
+            TRITON_BLOCK_SIZE=TRITON_BLOCK_SIZE,
+        )
+    else:
+        _dummy_batch_body(
+            _load_ptr(params + 2, tl.int64),
+            _load_ptr(params + 3, tl.int32),
+            _load_ptr(params + 4, tl.int32),
+            _load_ptr(params + 5, tl.int32),
+            seq_lens_ptr,
+            query_start_loc_ptr,
+            _load_ptr(params + 6, tl.int32),
+            positions_ptr,
+            _load_ptr(params + 7, tl.int8),
+            _load_scalar(params, 11),
+            _load_scalar(params, 12),
+            _load_scalar(params, 13),
+            _load_scalar(params, 14),
+            _load_scalar(params, 15),
+            _load_scalar(params, 16),
+            TRITON_BLOCK_SIZE=TRITON_BLOCK_SIZE,
         )
 
 
@@ -955,6 +1058,124 @@ class DecodePrologueBatch:
             window.shape[0],
             [window, idx_mapping, all_token_ids],
             [all_token_ids.stride(0), num_reqs],
+            fallback,
+        )
+
+    def stage_fill_i64(self, *, fuse: bool, tensor: torch.Tensor, value: int) -> None:
+        """Stage an int64 tensor fill; the direct path fills eagerly."""
+
+        def fallback() -> None:
+            tensor.fill_(value)
+
+        if not (fuse and self._fuse_ok()):
+            fallback()
+            return
+        numel = tensor.numel()
+        self._add_row(
+            _KIND_FILL_I64,
+            cdiv(numel, _TRITON_BLOCK_SIZE),
+            [tensor],
+            [value, numel],
+            fallback,
+        )
+
+    def stage_zero_block_table_rows(
+        self,
+        *,
+        fuse: bool,
+        block_tables: Sequence[torch.Tensor],
+        strides: Sequence[int],
+        num_rows: int,
+        fallback: Callable[[], None],
+    ) -> None:
+        """Stage the dummy block-table row zeroing, one row per KV group."""
+        if not (fuse and self._fuse_ok()):
+            fallback()
+            return
+        for block_table, stride in zip(block_tables, strides):
+            self._add_row(
+                _KIND_ZERO_ROWS,
+                num_rows,
+                [block_table],
+                [stride],
+                fallback,
+            )
+
+    def stage_dummy_batch(
+        self,
+        *,
+        fuse: bool,
+        idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        logits_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        is_padding: torch.Tensor,
+        num_reqs: int,
+        num_tokens: int,
+        base_tokens: int,
+        num_extra: int,
+        max_num_reqs: int,
+        is_padding_value: int,
+    ) -> None:
+        """Stage the dummy-batch buffer build.
+
+        The staged row writes the step's shared buffers (query_start_loc,
+        seq_lens, positions), so its launch must not also carry rows that
+        read them: the dummy bracket flushes before the attention phases
+        batch their own launch.
+        """
+
+        def fallback() -> None:
+            from vllm.v1.worker.gpu.input_batch import _init_dummy_batch_kernel
+
+            _init_dummy_batch_kernel[(cdiv(max(max_num_reqs + 1, num_tokens), 1024),)](
+                idx_mapping,
+                expanded_local_pos,
+                cu_num_logits,
+                logits_indices,
+                seq_lens,
+                query_start_loc,
+                input_ids,
+                positions,
+                is_padding,
+                num_reqs,
+                num_tokens,
+                base_tokens,
+                num_extra,
+                max_num_reqs,
+                is_padding_value,
+                BLOCK_SIZE=1024,  # type: ignore
+            )
+
+        if not (fuse and self._fuse_ok()):
+            fallback()
+            return
+        self._note_shared_tensor("query_start_loc", query_start_loc)
+        self._note_shared_tensor("seq_lens", seq_lens)
+        self._note_shared_tensor("positions", positions)
+        self._add_row(
+            _KIND_DUMMY_BATCH,
+            cdiv(max(max_num_reqs + 1, num_tokens), _TRITON_BLOCK_SIZE),
+            [
+                idx_mapping,
+                expanded_local_pos,
+                cu_num_logits,
+                logits_indices,
+                input_ids,
+                is_padding,
+            ],
+            [
+                num_reqs,
+                num_tokens,
+                base_tokens,
+                num_extra,
+                max_num_reqs,
+                is_padding_value,
+            ],
             fallback,
         )
 

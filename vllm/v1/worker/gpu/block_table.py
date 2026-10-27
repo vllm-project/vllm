@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -12,6 +13,9 @@ from vllm.v1.worker.gpu.buffer_utils import (
     UvaBackedTensor,
     _load_ptr,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.backends.mla.decode_prologue import DecodePrologueBatch
 
 
 class BlockTables:
@@ -215,7 +219,11 @@ class BlockTables:
         )
         return tuple(bt[:num_reqs_padded] for bt in out)
 
-    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
+    def get_dummy_block_tables(
+        self,
+        num_reqs: int,
+        prologue: "DecodePrologueBatch | None" = None,
+    ) -> tuple[torch.Tensor, ...]:
         # NOTE(woosuk): The output may be used for CUDA graph capture.
         # Therefore, this method must return the persistent tensor
         # with the same memory address as that used during the model's forward pass,
@@ -225,14 +233,29 @@ class BlockTables:
         # block rather than through the previous real step's (stale) block
         # ids, which may point at blocks since freed and reallocated.
         num_rows = max(num_reqs, self._num_dirty_rows)
-        # One launch zeroes every group's rows instead of one zero_ per group;
-        # per-group column counts differ, hence the stride lookup.
-        if self.input_block_tables:
+
+        def launch_zero() -> None:
             _zero_block_table_rows_kernel[(self.num_kv_cache_groups, num_rows)](
                 self.input_block_table_ptrs,
                 self.input_block_table_strides,
                 BLOCK_SIZE=1024,  # type: ignore
             )
+
+        # One launch zeroes every group's rows instead of one zero_ per group;
+        # per-group column counts differ, hence the stride lookup. Staging
+        # defers the zero to the prologue flush, so callers that populate the
+        # returned rows first (state slots, dummy context) must not stage.
+        if self.input_block_tables:
+            if prologue is None:
+                launch_zero()
+            else:
+                prologue.stage_zero_block_table_rows(
+                    fuse=True,
+                    block_tables=self.input_block_tables,
+                    strides=[bt.stride(0) for bt in self.input_block_tables],
+                    num_rows=num_rows,
+                    fallback=launch_zero,
+                )
         # Profiling may populate the returned rows with valid block IDs.
         self._num_dirty_rows = num_reqs
         return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
@@ -270,11 +293,18 @@ class BlockTables:
         )
         return slot_mappings[:, :num_tokens_padded]
 
-    def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:
+    def get_dummy_slot_mappings(
+        self, num_tokens: int, prologue: "DecodePrologueBatch | None" = None
+    ) -> torch.Tensor:
         # Fill the entire slot_mappings tensor, not just the first `num_tokens` entries.
         # This is because the padding logic is complex and kernels may access beyond
         # the requested range.
-        self.slot_mappings.fill_(PAD_SLOT_ID)
+        if prologue is None:
+            self.slot_mappings.fill_(PAD_SLOT_ID)
+        else:
+            prologue.stage_fill_i64(
+                fuse=True, tensor=self.slot_mappings, value=PAD_SLOT_ID
+            )
         # NOTE(woosuk): The output may be used for CUDA graph capture.
         # Therefore, this method must return the persistent tensor
         # with the same memory address as that used during the model's forward pass,

@@ -12,6 +12,7 @@ from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
+    from vllm.v1.attention.backends.mla.decode_prologue import DecodePrologueBatch
     from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
     from vllm.v1.worker.gpu.block_table import BlockTables
 
@@ -131,6 +132,7 @@ class InputBatch:
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
         is_padding: bool = True,
+        prologue: "DecodePrologueBatch | None" = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -184,24 +186,45 @@ class InputBatch:
             input_buffers.positions[:num_tokens] = 0
             input_buffers.is_padding[:num_tokens] = is_padding
         else:
-            _init_dummy_batch_kernel[(cdiv(max(max_num_reqs + 1, num_tokens), 1024),)](
-                idx_mapping,
-                expanded_local_pos,
-                cu_num_logits,
-                logits_indices,
-                input_buffers.seq_lens,
-                input_buffers.query_start_loc,
-                input_buffers.input_ids,
-                input_buffers.positions,
-                input_buffers.is_padding,
-                num_reqs,
-                num_tokens,
-                base_tokens,
-                num_extra,
-                max_num_reqs,
-                is_padding,
-                BLOCK_SIZE=1024,  # type: ignore
-            )
+            if prologue is None:
+                grid = (cdiv(max(max_num_reqs + 1, num_tokens), 1024),)
+                _init_dummy_batch_kernel[grid](
+                    idx_mapping,
+                    expanded_local_pos,
+                    cu_num_logits,
+                    logits_indices,
+                    input_buffers.seq_lens,
+                    input_buffers.query_start_loc,
+                    input_buffers.input_ids,
+                    input_buffers.positions,
+                    input_buffers.is_padding,
+                    num_reqs,
+                    num_tokens,
+                    base_tokens,
+                    num_extra,
+                    max_num_reqs,
+                    is_padding,
+                    BLOCK_SIZE=1024,  # type: ignore
+                )
+            else:
+                prologue.stage_dummy_batch(
+                    fuse=True,
+                    idx_mapping=idx_mapping,
+                    expanded_local_pos=expanded_local_pos,
+                    cu_num_logits=cu_num_logits,
+                    logits_indices=logits_indices,
+                    seq_lens=input_buffers.seq_lens,
+                    query_start_loc=input_buffers.query_start_loc,
+                    input_ids=input_buffers.input_ids,
+                    positions=input_buffers.positions,
+                    is_padding=input_buffers.is_padding,
+                    num_reqs=num_reqs,
+                    num_tokens=num_tokens,
+                    base_tokens=base_tokens,
+                    num_extra=num_extra,
+                    max_num_reqs=max_num_reqs,
+                    is_padding_value=int(is_padding),
+                )
         seq_lens = input_buffers.seq_lens[:num_reqs]
         query_start_loc = input_buffers.query_start_loc[: num_reqs + 1]
         input_ids = input_buffers.input_ids[:num_tokens]
@@ -354,6 +377,17 @@ def _init_dummy_batch_kernel(
     tl.store(input_ids_ptr + offs, tl.zeros([BLOCK_SIZE], tl.int32), mask=is_tok)
     tl.store(positions_ptr + offs, tl.zeros([BLOCK_SIZE], tl.int64), mask=is_tok)
     tl.store(is_padding_ptr + offs, is_padding != 0, mask=is_tok)
+
+
+@triton.jit(do_not_specialize=["num_tokens", "num_tokens_padded"])
+def _fill_is_padding_kernel(
+    is_padding_ptr,  # [num_tokens_padded] bool
+    num_tokens,
+    num_tokens_padded,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offs = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    tl.store(is_padding_ptr + offs, offs >= num_tokens, mask=offs < num_tokens_padded)
 
 
 @triton.jit

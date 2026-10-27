@@ -228,6 +228,15 @@ class ModelState(ABC):
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         raise NotImplementedError
 
+    def begin_dummy_prologue(self) -> Any:
+        """Open a prologue staging batch before a dummy batch is built.
+
+        The default returns None; model states with a batched decode
+        prologue override this to fold the dummy path's buffer builds into
+        one launch flushed ahead of the attention phases' launch.
+        """
+        return None
+
     @abstractmethod
     def prepare_attn(
         self,
