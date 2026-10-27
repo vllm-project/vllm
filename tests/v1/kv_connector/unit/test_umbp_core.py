@@ -1195,7 +1195,9 @@ def test_sync_load_finishes_before_forward_without_layer_hooks(
     assert handle.waited == [handle.load_job]
     assert worker.get_finished(set()) == (None, None)
     assert worker.get_block_ids_with_load_errors() == ({7} if fail_load else set())
-    stats = worker.get_kv_connector_stats().reduce()
+    connector_stats = worker.get_kv_connector_stats()
+    assert connector_stats is not None
+    stats = connector_stats.reduce()
     assert stats["load_completed"] == (0 if fail_load else 1)
     assert stats["load_failed"] == (1 if fail_load else 0)
 

@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockIdentityCodec,
+    BlockLoadBatch,
     BlockTransferPlan,
     KVLayoutPlanner,
     LoadSpec,
@@ -60,6 +61,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheTensor,
     MLAAttentionSpec,
@@ -108,6 +110,7 @@ def test_mamba_align_states_store_only_from_boundary_handoffs():
         )
 
     positional = scheduler.build_connector_meta(output({}))
+    assert isinstance(positional, UMBPConnectorMetadata)
     assert {
         (plan.group_id, plan.block_id) for plan in positional.iter_store_plans()
     } == {
@@ -117,6 +120,7 @@ def test_mamba_align_states_store_only_from_boundary_handoffs():
 
     scheduler._request_trackers["m"].saved_tokens = 0
     handed_off = scheduler.build_connector_meta(output({"m": [(1, 9, 32)]}))
+    assert isinstance(handed_off, UMBPConnectorMetadata)
     handed_off_plans = list(handed_off.iter_store_plans())
     assert (1, 9) in {(plan.group_id, plan.block_id) for plan in handed_off_plans}
     assert not any(
@@ -193,6 +197,7 @@ def test_store_plans_store_each_groups_complete_blocks():
 def test_store_plans_apply_core_reachable_block_mask(monkeypatch):
     config = _kv_cache_config()
     full = config.kv_cache_groups[0].kv_cache_spec
+    assert isinstance(full, FullAttentionSpec)
     sliding = SlidingWindowSpec(
         block_size=16,
         num_kv_heads=full.num_kv_heads,
@@ -244,6 +249,7 @@ def test_store_plans_apply_core_reachable_block_mask(monkeypatch):
 def test_single_sliding_window_stores_a_replayable_tail(use_eagle):
     config = _kv_cache_config()
     full = config.kv_cache_groups[0].kv_cache_spec
+    assert isinstance(full, FullAttentionSpec)
     config.kv_cache_groups[0].kv_cache_spec = SlidingWindowSpec(
         block_size=16,
         num_kv_heads=full.num_kv_heads,
@@ -278,6 +284,7 @@ def test_single_sliding_window_stores_a_replayable_tail(use_eagle):
             matched,
         )
         loaded = scheduler._pending_loads[request.request_id]
+        assert isinstance(loaded, BlockLoadBatch)
         assert loaded.block_ids == [5, 6]
         expected_hashes = [b"b", b"c"] if use_eagle else [b"c", b"d"]
         assert loaded.keys == [codec.key(block_hash) for block_hash in expected_hashes]
@@ -298,6 +305,7 @@ def test_external_chunked_local_hit_preserves_absolute_positions(
     """
     config = _kv_cache_config()
     full = config.kv_cache_groups[0].kv_cache_spec
+    assert isinstance(full, FullAttentionSpec)
     config.kv_cache_groups.append(
         KVCacheGroupSpec(
             ["chunked"],
@@ -361,6 +369,7 @@ def test_external_chunked_local_hit_preserves_absolute_positions(
 def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
     config = _kv_cache_config()
     full = config.kv_cache_groups[0].kv_cache_spec
+    assert isinstance(full, FullAttentionSpec)
     config.kv_cache_groups.append(
         KVCacheGroupSpec(
             ["sliding"],
@@ -402,6 +411,7 @@ def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
             48,
         )
         loaded = scheduler._pending_loads[request.request_id]
+        assert isinstance(loaded, BlockLoadBatch)
         assert loaded.keys == [
             codec.key(b"a", 0),
             codec.key(b"b", 0),
@@ -416,6 +426,7 @@ def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
 def test_chunk_boundary_hit_without_transfers_is_synchronous():
     config = _kv_cache_config()
     full = config.kv_cache_groups[0].kv_cache_spec
+    assert isinstance(full, FullAttentionSpec)
     config.kv_cache_groups[0].kv_cache_spec = ChunkedLocalAttentionSpec(
         block_size=16,
         num_kv_heads=full.num_kv_heads,
@@ -575,6 +586,7 @@ def test_hybrid_lookup_uses_latest_mamba_checkpoint(lookup_async, monkeypatch):
         codec,
     )
     try:
+        assert scheduler._lookup_coordinator is not None
         pool = scheduler._lookup_coordinator.block_pool
         for operation in (
             "get_new_blocks",
@@ -632,7 +644,9 @@ def test_hybrid_shadow_lookup_cleans_up_after_failure(monkeypatch, failure_stage
     request = make_request("r", num_tokens=33)
     handle.hits = {codec.key(h, g): True for h in request.block_hashes for g in (0, 1)}
     coordinator = scheduler._lookup_coordinator
+    assert coordinator is not None
     pool = coordinator.block_pool
+    assert isinstance(pool, umbp_scheduler._LookupBlockPool)
     free_blocks = pool.get_num_free_blocks()
 
     def fail(*args, **kwargs):
@@ -727,6 +741,8 @@ def test_scheduler_accepts_only_computed_hash_aligned_tail(boundary, monkeypatch
         request, ([7],), [(0, 7, boundary)]
     )
     metadata = scheduler.build_connector_meta(make_scheduler_output())
+    assert isinstance(metadata, UMBPConnectorMetadata)
+    assert scheduler.codec is not None
 
     assert len(metadata.store_plans) == (1 if boundary == 12 else 0)
     if metadata.store_plans:
@@ -765,6 +781,8 @@ def test_scheduler_stores_exact_hybrid_boundary_state():
         )
     )
 
+    assert isinstance(metadata, UMBPConnectorMetadata)
+    assert scheduler.codec is not None
     assert len(metadata.store_plans) == 1
     plan = metadata.store_plans[0]
     assert plan.group_id == 1
@@ -879,6 +897,7 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
         make_scheduler_output(finished={request.request_id})
     )
 
+    assert isinstance(metadata, UMBPConnectorMetadata)
     assert len(metadata.store_plans) == 2
     assert {(plan.group_id, plan.block_id) for plan in metadata.store_plans} == {
         (0, 7),
@@ -1101,6 +1120,8 @@ def test_eager_restored_prefix_rechecks_residency_per_group_and_rank(
     )
     try:
         meta = scheduler.build_connector_meta(output)
+        assert isinstance(meta, UMBPConnectorMetadata)
+        assert scheduler.codec is not None
         expected = {(0, b"c"), (0, b"d"), (1, b"d")} if restored_tokens == 32 else set()
         if failure == "missing-rank":
             expected.add((0, b"a"))
