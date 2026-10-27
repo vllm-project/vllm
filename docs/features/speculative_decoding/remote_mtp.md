@@ -32,6 +32,10 @@ Exaone MTP modules use the draft checkpoint's module count, attention types and
 sliding windows, including when the draft checkpoint is published separately
 from the target.
 
+HYV3 and ERNIE MTP heads use the selected draft checkpoint's normalization,
+rotary position settings and module layout, including when the draft checkpoint
+is published separately from the target.
+
 Native unquantized HYV3 loading checks every MTP-owned parameter, including each
 packed projection and local expert shard. Draft-only checkpoints may omit the
 target-owned embedding and LM head; the native proposer installs them after

@@ -209,6 +209,11 @@ class HYV3MultiTokenPredictor(nn.Module):
 class HYV3MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            vllm_config = vllm_config.with_hf_config(
+                speculative_config.draft_model_config.hf_config
+            )
         self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
