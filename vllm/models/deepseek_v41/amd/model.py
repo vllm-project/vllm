@@ -460,14 +460,17 @@ class DeepseekV4DecoderLayer(nn.Module):
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
         pre_mix: torch.Tensor,
-        post_mix: torch.Tensor,
-        res_mix: torch.Tensor,
-        residual: torch.Tensor,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        residual: torch.Tensor | None,
     ) -> None:
         """Write the KV ``forward`` would for the replay layers' inputs, skipping
         the rest of the layer; the replay batch then reruns its rows."""
         # The replay batch rules out Engram and sequence parallel here.
         assert self.engram is None and not self.use_sequence_parallel
+        if residual is None:
+            # A PP stage that starts at the cut: x is the posted stream.
+            residual, x, post_mix, res_mix = x, None, None, None
         fuse_attn_norm = self.fuse_seam_norm
         residual, post_mix, res_mix, x, _attn_pre = self.mhc_pre_delayed(
             residual,
@@ -922,9 +925,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
         pre_mix: torch.Tensor,
-        post_mix: torch.Tensor,
-        res_mix: torch.Tensor,
-        residual: torch.Tensor,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, ...]:
         """Layers past the last KV source, on the rows they are given.
 
@@ -935,9 +938,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # and sequence parallel is unsupported while replay is on.
         cut_aux: list[torch.Tensor] = []
         if self.decoder_replay_start in self.aux_hidden_state_layers:
-            cut_aux.append(
-                self.mhc_post(hidden_states, residual, post_mix, res_mix).mean(dim=1)
+            # No residual: the stage starts at the cut, its input already posted.
+            settled = (
+                hidden_states
+                if residual is None
+                else self.mhc_post(hidden_states, residual, post_mix, res_mix)
             )
+            cut_aux.append(settled.mean(dim=1))
         (
             hidden_states,
             residual,
