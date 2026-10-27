@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from starlette.responses import JSONResponse, StreamingResponse
 
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
@@ -36,7 +37,12 @@ from vllm.entrypoints.launchers.run_batch import (
     validate_batch,
     validate_run_batch_args,
 )
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingResponse,
+    EmbeddingResponseData,
+)
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import MiB_bytes
@@ -550,6 +556,46 @@ def test_completions_invalid_input():
         assert proc.returncode != 0, f"{proc=}"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_factory", [JSONResponse, create_json_response])
+async def test_batch_embedding_json_responses(response_factory):
+    expected = EmbeddingResponse(
+        id="embd-test",
+        model=EMBEDDING_MODEL_NAME,
+        data=[EmbeddingResponseData(index=0, embedding=[0.25, -0.5])],
+        usage=UsageInfo(prompt_tokens=3, total_tokens=3),
+    )
+
+    async def handler(request):
+        return response_factory(expected.model_dump())
+
+    request = run_batch_module.BatchRequestInput.model_validate_json(
+        INPUT_EMBEDDING_BATCH.splitlines()[0]
+    )
+    result = await run_batch_module.run_request(handler, request)
+
+    assert result.custom_id == request.custom_id
+    assert result.error is None
+    assert result.response is not None
+    assert result.response.status_code == 200
+    assert result.response.body == expected
+
+
+@pytest.mark.asyncio
+async def test_batch_rejects_json_stream():
+    async def handler(request):
+        return StreamingResponse(iter([b"{}"]), media_type="application/json")
+
+    request = run_batch_module.BatchRequestInput.model_validate_json(
+        INPUT_EMBEDDING_BATCH.splitlines()[0]
+    )
+    result = await run_batch_module.run_request(handler, request)
+
+    assert result.response is not None
+    assert result.response.status_code == 400
+    assert result.error == "Request must not be sent in stream mode"
+
+
 def test_embeddings():
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
@@ -573,11 +619,26 @@ def test_embeddings():
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
-        for line in contents.strip().split("\n"):
-            # Ensure that the output format conforms to the openai api.
-            # Validation should throw if the schema is wrong.
+        outputs = [
             BatchRequestOutput.model_validate_json(line)
+            for line in output_file.read().splitlines()
+        ]
+        assert [output.custom_id for output in outputs] == [
+            "request-1",
+            "request-2",
+            "request-3",
+            "request-4",
+        ]
+        for output in outputs[:3]:
+            assert output.error is None
+            assert output.response is not None
+            assert output.response.status_code == 200
+            assert isinstance(output.response.body, EmbeddingResponse)
+            assert len(output.response.body.data) == 1
+            assert len(output.response.body.data[0].embedding) == 384
+        assert outputs[3].response is not None
+        assert outputs[3].response.status_code == 404
+        assert outputs[3].error is not None
 
 
 @pytest.mark.parametrize("input_batch", [INPUT_SCORE_BATCH, INPUT_RERANK_BATCH])
