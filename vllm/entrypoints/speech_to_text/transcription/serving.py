@@ -179,6 +179,7 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
                     output_tokens=completion_tokens,
                     total_tokens=total_tokens,
                 ),
+                duration=audio_duration_s,
             )
             request_metadata.final_usage_info = UsageInfo(
                 prompt_tokens=num_prompt_tokens,
