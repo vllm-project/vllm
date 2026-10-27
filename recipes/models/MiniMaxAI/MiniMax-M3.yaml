@@ -15,7 +15,7 @@ meta:
     b200: verified
     b300: verified
     # GB200: verified with the NVFP4 variant only (InferenceX #4281,
-    # run 39150937290); other variants on GB200 are not qualified.
+    # run 40476678241); other variants on GB200 are not qualified.
     gb200: verified
     mi300x: verified
     mi355x: verified
@@ -277,7 +277,7 @@ variants:
           - "--no-enable-flashinfer-autotune"
           - "--stream-interval"
           - "20"
-      # GB200 AgentX lane (InferenceX #4281, run 39150937290): one tray per TP4
+      # GB200 AgentX lane (InferenceX #4281, run 40476678241): one tray per TP4
       # worker, two trays for TP8. Per-concurrency --max-num-seqs and CUDA
       # graph sizes are in the guide.
       gb200:
@@ -1184,12 +1184,14 @@ guide: |
   |---:|---:|---:|---|---|
   | 1 | 4 | 2 | none | `1,2,4,8` |
   | 1 | 8 | 2 | none | `1,2,4,8` |
+  | 5 | 8 | 8 | none | `1,2,4` then every 4 up to `32` |
   | 10 | 4 | 16 | none | `1,2,4` then every 4 up to `64` |
   | 20 | 4 | 8 | SimpleCPUOffload | every 4 from `4` to `32` |
+  | 22 | 4 | 12 | SimpleCPUOffload | every 4 from `4` to `48` |
   | 25 | 4 | 16 | SimpleCPUOffload | every 4 from `4` to `64` |
   | 30 | 4 | 45 | SimpleCPUOffload | every 4 from `4` to `180` |
 
-  Every list ends with `256,512,1024,2048` and uses `{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[...]}`. Sizes 1 and 2 give the drafter's decode steps full CUDA graphs at concurrency 1.
+  Every list ends with `256,512,1024,2048` and uses `{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[...]}`. Sizes 1 and 2 give the drafter's decode steps full CUDA graphs on the GPU-resident points.
 
   The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden EAGLE3-GQA acceptance length (2.78 for MiniMax-M3 with three draft tokens, thinking on; [`minimaxm3_eagle3_gqa.yaml`](https://github.com/SemiAnalysisAI/InferenceX/blob/main/inferencex-e2e/infx/golden_al_distribution/minimaxm3_eagle3_gqa.yaml)) so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler, as in the command below; the lane's accuracy evals ran that way.
 
