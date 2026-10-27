@@ -568,38 +568,37 @@ class _StreamingArgs:
             self._stop = stop if self._stop is None else min(self._stop, stop)
         return out, safe, streams
 
-    # A converter only appends to its previous output between ticks, so
-    # checking this much of the cached tail detects a rewritten boundary
-    # without rescanning the whole document on every delta.
-    _OVERLAP = 256
-
     def _extends(self, args_json: str) -> bool:
         """Whether *args_json* still has the cached document as its prefix."""
         raw = self._raw
         if not raw.startswith("{") or len(args_json) < len(raw):
             return False
-        if len(args_json) == len(raw):
-            return args_json == raw
-        start = max(len(raw) - self._OVERLAP, 0)
-        return args_json[start : len(raw)] == raw[start:]
+        # Compare the whole prefix: a converter that rewrites text far from
+        # the end is invisible to a tail-only check when the tail repeats,
+        # and its deltas would be sliced from stale offsets.  ``startswith``
+        # is a C-level memcmp, so this stays far cheaper than a rewriter pass.
+        return args_json.startswith(raw)
 
     def delta(self, args_json: str) -> tuple[str, bool] | None:
         """Return (newly safe text, value_streams), or ``None`` for a full pass."""
         raw = self._raw
         if not self._extends(args_json):
             return None
+        if self.streams and self._at_end:
+            delta = args_json[len(raw) :]
+            # No unescaped quote means the delta stays inside the cached open
+            # string, so a non-finite-looking token in it is string content
+            # and cannot need the rewrite the fragment check guards against.
+            if not _unescaped_quote(delta, _is_escaped(raw, len(raw))):
+                self._raw = args_json
+                self._emitted += len(delta)
+                return delta, True
         if not self._properties and not self._nonfinite:
             # A non-finite literal introduced after the cache was built may
             # rewrite text the full pass left verbatim after a give-up.
             added = args_json[max(0, len(raw) - _NON_FINITE_OVERLAP) :]
             if _has_non_finite_literal(added):
                 return None
-        if self.streams and self._at_end:
-            delta = args_json[len(raw) :]
-            if not _unescaped_quote(delta, _is_escaped(raw, len(raw))):
-                self._raw = args_json
-                self._emitted += len(delta)
-                return delta, True
         skip = 1 if self._raw_boundary else 0
         base = self._raw_boundary
         raw_tail = args_json[base:]

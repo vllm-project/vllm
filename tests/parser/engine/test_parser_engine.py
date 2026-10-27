@@ -2406,6 +2406,26 @@ class TestIncrementalArgRewrite:
         assert args == '{"body": "' + body + '"}'
         assert calls < 10, f"rewrote {calls} times for {len(chunks)} deltas"
 
+    def test_long_string_naming_nonfinite_is_not_rewritten_per_delta(self, monkeypatch):
+        """A no-schema open string that names a non-finite literal is still
+        string content; the fragment check must not force a full pass."""
+        calls = 0
+
+        class CountingRewriter(_ArgsRewriter):
+            def rewrite(self):
+                nonlocal calls
+                calls += 1
+                return super().rewrite()
+
+        monkeypatch.setattr(parser_engine, "_ArgsRewriter", CountingRewriter)
+        engine = _make_engine(_converter_config(_verbatim_converter))
+        body = "Infinity " * 500
+        chunks = ['{"body": "'] + [body[i : i + 8] for i in range(0, len(body), 8)]
+        chunks.append('"}')
+        args = _stream_tool_args(engine, "f", chunks)
+        assert args == '{"body": "' + body + '"}'
+        assert calls < 10, f"rewrote {calls} times for {len(chunks)} deltas"
+
     def test_non_extending_text_falls_back_to_full_pass(self):
         tool = _make_tool("f", {"a": {"type": "integer"}})
         properties = find_tool_properties([tool], "f")
@@ -2421,6 +2441,18 @@ class TestIncrementalArgRewrite:
         string_keys = ParserEngine._streamable_string_keys(properties)
         cache = _StreamingArgs('{"a": 1, "b": "x"}', properties, string_keys)
         assert cache.delta('{"a": 1, "b": "y", "c": 2}') is None
+
+    def test_rewrite_behind_identical_tail_falls_back_to_full_pass(self):
+        """The cached prefix is compared in full: an open-string converter
+        appends at the end, so a same-length rewrite far from the end leaves
+        the tail identical and its delta would be sliced from stale offsets."""
+        tool = _make_tool("f", {"a": {"type": "string"}, "b": {"type": "string"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        raw = '{"a": "1", "b": "' + "x" * 300
+        cache = _StreamingArgs(raw, properties, string_keys)
+        rewritten = '{"a": "2", "b": "' + "x" * 301
+        assert cache.delta(rewritten) is None
 
     @pytest.mark.parametrize("size", [1, 2, 3, 5])
     def test_non_delimited_nonfinite_literal_streams_as_final(self, size):
