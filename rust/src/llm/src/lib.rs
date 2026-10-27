@@ -104,6 +104,7 @@ impl Llm {
             (stream_interval > NonZeroU32::MIN).then_some(stream_interval);
 
         let prepared = req.prepare(self.randomize_request_id)?;
+        let remote_prefill_cached_tokens = prepared.remote_prefill_cached_tokens();
         let prompt_token_ids = prepared.prompt_token_ids().into();
         let external_request_id = prepared
             .engine_request
@@ -135,6 +136,7 @@ impl Llm {
 
         Ok(GenerateOutputStream::new(
             prompt_token_ids,
+            remote_prefill_cached_tokens,
             stream,
             request_metrics,
             guard,
