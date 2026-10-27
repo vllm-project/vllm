@@ -52,6 +52,18 @@ class TestResponsesRequestSamplingParams:
 
         assert sampling_params.min_p == 0.0
 
+    def test_min_tokens(self):
+        """Test that min_tokens is forwarded to SamplingParams."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            min_tokens=4,
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.min_tokens == 4
+
     def test_extra_sampling_params(self):
         """Test extra sampling parameters are correctly mapped."""
         request = ResponsesRequest(
