@@ -731,18 +731,15 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] MoE Refactor Integration TEMPORARY"
   key: moe-refactor-integration-test-h100-temporary
+  automatic_shard: true
   device: h100
   optional: true
   num_devices: 2
-  parallelism: 4
   commands:
-    # Timing-balanced static split of the former config-h100.txt (measured on
-    # build 83851): shards ~12.4/13.6/12.4/14.5m of eval time. New configs must
-    # be added to exactly one config-h100-shard-*.txt.
-    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100-shard-$$BUILDKITE_PARALLEL_JOB.txt
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
   mirror:
     amd:
-      label: ":amd: (MI355) MoE Refactor Integration Shard %N"
+      label: ":amd: (MI355) MoE Refactor Integration"
       dind: false
       device: mi355_2
       num_devices: 2
@@ -759,23 +756,22 @@ steps:
       env:
         VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       commands:
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-rocm-shard-$$BUILDKITE_PARALLEL_JOB.txt
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-rocm.txt
 
-- label: ":nvidia: (B200) [Nightly] MoE Refactor Integration TEMPORARY Shard %N"
+- label: ":nvidia: (B200) [Nightly] MoE Refactor Integration TEMPORARY"
   key: moe-refactor-integration-test-b200-temporary
+  automatic_shard: true
   device: b200-k8s
   optional: true
   num_devices: 2
-  parallelism: 4
   commands:
-    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200-shard-$$BUILDKITE_PARALLEL_JOB.txt
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt
   mirror:
     amd:
       label: ":amd: (MI355) MoE Refactor BF16 Integration"
       dind: false
       device: mi355_2
       num_devices: 2
-      parallelism: 1
       timeout_in_minutes: 105
       working_dir: /vllm-workspace/tests
       depends_on:
