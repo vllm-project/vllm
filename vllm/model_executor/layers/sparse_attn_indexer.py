@@ -506,16 +506,19 @@ def sparse_attn_indexer(
 
         # Dummy allocation for the peak logits memory during inference: the
         # prefill chunks' budget, or the decode logits, which eager and
-        # piecewise steps allocate outside the CUDA graph pools. DeepGEMM emits
-        # them as [rows, max_model_len padded], BF16 on SM100 (plus the FP32
-        # copy) and FP32 elsewhere.
+        # piecewise steps allocate outside the CUDA graph pools. On SM100
+        # DeepGEMM emits them in BF16 with rows padded to whole 384-column KV
+        # splits and 1024-byte strides (lcm 1536), and the FP32 copy keeps that
+        # stride; elsewhere they are FP32.
         if current_platform.is_device_capability_family(100):
-            decode_elem_bytes = 6 if fp32_decode_logits else 2
+            decode_row_bytes = round_up(max_model_len, 1536) * (
+                6 if fp32_decode_logits else 2
+            )
         else:
-            decode_elem_bytes = 4
+            decode_row_bytes = round_up(max_model_len, 1024) * 4
         max_logits_bytes = max(
             envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
-            max_decode_tokens * round_up(max_model_len, 1024) * decode_elem_bytes,
+            max_decode_tokens * decode_row_bytes,
         )
         _ = torch.empty(
             max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
