@@ -3,6 +3,7 @@
 
 import types
 from dataclasses import dataclass, replace
+from typing import NotRequired, TypedDict
 
 import pytest
 import torch
@@ -1522,10 +1523,21 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
 # -----------------------------------------------------------------------------
 # ROCm Oracle-based kernel execution tests
 # -----------------------------------------------------------------------------
+class RocmBackendConfig(TypedDict):
+    activation: str
+    rtol: float
+    percent: float
+    requires_aiter: bool
+    requires_gfx950: bool
+    requires_gfx1250: NotRequired[bool]
+    interleaved_layout: NotRequired[bool]
+    act_type: NotRequired[str]
+
+
 # TODO: Further tighten the accuracy threshold.
 # - More accurate ref moe to include activation quantization
 # - Check aiter kernel accuracy. E.g., quant / dequant details.
-ROCM_BACKEND_CONFIGS = {
+ROCM_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
     "TRITON": {
         "activation": "SWIGLUOAI",
         "rtol": 0.3,
@@ -1814,6 +1826,7 @@ def test_rocm_mxfp4_moe_oracle(
                 apply_router_weight_on_input=False,
             )
 
+    assert isinstance(out, torch.Tensor)
     # Verify output is valid (no NaN/Inf) and has expected shape
     assert out.shape == (num_tokens, hidden_size), f"Unexpected shape: {out.shape}"
     assert not torch.any(torch.isnan(out)), "Output contains NaN"
@@ -1881,6 +1894,137 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Check accuracy using per-backend thresholds
     check_accuracy(ref, out, atol=0.1, rtol=config["rtol"], percent=config["percent"])
+
+
+@pytest.mark.parametrize("intermediate_size_unpadded", [640, 704])
+@pytest.mark.skipif(not ROCM_GFX950, reason="Requires GFX950")
+@pytest.mark.skipif(not ROCM_AITER_AVAILABLE, reason="Requires AITER")
+@torch.inference_mode()
+def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
+    intermediate_size_unpadded: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """At MoE tp_size == 1 the W4A4 MoE masks the padding and nothing else.
+
+    The experts are stored 768 wide with zeros past the real width, so the
+    layer computes the same function whether the kernel is told that the tail
+    is padding or not. A pad that is doubled twice (once by vLLM, once inside
+    AITER for the fused gate/up weight) masks live intermediate rows as well.
+    640 stored at 768 is Qwen3.8 Flash Next's shape at TP1 and under expert
+    parallelism before the W4A4 intermediate was aligned to 128.
+    """
+    import vllm.distributed.parallel_state as ps
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        backend_to_kernel_cls,
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+        make_mxfp4_moe_kernel,
+        make_mxfp4_moe_quant_config,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    init_workspace_manager(torch.accelerator.current_device_index())
+    monkeypatch.setattr(ps, "_TP", types.SimpleNamespace(world_size=1))
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+
+    backend = Mxfp4MoeBackend.AITER_MXFP4_MXFP4
+    experts_cls = backend_to_kernel_cls(backend)[0]
+    num_experts, topk, num_tokens = 8, 2, 64
+    hidden_size, intermediate_size = 512, 768
+    dtype, device = torch.bfloat16, "cuda:0"
+
+    torch.manual_seed(0)
+    w13 = torch.randn(
+        num_experts, 2 * intermediate_size, hidden_size, dtype=dtype, device=device
+    )
+    w13[:, intermediate_size_unpadded:intermediate_size] = 0
+    w13[:, intermediate_size + intermediate_size_unpadded :] = 0
+    w2 = torch.randn(
+        num_experts, hidden_size, intermediate_size, dtype=dtype, device=device
+    )
+    w2[..., intermediate_size_unpadded:] = 0
+    w13_q, w13_scale = dynamic_mxfp4_quant(w13.reshape(-1, hidden_size))
+    w2_q, w2_scale = dynamic_mxfp4_quant(w2.reshape(-1, intermediate_size))
+    w13_q = w13_q.reshape(num_experts, 2 * intermediate_size, -1)
+    w13_scale = w13_scale.reshape(num_experts, 2 * intermediate_size, -1)
+    w2_q = w2_q.reshape(num_experts, hidden_size, -1)
+    w2_scale = w2_scale.reshape(num_experts, hidden_size, -1)
+
+    layer = types.SimpleNamespace(w13_input_scale=None, w2_input_scale=None)
+    w13_q, w2_q, w13_scale, w2_scale, _, _ = (
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+            mxfp4_backend=backend,
+            layer=layer,
+            w13_weight=w13_q,
+            w2_weight=w2_q,
+            w13_weight_scale=w13_scale,
+            w2_weight_scale=w2_scale,
+            w13_bias=None,
+            w2_bias=None,
+        )
+    )
+    weights = (w13_q, w2_q, w13_scale, w2_scale)
+    weights_before = [w.clone() for w in weights]
+
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    topk_weights, topk_ids = torch.topk(
+        torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device),
+        k=topk,
+        dim=-1,
+    )
+    topk_weights = torch.softmax(topk_weights, dim=-1)
+
+    def run(unpadded: int) -> torch.Tensor:
+        moe_config = FusedMoEConfig(
+            num_experts=num_experts,
+            experts_per_token=topk,
+            hidden_dim=hidden_size,
+            intermediate_size=intermediate_size,
+            num_local_experts=num_experts,
+            num_logical_experts=num_experts,
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            activation=MoEActivation.SILU,
+            in_dtype=dtype,
+            device=device,
+            routing_method=RoutingMethodType.Renormalize,
+            intermediate_size_per_partition_unpadded=unpadded,
+        )
+        quant_config = make_mxfp4_moe_quant_config(
+            mxfp4_backend=backend, w1_scale=w13_scale, w2_scale=w2_scale
+        )
+        with set_current_vllm_config(VllmConfig()):
+            kernel = make_mxfp4_moe_kernel(
+                moe_quant_config=quant_config,
+                moe_config=moe_config,
+                mxfp4_backend=backend,
+                experts_cls=experts_cls,
+                routing_tables=None,
+            )
+            return kernel.apply(
+                hidden_states=x,
+                w1=w13_q,
+                w2=w2_q,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+    padded = run(intermediate_size_unpadded)
+    unpadded = run(intermediate_size)
+
+    for before, after in zip(weights_before, weights):
+        assert torch.equal(before, after), "the MoE op modified its weights"
+    torch.testing.assert_close(padded, unpadded, atol=1e-2, rtol=1e-2)
 
 
 # -----------------------------------------------------------------------------
@@ -2074,10 +2218,11 @@ def test_select_mxfp4_moe_backend_respects_checkpoint_activation(
 
 @pytest.mark.parametrize("backend_name", ["AITER_TRITON_MXFP4_BF16", "AITER_MXFP4_FP8"])
 @pytest.mark.parametrize("use_ep", [False, True])
-def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
+def test_aiter_mxfp4_monolithic_expert_parallel_support(
     monkeypatch: pytest.MonkeyPatch, backend_name: str, use_ep: bool
 ):
-    """Global routing cannot index local expert weights, even without all-to-all."""
+    """Naive EP (no all-to-all) is supported by W4A16, which takes an expert_map;
+    W4A8's global routing cannot index local expert weights."""
     from tests.kernels.moe.utils import make_dummy_moe_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
@@ -2122,8 +2267,10 @@ def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
         FusedMoEActivationFormat.Standard,
     )
 
-    assert supported is not use_ep
-    if use_ep:
+    expect_supported = not use_ep or backend_name == "AITER_TRITON_MXFP4_BF16"
+    assert supported is expect_supported
+    if not expect_supported:
+        assert reason is not None
         assert "parallel config" in reason
 
 

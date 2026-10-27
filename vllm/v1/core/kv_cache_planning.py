@@ -1458,6 +1458,7 @@ def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
     available_memory: list[int],
+    global_kv_cache_groups: list[KVCacheGroupSpec],
 ) -> list[KVCacheConfig]:
     """Generates the KV cache configurations for a model.
     Since we use a shared centralized controller for all workers, we need the
@@ -1470,6 +1471,7 @@ def get_kv_cache_configs(
        the whole model.
     2. Generate the KV cache groups based on the layer ratio of the whole model.
        This also handles spec unification for hybrid models.
+       (Steps 1-2 are done by `get_global_kv_cache_groups`.)
     3. Handle auto-fit max_model_len and memory checks using per-worker
        projected groups to account for PP sharding.
     4. Generate the KV cache configs for each worker based on the KV cache
@@ -1483,6 +1485,7 @@ def get_kv_cache_configs(
         kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
         available_memory: Memory available for KV cache in bytes for each
             worker.
+        global_kv_cache_groups: From `get_global_kv_cache_groups`.
 
     Returns:
         The generated KVCacheConfigs for each worker.
@@ -1491,48 +1494,6 @@ def get_kv_cache_configs(
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 
     builder = get_kv_cache_config_builder(vllm_config)
-
-    # Merge the KV cache specs of all workers. Different PP stages may have
-    # different layer names, and different TP ranks of the same PP stage should
-    # have the same KV cache spec.
-    merged_kv_cache_specs: dict[str, KVCacheSpec] = {}
-    for kv_cache_spec_one_worker in kv_cache_specs:
-        for layer_name, layer_spec in kv_cache_spec_one_worker.items():
-            if layer_name not in merged_kv_cache_specs:
-                merged_kv_cache_specs[layer_name] = layer_spec
-            else:
-                assert merged_kv_cache_specs[layer_name] == layer_spec, (
-                    "The KV cache specs for the same layer are different "
-                    "across workers. This is not supported yet."
-                )
-
-    # Check if the KV cache specs are registered correctly.
-    # This is to prevent that some layers are initialized with unregistered specs.
-    KVCacheSpecRegistry.check_kv_cache_spec_registry(merged_kv_cache_specs)
-
-    # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
-    # tag every SlidingWindowSpec with how many extra tokens to retain in the window.
-    extra_retained_tokens = max(0, vllm_config.num_prefill_lookahead_tokens - 1)
-    for layer_name, layer_spec in merged_kv_cache_specs.items():
-        if isinstance(layer_spec, SlidingWindowSpec):
-            merged_kv_cache_specs[layer_name] = replace(
-                layer_spec, extra_retained_tokens=extra_retained_tokens
-            )
-
-    # Get global KV cache groups. This also handles spec unification for
-    # hybrid models when disable_hybrid_kv_cache_manager is enabled.
-    # After this call, merged_kv_cache_specs may be modified in-place.
-    global_kv_cache_groups = get_kv_cache_groups_from_builder(
-        builder, vllm_config, merged_kv_cache_specs
-    )
-    spec_config = vllm_config.speculative_config
-    if spec_config is not None and spec_config.use_eagle_block_drop():
-        draft_layer_names = {
-            name for name, spec in merged_kv_cache_specs.items() if spec.is_draft
-        }
-        for group in global_kv_cache_groups:
-            group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
-        _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
 
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
@@ -1637,6 +1598,59 @@ def get_kv_cache_configs(
         )
 
     return kv_cache_configs
+
+
+def get_global_kv_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+) -> list[KVCacheGroupSpec]:
+    """Group the layers of the whole model (all workers' specs merged)."""
+    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+
+    builder = get_kv_cache_config_builder(vllm_config)
+
+    # Merge the KV cache specs of all workers. Different PP stages may have
+    # different layer names, and different TP ranks of the same PP stage should
+    # have the same KV cache spec.
+    merged_kv_cache_specs: dict[str, KVCacheSpec] = {}
+    for kv_cache_spec_one_worker in kv_cache_specs:
+        for layer_name, layer_spec in kv_cache_spec_one_worker.items():
+            if layer_name not in merged_kv_cache_specs:
+                merged_kv_cache_specs[layer_name] = layer_spec
+            else:
+                assert merged_kv_cache_specs[layer_name] == layer_spec, (
+                    "The KV cache specs for the same layer are different "
+                    "across workers. This is not supported yet."
+                )
+
+    # Check if the KV cache specs are registered correctly.
+    # This is to prevent that some layers are initialized with unregistered specs.
+    KVCacheSpecRegistry.check_kv_cache_spec_registry(merged_kv_cache_specs)
+
+    # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
+    # tag every SlidingWindowSpec with how many extra tokens to retain in the window.
+    extra_retained_tokens = max(0, vllm_config.num_prefill_lookahead_tokens - 1)
+    for layer_name, layer_spec in merged_kv_cache_specs.items():
+        if isinstance(layer_spec, SlidingWindowSpec):
+            merged_kv_cache_specs[layer_name] = replace(
+                layer_spec, extra_retained_tokens=extra_retained_tokens
+            )
+
+    # Get global KV cache groups. This also handles spec unification for
+    # hybrid models when disable_hybrid_kv_cache_manager is enabled.
+    # After this call, merged_kv_cache_specs may be modified in-place.
+    global_kv_cache_groups = get_kv_cache_groups_from_builder(
+        builder, vllm_config, merged_kv_cache_specs
+    )
+    spec_config = vllm_config.speculative_config
+    if spec_config is not None and spec_config.use_eagle_block_drop():
+        draft_layer_names = {
+            name for name, spec in merged_kv_cache_specs.items() if spec.is_draft
+        }
+        for group in global_kv_cache_groups:
+            group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
+        _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
+    return global_kv_cache_groups
 
 
 class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
