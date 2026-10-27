@@ -3,6 +3,7 @@ meta:
   slug: "qwen3.8-flash-next"
   provider: "Qwen"
   description: "Qwen4 architecture preview with a 125B-parameter main model, supplemented by an additional 51B N-gram embeddings, with 6B parameters activated per token."
+  date_added: 2026-08-26
   date_updated: 2026-10-27
   tasks:
     - multimodal
