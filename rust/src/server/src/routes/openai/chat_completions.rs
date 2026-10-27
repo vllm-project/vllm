@@ -26,6 +26,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
+use vllm_text::tokenizer::DynTokenizer;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
@@ -39,7 +40,7 @@ use crate::routes::openai::chat_completions::types::{
 };
 use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
 use crate::routes::openai::utils::logprobs::{
-    decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
+    decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps, visible_logprob_positions,
 };
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::types::{
@@ -99,6 +100,7 @@ pub async fn chat_completions(
     // Like Python, report reasoning-token details only when a reasoning parser
     // is configured to count them.
     let count_reasoning_tokens = state.chat.reasoning_parser_name().is_some();
+    let tokenizer = state.chat.text().tokenizer();
 
     let n = prepared.n;
     let chat_streams = match state
@@ -128,6 +130,7 @@ pub async fn chat_completions(
                     api_server_options,
                     count_reasoning_tokens,
                     prepared.options.clone(),
+                    tokenizer.clone(),
                 )
             })
             .collect();
@@ -146,6 +149,7 @@ pub async fn chat_completions(
                 api_server_options,
                 count_reasoning_tokens,
                 prepared.options.clone(),
+                tokenizer.clone(),
             )
         }))
         .instrument(request_span.clone())
@@ -223,7 +227,9 @@ async fn collect_chat_completion(
         return_tokens_as_token_ids,
         return_weight_versions,
         is_named_tool_choice,
+        include_stop_str_in_output,
     }: ResponseOptions,
+    tokenizer: DynTokenizer,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let return_tokens_as_token_ids =
         return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
@@ -251,13 +257,10 @@ async fn collect_chat_completion(
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
     let reasoning = message.reasoning();
-    // Output logprobs and token IDs cover the complete generated token stream.
+    // Output logprobs and token IDs can contain reasoning tokens.
     // When reasoning is hidden, omit them rather than leaking hidden reasoning
     // tokens through per-token metadata.
     let include_output_metadata = include_reasoning || reasoning.is_none();
-    let finish_reason =
-        chat_finish_reason_to_openai(&finish_reason, saw_tool_calls && !is_named_tool_choice)?
-            .to_string();
     let tool_calls = message
         .tool_calls()
         .map(|call| ToolCall {
@@ -271,15 +274,23 @@ async fn collect_chat_completion(
         .collect::<Vec<_>>();
     let logprobs = if requested_logprobs && include_output_metadata {
         Some(decoded_logprobs_to_openai_chat(
-            logprobs.as_ref().ok_or_else(|| {
-                server_error!("chat response requested logprobs but generation returned none")
-            })?,
+            visible_logprob_positions(
+                logprobs.as_ref().ok_or_else(|| {
+                    server_error!("chat response requested logprobs but generation returned none")
+                })?,
+                Some(&finish_reason),
+                include_stop_str_in_output,
+                tokenizer.as_ref(),
+            ),
             output_top_logprobs,
             return_tokens_as_token_ids,
         )?)
     } else {
         None
     };
+    let finish_reason =
+        chat_finish_reason_to_openai(&finish_reason, saw_tool_calls && !is_named_tool_choice)?
+            .to_string();
     let prompt_logprobs = if include_prompt_logprobs {
         Some(prompt_logprobs_to_maps(
             prompt_logprobs.as_ref(),
@@ -401,7 +412,9 @@ async fn chat_completion_chunk_stream(
         return_tokens_as_token_ids,
         return_weight_versions,
         is_named_tool_choice,
+        include_stop_str_in_output,
     }: ResponseOptions,
+    tokenizer: DynTokenizer,
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     let return_tokens_as_token_ids =
@@ -493,6 +506,7 @@ async fn chat_completion_chunk_stream(
             Ok(ChatEvent::LogprobsDelta {
                 logprobs,
                 token_ids,
+                finish_reason,
             }) => {
                 let delta_token_count = token_ids.len();
                 continuous_usage.add_output_tokens(delta_token_count);
@@ -507,7 +521,12 @@ async fn chat_completion_chunk_stream(
                         .as_ref()
                         .map(|lp| {
                             decoded_logprobs_to_openai_chat(
-                                lp,
+                                visible_logprob_positions(
+                                    lp,
+                                    finish_reason.as_ref(),
+                                    include_stop_str_in_output,
+                                    tokenizer.as_ref(),
+                                ),
                                 output_top_logprobs,
                                 return_tokens_as_token_ids,
                             )
@@ -1132,6 +1151,8 @@ mod tests {
     use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
+    use vllm_tokenizer::test_utils::TestTokenizer;
+
     use super::{
         ApiServerOptions, ChatCompletionStreamResponse, ResponseOptions, StreamResponseEnvelope,
         UpdateOutput, block_delta_chunk, chat_completion_chunk_stream, final_chunk,
@@ -1293,6 +1314,7 @@ mod tests {
                 token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
+                finish_reason: None,
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
@@ -1346,6 +1368,7 @@ mod tests {
                 include_reasoning: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await
@@ -1401,6 +1424,7 @@ mod tests {
                 token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
+                finish_reason: None,
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
@@ -1439,6 +1463,7 @@ mod tests {
                 include_reasoning: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await
@@ -1492,6 +1517,7 @@ mod tests {
                 include_usage: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await
@@ -1556,6 +1582,7 @@ mod tests {
             ApiServerOptions::default(),
             false,
             ResponseOptions::default(),
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await
@@ -1589,6 +1616,7 @@ mod tests {
                 token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
+                finish_reason: None,
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
@@ -1608,6 +1636,7 @@ mod tests {
                 token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
+                finish_reason: None,
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
@@ -1646,6 +1675,7 @@ mod tests {
                 return_token_ids: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await
@@ -1685,6 +1715,7 @@ mod tests {
                 kind: AssistantBlockKind::Reasoning,
             }),
             Ok(ChatEvent::LogprobsDelta {
+                finish_reason: None,
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
@@ -1704,6 +1735,7 @@ mod tests {
                 token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
+                finish_reason: None,
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
@@ -1723,6 +1755,7 @@ mod tests {
                 },
             }),
             Ok(ChatEvent::LogprobsDelta {
+                finish_reason: None,
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
@@ -1746,6 +1779,7 @@ mod tests {
                 token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
+                finish_reason: None,
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
@@ -1784,6 +1818,7 @@ mod tests {
                 return_token_ids: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await
@@ -1867,6 +1902,7 @@ mod tests {
                 include_reasoning: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await
@@ -1908,6 +1944,7 @@ mod tests {
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: None,
                 token_ids: vec![20],
+                finish_reason: None,
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
@@ -1934,6 +1971,7 @@ mod tests {
                 return_token_ids: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await
@@ -1977,6 +2015,7 @@ mod tests {
                 token_count: Some(2),
             }),
             Ok(ChatEvent::LogprobsDelta {
+                finish_reason: None,
                 logprobs: None,
                 token_ids: vec![20, 21],
             }),
@@ -2021,6 +2060,7 @@ mod tests {
                 include_reasoning: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await
@@ -2097,6 +2137,7 @@ mod tests {
                 include_continuous_usage: true,
                 ..Default::default()
             },
+            Arc::new(TestTokenizer::new()),
         )
         .collect::<Vec<_>>()
         .await
@@ -2163,6 +2204,7 @@ mod tests {
                     include_continuous_usage: true,
                     ..Default::default()
                 },
+                Arc::new(TestTokenizer::new()),
             )
             .collect::<Vec<_>>()
             .await

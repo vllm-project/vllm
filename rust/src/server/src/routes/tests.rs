@@ -4446,7 +4446,7 @@ async fn selected_logprobs_reach_engine_and_both_openai_response_modes() {
                                 outputs: vec![request_output_with_logprobs(
                                     &request.request_id,
                                     vec![104],
-                                    Some(EngineCoreFinishReason::Stop),
+                                    Some(EngineCoreFinishReason::Length),
                                     None,
                                     Some(Logprobs {
                                         positions: vec![PositionLogprobs {
@@ -4636,7 +4636,7 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(b"hi"),
-                            Some(EngineCoreFinishReason::Stop),
+                            Some(EngineCoreFinishReason::Length),
                             None,
                             Some(sample_logprobs_for_tokens(&bytes_to_token_ids(b"hi"))),
                             Some(prompt_logprobs_for_tokens(&prompt_token_ids)),
@@ -5772,7 +5772,7 @@ async fn non_stream_completions_include_logprobs() {
                             request_output_with_logprobs(
                                 &request.request_id,
                                 vec![b'i' as u32],
-                                Some(EngineCoreFinishReason::Stop),
+                                Some(EngineCoreFinishReason::Length),
                                 None,
                                 Some(sample_logprobs_for_token(b'i' as u32, b'I' as u32)),
                                 None,
@@ -5867,7 +5867,7 @@ async fn logprob_tokens_with_server_flag(
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             vec![b'h' as u32],
-                            Some(EngineCoreFinishReason::Stop),
+                            Some(EngineCoreFinishReason::Length),
                             None,
                             Some(sample_logprobs_for_token(b'h' as u32, b'H' as u32)),
                             None,
@@ -6102,15 +6102,15 @@ async fn non_stream_completions_include_prompt_logprobs() {
     assert_eq!(json["choices"][0]["text"], "hellohi");
     assert_eq!(
         json["choices"][0]["logprobs"]["tokens"],
-        json!(["h", "e", "l", "l", "o", "h", "i", "!"])
+        json!(["h", "e", "l", "l", "o", "h", "i"])
     );
     assert_eq!(
         json["choices"][0]["logprobs"]["text_offset"],
-        json!([0, 1, 2, 3, 4, 5, 6, 7])
+        json!([0, 1, 2, 3, 4, 5, 6])
     );
     assert_eq!(
         json["choices"][0]["logprobs"]["token_logprobs"],
-        json!([null, -0.3, -0.4, -0.45, -0.5, -0.1, -0.1, -0.1])
+        json!([null, -0.3, -0.4, -0.45, -0.5, -0.1, -0.1])
     );
     assert_eq!(
         json["choices"][0]["prompt_logprobs"][0],

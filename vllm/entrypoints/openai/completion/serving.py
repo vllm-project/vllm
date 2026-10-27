@@ -23,6 +23,7 @@ from vllm.entrypoints.generate.base.serving import (
     clamp_prompt_logprobs,
     completion_top_logprobs_limit,
     format_token_id_placeholder,
+    get_logprob_token_ids,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
@@ -461,7 +462,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     if request.logprobs is not None:
                         assert out_logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_completion_logprobs(
-                            token_ids=delta_token_ids,
+                            token_ids=get_logprob_token_ids(
+                                delta_token_ids,
+                                output,
+                                request,
+                                tokenizer,
+                                self.default_sampling_params,
+                            ),
                             top_logprobs=out_logprobs,
                             num_output_top_logprobs=request.logprobs,
                             tokenizer=tokenizer,
@@ -685,7 +692,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 if request.logprobs is not None:
                     assert out_logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_completion_logprobs(
-                        token_ids=token_ids,
+                        token_ids=get_logprob_token_ids(
+                            token_ids,
+                            output,
+                            request,
+                            tokenizer,
+                            self.default_sampling_params,
+                        ),
                         top_logprobs=out_logprobs,
                         tokenizer=tokenizer,
                         num_output_top_logprobs=request.logprobs,
