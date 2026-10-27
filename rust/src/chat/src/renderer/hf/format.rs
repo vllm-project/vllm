@@ -18,7 +18,8 @@ use serde_with::{DeserializeFromStr, SerializeDisplay};
 use tracing::{debug, warn};
 use vllm_text::backend::hf::HfSpecialTokens;
 
-use super::template::{CompiledChatTemplate, TemplateContext};
+use super::error::TemplateError;
+use super::template::TemplateContext;
 use super::{
     TemplateContent, TemplateContentPart, TemplateMessage, TemplateTool, TemplateToolCall,
     TemplateToolDefinition, TemplateToolFunction,
@@ -86,9 +87,10 @@ impl fmt::Display for ChatTemplateContentFormatOption {
 }
 
 /// Renderer inputs that every probe renders with: the same for all requests.
+#[derive(Default)]
 pub(super) struct ProbeContext<'a> {
     pub(super) special_tokens: Option<&'a HfSpecialTokens>,
-    pub(super) template_kwargs: &'a HashMap<String, JsonValue>,
+    pub(super) template_kwargs: Option<&'a HashMap<String, JsonValue>>,
 }
 
 /// Content shapes a chat template renders correctly, found by rendering probe
@@ -124,14 +126,18 @@ const PROBE_ASSISTANT: &str = "PROBE_ASSISTANT";
 const PROBE_TOOL: &str = "PROBE_TOOL";
 
 impl ContentCapabilities {
-    /// Render the probe conversations through `template`.
+    /// Render the probe conversations with `render`, which renders the
+    /// template being probed.
     ///
     /// A template that renders nothing without tools, such as a `tool_use`
     /// template, is probed again with one tool.
-    pub(super) fn probe(template: &CompiledChatTemplate, ctx: &ProbeContext<'_>) -> Self {
-        let mut capabilities = Self::probe_with_tools(template, ctx, None);
+    pub(super) fn probe(
+        render: &impl Fn(TemplateContext<'_>) -> Result<String, TemplateError>,
+        ctx: &ProbeContext<'_>,
+    ) -> Self {
+        let mut capabilities = Self::probe_with_tools(render, ctx, None);
         if !capabilities.renders_any() {
-            capabilities = Self::probe_with_tools(template, ctx, Some(&[probe_tool()]));
+            capabilities = Self::probe_with_tools(render, ctx, Some(&[probe_tool()]));
         }
         if capabilities.renders_any() {
             debug!(?capabilities, "probed chat template content capabilities");
@@ -147,22 +153,21 @@ impl ContentCapabilities {
     /// Render the probe conversations with `tools`; a tool round trip is
     /// always rendered with a tool, since a request carrying one has tools.
     fn probe_with_tools(
-        template: &CompiledChatTemplate,
+        render_template: &impl Fn(TemplateContext<'_>) -> Result<String, TemplateError>,
         ctx: &ProbeContext<'_>,
         tools: Option<&[TemplateTool]>,
     ) -> Self {
         let render = |messages: &[TemplateMessage<'_>], tools: Option<&[TemplateTool]>| {
-            template
-                .apply(TemplateContext {
-                    messages,
-                    add_generation_prompt: true,
-                    continue_final_message: false,
-                    tools,
-                    documents: None,
-                    template_kwargs: Some(ctx.template_kwargs),
-                    special_tokens: ctx.special_tokens,
-                })
-                .ok()
+            render_template(TemplateContext {
+                messages,
+                add_generation_prompt: true,
+                continue_final_message: false,
+                tools,
+                documents: None,
+                template_kwargs: ctx.template_kwargs,
+                special_tokens: ctx.special_tokens,
+            })
+            .ok()
         };
         let passes = |messages: &[TemplateMessage<'_>], expected: &[&str]| {
             render(messages, tools).is_some_and(|prompt| renders_texts(&prompt, expected))
@@ -373,27 +378,23 @@ fn renders_texts(prompt: &str, expected: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
 
     use expect_test::expect;
 
-    use super::{
-        ChatTemplateContentFormatOption, CompiledChatTemplate, ContentCapabilities, ProbeContext,
-    };
+    use super::{ChatTemplateContentFormatOption, ContentCapabilities, ProbeContext};
+    use crate::renderer::hf::template::CompiledChatTemplate;
 
     fn probe(template: &str) -> ContentCapabilities {
-        let template =
-            CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
-                .expect("template should compile");
-        ContentCapabilities::probe(
-            &template,
-            &ProbeContext {
-                special_tokens: None,
-                template_kwargs: &HashMap::new(),
-            },
+        let template = CompiledChatTemplate::new(
+            template.to_string(),
+            ChatTemplateContentFormatOption::String,
+            None,
+            &ProbeContext::default(),
         )
+        .expect("template should compile");
+        ContentCapabilities::probe(&|ctx| template.apply(ctx), &ProbeContext::default())
     }
 
     /// One line per template: whether strings render, then the roles and
