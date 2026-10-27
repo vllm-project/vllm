@@ -286,6 +286,69 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     assert recorded_scale != kv_lora_rank**-0.5
 
 
+@pytest.mark.parametrize("return_lse", [False, True])
+def test_flashinfer_sparse_mla_splits_batch_over_grid_limit(monkeypatch, return_lse):
+    """trtllm-gen puts the batch on gridDim.z, so large steps must be split."""
+    from vllm.v1.attention.backends.mla import flashinfer_mla_sparse
+
+    num_tokens, num_heads, kv_lora_rank, topk = 7, 2, 4, 8
+    # The LSE path runs a Triton kernel on the top-k lengths.
+    device = "cuda"
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.scale = 1.0
+    impl.kv_cache_dtype = "auto"
+    impl.qk_nope_head_dim = kv_lora_rank
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = 0
+    impl._workspace_buffer = torch.empty(1, device=device)
+    impl.bmm1_scale = None
+    impl.bmm2_scale = None
+    impl.is_nope_mla = True
+    impl.need_to_return_lse_for_decode = return_lse
+    impl.index_group = MagicMock()
+
+    import flashinfer.decode
+
+    batch_sizes = []
+
+    def fake_flashinfer(**kwargs):
+        query = kwargs["query"]
+        batch_sizes.append(query.shape[0])
+        assert kwargs["block_tables"].shape[0] == query.shape[0]
+        assert kwargs["seq_lens"].shape[0] == query.shape[0]
+        assert kwargs["sparse_mla_top_k_lens"].shape[0] == query.shape[0]
+        out = query + kwargs["seq_lens"].view(-1, 1, 1, 1)
+        if kwargs["return_lse"]:
+            return out, out.sum(dim=-1).squeeze(1)
+        return out
+
+    monkeypatch.setattr(
+        flashinfer.decode, "trtllm_batch_decode_with_kv_cache_mla", fake_flashinfer
+    )
+    monkeypatch.setattr(flashinfer_mla_sparse, "_TRTLLM_GEN_MAX_BATCH", 3)
+
+    q = torch.randn(num_tokens, num_heads, kv_lora_rank, device=device)
+    seq_lens = torch.arange(1, num_tokens + 1, dtype=torch.int32, device=device)
+    topk_indices = torch.zeros((num_tokens, topk), dtype=torch.int32, device=device)
+    out, lse = impl._forward_mqa_kernel(
+        q,
+        torch.zeros(2, 32, kv_lora_rank, device=device),
+        topk_indices,
+        seq_lens,
+        layer=SimpleNamespace(),
+        block_size=32,
+        is_decode=False,
+    )
+
+    assert batch_sizes == [3, 3, 1]
+    expected = q + seq_lens.view(-1, 1, 1)
+    torch.testing.assert_close(out, expected)
+    if return_lse:
+        torch.testing.assert_close(lse, expected.sum(dim=-1))
+    else:
+        assert lse is None
+
+
 def test_hisparse_routes_prefill_to_sparse_mqa():
     layer = SimpleNamespace(hisparse_cache=object())
 

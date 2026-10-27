@@ -346,6 +346,15 @@ _TRTLLM_GEN_SOFTMAX_STAT_BYTES = 8  # sizeof(float2)
 _TRTLLM_GEN_SOFTMAX_SLOTS_PER_TOKEN = 256  # round_up(q_len=1, 256)
 _TRTLLM_GEN_SOFTMAX_GUARD_BYTES = 1024 * 1024
 
+# trtllm-gen launches the MLA decode kernel with gridDim.z = batch size
+# (FlashInfer include/flashinfer/trtllm/fmha/fmhaKernels.cuh), and CUDA caps
+# gridDim.z at 65535. forward_mqa passes one request per query token, so larger
+# steps must be split; an oversized launch only logs CUDA_ERROR_INVALID_VALUE
+# and leaves the output unwritten. Split at a power of two: FlashInfer autotune
+# rounds batches up to power-of-two buckets, and the 65536 bucket's profiling
+# launches fail the same way, so a 65535-row call would get a bogus tactic.
+_TRTLLM_GEN_MAX_BATCH = 32768
+
 # Keep in sync with the VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE default in
 # vllm/envs.py.
 _DEFAULT_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
@@ -635,29 +644,38 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 topk_lens = prepare_sparse_mla_safe_lengths(topk_indices, seq_lens)
             extra_kwargs["sparse_mla_top_k_lens"] = topk_lens
 
-        kernel_out = trtllm_batch_decode_with_kv_cache_mla(
-            query=query,
-            kv_cache=kv_cache.unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=block_tables,
-            seq_lens=seq_lens_arg,
-            max_seq_len=sparse_topk_capacity,
-            bmm1_scale=self.bmm1_scale,
-            bmm2_scale=self.bmm2_scale,
-            sparse_mla_top_k=sparse_topk_capacity,
-            return_lse=self.need_to_return_lse_for_decode,
-            **extra_kwargs,
-        )
-        if self.need_to_return_lse_for_decode:
-            assert isinstance(kernel_out, tuple)
-            o, lse = kernel_out
-        else:
-            assert isinstance(kernel_out, torch.Tensor)
-            o = kernel_out
-            lse = None
+        outs: list[torch.Tensor] = []
+        lses: list[torch.Tensor] = []
+        # max(..., 1): an empty batch still makes one (empty) kernel call.
+        for start in range(0, max(query.shape[0], 1), _TRTLLM_GEN_MAX_BATCH):
+            rows = slice(start, start + _TRTLLM_GEN_MAX_BATCH)
+            kernel_out = trtllm_batch_decode_with_kv_cache_mla(
+                query=query[rows],
+                kv_cache=kv_cache.unsqueeze(1),
+                workspace_buffer=self._workspace_buffer,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                block_tables=block_tables[rows],
+                seq_lens=seq_lens_arg[rows],
+                max_seq_len=sparse_topk_capacity,
+                bmm1_scale=self.bmm1_scale,
+                bmm2_scale=self.bmm2_scale,
+                sparse_mla_top_k=sparse_topk_capacity,
+                return_lse=self.need_to_return_lse_for_decode,
+                **{k: v[rows] for k, v in extra_kwargs.items()},
+            )
+            if self.need_to_return_lse_for_decode:
+                assert isinstance(kernel_out, tuple)
+                outs.append(kernel_out[0])
+                lses.append(kernel_out[1])
+            else:
+                assert isinstance(kernel_out, torch.Tensor)
+                outs.append(kernel_out)
+        o = outs[0] if len(outs) == 1 else torch.cat(outs)
+        lse = None
+        if lses:
+            lse = lses[0] if len(lses) == 1 else torch.cat(lses)
 
         out = o.view(-1, o.shape[-2], o.shape[-1])
         if lse is not None:
