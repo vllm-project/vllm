@@ -691,25 +691,10 @@ class BaseRenderer(ABC, Generic[_T]):
         if want_offsets:
             kwargs = {**kwargs, "return_offsets_mapping": True}
         encoding = tokenizer(prompt["prompt"], **kwargs)
-
-        token_ids = encoding["input_ids"]
-        offset_mapping = encoding["offset_mapping"] if want_offsets else None
-        truncation = params._truncation_slice(tokenizer, len(token_ids))
-        if truncation is not None and self._keeps_special_tokens(prompt, params):
-            # Not every tokenizer can return `special_tokens_mask`. Tokenizing
-            # the text alone works with all of them and shows the added tokens.
-            text_ids = tokenizer(
-                prompt["prompt"],
-                **{**params.get_encode_kwargs(), "add_special_tokens": False},
-            )["input_ids"]
-            kept = params._truncation_indices(truncation, token_ids, text_ids)
-            if kept is not None:
-                token_ids = [token_ids[i] for i in kept]
-                if offset_mapping is not None:
-                    offset_mapping = [offset_mapping[i] for i in kept]
-
         return self._build_tokens_prompt(
-            token_ids, prompt, offset_mapping=offset_mapping
+            encoding["input_ids"],
+            prompt,
+            offset_mapping=encoding["offset_mapping"] if want_offsets else None,
         )
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:

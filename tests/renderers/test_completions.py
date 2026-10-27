@@ -97,7 +97,11 @@ class DummyTokenizer:
     def __call__(self, text: str, **kwargs):
         # BaseRenderer._tokenize_prompt calls the tokenizer via __call__ (to
         # unify the output type), so mirror a real tokenizer's BatchEncoding.
-        return {"input_ids": self.encode(text, **kwargs)}
+        encoding = {"input_ids": self.encode(text, **kwargs)}
+        if kwargs.get("return_special_tokens_mask"):
+            # `encode` adds no special tokens.
+            encoding["special_tokens_mask"] = [0] * len(encoding["input_ids"])
+        return encoding
 
 
 def _cls_sep_tokenizer(**kwargs: Any) -> TokenizersBackend:

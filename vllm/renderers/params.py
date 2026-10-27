@@ -522,50 +522,29 @@ class TokenizeParams:
 
     @staticmethod
     def _truncation_indices(
-        truncation: slice, token_ids: list[int], text_ids: list[int]
+        truncation: slice, special_tokens_mask: list[int]
     ) -> list[int] | None:
-        """The indices of `token_ids` to keep so that `truncation` spares the
-        special tokens.
+        """The indices of the prompt tokens to keep so that `truncation` spares
+        the special tokens.
 
-        `text_ids` is the same text tokenized without special tokens, so the
-        tokens around it in `token_ids`, such as `[CLS]` and `[SEP]`, are the
-        ones the tokenizer added. These are all kept and only the text between
-        them is truncated, as the tokenizer's own truncation does.
+        `special_tokens_mask` flags the tokens that the tokenizer added, such as
+        `[CLS]` and `[SEP]`. These are all kept and only the text is truncated,
+        as the tokenizer's own truncation does.
 
         `None` means `truncation` applies as it is: there are no special tokens
-        to keep, no telling which ones they are, or no room for them.
+        to keep, or no room for them.
         """
-        length = len(token_ids)
-        num_added = length - len(text_ids)
-        if num_added <= 0:
-            return None
-
-        # The text tokens sit between the added ones. If they are not found
-        # there, the tokenizer split the text differently without the special
-        # tokens, and there is no telling which tokens it added.
-        num_prefix = next(
-            (
-                i
-                for i in range(num_added + 1)
-                if token_ids[i : i + len(text_ids)] == text_ids
-            ),
-            None,
-        )
-        if num_prefix is None:
-            return None
-
-        # Shrink the kept span so that the special tokens at either end fit.
-        num_suffix = num_added - num_prefix
+        length = len(special_tokens_mask)
+        special = [i for i in range(length) if special_tokens_mask[i]]
+        text = [i for i in range(length) if not special_tokens_mask[i]]
         start, stop, _ = truncation.indices(length)
-        text_start, text_stop = start + num_prefix, stop - num_suffix
-        if text_start > text_stop:
+        num_text = stop - start - len(special)
+        if not special or num_text < 0:
             return None
 
-        return [
-            *range(num_prefix),
-            *range(text_start, text_stop),
-            *range(length - num_suffix, length),
-        ]
+        # Only the text is truncated, from the same side as `truncation`.
+        text = text[:num_text] if start == 0 else text[len(text) - num_text :]
+        return sorted(special + text)
 
     def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply truncation to prompt tokens if necessary."""
