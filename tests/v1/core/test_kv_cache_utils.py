@@ -1067,9 +1067,8 @@ def test_request_continues_from_frontend_block_hashes(hash_fn):
     ]
 
 
-def test_engine_core_checks_frontend_block_hash_count():
+def test_frontend_block_hashes_count_check():
     from vllm.v1.engine import EngineCoreRequest, PrefixHashConfig
-    from vllm.v1.engine.core import EngineCore
 
     def frontend_hashes(config, num_hashes):
         request = EngineCoreRequest(
@@ -1084,8 +1083,7 @@ def test_engine_core_checks_frontend_block_hash_count():
             data_parallel_rank=None,
             block_hashes=[bytes([i]) * 32 for i in range(num_hashes)],
         )
-        engine = SimpleNamespace(prefix_hash_config=config)
-        return EngineCore._frontend_block_hashes(engine, request)  # type: ignore[arg-type]
+        return kv_cache_utils.frontend_block_hashes(request, config)
 
     config = PrefixHashConfig(
         hash_algo="sha256", hash_block_size=3, none_hash=kv_cache_utils.NONE_HASH
