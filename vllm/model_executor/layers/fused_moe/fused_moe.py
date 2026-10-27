@@ -299,6 +299,7 @@ def fused_moe_kernel(
     # Pointers to matrices
     a_ptr,
     b_ptr,
+    b_desc,
     c_ptr,
     b_bias_ptr,
     a_scale_ptr,
@@ -352,6 +353,7 @@ def fused_moe_kernel(
     # Tensor-descriptor path for the A gather and B load in the K-loop.
     USE_TD: tl.constexpr = False,
     IN_PRECISION: tl.constexpr = None,
+    USE_TMA_B: tl.constexpr = False,
 ):
     """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
@@ -442,6 +444,7 @@ def fused_moe_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     # TD gather and the SWAP_AB accumulator layout are mutually exclusive.
     tl.static_assert(not (USE_TD and SWAP_AB))
+    tl.static_assert(not (USE_TD and USE_TMA_B))
     if USE_TD:
         # ``tt.descriptor_gather`` requires block_shape[0] == 1 and i32 idx.
         m_td = num_valid_tokens // top_k
@@ -524,16 +527,26 @@ def fused_moe_kernel(
             b = b_desc.load([pid_n * BLOCK_SIZE_N, k * BLOCK_SIZE_K]).T
         elif SWAP_AB:
             a_mask = (offs_k[:, None] < K - k * BLOCK_SIZE_K) & token_mask[None, :]
-            b_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
             a = tl.load(a_ptrs, mask=a_mask, other=0.0)
-            b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+            if not USE_TMA_B:
+                b_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
+                b = tl.load(b_ptrs, mask=b_mask, other=0.0)
         else:
             a = tl.load(
                 a_ptrs,
                 mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                 other=0.0,
             )
-            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+            if not USE_TMA_B:
+                b = tl.load(
+                    b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0
+                )
+        if USE_TMA_B:
+            b = b_desc.load(
+                [off_experts.to(tl.int32), pid_n * BLOCK_SIZE_N, k * BLOCK_SIZE_K]
+            ).reshape((BLOCK_SIZE_N, BLOCK_SIZE_K))
+            if not SWAP_AB:
+                b = b.T
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(
@@ -845,6 +858,26 @@ def invoke_fused_moe_triton_kernel(
     BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
     if block_shape is not None:
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
+    use_tma_b = (
+        bool(config.pop("USE_TMA", True))
+        and use_fp8_w8a8
+        and block_shape is not None
+        and all(block_shape)
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(90)
+        and B.device.type == "cuda"
+        and B.is_contiguous()
+        and B.size(1) % config["BLOCK_SIZE_N"] == 0
+        and B.size(2) % BLOCK_SIZE_K == 0
+    )
+    b_desc = None
+    if use_tma_b:
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        set_triton_allocator(B.device)
+        b_desc = TensorDescriptor.from_tensor(
+            B, [1, config["BLOCK_SIZE_N"], BLOCK_SIZE_K]
+        )
     if use_td and A.size(1) % BLOCK_SIZE_K != 0:
         # TD gather/load feeding tl.dot with a non-block-aligned K
         # miscompiles (~74% of output elements wrong) on real HW;
@@ -867,6 +900,7 @@ def invoke_fused_moe_triton_kernel(
     fused_moe_kernel[grid](
         A,
         B,
+        b_desc,
         C,
         B_bias,
         A_scale,
@@ -910,6 +944,7 @@ def invoke_fused_moe_triton_kernel(
         SWAP_AB=SWAP_AB,
         USE_TD=use_td,
         IN_PRECISION=fp32_dot_precision(A.dtype),
+        USE_TMA_B=use_tma_b,
         **config,
     )
 
@@ -1291,6 +1326,8 @@ def get_moe_wna16_block_config(
 def should_moe_wna16_use_cuda(
     num_valid_tokens: int, group_size: int, num_experts: int, bit: int
 ):
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
     return (
         current_platform.is_cuda()
         and bit == 4
@@ -1422,6 +1459,51 @@ def get_default_config(
     return config
 
 
+def _moe_config_shape(w2_shape: tuple[int, ...], dtype: str | None) -> tuple[int, int]:
+    """(E, N) as used by both the tuned-config lookup and the default heuristic."""
+    E, _, N = w2_shape
+    if dtype == "int4_w4a16":
+        N = N * 2
+    return E, N
+
+
+def _get_configured_moe_config(
+    w2_shape: tuple[int, ...],
+    dtype: str | None,
+    M: int,
+    block_shape: list[int] | None = None,
+) -> dict[str, int] | None:
+    """Config from an override or a tuned file, or None if neither applies."""
+    from vllm.model_executor.layers.fused_moe import get_config
+
+    override_config = get_config()
+    if override_config:
+        return override_config
+
+    E, N = _moe_config_shape(w2_shape, dtype)
+    block_n = block_shape[0] if block_shape else 0
+    block_k = block_shape[1] if block_shape else 0
+    configs = get_moe_configs(E, N, dtype, block_n, block_k)
+    if configs:
+        # Pick the config tuned for the closest batch size
+        return configs[min(configs.keys(), key=lambda x: abs(x - M))]
+    return None
+
+
+def has_configured_moe_config(
+    w2_shape: tuple[int, ...],
+    dtype: str | None,
+    M: int,
+    block_shape: list[int] | None = None,
+) -> bool:
+    """Whether try_get_optimal_moe_config resolves to an override or a tuned config.
+
+    False means it falls back to get_default_config, so a caller whose layout that
+    heuristic does not model may adjust the tiles it returns.
+    """
+    return _get_configured_moe_config(w2_shape, dtype, M, block_shape) is not None
+
+
 def try_get_optimal_moe_config(
     w1_shape: tuple[int, ...],
     w2_shape: tuple[int, ...],
@@ -1430,27 +1512,10 @@ def try_get_optimal_moe_config(
     M: int,
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
-    from vllm.model_executor.layers.fused_moe import get_config
-
-    override_config = get_config()
-    if override_config:
-        config = override_config
-    else:
-        # First try to load optimal config from the file
-        E, _, N = w2_shape
-        if dtype == "int4_w4a16":
-            N = N * 2
-        block_n = block_shape[0] if block_shape else 0
-        block_k = block_shape[1] if block_shape else 0
-        configs = get_moe_configs(E, N, dtype, block_n, block_k)
-
-        if configs:
-            # If an optimal configuration map has been found, look up the
-            # optimal config
-            config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
-        else:
-            # Else use the default config
-            config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
+    config = _get_configured_moe_config(w2_shape, dtype, M, block_shape)
+    if config is None:
+        E, N = _moe_config_shape(w2_shape, dtype)
+        config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
     return config
 
 

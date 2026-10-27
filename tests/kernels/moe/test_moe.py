@@ -76,7 +76,7 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     class FakeKernel:
         def __getitem__(self, grid):
             def launch(*args, **kwargs) -> None:
-                captured["a_scale"] = args[4]
+                captured["a_scale"] = args[5]
 
             return launch
 

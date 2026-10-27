@@ -5,8 +5,8 @@
 Each case is a list of requests `(query_len, kv_len, num_draft_tokens)`
 per DP rank. The bench builds the batch without the scheduler, runs it through
 the real `execute_model` (input prep, attention metadata, DP sync), and times
-the target-model forward captured as a CUDA graph. Sampling, the speculator
-and CPU step overhead aren't measured.
+the target forward and configured drafter captured as a CUDA graph. Target
+sampling, rejection sampling and CPU step overhead aren't measured.
 
 Single GPU: `vllm bench forward --model M --case decode=32*1@8192`.
 Multi-GPU: `torchrun --nproc-per-node=N -m vllm.entrypoints.cli.main bench
@@ -70,6 +70,13 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
         default="auto",
         help="MoE routing. balanced: fixed routing with equal load per EP rank. "
         "auto: balanced with dummy weights, else real.",
+    )
+    parser.add_argument(
+        "--exclude-drafter",
+        action="store_true",
+        help="Time only the target model. By default, a configured MTP, EAGLE, "
+        "DSpark, or DFlash drafter is included, assuming all draft tokens "
+        "are accepted. Target sampling and rejection sampling are excluded.",
     )
     parser.add_argument("--iters", type=int, default=20, help="Replays per sample.")
     parser.add_argument("--samples", type=int, default=5)
@@ -146,9 +153,23 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
     from vllm.benchmarks.forward.routing import install_routing
 
     context = runner.vllm_config.compilation_config.static_forward_context
+    kv_caches = {
+        name: getattr(layer, "kv_cache", None) for name, layer in context.items()
+    }
+    attn_groups = [group for groups in runner.attn_groups for group in groups]
     kv_config = runner.kv_cache_config
     dcp_size = runner.parallel_config.decode_context_parallel_size
     rng = np.random.default_rng([args.seed, runner.dp_rank])
+    include_drafter = not args.exclude_drafter
+    lookahead = (
+        runner.num_speculative_steps + 1
+        if include_drafter and runner.vllm_config.speculative_config is not None
+        else 0
+    )
+    if lookahead and any(
+        r.kv_len + lookahead > runner.model_config.max_model_len for r in case.requests
+    ):
+        raise ValueError("Increase --max-model-len to leave room for draft lookahead.")
     batch = build_batch(
         case,
         kv_config.kv_cache_groups,
@@ -156,8 +177,9 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         runner.model_config.get_vocab_size(),
         rng,
         dcp_size,
+        lookahead,
     )
-    zero_kv_blocks(context, kv_config.kv_cache_groups, batch, kv_config.num_blocks)
+    zero_kv_blocks(kv_caches, attn_groups, batch, kv_config.num_blocks)
     profile_prefix = None
     if args.profile_dir:
         from vllm.distributed.parallel_state import get_world_group
@@ -176,10 +198,16 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         args.iters,
         args.samples,
         touched_kv_views(
-            context, kv_config.kv_cache_groups, batch, kv_config.num_blocks, dcp_size
+            kv_caches,
+            attn_groups,
+            batch,
+            kv_config.num_blocks,
+            dcp_size,
+            lookahead,
         ),
         case.name,
         profile_prefix,
+        include_drafter=include_drafter,
     )
     routing, balanced = install_routing(
         runner, args.routing, args.load_format == "dummy", batch.num_tokens, args.seed
