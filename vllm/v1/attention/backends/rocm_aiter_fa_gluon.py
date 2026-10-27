@@ -20,7 +20,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 _HEAD_SIZE = 256
 _QUERY_GROUP_SIZES = (6,)
 _BLOCK_SIZE = 16
-_CONTEXT_PARTITION_SIZE = 256
+_CONTEXT_PARTITION_SIZE = 128
 
 if current_platform.is_rocm():
     from aiter.ops.triton.gluon.pa_decode_gluon import (
