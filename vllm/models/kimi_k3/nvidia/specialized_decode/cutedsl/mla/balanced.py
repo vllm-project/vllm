@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The KV-balanced MLA core (``kv_balanced_mla``) for the specialized decode under
-DCP, selected with ``additional_config={"mla_core": "kv_balanced"}``.
+"""The KV-balanced MLA core (``kv_balanced_mla``) for the specialized decode,
+selected with ``additional_config={"mla_core": "kv_balanced"}``: a swap-in for the
+tokenspeed and trtllm-gen cores under TP and DCP alike.
 
 It replaces tokenspeed's fixed split count (sized from the deployment's longest
 sequence, so a typical request fills a few clusters) with a device plan from this
-rank's KV shard lengths. As in KIMI_K3_KV_BALANCED_MLA, the first MLA layer of a
-forward plans and every later one reuses the plan (all MLA layers of a step share
-the lengths); it is captured with the decode graph. It writes the DcpBox rows and
-log2 LSE that tokenspeed would, PDL chained between MlaQuery and DcpValue as
-tokenspeed is, so the rest of the layer is unchanged.
+rank's KV lengths. As in KIMI_K3_KV_BALANCED_MLA, the first MLA layer of a forward
+plans and every later one reuses the plan (all MLA layers of a step share the
+lengths); it is captured with the decode graph. It writes what the core it replaces
+would: under DCP every rank's heads over the local shard into the DcpBox rows and
+log2 LSE, else this rank's heads into the BF16 latent; PDL chained between MlaQuery
+and the value kernel, so the rest of the layer is unchanged.
 
 ``VLLM_K3_SPEC_KVB="capacity:min_split_tokens:max_waves"`` sets the planner bounds
 (default 16:512:8: the merged backend's 8:1024:8 under-fills the GPU at the
@@ -43,18 +45,13 @@ def planner_bounds() -> tuple[int, int, int]:
 
 def balanced_cores(core, dcp, heads, pitches, queries, device):
     """One MLA layer's KV-balanced cores per query length q for ``core ==
-    "kv_balanced"``, else None. ``heads``: this rank's heads; ``pitches``: the
-    layer's batches (tokens)."""
+    "kv_balanced"``, else None. ``heads``: this rank's heads (under DCP the core
+    runs every rank's); ``pitches``: the layer's batches (tokens)."""
     if core != "kv_balanced":
         return None
-    if dcp is None:
-        raise ValueError("Kimi K3 MLA core kv_balanced needs DCP")
+    heads = heads if dcp is None else dcp.size * heads
     most = max(pitches, default=1)
-    return {
-        q: BalancedCore(dcp.size * heads, q, most // q, device)
-        for q in queries
-        if most >= q
-    }
+    return {q: BalancedCore(heads, q, most // q, device) for q in queries if most >= q}
 
 
 class BalancedCore:
@@ -93,12 +90,17 @@ class BalancedCore:
         self.device = device
 
     def run(self, box, query, cache, block_table, lengths, totals, scales, out, lse):
-        """The first ``reqs = lse.shape[0]`` requests' ``query`` rows [reqs, q, H, 576]
-        (FP8) over this rank's shard of the KV (``lengths``), masked causally in
-        global positions (``totals``, the full lengths), into the DcpBox ``out`` rows
-        [reqs, q, H, 512] (BF16) and ``lse`` [reqs, q, H] (log2)."""
-        reqs = lse.shape[0]
-        lengths, block_table, totals = lengths[:reqs], block_table[:reqs], totals[:reqs]
+        """The first ``reqs = out.shape[0]`` requests' ``query`` rows [reqs, q, H,
+        576] (FP8) over this rank's KV (``lengths``) into ``out`` [reqs, q, H, 512]
+        (BF16). Under DCP (``box``) the KV is this rank's shard, masked causally in
+        global positions (``totals``, the full lengths), and ``lse`` [reqs, q, H]
+        (log2) is written for the DCP merge; else ``lse`` is None."""
+        reqs = out.shape[0]
+        lengths, block_table = lengths[:reqs], block_table[:reqs]
+        if box is None:
+            cp, totals = (1, 0, 1), None
+        else:
+            cp, totals = (box.size, box.rank, box.interleave), totals[:reqs]
         # One plan per forward, made by its first MLA layer; calls outside a forward
         # (compile warmup) plan for themselves.
         context = get_forward_context() if is_forward_context_available() else None
@@ -124,6 +126,6 @@ class BalancedCore:
             _WORKSPACE[self.device],
             lse=lse,
             causal_lens=totals,
-            cp=(box.size, box.rank, box.interleave),
+            cp=cp,
             out=out,
         )

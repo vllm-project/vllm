@@ -133,8 +133,8 @@ def trtllm_decode(query, cache, block_table, lengths, max_seq, scales, out):
 
 class PreparedMla:
     """``max_context`` (the deployment's longest sequence) bounds the split count;
-    ``core`` forces "tokenspeed" or "trtllm", or (DCP) "kv_balanced", the KV-balanced
-    core of ``balanced.py``. ``dcp``: the model's DcpBox, with this
+    ``core`` forces "tokenspeed", "trtllm" or "kv_balanced" (``balanced.py``, in place
+    of both). ``dcp``: the model's DcpBox, with this
     layer's mailbox ``parity``. ``queries``: the query lengths q (spec verify: 1 + the
     draft length) prepared for every batch of rows divisible by q."""
 
