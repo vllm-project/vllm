@@ -8,13 +8,15 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
 )
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="requires a CUDA device"
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires a CUDA or XPU device",
 )
 
 
@@ -29,7 +31,10 @@ def _run_prepare(
     max_num_reqs: int = 4,
     max_num_tokens: int = 16,
 ):
-    device = torch.device("cuda")
+    # upstream's device_type (XPU support), but max_num_reqs/max_num_tokens stay
+    # PARAMETERS: the padding test drives this helper at max_num_tokens=4096 to
+    # make the pad loop iterate, and re-hardcoding them here would shadow that.
+    device = torch.device(current_platform.device_type)
     num_speculative_steps = 3
 
     input_buffers = SimpleNamespace(

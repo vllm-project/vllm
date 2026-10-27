@@ -431,6 +431,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         """Publish context features required by a draft's candidate head. Runs
         inside the FULL graph, so it must not sync with the host."""
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
+
     @torch.inference_mode()
     def propose(
         self,
@@ -542,6 +546,15 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.sample_from_anchor,
                 num_reqs,
             )
+
+        if num_speculative_tokens == 0:
+            # No drafts are needed: store the context K/V to keep the drafter in
+            # sync, and skip the query pass.
+            self._store_hidden_states(
+                num_target_tokens, last_hidden_states, aux_hidden_states
+            )
+            self._precompute_context_kv(0, num_target_tokens, dummy_run)
+            return self.draft_tokens[:num_reqs]
 
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(
