@@ -33,7 +33,8 @@ use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error,
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
-    ChatCompletionStreamChoice, ChatCompletionStreamResponse, ChatMessageDelta,
+    ChatCompletionStreamChoice, ChatCompletionStreamPrompt, ChatCompletionStreamResponse,
+    ChatMessageDelta,
 };
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
@@ -332,9 +333,10 @@ async fn chat_completion_chunk_stream(
             }) => {
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 let mut chunk = start_chunk(&envelope);
-                if return_token_ids {
-                    chunk.prompt_token_ids = Some(prompt_token_ids.to_vec());
-                }
+                chunk.prompt = Some(ChatCompletionStreamPrompt {
+                    prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
+                    prompt_text: None,
+                });
                 yield_chunk!(chunk);
                 // When echo=true, emit the last assistant message content as a delta chunk.
                 if let Some(echo_text) = &echo {
@@ -1530,6 +1532,63 @@ mod tests {
         assert_eq!(
             chunks[2].choices[0].delta.tool_calls.as_ref().unwrap()[0].id,
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_returns_prompt_token_ids_on_first_chunk_only() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![7, 8, 9].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Text,
+                delta: "hi".to_string(),
+                token_count: None,
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: None,
+                token_ids: vec![20],
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: done_usage(3, 1, 0),
+                timestamps: Default::default(),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                return_token_ids: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        let chunks = chunks
+            .iter()
+            .map(|chunk| serde_json::to_value(chunk).expect("serialize chunk"))
+            .collect::<Vec<_>>();
+        assert_eq!(chunks[0]["prompt_token_ids"], json!([7, 8, 9]));
+        assert_eq!(chunks[0].get("prompt_text"), Some(&serde_json::Value::Null));
+        assert!(
+            chunks[1..].iter().all(|chunk| chunk.get("prompt_token_ids").is_none()
+                && chunk.get("prompt_text").is_none()),
+            "{chunks:?}"
         );
     }
 
