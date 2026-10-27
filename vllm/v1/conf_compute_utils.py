@@ -53,7 +53,6 @@ _orig_cuda = torch.Tensor.cuda
 _orig_event_cls = torch.Event
 _orig_cuda_event_record = torch.cuda.Event.record
 _orig_cuda_event_synchronize = torch.cuda.Event.synchronize
-_orig_cuda_event_query = torch.cuda.Event.query
 _orig_stream_synchronize = torch.cuda.Stream.synchronize
 _orig_stream_wait_stream = torch.cuda.Stream.wait_stream
 _orig_stream_query = torch.cuda.Stream.query
@@ -71,10 +70,6 @@ _producer_of: dict[int, torch.cuda.Stream] = {}
 # Storage base addresses of the tensors registered via
 # register_inplace_h2d_target(); views of them are matched too.
 _inplace_h2d_storages: set[int] = set()
-# Whether a non_blocking H2D from pinned memory has completed when
-# cudaMemcpyAsync returns (bounce-buffer CC). Probed by install(). When it has,
-# an in-place upload needs no compute-stream wait on the staging stream.
-_pinned_h2d_host_sync = False
 # Upper bound on the staging buffer an H2D copy into an existing tensor may use.
 _MAX_STAGED_BYTES = 32 << 20
 
@@ -137,33 +132,12 @@ def _h2d(
     return tmp if out is None else _orig_copy_(out, tmp, non_blocking=True)
 
 
-def _probe_pinned_h2d_host_sync() -> bool:
-    """True if a non_blocking H2D from pinned memory returns only after the
-    work queued ahead of it on its stream has completed."""
-    stream = torch.cuda.Stream()
-    src = torch.ones(1 << 16, pin_memory=True)
-    with torch.cuda.stream(stream):
-        x = torch.randn(2048, 2048, device=stream.device)
-        dst = torch.empty_like(src, device=stream.device)
-        for _ in range(16):
-            x = x @ x
-        before = torch.cuda.Event()
-        _orig_cuda_event_record(before, stream)
-        _orig_copy_(dst, src, non_blocking=True)
-        host_sync = bool(_orig_cuda_event_query(before))
-    _orig_stream_synchronize(stream)
-    del x, dst
-    torch.cuda.empty_cache()
-    return host_sync
-
-
 def _h2d_inplace(out: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     cur = torch.cuda.current_stream(out.device)
     staging = _staging_stream(cur.device_index)
     with torch.cuda.stream(staging):
         _orig_copy_(out, src, non_blocking=True)
-    if not _pinned_h2d_host_sync:
-        cur.wait_stream(staging)
+    cur.wait_stream(staging)
     return out
 
 
@@ -342,11 +316,10 @@ def install() -> None:
     ``torch.cuda.Event`` instances (which subclass the original). Only D2H
     copies on registered streams depend on these patches.
     """
-    global _d2h_executor, _pinned_h2d_host_sync
+    global _d2h_executor
     if _d2h_executor is not None:
         return
     _d2h_executor = ThreadPoolExecutor(1, thread_name_prefix="vllm-cc-d2h")
-    _pinned_h2d_host_sync = _probe_pinned_h2d_host_sync()
     logger.info(
         "NVIDIA Confidential Computing: issuing non-blocking H2D copies on a "
         "staging stream and D2H copies from a worker thread."
