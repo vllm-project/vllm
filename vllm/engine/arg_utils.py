@@ -804,6 +804,7 @@ class EngineArgs:
     )
     enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
     enable_nccl_comm_suspend: bool = ModelConfig.enable_nccl_comm_suspend
+    checkpoint_prepare_on_startup: bool = ModelConfig.checkpoint_prepare_on_startup
     override_generation_config: dict[str, Any] = get_field(
         ModelConfig, "override_generation_config"
     )
@@ -1063,6 +1064,10 @@ class EngineArgs:
         model_group.add_argument(
             "--enable-nccl-comm-suspend",
             **model_kwargs["enable_nccl_comm_suspend"],
+        )
+        model_group.add_argument(
+            "--checkpoint-prepare-on-startup",
+            **model_kwargs["checkpoint_prepare_on_startup"],
         )
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(
@@ -2052,6 +2057,7 @@ class EngineArgs:
             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
             enable_cumem_allocator=self.enable_cumem_allocator,
             enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
+            checkpoint_prepare_on_startup=self.checkpoint_prepare_on_startup,
             model_impl=self.model_impl,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,

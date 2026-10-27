@@ -3,6 +3,7 @@
 
 mod abort_requests;
 mod cache;
+mod checkpoint;
 mod collective_rpc;
 mod health;
 mod inference;
@@ -182,6 +183,19 @@ fn build_router_with_options(
     if state.api_server_options.enable_tokenizer_info_endpoint {
         // TODO: implement `/tokenizer_info`.
         router = router.route("/tokenizer_info", get(not_supported));
+    }
+
+    // Process checkpoint lifecycle, which requires sleep mode.
+    if state
+        .engine_core_client()
+        .ready_responses()
+        .iter()
+        .all(|ready| ready.enable_sleep_mode)
+    {
+        router = router
+            .route("/checkpoint/prepare", post(checkpoint::prepare))
+            .route("/checkpoint/restore", post(checkpoint::restore))
+            .route("/checkpoint/status", get(checkpoint::status));
     }
 
     if runtime_lora_updating_enabled {
