@@ -28,6 +28,21 @@ or topology in each family. A target with hybrid attention or recurrent layers
 can have a conventional attention-only MTP head. The target's architecture name
 alone does not determine the draft's cache layout.
 
+Exaone MTP modules use the draft checkpoint's module count, attention types and
+sliding windows, including when the draft checkpoint is published separately
+from the target.
+
+HYV3 and ERNIE MTP heads use the selected draft checkpoint's normalization,
+rotary position settings and module layout, including when the draft checkpoint
+is published separately from the target.
+
+Native unquantized HYV3 loading checks every MTP-owned parameter, including each
+packed projection and local expert shard. Draft-only checkpoints may omit the
+target-owned embedding and LM head; the native proposer installs them after
+loading. Included tied heads load from the checkpoint embedding, and included
+untied heads load from its LM head. An explicit native loader
+`enable_weights_track=False` retains the existing unchecked-loading opt-out.
+
 The standalone allocator accepts one homogeneous, unquantized full-attention,
 dense MLA, or sliding-window group. It uses the shared vLLM KV allocator and
 retains a null block. Sliding-window attention conservatively reserves the full

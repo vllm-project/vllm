@@ -22,7 +22,9 @@ The default request budget is 100 ms and the initial connection budget is
 speculation for affected requests, returning zero valid drafts while the target
 continues. `error` surfaces the failure. Reconnection may admit new identities;
 it does not rebuild the old requests' draft KV. Generation and session fencing
-prevent late replies from reactivating retired state.
+prevent late replies from reactivating retired state. Replies for another session,
+request, or batch are discarded before their ordering counters or draft tokens are
+used.
 
 Protocol v2.2 assigns one server execution deadline to each pipelined prefill
 group. Waiting behind an earlier chunk consumes that group's remaining budget.

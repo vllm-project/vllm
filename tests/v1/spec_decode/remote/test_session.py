@@ -27,6 +27,7 @@ from vllm.v1.spec_decode.remote.capabilities import (
 from vllm.v1.spec_decode.remote.cuda_ipc import CudaIpcError
 from vllm.v1.spec_decode.remote.protocol import (
     PROTOCOL_MINOR,
+    AdvanceAndPropose,
     CloseSequence,
     ErrorReply,
     FeatureSlot,
@@ -165,7 +166,7 @@ def protocol_peer():
     listener = listen("tcp://127.0.0.1:0")
     connections, threads, errors = [], [], []
 
-    def start(script, *, protocol_minor=PROTOCOL_MINOR):
+    def start(script, *, protocol_minor=PROTOCOL_MINOR, ack_session_id="s"):
         def serve():
             try:
                 conn = listener.accept(timeout=5)
@@ -180,7 +181,7 @@ def protocol_peer():
                     envelope,
                     HelloAck(
                         server_id="scripted",
-                        session_id="s",
+                        session_id=ack_session_id,
                         session_epoch=1,
                         selected_transport="inline",
                         capabilities=adapter.capabilities(),
@@ -3131,3 +3132,74 @@ def test_consuming_results_replenishes_the_receive_budget(session):
         assert session.pending_frames == session._inbound_bytes == 0
         assert not session._inbound_sizes
         assert session._conn._max_data_bytes == session._max_result_frame_bytes
+
+
+@pytest.mark.parametrize("session_id", ["foreign", ""])
+def test_handshake_rejects_session_identity_different_from_its_envelope(
+    protocol_peer, session_id
+):
+    endpoint = protocol_peer(lambda peer: None, ack_session_id=session_id)
+    session = RemoteDraftSession(endpoint, IDENTITY)
+    try:
+        with pytest.raises(RemoteDraftError, match="session.*envelope"):
+            session.connect()
+        assert not session.connected
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("mismatch", ["session", "request", "batch"])
+def test_proposal_ignores_completion_for_another_session_request_or_batch(
+    protocol_peer, mismatch
+):
+    sent = threading.Event()
+    release = threading.Event()
+
+    def reply(peer):
+        for expected in (OpenSequence, PrefillChunk):
+            envelope, message, _ = peer.recv()
+            assert isinstance(message, expected)
+            peer.reply(envelope, SequenceAck(message.key))
+        envelope, message, _ = peer.recv()
+        assert isinstance(message, AdvanceAndPropose)
+        for base, values, sequence_number, foreign in (
+            (0, [21, 22, 23], 100, True),
+            (3, [11, 12, 13], 0, False),
+        ):
+            for frame in (
+                tensor_to_frame(base, tokens([values], torch.int64)),
+                tensor_to_frame(base + 1, tokens([3])),
+                tensor_to_frame(base + 2, tokens([int(OK)])),
+            ):
+                peer.conn.send_data(frame)
+            peer.conn.send_control(
+                encode_message(
+                    ProposalResponse(
+                        message.batch_id + int(foreign and mismatch == "batch"),
+                        sequence_number,
+                        base,
+                    ),
+                    session_id="foreign" if foreign and mismatch == "session" else "s",
+                    request_id=envelope.request_id
+                    + int(foreign and mismatch == "request"),
+                )
+            )
+        sent.set()
+        assert release.wait(5)
+
+    endpoint = protocol_peer(reply)
+    session = RemoteDraftSession(endpoint, IDENTITY, request_timeout_ms=1000)
+    try:
+        session.connect()
+        key = ready(session, 1)
+        handle = session.dispatch(batch(0, [key], recovery=[4]))
+        assert sent.wait(5)
+        result = session.collect(handle)
+        assert result.row_statuses == (OK,)
+        assert result.output.token_ids.tolist() == [[11, 12, 13]]
+        assert result.output.valid_lengths.tolist() == [3]
+        assert session.sequence_state(key) is SequenceState.READY
+        assert session.connected and session.pending_frames == 0
+    finally:
+        release.set()
+        session.close()
