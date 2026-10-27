@@ -149,6 +149,7 @@ class EngineCoreSentinel:
         engine = self.engine
         scheduler = cast(Scheduler, engine.scheduler)
         ft_config = self.parallel_config.fault_tolerance_config
+        # Evict the KV blocks that the failed step may have partially written.
         self._clear_contaminated_blocks()
 
         if ft_config.resume_requests_after_recovery:
@@ -306,6 +307,11 @@ class EngineCoreSentinel:
         # Workers replay masks for the cumulative dead set.
         ft_request.params["dead_dp_ranks"] = sorted(self._dead_dp_ranks)
         self._prepare_round(ft_request)
+        if ft_request.params.get("abort", False):
+            aborted = self.engine.scheduler.finish_requests(
+                None, RequestStatus.FINISHED_ABORTED
+            )
+            self.engine._send_abort_outputs(aborted)
         self._recover_and_vote(ft_request, terminal=False)
         return self._mark_healthy(ft_request)
 
