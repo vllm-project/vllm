@@ -29,7 +29,9 @@ from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseSlotInvalidator,
+    drop_hisparse_host_pool,
     release_pinned_state,
+    update_hisparse_residency,
 )
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
@@ -254,6 +256,7 @@ class HiSparseConnectorWorker:
                 pinned_host_pools,
                 shared_host_region,
             )
+            drop_hisparse_host_pool(self.vllm_config)
             raise
 
     def initialize(
@@ -341,6 +344,10 @@ class HiSparseConnectorWorker:
             self.request_state_indices
         )
         self.hot_backing = hot_backing
+        self.residency: torch.Tensor | None = next(
+            (cache.residency for cache in cache_handles if cache.residency is not None),
+            None,
+        )
         self._pending_invalid_block_ids: list[int] = []
         # Destination block ids of host copies this worker has run.
         self._completed_host_copy_dst_ids: list[int] = []
@@ -415,6 +422,10 @@ class HiSparseConnectorWorker:
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
         current_stream().wait_event(previous_host_write_event)
+        if self.shared_host_region is not None and not num_tokens:
+            # Without a forward, no TP collective keeps rank 0 from recording
+            # a shared event again before every rank has issued its wait.
+            get_tp_group().barrier()
         self._release_completed_dma_descriptors()
         self._dma_submitted = False
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
@@ -424,7 +435,6 @@ class HiSparseConnectorWorker:
         self._clear_forward_mirror_state()
         for handle in self.cache_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
-            handle.mirror_from_resident = True
         self._copy_host_blocks(metadata.host_block_copies, previous_host_write_event)
         transfers = (
             metadata.command.page_transfers if metadata.command is not None else []
@@ -445,6 +455,15 @@ class HiSparseConnectorWorker:
         self._pending_invalid_block_ids.extend(metadata.source_block_ids)
         if request_state_indices is not None:
             self.set_request_state_indices(request_state_indices)
+        if metadata.residency_updates:
+            assert self.residency is not None
+            assert request_state_indices is not None and request_ids is not None
+            update_hisparse_residency(
+                self.residency,
+                metadata.residency_updates,
+                request_ids,
+                request_state_indices,
+            )
 
     def _clear_forward_mirror_state(self) -> None:
         self._per_layer_mirrored.clear()
@@ -958,4 +977,5 @@ class HiSparseConnectorWorker:
             self.pinned_host_pools,
             self.shared_host_region,
         )
+        drop_hisparse_host_pool(self.vllm_config)
         self._initialized = False

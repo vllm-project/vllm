@@ -1,0 +1,4 @@
+# Dependencies used by `vllm bench sweep plot`.
+matplotlib
+pandas
+seaborn
