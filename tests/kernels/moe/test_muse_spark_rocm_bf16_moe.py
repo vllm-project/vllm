@@ -12,6 +12,8 @@ import torch
 import vllm.models.muse_spark.amd.muse_moe_runner as amd_muse_moe_runner
 from vllm import envs
 from vllm.config.kernel import MoEBackend
+from vllm.config.model import ModelConfig
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -56,7 +58,6 @@ from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseSparkUnquantizedMoEQuantConfig,
     _online_mxfp4_applies,
     _quantize_experts_to_mxfp4,
-    interleave_w13_for_triton_swiglu,
     validate_bf16_deployment,
     validate_fp8_deployment,
     validate_mxfp4_deployment,
@@ -285,15 +286,22 @@ def test_muse_mxfp4_method_requires_w4a4_aiter(monkeypatch) -> None:
 
     state["scheme"] = "w_mxfp4_a_mxfp4"
     state["backend"] = Mxfp4MoeBackend.EMULATION
+    auto_config = _moe_config(
+        parallel_config=_parallel_config(tp_size=8), moe_backend="auto"
+    )
     monkeypatch.setattr(amd_muse_moe_runner, "_use_w4a16_mxfp4_experts", lambda: False)
     with pytest.raises(NotImplementedError, match="AITER_MXFP4_MXFP4"):
-        MuseSparkQuarkOCPMXFusedMoE(config, kMxfp4Static, kMxfp4Dynamic)
+        MuseSparkQuarkOCPMXFusedMoE(auto_config, kMxfp4Static, kMxfp4Dynamic)
 
     # gfx942 has no FP4 matrix cores: keep MXFP4 weights, run BF16 activations.
     monkeypatch.setattr(amd_muse_moe_runner, "_use_w4a16_mxfp4_experts", lambda: True)
-    method = MuseSparkQuarkOCPMXFusedMoE(config, kMxfp4Static, kMxfp4Dynamic)
+    method = MuseSparkQuarkOCPMXFusedMoE(auto_config, kMxfp4Static, kMxfp4Dynamic)
     assert method.mxfp4_backend is Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16
     assert method.experts_cls is MuseSparkAiterW4A16Experts
+
+    # An explicitly requested backend is not silently replaced.
+    with pytest.raises(NotImplementedError, match="AITER_MXFP4_MXFP4"):
+        MuseSparkQuarkOCPMXFusedMoE(config, kMxfp4Static, kMxfp4Dynamic)
 
 
 def test_muse_fp8_method_requires_route_preserving_triton(monkeypatch) -> None:
@@ -582,26 +590,58 @@ def _dequant_mxfp4(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     return (values.unflatten(-1, (-1, 32)) * block_scales[..., None]).flatten(-2)
 
 
+def _reference_route_outputs(
+    hidden_states: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    topk_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Unweighted SiLU-gated expert output per route; w13 rows are [gate | up]."""
+    num_tokens, top_k = topk_ids.shape
+    intermediate_size = w2.shape[-1]
+    rows = hidden_states.repeat_interleave(top_k, dim=0)
+    expert_ids = topk_ids.reshape(-1)
+    out = torch.empty_like(rows)
+    for expert in range(w13.shape[0]):
+        idx = (expert_ids == expert).nonzero().squeeze(1)
+        gate_up = (rows[idx].float() @ w13[expert].float().T).to(rows.dtype)
+        gate, up = gate_up.split(intermediate_size, dim=-1)
+        activated = (torch.nn.functional.silu(gate.float()) * up.float()).to(rows.dtype)
+        out[idx] = (activated.float() @ w2[expert].float().T).to(rows.dtype)
+    return out.view(num_tokens, top_k, -1)
+
+
 @pytest.mark.skipif(not ROCM_GFX942, reason="requires a GFX942 GPU")
 @pytest.mark.skipif(not ROCM_AITER_SUPPORTED, reason="requires supported AITER")
+@pytest.mark.parametrize(
+    "num_tokens,top_k",
+    # 16 routes take aiter's fused sort, 65,544 routes its int32 indices.
+    [(2, 8), (16, 4), (8193, 8)],
+)
 @torch.inference_mode()
-def test_rocm_aiter_w4a16_mxfp4_route_outputs_match_dequantized_reference(
+def test_rocm_aiter_w4a16_mxfp4_moe_matches_dequantized_reference(
     enable_rocm_aiter,
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    num_tokens: int,
+    top_k: int,
 ) -> None:
     torch.manual_seed(1234)
-    num_tokens, num_experts, top_k = 16, 8, 4
-    hidden_size, intermediate_size = 256, 256
+    num_experts, hidden_size, intermediate_size = 8, 256, 256
     dtype = torch.bfloat16
     device = torch.device("cuda")
-    config = _moe_config(
-        moe_backend="auto",
-        num_experts=num_experts,
-        top_k=top_k,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        device="cuda",
-        routing_method=RoutingMethodType.Renormalize,
-    )
+    default_vllm_config.model_config = ModelConfig()
+    with device:
+        layer = FusedMoEFactory(
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            prefix="experts",
+        ).routed_experts
+    method = MuseSparkQuarkOCPMXFusedMoE(layer.moe_config, kMxfp4Static, kMxfp4Dynamic)
+    assert method.mxfp4_backend is Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16
 
     w13_packed, w13_scales = _quantize_experts_to_mxfp4(
         torch.randn(
@@ -615,40 +655,20 @@ def test_rocm_aiter_w4a16_mxfp4_route_outputs_match_dequantized_reference(
         )
         / intermediate_size**0.5
     )
-    # Reference weights are the exact MXFP4 values, in the [gate | up] layout.
     w13_ref = _dequant_mxfp4(w13_packed, w13_scales).to(dtype)
     w2_ref = _dequant_mxfp4(w2_packed, w2_scales).to(dtype)
 
-    layer = SimpleNamespace(
-        w13_weight=torch.nn.Parameter(w13_packed, requires_grad=False),
-        w2_weight=torch.nn.Parameter(w2_packed, requires_grad=False),
-        w13_weight_scale=torch.nn.Parameter(w13_scales, requires_grad=False),
-        w2_weight_scale=torch.nn.Parameter(w2_scales, requires_grad=False),
-        w13_input_scale=None,
-        w2_input_scale=None,
-    )
-    interleave_w13_for_triton_swiglu(layer)
-    w13, w2, w13_precision, w2_precision, _, _ = (
-        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
-            mxfp4_backend=Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
-            layer=layer,
-            w13_weight=layer.w13_weight,
-            w2_weight=layer.w2_weight,
-            w13_weight_scale=layer.w13_weight_scale,
-            w2_weight_scale=layer.w2_weight_scale,
-        )
-    )
-    base_quant_config = make_mxfp4_moe_quant_config(
-        mxfp4_backend=Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
-        w1_scale=w13_precision,
-        w2_scale=w2_precision,
-    )
-    assert base_quant_config is not None
-    quant_config = MuseSparkQuarkOCPMXMoEQuantConfig(
-        **vars(base_quant_config), post_expert_norm_fn=_rms_norm
-    )
-    experts = MuseSparkAiterW4A16Experts(config, quant_config)
-    reducer = experts.finalize_weight_and_reduce_impl()
+    with device:
+        method.create_weights(layer, num_experts, hidden_size, intermediate_size, dtype)
+    layer.w13_weight.copy_(w13_packed)
+    layer.w2_weight.copy_(w2_packed)
+    layer.w13_weight_scale.copy_(w13_scales)
+    layer.w2_weight_scale.copy_(w2_scales)
+    layer.post_expert_norm_fn = _rms_norm
+    method.process_weights_after_loading(layer)
+    kernel = method.moe_kernel
+    assert kernel is not None
+    assert isinstance(kernel.fused_experts, MuseSparkAiterW4A16Experts)
 
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
     topk_logits, topk_ids = torch.topk(
@@ -656,32 +676,36 @@ def test_rocm_aiter_w4a16_mxfp4_route_outputs_match_dequantized_reference(
     )
     topk_weights = torch.softmax(topk_logits, dim=-1)
     topk_ids = topk_ids.to(torch.int32)
-    route_buffer, launch = _route_launcher(
-        experts,
-        hidden_states,
-        w13,
-        w2,
-        topk_weights,
-        topk_ids,
-        intermediate_size=intermediate_size,
-        num_experts=num_experts,
-    )
-    launch()
-    routes = experts._route_output
-    assert routes is not None
-    assert routes.shape == route_buffer.shape
 
-    expected_routes = _explicit_expert_outputs(hidden_states, w13_ref, w2_ref, topk_ids)
-    torch.testing.assert_close(routes, expected_routes, rtol=2e-2, atol=2e-2)
+    def _run() -> torch.Tensor:
+        return kernel.apply(
+            hidden_states,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
 
-    output = torch.empty(num_tokens, hidden_size, device=device, dtype=dtype)
-    actual = reducer.apply(output, route_buffer, topk_weights, topk_ids, False)
+    actual = _run().clone()
+    routes = _reference_route_outputs(hidden_states, w13_ref, w2_ref, topk_ids)
     expected = (
         (_rms_norm(routes, out_dtype=torch.float32) * topk_weights[..., None])
         .sum(dim=1)
         .to(dtype)
     )
-    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = _run()
+    graph.replay()
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(captured, actual, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not ROCM_GFX950, reason="requires a GFX950 GPU")

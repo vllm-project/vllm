@@ -4,7 +4,7 @@ meta:
   provider: "Muse (Meta)"
   description: "Sparse MoE reasoning model with 816B total / 42B active parameters and a 1M-token context, built for long-horizon agentic coding. Native image and video perception, channel-scoped reasoning and tool calls via the `muse` parsers, and an optional DSpark draft model for speculative decoding."
   date_added: 2026-10-15
-  date_updated: 2026-10-16
+  date_updated: 2026-10-27
   tasks:
     - text
     - multimodal
@@ -234,7 +234,8 @@ guide: |
   - **Hardware**: the checkpoints hold ~1.64 TB of weights in BF16 and
     ~509 GB in Quark MXFP4, before KV cache. NVFP4 (~533 GB) is the primary
     NVIDIA Blackwell path and fits one 8-GPU node. On AMD, all three AMD
-    variants are validated on gfx950 (MI350X/MI355X).
+    variants are validated on gfx950 (MI350X/MI355X); the Quark MXFP4 variant
+    also runs on gfx942 (MI300X/MI325X), see below.
 
   ## NVIDIA
 
@@ -260,6 +261,11 @@ guide: |
 
   In both MXFP4 variants the experts of the first and last layers stay BF16 and
   run on Triton BF16 MoE.
+
+  gfx942 (MI300X, MI325X) has no FP4 matrix cores, so there the Quark MXFP4
+  checkpoint runs its experts on AITER Triton W4A16 kernels: MXFP4 weights with
+  BF16 activations, selected automatically. Only plain **TP** is supported;
+  expert parallelism is not. This path is validated on 4x MI325X with TP4.
 
   On AMD, the recipe's commands are text-only (`--language-model-only`), use the
   V2 model runner, disable prefix caching, enable chunked prefill, and request
