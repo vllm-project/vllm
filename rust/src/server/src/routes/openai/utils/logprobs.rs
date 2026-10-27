@@ -301,7 +301,9 @@ pub fn clamp_logprob(logprob: f32) -> f32 {
 mod tests {
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
-    use super::{decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps};
+    use super::{
+        decoded_logprobs_to_openai, decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
+    };
 
     #[test]
     fn prompt_logprobs_maps_reject_missing_multi_token_payload() {
@@ -370,6 +372,49 @@ mod tests {
         assert_eq!(chat_top_logprobs_len(0), 0);
         assert_eq!(chat_top_logprobs_len(1), 1);
         assert_eq!(chat_top_logprobs_len(-1), 3);
+    }
+
+    #[test]
+    fn completion_logprobs_keep_space_prefixed_tokens_distinct() {
+        let logprobs = DecodedLogprobs {
+            positions: vec![
+                DecodedPositionLogprobs {
+                    entries: vec![
+                        DecodedTokenLogprob {
+                            token_id: 1,
+                            token: " the".to_string(),
+                            logprob: -0.1,
+                            rank: 1,
+                        },
+                        DecodedTokenLogprob {
+                            token_id: 2,
+                            token: "the".to_string(),
+                            logprob: -0.2,
+                            rank: 2,
+                        },
+                    ],
+                },
+                DecodedPositionLogprobs {
+                    entries: vec![DecodedTokenLogprob {
+                        token_id: 3,
+                        token: "x".to_string(),
+                        logprob: -0.3,
+                        rank: 1,
+                    }],
+                },
+            ],
+        };
+
+        let response = decoded_logprobs_to_openai(&logprobs, 0, false).unwrap();
+        assert_eq!(response.tokens, [" the", "x"]);
+        assert_eq!(response.text_offset, [0, 4]);
+        assert_eq!(
+            response.top_logprobs[0].as_ref().unwrap(),
+            &std::collections::HashMap::from([
+                (" the".to_string(), -0.1),
+                ("the".to_string(), -0.2),
+            ])
+        );
     }
 
     #[test]

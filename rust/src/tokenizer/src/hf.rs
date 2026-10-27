@@ -140,6 +140,46 @@ fn encode_fastokens_ordinary(
     Ok(tokenizer.post_process(ids, false))
 }
 
+fn leading_space_marker(tokenizer_json: &serde_json::Value) -> Option<char> {
+    fn metaspace_marker(pre_tokenizer: &serde_json::Value) -> Option<char> {
+        let replacement = pre_tokenizer
+            .get("replacement")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("▁");
+        let mut chars = replacement.chars();
+        let marker = chars.next()?;
+        chars.next().is_none().then_some(marker)
+    }
+
+    let pre_tokenizer = tokenizer_json.get("pre_tokenizer")?;
+    match pre_tokenizer.get("type").and_then(serde_json::Value::as_str) {
+        Some("Metaspace") => metaspace_marker(pre_tokenizer),
+        Some("Sequence") => pre_tokenizer
+            .get("pretokenizers")?
+            .as_array()?
+            .iter()
+            .find(|pre_tokenizer| {
+                pre_tokenizer.get("type").and_then(serde_json::Value::as_str) == Some("Metaspace")
+            })
+            .and_then(metaspace_marker),
+        _ => None,
+    }
+}
+
+fn restore_leading_spaces(raw_token: &str, decoded: String, marker: char) -> String {
+    let marker_count = raw_token.chars().take_while(|&ch| ch == marker).count();
+    let existing_spaces = decoded.chars().take_while(|&ch| ch == ' ').count();
+    let missing_spaces = marker_count.saturating_sub(existing_spaces);
+    if missing_spaces == 0 {
+        return decoded;
+    }
+
+    let mut restored = String::with_capacity(decoded.len() + missing_spaces);
+    restored.push_str(&" ".repeat(missing_spaces));
+    restored.push_str(&decoded);
+    restored
+}
+
 /// Tokenizer from `tokenizer.json` in HuggingFace format.
 ///
 /// This tries to load with `fastokens` first for better performance, then falls
@@ -150,10 +190,11 @@ pub struct HuggingFaceTokenizer {
     special_token_ids: Arc<[u32]>,
     added_vocab: Box<[(String, u32)]>,
     vocab_size: usize,
+    leading_space_marker: Option<char>,
 }
 
 impl HuggingFaceTokenizer {
-    fn from_hf_backend(tokenizer: HfTokenizer) -> Self {
+    fn from_hf_backend(tokenizer: HfTokenizer, leading_space_marker: Option<char>) -> Self {
         let added_vocab = {
             let mut vocab: Vec<_> = tokenizer
                 .get_added_tokens_decoder()
@@ -181,10 +222,14 @@ impl HuggingFaceTokenizer {
             special_token_ids,
             added_vocab,
             vocab_size,
+            leading_space_marker,
         }
     }
 
-    fn from_fastokens_backend(tokenizer: FastokensTokenizer) -> Self {
+    fn from_fastokens_backend(
+        tokenizer: FastokensTokenizer,
+        leading_space_marker: Option<char>,
+    ) -> Self {
         let added_vocab = {
             let mut vocab: Vec<_> = tokenizer
                 .added_tokens()
@@ -225,6 +270,7 @@ impl HuggingFaceTokenizer {
             special_token_ids,
             added_vocab,
             vocab_size,
+            leading_space_marker,
         }
     }
 
@@ -232,18 +278,20 @@ impl HuggingFaceTokenizer {
     pub fn new_fastokens(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with fastokens");
         let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
+        let leading_space_marker = leading_space_marker(&tokenizer_json);
         let t = FastokensTokenizer::from_json(tokenizer_json)
             .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
-        Ok(Self::from_fastokens_backend(t))
+        Ok(Self::from_fastokens_backend(t, leading_space_marker))
     }
 
     /// Load from `tokenizer.json` with Hugging Face `tokenizers`.
     pub fn new_hf(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with huggingface tokenizers");
         let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
+        let leading_space_marker = leading_space_marker(&tokenizer_json);
         let t = serde_json::from_value::<HfTokenizer>(tokenizer_json)
             .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
-        Ok(Self::from_hf_backend(t))
+        Ok(Self::from_hf_backend(t, leading_space_marker))
     }
 
     /// Load from `tokenizer.json` via fastokens or HuggingFace tokenizers.
@@ -300,6 +348,20 @@ impl Tokenizer for HuggingFaceTokenizer {
                 decode_fastokens_byte_level(t, token_ids, skip_special_tokens)
             }
         }
+    }
+
+    fn decode_token(&self, token_id: u32, skip_special_tokens: bool) -> Result<String> {
+        let decoded = self.decode(&[token_id], skip_special_tokens)?;
+        let Some(marker) = self.leading_space_marker else {
+            return Ok(decoded);
+        };
+        if skip_special_tokens && self.is_special_id(token_id) {
+            return Ok(decoded);
+        }
+        let Some(raw_token) = self.id_to_token(token_id) else {
+            return Ok(decoded);
+        };
+        Ok(restore_leading_spaces(&raw_token, decoded, marker))
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
@@ -801,7 +863,7 @@ mod tests {
 
     #[test]
     fn decode_stream_anchors_undefined_ids_zero_width() {
-        let wrapper = HuggingFaceTokenizer::from_fastokens_backend(tiny_byte_level_bpe());
+        let wrapper = HuggingFaceTokenizer::from_fastokens_backend(tiny_byte_level_bpe(), None);
         assert!(matches!(
             wrapper.backend,
             super::Backend::FastokensByteLevel(_)
