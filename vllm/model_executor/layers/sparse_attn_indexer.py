@@ -36,6 +36,9 @@ from vllm.model_executor.layers.indexer_topk import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
+from vllm.model_executor.layers.sparse_prefill_topk import (
+    stable_prefill_topk_from_valid_range,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -735,7 +738,6 @@ def sparse_attn_indexer(
                         ),
                         row_ends,
                     )
-                num_rows = logits.shape[0]
                 if candidate_blocks is not None:
                     # Two-level selection (v4.1): the candidate source
                     # publishes its top blocks; later indexers mask their
@@ -760,14 +762,13 @@ def sparse_attn_indexer(
                             chunk_candidates,
                             candidate_block_size,
                         )
-                ops.top_k_per_row_prefill(
+                # Value-desc / index-asc. CUDA top_k_per_row_prefill is not
+                # membership-stable when equal finite scores sit at the cut.
+                stable_prefill_topk_from_valid_range(
                     logits,
                     torch.zeros_like(row_ends) if row_starts is None else row_starts,
                     row_ends,
                     topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
                     topk_tokens,
                 )
 
