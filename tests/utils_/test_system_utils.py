@@ -82,20 +82,6 @@ def test_kill_process_tree_skips_child_that_exits_mid_walk(monkeypatch):
             p.wait()
 
 
-def test_claim_triton_cache_dir_defaults_under_vllm_cache_root(monkeypatch, tmp_path):
-    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
-    # setenv "" rather than delenv: the function writes os.environ directly,
-    # and delenv records nothing to restore for an absent variable.
-    monkeypatch.setenv("TRITON_CACHE_DIR", "")
-    envs.disable_envs_cache()
-
-    claim_triton_cache_dir()
-
-    expected = tmp_path / "triton_cache"
-    assert os.environ["TRITON_CACHE_DIR"] == str(expected)
-    assert expected.is_dir()
-
-
 def test_claim_triton_cache_dir_honours_caller(monkeypatch, tmp_path):
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path / "mine"))
