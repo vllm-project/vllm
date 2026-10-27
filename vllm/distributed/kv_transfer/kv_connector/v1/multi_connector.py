@@ -83,8 +83,8 @@ class MultiKVConnectorKVEvents(KVConnectorKVEvents):
     def __init__(self, events: Iterable[KVConnectorKVEvents | None]) -> None:
         self.events: list[KVConnectorKVEvents | None] = list(events)
 
-    def _present(self) -> list[KVConnectorKVEvents]:
-        return [e for e in self.events if e is not None]
+    def _present(self) -> Iterable[KVConnectorKVEvents]:
+        return (e for e in self.events if e is not None)
 
     def add_events(self, events: list["KVCacheEvent"]) -> None:
         raise TypeError(
@@ -93,8 +93,8 @@ class MultiKVConnectorKVEvents(KVConnectorKVEvents):
         )
 
     def aggregate(self) -> "MultiKVConnectorKVEvents":
-        for e in self._present():
-            e.aggregate()
+        for i, e in enumerate(self.events):
+            self.events[i] = e and e.aggregate()
         return self
 
     def aggregate_worker(self, other: KVConnectorKVEvents) -> KVConnectorKVEvents:

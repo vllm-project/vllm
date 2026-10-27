@@ -1391,6 +1391,22 @@ def test_multi_connector_kv_cache_events_aggregate_per_connector():
     assert second.get_number_of_workers() == 1
 
 
+def test_multi_connector_kv_cache_events_keep_aggregate_results():
+    class CopyOnAggregateKVEvents(ListKVEvents):
+        def aggregate(self) -> ListKVEvents:
+            return ListKVEvents(self.events)
+
+    a = _block_stored("a")
+    first = CopyOnAggregateKVEvents([a])
+    multi = MultiKVConnectorKVEvents([first, None])
+
+    assert multi.aggregate() is multi
+    # Each connector's aggregate() result replaces its container.
+    assert multi.events[0] is not first
+    assert multi.events[0].get_all_events() == [a]
+    assert multi.events[1] is None
+
+
 def test_multi_connector_routes_kv_cache_events_to_each_connector(mc):
     seen: list[tuple[int, KVConnectorKVEvents | None]] = []
     for i, connector in enumerate(mc._connectors):
