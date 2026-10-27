@@ -4,7 +4,7 @@ meta:
   provider: "Moonshot AI"
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
-  date_updated: 2026-10-25
+  date_updated: 2026-10-26
   tasks:
     - multimodal
     - text
@@ -1491,14 +1491,14 @@ guide: |
 
   This example uses one TP8/DCP8 prefill worker and one TP8/DCP8 decode worker on separate 8-GPU MI355X nodes. MoRIIO transfers the KV cache in READ mode; `MultiConnector` combines it with `SimpleCPUOffloadConnector` on prefill only. Both roles use the same target and DSpark draft checkpoints and FP8 KV.
 
-  These standalone commands are based on the 1P1D c48 configuration in [InferenceX#3582](https://github.com/SemiAnalysisAI/InferenceX/pull/3582), with real block verification for serving and accuracy evaluation. They are separate from the command builder's NIXL PD configuration.
+  These standalone commands are based on the 1P1D c48 configuration in [InferenceX#4391](https://github.com/SemiAnalysisAI/InferenceX/pull/4391), with real block verification for serving and accuracy evaluation. They are separate from the command builder's NIXL PD configuration.
 
   ### Prerequisites
 
   - Make [moonshotai/Kimi-K3](https://huggingface.co/moonshotai/Kimi-K3) and [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark) available inside every worker container. The commands below use `/models/Kimi-K3` and `/models/Inferact-Kimi-K3-DSpark` as example container paths; adjust them to match your deployment. Use identical checkpoint revisions on all workers.
   - Use the worker and router images below, with the same worker image build on every node. The worker image contains the required vLLM support; no source patches are needed.
   - Expose all eight GPUs, `/dev/infiniband`, host networking, and sufficient shared memory to each worker container. Allow locked memory for RDMA. The container's verbs provider must be compatible with the host NIC and driver.
-  - The prefill offload budget is 1,799 GB of host DRAM **across all eight ranks**, in addition to weight-loading and runtime memory. Reduce `CPU_OFFLOAD_BYTES` if the host cannot accommodate that allocation; the documented configurations use `1799000000000`.
+  - The prefill offload budget is 2,399 GB of host DRAM **across all eight ranks**, in addition to weight-loading and runtime memory. Reduce `CPU_OFFLOAD_BYTES` if the host cannot accommodate that allocation; the documented configurations use `2399000000000`.
   - Set `SOCKET_IFNAME` and `RDMA_DEVICES` to your network interface and HCA list. `ROUTER_IP` and each `WORKER_IP` must be reachable addresses, not `0.0.0.0`. Allow router TCP ports 8000 and 36367, worker HTTP port 6100, and MoRIIO handshake/notification ports 26000–26007 and 27000–27007, plus the site's RDMA traffic.
 
   ```bash
@@ -1536,7 +1536,7 @@ guide: |
   : "${WORKER_IP:?Set this worker reachable IP}"
   : "${SOCKET_IFNAME:?Set the host network interface}"
   : "${RDMA_DEVICES:?Set the comma-separated HCA list}"
-  CPU_OFFLOAD_BYTES=${CPU_OFFLOAD_BYTES:-1799000000000}
+  CPU_OFFLOAD_BYTES=${CPU_OFFLOAD_BYTES:-2399000000000}
 
   export NCCL_SOCKET_IFNAME="$SOCKET_IFNAME" GLOO_SOCKET_IFNAME="$SOCKET_IFNAME"
   export NCCL_IB_HCA="$RDMA_DEVICES"
@@ -1561,6 +1561,7 @@ guide: |
       MAX_SEQS=96
       BATCHED=8192
       KV_ROLE=kv_producer
+      export HSA_NO_SCRATCH_RECLAIM=0
       COMPILATION="{\"mode\":3,\"cudagraph_mode\":\"NONE\",\"max_cudagraph_capture_size\":0,\"custom_ops\":$CUSTOM_OPS}"
       ;;
     decode)
@@ -1597,7 +1598,7 @@ guide: |
     --max-model-len 1048576 \
     --stream-interval 10 \
     --enable-prefix-caching --prefix-match-unit 128 \
-    --kv-cache-dtype fp8 --mamba-ssm-cache-dtype float32 \
+    --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
     --block-size 128 \
     --attention-backend ROCM_AITER_MLA \
     --attention-config '{"mla_prefill_backend":"ROCM_AITER_FA","use_prefill_query_quantization":true}' \
@@ -1624,15 +1625,15 @@ guide: |
   bash kimi-k3-pd.sh decode
   ```
 
-  Prefill uses an 8,192-token batch budget without CUDA graphs; decode uses a 512-token budget with `FULL_DECODE_ONLY` graphs. Both roles use a 96-sequence limit and four DSpark draft tokens. INT4 QuickReduce is a quantized collective optimization; validate accuracy for your workload and keep the same setting on all workers. The RDMA queue backoff is 50,000 microseconds (50 ms).
+  Prefill uses an 8,192-token batch budget without CUDA graphs; decode uses a 512-token budget with `FULL_DECODE_ONLY` graphs. Both roles use a 96-sequence limit and four DSpark draft tokens, with BF16 SSM. INT4 QuickReduce is a quantized collective optimization; validate accuracy for your workload and keep the same setting on all workers. The RDMA queue backoff is 50,000 microseconds (50 ms).
 
-  If long prefills encounter kernel scratch-allocation errors with limited free VRAM, allow scratch reclamation on the prefill worker with `HSA_NO_SCRATCH_RECLAIM=0 bash kimi-k3-pd.sh prefill`, subject to the host's ROCm/firmware compatibility requirements. This controls temporary kernel scratch memory, not KV-cache eviction or post-exit cleanup.
+  Prefill scratch reclamation is enabled with `HSA_NO_SCRATCH_RECLAIM=0`, matching the c48 configurations.
 
   ### Scaling and concurrency tuning
 
   For 1P2D or 1P3D, run the decode command on additional nodes with their own `WORKER_IP`. Discovery registers each worker automatically; the port ranges can be reused on separate hosts. These are router-balanced replicas, not a cross-node TP group.
 
-  Let `C` be the expected global client concurrency, `N` the number of decode workers, and `K` the draft length (4 here). Use the following as capacity-planning starting points, not fixed batch sizes or guaranteed optimal settings:
+  For the offload configurations, let `C` be global client concurrency, `N` the number of decode workers, and `K` the draft length:
 
   ```text
   P max-num-seqs = 2 * C
@@ -1640,22 +1641,19 @@ guide: |
   D graph max G = (K + 1) * C
   ```
 
-  Set `MAX_SEQS` in each role's branch accordingly. The factor of two provides scheduling headroom. For decode, set `max_cudagraph_capture_size` to `G`, keeping it within the decode token budget. In `CAPTURES`, include every size from 1 through the smaller of `G` and the next power of two at or above `2 * C`, then larger multiples of 10 up to `G`; include `G` itself if needed.
+  These are tuning starting points; sequence limits provide scheduling headroom. Keep P/D SSM dtypes, DCP settings, and cache layouts matched.
 
-  At low concurrency, `G = (K + 1) * D max-num-seqs` with dense captures from 1 through `G` is an alternative.
+  | Topology | Global concurrency | P / per-D max sequences | Draft tokens | SSM state | P CPU offload | D graph dense / max |
+  | --- | ---: | --- | ---: | --- | --- | --- |
+  | 1P1D | 8 | 1 / 1 | 7 | FP32 | None | Explicit `[1, 8]` |
+  | 1P1D | 48 | 96 / 96 | 4 | BF16 | 2399 GB | 128 / 240 |
+  | 1P2D | 24 | 48 / 24 | 4 | BF16 | 2399 GB | 64 / 120 |
+  | 1P2D | 48 | 96 / 48 | 4 | BF16 | 2399 GB | 128 / 240 |
+  | 1P3D | 24 | 48 / 16 | 4 | BF16 | 2399 GB | 64 / 120 |
 
-  The configurations below range from throughput-oriented to latency-oriented. All use TP8 workers, K4, prefill-only CPU offload, and the same P/D token budgets and graph modes as the example above. Capture every integer size from 1 through **dense**, then larger multiples of 10 through **max**.
+  For c8, set both sequence limits to 1, use K7 and FP32 SSM, and remove prefill CPU offload (use MoRIIO alone). On decode only, set `VLLM_USE_V2_MODEL_RUNNER=1`, add `--additional-config '{"decode_backend":"latency_specialized"}'`, and use graph sizes `[1, 8]` with maximum 8.
 
-  | Topology | Global concurrency C | P/D DCP | P max-num-seqs | Per-D max-num-seqs | D graph dense / max |
-  | --- | ---: | --- | ---: | ---: | --- |
-  | 1P1D | 56 | 8/8 | 112 | 112 | 128 / 280 |
-  | 1P1D | 48 | 8/8 | 96 | 96 | 128 / 240 |
-  | 1P2D | 48 | 8/8 | 96 | 48 | 128 / 240 |
-  | 1P2D | 24 | 8/8 | 48 | 24 | 64 / 120 |
-  | 1P3D | 24 | 8/8 | 48 | 16 | 64 / 120 |
-  | 1P3D | 12 | 1/1 | 24 | 8 | 40 / 40 |
-
-  The 1P3D C=12 configuration uses the low-concurrency graph formula (`G = 5 * 8 = 40`) and disables DCP with `--decode-context-parallel-size 1` on both roles. Keep P/D DCP and cache layouts matched. Benchmark concurrency sweeps and harness settings remain in the linked InferenceX configuration.
+  Benchmark concurrency sweeps and harness settings remain in the linked InferenceX configuration. Benchmark runs use its measured golden acceptance curve; the serving commands retain real block verification.
 
   ### Verify routed inference
 
