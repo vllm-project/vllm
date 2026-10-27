@@ -91,7 +91,6 @@ class Attention:
                 policy.update(
                     dcp=dcp_box(runtime, heads), parity=runtime.mla_layers % 2
                 )
-                policy.update(first=runtime.mla_layers == 0)
             runtime.mla_layers += 1
             pitches = {b: pitch for b in runtime.batches}
             self.core = PreparedMla(attention, pitches, query, **policy)

@@ -299,9 +299,7 @@ class KvBalancedMla:
         self.arch = torch.cuda.get_device_capability(device)
         self.q_tiles = query_tiles(heads, q)
         self.clusters = max_active_clusters(device)
-        self.list_len = work_list_len(
-            heads, q, max_requests, self.clusters, max_waves
-        )
+        self.list_len = work_list_len(heads, q, max_requests, self.clusters, max_waves)
         self.max_waves = self.list_len // self.clusters - 1
         self.workspace_bytes = workspace_bytes(heads, q, max_requests, capacity)
         self.block_b = triton.next_power_of_2(max(16, max_requests))
