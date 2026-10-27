@@ -20,7 +20,10 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.kv_transfer import hisparse_host_pool_dir
 from vllm.distributed import get_tp_group
-from vllm.distributed.device_communicators.shm_broadcast import SHM_PATH
+from vllm.distributed.device_communicators.shm_broadcast import (
+    SHM_PATH,
+    check_shm_free_space,
+)
 from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -32,6 +35,7 @@ from vllm.v1.hisparse.types import SparseKVResidencyUpdate
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
     _get_populate_write_fn,
+    advise_huge_pages,
     map_shared_file,
 )
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
@@ -213,13 +217,23 @@ def _map_host_pool_file(directory: str, size: int) -> torch.Tensor:
     """Map an unlinked, pre-faulted file (e.g. on hugetlbfs) as host memory."""
     page = max(os.statvfs(directory).f_bsize, mmap.PAGESIZE)
     mapped_size = round_up(size, page)
+    is_hugetlb = page > mmap.PAGESIZE
+    if not is_hugetlb:
+        check_hisparse_host_memory(mapped_size)
+        check_shm_free_space(
+            mapped_size,
+            shm_path=directory,
+            allocation_name="HiSparse pinned host pool",
+        )
     fd, path = tempfile.mkstemp(prefix="vllm_hisparse_", dir=directory)
     try:
         os.unlink(path)
         os.ftruncate(fd, mapped_size)
-        mapping = map_shared_file(fd, mapped_size, page > mmap.PAGESIZE)
+        mapping = map_shared_file(fd, mapped_size, is_hugetlb)
     finally:
         os.close(fd)
+    if not is_hugetlb:
+        advise_huge_pages(mapping)
     _get_populate_write_fn(mapping)(mapping, 0, mapped_size)
     return torch.frombuffer(mapping, dtype=torch.int8, count=mapped_size)
 
@@ -410,14 +424,13 @@ def allocate_hisparse_host_pools(
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], SharedOffloadRegion | None]:
     """Allocate private host tensors or one mmap shared by local TP ranks.
 
-    A configured ``host_pool_dir`` backs the pool with files in that directory
-    (typically hugetlbfs), whose huge pages are not counted in available RAM.
+    A configured ``host_pool_dir`` backs the pool with files in that directory.
+    Only hugetlbfs backing skips the ordinary RAM check.
     """
     host_pool_dir = hisparse_host_pool_dir(vllm_config.kv_transfer_config)
-    memory_check = check_hisparse_host_memory if host_pool_dir is None else None
     if not use_shared_host_pool:
-        if memory_check is not None:
-            memory_check(sum(tensor_sizes))
+        if host_pool_dir is None:
+            check_hisparse_host_memory(sum(tensor_sizes))
         private_pools = [
             allocate_pinned_host_pool(size, host_pool_dir) for size in tensor_sizes
         ]
@@ -438,7 +451,7 @@ def allocate_hisparse_host_pools(
         kv_bytes_per_chunk=num_blocks * host_block_stride,
         cpu_page_size=sum(tensor_sizes),
         barrier=tp_group.barrier,
-        creator_memory_check=memory_check,
+        creator_memory_check=check_hisparse_host_memory,
         populate_shard=(tp_group.rank_in_group, tp_group.world_size),
         shm_dir=host_pool_dir or SHM_PATH,
     )

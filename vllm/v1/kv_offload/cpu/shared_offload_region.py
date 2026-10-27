@@ -25,6 +25,7 @@ logger = init_logger(__name__)
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
+_MADV_HUGEPAGE = getattr(mmap, "MADV_HUGEPAGE", 14)
 _MAP_FIXED = 0x10
 # Page-cache inserts are serialized per shm file, capping pre-faulting of one
 # file near 10 GiB/s; smaller segments are not worth a file.
@@ -83,6 +84,17 @@ def _get_populate_write_fn(
         )
         return _fallback_populate_write
     return _madvise_populate_write
+
+
+def advise_huge_pages(mmap_obj: mmap.mmap) -> int:
+    """Request THP and return the preferred alignment for pre-fault shards."""
+    try:
+        with open("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size") as f:
+            page_size = max(int(f.read()), mmap.PAGESIZE)
+        mmap_obj.madvise(_MADV_HUGEPAGE)
+    except (AttributeError, OSError, ValueError):
+        return mmap.PAGESIZE
+    return page_size
 
 
 def map_shared_file(fd: int, size: int, is_hugetlb: bool) -> mmap.mmap:
@@ -194,13 +206,13 @@ class SharedOffloadRegion:
                 # land on a 0-byte stub and spin in _wait_for_file_size
                 # for the full 30 s timeout.
                 self._creator = True
-                if creator_memory_check is not None:
-                    creator_memory_check(self.total_size_bytes)
+                if creator_memory_check is not None and not self.is_hugetlb:
+                    creator_memory_check(self.mapped_size_bytes)
                 # hugetlbfs statfs reports no free space without a size=
                 # limit; mmap below fails with ENOMEM on a short pool instead.
                 if not self.is_hugetlb:
                     check_shm_free_space(
-                        self.total_size_bytes,
+                        self.mapped_size_bytes,
                         shm_path=shm_dir,
                         allocation_name=f"CPU KV offload shared region in {shm_dir}",
                     )
@@ -211,7 +223,7 @@ class SharedOffloadRegion:
                 # Joiners wait for the first file, so size it last.
                 os.ftruncate(self.fd, self._segments[0][2])
                 logger.info(
-                    "Created mmap file %s (%.2f GB, %d KiB pages)",
+                    "Created mmap file %s (%.2f GB, %d KiB file blocks)",
                     self.mmap_path,
                     self.mapped_size_bytes / 1e9,
                     self.page_size // 1024,
@@ -230,6 +242,9 @@ class SharedOffloadRegion:
                     prot=mmap.PROT_READ | mmap.PROT_WRITE,
                 )
                 self._map_segments()
+            populate_page_size = self.page_size
+            if not self.is_hugetlb and shm_dir != SHM_PATH:
+                populate_page_size = advise_huge_pages(self.mmap_obj)
             if barrier is not None:
                 barriers_remaining -= 1
                 barrier()
@@ -240,7 +255,9 @@ class SharedOffloadRegion:
             if populate_shard is not None:
                 populate_write_fn = _get_populate_write_fn(self.mmap_obj)
                 index, count = populate_shard
-                share = round_up(cdiv(self.mapped_size_bytes, count), self.page_size)
+                share = round_up(
+                    cdiv(self.mapped_size_bytes, count), populate_page_size
+                )
                 start = min(index * share, self.mapped_size_bytes)
                 if start < self.mapped_size_bytes:
                     length = min(share, self.mapped_size_bytes - start)

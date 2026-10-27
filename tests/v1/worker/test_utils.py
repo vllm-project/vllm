@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import mmap
+import shutil
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import numpy as np
+import psutil
 import pytest
 import torch
 
@@ -323,12 +325,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch, host_po
         "kv_bytes_per_chunk": 4 * page,
         "cpu_page_size": 64,
         "barrier": tp_group.barrier,
-        # Huge pages are reserved outside of the RAM that psutil reports.
-        "creator_memory_check": (
-            hisparse_runtime_module.check_hisparse_host_memory
-            if host_pool_dir is None
-            else None
-        ),
+        "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
         "populate_shard": (1, 2),
         "shm_dir": host_pool_dir or "/dev/shm",
     }
@@ -447,6 +444,24 @@ def test_private_host_pool_maps_unlinked_file_in_host_pool_dir(monkeypatch, tmp_
     assert host_pool.data_ptr() == registered.data_ptr()
     host_pool.fill_(7)
     assert int(registered[:size].sum()) == 7 * size
+
+
+@pytest.mark.parametrize("resource", ["ram", "space"])
+def test_custom_host_pool_rejects_insufficient_resources(
+    monkeypatch, tmp_path, resource
+):
+    """Custom tmpfs backing must pass memory checks before faulting pages."""
+    if resource == "ram":
+        memory = psutil.virtual_memory()._replace(available=0)
+        monkeypatch.setattr(psutil, "virtual_memory", lambda: memory)
+        error, message = ValueError, "RAM is available"
+    else:
+        usage = shutil.disk_usage(tmp_path)._replace(free=0)
+        monkeypatch.setattr(shutil, "disk_usage", lambda path: usage)
+        error, message = RuntimeError, "Insufficient space"
+    with pytest.raises(error, match=message):
+        hisparse_runtime_module._map_host_pool_file(str(tmp_path), mmap.PAGESIZE)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_hisparse_registration_chunks_end_between_host_blocks():

@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, mock_open
 
 import pytest
 
@@ -492,6 +492,43 @@ def test_file_has_correct_size(iid):
     """The mmap file size on disk must equal total_size_bytes."""
     with _region(iid, num_chunks=4) as r:
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
+
+
+def test_custom_backing_prefaults_thp_aligned_shards_without_padding(
+    iid, tmp_path, monkeypatch
+):
+    """Request THP before pre-faulting a PMD-aligned share of an exact-size pool."""
+    pmd_size = 2 << 20
+    size = 3 * pmd_size + PAGE_SIZE
+    advice_calls = []
+
+    class ObservedMmap(mmap.mmap):
+        def madvise(self, advice, *args):
+            advice_calls.append((advice, args))
+
+    monkeypatch.setattr(mmap, "mmap", ObservedMmap)
+    monkeypatch.setattr(
+        region_module, "open", mock_open(read_data=str(pmd_size)), raising=False
+    )
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=1,
+        rank=None,
+        kv_bytes_per_chunk=size,
+        cpu_page_size=size,
+        populate_shard=(1, 2),
+        shm_dir=str(tmp_path),
+    )
+    try:
+        assert region.base_tensor.numel() == region.mapped_size_bytes == size
+        populate = getattr(mmap, "MADV_POPULATE_WRITE", 23)
+        assert advice_calls == [
+            (getattr(mmap, "MADV_HUGEPAGE", 14), ()),
+            (populate, (0, PAGE_SIZE)),
+            (populate, (2 * pmd_size, pmd_size + PAGE_SIZE)),
+        ]
+    finally:
+        region.cleanup()
 
 
 def test_hugetlbfs_dir_rounds_mapping_to_huge_pages(iid, monkeypatch):

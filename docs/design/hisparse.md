@@ -44,6 +44,32 @@ RDMA registration must pin by orders of magnitude. The huge pages must be
 reserved up front (`vm.nr_hugepages` or the pod's `hugepages-<size>`
 resource); startup fails with a clear error if they are not.
 
+For transparent huge pages (THP), point `host_pool_dir` at a dedicated tmpfs
+mounted with `huge=always,mpol=interleave`. Prepare it through the container
+runtime or, with Linux mount permissions, before starting vLLM:
+
+```bash
+mkdir -p /run/vllm-hisparse
+mount -t tmpfs -o size=1100G,huge=always,mpol=interleave,mode=0700 \
+    tmpfs /run/vllm-hisparse
+```
+
+Configure the connector, including when nested in `MultiConnector`:
+
+```json
+{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":1024,"host_pool_dir":"/run/vllm-hisparse"}}
+```
+
+HiSparse requests THP before populating the mapping and aligns shared-pool
+prefault shards to the kernel's THP size. The logical capacity and CUDA
+registration boundaries stay unchanged. THP allocation is best effort; it
+does not require reserved hugetlb pages. Tmpfs capacity, ordinary RAM and
+cgroup headroom checks still apply. Leave room for weights and other engine
+allocations, and make the same directory available to every local TP worker.
+Shared pools default to `/dev/shm`; private pools keep their existing
+allocation. No launcher or engine mount operation is needed. See Linux's
+[tmpfs mount policies](https://docs.kernel.org/filesystems/tmpfs.html).
+
 Startup logs report two concurrency bounds at `max_model_len`. The generic
 `Maximum concurrency` line charges each request its full admission footprint,
 including the in-flight window of every resident group. The `HiSparse
