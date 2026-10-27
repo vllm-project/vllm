@@ -9433,3 +9433,303 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
 
     engine_task.abort_and_join().await;
 }
+
+/// Captures the events `--enable-log-outputs` logs, one `LEVEL field=value ...`
+/// line per event.
+#[derive(Clone, Default)]
+struct OutputLogCapture(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl OutputLogCapture {
+    /// Start capturing from an empty log. The capture is the global subscriber
+    /// because offloaded handlers run on the request runtime's threads; the
+    /// tests using it are `#[serial]`.
+    fn start() -> Self {
+        static CAPTURE: std::sync::OnceLock<OutputLogCapture> = std::sync::OnceLock::new();
+        let capture = CAPTURE
+            .get_or_init(|| {
+                use tracing_subscriber::layer::SubscriberExt as _;
+                let capture = OutputLogCapture::default();
+                tracing::subscriber::set_global_default(
+                    tracing_subscriber::registry().with(capture.clone()),
+                )
+                .expect("install output log capture");
+                capture
+            })
+            .clone();
+        capture.0.lock().expect("output log lock").clear();
+        capture
+    }
+
+    fn lines(&self) -> String {
+        self.0.lock().expect("output log lock").join("\n")
+    }
+}
+
+/// Marks a span that carries a `request_id` field, so captured events can show
+/// whether they are attributed to a request. The IDs themselves are random.
+struct CapturedRequestId;
+
+impl<S> tracing_subscriber::Layer<S> for OutputLogCapture
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attrs.metadata().fields().field("request_id").is_some()
+            && let Some(span) = ctx.span(id)
+        {
+            span.extensions_mut().insert(CapturedRequestId);
+        }
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() != "vllm_server::routes::output_log" {
+            return;
+        }
+        let mut line = event.metadata().level().to_string();
+        let in_request = ctx.event_scope(event).is_some_and(|mut scope| {
+            scope.any(|span| span.extensions().get::<CapturedRequestId>().is_some())
+        });
+        if !in_request {
+            line.push_str(" <outside request span>");
+        }
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn fmt::Debug| {
+                line.push_str(&format!(" {}={value:?}", field.name()));
+            },
+        );
+        self.0.lock().expect("output log lock").push(line);
+    }
+}
+
+/// Send one request to a fresh app whose engine replies with `output_specs`,
+/// and return the logged outputs.
+async fn output_logs_for_request(
+    log_outputs: crate::config::OutputLogging,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    uri: &str,
+    body: serde_json::Value,
+) -> String {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-log-outputs",
+        output_specs,
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                log_outputs,
+                enable_scale_out: true,
+                ..Default::default()
+            },
+        ),
+    ));
+    let capture = OutputLogCapture::start();
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    capture.lines()
+}
+
+fn chat_body(stream: bool) -> serde_json::Value {
+    json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "stream": stream,
+        "messages": [{"role": "user", "content": "hello"}]
+    })
+}
+
+/// Reasoning, then content split over two updates, the last one cut off by
+/// the length limit (so its text stays visible, unlike an EOS token).
+fn reasoning_then_content_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
+    vec![
+        (token_ids("<think>Greet.</think>"), None),
+        (token_ids("Hi"), None),
+        (token_ids("!"), Some(EngineCoreFinishReason::Length)),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_chat_stream_deltas_and_complete_output() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        reasoning_then_content_output_specs(),
+        "/v1/chat/completions",
+        chat_body(true),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details stream="delta" token_ids=[61441, 71, 114, 101, 101, 116, 46, 61442]
+        INFO message=generated response stream="delta" output="[reasoning: Greet.]"
+        DEBUG message=generated response details stream="delta" token_ids=[72, 105]
+        INFO message=generated response stream="delta" output="Hi"
+        DEBUG message=generated response details stream="delta" token_ids=[33]
+        INFO message=generated response stream="delta" output="!" finish_reason="length"
+        INFO message=generated response stream="complete" output="Hi!" finish_reason="length""#]].assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_chat_text_released_at_finish_with_its_update() {
+    // With tools, the parser holds back a possible `<tool_call>` opener and
+    // releases it only when the stream finishes, after the update ended.
+    let mut body = chat_body(true);
+    body["tools"] = json!([{
+        "type": "function",
+        "function": {"name": "get_weather", "parameters": {"type": "object"}}
+    }]);
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        vec![(
+            token_ids("Hello<tool_ca"),
+            Some(EngineCoreFinishReason::Length),
+        )],
+        "/v1/chat/completions",
+        body,
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details stream="delta" token_ids=[72, 101, 108, 108, 111, 60, 116, 111, 111, 108, 95, 99, 97]
+        INFO message=generated response stream="delta" output="Hello<tool_ca" finish_reason="length"
+        INFO message=generated response stream="complete" output="Hello<tool_ca" finish_reason="length""#]].assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_chat_deltas_sent_before_a_stream_error() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        vec![
+            (token_ids("Hello"), None),
+            (token_ids("!"), Some(EngineCoreFinishReason::Error)),
+        ],
+        "/v1/chat/completions",
+        chat_body(true),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details stream="delta" token_ids=[72, 101, 108, 108, 111]
+        INFO message=generated response stream="delta" output="Hello"
+        DEBUG message=generated response details stream="delta" token_ids=[33]
+        INFO message=generated response stream="delta" output="!""#]]
+    .assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_non_stream_chat_content() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        reasoning_then_content_output_specs(),
+        "/v1/chat/completions",
+        chat_body(false),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details token_ids=[61441, 71, 114, 101, 101, 116, 46, 61442, 72, 105, 33]
+        INFO message=generated response output="Hi!" finish_reason="length""#]].assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_completion_stream_deltas_and_complete_output() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        default_stream_output_specs(),
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "stream": true}),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details stream="delta" token_ids=[104]
+        INFO message=generated response stream="delta" output="h"
+        DEBUG message=generated response details stream="delta" token_ids=[105]
+        INFO message=generated response stream="delta" output="i"
+        INFO message=generated response stream="complete" output="hi" finish_reason="stop""#]]
+    .assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_without_deltas_logs_only_complete_completion_stream() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::Complete,
+        default_stream_output_specs(),
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "stream": true}),
+    )
+    .await;
+
+    expect_test::expect![[
+        r#"INFO message=generated response stream="complete" output="hi" finish_reason="stop""#
+    ]]
+    .assert_eq(&logs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_logs_non_stream_completion_and_generate_token_ids() {
+    let completion = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        default_stream_output_specs(),
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello"}),
+    )
+    .await;
+    let generate = output_logs_for_request(
+        crate::config::OutputLogging::CompleteAndDeltas,
+        default_stream_output_specs(),
+        "/inference/v1/generate",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "sampling_params": {"max_tokens": 3}
+        }),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details token_ids=[104, 105, 33]
+        INFO message=generated response output="hi" finish_reason="stop"
+        ---
+        DEBUG message=generated response details token_ids=[104, 105, 33]
+        INFO message=generated response output="" finish_reason="stop""#]]
+    .assert_eq(&format!("{completion}\n---\n{generate}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_outputs_disabled_logs_nothing() {
+    let logs = output_logs_for_request(
+        crate::config::OutputLogging::Disabled,
+        default_stream_output_specs(),
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "stream": true}),
+    )
+    .await;
+
+    assert_eq!(logs, "");
+}
