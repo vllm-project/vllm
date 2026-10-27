@@ -980,8 +980,6 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     torch.Tensor | None,
 ]:
     """Convert loaded weights into backend-specific kernel format."""
-    import os
-
     is_gfx1250 = False
     if current_platform.is_rocm():
         from vllm.platforms.rocm import on_gfx1250
@@ -1363,8 +1361,6 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250:
         from aiter.ops.shuffle import moe_shuffle_scale, moe_shuffle_weight
-
-        os.environ.setdefault("AITER_FORCE_A8W4", "1")
 
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
