@@ -2546,27 +2546,17 @@ def sort_batch_req_ids(
     num_computed_tokens: np.ndarray | None = None,
     req_id_to_index: dict[str, int] | None = None,
 ) -> list[str]:
-    # Order verification/decode -> short_extend -> extend -> prefill.
-    # Keeping requests that have context ahead of context-less ones lets
-    # split_decodes_prefills_and_extends end the extend region as early as
-    # possible; the splitter clamps the boundary itself, so this is a tightening
-    # rather than a correctness requirement. The context term precedes the
-    # decode-length term because split_dcp_context_queries splits at
-    # decode_threshold=1, where a context-less decode_query_len chunk is a prefill.
+    # Order verification/decode -> short_extend -> extend -> prefill. The
+    # splitter clamps its prefill boundary, so sorting by context only keeps the
+    # extend region small; correctness does not depend on it.
     def key(r: str) -> tuple[bool, bool, bool, int]:
         num = num_tokens_per_req[r]
         drafts = draft_tokens.get(r)
         return (
             not drafts,
-            # Requests that fit in a decode chunk stay with the decodes, and
-            # drafted requests are pinned ahead of everything by the term above,
-            # so neither needs the lookup. The scheduler only pads a 1-token
-            # prompt with drafts, so a fresh 2..decode_query_len prompt is
-            # undrafted: sorting it behind the extends would make it a
-            # zero-context extend, which costs a context chunk it has no use for
-            # and raises num_extends for the requests that do. `not` keeps the
-            # numpy scalar out of the tuple: sorting compares tuples O(n log n)
-            # times, and numpy scalars compare far slower.
+            # Rows up to decode_query_len stay with the decodes: a fresh one
+            # sorted behind the extends would run as a zero-context extend.
+            # `not` keeps numpy scalars, which compare slowly, out of the tuple.
             num > decode_query_len
             and not drafts
             and num_computed_tokens is not None

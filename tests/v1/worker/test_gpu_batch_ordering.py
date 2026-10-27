@@ -10,12 +10,9 @@ prefill.
 Conversely, a prompt chunk of exactly decode_query_len tokens has a decode
 batch's shape, and must not be classified as a uniform decode batch.
 
-split_decodes_prefills_and_extends took the first context-less request as the
-start of the prefills, so it needed requests carrying computed context to
-precede those carrying none. It no longer relies on that: it clamps the prefill
-boundary past the last row with context, so the classification is correct under
-any ordering. The ordering still decides how much lands in the extend region,
-and has to be asserted on its own because the clamp hides it.
+split_decodes_prefills_and_extends starts the prefill region after the last
+request with context, so it is correct under any ordering. The ordering only
+decides how much lands in the extend region, so it is asserted on its own.
 """
 
 import ast
@@ -289,26 +286,15 @@ def test_extends_precede_prefills_through_the_splitter():
 
     assert classify(req_ids) == (1, 1, 1)
 
-    # Misordered, "resumed" keeps its KV history anyway: the splitter will not
-    # start the prefill region before the last request that has context, so the
-    # context-less "fresh" chunk is classified as an extend rather than taking
-    # "resumed" onto the prefill side with it.
+    # Misordered, the clamp still keeps "resumed" off the prefill side, and
+    # "fresh" becomes a zero-context extend.
     assert classify(["d0", "fresh", "resumed"]) == (1, 2, 0)
 
 
 def test_ordering_holds_for_the_dcp_splitter_threshold():
-    """The same ordering must still satisfy the splitter's other caller.
-
-    split_dcp_context_queries (vllm/v1/worker/cp_utils.py) splits at the default
-    decode_threshold=1, where a context-less chunk of exactly decode_query_len
-    tokens is a prefill rather than a decode. The context term fires only above
-    decode_query_len, so it leaves such a chunk among the decodes and this caller
-    classifies it as a zero-context extend instead. That is the trade the term
-    accepts: the alternative keeps the chunk out of the extend region here, but
-    puts every undrafted 2..decode_query_len prompt into it at the model runner's
-    own threshold, on every step. What must still hold at threshold 1 is the one
-    thing the splitter cannot recover from: no request carrying context may be
-    classified as a prefill.
+    """cp_utils splits at decode_threshold=1; no request with context may be a
+    prefill there either. A fresh decode_query_len chunk runs as a zero-context
+    extend at that threshold, the cost of keeping it with the decodes.
     """
     decode_query_len = 4
     num_tokens_per_req = {"fresh": 4, "extend": 4096, "d0": 4}
@@ -323,8 +309,7 @@ def test_ordering_holds_for_the_dcp_splitter_threshold():
         num_computed,
         req_id_to_index,
     )
-    # "fresh" is not above decode_query_len, so the context term leaves it with
-    # the decodes rather than sorting it behind the extend.
+    # "fresh" is not above decode_query_len, so it stays with the decodes.
     assert req_ids == ["d0", "fresh", "extend"]
 
     metadata = _make_common_attn_metadata(
@@ -335,13 +320,10 @@ def test_ordering_holds_for_the_dcp_splitter_threshold():
     num_decodes, num_extends, num_prefills, *_ = split_decodes_prefills_and_extends(
         metadata
     )
-    # Every row is longer than this threshold, so none is a decode, and the
-    # clamp ends the extend region past "extend", the last row with context.
-    # "fresh" is inside it: a zero-context extend, the cost described above.
+    # No row is a decode at threshold 1, and the clamp ends the extend region
+    # past "extend", so "fresh" is a zero-context extend.
     assert (num_decodes, num_extends, num_prefills) == (0, 3, 0)
 
-    # The invariant the clamp exists to hold: whatever the ordering, no request
-    # carrying context is left on the prefill side.
     prefill_rows = req_ids[len(req_ids) - num_prefills :] if num_prefills else []
     assert all(num_computed[req_id_to_index[r]] == 0 for r in prefill_rows), (
         f"context-carrying request in the prefill region: {prefill_rows}"
@@ -349,18 +331,10 @@ def test_ordering_holds_for_the_dcp_splitter_threshold():
 
 
 def test_sorted_batches_never_put_context_on_the_prefill_side():
-    """Random batches through the real sort and the real splitter.
-
-    Nothing carrying context may be classified as a prefill, at any threshold
-    the splitter can be called with, from 1 (cp_utils) to decode_query_len (the
-    model runner).
-
-    Since the clamp, this holds for any ordering, so what it really covers is
-    the clamp rather than the sort: it would still pass if the sort key stopped
-    reading computed context. That is deliberate -- it is the end-to-end
-    property users care about, and the sort is pinned separately by
-    test_sort_key_reads_state_slots_not_batch_positions and
-    test_gather_hands_the_request_state_to_the_sort.
+    """Random batches through the real sort and splitter: nothing with context
+    may be a prefill at any threshold from 1 (cp_utils) to decode_query_len.
+    This holds for any ordering, so it covers the clamp; the next two tests cover
+    the sort.
     """
     rng = np.random.default_rng(0)
     for decode_query_len in (1, 2, 4, 8):
@@ -369,8 +343,7 @@ def test_sorted_batches_never_put_context_on_the_prefill_side():
             # Slots differ from batch positions, and free slots hold stale counts.
             slots = rng.permutation(len(req_ids) + 3)[: len(req_ids)]
             req_id_to_index = {r: int(s) for r, s in zip(req_ids, slots)}
-            # Decode-shaped, short-chunk and long-chunk requests, each of which
-            # may or may not already have computed context.
+            # Decode-shaped, short-chunk and long-chunk requests.
             num_tokens_per_req = {
                 r: int(rng.choice([1, decode_query_len, rng.integers(2, 16), 4096]))
                 for r in req_ids
@@ -414,23 +387,16 @@ def test_sorted_batches_never_put_context_on_the_prefill_side():
                     f"decode_threshold={decode_threshold} order={order} "
                     f"computed={[int(num_computed[req_id_to_index[r]]) for r in order]}"
                 )
-                # The token count must agree with the request split.
                 assert num_prefill_tokens == sum(
                     num_tokens_per_req[r] for r in prefill_side
                 )
 
 
 def test_sort_key_reads_state_slots_not_batch_positions():
-    """The context term must index the state array by slot, not batch position.
-
-    The splitter clamps the prefill boundary, so its outcome is the same under
-    any ordering and the sweep above cannot tell the two lookups apart. Assert
-    the ordering itself instead: among the requests that consult the term, one
-    without context may never precede one that has context.
+    """The context term must read the state array by slot, not batch position.
+    The clamp hides the ordering from the splitter, so this asserts it directly.
     """
-    # One hand-built batch first, so a regression reads as three requests
-    # rather than a seed. Three of the five slots are owned; the free ones
-    # still hold a stale count, which is what a positional read picks up.
+    # Free slots 1 and 3 hold a stale count, which is what a positional read sees.
     #   batch position 0, "fresh",   slot 2,   0 computed tokens
     #   batch position 1, "resumed", slot 0, 300 computed tokens
     #   batch position 2, "chunked", slot 4,  64 computed tokens
@@ -438,8 +404,7 @@ def test_sort_key_reads_state_slots_not_batch_positions():
     req_id_to_index = {"fresh": 2, "resumed": 0, "chunked": 4}
     # Above decode_query_len, so the context term consults the state array.
     num_tokens_per_req = {"fresh": 16, "resumed": 16, "chunked": 16}
-    # By position the three would read 300, 11 and 0 rather than 0, 300 and 64,
-    # putting the only context-less request at the front.
+    # By position they would read 300, 11 and 0, which puts "fresh" first.
     assert sort_batch_req_ids(
         num_tokens_per_req, {}, 8, num_computed, req_id_to_index
     ) == ["resumed", "chunked", "fresh"]
@@ -451,8 +416,7 @@ def test_sort_key_reads_state_slots_not_batch_positions():
             slots = rng.permutation(len(req_ids) + 3)[: len(req_ids)]
             req_id_to_index = {r: int(s) for r, s in zip(req_ids, slots)}
             num_tokens_per_req = {r: int(rng.integers(2, 64)) for r in req_ids}
-            # Free slots hold stale counts, so a positional read finds context
-            # that belongs to no request in this batch.
+            # Free slots hold stale counts that a positional read would pick up.
             num_computed = np.full(len(req_ids) + 3, 11, dtype=np.int32)
             for r in req_ids:
                 num_computed[req_id_to_index[r]] = int(
@@ -466,8 +430,7 @@ def test_sort_key_reads_state_slots_not_batch_positions():
                 req_id_to_index,
             )
 
-            # Only rows above decode_query_len consult the term; the shorter
-            # ones stay with the decodes and may sort either way.
+            # Rows up to decode_query_len never consult the context term.
             consulting = [r for r in order if num_tokens_per_req[r] > decode_query_len]
             context_less = [
                 r for r in consulting if not num_computed[req_id_to_index[r]]
@@ -486,16 +449,10 @@ def test_sort_key_reads_state_slots_not_batch_positions():
 
 
 def test_gather_hands_the_request_state_to_the_sort():
-    """The sort can only see context if the call site passes the state in.
-
-    Every other sort test calls sort_batch_req_ids directly, so dropping the
-    two state arguments in gather_batch_req_state leaves all of them green.
-    The clamp would keep the result correct, and the lost ordering would show
-    up only as extra zero-context rows in the extend region. Go through the
-    runner so the call site itself is covered.
+    """gather_batch_req_state must pass the request state to the sort.
+    Every other test calls sort_batch_req_ids directly, so cover the call site.
     """
-    # {req_id: (num_computed_tokens, prefill_len)}; "fresh" is the only row
-    # without context, so it is the only one the context term moves.
+    # {req_id: (num_computed_tokens, prefill_len)}; only "fresh" has no context.
     runner = _make_runner(
         {"fresh": (0, 4096), "resumed": (2048, 4096), "running": (512, 512)},
         decode_query_len=4,
@@ -506,8 +463,7 @@ def test_gather_hands_the_request_state_to_the_sort():
         scheduled_spec_decode_tokens={},
     )
     state, _ = runner.gather_batch_req_state(scheduler_output, False)
-    # Without the state arguments every row ties and the input order survives,
-    # leaving "fresh" in front of the two that carry context.
+    # Without the state every row ties, and "fresh" would stay in front.
     assert state.req_ids == ["resumed", "running", "fresh"]
 
 
@@ -588,14 +544,11 @@ def test_no_speculator_dispatches_on_query_length_alone():
 
 
 def test_padded_drafts_on_a_context_less_prompt_keep_the_prefill_region_clear():
-    """The one row the batch ordering cannot place correctly.
+    """The one row the ordering cannot place: a padded one-token prompt.
 
-    The scheduler pads a new one-token prompt to decode_query_len and gives it
-    placeholder drafts (scheduler.py, pad_spec_decode). The draft term sorts it
-    ahead of requests that do carry context, and it cannot be ordered behind
-    them: adaptive verification requires drafted requests to stay contiguous at
-    the front. At threshold 1, the caller in cp_utils, the padded row is a
-    prefill, so the splitter has to keep the prefill region clear itself.
+    Its placeholder drafts keep it at the front, since adaptive verification
+    needs drafted requests contiguous. At threshold 1 it is a prefill ahead of
+    rows with context, so the splitter must keep the prefill region clear itself.
     """
     num_tokens_per_req = {"running": 4, "one_token_prompt": 4, "prefix_hit": 2048}
     req_id_to_index = {"running": 0, "one_token_prompt": 1, "prefix_hit": 2}
@@ -605,25 +558,21 @@ def test_padded_drafts_on_a_context_less_prompt_keep_the_prefill_region_clear():
     order = sort_batch_req_ids(
         num_tokens_per_req, draft_tokens, 4, num_computed, req_id_to_index
     )
-    # The padded prompt stays with the drafted requests at the front.
     assert order == ["running", "one_token_prompt", "prefix_hit"]
 
     metadata = _make_common_attn_metadata(
         [num_tokens_per_req[r] for r in order],
         [int(num_computed[req_id_to_index[r]]) for r in order],
     )
-    # Only threshold 1 exercises this. The padded row is decode_query_len long,
-    # so at threshold 4 it is decode-shaped, nothing in the batch is a prefill,
-    # and the splitter returns before it reaches the clamp -- which is why this
-    # bug belongs to the cp_utils caller alone.
+    # At threshold 4 the padded row is decode-shaped and nothing is a prefill,
+    # so only cp_utils' threshold of 1 reaches the clamp.
     assert split_decodes_prefills_and_extends(metadata, 4)[2] == 0
 
     num_decodes, num_extends, num_prefills, *_ = split_decodes_prefills_and_extends(
         metadata, 1
     )
-    # Without the clamp the padded row ends the extend region at position 1,
-    # and "prefix_hit" loses its 1024 cached tokens. With it, the boundary moves
-    # past the last row with context and there is no prefill region at all.
+    # Without the clamp the prefill region would start at the padded row, and
+    # "prefix_hit" would lose its 1024 cached tokens.
     assert (num_decodes, num_extends, num_prefills) == (0, 3, 0)
     prefill_rows = order[len(order) - num_prefills :] if num_prefills else []
     assert all(num_computed[req_id_to_index[r]] == 0 for r in prefill_rows), (
