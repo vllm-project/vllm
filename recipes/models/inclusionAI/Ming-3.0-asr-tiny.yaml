@@ -4,7 +4,7 @@ meta:
   provider: "inclusionAI"
   description: "Chinese, English, and dialect speech recognition with topic, hotword, and dialogue context."
   date_added: 2026-10-26
-  date_updated: 2026-10-26
+  date_updated: 2026-10-27
   tasks:
     - multimodal
   performance_headline: "Context-aware Chinese, English, and dialect ASR; single-GPU serving"
@@ -172,17 +172,64 @@ guide: |
 
   ## Offline inference
 
-  From the same vLLM source checkout, use the [Ming ASR example](https://github.com/vllm-project/vllm/blob/main/examples/speech_to_text/ming_v3_asr.py):
+  From the same vLLM source checkout, use the shared [audio language model example](https://github.com/vllm-project/vllm/blob/main/examples/generate/multimodal/audio_language_offline.py) with its built-in audio assets:
 
   ```bash
-  .venv/bin/python examples/speech_to_text/ming_v3_asr.py --audio english.wav
-  .venv/bin/python examples/speech_to_text/ming_v3_asr.py \
-    --audio context.wav --language zh --context-chunks \
-    --prompt 'This is an audio about 同囚.' \
-    --hotwords '同囚,黄国权,游学修,关楚耀,赵永洪,赵咏瑶,狱警,长镜头,吞玻璃戏,糖化玻璃,真实案例数据.'
+  python examples/generate/multimodal/audio_language_offline.py --model-type ming_v3_asr
   ```
 
-  This example uses the same native request construction and audio processing, BF16 eager execution, greedy decoding, and request-level 10-gram blocking.
+  This uses the shared example's sampling defaults (`temperature=0.2`, `max_tokens=64`) and prints raw model output, including the language label. For the downloaded Context clip, use the native prompt builder with greedy decoding and 10-gram blocking:
+
+  ```python
+  from vllm import LLM, SamplingParams
+  from vllm.config.speech_to_text import SpeechToTextParams
+  from vllm.model_executor.models.ming_v3_asr import (
+      MingV3ASRForConditionalGeneration as MingASR,
+  )
+  from vllm.multimodal.audio import AudioResampler
+  from vllm.multimodal.media.audio import load_audio
+
+  def main():
+      llm = LLM(
+          model="inclusionAI/Ming-3.0-asr-tiny",
+          trust_remote_code=True,
+          dtype="bfloat16",
+          max_model_len=8192,
+          max_num_seqs=4,
+          enforce_eager=True,
+          logits_processors=[
+              "vllm.model_executor.models.ming_v3_asr_logits_processor:"
+              "NoRepeatNGramLogitsProcessor",
+          ],
+      )
+      audio, rate = load_audio("context.wav", sr=None, mono=True)
+      audio = AudioResampler(16000).resample(audio, orig_sr=rate)
+      params = SpeechToTextParams(
+          audio=audio,
+          stt_config=MingASR.get_speech_to_text_config(llm.model_config, "transcribe"),
+          model_config=llm.model_config,
+          language="zh",
+          request_prompt="This is an audio about 同囚.",
+          hotwords=(
+              "同囚,黄国权,游学修,关楚耀,赵永洪,赵咏瑶,狱警,长镜头,"
+              "吞玻璃戏,糖化玻璃,真实案例数据."
+          ),
+          extra_args={"context_chunks": True},
+      )
+      outputs = llm.generate(
+          MingASR.get_generation_prompt(params),
+          SamplingParams(
+              temperature=0,
+              max_tokens=256,
+              extra_args={"no_repeat_ngram_size": 10},
+          ),
+      )
+      print(MingASR.post_process_output(outputs[0].outputs[0].text))
+
+
+  if __name__ == "__main__":
+      main()
+  ```
 
   ## Limitations
 
