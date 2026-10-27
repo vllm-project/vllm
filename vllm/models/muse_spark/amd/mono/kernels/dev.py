@@ -334,26 +334,19 @@ def _spin_bounded(load_all, pending, health, region_id, index, tag):
 # from an earlier launch never matches; no region is ever zeroed.
 
 
-def mb_put(tag, base, i, v):
-    """Pair i := (v, tag), device scope."""
+def mb_put(tag, base, i, v, cm=CM_DEV):
+    """Pair i := (v, tag), device scope (CM_SYS: system scope, a peer GPU's buffer)."""
     bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
     bo.buffer_store(
         fx.Vector.from_elements([bits, tag], fx.Int32),
         rsrc(base),
         i * 2,
-        cache_modifier=CM_DEV,
+        cache_modifier=cm,
     )
 
 
 def mb_put_sys(tag, base, i, v):
-    """Pair i := (v, tag), system scope (a peer GPU's buffer)."""
-    bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
-    bo.buffer_store(
-        fx.Vector.from_elements([bits, tag], fx.Int32),
-        rsrc(base),
-        i * 2,
-        cache_modifier=CM_SYS,
-    )
+    mb_put(tag, base, i, v, CM_SYS)
 
 
 def mb_put2(tag, base, i, w0, w1):
