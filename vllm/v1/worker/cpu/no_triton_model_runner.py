@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+from contextlib import AbstractContextManager
+from copy import deepcopy
 
 import torch
 
@@ -9,6 +11,9 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    initialize_mamba_ssu_backend,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -21,12 +26,29 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.watermarking import create_watermarker
-from vllm.v1.worker.cpu.attn_utils import FastPrefillHelper
+from vllm.v1.worker.block_table import get_block_table_width
+from vllm.v1.worker.cpu.attn_utils import (
+    FastPrefillHelper,
+    get_kv_cache_spec,
+    init_attn_backend,
+    init_kv_cache,
+)
+from vllm.v1.worker.cpu.block_table import CPUBlockTables
 from vllm.v1.worker.cpu.ec_connector import get_ec_connector
 from vllm.v1.worker.cpu.encoder_cache import EncoderCache
 from vllm.v1.worker.cpu.input_batch import InputBuffers
-from vllm.v1.worker.cpu.kv_connector import NO_OP_KV_CONNECTOR, KVConnector
+from vllm.v1.worker.cpu.kv_connector import (
+    NO_OP_KV_CONNECTOR,
+    KVConnector,
+    get_kv_connector,
+)
 from vllm.v1.worker.cpu.logprob import CPUPromptLogprobsWorker
 from vllm.v1.worker.cpu.lora_utils import LoraState
 from vllm.v1.worker.cpu.model_states import init_model_state
@@ -252,3 +274,105 @@ class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
 
     def get_draft_model(self) -> torch.nn.Module | None:
         return None
+
+    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
+        encoder_runner = getattr(self.model_state, "encoder_runner", None)
+        return encoder_runner.get_encoder_timing_stats() if encoder_runner else {}
+
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        return get_kv_cache_spec(self.vllm_config)
+
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> None:
+        kv_cache_config = deepcopy(kv_cache_config)
+        self.kv_cache_config = kv_cache_config
+
+        block_table_max_model_len = self.max_model_len
+        if self.is_encoder_decoder:
+            block_table_max_model_len = max(
+                block_table_max_model_len,
+                self.scheduler_config.max_num_encoder_input_tokens,
+                getattr(self.model_config.hf_config, "max_source_positions", 0),
+            )
+
+        block_sizes = []
+        max_num_blocks_per_group = []
+        slot_mapping_enabled = []
+        sliding_window_reach = []
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            spec = kv_cache_group.kv_cache_spec
+            block_sizes.append(spec.block_size)
+            layer_spec = (
+                spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
+            )
+            slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+            sliding_window_reach.append(
+                layer_spec.num_retained_tokens
+                if isinstance(layer_spec, SlidingWindowSpec)
+                else 0
+            )
+            max_num_blocks = spec.max_num_blocks_per_req(
+                self.vllm_config, block_table_max_model_len
+            )
+            max_num_blocks = get_block_table_width(
+                max_num_blocks,
+                spec.block_size,
+                token_alignment=spec.block_table_token_alignment,
+            )
+            max_num_blocks_per_group.append(max_num_blocks)
+
+        with self.jit_warmup_registry.activate():
+            self.attn_groups, self.kernel_block_sizes = init_attn_backend(
+                self.kv_cache_config,
+                self.vllm_config,
+                self.device,
+            )
+
+        self.block_tables = CPUBlockTables(
+            block_sizes=block_sizes,
+            max_num_reqs=self.max_num_reqs,
+            max_num_batched_tokens=self.max_num_tokens,
+            max_num_blocks_per_group=max_num_blocks_per_group,
+            device=self.device,
+            slot_mapping_enabled=slot_mapping_enabled,
+            sliding_window_reach=sliding_window_reach,
+        )
+        initialize_mamba_ssu_backend(
+            self.vllm_config.mamba_config,
+            self.kv_cache_config,
+            use_replayssm=self.cache_config.use_replayssm,
+        )
+        if self.cache_config.kv_sharing_fast_prefill:
+            self.fast_prefill = FastPrefillHelper()
+
+        with self.jit_warmup_registry.activate():
+            kv_caches_dict = init_kv_cache(
+                self.compilation_config.static_forward_context,
+                self.kv_cache_config,
+                self.device,
+                self.kernel_block_sizes,
+                self.vllm_config,
+                kv_cache_allocation_context=kv_cache_allocation_context,
+                attn_groups=(group for groups in self.attn_groups for group in groups),
+            )
+        self.kv_caches = [
+            cache for cache in kv_caches_dict.values() if cache.device == self.device
+        ]
+        self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
+        if is_profiling:
+            self.kv_connector = NO_OP_KV_CONNECTOR
+        else:
+            self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+
+    def _init_kv_zero_meta(self) -> None:
+        self.kv_block_zeroer = CPUKVBlockZeroer(
+            self.device,
+            attn_groups_iter=(group for groups in self.attn_groups for group in groups),
+            kernel_block_sizes=self.kernel_block_sizes,
+            static_forward_context=self.compilation_config.static_forward_context,
+            num_blocks=self.kv_cache_config.num_blocks,
+        )
