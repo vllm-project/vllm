@@ -108,6 +108,7 @@ steps:
 - label: ":nvidia: (H200 MIG 18GB) V1 Executor + Worker"
   device: h200_18gb
   key: v1-executor-worker
+  automatic_shard: true
   timeout_in_minutes: 45
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
