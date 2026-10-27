@@ -351,13 +351,18 @@ def _one_sided_lifecycle_worker(rank, world_size):
         assert torch.get_default_device() == torch.device(f"{DEVICE}:{rank}")
     assert manager.initialized
     assert manager.get_communication().params.hidden_size == 4096
+    legacy = getattr(manager.get_communication(), "alltoall", None)
+    workspace_id = id(getattr(legacy, "_WORKSPACE", None))
+    workspace_cache = getattr(type(legacy), "_WORKSPACE_CACHE", {})
+    del legacy
 
     torch.distributed.barrier()
 
-    # Cleanup
-    manager.cleanup()
+    # Group teardown calls destroy(), while layer setup can call cleanup().
+    manager.destroy()
     assert not manager.initialized
     assert manager.communication is None
+    assert all(id(value) != workspace_id for value in workspace_cache.values())
 
     torch.distributed.barrier()
 
@@ -366,7 +371,10 @@ def _one_sided_lifecycle_worker(rank, world_size):
     assert manager.initialized
 
     torch.distributed.barrier()
-    manager.cleanup()
+    manager.destroy()
+    manager.destroy()
+    assert not manager.initialized
+    assert manager.communication is None
 
 
 @requires_multi_gpu
@@ -374,7 +382,7 @@ def _one_sided_lifecycle_worker(rank, world_size):
 @requires_ptrace
 @pytest.mark.parametrize("world_size", [2])
 def test_one_sided_manager_lifecycle(world_size):
-    """Test init, cleanup, and reinit with different params."""
+    """Destroy releases the communicator/cache before process-group teardown."""
     _spawn_workers(
         _one_sided_lifecycle_worker,
         world_size,

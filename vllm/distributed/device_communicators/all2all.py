@@ -857,10 +857,6 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         )
         if communication is not None:
             # Growth happens during model initialization, before graph capture.
-            # Destroy the old wrapper on every rank before replacing it;
-            # FlashInfer owns the underlying workspace cache.
-            torch.accelerator.synchronize()
-            dist.barrier(group=self.cpu_group)
             self.cleanup()
             dist.barrier(group=self.cpu_group)
         torch.accelerator.empty_cache()
@@ -892,9 +888,24 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
 
     def cleanup(self):
         if self.communication is not None:
+            torch.accelerator.synchronize()
+            dist.barrier(group=self.cpu_group)
+            # FlashInfer 0.7.2 keeps the legacy workspace alive after destroy().
+            # Evict only this cache entry; other live wrappers retain their
+            # own references until they are destroyed.
+            legacy = getattr(self.communication, "alltoall", None)
+            workspace = getattr(legacy, "_WORKSPACE", None)
+            cache = getattr(type(legacy), "_WORKSPACE_CACHE", {})
             self.communication.destroy()
             self.communication = None
+            if workspace is not None:
+                for key, value in list(cache.items()):
+                    if value is workspace:
+                        del cache[key]
         self.initialized = False
+
+    def destroy(self):
+        self.cleanup()
 
     def checkpoint_prepare(self) -> None:
         if self.communication is not None:
