@@ -620,16 +620,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if vllm_config.kernel_config.enable_jit_warmup:
             from vllm.v1.attention.backends.mla.sparse_swa import (
                 _COMPUTE_PREFILL_METADATA_KERNEL,
-                _COMPUTE_SWA_INDICES_AND_LENS_BATCHED_KERNEL,
                 _COMPUTE_SWA_INDICES_AND_LENS_KERNEL,
             )
 
             _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
             _COMPUTE_SWA_INDICES_AND_LENS_KERNEL.register_warmup(
-                window_size=self.window_size,
-                block_size=self.swa_cache_layer.block_size,
-            )
-            _COMPUTE_SWA_INDICES_AND_LENS_BATCHED_KERNEL.register_warmup(
                 window_size=self.window_size,
                 block_size=self.swa_cache_layer.block_size,
             )
