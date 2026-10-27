@@ -4934,7 +4934,7 @@ async fn happy_path_returns_sse_stream() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").and_then(|value| value.to_str().ok()),
-        Some("text/event-stream")
+        Some("text/event-stream; charset=utf-8")
     );
 
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
@@ -6961,7 +6961,7 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").and_then(|value| value.to_str().ok()),
-        Some("text/event-stream")
+        Some("text/event-stream; charset=utf-8")
     );
 
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
@@ -7314,7 +7314,7 @@ async fn completions_happy_path_returns_sse_stream() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").and_then(|value| value.to_str().ok()),
-        Some("text/event-stream")
+        Some("text/event-stream; charset=utf-8")
     );
 
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
