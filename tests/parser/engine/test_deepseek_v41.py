@@ -152,10 +152,12 @@ def test_python_argument_conversion_and_partial_values():
     "partial_tag", ['<｜DSML｜ parameter name="j', "<｜DSML｜ parameter na"]
 )
 def test_partial_tag_after_gt_is_held_back(partial_tag):
-    converter = deepseek_v41_config().arg_converter
+    config = deepseek_v41_config()
+    assert config.arg_converter is not None
+    assert config.arg_value_extender is not None
     raw = '<｜DSML｜ parameter name="k" string="true">a > b' + partial_tag
-    assert json.loads(converter(raw, True)) == {"k": "a > b"}
-    assert deepseek_v41_config().arg_value_extender(raw) is None
+    assert json.loads(config.arg_converter(raw, True)) == {"k": "a > b"}
+    assert config.arg_value_extender(raw) is None
 
 
 def test_long_string_argument_streams_before_close():

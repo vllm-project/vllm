@@ -1311,6 +1311,7 @@ class TestArgValueExtender:
         extend = _dsml_arg_value_extender(
             "<" + _PARAM_OPEN.format(name="k", is_str="true") + "x"
         )
+        assert extend is not None
         assert [extend(d) for d in ['a"\n', "</｜DSML｜para", "meter>"]] == [
             'a\\"\\n',
             "</｜DSML｜para",
