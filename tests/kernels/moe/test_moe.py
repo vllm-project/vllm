@@ -617,6 +617,74 @@ def test_host_resident_weights_take_sorted_path(
     assert bool(aligned) == host_resident
 
 
+@pytest.mark.parametrize("m", [1, 2, 4])
+@pytest.mark.parametrize("is_integrated", [False, True])
+def test_integrated_gpu_expert_assignment(
+    m: int, is_integrated: bool, monkeypatch, workspace_init
+):
+    """Integrated GPUs (such as GB10 / DGX Spark) take the naive path only
+    at batch 1 to avoid repeated weight reads over unified memory.
+    Discrete GPUs preserve the heuristic threshold."""
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        current_platform, "is_integrated_gpu", lambda device_id=0: is_integrated
+    )
+    aligned: list[int] = []
+    align = fused_moe_module.moe_align_block_size
+
+    def counting_align(*args, **kwargs):
+        aligned.append(1)
+        return align(*args, **kwargs)
+
+    monkeypatch.setattr(fused_moe_module, "moe_align_block_size", counting_align)
+
+    set_random_seed(7)
+    e, n, k, topk, dtype = 128, 256, 128, 8, torch.bfloat16
+    a = torch.randn((m, k), device="cuda", dtype=dtype)
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 8
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 8
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+
+    with set_current_vllm_config(vllm_config):
+        out = fused_moe(a, w1, w2, score, topk, renormalize=False)
+        ref = torch_moe(a, w1, w2, score, topk)
+
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+    expected_aligned = is_integrated and (m > 1)
+    assert bool(aligned) == expected_aligned
+
+
+@pytest.mark.parametrize("override,expected_naive_m2", [("0", False), ("1", True)])
+def test_naive_block_assignment_override(
+    override: str, expected_naive_m2: bool, monkeypatch, workspace_init
+):
+    """Test environment variable override for naive block assignment."""
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT", override)
+    aligned: list[int] = []
+    align = fused_moe_module.moe_align_block_size
+
+    def counting_align(*args, **kwargs):
+        aligned.append(1)
+        return align(*args, **kwargs)
+
+    monkeypatch.setattr(fused_moe_module, "moe_align_block_size", counting_align)
+
+    set_random_seed(7)
+    m, e, n, k, topk, dtype = 2, 128, 256, 128, 8, torch.bfloat16
+    a = torch.randn((m, k), device="cuda", dtype=dtype)
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 8
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 8
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+
+    with set_current_vllm_config(vllm_config):
+        fused_moe(a, w1, w2, score, topk, renormalize=False)
+
+    assert (not bool(aligned)) == expected_naive_m2
+
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS_SMALL_M)
 @pytest.mark.parametrize("e", NUM_EXPERTS_LARGE)
 @pytest.mark.parametrize("topk", TOP_KS_SMALL)

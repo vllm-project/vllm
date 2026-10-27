@@ -1632,16 +1632,52 @@ def _prepare_expert_assignment(
     # path of the fused_moe_kernel kernel, which reads an expert's weights once
     # per (token, expert) pair. Not for weights in host memory: there every
     # repeated read crosses PCIe, so group each expert's tokens instead.
-    naive_block_assignment = (
+    naive_block_assignment = False
+    if (
         expert_map is None
         and not weights_host_resident
-        and num_tokens * top_k_num * 4 <= global_num_experts
         and not (
             (use_int8_w8a16 or use_int4_w4a16)
             and block_shape is not None
             and block_shape[1] > 0
         )
-    )
+    ):
+        override = envs.VLLM_MOE_NAIVE_BLOCK_ASSIGNMENT
+        if override is not None:
+            val = override.strip().lower()
+            if val in ("0", "false", "off"):
+                naive_block_assignment = False
+            elif val in ("1", "true", "on"):
+                naive_block_assignment = (
+                    num_tokens * top_k_num * 4 <= global_num_experts
+                )
+            else:
+                try:
+                    max_tokens = int(val)
+                    naive_block_assignment = (
+                        num_tokens <= max_tokens
+                        and num_tokens * top_k_num * 4 <= global_num_experts
+                    )
+                except ValueError:
+                    naive_block_assignment = (
+                        num_tokens * top_k_num * 4 <= global_num_experts
+                    )
+        else:
+            from vllm.platforms import current_platform
+
+            device_idx = (
+                topk_ids.device.index if topk_ids.device.index is not None else 0
+            )
+            if current_platform.is_integrated_gpu(device_idx):
+                # On integrated / unified-memory GPUs (e.g. GB10 / DGX Spark),
+                # multiple tokens routing to the same expert cause redundant
+                # weight reads over shared/lower-bandwidth memory (LPDDR5x).
+                # Take the naive path only when tokens cannot collide (batch 1).
+                naive_block_assignment = num_tokens == 1
+            else:
+                naive_block_assignment = (
+                    num_tokens * top_k_num * 4 <= global_num_experts
+                )
 
     if naive_block_assignment:
         return (
