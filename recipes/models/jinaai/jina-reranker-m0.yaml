@@ -1,0 +1,168 @@
+meta:
+  title: "Jina Reranker m0"
+  slug: "jina-reranker-m0"
+  provider: "Jina AI"
+  description: "Multilingual, multimodal reranker for text and visual documents across 29+ languages via Qwen2-VL backbone"
+  date_added: 2025-10-29
+  date_updated: 2026-04-17
+  tasks:
+    - embedding
+  related_recipes: []
+
+model:
+  model_id: "jinaai/jina-reranker-m0"
+  min_vllm_version: "0.10.0"
+  architecture: dense
+  parameter_count: "2.4B"
+  active_parameters: "2.4B"
+  context_length: 32768
+  base_args:
+    - "--gpu-memory-utilization"
+    - "0.75"
+    - "--max-num-seqs"
+    - "32"
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 6
+    description: "BF16 weights; 2x T4 or 2x L4 GPUs"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides:
+  amd:
+    # AITER is optional here but recommended for perf on MI300X/MI325X/MI355X.
+    extra_args: []
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [jinaai/jina-reranker-m0](https://huggingface.co/jinaai/jina-reranker-m0) is a
+  multilingual, multimodal reranker that ranks visual documents across 29+ languages.
+  It accepts text and visual content, including pages with mixed text, figures, tables,
+  and various layouts.
+
+  Deployment target: 2x NVIDIA T4 or 2x NVIDIA L4.
+
+  ## Prerequisites
+
+  - Hardware: 2x T4 or 2x L4 (or any 2x GPU with ~16 GB each)
+  - vLLM >= 0.10.0
+
+  ### Install vLLM (CUDA)
+
+  ```bash
+  uv pip install vllm
+  ```
+
+  ### Install vLLM (AMD ROCm)
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.14.1/rocm700
+  ```
+
+  ## Launch command
+
+  ```bash
+  vllm serve jinaai/jina-reranker-m0 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --tensor_parallel_size 2 \
+    --gpu-memory-utilization 0.75 \
+    --max-num-seqs 32
+  ```
+
+  On AMD:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  vllm serve jinaai/jina-reranker-m0 \
+    --tensor_parallel_size 2 --gpu-memory-utilization 0.75 --max-num-seqs 32
+  ```
+
+  ## Rerank API
+
+  ```bash
+  curl -X POST http://localhost:8000/v1/rerank \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "jinaai/jina-reranker-m0",
+      "query": "What are the health benefits of green tea?",
+      "documents": [
+        "Green tea contains antioxidants called catechins...",
+        "El precio del café ha aumentado un 20% este año...",
+        "Studies show that drinking green tea regularly..."
+      ],
+      "top_n": 3,
+      "return_documents": true
+    }'
+  ```
+
+  ## Score API
+
+  Text-to-text:
+
+  ```bash
+  curl -X POST http://localhost:8000/v1/score \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "jinaai/jina-reranker-m0",
+      "text_1": ["What is the capital of Brazil?"],
+      "text_2": ["The capital of Brazil is Brasilia."]
+    }'
+  ```
+
+  Multimodal (text vs. images):
+
+  ```json
+  {
+    "model": "jinaai/jina-reranker-m0",
+    "text_1": "A cat",
+    "text_2": {
+      "content": [
+        {"type": "image_url", "image_url": {"url": "cat_img.jpg"}},
+        {"type": "image_url", "image_url": {"url": "dog_img.jpg"}}
+      ]
+    }
+  }
+  ```
+
+  ## Offline Deployment
+
+  ```python
+  from vllm import LLM
+
+  llm = LLM(
+      model="jinaai/jina-reranker-m0",
+      tensor_parallel_size=2,
+      gpu_memory_utilization=0.75,
+      max_model_len=1024,
+      max_num_seqs=32,
+      kv_cache_dtype="fp8",
+      dtype="bfloat16",
+  )
+
+  res = llm.score("fast recipes for weeknight dinners", [
+      "A 65-minute pasta with garlic and olive oil.",
+      "Slow braised short ribs that cook for 5 hours.",
+      "Stir-fry veggies with pre-cooked rice.",
+  ])
+  for item in res:
+      print(item.outputs.score)
+  ```
+
+  ## References
+
+  - [jina-reranker-m0 on Hugging Face](https://huggingface.co/jinaai/jina-reranker-m0)
+  - [vLLM Score API documentation](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#score-api)
