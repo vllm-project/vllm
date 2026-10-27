@@ -10,7 +10,11 @@ from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config import LoadConfig
 from vllm.config.cache import CacheDType
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import (
+    FLASHINFER_MOE_EP_BACKENDS,
+    PASSTHROUGH_ALL2ALL_BACKEND,
+    MoEBackend,
+)
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config, replace
@@ -1882,11 +1886,25 @@ class SpeculativeConfig:
         Only non-None fields override, so an unset field keeps whatever the
         target resolved.
         """
+        overrides: dict[str, Any] = {}
+        if (
+            self.moe_backend is not None
+            and self.moe_backend not in FLASHINFER_MOE_EP_BACKENDS
+            and vllm_config.kernel_config.moe_backend in FLASHINFER_MOE_EP_BACKENDS
+            and vllm_config.parallel_config.all2all_backend
+            == PASSTHROUGH_ALL2ALL_BACKEND
+        ):
+            # Passthrough was inferred for the target's self-dispatching backend.
+            overrides["parallel_config"] = replace(
+                vllm_config.parallel_config,
+                all2all_backend="allgather_reducescatter",
+            )
         for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
             if (value := getattr(self, src)) is not None:
-                sub_config = replace(getattr(vllm_config, config_name), **{dst: value})
-                vllm_config = replace(vllm_config, **{config_name: sub_config})
-        return vllm_config
+                overrides[config_name] = replace(
+                    getattr(vllm_config, config_name), **{dst: value}
+                )
+        return replace(vllm_config, **overrides) if overrides else vllm_config
 
     @field_validator("attention_backend", mode="before")
     @classmethod
