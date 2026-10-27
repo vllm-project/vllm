@@ -1536,6 +1536,9 @@ class VllmConfig:
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
+        # Model hooks derive values from max_model_len, so apply the draft's
+        # limit first.
+        self._limit_max_model_len_to_draft()
         self.try_verify_and_update_config()
         self._reject_mismatched_float_kv_cache()
         self._resolve_and_verify_engram_config()
@@ -1550,8 +1553,6 @@ class VllmConfig:
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
-
-        self._limit_max_model_len_to_draft()
 
         if (
             self.model_config is not None
@@ -3420,6 +3421,16 @@ class VllmConfig:
 
     @model_validator(mode="after")
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
+        if (
+            self.cache_config.cache_dtype == "nvfp4_ds_mla"
+            and self.parallel_config.decode_context_parallel_size > 1
+        ):
+            raise ValueError(
+                "nvfp4_ds_mla KV cache is not supported with decode context "
+                "parallelism: the chunked-context prefill gather is not "
+                "validated under DCP. Use decode_context_parallel_size=1 or a "
+                "different --kv-cache-dtype."
+            )
         if self.model_config is None:
             return self
         # The ds_mla layouts are MLA-only by construction; the plain nvfp4
