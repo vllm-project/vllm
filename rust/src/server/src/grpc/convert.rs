@@ -4,11 +4,11 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
-use thiserror_ext::AsReport as _;
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
@@ -84,6 +84,7 @@ pub fn to_text_request(
     };
     let session_id = req.session_id.filter(|s| !s.is_empty());
     let kv_hints = req.kv_hints.map(kv_hints_from_proto);
+    let reasoning_gate = req.engine_reasoning_gate.unwrap_or_default();
 
     let sampling = req.sampling.as_ref();
     let decoding = req.decoding.as_ref();
@@ -93,7 +94,7 @@ pub fn to_text_request(
 
     let mut sampling_params =
         build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
-    sampling_params.watermarking = req.watermarking.unwrap_or(true);
+    sampling_params.watermarking = req.watermarking;
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -137,8 +138,15 @@ pub fn to_text_request(
         data_parallel_rank: None,
         session_id,
         kv_hints,
-        reasoning_parser_kwargs: Default::default(),
-        reasoning_ended: None,
+        reasoning_parser_kwargs: ReasoningParserKwargs {
+            chat_template_kwargs: reasoning_gate
+                .chat_template_kwargs
+                .map(|kwargs| {
+                    kwargs.fields.iter().map(|(k, v)| (k.clone(), proto_value_to_json(v))).collect()
+                })
+                .unwrap_or_default(),
+        },
+        reasoning_ended: reasoning_gate.reasoning_ended,
         lora_request: None,
         arrival_time: None,
     })
@@ -213,6 +221,7 @@ fn build_sampling_params(
             params.stop_token_ids = Some(s.stop_token_ids.clone());
         }
         params.ignore_eos = s.ignore_eos;
+        params.thinking_token_budget = s.thinking_token_budget;
     }
 
     // ResponseOptions → logprobs
@@ -290,9 +299,6 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
-    params
-        .validate()
-        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
     Ok(Some(params))
 }
 
@@ -388,7 +394,13 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Error => return Err(Status::internal("engine failed during generation")),
+        FinishReason::Error(Some(error)) if error.is_validation_error() => {
+            return Err(Status::invalid_argument(error.message.clone()));
+        }
+        FinishReason::Error(Some(error)) if error.retryable => {
+            return Err(Status::unavailable(error.message.clone()));
+        }
+        FinishReason::Error(_) => return Err(Status::internal("engine failed during generation")),
         FinishReason::Abort | FinishReason::Repetition(_) => (PbFinishReason::Aborted as i32, None),
     };
 
@@ -396,8 +408,8 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         num_output_tokens: finished.usage.output_token_count as u32,
         finish_reason,
         stop_reason,
-        kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
-        ec_transfer_params: finished.ec_transfer_params.as_ref().and_then(json_to_proto_struct),
+        kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
+        ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
         num_cached_tokens: Some(finished.usage.cached_token_count as u32),
     })
 }
@@ -555,8 +567,9 @@ impl ResponseOpts {
 #[cfg(test)]
 mod tests {
     use prost::Message as _;
-    use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::output::{RequestError, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
     };
@@ -602,12 +615,85 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 &TestTokenizer::new(),
             )
             .unwrap()
             .generate_request;
             let params = engine.sampling_params;
             assert_eq!(params.bad_words_token_ids, Some(vec![vec![5], vec![7, 11]]));
+        }
+    }
+
+    #[test]
+    fn grpc_reasoning_controls_reach_engine_request_with_presence_intact() {
+        let chat_template_kwargs =
+            serde_json::json!({"enable_thinking": false, "reasoning_effort": "high"});
+        for (gate, budget) in [
+            (None, None),
+            (
+                Some(pb::EngineReasoningGate {
+                    reasoning_ended: Some(false),
+                    chat_template_kwargs: json_to_proto_struct(&chat_template_kwargs),
+                }),
+                Some(0),
+            ),
+            (
+                Some(pb::EngineReasoningGate {
+                    reasoning_ended: Some(true),
+                    chat_template_kwargs: None,
+                }),
+                Some(128),
+            ),
+            (Some(pb::EngineReasoningGate::default()), Some(-1)),
+        ] {
+            let expected = (
+                serde_json::json!({
+                    "chat_template_kwargs": gate
+                        .as_ref()
+                        .and_then(|gate| gate.chat_template_kwargs.as_ref())
+                        .map_or_else(|| serde_json::json!({}), |_| chat_template_kwargs.clone()),
+                }),
+                gate.as_ref().and_then(|gate| gate.reasoning_ended),
+                budget.filter(|v| *v >= 0).map(|v| v as u64),
+            );
+            let request = pb::GenerateRequest {
+                engine_reasoning_gate: gate,
+                stopping: Some(pb::StoppingCriteria {
+                    thinking_token_budget: budget,
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let encoded = request.encode_to_vec();
+            for stream in [false, true] {
+                let request = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+                let text = to_text_request(request, stream, &["test-model".to_string()])
+                    .expect("reasoning controls accepted");
+                let engine = vllm_text::lower_text_request(
+                    text,
+                    vec![1],
+                    SamplingHints::default(),
+                    SamplingLimits {
+                        max_model_len: 256,
+                        max_logprobs: 20,
+                        model_vocab_size: 512,
+                        tokenizer_vocab_size: 512,
+                    },
+                    StructuredOutputBackend::Xgrammar,
+                    &TestTokenizer::new(),
+                )
+                .expect("reasoning controls lower to engine")
+                .generate_request;
+                assert_eq!(
+                    (
+                        serde_json::to_value(engine.reasoning_parser_kwargs).unwrap(),
+                        engine.reasoning_ended,
+                        engine.sampling_params.thinking_token_budget,
+                    ),
+                    expected,
+                );
+            }
         }
     }
 
@@ -623,10 +709,7 @@ mod tests {
                 let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
                 let text = to_text_request(decoded, stream, &["test-model".to_string()])
                     .expect("convert request");
-                assert_eq!(
-                    text.sampling_params.watermarking,
-                    watermarking.unwrap_or(true)
-                );
+                assert_eq!(text.sampling_params.watermarking, watermarking);
             }
         }
     }
@@ -676,20 +759,6 @@ mod tests {
             .expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
-    }
-
-    #[test]
-    fn grpc_rejects_empty_grammar_before_engine() {
-        use super::pb::decoding_parameters::StructuredOutput;
-        let req = pb::GenerateRequest {
-            decoding: Some(pb::DecodingParameters {
-                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
-                ..Default::default()
-            }),
-            ..base_request()
-        };
-        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
-        assert!(err.message().contains("grammar cannot be an empty string"));
     }
 
     #[test]
@@ -769,6 +838,7 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 1,
                 &TestTokenizer::new(),
             )
@@ -817,6 +887,7 @@ mod tests {
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
+                    StructuredOutputBackend::Xgrammar,
                     &TestTokenizer::new(),
                 )
                 .unwrap()
@@ -866,6 +937,7 @@ mod tests {
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
+            timestamps: Default::default(),
         }
     }
 
@@ -932,6 +1004,35 @@ mod tests {
 
         assert_eq!(info.finish_reason, PbFinishReason::Aborted as i32);
         assert_eq!(info.stop_reason, None);
+    }
+
+    #[test]
+    fn engine_errors_map_to_status_codes() {
+        let error = RequestError {
+            code: "engine_paused".to_string(),
+            message: "Generation is paused.".to_string(),
+            retryable: true,
+        };
+        let fin = finished(FinishReason::Error(Some(Box::new(error))));
+        let status = to_finish_info(&fin, &[]).expect_err("retryable error");
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+
+        let error = RequestError {
+            code: RequestError::VALIDATION_ERROR.to_string(),
+            message: "Invalid structured outputs: Grammar error: bad".to_string(),
+            retryable: false,
+        };
+        let fin = finished(FinishReason::Error(Some(Box::new(error))));
+        let status = to_finish_info(&fin, &[]).expect_err("invalid request");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            "Invalid structured outputs: Grammar error: bad"
+        );
+
+        let fin = finished(FinishReason::Error(None));
+        let status = to_finish_info(&fin, &[]).expect_err("internal error");
+        assert_eq!(status.code(), tonic::Code::Internal);
     }
 
     #[test]

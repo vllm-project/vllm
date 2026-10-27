@@ -41,6 +41,7 @@ If you are only developing vLLM's Python code, install vLLM using:
 
 ```bash
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
+vllm download-kernels
 ```
 
 To rebuild only the Rust frontend binary:
@@ -259,8 +260,24 @@ The PR needs to meet the following code quality standards:
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This
   includes both unit tests and integration tests.
-- Please add documentation to `docs/` if the PR modifies the user-facing behaviors of vLLM.
-  It helps vLLM users understand and utilize the new features or changes.
+- Document user-visible changes in the same PR; see
+  [Documenting User-Visible Changes](#documenting-user-visible-changes).
+
+### Documenting User-Visible Changes
+
+If a PR changes what users can run, configure, or observe, update the rendered
+docs in the same PR; code comments, tests, and PR descriptions alone are not
+found by users or their agents. CLI arguments, config fields, and environment
+variables are documented in their docstring, `help=` text, or
+`environment_variables` comment, which generate the reference pages. Everything
+else goes on its page under `docs/` (feature, model, hardware, deprecation),
+linked from its index. Lead with what it is, how to enable it, and the default,
+using the names users search for.
+
+To check, ask a fresh agent a user question (e.g. "What does `VLLM_FOO` do?")
+three times, limited in turn to web search, GitHub, and a local checkout (before
+merge: the docs preview and the PR branch). If it cannot find and quote the
+docs, fix the docs.
 
 ### Adding or Changing Kernels
 
@@ -328,9 +345,15 @@ review process:
   in the upstream repository. Your branch must contain every commit currently
   on that branch: **zero commits behind**. This also applies to PRs targeting
   release branches or another PR's branch.
-- If the PR is behind, the bot reports the count without creating a new build.
-  Merge or rebase onto the latest target branch, then rerun the command. If the
-  target branch advances in the meantime, update your branch and try again.
+- If the PR is behind, the bot merges the target branch into your PR branch
+  (like the **Update branch** button) and runs CI on the resulting merge commit.
+  Pull the branch before pushing more changes. This needs **Allow edits by
+  maintainers** enabled on fork PRs. If the merge conflicts or is not allowed,
+  the bot reports the count without creating a new build; merge or rebase onto
+  the latest target branch yourself, then rerun the command.
+- PR authors without write access cannot start another full run (including
+  `--allow-stale`) on a commit that already has a CI build. Push new changes,
+  use `/ci retry` to rerun failed jobs, or ask a reviewer with write access.
 - To run CI on an outdated branch at your own risk, append `--allow-stale` to
   any run command, for example `/ci run --allow-stale` or
   `/amd-ci run all --allow-stale`. The same authorization requirements apply.
@@ -338,9 +361,8 @@ review process:
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
 - Retrying or cancelling builds does not check branch freshness.
-- These commands do not modify your branch or enforce merge requirements.
-  Direct Buildkite launches are outside this workflow. No additional token is
-  needed.
+- Apart from that merge, these commands do not modify your branch or enforce
+  merge requirements. Direct Buildkite launches are outside this workflow.
 
 Maintainers must configure required Buildkite status checks on the latest PR
 commit and enable GitHub's

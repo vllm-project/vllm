@@ -247,12 +247,16 @@ def test_amd_attn_res_fp8_preserves_prefix_and_quantized_output(
         )
         ref_output, ref_scale = quant(reference)
         torch.testing.assert_close(scale, ref_scale, atol=1e-7, rtol=1e-6)
+
         # Floating-point fusion can move values at FP8 rounding midpoints.
         # Bound each change to the adjacent code and bound how often it occurs.
-        code_delta = (
-            output.view(torch.uint8).to(torch.int16)
-            - ref_output.view(torch.uint8).to(torch.int16)
-        ).abs()
+        # Codes are sign-magnitude, so order them by value to keep a step
+        # across zero adjacent.
+        def ordinal(x: torch.Tensor) -> torch.Tensor:
+            code = x.view(torch.uint8).to(torch.int16)
+            return torch.where(code >= 0x80, 0x80 - code, code)
+
+        code_delta = (ordinal(output) - ordinal(ref_output)).abs()
         assert code_delta.max().item() <= 1
         assert (code_delta != 0).float().mean().item() < 1e-4
     torch.testing.assert_close(prefix, ref_prefix, atol=0, rtol=0)

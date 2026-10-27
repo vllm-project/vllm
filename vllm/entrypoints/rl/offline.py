@@ -26,6 +26,10 @@ class RLOfflineMixin(OfflineInferenceMixin):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
+    def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
+        self.llm_engine.collective_rpc("shutdown_weight_transfer_engine")
+
     def start_weight_update(self) -> None:
         """Start a new weight update."""
         self.llm_engine.collective_rpc("start_weight_update")
