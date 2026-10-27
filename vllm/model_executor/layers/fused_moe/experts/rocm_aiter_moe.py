@@ -417,14 +417,19 @@ def rocm_aiter_fused_experts(
             moe_config.tp_size,
         )
 
-        # AITER's bias-less W4A16 FlyDSL stage 1 leaves the padded intermediate
-        # columns unwritten (ROCm/aiter#6598); the padded weights are zero, so
-        # declare no pad there. SITU zeroes its own scratch on a non-zero pad.
-        if (
-            quant_config.use_mxfp4_w4a16
-            and quant_config.w1_bias is None
-            and activation != MoEActivation.SITU
-        ):
+        # For W4A16 paths, declare no intermediate padding so AITER's CK-Tile
+        # stage-1 kernel processes the full weight width without the per-column
+        # skip overhead.  Two reasons this is safe:
+        #
+        # - Bias-less (DSv4.1): FlyDSL stage-1 leaves padded columns unwritten
+        #   (ROCm/aiter#6598); zero weights give zero output there.
+        # - Biased (gpt-oss): GptOssMxfp4MoEMethod.get_fused_moe_quant_config
+        #   already pre-pads w1_bias to match the padded weight width so the
+        #   CK-Tile kernel's stride-kargs.N bias access is correct.  Padded
+        #   weight columns are zero, padded bias entries are zero → zero output.
+        #
+        # SITU zeroes its own scratch on a non-zero pad so it is excluded.
+        if quant_config.use_mxfp4_w4a16 and activation != MoEActivation.SITU:
             intermediate_pad = 0
 
         # AITER's stage1 GEMM needs gate_mode to match how weights were

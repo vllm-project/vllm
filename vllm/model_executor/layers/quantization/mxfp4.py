@@ -419,6 +419,27 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             w1_scale = layer.w13_weight_scale
             w2_scale = layer.w2_weight_scale
 
+        # The AITER CK-Tile stage-1 kernel indexes the bias tensor with stride
+        # kargs.N (the full padded output width).  When weights are padded to a
+        # CK-Tile tile boundary the bias must be padded to match so the kernel
+        # accesses the correct per-expert row.  Pad once at load time with zeros;
+        # the padded weight columns are also zero so those output positions end up
+        # as zero without any in-kernel masking.  The forward pass can then pass
+        # intermediate_pad=0 for the biased path, eliminating the column-skip
+        # overhead in the CK-Tile kernel (see rocm_aiter_moe.py).
+        if (
+            w1_bias is not None
+            and self.moe.intermediate_size_per_partition_unpadded is not None
+        ):
+            inter_pad = (
+                self.moe.intermediate_size_per_partition
+                - self.moe.intermediate_size_per_partition_unpadded
+            )
+            if inter_pad > 0:
+                w1_bias = torch.nn.functional.pad(
+                    w1_bias, (0, 2 * inter_pad), value=0.0
+                )
+
         return make_mxfp4_moe_quant_config(
             mxfp4_backend=self.mxfp4_backend,
             w1_scale=w1_scale,
