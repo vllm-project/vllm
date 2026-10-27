@@ -21,9 +21,11 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
+use crate::metrics::SchedulerStatsRecorder;
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::lora::LoraRequest;
 use crate::protocol::multimodal::{
     MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmModality, MmSlice,
     PlaceholderRange, SliceSpec,
@@ -41,6 +43,7 @@ use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
     setup_mock_engine_with_init, spawn_mock_engine_task,
 };
+use crate::transport::ConnectedEngine;
 use crate::{
     CoordinatorMode, ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
     Error, TransportMode,
@@ -2745,7 +2748,7 @@ async fn reset_prefix_cache_returns_false_when_any_engine_fails() {
 }
 
 #[test]
-fn python_msgpack_fixtures_match_rust_encoding() {
+fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     init_tracing();
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/python_compat.py");
     let output = Command::new(&script)
@@ -2774,10 +2777,15 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         lines.next().expect("missing multipart prompt logprobs fixture line");
     let nixl_stats_hex = lines.next().expect("missing NIXL stats fixture line");
     let mooncake_stats_hex = lines.next().expect("missing Mooncake stats fixture line");
+    let mooncake_transfer_stats_hex =
+        lines.next().expect("missing Mooncake transfer stats fixture line");
     let multi_connector_stats_hex =
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
     let extended_outputs_hex = lines.next().expect("missing extended outputs fixture line");
+    let lora_request_hex = lines.next().expect("missing LoRA request fixture line");
+    let inplace_lora_request_hex =
+        lines.next().expect("missing in-place LoRA request fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2893,7 +2901,22 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         ec_transfer_params: None,
                         trace_headers: None,
                         prefill_stats: None,
-                        routed_experts: None,
+                        routed_experts: Some(
+                            WireArray {
+                                dtype: NumpyDtype {
+                                    scalar: U8,
+                                    endianness: Native,
+                                },
+                                shape: [
+                                    2,
+                                    1,
+                                    2,
+                                ],
+                                data: RawView(
+                                    b"\0\x01\x02\x03",
+                                ),
+                            },
+                        ),
                         num_nans_in_logits: 0,
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
@@ -2976,14 +2999,66 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             if stats.0.contains_key(&MooncakeOperation::LoadGet)
     ));
 
+    let mooncake_transfer_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(mooncake_transfer_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        mooncake_transfer_stats,
+        KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
+    ));
+
     let multi_connector_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
-    assert!(matches!(
-        multi_connector_stats,
-        KvConnectorStats::Multi(stats)
-            if stats.nixl.is_some()
-                && stats.mooncake.is_some()
-                && stats.other.contains_key("UnsupportedConnector")
+    let KvConnectorStats::Multi(multi_connector_stats) = multi_connector_stats else {
+        panic!("Python MultiConnector stats should decode as Multi");
+    };
+    assert!(multi_connector_stats.nixl.is_some());
+    assert!(multi_connector_stats.mooncake_transfer.is_some());
+    assert!(multi_connector_stats.mooncake.is_some());
+    assert!(multi_connector_stats.other.contains_key("UnsupportedConnector"));
+    let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
+    assert_eq!(nixl_stats.num_failed_handshakes, [1]);
+    assert_eq!(nixl_stats.num_notifications_after_expiry, [2]);
+
+    let metrics = vllm_metrics::Metrics::new();
+    let recorder = SchedulerStatsRecorder::new(
+        &metrics.scheduler,
+        "test-model",
+        &[ConnectedEngine {
+            engine_id: EngineId::from_engine_index(0),
+            ready_response: crate::mock_engine::default_ready_response(),
+        }],
+    );
+    recorder.record(
+        0,
+        &SchedulerStats {
+            kv_connector_stats: Some(KvConnectorStats::Multi(multi_connector_stats)),
+            ..Default::default()
+        },
+    );
+    let rendered_metrics = metrics.render().unwrap();
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_xfer_time_seconds_count{model_name=\"test-model\",engine=\"0\"} 2"
+        )
+    );
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_bytes_transferred_count{model_name=\"test-model\",engine=\"0\"} 2"
+        )
+    );
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_bytes_transferred_sum{model_name=\"test-model\",engine=\"0\"} 12288"
+        )
+    );
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_failed_transfers_total{model_name=\"test-model\",engine=\"0\"} 2"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_failed_notifications_total{model_name=\"test-model\",engine=\"0\"} 1"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_notifications_after_expiry_total{model_name=\"test-model\",engine=\"0\"} 2"
     ));
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
@@ -3019,6 +3094,15 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     assert!(ready_response.enable_sleep_mode);
     assert!(ready_response.supports_draft_weight_updates);
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
+    assert_eq!(
+        ready_response.vllm_config,
+        Some(serde_json::json!({
+            "model_config": {"model": "test-model", "max_model_len": 32768},
+            "cache_config": {"num_gpu_blocks": 1000, "gpu_memory_utilization": 0.9},
+            "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
+            "speculative_config": null,
+        }))
+    );
     let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
     assert!(kv_events_config.enable_kv_cache_events);
     assert_eq!(kv_events_config.publisher, "zmq");
@@ -3031,6 +3115,44 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     assert_eq!(kv_events_config.buffer_steps, 10_000);
     assert_eq!(kv_events_config.hwm, 100_000);
     assert_eq!(kv_events_config.max_queue_size, 100_000);
+
+    let lora_request_bytes = hex::decode(lora_request_hex).unwrap();
+    let expected_lora_request = LoraRequest {
+        lora_name: "adapter-a".to_string(),
+        lora_int_id: 3,
+        lora_path: "/adapters/a".to_string(),
+        base_model_name: Some("base-model".to_string()),
+        load_inplace: true,
+        is_3d_lora_weight: true,
+    };
+    let decoded_lora_request: EngineCoreRequest =
+        rmp_serde::from_slice(&lora_request_bytes).unwrap();
+    assert_eq!(
+        decoded_lora_request.lora_request,
+        Some(expected_lora_request.clone())
+    );
+    let python_lora_slot = match decode_value(&lora_request_bytes) {
+        Value::Array(items) => items.get(6).cloned().expect("request lora_request slot"),
+        other => panic!("request should encode as tuple array, got {other:?}"),
+    };
+    assert_eq!(
+        decode_value(&rmp_serde::to_vec_named(&expected_lora_request).unwrap()),
+        python_lora_slot,
+    );
+
+    let decoded_inplace_lora_request: LoraRequest =
+        rmp_serde::from_slice(&hex::decode(inplace_lora_request_hex).unwrap()).unwrap();
+    assert_eq!(
+        decoded_inplace_lora_request,
+        LoraRequest {
+            lora_name: "adapter-b".to_string(),
+            lora_int_id: 4,
+            lora_path: "/adapters/b".to_string(),
+            base_model_name: None,
+            load_inplace: true,
+            is_3d_lora_weight: false,
+        },
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

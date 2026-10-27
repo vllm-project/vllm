@@ -31,7 +31,7 @@ use self::convert::{ResponseOptions, prepare_completion_request};
 pub(crate) use self::types::CompletionRequest;
 use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
-    prompt_logprobs_to_maps, text_len,
+    prompt_logprobs_to_maps, text_end_offset, text_len,
 };
 use super::utils::metrics::PerRequestMetrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
@@ -141,6 +141,7 @@ async fn collect_completion(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
@@ -157,6 +158,8 @@ async fn collect_completion(
         return_tokens_as_token_ids,
     }: ResponseOptions,
 ) -> Result<CompletionResponse, ApiError> {
+    let return_tokens_as_token_ids =
+        return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
     let collected = stream
         .collect_output()
         .await
@@ -228,7 +231,10 @@ async fn collect_completion(
             prompt_logprobs,
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
+            routed_experts: None,
+            weight_versions: None,
         }],
+        service_tier: None,
         usage: Some(usage),
         metrics,
         system_fingerprint: None,
@@ -247,6 +253,7 @@ async fn completion_chunk_stream(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
@@ -263,6 +270,8 @@ async fn completion_chunk_stream(
     }: ResponseOptions,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
+    let return_tokens_as_token_ids =
+        return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
     pin_mut!(stream);
     let envelope = Arc::new(StreamResponseEnvelope::new(
         request_id,
@@ -270,7 +279,10 @@ async fn completion_chunk_stream(
         created,
         response_model,
     ));
-    let mut visible_text_len = 0_u32;
+    // Offset of the next reported token in the visible text, advanced by the
+    // tokens reported so far rather than by the streamed text: text held back
+    // for stop strings or incomplete UTF-8 lags the tokens.
+    let mut next_text_offset = 0_u32;
     let mut first_chunk = true;
     let mut continuous_usage = ContinuousUsage::default();
 
@@ -301,7 +313,7 @@ async fn completion_chunk_stream(
                 debug!("completion stream started");
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 if let Some(prompt) = echo.as_ref() {
-                    visible_text_len = text_len(prompt);
+                    next_text_offset = text_len(prompt);
                     let logprobs = if prompt_only && requested_logprobs.is_some() {
                         Some(prompt_only_logprobs_to_openai(
                             prompt_logprobs.as_ref(),
@@ -359,7 +371,11 @@ async fn completion_chunk_stream(
                             finished.usage.prompt_token_count,
                             finished.usage.output_token_count,
                         );
-                        let final_chunk = final_chunk(&envelope, finished.finish_reason)?;
+                        let final_chunk = final_chunk(
+                            &envelope,
+                            finished.finish_reason,
+                            finished.kv_transfer_params.map(|value| *value),
+                        )?;
                         yield_chunk!(final_chunk);
 
                         if include_usage {
@@ -382,18 +398,21 @@ async fn completion_chunk_stream(
                     }
                     continue;
                 }
-                let delta_text_len = text_len(&delta);
                 let logprobs = if requested_logprobs.is_some() {
                     let decoded_logprobs = logprobs.as_ref().ok_or_else(|| {
                         server_error!(
                             "completion stream requested logprobs but generation returned none"
                         )
                     })?;
-                    Some(decoded_logprobs_to_openai(
+                    let logprobs = decoded_logprobs_to_openai(
                         decoded_logprobs,
-                        visible_text_len,
+                        next_text_offset,
                         return_tokens_as_token_ids,
-                    )?)
+                    )?;
+                    if let Some(offset) = text_end_offset(&logprobs) {
+                        next_text_offset = offset;
+                    }
+                    Some(logprobs)
                 } else {
                     None
                 };
@@ -404,7 +423,6 @@ async fn completion_chunk_stream(
                     choice.token_ids = Some(token_ids);
                 }
                 yield_chunk!(chunk);
-                visible_text_len = visible_text_len.saturating_add(delta_text_len);
 
                 if let Some(finished) = finished {
                     if enable_log_requests {
@@ -421,7 +439,11 @@ async fn completion_chunk_stream(
                         finished.usage.prompt_token_count,
                         finished.usage.output_token_count,
                     );
-                    let final_chunk = final_chunk(&envelope, finished.finish_reason)?;
+                    let final_chunk = final_chunk(
+                        &envelope,
+                        finished.finish_reason,
+                        finished.kv_transfer_params.map(|value| *value),
+                    )?;
                     yield_chunk!(final_chunk);
 
                     if include_usage {
@@ -466,9 +488,12 @@ fn delta_chunk(
     chunk
 }
 
+/// Build the terminal chunk carrying the finish reason and, like Python, the
+/// request's KV transfer params.
 fn final_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     finish_reason: FinishReason,
+    kv_transfer_params: Option<Value>,
 ) -> Result<CompletionStreamResponse, ApiError> {
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?;
@@ -479,6 +504,7 @@ fn final_chunk(
         stop_reason,
         ..Default::default()
     });
+    chunk.kv_transfer_params = kv_transfer_params;
     Ok(chunk)
 }
 
@@ -638,29 +664,29 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
-        let chunk =
-            final_chunk(&stream_envelope(), FinishReason::stop_eos()).expect("finish reason valid");
+        let chunk = final_chunk(&stream_envelope(), FinishReason::stop_eos(), None)
+            .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
         assert_eq!(chunk.choices[0].text, "");
     }
 
     #[test]
     fn final_chunk_maps_length_finish_reason() {
-        let chunk =
-            final_chunk(&stream_envelope(), FinishReason::Length).expect("finish reason valid");
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, None)
+            .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
     }
 
     #[test]
     fn final_chunk_maps_abort_finish_reason() {
-        let chunk =
-            final_chunk(&stream_envelope(), FinishReason::Abort).expect("finish reason valid");
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, None)
+            .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
     }
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None)).is_err());
+        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None), None).is_err());
     }
 
     #[tokio::test]
@@ -889,6 +915,148 @@ mod tests {
         }
     }
 
+    /// Streamed `text_offset` follows the reported tokens, not the streamed text, which lags
+    /// them while the detokenizer holds text back. Ported from Python's
+    /// `test_stream_text_offset_matches_non_stream_with_stop_holdback`.
+    #[tokio::test]
+    async fn completion_chunk_stream_advances_text_offset_by_reported_tokens() {
+        fn single_token_logprobs(token: &str) -> DecodedLogprobs {
+            DecodedLogprobs {
+                positions: vec![DecodedPositionLogprobs {
+                    entries: vec![DecodedTokenLogprob {
+                        token_id: 0,
+                        token: token.to_string(),
+                        logprob: -1.0,
+                        rank: 1,
+                    }],
+                }],
+            }
+        }
+
+        let cases = [
+            // One character held back for the stop string `"\n\n"` until the request finishes.
+            (
+                vec![("abc", "ab"), (" de", "c d"), ("!", "e!")],
+                vec![0, 3, 6],
+            ),
+            // A two-byte character split across two tokens: the first token streams no text.
+            (
+                vec![("\u{fffd}", ""), ("\u{fffd}", "é"), ("x", "x")],
+                vec![0, 1, 2],
+            ),
+        ];
+
+        for (deltas, expected_offsets) in cases {
+            let last = deltas.len() - 1;
+            let events = std::iter::once(Ok(DecodedTextEvent::Start {
+                prompt_token_ids: vec![9].into(),
+                prompt_logprobs: None,
+            }))
+            .chain(deltas.iter().enumerate().map(|(i, (token, text))| {
+                Ok(decoded_delta(
+                    *text,
+                    vec![i as u32],
+                    Some(single_token_logprobs(token)),
+                    (i == last).then(|| Finished {
+                        usage: vllm_llm::TokenUsage::default(),
+                        finish_reason: FinishReason::Stop(None),
+                        kv_transfer_params: None,
+                        ec_transfer_params: None,
+                        sampling_mask: None,
+                        timestamps: vllm_llm::RequestTimestamps::default(),
+                    }),
+                ))
+            }))
+            .collect::<Vec<_>>();
+
+            let chunks = completion_chunk_stream(
+                stream::iter(events),
+                "cmpl-1".to_string(),
+                "model".to_string(),
+                1,
+                ApiServerOptions::default(),
+                ResponseOptions {
+                    requested_logprobs: Some(0),
+                    ..Default::default()
+                },
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let chunks: Vec<_> = chunks.into_iter().try_collect().expect("stream should succeed");
+
+            let offsets = chunks
+                .iter()
+                .filter_map(|chunk| chunk_response(chunk).choices[0].logprobs.as_ref())
+                .flat_map(|logprobs| logprobs.text_offset.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(offsets, expected_offsets, "deltas: {deltas:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_stream_puts_kv_transfer_params_on_finish_chunk_only() {
+        let stream = stream::iter(vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_ids: vec![1, 2].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(decoded_delta("a", vec![7], None, None)),
+            Ok(decoded_delta(
+                "b",
+                vec![8],
+                None,
+                Some(Finished {
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 2,
+                        output_token_count: 2,
+                        cached_token_count: 0,
+                    },
+                    finish_reason: FinishReason::Length,
+                    kv_transfer_params: Some(Box::new(
+                        serde_json::json!({"remote_block_ids": [1, 2]}),
+                    )),
+                    ec_transfer_params: None,
+                    sampling_mask: None,
+                    timestamps: Default::default(),
+                }),
+            )),
+        ]);
+
+        let chunks = completion_chunk_stream(
+            stream,
+            "cmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_usage: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let chunks: Vec<_> = chunks.into_iter().try_collect().expect("stream should succeed");
+        let payloads: Vec<_> = chunks
+            .iter()
+            .map(|chunk| serde_json::to_value(chunk).expect("chunk should serialize"))
+            .collect();
+
+        // Two text deltas, finish, usage.
+        assert_eq!(payloads.len(), 4);
+        assert_eq!(
+            payloads[2]["choices"][0]["finish_reason"],
+            serde_json::json!("length")
+        );
+        assert_eq!(
+            payloads[2]["kv_transfer_params"],
+            serde_json::json!({"remote_block_ids": [1, 2]})
+        );
+        for index in [0, 1, 3] {
+            assert!(payloads[index].get("kv_transfer_params").is_none());
+        }
+    }
+
     #[tokio::test]
     async fn completion_stream_serializes_requested_token_ids_on_every_choice() {
         let stream = stream::iter(vec![
@@ -1083,7 +1251,9 @@ mod tests {
                         cached_token_count: 0,
                     },
                     finish_reason: FinishReason::Length,
-                    kv_transfer_params: None,
+                    kv_transfer_params: Some(Box::new(
+                        serde_json::json!({"remote_block_ids": [1, 2]}),
+                    )),
                     ec_transfer_params: None,
                     sampling_mask: None,
                     timestamps: Default::default(),
@@ -1125,6 +1295,10 @@ mod tests {
             CompletionSseChunk::Chunk(chunk) => {
                 assert_eq!(chunk.choices[0].text, "");
                 assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
+                assert_eq!(
+                    chunk.kv_transfer_params,
+                    Some(serde_json::json!({"remote_block_ids": [1, 2]}))
+                );
             }
             CompletionSseChunk::Usage(_) => panic!("expected final chunk"),
         }

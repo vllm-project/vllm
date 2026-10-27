@@ -123,6 +123,7 @@
 /vllm/v1/worker/gpu @WoosukKwon @njhill @yewentao256
 /vllm/v1/worker/gpu/kv_connector.py @orozery
 /vllm/v1/worker/gpu/model_states/mamba_hybrid.py @WoosukKwon @njhill @yewentao256 @ZJY0516
+/vllm/v1/worker/gpu/spec_decode @WoosukKwon @njhill @yewentao256 @TheEpicDolphin
 
 # CI & building
 /.buildkite @Harry-Chen @khluu
@@ -218,7 +219,8 @@ mkdocs.yaml @hmellor
 /vllm/v1/attention/ops/triton_unified_attention.py @tdoublep
 /vllm/third_party/flash_linear_attention @ZJY0516 @vadiklyutiy
 /vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl @gau-nernst
-/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py @gau-nernst
+/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm100.py @gau-nernst
+/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm90.py @gau-nernst
 /vllm/model_executor/kernels/linear/cute_dsl/gemm_rs_ar.py @gau-nernst
 /vllm/cute_utils @gau-nernst
 

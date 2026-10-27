@@ -10,13 +10,13 @@
 from vllm.multimodal.processing import PromptUpdateDetails, cached_encode
 from vllm.tokenizers.hf import HfTokenizer
 
-from .internvl import InternVLImageProcessor, InternVLProcessor
+from .internvl import InternVLChatImageProcessor, InternVLChatProcessor
 
 
-class NVLMProcessor(InternVLProcessor):
+class NVLMProcessor(InternVLChatProcessor):
     def __init__(
         self,
-        image_processor: InternVLImageProcessor,
+        image_processor: InternVLChatImageProcessor,
         tokenizer: HfTokenizer,
         *,
         image_seq_length: int,
