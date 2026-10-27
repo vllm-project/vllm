@@ -382,7 +382,7 @@ class RequestRunner:
         skip_reading_prefix_cache: bool = False,
         req_id: str | None = None,
         resumable: bool = False,
-    ) -> Request:
+    ):
         if req_id is None:
             self.req_id += 1
             req_id = str(self.req_id)
@@ -405,7 +405,6 @@ class RequestRunner:
             req.kv_transfer_params = kv_transfer_params
 
         self.scheduler.add_request(req)
-        return req
 
     def _parse_transfers(self):
         for src_spec, dst_spec in self.offloading_spec.get_flushed_transfers():

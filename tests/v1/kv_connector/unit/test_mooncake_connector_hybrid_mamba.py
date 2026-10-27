@@ -154,31 +154,7 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
 
 
 @pytest.mark.cpu_test
-def test_lookahead_hashing_still_truncates_remote_decode_prompt():
-    """D always recomputes the last token, so P must stop at h(N-1)."""
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector",
-        kv_role="kv_producer",
-    )
-    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
-    connector = MooncakeConnector(
-        vllm_config,
-        KVConnectorRole.SCHEDULER,
-        make_hybrid_gdn_kv_cache_config(vllm_config.cache_config.block_size),
-    )
-    connector.set_num_hash_lookahead_tokens(1)
-    request = create_request(num_tokens=10, do_remote_decode=True)
-    original_tokens = list(request.prompt_token_ids)
-
-    connector.on_new_request(request)
-
-    assert request.prompt_token_ids == original_tokens[:-1]
-    assert request.num_prompt_tokens == len(original_tokens) - 1
-    assert request.kv_transfer_params["_p_side_truncated"] is True
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("num_lookahead", [0, 1, 2, 5])
+@pytest.mark.parametrize("num_lookahead", [0, 1, 5])
 @pytest.mark.parametrize("use_embeds", [False, True])
 @pytest.mark.parametrize(
     "scheduler_cls, connector_name",

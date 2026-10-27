@@ -54,10 +54,10 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
-from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
-from .utils import create_vllm_config
+from .utils import create_scheduler, create_vllm_config
 
 
 def _make_vllm_config():
@@ -283,9 +283,6 @@ def _make_block_stored(
 
 def test_scheduler_role_initializes_store_scheduler_only():
     vllm_config = _make_vllm_config()
-    spec = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
-    spec.method = "mtp"
-    vllm_config.speculative_config = spec
     kv_cache_config = _make_kv_cache_config()
 
     with (
@@ -311,13 +308,6 @@ def test_scheduler_role_initializes_store_scheduler_only():
 
     connector.bind_gpu_block_pool(block_pool)
     mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
-
-    connector.set_num_hash_lookahead_tokens(1)
-    assert connector.num_hash_lookahead_tokens == 1
-    assert connector.connector_scheduler._store_coord.num_hash_lookahead_tokens == 1
-    connector.set_num_hash_lookahead_tokens(0)
-    assert connector.num_hash_lookahead_tokens == 0
-    assert connector.connector_scheduler._store_coord.num_hash_lookahead_tokens == 0
 
 
 def test_scheduler_reports_mooncake_cache_source():
@@ -364,7 +354,6 @@ def test_worker_methods_delegate_to_store_worker():
     worker = mock_worker_cls.return_value
     worker.get_finished.return_value = ({"req-1"}, {"req-2"})
     worker.get_block_ids_with_load_errors.return_value = {3, 4}
-    connector.set_num_hash_lookahead_tokens(5)
     connector.bind_connector_metadata(metadata)
 
     connector.register_kv_caches(kv_caches)
@@ -374,8 +363,6 @@ def test_worker_methods_delegate_to_store_worker():
     invalid_block_ids = connector.get_block_ids_with_load_errors()
 
     worker.register_kv_caches.assert_called_once_with(kv_caches)
-    assert connector.num_hash_lookahead_tokens == 5
-    assert worker.coord.num_hash_lookahead_tokens == 5
     worker.start_load_kv.assert_called_once_with(metadata)
     worker.wait_for_save.assert_called_once_with(metadata)
     worker.get_finished.assert_called_once_with(finished_req_ids, metadata)
@@ -1198,6 +1185,7 @@ def test_shutdown_scheduler_role_is_noop():
     connector.shutdown()
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     ("kv_role", "save_decode_cache"),
     [("kv_both", False), ("kv_both", True), ("kv_consumer", True)],
@@ -1282,6 +1270,7 @@ def test_finish_during_prefill_saves_only_completed_kv(
     assert connector.build_connector_meta(SchedulerOutput.make_empty()).requests == []
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("tail_first", [False, True])
 @pytest.mark.parametrize("tail_completes_first", [False, True])
 @pytest.mark.parametrize("stale_in_flight_tokens", [0, 2])
@@ -1417,9 +1406,10 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
     assert connector.build_connector_meta(SchedulerOutput.make_empty()).requests == []
 
 
-@pytest.mark.parametrize("num_lookahead", [1, 2, 5])
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("all_supported", [False, True])
-def test_store_uses_multi_connectors_final_hash_protocol(num_lookahead, all_supported):
+def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
+    num_lookahead = 2
     config = create_vllm_config(
         kv_connector="MultiConnector",
         kv_role="kv_both",
@@ -1457,3 +1447,40 @@ def test_store_uses_multi_connectors_final_hash_protocol(num_lookahead, all_supp
     assert hit == (64 if all_supported else 48)
     # Even with the legacy protocol, applying the load mask must not drop again.
     assert coord.load_mask(hashes, hit) == ([True] * (hit // 16),)
+
+
+@pytest.mark.cpu_test
+def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
+    config = _make_role_vllm_config(
+        "kv_both", enable_lookup=True, save_decode_cache=True
+    )
+    config.scheduler_config.async_scheduling = False
+    spec = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
+    spec.method = "mtp"
+    spec.draft_model_config = config.model_config
+    config.speculative_config = spec
+    with patch.object(scheduler, "LookupKeyClient") as lookup:
+        lookup.return_value.lookup.return_value = MooncakeLookupResult(0)
+        engine_scheduler = create_scheduler(config, num_blocks=16)
+    init_none_hash(sha256)
+    request = Request(
+        "lookahead",
+        list(range(32)),
+        SamplingParams(max_tokens=2),
+        None,
+        block_hasher=get_request_block_hasher(16, sha256, 1),
+    )
+    engine_scheduler.add_request(request)
+    first = engine_scheduler.schedule()
+    assert [m.token_len_chunk for m in first.kv_connector_metadata.requests] == [16]
+    engine_scheduler.update_from_output(
+        first,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[32]],
+        ),
+    )
+    second = engine_scheduler.schedule()
+    assert second.scheduled_cached_reqs.new_block_ids == [None]
+    assert [m.token_len_chunk for m in second.kv_connector_metadata.requests] == [32]

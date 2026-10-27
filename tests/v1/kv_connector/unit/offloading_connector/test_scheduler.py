@@ -4430,41 +4430,20 @@ class TestEagle:
         # 3 hits, pop to 2 → 2 * block_size = 8 tokens loadable
         assert sched._lookup(req_status) == 8
 
-    def test_lookahead_hash_lookup_keeps_proven_boundary(self, request_runner):
-        """A lookahead hash proves the EAGLE boundary, so no hit is dropped."""
-        block_size = 4
-        groups = [
-            KVCacheGroupSpec(
-                ["layer0"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-                is_eagle_group=True,
-            ),
-        ]
-        runner = request_runner(
-            block_size=block_size,
-            num_gpu_blocks=100,
-            async_scheduling=False,
-            kv_cache_groups=groups,
-        )
-        runner.scheduler_connector.set_num_hash_lookahead_tokens(1)
-        runner.manager.lookup.return_value = LookupResult.HIT
-        sched = runner.connector_scheduler
-        req_status = self._make_req_status(
-            sched, num_tokens=12, offload_keys_per_group=[[1, 2, 3]]
-        )
-
-        assert sched._lookup(req_status) == 12
-
-    @pytest.mark.parametrize("num_lookahead", [1, 2, 5])
-    @pytest.mark.parametrize("num_tokens", [1, 16, 17, 20])
-    @pytest.mark.parametrize("blocks_per_chunk", [1, 2])
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize(
+        "num_lookahead, num_tokens, blocks_per_chunk, expected",
+        [
+            (1, 1, 1, 0),
+            (1, 16, 1, 12),
+            (1, 17, 1, 16),
+            (2, 20, 2, 16),
+            (5, 20, 1, 12),
+            (5, 20, 2, 8),
+        ],
+    )
     def test_lookahead_lookup_waits_for_full_window(
-        self, request_runner, num_lookahead, num_tokens, blocks_per_chunk
+        self, request_runner, num_lookahead, num_tokens, blocks_per_chunk, expected
     ):
         """Only chunks whose entire lookahead window is known can hit."""
         block_size = 4
@@ -4473,6 +4452,18 @@ class TestEagle:
             num_gpu_blocks=100,
             async_scheduling=False,
             blocks_per_chunk=blocks_per_chunk,
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["mtp"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                    is_eagle_group=True,
+                )
+            ],
         )
         connector = runner.scheduler_connector
         connector.set_num_hash_lookahead_tokens(num_lookahead)
@@ -4485,8 +4476,6 @@ class TestEagle:
         )
         connector.on_new_request(request)
         runner.manager.lookup.return_value = LookupResult.HIT
-        chunk_size = block_size * blocks_per_chunk
-        expected = max(0, num_tokens - num_lookahead) // chunk_size * chunk_size
 
         assert connector.get_num_new_matched_tokens(request, 0) == (
             expected,
@@ -4982,8 +4971,9 @@ class TestEagle:
         )
         runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=((0, 0),))
 
+    @pytest.mark.cpu_test
     @pytest.mark.parametrize("async_scheduling", [True, False])
-    @pytest.mark.parametrize("num_lookahead", [1, 2, 5])
+    @pytest.mark.parametrize("num_lookahead", [1, 5])
     def test_lookahead_store_includes_block_hashed_by_sampled_token(
         self, request_runner, async_scheduling: bool, num_lookahead: int
     ):

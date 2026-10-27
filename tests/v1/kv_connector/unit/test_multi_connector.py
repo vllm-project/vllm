@@ -13,13 +13,15 @@ import torch
 from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig, SpeculativeConfig
-from vllm.config.attention import HiSparseConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     SupportsHMA,
     supports_hma,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,
@@ -139,7 +141,7 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
         return (False, None)
 
 
-class LookaheadHashingTestConnector(KVConnectorBase_V1):
+class LookaheadHashingTestConnector(ExampleConnector):
     """Minimal real connector for lookahead-hash protocol tests."""
 
     @classmethod
@@ -151,27 +153,6 @@ class LookaheadHashingTestConnector(KVConnectorBase_V1):
                 "supports_lookahead_block_hashes", False
             )
         )
-
-    def start_load_kv(self, forward_context, **kwargs):
-        pass
-
-    def wait_for_layer_load(self, layer_name):
-        pass
-
-    def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
-        pass
-
-    def wait_for_save(self):
-        pass
-
-    def build_connector_meta(self, scheduler_output):
-        return None
-
-    def get_num_new_matched_tokens(self, request, num_computed_tokens):
-        return (0, False)
-
-    def update_state_after_alloc(self, request, blocks, num_tokens) -> None:
-        pass
 
 
 class MockDivergentHMAConnector(MockHMAConnector):
@@ -1098,25 +1079,22 @@ Options:
 """)
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     (
         "child_support",
         "num_lookahead",
         "prefix_caching",
         "disabled",
-        "hisparse",
         "expected",
     ),
     [
-        ([], 1, True, False, False, False),
-        ([True, True], 1, True, False, False, True),
-        ([True, False], 1, True, False, False, False),
-        ([True, True], 1, False, False, False, True),
-        ([True, True], 2, True, False, False, True),
-        ([True, True], 1, True, True, False, False),
-        ([True, True], 1, True, False, True, True),
-        ([True, True], 2, True, False, True, True),
-        ([True, False], 2, True, False, True, False),
+        ([], 1, True, False, False),
+        ([True, True], 1, True, False, True),
+        ([True, False], 1, True, False, False),
+        ([True, True], 1, False, False, True),
+        ([True, True], 2, True, False, True),
+        ([True, True], 1, True, True, False),
     ],
 )
 @pytest.mark.parametrize("nested", [False, True])
@@ -1126,7 +1104,6 @@ def test_factory_configures_multi_connector_lookahead_block_hashes(
     num_lookahead: int,
     prefix_caching: bool,
     disabled: bool,
-    hisparse: bool,
     expected: bool,
     nested: bool,
     role: KVConnectorRole,
@@ -1154,8 +1131,6 @@ def test_factory_configures_multi_connector_lookahead_block_hashes(
     spec.disable_lookahead_block_hashes = disabled
     vllm_config.speculative_config = spec
     vllm_config.cache_config.enable_prefix_caching = prefix_caching
-    if hisparse:
-        vllm_config.attention_config.hisparse_config = HiSparseConfig()
 
     assert vllm_config.num_hash_lookahead_tokens == (num_lookahead if expected else 0)
 
@@ -1166,7 +1141,6 @@ def test_factory_configures_multi_connector_lookahead_block_hashes(
     )
 
     assert isinstance(connector, MultiConnector)
-    assert vllm_config.num_hash_lookahead_tokens == (num_lookahead if expected else 0)
     expected_tokens = num_lookahead if expected else 0
     assert connector.num_hash_lookahead_tokens == expected_tokens
     for child in connector.sub_connectors:

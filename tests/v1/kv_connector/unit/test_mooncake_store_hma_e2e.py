@@ -8,6 +8,7 @@ import threading
 import types
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
@@ -386,10 +387,7 @@ def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
     """Add the tail's non-Mamba puts as the scheduler does before the worker."""
     req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
     req.boundary_puts[:0] = _partial_tail_non_mamba_puts(
-        thread.coord,
-        req,
-        [db.block_size for db in thread.token_databases],
-        apply_eagle=True,
+        thread.coord, req, [db.block_size for db in thread.token_databases]
     )
     return req
 
@@ -642,7 +640,9 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     assert store.puts == expected
 
 
-def test_worker_lookup_hits_sub_block_partial_tail():
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("num_lookahead", [0, 1, 5])
+def test_worker_lookup_hits_sub_block_partial_tail(num_lookahead):
     """worker.lookup must query sub-block keys when partial hash hits are on.
 
     Regression test: ``lookup`` hard-coded ``fine_grained = False``, so the
@@ -690,6 +690,7 @@ def test_worker_lookup_hits_sub_block_partial_tail():
     worker.tp_size = 1
     worker.pp_size = 1
     worker.num_kv_head = 8
+    worker.coord.num_hash_lookahead_tokens = num_lookahead
     assert worker.coord.enable_partial_hash_hits
 
     for g_idx, db in enumerate(worker.token_dbs):
@@ -708,24 +709,26 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         replicate_config=MagicMock(),
     )
 
-    # A 12-token prompt leaves a resend-safe sub-block checkpoint at 8.
-    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(5)]
+    # Keep checkpoint 8 while moving the prompt beyond its lookahead window.
+    prompt_len = max(12, 8 + num_lookahead)
+    hs = [
+        BlockHash(bytes([i + 1]) * 4) for i in range((prompt_len - num_lookahead) // 4)
+    ]
     req = ReqMeta(
         req_id="r0",
         token_len_chunk=0,
         block_ids=([1], [2]),
         block_hashes=hs,
         can_save=True,
-        num_prompt_tokens=12,
-        completed_token_len=12,
+        num_prompt_tokens=prompt_len,
+        completed_token_len=prompt_len,
         boundary_puts=[(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
 
     worker.store = store
 
-    # A 13-token prompt sharing the prefix must hit the stored boundary at 8.
-    assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
+    assert worker.lookup(num_tokens=prompt_len + 1, block_hashes=hs).hit_length == 8
 
 
 def test_worker_setup_tolerates_finer_scratch_group():

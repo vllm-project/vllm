@@ -950,9 +950,7 @@ def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
     """Add the tail's non-Mamba puts as the scheduler does before the worker."""
     req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
     req.boundary_puts[:0] = _partial_tail_non_mamba_puts(
-        thread.coord,
-        req,
-        [db.block_size for db in thread.token_databases],
+        thread.coord, req, [db.block_size for db in thread.token_databases]
     )
     return req
 
@@ -1594,7 +1592,7 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
     )
     coord = SimpleNamespace(
         lcm_block_size=16,
-        store_mask=lambda token_len, start_token, num_prompt_tokens=None, **kwargs: (
+        store_mask=lambda token_len, start_token, num_prompt_tokens=None: (
             None,
             [True, False],
         ),
@@ -1649,7 +1647,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
     store.batch_put_from_multi_buffers.return_value = [256, 256, 512, 512]
     coord = SimpleNamespace(
         lcm_block_size=16,
-        store_mask=lambda token_len, start_token, num_prompt_tokens=None, **kwargs: (
+        store_mask=lambda token_len, start_token, num_prompt_tokens=None: (
             None,
             None,
         ),

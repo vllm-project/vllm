@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-import torch
 
 from tests.models.utils import check_logprobs_close
 from tests.utils import single_gpu_only
-from vllm import LLM, SamplingParams, TokensPrompt
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm import SamplingParams, TokensPrompt
 from vllm.platforms import current_platform
 
 from ...utils import (
@@ -51,8 +49,9 @@ def test_mtp_correctness(
 @single_gpu_only
 def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
     monkeypatch: pytest.MonkeyPatch,
+    vllm_runner,
 ):
-    """Offloading uses the lookahead-proven MTP boundary without accuracy loss."""
+    """Enabling a connector preserves MTP local-cache hits and model outputs."""
     aligned_page_size = 544
     prompt_len = 2 * aligned_page_size + 1
     sampling_params = SamplingParams(
@@ -61,27 +60,27 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
         logprobs=5,
     )
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_MLA_DISABLE", "1")
-        llm = LLM(
-            model="Qwen/Qwen3.5-0.8B-Base",
-            trust_remote_code=True,
-            enable_prefix_caching=True,
-            max_model_len=2048,
-            speculative_config={
-                "method": "mtp",
-                "num_speculative_tokens": 1,
-                "max_model_len": 2048,
+    monkeypatch.setenv("VLLM_MLA_DISABLE", "1")
+    with vllm_runner(
+        model_name="Qwen/Qwen3.5-0.8B-Base",
+        trust_remote_code=True,
+        enable_prefix_caching=True,
+        max_model_len=2048,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 1,
+            "max_model_len": 2048,
+        },
+        kv_transfer_config={
+            "kv_connector": "OffloadingConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "cpu_bytes_to_use": 512 << 20,
             },
-            kv_transfer_config={
-                "kv_connector": "OffloadingConnector",
-                "kv_role": "kv_both",
-                "kv_connector_extra_config": {
-                    "cpu_bytes_to_use": 512 << 20,
-                },
-            },
-            limit_mm_per_prompt={"image": 0, "video": 0},
-        )
+        },
+        limit_mm_per_prompt={"image": 0, "video": 0},
+    ) as runner:
+        llm = runner.get_llm()
         assert llm.llm_engine.vllm_config.cache_config.prefix_match_unit is None
 
         tokenizer = llm.get_tokenizer()
@@ -123,10 +122,6 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
             name_1="warm_mtp",
             always_check_logprobs=True,
         )
-
-        del llm
-        torch.accelerator.empty_cache()
-        cleanup_dist_env_and_memory()
 
 
 @single_gpu_only

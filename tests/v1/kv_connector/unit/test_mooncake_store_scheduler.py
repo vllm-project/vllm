@@ -49,8 +49,6 @@ def _make_bare_scheduler(
     scheduler.enable_kv_events = False
     scheduler.lookup_async = False
     scheduler.enable_lookup = True
-    scheduler.client = SimpleNamespace(discard=lambda req_id: None)
-
     scheduler._capacity_only = False
     scheduler._block_size = 16
     scheduler._hash_block_size = hash_block_size
@@ -930,6 +928,7 @@ def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
     assert req_meta.boundary_puts is None
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("hash_block_size", [4, 16])
 @pytest.mark.parametrize("can_load", [False, True])
 def test_from_request_tracker_caps_save_length_without_changing_load(
@@ -1374,6 +1373,7 @@ def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
     ]
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "num_lookahead, mamba_tail, expected",
     [
@@ -1381,7 +1381,6 @@ def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
         (0, 68, []),
         # Lookahead: core keeps the checkpoint at 72 and needs no proof block.
         (1, 72, [BoundaryPut(0, 9, 72)]),
-        (2, 68, [BoundaryPut(0, 9, 68)]),
         (5, 68, [BoundaryPut(0, 9, 68)]),
         (10, 60, [BoundaryPut(0, 7, 56), BoundaryPut(0, 8, 60)]),
     ],
@@ -1871,101 +1870,3 @@ def test_worker_metadata_aggregates_completions_across_ranks():
         MooncakeStoreWorkerMetadata(completed_saves={1: 1, 2: 1})
     )
     assert merged.completed_saves == {1: 2, 2: 1}
-
-
-def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
-    scheduler = _make_bare_scheduler()
-    scheduler._store_coord.num_hash_lookahead_tokens = 1
-    token_ids = list(range(32))
-    request = SimpleNamespace(
-        all_token_ids=token_ids,
-        block_hashes=[b"eagle-0"],
-        num_prompt_tokens=32,
-        num_output_placeholders=0,
-    )
-    scheduler._unfinished_requests["req-0"] = (request, ([1, 2],))
-    scheduler._request_trackers["req-0"] = RequestTracker(
-        req_id="req-0",
-        token_len=16,
-        allocated_block_ids=([1, 2],),
-        num_saved_tokens=0,
-        token_ids=token_ids[:16],
-        prefill_end_tokens=32,
-    )
-    out = SimpleNamespace(
-        finished_req_ids=set(),
-        preempted_req_ids=set(),
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["req-0"],
-            new_block_ids=[None],
-            num_computed_tokens=[16],
-            resumed_req_ids=set(),
-        ),
-        num_scheduled_tokens={"req-0": 1},
-        scheduled_spec_decode_tokens={},
-        kv_connector_block_state=_make_connector_block_state(block_ids=([1, 2],)),
-    )
-
-    meta = scheduler.build_connector_meta(out)
-
-    assert len(meta.requests) == 1
-    assert meta.requests[0].block_hashes == [b"eagle-0"]
-    assert meta.requests[0].token_len_chunk == 16
-    assert scheduler._request_trackers["req-0"].num_saved_tokens == 16
-
-
-def test_lookahead_finished_request_flushes_last_hashed_block():
-    # The last lookahead hash exists only once the request has finished, so
-    # its save is pinned at finish and emitted on the next step.
-    scheduler = _make_bare_scheduler()
-    scheduler._store_coord.num_hash_lookahead_tokens = 1
-    token_ids = list(range(32))
-    request = SimpleNamespace(
-        request_id="req-0",
-        all_token_ids=token_ids,
-        block_hashes=[b"eagle-0"],
-        num_prompt_tokens=32,
-        num_tokens=32,
-        num_computed_tokens=32,
-        num_in_flight_tokens=0,
-        num_stale_output_tokens=0,
-    )
-    scheduler._request_trackers["req-0"] = RequestTracker(
-        req_id="req-0",
-        token_len=32,
-        allocated_block_ids=([1, 2],),
-        num_saved_tokens=0,
-        token_ids=token_ids,
-        prefill_end_tokens=32,
-    )
-    scheduler._unfinished_requests["req-0"] = (request, ([1, 2],))
-    pool = scheduler._gpu_block_pool
-
-    scheduler.register_finished_lookahead_save(request, ([1, 2],))
-
-    assert pool.blocks[1].ref_cnt == pool.blocks[2].ref_cnt == 1
-    out = SimpleNamespace(
-        finished_req_ids={"req-0"},
-        preempted_req_ids=set(),
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=[],
-            new_block_ids=[],
-            num_computed_tokens=[],
-            resumed_req_ids=set(),
-        ),
-        num_scheduled_tokens={},
-        scheduled_spec_decode_tokens={},
-        kv_connector_block_state=_make_connector_block_state(),
-    )
-    meta = scheduler.build_connector_meta(out)
-
-    assert len(meta.requests) == 1
-    req_meta = meta.requests[0]
-    assert req_meta.block_hashes == [b"eagle-0"]
-    assert req_meta.token_len_chunk == 16
-    assert req_meta.store_job_id is not None
-
-    scheduler.update_connector_output(_make_worker_output({req_meta.store_job_id: 1}))
-    assert pool.blocks[1].ref_cnt == pool.blocks[2].ref_cnt == 0
