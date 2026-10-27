@@ -350,5 +350,72 @@ def test_flashinfer_b12x_moe_relu2(
         )
 
 
+@pytest.mark.parametrize(
+    "activation,configured_n,w13_rows,expected_n",
+    [
+        # Non-gated: w13 rows were padded 1856 -> 1920 by scale swizzling.
+        (MoEActivation.RELU2_NO_MUL, 1856, 1920, 1920),
+        # Non-gated, already a multiple of 128: no padding.
+        (MoEActivation.RELU2_NO_MUL, 1920, 1920, 1920),
+        # Gated: w13 holds [up, gate], so its rows are 2 * n.
+        (MoEActivation.SILU, 1856, 2 * 1856, 1856),
+        (MoEActivation.SILU, 1920, 2 * 1920, 1920),
+    ],
+)
+def test_flashinfer_b12x_wrapper_uses_padded_intermediate_size(
+    monkeypatch: pytest.MonkeyPatch,
+    activation: MoEActivation,
+    configured_n: int,
+    w13_rows: int,
+    expected_n: int,
+):
+    """B12xMoEWrapper must be built with the intermediate size present in
+    the prepared (possibly padded) weights, not the configured size."""
+    import flashinfer.fused_moe
+
+    import vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe as b12x
+
+    captured: dict = {}
+
+    class FakeB12xMoEWrapper:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(flashinfer.fused_moe, "B12xMoEWrapper", FakeB12xMoEWrapper)
+    monkeypatch.setattr(
+        b12x, "flashinfer_convert_sf_to_mma_layout", lambda sf, **kwargs: sf
+    )
+
+    e, k = 2, 256
+    w13_scale = torch.ones((e, w13_rows, k // 16), dtype=torch.float32)
+    w2_scale = torch.ones((e, k, w13_rows // 16), dtype=torch.float32)
+    ones_e = torch.ones(e, dtype=torch.float32)
+
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        experts = FlashInferB12xExperts(
+            moe_config=make_dummy_moe_config(
+                num_experts=e,
+                experts_per_token=1,
+                hidden_dim=k,
+                intermediate_size=configured_n,
+                activation=activation,
+            ),
+            quant_config=nvfp4_moe_quant_config(
+                g1_alphas=ones_e,
+                g2_alphas=ones_e,
+                a1_gscale=ones_e,
+                a2_gscale=ones_e.clone(),
+                w1_scale=w13_scale,
+                w2_scale=w2_scale,
+            ),
+        )
+        _process_b12x_weights(experts, w13_scale, w2_scale, ones_e, ones_e)
+        experts._ensure_wrapper()
+
+    assert captured["intermediate_size"] == expected_n
+
+
 if __name__ == "__main__":
     test_flashinfer_b12x_moe(16, 128, 256, 8, 2, torch.bfloat16)
