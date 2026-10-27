@@ -80,7 +80,7 @@ from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
-from vllm.logprobs import SampleLogprobs
+from vllm.logprobs import LogprobsOnePosition, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
@@ -255,13 +255,6 @@ class OpenAIServingResponses(GenerateBaseServing):
     def _validate_create_responses_input(
         self, request: ResponsesRequest
     ) -> ErrorResponse | None:
-        if self.use_harmony and request.is_include_output_logprobs():
-            return self.create_error_response(
-                err_type="invalid_request_error",
-                message="logprobs are not supported with gpt-oss models",
-                status_code=HTTPStatus.BAD_REQUEST,
-                param="logprobs",
-            )
         if request.store and not self.enable_store and request.background:
             return self.create_error_response(
                 err_type="invalid_request_error",
@@ -810,6 +803,11 @@ class OpenAIServingResponses(GenerateBaseServing):
                     incomplete=(
                         i == len(harmony_msgs) - 1 and context.last_append_flush_status
                     ),
+                    text_logprobs=self._create_harmony_text_logprobs(
+                        context.text_logprobs_by_message.get(id(msg), []),
+                        request,
+                        tokenizer,
+                    ),
                 )
                 if next_streamed is not None and next_streamed[0] is msg:
                     reuse_streamed_item_ids(items, next_streamed[1])
@@ -1011,6 +1009,26 @@ class OpenAIServingResponses(GenerateBaseServing):
                 )
             )
         return out
+
+    def _create_harmony_text_logprobs(
+        self,
+        text_logprobs: Sequence[tuple[int, LogprobsOnePosition]],
+        request: ResponsesRequest,
+        tokenizer: TokenizerLike,
+    ) -> list[Logprob] | None:
+        """Convert (token_id, logprobs) pairs collected by HarmonyContext.
+
+        Streaming deltas, streaming done events and the final response all
+        go through here so they report identical logprobs.
+        """
+        if not request.is_include_output_logprobs():
+            return None
+        return self._create_response_logprobs(
+            token_ids=[token_id for token_id, _ in text_logprobs],
+            logprobs=[logprobs for _, logprobs in text_logprobs],
+            tokenizer=tokenizer,
+            top_logprobs=request.top_logprobs,
+        )
 
     def _log_final_output(
         self,
@@ -1305,6 +1323,9 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
+        # Text tokens with an empty delta (e.g. part of a multi-byte
+        # character) wait here until the next text delta is emitted.
+        pending_text_logprobs: list[tuple[int, LogprobsOnePosition]] = []
 
         async for ctx in result_generator:
             assert isinstance(ctx, HarmonyContext)
@@ -1312,18 +1333,37 @@ class OpenAIServingResponses(GenerateBaseServing):
             # finish_reason='error' indicates a retryable error
             self._raise_if_error(ctx.finish_reason, request.request_id)
 
-            for segment in ctx.last_append_segments:
+            for segment, text_logprob in zip(
+                ctx.last_append_segments, ctx.last_append_text_logprobs, strict=True
+            ):
+                if text_logprob is not None:
+                    pending_text_logprobs.append(text_logprob)
+
                 if segment.delta:
+                    delta_logprobs = None
+                    if text_logprob is not None:
+                        delta_logprobs = self._create_harmony_text_logprobs(
+                            pending_text_logprobs, request, tokenizer
+                        )
+                        pending_text_logprobs = []
                     for event in emit_content_delta_events(
-                        segment, state, ctx.function_tool_names
+                        segment, state, ctx.function_tool_names, delta_logprobs
                     ):
                         yield _increment_sequence_number_and_return(event)
 
                 elif completed_message := segment.completed_message:
+                    pending_text_logprobs = []
                     done_items: list[ResponseOutputItem] = []
                     # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(
-                        completed_message, state, ctx.function_tool_names
+                        completed_message,
+                        state,
+                        ctx.function_tool_names,
+                        self._create_harmony_text_logprobs(
+                            ctx.text_logprobs_by_message.get(id(completed_message), []),
+                            request,
+                            tokenizer,
+                        ),
                     ):
                         if isinstance(event, ResponseOutputItemDoneEvent):
                             done_items.append(event.item)
