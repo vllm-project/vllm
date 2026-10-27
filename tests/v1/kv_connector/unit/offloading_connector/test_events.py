@@ -536,9 +536,10 @@ def test_take_events_opt_out_keeps_placeholders():
     assert len(events[3].block_hashes) == 3
 
 
-def test_mamba_chunk_store_emits_self_describing_event():
-    """A recurrent group's chunk is announced like an attention chunk, with
-    kv_cache_spec_kind "mamba", so a consumer can align it by hash."""
+def test_mamba_chunk_store_emits_state_checkpoint_event():
+    """A recurrent group's chunk is announced as one state checkpoint: the
+    chunk's last hash, chained to its predecessor, with no tokens and
+    kv_cache_spec_kind "mamba", so a consumer aligns it by hash."""
     tracker = _tracker()
     group_config = _group_config(
         group_idx=1, block_size=8, tokens_per_hash=4, mamba=True
@@ -553,7 +554,7 @@ def test_mamba_chunk_store_emits_self_describing_event():
     assert isinstance(event, BlockStored)
     assert event.block_hashes == [_wire_hash(_hash(3))]
     assert event.parent_block_hash == _wire_hash(_hash(1))
-    assert event.token_ids == list(range(9, 17))
+    assert event.token_ids == []
     assert event.block_size == 8
     assert event.group_idx == 1
     assert event.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
@@ -565,10 +566,30 @@ def test_mamba_chunk_store_emits_self_describing_event():
     assert removed.group_idx == 1
 
 
+def test_mamba_multi_hash_chunk_announces_only_last_hash():
+    """In chunk mode a recurrent chunk spans several hashes, but only the
+    last one is a resumable checkpoint; the others are not announced."""
+    tracker = _tracker()
+    group_config = _group_config(block_size=4, blocks_per_chunk=4, mamba=True)
+    req = _request(block_hashes=[_hash(i) for i in range(8)], token_count=32)
+    keys = _record_chunks(tracker, req, group_config, num_chunks=2)
+
+    [event] = tracker.take_events([_stored_event(keys[1:])])
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(7))]
+    assert event.parent_block_hash == _wire_hash(_hash(6))
+    assert event.token_ids == []
+    assert event.block_size == 4
+
+    [removed] = tracker.take_events([_removed_event(keys[1:])])
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == [_wire_hash(_hash(7))]
+
+
 @pytest.mark.parametrize(
     "record_method", ["record_partial_store", "record_partial_lookup"]
 )
-def test_mamba_partial_tail_event_is_self_describing(record_method):
+def test_mamba_partial_tail_event_is_state_checkpoint(record_method):
     tracker = _tracker()
     group_config = _group_config(
         block_size=16, blocks_per_chunk=1, mamba=True
@@ -580,9 +601,9 @@ def test_mamba_partial_tail_event_is_self_describing(record_method):
     [event] = tracker.take_events([_stored_event([key])])
 
     assert isinstance(event, BlockStored)
-    assert event.block_hashes == [_wire_hash(_hash(i)) for i in range(4, 7)]
-    assert event.parent_block_hash == _wire_hash(_hash(3))
-    assert event.token_ids == list(range(17, 29))
+    assert event.block_hashes == [_wire_hash(_hash(6))]
+    assert event.parent_block_hash == _wire_hash(_hash(5))
+    assert event.token_ids == []
     assert event.block_size == 4
     assert event.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
 

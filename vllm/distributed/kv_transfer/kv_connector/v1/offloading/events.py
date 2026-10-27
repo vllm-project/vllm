@@ -14,11 +14,11 @@ of the same hash. Opt-in via
 ``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
 KV cache events are enabled. See the PR description for the full design.
 
-Recurrent (Mamba / linear-attention) state groups are described the same way
-as full-attention chunks: the payload lists the chunk's hashes and tokens so a
-consumer can place it at the same radix position as the attention blocks, and
-``kv_cache_spec_kind`` is ``"mamba"``. The residency it announces is the state
-checkpoint at the chunk's last hash, not a reusable token range: a hybrid
+Recurrent (Mamba / linear-attention) state groups announce state checkpoints,
+not token ranges: an offloaded chunk holds the recurrent state at the chunk's
+last hash only. Their ``BlockStored`` therefore carries that single hash, its
+parent, an empty ``token_ids`` and ``kv_cache_spec_kind`` ``"mamba"``. A
+consumer aligns it by hash with the attention group's blocks, and a hybrid
 prefix is reusable only up to a boundary where every group has a residency.
 Windowed attention groups keep the legacy placeholder payload.
 """
@@ -117,7 +117,28 @@ def describes_group(group_config: "GroupOffloadConfig") -> bool:
     """
     if group_config.sliding_window_size_in_chunks is None:
         return True
+    return _is_recurrent_group(group_config)
+
+
+def _is_recurrent_group(group_config: "GroupOffloadConfig") -> bool:
     return isinstance(group_config.kv_cache_spec, MambaSpec)
+
+
+def _as_state_checkpoint(meta: _OffloadEventMetadata) -> _OffloadEventMetadata:
+    """Reduce a chunk payload to the recurrent state checkpoint it holds.
+
+    A recurrent group's offloaded chunk is one state, valid at the chunk's
+    last hash. Announcing the whole hash range would let a consumer treat
+    every hash in it as a resumable position, so the payload keeps only the
+    last hash (the OffloadKey), chained to the hash before it, and no tokens:
+    the consumer aligns it with the attention group's blocks by hash.
+    """
+    assert meta.block_hashes
+    if len(meta.block_hashes) > 1:
+        meta.parent_block_hash = meta.block_hashes[-2]
+    meta.block_hashes = meta.block_hashes[-1:]
+    meta.token_ids = ()
+    return meta
 
 
 class OffloadingEventsTracker:
@@ -268,6 +289,8 @@ class OffloadingEventsTracker:
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={_PRIMARY_RESIDENCY},
         )
+        if _is_recurrent_group(group_config):
+            meta = _as_state_checkpoint(meta)
         if existing := self._pending_event_metadata.get(offload_key):
             meta.active_residencies.update(existing.active_residencies)
         self._pending_event_metadata[offload_key] = meta
@@ -313,7 +336,8 @@ class OffloadingEventsTracker:
     ) -> _OffloadEventMetadata:
         """Build the payload snapshot for one offloaded chunk: its
         constituent per-block hashes, the whole chunk's tokens, and the
-        per-block ``block_size``."""
+        per-block ``block_size``. A recurrent group's chunk is reduced to
+        its state checkpoint (see :func:`_as_state_checkpoint`)."""
         hashes_per_chunk = group_config.hashes_per_chunk
         assert hashes_per_chunk > 0
         assert chunk_idx >= 0
@@ -352,7 +376,12 @@ class OffloadingEventsTracker:
         tok_start = chunk_idx * group_config.tokens_per_chunk
         tok_end = tok_start + group_config.tokens_per_chunk
         assert tok_end <= len(req.all_token_ids)
-        token_ids = tuple(req.all_token_ids[tok_start:tok_end])
+        # A recurrent chunk's payload carries no tokens; skip the copy.
+        token_ids: tuple[int, ...] = (
+            ()
+            if _is_recurrent_group(group_config)
+            else tuple(req.all_token_ids[tok_start:tok_end])
+        )
 
         lora_id: int | None = None
         lora_name: str | None = None
@@ -360,7 +389,7 @@ class OffloadingEventsTracker:
             lora_id = req.lora_request.adapter_id
             lora_name = req.lora_request.name
 
-        return _OffloadEventMetadata(
+        meta = _OffloadEventMetadata(
             block_hashes=tuple(chunk_hashes),
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
@@ -372,6 +401,9 @@ class OffloadingEventsTracker:
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={_PRIMARY_RESIDENCY},
         )
+        if _is_recurrent_group(group_config):
+            meta = _as_state_checkpoint(meta)
+        return meta
 
     def _placeholder_stored(
         self,
