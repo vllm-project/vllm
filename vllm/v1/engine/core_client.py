@@ -1823,6 +1823,29 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             for req_id in outputs.finished_requests:
                 if (engine := self.reqs_in_flight.pop(req_id, None)) is not None:
                     self.engine_inflight[engine] -= 1
+                    self._release_from_snapshot(engine)
+
+    def _release_from_snapshot(self, engine: EngineIdentity) -> None:
+        """Take a finished request off its engine's latest stats snapshot.
+
+        This mirrors the local increment made when a request is routed. The
+        coordinator publishes snapshots every 100ms, so without it an engine
+        that has just freed a slot keeps its old count until the next one:
+        when every engine is at its max_num_seqs, the freed engine then ties
+        with full engines and a new request can land on a full engine, where
+        it waits for a whole request to finish before it starts.
+        """
+        try:
+            idx = self.core_engines.index(engine)
+        except ValueError:
+            return
+        if idx >= len(self.lb_engines):
+            return
+        counts = self.lb_engines[idx]
+        if counts[1] > 0:
+            counts[1] -= 1
+        elif counts[0] > 0:
+            counts[0] -= 1
 
     @staticmethod
     async def eep_process_engine_core_notification(

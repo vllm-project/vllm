@@ -411,6 +411,28 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
+def test_dplb_finished_request_frees_its_slot_before_next_snapshot():
+    """A request that finishes between two stats snapshots frees its engine
+    at once: the next request goes there, not to an engine that is full."""
+    client = _make_dplb_client(num_engines=3)
+    # Every engine runs 16 requests, its max_num_seqs, and the last snapshot
+    # says so.
+    reqs = [make_request(SamplingParams(max_tokens=1)) for _ in range(48)]
+    engines = [client.get_core_engine_for_request(req) for req in reqs]
+    client.lb_engines = [[0, 16, 0.1] for _ in range(3)]
+
+    # One request on the last engine in scan order finishes.
+    freed = client.core_engines[2]
+    done = next(r for r, e in zip(reqs, engines) if e == freed)
+    outputs = EngineCoreOutputs(finished_requests={done.request_id})
+    asyncio.run(DPLBAsyncMPClient.process_engine_outputs(client, outputs))
+
+    chosen = client.get_core_engine_for_request(
+        make_request(SamplingParams(max_tokens=1))
+    )
+    assert chosen == freed
+
+
 @pytest.mark.parametrize("final_sent", [False, True])
 def test_dplb_streaming_session_abort_goes_to_all_engines(final_sent: bool):
     """A streaming-input chunk in flight when its session finished may
