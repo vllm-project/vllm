@@ -362,6 +362,7 @@ def _fa4_varlen_scalars(
 
 
 class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
+    supports_shardq: ClassVar[bool] = False
     # FA4 emits a natural-log LSE; prefill converts trtllm-gen's log2 LSE.
     lse_base_on_e: bool = True
 

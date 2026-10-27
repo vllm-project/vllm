@@ -443,6 +443,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
     lse_base_on_e: bool = False
+    supports_shardq: ClassVar[bool] = True
 
     def __init__(
         self,

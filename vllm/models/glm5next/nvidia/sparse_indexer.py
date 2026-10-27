@@ -13,9 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.model_executor.layers.sparse_attn_indexer import (
-    PrefillRowShard,
     _merge_dcp_topk_global,
-    _reserve_row_shard_exchange_transient,
     as_fp32_logits,
 )
 from vllm.models.glm5next.common.sparse_indexer import (
@@ -180,10 +178,6 @@ def sparse_attn_indexer_kpool(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
 
-        # The dummy run returns before exchange_topk executes, so reserve its
-        # worst-case transient for the memory profile.
-        _reserve_row_shard_exchange_transient(topk_indices_buffer, hidden_states.device)
-
         return topk_indices_buffer
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
@@ -297,13 +291,6 @@ def sparse_attn_indexer_kpool(
             _pos = positions[num_decode_tokens:num_tokens].to(torch.int32)
             _buf = topk_indices_buffer[num_decode_tokens:num_tokens]
             _fill_causal_indices(_buf, _pos)
-        # Short prefills score nothing locally; suppress the shard there.
-        row_shard = None
-        if not short_prefill:
-            row_shard = PrefillRowShard.from_metadata(
-                prefill_metadata, num_decode_tokens
-            )
-
         # Get the full shared workspace buffers once (will allocate on first use).
         # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
         # MXFP4 (head_dim/2 bytes packed + head_dim/MXFP4_BLOCK_SIZE ue8m0
@@ -333,11 +320,6 @@ def sparse_attn_indexer_kpool(
 
             row_start, row_end = chunk.token_start, chunk.token_end
             cu_seqlen_ks, cu_seqlen_ke = chunk.cu_seqlen_ks, chunk.cu_seqlen_ke
-            if row_shard is not None:
-                narrowed = row_shard.narrow(chunk)
-                if narrowed is None:
-                    continue
-                row_start, row_end, cu_seqlen_ks, cu_seqlen_ke = narrowed
 
             q_slice = q_quant[row_start:row_end]
             q_scale_slice = q_scale[row_start:row_end] if q_scale is not None else None
@@ -427,12 +409,6 @@ def sparse_attn_indexer_kpool(
                         pool_ids, valid, topk_tokens, index_kpool
                     )
                 topk_indices_buffer[row_start:row_end, : expanded.shape[-1]] = expanded
-
-        if row_shard is not None:
-            # The k-pool expansion appends the request's incomplete tail
-            # (index_kpool - 1 entries) after the logical top-k history; those
-            # columns are part of the attention index and are exchanged too.
-            row_shard.exchange_topk(topk_indices_buffer, topk_tokens + index_kpool - 1)
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode

@@ -38,6 +38,7 @@ from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
 )
+from vllm.v1.attention.ops.shardq import reserve_shardq_buffers
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
@@ -234,6 +235,9 @@ class DeepseekV32Attention(MLAAttention):
         self._dense_mha_metadata_layer_name = (
             self.layer_name if enable_short_prefill_scoring_skip else ""
         )
+        # MTP draft steps reuse top-k rows by token slot, which ShardQ's
+        # compact per-rank rows would break.
+        self.use_shardq = not is_mtp_layer and getattr(self.impl, "use_shardq", False)
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_query = fp8_attention and self.impl.supports_quant_query_input
@@ -516,6 +520,7 @@ class DeepseekV32Attention(MLAAttention):
                 ),
                 skip_topk_buffer_clear=True,
                 topk_backend=self.indexer.indexer_op.topk_backend,
+                shardq_layer_name=self.layer_name if self.use_shardq else "",
             )
         self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
@@ -523,6 +528,18 @@ class DeepseekV32Attention(MLAAttention):
             self.layer_name
         )
         if attn_metadata is None:
+            if self.use_shardq:
+                scheduler_config = self._vllm_config.scheduler_config
+                reserve_shardq_buffers(
+                    scheduler_config.max_num_batched_tokens,
+                    scheduler_config.max_num_seqs,
+                    self.num_local_heads,
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                    self.kv_lora_rank,
+                    current_platform.fp8_dtype() if self._fp8_query else output.dtype,
+                    output.dtype,
+                    output.device,
+                )
             output.zero_()
             return
         attn_metadata = cast("MLACommonMetadata", attn_metadata)
@@ -594,9 +611,15 @@ class DeepseekV32Attention(MLAAttention):
                 mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
             assert self.dcp_manager.query_gather is not None
             mqa_q_arg = self.dcp_manager.query_gather(mqa_q_arg)
-        attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
-            mqa_q_arg, kv_cache, attn_metadata, self
-        )
+        if self.use_shardq and getattr(attn_metadata, "shardq", None) is not None:
+            attn_out = self.impl.forward_mqa_shardq(  # type: ignore[attr-defined]
+                mqa_q_arg, kv_cache, attn_metadata, self
+            )
+            lse = None
+        else:
+            attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                mqa_q_arg, kv_cache, attn_metadata, self
+            )
 
         if self.impl.dcp_world_size > 1:
             assert lse is not None and self.dcp_manager is not None
