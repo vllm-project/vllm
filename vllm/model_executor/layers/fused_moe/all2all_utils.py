@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -31,6 +31,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one
 from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.passthrough import (
+    PassThroughPrepareAndFinalize,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import (
     has_deep_ep,
@@ -40,29 +43,48 @@ from vllm.utils.import_utils import (
     has_nixl_ep,
 )
 
+if TYPE_CHECKING:
+    from flashinfer.fused_moe import QuantFormat
+
 
 @dataclass(frozen=True)
 class FlashInferOneSidedDispatchLayout:
-    x_bytes_per_token: int
-    x_sf_bytes_per_token: int
+    dispatch_format: "QuantFormat"
+    extra_payload_bytes_per_token: int = 0
 
 
 def flashinfer_one_sided_dispatch_layout(
-    hidden_dim: int, quant_config: FusedMoEQuantConfig
+    hidden_dim: int,
+    quant_config: FusedMoEQuantConfig,
+    input_dtype: torch.dtype | None = None,
 ) -> FlashInferOneSidedDispatchLayout:
     """Return the one-sided activation payload layout."""
+    if input_dtype is not None and input_dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(
+            "flashinfer_nvlink_one_sided unpacked inputs must be float16 "
+            f"or bfloat16, got {input_dtype}"
+        )
+
+    from flashinfer.fused_moe import QuantFormat
+
+    if input_dtype is not None:
+        return FlashInferOneSidedDispatchLayout(
+            QuantFormat.FP16 if input_dtype == torch.float16 else QuantFormat.BF16
+        )
     if quant_config.quant_dtype is None:
-        return FlashInferOneSidedDispatchLayout(hidden_dim * 2, 0)
+        return FlashInferOneSidedDispatchLayout(QuantFormat.BF16)
     if quant_config.quant_dtype == "nvfp4":
-        scale_elems = hidden_dim // 16
-        return FlashInferOneSidedDispatchLayout(hidden_dim // 2, scale_elems)
+        return FlashInferOneSidedDispatchLayout(QuantFormat.NVFP4)
     if quant_config.quant_dtype == "mxfp8":
         align = quant_config.mx_alignment
         padded_k = (
             ((hidden_dim + align - 1) // align) * align if align > 0 else hidden_dim
         )
-        scale_elems = padded_k // 32
-        return FlashInferOneSidedDispatchLayout(hidden_dim, scale_elems)
+        # FI accounts for the logical row's scales; include vLLM's padding.
+        extra_scale_bytes = padded_k // 32 - (hidden_dim + 31) // 32
+        return FlashInferOneSidedDispatchLayout(
+            QuantFormat.MXFP8, max(0, extra_scale_bytes)
+        )
     if (
         quant_config.use_fp8_w8a8
         and quant_config.quant_dtype == current_platform.fp8_dtype()
@@ -73,9 +95,7 @@ def flashinfer_one_sided_dispatch_layout(
                 "flashinfer_nvlink_one_sided DeepSeek Blockwise FP8 dispatch "
                 f"requires hidden_dim divisible by 128; got {hidden_dim}"
             )
-        scale_elems = hidden_dim // 128
-        scale_bytes = scale_elems * torch.float32.itemsize
-        return FlashInferOneSidedDispatchLayout(hidden_dim, scale_bytes)
+        return FlashInferOneSidedDispatchLayout(QuantFormat.DeepSeekFp8)
     raise NotImplementedError(
         "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
         "DeepSeek Blockwise FP8 (E4M3 with FP32 1x128 scales), and bf16 "
@@ -174,7 +194,12 @@ def maybe_make_prepare_finalize(
     allow_new_interface: bool = False,
     use_monolithic: bool = False,
     all2all_manager: Any | None = None,
+    input_dtype: torch.dtype | None = None,
 ) -> FusedMoEPrepareAndFinalize | None:
+    if moe.moe_parallel_config.use_passthrough_all2all:
+        # The experts dispatch and combine themselves, in every EP topology.
+        return PassThroughPrepareAndFinalize()
+
     if not moe.moe_parallel_config.use_all2all_kernels:
         if not allow_new_interface:
             return None
@@ -312,14 +337,24 @@ def maybe_make_prepare_finalize(
     elif moe.use_mori_kernels:
         assert quant_config is not None
 
+        # MXFP4 activations are dispatched as packed FP4 with their e8m0
+        # block scales, which the experts consume without re-quantizing.
+        use_fp4_dispatch = quant_config.use_mxfp4_w4a4
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
-        use_fp8_dispatch = (
+        use_fp8_dispatch = not use_fp4_dispatch and (
             quant_config.is_per_act_token
             or quant_config.is_block_quantized
             or quant_config.is_per_tensor
         )
-        if use_fp8_dispatch:
+        if use_fp4_dispatch:
+            # One e8m0 scale per 32-element block. token_hidden_size stays
+            # the unpacked hidden size: mori sizes its token buffers by the
+            # BF16 input type, which also covers the BF16 combine.
+            quant_dtype = torch.float4_e2m1fn_x2
+            scale_dim = moe.hidden_dim // 32
+            scale_type_size = torch.float8_e8m0fnu.itemsize
+        elif use_fp8_dispatch:
             # For PTPC (per token per channel) or per-tensor quant,
             # scale dim is 1. For 1x128 quant, scale dim is
             # hidden_dim // 128
@@ -329,18 +364,20 @@ def maybe_make_prepare_finalize(
                 if (quant_config.is_per_act_token or quant_config.is_per_tensor)
                 else moe.hidden_dim // 128
             )
+            scale_type_size = torch.float32.itemsize
         else:
             # Unquantized dispatch (e.g. AITER with defer_input_quant):
             # dispatch raw BF16/FP16 data, no scales needed.
             quant_dtype = moe.in_dtype
             scale_dim = 0
+            scale_type_size = 0
         all_to_all_args = dict(
             rank=all2all_manager.rank,
             num_ep_ranks=all2all_manager.world_size,
             quant_dtype=quant_dtype,
             token_hidden_size=moe.hidden_dim,
             scale_dim=scale_dim,
-            scale_type_size=0 if scale_dim == 0 else torch.float32.itemsize,
+            scale_type_size=scale_type_size,
             max_num_tokens_per_dp_rank=moe.max_num_tokens,
             input_dtype=moe.in_dtype,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
@@ -353,6 +390,7 @@ def maybe_make_prepare_finalize(
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
+            use_fp4_dispatch=use_fp4_dispatch,
         )
 
     elif moe.use_fi_nvl_two_sided_kernels:
@@ -367,7 +405,7 @@ def maybe_make_prepare_finalize(
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
         dispatch_layout = flashinfer_one_sided_dispatch_layout(
-            moe.hidden_dim, quant_config
+            moe.hidden_dim, quant_config, input_dtype=input_dtype
         )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
             max_num_tokens=max_num_tokens,
@@ -375,8 +413,8 @@ def maybe_make_prepare_finalize(
             num_experts=moe.num_experts,
             hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
-            x_bytes_per_token=dispatch_layout.x_bytes_per_token,
-            x_sf_bytes_per_token=dispatch_layout.x_sf_bytes_per_token,
+            dispatch_format=dispatch_layout.dispatch_format,
+            extra_payload_bytes_per_token=dispatch_layout.extra_payload_bytes_per_token,
         )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:

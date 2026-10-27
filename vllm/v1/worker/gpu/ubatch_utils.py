@@ -24,7 +24,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
@@ -150,7 +150,7 @@ def _slice_input_batch(
     dcp_local_seq_lens = None
     if dcp_size > 1:
         assert dcp_local_seq_lens_buf is not None
-        dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+        dcp_local_seq_lens = prepare_dcp_local_seq_lens(
             dcp_local_seq_lens_buf,
             seq_lens,
             num_reqs,
@@ -181,6 +181,11 @@ def _slice_input_batch(
             req_start:req_stop
         ],
         is_prefilling_np=input_batch.is_prefilling_np[req_start:req_stop],
+        prefill_runs_as_decode_np=(
+            None
+            if input_batch.prefill_runs_as_decode_np is None
+            else input_batch.prefill_runs_as_decode_np[req_start:req_stop]
+        ),
         input_ids=input_batch.input_ids[tok_start:tok_stop],
         positions=input_batch.positions[tok_start:tok_stop],
         is_padding=input_batch.is_padding[tok_start:tok_stop],
@@ -189,6 +194,7 @@ def _slice_input_batch(
             if input_batch.prompt_lens is None
             else input_batch.prompt_lens[req_start:req_stop]
         ),
+        max_seq_len_np=None,
         fast_prefill=None,
     )
 
@@ -456,6 +462,7 @@ class UBatchRunner:
             compute_stream=compute_stream,
             forward_contexts=ubatch_state.forward_contexts,
             ready_barrier=self.ready_barrier,
+            token_offsets=[s.token_slice.start for s in ubatch_slices],
         )
 
         outputs: dict[int, Any] = {}
@@ -514,7 +521,7 @@ class UBatchRunner:
                 stack.close()
 
             if errors:
-                failed = min(errors)
+                failed = next(iter(errors))
                 raise RuntimeError(
                     f"Microbatch {failed} of {self.num_ubatches} failed"
                 ) from errors[failed]

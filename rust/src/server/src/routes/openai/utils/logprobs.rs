@@ -164,6 +164,16 @@ pub fn text_len(text: &str) -> u32 {
     u32::try_from(text.chars().count()).unwrap_or(u32::MAX)
 }
 
+/// The text offset just past the last token of a completions `logprobs`
+/// payload, where the next token's offset starts.
+pub fn text_end_offset(logprobs: &LogProbs) -> Option<u32> {
+    logprobs
+        .text_offset
+        .last()
+        .zip(logprobs.tokens.last())
+        .map(|(&offset, token)| offset.saturating_add(text_len(token)))
+}
+
 /// Concatenate two OpenAI-style completion logprobs payloads in token order.
 pub fn append_openai_logprobs(mut prefix: LogProbs, suffix: LogProbs) -> LogProbs {
     prefix.tokens.extend(suffix.tokens);
@@ -193,12 +203,7 @@ pub fn collected_logprobs_to_openai(
         })?;
         let prompt_logprobs =
             decoded_prompt_logprobs_to_openai(prompt_logprobs, 0, return_tokens_as_token_ids)?;
-        let completion_start = prompt_logprobs
-            .text_offset
-            .last()
-            .zip(prompt_logprobs.tokens.last())
-            .map(|(&offset, token)| offset.saturating_add(text_len(token)))
-            .unwrap_or(0);
+        let completion_start = text_end_offset(&prompt_logprobs).unwrap_or(0);
         return match collected.logprobs.as_ref() {
             Some(completion_logprobs) => Ok(append_openai_logprobs(
                 prompt_logprobs,
@@ -284,7 +289,9 @@ fn chat_top_logprob_entries(
         usize::try_from(top_logprobs).unwrap_or(0)
     };
 
-    position.entries.iter().take(limit)
+    // The engine row is the sampled token followed by the top-k or requested
+    // tokens, so the sampled token may repeat. Keep each token's first entry.
+    position.entries.iter().unique_by(|entry| entry.token_id).take(limit)
 }
 
 fn token_bytes(token: &str) -> Vec<u8> {
@@ -368,6 +375,26 @@ mod tests {
         assert_eq!(chat_top_logprobs_len(0), 0);
         assert_eq!(chat_top_logprobs_len(1), 1);
         assert_eq!(chat_top_logprobs_len(-1), 3);
+    }
+
+    #[test]
+    fn chat_logprobs_dedupes_repeated_tokens_before_top_logprobs_cut() {
+        // Sampled `A` is also the top-1 token: the engine row is `[A, A, B, C]`.
+        let mut logprobs = sample_logprobs();
+        let sampled = logprobs.positions[0].entries[0].clone();
+        logprobs.positions[0].entries.insert(0, sampled);
+
+        let top_tokens = |top_logprobs| {
+            let chat_logprobs =
+                decoded_logprobs_to_openai_chat(&logprobs, top_logprobs, false).unwrap();
+            chat_logprobs.content.unwrap()[0]
+                .top_logprobs
+                .iter()
+                .map(|entry| entry.token.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(top_tokens(2), ["A", "B"]);
+        assert_eq!(top_tokens(-1), ["A", "B", "C"]);
     }
 
     #[test]

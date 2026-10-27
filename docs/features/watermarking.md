@@ -18,8 +18,16 @@ vllm serve MODEL \
 ```
 
 Watermarking is disabled when `--watermark-config` is omitted. Gumbel-max (see
-`gumbel`) is the default algorithm within an enabled `WatermarkConfig`. When
-watermarking is configured, it is enabled for requests by default.
+`gumbel`) is the default algorithm within an enabled `WatermarkConfig`.
+
+The request-level `watermarking` option has two effective states:
+
+- Omitted (`None` in Python) or `true` requests watermarking.
+- `false` explicitly opts out.
+
+When a request asks for watermarking but the engine or generation mode cannot
+apply it, vLLM emits a server-side warning once and runs the request without a
+watermark.
 
 Requests can opt out without changing the engine-level algorithm or key:
 
@@ -30,14 +38,12 @@ sampling_params = SamplingParams(watermarking=False)
 ```
 
 The Python OpenAI-compatible APIs and the Rust chat/completions APIs accept the
-same `watermarking: false` request field. The Rust token API accepts it in
-`sampling_params`, and the Rust gRPC `GenerateRequest` accepts
-the optional `watermarking` field. Omitting the field keeps watermarking enabled
-when the engine has a watermark configuration.
+same optional `watermarking` request field. The Rust token API accepts it in
+`sampling_params`, and the Rust gRPC `GenerateRequest` accepts it directly.
+Omitting the field requests watermarking by default.
 
-Deployments that require watermarking must restrict this field to trusted
-callers, or strip and validate it at the ingress boundary, so untrusted clients
-cannot opt out.
+Deployments that require watermarking must restrict explicit opt-out to trusted
+callers, or strip and validate the field at the ingress boundary.
 
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to
@@ -49,6 +55,34 @@ speculative decoding is enabled. It permits speculative decoding with a
 watermarking algorithm that does not support it natively, at the cost of
 weaker detectability. See
 [Speculative decoding](#speculative-decoding).
+
+## Monitoring
+
+When `watermark_config` is set, the Prometheus counter
+`vllm:watermark_requests_total` counts finished requests by `status`:
+
+- `watermarked`: the request was sampled with the watermark switched on.
+- `skipped`: the request asked for the watermark (omitted or `true`) but could
+  not use it, such as `temperature=0` and trace replay requests. A beam search
+  request that asks for the watermark runs without it and logs a warning. Its
+  beam steps count as `not_watermarked`, not `skipped`.
+- `not_watermarked`: all other finished requests. This includes explicit
+  opt-outs, pooling requests, and the internal requests of beam search (one
+  per beam step), generative scoring and language detection.
+
+Each finished request has exactly one status, so the sum over `status` equals
+`vllm:request_success_total` on the same instance. Requests that the client
+aborts are in neither counter. The counter does not exist without
+`watermark_config`. With `n > 1`, each sequence counts once. In a
+disaggregated prefill/decode deployment, both instances count a request: sum
+over decode instances only. For streaming input, the first input chunk sets
+the status.
+
+The status is per request, not per token. A `watermarked` request can contain
+tokens without the watermark: accepted draft tokens with
+`allow_target_only_watermarking`, tokens whose context repeats
+(`deduplicate_contexts`), the first `context_width` generated tokens with
+`deduplicate_contexts: "all"`, and tokens that a grammar forces.
 
 ## Architecture
 
@@ -63,11 +97,38 @@ the reference algorithms. `WatermarkDetector` consumes token IDs, so callers
 remain responsible for using the tokenizer and watermark profile that match
 generation.
 
+## Interactions with generation features
+
+- Greedy decoding (`temperature=0`) cannot apply a Gumbel watermark. The first
+  such request emits a server-side warning; it and subsequent greedy requests
+  use ordinary greedy sampling without a watermark. This includes
+  transcription, translation, and realtime transcription, which default to
+  greedy decoding. Transcription and translation can use a nonzero temperature
+  to apply the configured watermark.
+- Beam search cannot apply a watermark. The first watermarked beam request emits
+  a server-side warning and runs without watermarking.
+- Trace replay replaces the sampled token and therefore cannot apply a
+  watermark. The first watermarked trace replay request emits a server-side
+  warning and runs without watermarking.
+- Parallel sampling (`n > 1`) is supported, but plain Gumbel candidates can be
+  identical while their contexts remain identical.
+- Structured outputs and tool grammars are applied before watermark sampling.
+  Restrictive constraints can reduce the statistical evidence available to a
+  detector.
+- Automatic language detection and generative scoring use unwatermarked
+  auxiliary generations. Language-detection tokens are not part of the returned
+  transcription, and generative scoring returns scores rather than generated
+  text.
+- Speculative decoding has additional requirements and partial-watermarking
+  modes described in [Speculative decoding](#speculative-decoding).
+
 ## Speculative decoding
 
 Watermarking requires speculative decoding to use probabilistic draft sampling,
-standard rejection sampling, and an autoregressive model-based method (`dspark`,
-`eagle`, `eagle3`, or `mtp`). Parallel drafting is supported only by `dspark`.
+standard rejection sampling, and a model-based method (`dflash`, `dspark`,
+`eagle`, `eagle3`, or `mtp`). Parallel drafting is supported only by `dflash`
+and `dspark`. DFlash drafters with a candidate head (`DFlash2DraftModel`,
+`LiLiCorrDraftModel`) are not supported.
 
 A watermarking algorithm without native speculative-decoding support is
 rejected before model loading. Set
@@ -77,30 +138,17 @@ watermarked. The watermark signal is diluted in proportion to the share of
 output tokens supplied by accepted drafts; rejected drafts do not dilute it
 because their recovery tokens are watermarked.
 
-Speculative-decoding token paths do not currently support generation-side
-context deduplication. The configured `deduplicate_contexts` policy is not
-applied to accepted drafts, rejection-recovery tokens, or bonus tokens.
-
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
 
-## Algorithms
-
-### Gumbel-max
-
-Gumbel-max derives a deterministic pseudorandom value from the key, prior token
-context, and every candidate token, then uses the resulting Gumbel noise for
-categorical sampling. See
-[Aaronson's original presentation](https://simons.berkeley.edu/sites/default/files/2024-10/LLM24-2%20Slides%20-%20Scott%20Aaronson.pdf).
-
-Gumbel-max requires stochastic sampling. Greedy requests (`temperature=0`)
-bypass watermarking and emit a warning once per worker.
+## Context deduplication
 
 When a token context is repeated, generation can use ordinary sampling for that
 occurrence. Reusing the repeated context leads to a bias over the sequence, as
 certain token choices would be correlated. Ordinary sampling at these positions
 allows for single-sequence non-distortion (see section G.3 of the
 [SynthID-Text supplementary materials](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf)).
+This also applies to drafter watermarking during speculative decoding.
 The detector independently deduplicates contexts so repeated keyed random
 vectors are not treated as independent evidence, meaning that context
 deduplication at generation time does not reduce the watermarking signal, unless
@@ -142,6 +190,18 @@ vllm serve MODEL \
   --watermark-config \
   '{"algorithm":"gumbel","key":42,"deduplicate_contexts":"all"}'
 ```
+
+## Algorithms
+
+### Gumbel-max
+
+Gumbel-max derives a deterministic pseudorandom value from the key, prior token
+context, and every candidate token, then uses the resulting Gumbel noise for
+categorical sampling. See
+[Aaronson's original presentation](https://simons.berkeley.edu/sites/default/files/2024-10/LLM24-2%20Slides%20-%20Scott%20Aaronson.pdf).
+
+Gumbel-max requires stochastic sampling. Greedy requests (`temperature=0`)
+bypass watermarking and emit a warning once per worker.
 
 ### Dual-key Gumbel-max
 
@@ -246,7 +306,7 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 - Watermarking is currently available only with Model Runner V2.
 - Not all watermarking algorithms have native speculative-decoding support.
-- Beam search expands candidates from model log probabilities and does not apply
-  Gumbel-max watermarking.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
+- Global custom logits processors are unavailable because Model Runner V2 does
+  not support them.

@@ -14,15 +14,14 @@ from vllm.utils.math_utils import cdiv
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
     from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.pcp_manager import PCPBatchMetadata
+    from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
+        AdmittedDraftCounts,
+    )
 
 
 class InputBuffers:
-    def __init__(
-        self,
-        max_num_reqs: int,
-        max_num_tokens: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_reqs: int, max_num_tokens: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.device = device
@@ -86,6 +85,8 @@ class InputBatch:
     is_prefilling_np: np.ndarray
     # == np.any(is_prefilling_np)
     has_prefill: bool
+    # No prefills, or only prefill rows that run as decodes.
+    decode_graph_eligible: bool
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
@@ -106,6 +107,9 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
+    # [num_reqs] only populated for non-dummy pipeline-parallel batches.
+    max_seq_len_np: np.ndarray | None = None
+
     # Longest query the batch may contain. Set when a cudagraph descriptor promises
     # a query length this batch's own split does not reach, so attention metadata
     # stays valid for every replay the graph serves.
@@ -115,8 +119,17 @@ class InputBatch:
     # (cudagraph capture) batches, which run the KV-sharing layers in full.
     fast_prefill: "FastPrefillBatchMetadata | None" = None
 
-    # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
-    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+    # Set only on a PCP rank-local batch.
+    pcp: "PCPBatchMetadata | None" = None
+
+    # [num_reqs] prefilling rows that schedule one new prompt token (excluding
+    # drafts) over existing context and so compute exactly like decodes.
+    # None if there are no prefills.
+    prefill_runs_as_decode_np: np.ndarray | None = None
+
+    # [num_reqs] admitted draft counts in flight to the host. Set only under
+    # adaptive verification with batch-sharded sampling, when the budget binds.
+    num_admitted_draft_tokens: "AdmittedDraftCounts | None" = None
 
     @classmethod
     def make_dummy(
@@ -201,6 +214,8 @@ class InputBatch:
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
             has_prefill=False,
+            max_seq_len_np=None,
+            decode_graph_eligible=True,
             input_ids=input_ids,
             positions=positions,
             is_padding=is_padding,
@@ -221,7 +236,8 @@ def set_dummy_context(
     max_model_len: int,
     input_block_tables: Sequence[torch.Tensor] | None = None,
 ) -> None:
-    """Give each dummy request context_len of context, used when profiling step cost."""
+    """Give each dummy request context_len of context, for profiling step cost
+    and for DCP FULL cudagraph capture."""
     if input_block_tables is None:
         input_block_tables = block_tables.input_block_tables
     if not input_block_tables:
@@ -245,17 +261,18 @@ def set_dummy_context(
     input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
 
     seq_len = context_len + query_len
-    for block_table, block_size, bpk in zip(
-        input_block_tables,
-        block_tables.kernel_block_sizes,
-        block_tables.blocks_per_kv_block,
-    ):
+    for block_table, block_size in zip(input_block_tables, block_tables.block_sizes):
         num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
         # Spans are disjoint until the pool runs out, then they wrap and share
         # blocks: profiling only needs the reads to be realistic, not distinct.
-        block_ids = torch.arange(
-            num_reqs * num_blocks, dtype=block_table.dtype, device=block_table.device
-        ) % (num_kv_blocks * bpk)
+        block_ids = (
+            torch.arange(
+                num_reqs * num_blocks,
+                dtype=block_table.dtype,
+                device=block_table.device,
+            )
+            % num_kv_blocks
+        )
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 
 
@@ -474,11 +491,7 @@ def combine_sampled_and_draft_tokens(
     num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
 
-    logits_indices = torch.empty(
-        num_logits,
-        dtype=torch.int64,
-        device=input_ids.device,
-    )
+    logits_indices = torch.empty(num_logits, dtype=torch.int64, device=input_ids.device)
     _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,

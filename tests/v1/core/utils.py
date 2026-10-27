@@ -7,8 +7,10 @@ import vllm.envs as envs
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
+    DiffusionConfig,
     ECTransferConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
@@ -17,6 +19,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.model import RunnerOption
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -25,6 +28,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
+from vllm.v1.core import kv_cache_planning
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -34,6 +38,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVQuantMode,
+    MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -57,7 +65,9 @@ def create_scheduler(
     enable_chunked_prefill: bool = True,
     enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
+    long_prefill_token_threshold_adaptive: bool = False,
     disable_chunked_mm_input: bool = False,
+    mm_encoder_only: bool = False,
     use_kv_connector: None | bool | str | MockKVConfig = None,
     kv_role: str = "kv_both",
     num_blocks: int = 10000,
@@ -75,8 +85,14 @@ def create_scheduler(
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
+    runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
+    prefill_schedule_interval: int = 1,
     scheduling_policy: SchedulerPolicy = "fcfs",
+    diffusion_canvas_length: int | None = None,
+    scheduler_cls: type[Scheduler] | None = None,
+    lora_config: LoRAConfig | None = None,
+    speculative_config: SpeculativeConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -87,6 +103,9 @@ def create_scheduler(
       enable_prefix_caching: optionally force APC config
                              (True/False) or use default
                              (False)
+      long_prefill_token_threshold: cap on prefill chunk size
+      long_prefill_token_threshold_adaptive: floor the cap at a
+                             fair share of the token budget
 
     Returns:
       {class}`Scheduler` instance
@@ -101,7 +120,10 @@ def create_scheduler(
         # The scheduler reads model_config.max_model_len, not the
         # SchedulerConfig one, so both must agree.
         max_model_len=max_model_len,
+        runner=runner,
     )
+    if mm_encoder_only:
+        model_config.multimodal_config.mm_encoder_only = True
     if use_ec_connector and ec_role == "ec_producer":
         model_config.multimodal_config = MultiModalConfig()
     if max_model_len is None:
@@ -112,10 +134,12 @@ def create_scheduler(
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_model_len,
         long_prefill_token_threshold=long_prefill_token_threshold,
+        long_prefill_token_threshold_adaptive=(long_prefill_token_threshold_adaptive),
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        prefill_schedule_interval=prefill_schedule_interval,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
@@ -152,8 +176,8 @@ def create_scheduler(
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
 
-    speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
+        assert speculative_config is None
         spec_kwargs: dict = dict(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )
@@ -178,6 +202,12 @@ def create_scheduler(
         else None
     )
 
+    diffusion_config: DiffusionConfig | None = None
+    if diffusion_canvas_length is not None:
+        # A diffusion checkpoint declares its canvas in the HF config.
+        model_config.hf_config.canvas_length = diffusion_canvas_length
+        diffusion_config = DiffusionConfig(canvas_length=diffusion_canvas_length)
+
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
@@ -188,7 +218,9 @@ def create_scheduler(
         ),
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
+        diffusion_config=diffusion_config,
         ec_transfer_config=ec_transfer_config,
+        lora_config=lora_config,
         observability_config=ObservabilityConfig(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,
         ),
@@ -207,7 +239,8 @@ def create_scheduler(
     )
     cache_config.num_gpu_blocks = num_blocks
     register_all_kvcache_specs(vllm_config)
-    scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
+    if scheduler_cls is None:
+        scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
     scheduler = scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
@@ -216,7 +249,7 @@ def create_scheduler(
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
     if use_v2_model_runner is None:
-        use_v2_model_runner = bool(envs.VLLM_USE_V2_MODEL_RUNNER)
+        use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER is not False
     scheduler.use_v2_model_runner = use_v2_model_runner
     return scheduler
 
@@ -311,3 +344,86 @@ def create_requests(
         )
         requests.append(request)
     return requests
+
+
+def new_kv_cache_spec(
+    block_size=16,
+    num_kv_heads=2,
+    head_size=64,
+    dtype=torch.float32,
+    page_size_padded=None,
+    sliding_window=None,
+    attention_chunk_size=None,
+    kv_quant_mode=KVQuantMode.NONE,
+):
+    return FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        page_size_padded=page_size_padded,
+        sliding_window=sliding_window,
+        attention_chunk_size=attention_chunk_size,
+        kv_quant_mode=kv_quant_mode,
+    )
+
+
+def new_sliding_window_spec(
+    block_size=16,
+    num_kv_heads=2,
+    head_size=64,
+    dtype=torch.float32,
+    page_size_padded=None,
+    sliding_window=1,
+):
+    return SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        page_size_padded=page_size_padded,
+        sliding_window=sliding_window,
+    )
+
+
+def new_mamba_spec(
+    block_size=16,
+    shapes=((2, 512), (3, 32, 32)),
+    dtypes=(torch.float32, torch.float32),
+    num_speculative_blocks=2,
+    mamba_cache_mode="none",
+    page_size_padded=None,
+):
+    return MambaSpec(
+        block_size=block_size,
+        shapes=shapes,
+        dtypes=dtypes,
+        page_size_padded=page_size_padded,
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
+
+
+def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
+    # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
+    return MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        max_tp_shards=1,
+        head_size=576,
+        dtype=torch.float32,
+        cache_dtype_str=cache_dtype_str,
+    )
+
+
+def get_kv_cache_configs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+) -> list[KVCacheConfig]:
+    return kv_cache_planning.get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
+        available_memory,
+        kv_cache_planning.get_global_kv_cache_groups(vllm_config, kv_cache_specs),
+    )

@@ -70,6 +70,10 @@ def gemma3_chat_template(content: str) -> str:
     return f"<bos><start_of_turn>user\n{content}<end_of_turn>\n<start_of_turn>model\n"
 
 
+def deepseek_vl2_chat_template(content: str) -> str:
+    return f"<|User|>: {content}\n\n<|Assistant|>:"
+
+
 def ernie45_vl_chat_template(content: str) -> str:
     return (
         f"<|begin_of_sentence|>User: {content}"
@@ -144,7 +148,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "<|vision_start|><|video_pad|><|vision_end|>"
             "Describe this video in one sentence."
         ),
-        needs_video_metadata=False,
+        needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
     "kimi_vl": VitCudagraphTestConfig(
@@ -172,6 +176,24 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
                 dummy_hf_overrides,
                 model_arch="KimiVLForConditionalGeneration",
             ),
+        },
+        marks=[pytest.mark.core_model],
+    ),
+    "minimax_m3": VitCudagraphTestConfig(
+        model="MiniMaxAI/MiniMax-M3",
+        modalities=["image"],
+        image_prompt=("]~b]user\n]<]image[>[What is in this image?[e~[\n]~b]ai\n"),
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [512],
+        },
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="MiniMaxM3SparseForConditionalGeneration",
+            ),
+            "mm_processor_kwargs": {"max_long_side_pixel": 336},
         },
         marks=[pytest.mark.core_model],
     ),
@@ -236,7 +258,11 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         vllm_runner_kwargs={
             "load_format": "dummy",
-            "attention_backend": "FLASHMLA_SPARSE_DSV41",
+            "attention_backend": (
+                "ROCM_FLASHMLA_SPARSE_DSV41"
+                if current_platform.is_rocm()
+                else "FLASHMLA_SPARSE_DSV41"
+            ),
             "hf_overrides": partial(
                 dummy_hf_overrides,
                 model_arch="DeepseekV41ForCausalLM",
@@ -333,6 +359,15 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             ),
         },
         skip=True,  # TODO: Re-enable this once OOM issues are resolved on CI.
+    ),
+    "deepseek_vl2": VitCudagraphTestConfig(
+        model="deepseek-ai/deepseek-vl2-tiny",
+        modalities=["image"],
+        image_prompt=deepseek_vl2_chat_template("<image>\nWhat is in this image?"),
+        vllm_runner_kwargs={
+            "hf_overrides": {"architectures": ["DeepseekVLV2ForCausalLM"]},
+        },
+        marks=[pytest.mark.core_model],
     ),
     "gemma4": VitCudagraphTestConfig(
         model="google/gemma-4-E2B-it",

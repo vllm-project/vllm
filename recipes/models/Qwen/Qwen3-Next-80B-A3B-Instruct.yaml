@@ -1,0 +1,232 @@
+meta:
+  title: "Qwen3-Next-80B-A3B-Instruct"
+  slug: "qwen3-next-80b-a3b-instruct"
+  provider: "Qwen"
+  description: "Advanced Qwen3-Next MoE model (80B total / 3B active) with hybrid attention, highly sparse experts, and multi-token prediction."
+  date_added: 2025-09-11
+  date_updated: 2026-09-10
+  tasks:
+    - text
+  performance_headline: "Highly sparse MoE with MTP-accelerated decoding, runs on 4x H200/H20/A100/A800"
+  related_recipes: []
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  min_vllm_version: "0.17.0"
+  architecture: moe
+  parameter_count: "80B"
+  active_parameters: "3B"
+  context_length: 262144
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Hermes parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+  spec_decoding:
+    description: "Multi-token prediction speculative decoding for lower latency"
+    args:
+      - "--speculative-config"
+      - '{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
+      - "--no-enable-chunked-prefill"
+  long_context:
+    description: "YaRN RoPE scaling to the model card's validated 1M-token context (factor 4.0 over the native 262,144). Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts."
+    args:
+      - "--hf-overrides"
+      - '{"rope_parameters":{"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}'
+      - "--max-model-len"
+      - "1010000"
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+opt_in_features:
+  - spec_decoding
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 192
+    description: "Full precision BF16 — fits on 4x H200/H20/A100/A800"
+  fp8:
+    model_id: "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
+    precision: fp8
+    vram_minimum_gb: 96
+    description: "Qwen official FP8 checkpoint — recommended on SM90/SM100"
+  nvfp4:
+    model_id: "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 48
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_fp8:
+    model_id: "RedHatAI/Qwen3-Next-80B-A3B-Instruct-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHat)"
+    vram_minimum_gb: 96
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_fp8_plain:
+    model_id: "RedHatAI/Qwen3-Next-80B-A3B-Instruct-FP8"
+    precision: fp8
+    label: "FP8 (RedHat)"
+    vram_minimum_gb: 96
+    description: "RedHatAI FP8 quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_fp8_block:
+    model_id: "RedHatAI/Qwen3-Next-80B-A3B-Instruct-FP8-block"
+    precision: fp8
+    label: "FP8 Block (RedHat)"
+    vram_minimum_gb: 96
+    description: "RedHatAI FP8 block quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/Qwen3-Next-80B-A3B-Instruct-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 48
+    description: "RedHatAI NVFP4 quantization"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+
+hardware_overrides:
+  blackwell:
+    extra_args:
+      - "--moe-backend"
+      - "flashinfer_trtllm"
+      - "--attention-backend"
+      - "FLASH_ATTN"
+    extra_env:
+      VLLM_USE_DEEP_GEMM: "0"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Qwen3-Next](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list) is an advanced LLM from the Qwen team featuring:
+  - A hybrid attention mechanism
+  - A highly sparse Mixture-of-Experts (MoE) structure
+  - Training-stability-friendly optimizations
+  - A multi-token prediction mechanism for faster inference
+
+  ## Prerequisites
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Deployment Configurations
+
+  Launch on 4x H200/H20 or 4x A100/A800 GPUs.
+
+  ### Basic Multi-GPU (BF16)
+  ```bash
+  vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct \
+    --tensor-parallel-size 4 \
+    --served-model-name qwen3-next \
+    --enable-prefix-caching
+  ```
+
+  If you hit `torch.AcceleratorError: CUDA error: an illegal memory access was encountered`, add `--compilation_config.cudagraph_mode=PIECEWISE`.
+
+  ### FP8 (SM90/SM100)
+  ```bash
+  vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct-FP8 \
+    --tensor-parallel-size 4 \
+    --enable-prefix-caching
+  ```
+
+  On SM100, accelerate with the FlashInfer TRTLLM MoE kernel:
+  ```bash
+  VLLM_USE_DEEP_GEMM=0 \
+  vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct-FP8 \
+    --tensor-parallel-size 4 \
+    --moe-backend flashinfer_trtllm \
+    --attention-backend FLASH_ATTN
+  ```
+
+  ### MTP (Multi-Token Prediction)
+  ```bash
+  vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct \
+    --tokenizer-mode auto --gpu-memory-utilization 0.8 \
+    --speculative-config '{"method": "qwen3_next_mtp", "num_speculative_tokens": 2}' \
+    --tensor-parallel-size 4 --no-enable-chunked-prefill
+  ```
+
+  ### Tool / Function Calling
+  ```bash
+  vllm serve ... --tool-call-parser hermes --enable-auto-tool-choice
+  ```
+
+  ### AMD (MI300X/MI325X/MI355X)
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.14.1/rocm700
+  ```
+  ```bash
+  SAFETENSORS_FAST_GPU=1 \
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
+  vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct \
+    --tensor-parallel-size 4 \
+    --max-model-len 32768 \
+    --no-enable-prefix-caching \
+    --trust-remote-code
+  ```
+
+  ## Client Usage
+
+  Benchmark:
+  ```bash
+  vllm bench serve \
+    --backend vllm \
+    --model Qwen/Qwen3-Next-80B-A3B-Instruct \
+    --served-model-name qwen3-next \
+    --endpoint /v1/completions \
+    --dataset-name random \
+    --random-input 2048 \
+    --random-output 1024 \
+    --max-concurrency 10 \
+    --num-prompt 100
+  ```
+
+  ## Troubleshooting
+
+  - **Sub-optimal MoE performance warning**: Tune the MoE Triton kernel with [benchmark_moe](https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/benchmark_moe.py), then set `VLLM_TUNED_CONFIG_FOLDER` to the directory containing the generated config.
+  - **IMA error in DP mode**: add `--compilation_config.cudagraph_mode=PIECEWISE`.
+  - For more parallel topologies, see the [Data Parallel Deployment docs](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment.html).
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct)
+  - [FP8 checkpoint](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct-FP8)
+  - [Qwen3-Next blog](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd)
