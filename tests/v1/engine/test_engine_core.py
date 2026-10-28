@@ -752,12 +752,23 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     """A bare EngineCoreProc holding just the state pause_scheduler touches."""
     core = object.__new__(EngineCoreProc)
     core.model_executor = MagicMock()
+    core.model_executor.is_sleeping = False
     core.scheduler = MagicMock()
     core.scheduler.has_requests.return_value = False
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
     return core
+
+
+def test_sleep_resume_rejection_preserves_request_policy():
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = True
+    core.reject_new_requests = True
+    with pytest.raises(RuntimeError, match="sleeping"):
+        core.resume_scheduler()
+    assert core.reject_new_requests
+    core.scheduler.set_pause_state.assert_not_called()
 
 
 @pytest.mark.parametrize(
