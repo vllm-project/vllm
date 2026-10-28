@@ -15,7 +15,8 @@ use crate::error::Error;
 pub struct DecodedTokenLogprob {
     /// Original vocabulary token ID for this candidate.
     pub token_id: u32,
-    /// Best-effort decoded token string for this candidate.
+    /// Best-effort decoded token string for this candidate; empty when the
+    /// request outputs no text.
     pub token: String,
     /// Log probability of this token candidate.
     pub logprob: f32,
@@ -42,7 +43,8 @@ pub struct DecodedLogprobs {
 pub struct DecodedPromptLogprobs {
     /// Original vocabulary token ID for the first prompt token.
     pub first_token_id: u32,
-    /// Best-effort decoded string for the first prompt token.
+    /// Best-effort decoded string for the first prompt token; empty when the
+    /// request outputs no text.
     ///
     /// The first prompt token has no left context to score against, so it is
     /// stored separately instead of appearing in `scored_positions`.
@@ -61,7 +63,7 @@ pub struct DecodedPromptLogprobs {
 /// same `llm` update. `context` carries the sampled tokens across the
 /// request's updates.
 pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
-    tokenizer: &T,
+    tokenizer: Option<&T>,
     logprobs: &Logprobs,
     context: &mut SampledContext,
 ) -> Result<DecodedLogprobs, Error> {
@@ -77,7 +79,7 @@ pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
 /// the remaining scored prompt positions into `scored_positions`, matching
 /// vLLM's prompt-logprobs semantics.
 pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
-    tokenizer: &T,
+    tokenizer: Option<&T>,
     prompt_token_ids: &[u32],
     logprobs: &Logprobs,
 ) -> Result<DecodedPromptLogprobs, Error> {
@@ -124,7 +126,7 @@ impl SampledContext {
 /// Decode consecutive positions, advancing `context` by each position's
 /// sampled token (its first entry).
 fn decode_positions<T: Tokenizer + ?Sized>(
-    tokenizer: &T,
+    tokenizer: Option<&T>,
     positions: &[PositionLogprobs],
     context: &mut SampledContext,
 ) -> Result<Vec<DecodedPositionLogprobs>, Error> {
@@ -143,10 +145,10 @@ fn decode_positions<T: Tokenizer + ?Sized>(
 /// Decode one token position's raw candidate set into decoded token strings
 /// plus logprob metadata.
 ///
-/// This decodes every candidate token ID independently through the active text
-/// backend.
+/// With a tokenizer, every candidate token ID is decoded independently through
+/// the active text backend.
 fn decode_position_logprobs<T: Tokenizer + ?Sized>(
-    tokenizer: &T,
+    tokenizer: Option<&T>,
     position: &PositionLogprobs,
     context: &SampledContext,
 ) -> Result<DecodedPositionLogprobs, Error> {
@@ -156,7 +158,9 @@ fn decode_position_logprobs<T: Tokenizer + ?Sized>(
             .iter()
             .map(|entry| {
                 let mut token = decode_logprob_token(tokenizer, entry.token_id)?;
-                if token.ends_with(char::REPLACEMENT_CHARACTER) {
+                if let Some(tokenizer) = tokenizer
+                    && token.ends_with(char::REPLACEMENT_CHARACTER)
+                {
                     token = repair_split_character(tokenizer, entry.token_id, context)?;
                 }
                 Ok::<_, Error>(DecodedTokenLogprob {
@@ -193,7 +197,7 @@ fn repair_split_character<T: Tokenizer + ?Sized>(
         // as such, so their bytes belong to this candidate's text.
         let mut clean_end = window.len();
         while clean_end > 0
-            && decode_logprob_token(tokenizer, window[clean_end - 1])?
+            && decode_logprob_token(Some(tokenizer), window[clean_end - 1])?
                 .ends_with(char::REPLACEMENT_CHARACTER)
         {
             clean_end -= 1;
@@ -219,16 +223,20 @@ fn repair_split_character<T: Tokenizer + ?Sized>(
 }
 
 /// Decode one logprob token on its own.
+/// Without a tokenizer the request outputs no text, so the token string stays
+/// empty.
 ///
 /// Special tokens keep their text regardless of the request's
 /// `skip_special_tokens`, like the Python frontend
 /// (`convert_ids_list_to_tokens`): they are real candidates, and completions
 /// `text_offset` advances by these strings.
 fn decode_logprob_token<T: Tokenizer + ?Sized>(
-    tokenizer: &T,
+    tokenizer: Option<&T>,
     token_id: u32,
 ) -> Result<String, Error> {
-    Ok(tokenizer.decode(&[token_id], false)?)
+    Ok(tokenizer.map_or(Ok(String::new()), |tokenizer| {
+        tokenizer.decode(&[token_id], false)
+    })?)
 }
 
 #[cfg(test)]
@@ -259,7 +267,7 @@ mod tests {
         };
 
         assert_eq!(
-            decode_logprobs(&tokenizer, &logprobs, &mut SampledContext::default()).unwrap(),
+            decode_logprobs(Some(&tokenizer), &logprobs, &mut SampledContext::default()).unwrap(),
             DecodedLogprobs {
                 positions: vec![DecodedPositionLogprobs {
                     entries: vec![
@@ -295,7 +303,8 @@ mod tests {
         };
 
         assert_eq!(
-            decode_prompt_logprobs(&tokenizer, &[b'p' as u32, b'x' as u32], &logprobs).unwrap(),
+            decode_prompt_logprobs(Some(&tokenizer), &[b'p' as u32, b'x' as u32], &logprobs)
+                .unwrap(),
             DecodedPromptLogprobs {
                 first_token_id: b'p' as u32,
                 first_token: "p".to_string(),
@@ -340,10 +349,11 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let decoded =
-            decode_logprobs(&tokenizer, &logprobs, &mut SampledContext::default()).unwrap();
+            decode_logprobs(Some(&tokenizer), &logprobs, &mut SampledContext::default()).unwrap();
         assert_eq!(tokens(&decoded.positions), [".", "<|im_end|>"]);
 
-        let prompt = decode_prompt_logprobs(&tokenizer, &[300, b'.' as u32], &logprobs).unwrap();
+        let prompt =
+            decode_prompt_logprobs(Some(&tokenizer), &[300, b'.' as u32], &logprobs).unwrap();
         assert_eq!(prompt.first_token, "<|im_start|>");
         assert_eq!(tokens(&prompt.scored_positions), [".", "<|im_end|>"]);
     }
@@ -373,10 +383,14 @@ mod tests {
         let tokenizer = TestTokenizer::new();
         // "你" is E4 BD A0; it arrives over two updates, then "!".
         let mut context = SampledContext::default();
-        let first =
-            decode_logprobs(&tokenizer, &sampled_positions(&[0xE4, 0xBD]), &mut context).unwrap();
+        let first = decode_logprobs(
+            Some(&tokenizer),
+            &sampled_positions(&[0xE4, 0xBD]),
+            &mut context,
+        )
+        .unwrap();
         let second = decode_logprobs(
-            &tokenizer,
+            Some(&tokenizer),
             &sampled_positions(&[0xA0, b'!' as u32]),
             &mut context,
         )
@@ -391,7 +405,8 @@ mod tests {
         let tokenizer = TestTokenizer::new();
         let prompt = [b'a' as u32, 0xE4, 0xBD, 0xA0];
         let decoded =
-            decode_prompt_logprobs(&tokenizer, &prompt, &sampled_positions(&prompt[1..])).unwrap();
+            decode_prompt_logprobs(Some(&tokenizer), &prompt, &sampled_positions(&prompt[1..]))
+                .unwrap();
 
         assert_eq!(sampled_tokens(&decoded.scored_positions), ["", "", "你"]);
     }
