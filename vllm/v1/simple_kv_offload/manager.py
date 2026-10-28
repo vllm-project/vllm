@@ -342,10 +342,15 @@ class SimpleCPUOffloadScheduler:
         """GPU blocks to keep available (free/offloaded) per step in lazy mode."""
         WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
         target = 0
-        for g in kv_cache_config.prefix_cacheable_groups:
+        for g in kv_cache_config.kv_cache_groups:
             spec = g.kv_cache_spec
             block_size = resolve_dcp_kv_block_size(spec, cp_world_size)
-            if isinstance(spec, MambaSpec):
+            if not spec.prefix_cacheable:
+                # Bounded-replay SWA (DSV4.1) is never offloaded, but its blocks for
+                # each scheduled token come from the same free queue.
+                if isinstance(spec, SlidingWindowSpec):
+                    target += cdiv(max_num_batched_tokens, block_size)
+            elif isinstance(spec, MambaSpec):
                 target += 2
             elif isinstance(spec, SlidingWindowSpec):
                 target += cdiv(spec.sliding_window, block_size) + 1
