@@ -149,16 +149,6 @@ class InputProcessor:
         for `PoolingParams`). The caller applies it to its private copy of the
         params so that a caller-owned params object is never mutated.
         """
-        # EngineCore decodes params with msgspec, which is stricter than the
-        # constructor (e.g. a bool or float in an int field). Do the same round
-        # trip here so such a request fails instead of crashing the EngineCore
-        # input thread. A fresh codec per call: this runs on a thread pool and
-        # the codecs are not thread-safe.
-        try:
-            MsgpackDecoder(type(params)).decode(MsgpackEncoder().encode(params))
-        except msgspec.ValidationError as e:
-            raise VLLMValidationError(f"Invalid {type(params).__name__}: {e}") from e
-
         watermarking: bool | None = None
         if isinstance(params, SamplingParams):
             supported_generation_tasks = [
@@ -261,6 +251,26 @@ class InputProcessor:
                 f"params must be either SamplingParams or PoolingParams, "
                 f"but got {type(params).__name__}"
             )
+
+        # EngineCore decodes params with msgspec, which is stricter than the
+        # constructor (e.g. a bool or float in an int field). Do the same round
+        # trip here, after verify() has normalized the params, so such a request
+        # fails instead of crashing the EngineCore input thread. A fresh codec
+        # per call: this runs on a thread pool and the codecs are not thread-safe.
+        try:
+            encoded = MsgpackEncoder().encode(params)
+        except TypeError:
+            # Not serializable (e.g. a custom object in extra_args): an
+            # in-process engine never encodes, and a multiprocess client
+            # fails at send as before, so there is nothing to check.
+            pass
+        else:
+            try:
+                MsgpackDecoder(type(params)).decode(encoded)
+            except msgspec.ValidationError as e:
+                raise VLLMValidationError(
+                    f"Invalid {type(params).__name__}: {e}"
+                ) from e
 
         return watermarking
 
