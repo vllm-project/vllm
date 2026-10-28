@@ -27,11 +27,11 @@ class SpecDecodingStats:
     num_spec_tokens: int
     num_drafts: int = 0
     num_draft_tokens: int = 0
-    num_verified_draft_tokens: int = 0
+    num_verified_tokens: int = 0
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
     num_draft_tokens_per_pos: list[int] = field(default_factory=list)
-    num_verified_draft_tokens_per_pos: list[int] = field(default_factory=list)
+    num_verified_tokens_per_pos: list[int] = field(default_factory=list)
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
@@ -39,22 +39,22 @@ class SpecDecodingStats:
             num_spec_tokens=num_spec_tokens,
             num_accepted_tokens_per_pos=[0] * num_spec_tokens,
             num_draft_tokens_per_pos=[0] * num_spec_tokens,
-            num_verified_draft_tokens_per_pos=[0] * num_spec_tokens,
+            num_verified_tokens_per_pos=[0] * num_spec_tokens,
         )
 
     def observe_draft_stats_per_req(
         self,
         num_draft_tokens: int,
         num_accepted_tokens: int,
-        num_verified_draft_tokens: int | None = None,
+        num_verified_tokens: int | None = None,
     ):
         self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
-        if num_verified_draft_tokens is not None:
-            self.num_verified_draft_tokens += num_verified_draft_tokens
-            for i in range(num_verified_draft_tokens):
-                self.num_verified_draft_tokens_per_pos[i] += 1
+        if num_verified_tokens is not None:
+            self.num_verified_tokens += num_verified_tokens
+            for i in range(num_verified_tokens):
+                self.num_verified_tokens_per_pos[i] += 1
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
@@ -80,7 +80,7 @@ class SpecDecodingLogging:
     def reset(self):
         self.num_drafts: list[int] = []
         self.num_draft_tokens: list[int] = []
-        self.num_verified_draft_tokens: list[int] = []
+        self.num_verified_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
         self.last_log_time = time.monotonic()
@@ -88,9 +88,7 @@ class SpecDecodingLogging:
     def observe(self, spec_decoding_stats: SpecDecodingStats):
         self.num_drafts.append(spec_decoding_stats.num_drafts)
         self.num_draft_tokens.append(spec_decoding_stats.num_draft_tokens)
-        self.num_verified_draft_tokens.append(
-            spec_decoding_stats.num_verified_draft_tokens
-        )
+        self.num_verified_tokens.append(spec_decoding_stats.num_verified_tokens)
         self.num_accepted_tokens.append(spec_decoding_stats.num_accepted_tokens)
         self.accepted_tokens_per_pos_lists.append(
             spec_decoding_stats.num_accepted_tokens_per_pos
@@ -101,7 +99,7 @@ class SpecDecodingLogging:
             return
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
-        num_verified_draft_tokens = np.sum(self.num_verified_draft_tokens)
+        num_verified_tokens = np.sum(self.num_verified_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
         if num_drafts == 0:
             self.reset()
@@ -153,7 +151,7 @@ class SpecDecodingLogging:
             draft_throughput,
             num_accepted_tokens,
             num_draft_tokens,
-            num_verified_draft_tokens,
+            num_verified_tokens,
             rates_str,
             draft_acceptance_rate,
         )
@@ -280,8 +278,8 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_draft_tokens = counters[1]
         self.counter_spec_decode_num_accepted_tokens = counters[2]
 
-        self.counter_spec_decode_num_verified_draft_tokens = None
-        self.counter_spec_decode_num_verified_draft_tokens_per_pos: dict[
+        self.counter_spec_decode_num_verified_tokens = None
+        self.counter_spec_decode_num_verified_tokens_per_pos: dict[
             int, list[prometheus_client.Counter]
         ] = {}
         if not is_diffusion:
@@ -291,15 +289,15 @@ class SpecDecodingProm:
                 documentation="Draft tokens actually verified by the target.",
                 labelnames=labelnames,
             )
-            self.counter_spec_decode_num_verified_draft_tokens = (
-                create_metric_per_engine(metric, per_engine_labelvalues)
+            self.counter_spec_decode_num_verified_tokens = create_metric_per_engine(
+                metric, per_engine_labelvalues
             )
             per_pos_metric = self._counter_cls(
                 name="vllm:spec_decode_num_verified_tokens_per_pos",
                 documentation="Draft tokens actually verified per draft position.",
                 labelnames=labelnames + ["position"],
             )
-            self.counter_spec_decode_num_verified_draft_tokens_per_pos = {
+            self.counter_spec_decode_num_verified_tokens_per_pos = {
                 idx: [
                     per_pos_metric.labels(*lv, str(pos))
                     for pos in range(speculative_config.num_speculative_tokens)
@@ -338,16 +336,14 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_accepted_tokens[engine_idx].inc(
             spec_decoding_stats.num_accepted_tokens
         )
-        if self.counter_spec_decode_num_verified_draft_tokens is not None:
-            self.counter_spec_decode_num_verified_draft_tokens[engine_idx].inc(
-                spec_decoding_stats.num_verified_draft_tokens
+        if self.counter_spec_decode_num_verified_tokens is not None:
+            self.counter_spec_decode_num_verified_tokens[engine_idx].inc(
+                spec_decoding_stats.num_verified_tokens
             )
         for pos, counter in enumerate(
-            self.counter_spec_decode_num_verified_draft_tokens_per_pos.get(
-                engine_idx, []
-            )
+            self.counter_spec_decode_num_verified_tokens_per_pos.get(engine_idx, [])
         ):
-            counter.inc(spec_decoding_stats.num_verified_draft_tokens_per_pos[pos])
+            counter.inc(spec_decoding_stats.num_verified_tokens_per_pos[pos])
         for pos, counter in enumerate(
             self.counter_spec_decode_num_accepted_tokens_per_pos.get(engine_idx, [])
         ):

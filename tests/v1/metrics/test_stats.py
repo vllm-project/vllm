@@ -46,10 +46,10 @@ def test_verified_counter_differs_from_proposals(verified_lengths, expected_per_
         stats.observe_draft_stats_per_req(
             num_draft_tokens=5,
             num_accepted_tokens=min(verified or 0, 2),
-            num_verified_draft_tokens=verified,
+            num_verified_tokens=verified,
         )
-    assert stats.num_verified_draft_tokens_per_pos == expected_per_pos
-    assert sum(expected_per_pos) == stats.num_verified_draft_tokens
+    assert stats.num_verified_tokens_per_pos == expected_per_pos
+    assert sum(expected_per_pos) == stats.num_verified_tokens
     prom.observe(stats)
 
     samples = {
@@ -76,7 +76,7 @@ def test_verified_counter_differs_from_proposals(verified_lengths, expected_per_
 def test_verified_tokens_logging():
     stats = SpecDecodingStats.new(num_spec_tokens=5)
     stats.observe_draft_stats_per_req(
-        num_draft_tokens=5, num_accepted_tokens=2, num_verified_draft_tokens=3
+        num_draft_tokens=5, num_accepted_tokens=2, num_verified_tokens=3
     )
 
     spec_logging = SpecDecodingLogging()
@@ -96,7 +96,7 @@ def test_iteration_stats_repr():
 def test_scheduler_iteration_details_serialization():
     spec_stats = SpecDecodingStats.new(num_spec_tokens=5)
     spec_stats.observe_draft_stats_per_req(
-        num_draft_tokens=5, num_accepted_tokens=2, num_verified_draft_tokens=3
+        num_draft_tokens=5, num_accepted_tokens=2, num_verified_tokens=3
     )
     iteration_details = SchedulerIterationDetails(
         iteration_index=1,

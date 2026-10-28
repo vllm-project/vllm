@@ -306,7 +306,7 @@ class ModelRunnerOutput:
     cudagraph_stats: CUDAGraphStat | None = None
 
     # Verified draft prefix lengths, in req_ids order.
-    num_verified_draft_tokens_per_req: list[int] | None = None
+    num_verified_tokens_per_req: list[int] | None = None
 
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
 

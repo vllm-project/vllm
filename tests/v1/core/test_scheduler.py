@@ -2809,18 +2809,18 @@ def test_adaptive_verification_stats_count_actual_budget(request_state):
             req_ids=[req_id],
             req_id_to_index=req_id_to_index,
             sampled_token_ids=[[1, 2, 3]],
-            num_verified_draft_tokens_per_req=[4],
+            num_verified_tokens_per_req=[4],
         ),
     )
 
     stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
     if request_state == "active":
         assert stats.num_draft_tokens == 5
-        assert stats.num_verified_draft_tokens == 4
+        assert stats.num_verified_tokens == 4
     else:
         assert stats is None
     if stats is not None:
-        assert stats.num_verified_draft_tokens_per_pos == [1, 1, 1, 1, 0]
+        assert stats.num_verified_tokens_per_pos == [1, 1, 1, 1, 0]
         payload = request.spec_decode_metrics.to_dict()
         assert payload["num_draft_tokens"] == stats.num_draft_tokens
         assert payload["num_verified_tokens"] == 4
@@ -2932,16 +2932,14 @@ def test_spec_decode_counts_grammar_invalid_drafts_as_proposed(
             req_ids=[req_id],
             req_id_to_index={req_id: 0},
             sampled_token_ids=[accepted_and_bonus],
-            num_verified_draft_tokens_per_req=(
-                None if av_budget is None else [av_budget]
-            ),
+            num_verified_tokens_per_req=(None if av_budget is None else [av_budget]),
         ),
     )
 
     # Only the scheduled draft tokens were verified.
     stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
     assert stats.num_draft_tokens == 3
-    assert stats.num_verified_draft_tokens == num_verified
+    assert stats.num_verified_tokens == num_verified
     assert stats.num_accepted_tokens == num_accepted
     payload = request.spec_decode_metrics.to_dict()
     assert payload["num_draft_tokens"] == 3

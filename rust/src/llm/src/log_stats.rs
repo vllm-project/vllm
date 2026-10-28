@@ -30,7 +30,7 @@ struct EngineMetrics {
     spec_decode_num_drafts: U64Counter,
     spec_decode_num_draft_tokens: U64Counter,
     spec_decode_num_accepted_tokens: U64Counter,
-    spec_decode_num_verified_draft_tokens: U64Counter,
+    spec_decode_num_verified_tokens: U64Counter,
     estimated_flops_per_gpu: U64Counter,
     estimated_read_bytes_per_gpu: U64Counter,
     estimated_write_bytes_per_gpu: U64Counter,
@@ -59,7 +59,7 @@ struct CounterSnapshot {
     spec_decode_num_drafts: u64,
     spec_decode_num_draft_tokens: u64,
     spec_decode_num_accepted_tokens: u64,
-    spec_decode_num_verified_draft_tokens: u64,
+    spec_decode_num_verified_tokens: u64,
     estimated_flops_per_gpu: u64,
     estimated_read_bytes_per_gpu: u64,
     estimated_write_bytes_per_gpu: u64,
@@ -150,9 +150,9 @@ fn resolve_engine_metrics(model_name: &str, engine_indices: &[u32]) -> Vec<Engin
                     .scheduler
                     .spec_decode_num_accepted_tokens
                     .get_or_create_owned(&el),
-                spec_decode_num_verified_draft_tokens: m
+                spec_decode_num_verified_tokens: m
                     .scheduler
-                    .spec_decode_num_verified_draft_tokens
+                    .spec_decode_num_verified_tokens
                     .get_or_create_owned(&el),
                 estimated_flops_per_gpu: m
                     .scheduler
@@ -369,7 +369,7 @@ fn read_counters(engines: &[EngineMetrics]) -> CounterSnapshot {
         snap.spec_decode_num_drafts += e.spec_decode_num_drafts.get();
         snap.spec_decode_num_draft_tokens += e.spec_decode_num_draft_tokens.get();
         snap.spec_decode_num_accepted_tokens += e.spec_decode_num_accepted_tokens.get();
-        snap.spec_decode_num_verified_draft_tokens += e.spec_decode_num_verified_draft_tokens.get();
+        snap.spec_decode_num_verified_tokens += e.spec_decode_num_verified_tokens.get();
         snap.estimated_flops_per_gpu += e.estimated_flops_per_gpu.get();
         snap.estimated_read_bytes_per_gpu += e.estimated_read_bytes_per_gpu.get();
         snap.estimated_write_bytes_per_gpu += e.estimated_write_bytes_per_gpu.get();
@@ -443,8 +443,8 @@ fn spec_decoding_log_stats(
         .spec_decode_num_accepted_tokens
         .wrapping_sub(prev.spec_decode_num_accepted_tokens);
     let verified_tokens = curr
-        .spec_decode_num_verified_draft_tokens
-        .wrapping_sub(prev.spec_decode_num_verified_draft_tokens);
+        .spec_decode_num_verified_tokens
+        .wrapping_sub(prev.spec_decode_num_verified_tokens);
 
     let (accepted_throughput, draft_throughput) = if elapsed > 0.0 {
         (
@@ -566,14 +566,14 @@ mod tests {
             spec_decode_num_drafts: 10,
             spec_decode_num_draft_tokens: 100,
             spec_decode_num_accepted_tokens: 40,
-            spec_decode_num_verified_draft_tokens: 90,
+            spec_decode_num_verified_tokens: 90,
             ..Default::default()
         };
         let curr = CounterSnapshot {
             spec_decode_num_drafts: 14,
             spec_decode_num_draft_tokens: 120,
             spec_decode_num_accepted_tokens: 52,
-            spec_decode_num_verified_draft_tokens: 105,
+            spec_decode_num_verified_tokens: 105,
             ..Default::default()
         };
 

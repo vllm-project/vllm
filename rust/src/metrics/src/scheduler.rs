@@ -255,8 +255,8 @@ pub struct SchedulerMetrics {
     pub spec_decode_num_draft_tokens: Family<EngineLabels, U64Counter>,
     pub spec_decode_num_accepted_tokens: Family<EngineLabels, U64Counter>,
     pub spec_decode_num_accepted_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
-    pub spec_decode_num_verified_draft_tokens: Family<EngineLabels, U64Counter>,
-    pub spec_decode_num_verified_draft_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
+    pub spec_decode_num_verified_tokens: Family<EngineLabels, U64Counter>,
+    pub spec_decode_num_verified_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
 
     // Per-engine performance / MFU counters.
     pub estimated_flops_per_gpu: Family<EngineLabels, U64Counter>,
@@ -425,18 +425,18 @@ impl SchedulerMetrics {
             spec_decode_num_accepted_tokens_per_pos.clone(),
         );
 
-        let spec_decode_num_verified_draft_tokens = Family::default();
+        let spec_decode_num_verified_tokens = Family::default();
         registry.register(
             "vllm:spec_decode_num_verified_tokens",
             "Draft tokens actually verified by the target.",
-            spec_decode_num_verified_draft_tokens.clone(),
+            spec_decode_num_verified_tokens.clone(),
         );
 
-        let spec_decode_num_verified_draft_tokens_per_pos = Family::default();
+        let spec_decode_num_verified_tokens_per_pos = Family::default();
         registry.register(
             "vllm:spec_decode_num_verified_tokens_per_pos",
             "Draft tokens actually verified per draft position.",
-            spec_decode_num_verified_draft_tokens_per_pos.clone(),
+            spec_decode_num_verified_tokens_per_pos.clone(),
         );
 
         // Per-engine performance / MFU counters.
@@ -665,8 +665,8 @@ impl SchedulerMetrics {
             spec_decode_num_draft_tokens,
             spec_decode_num_accepted_tokens,
             spec_decode_num_accepted_tokens_per_pos,
-            spec_decode_num_verified_draft_tokens,
-            spec_decode_num_verified_draft_tokens_per_pos,
+            spec_decode_num_verified_tokens,
+            spec_decode_num_verified_tokens_per_pos,
             estimated_flops_per_gpu,
             estimated_read_bytes_per_gpu,
             estimated_write_bytes_per_gpu,

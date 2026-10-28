@@ -105,8 +105,4 @@ all-`n == 1` workloads):
 | `num_accepted_draft_tokens` | `vllm:spec_decode_num_accepted_tokens_total` |
 | `num_verified_tokens` | `vllm:spec_decode_num_verified_tokens_total` |
 
-The metric `vllm:spec_decode_num_verified_tokens_total` counts draft tokens the target model ran a forward pass on, for the same requests counted by `num_draft_tokens` (i.e. results for already-finished requests are excluded). It excludes bonus tokens and can be smaller than `num_draft_tokens`, which counts drafter proposals.
-For example, with adaptive verification (`enable_adaptive_verification=True`), a five-token proposal shortened to three verification positions adds five to the draft counter and three to the verified counter. The mean verified draft width can be estimated by dividing the verified draft tokens by the verification steps (`vllm:spec_decode_num_drafts_total`) over the same time window.
-
-The per-position counter `vllm:spec_decode_num_verified_tokens_per_pos_total`
-uses a zero-based `position` label and sums to the scalar verified count.
+Like the per-request field, `vllm:spec_decode_num_verified_tokens_total` excludes bonus tokens. For example, with adaptive verification (`enable_adaptive_verification=True`), a five-token proposal verified at three positions adds five to the draft counter and three to the verified counter.

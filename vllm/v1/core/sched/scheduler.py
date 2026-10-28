@@ -2256,7 +2256,7 @@ class Scheduler(SchedulerInterface):
             model_runner_output.prompt_token_id_logprobs_dict
         )
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        num_verified_tokens = model_runner_output.num_verified_draft_tokens_per_req
+        num_verified_tokens = model_runner_output.num_verified_tokens_per_req
         num_proposed_spec_tokens = scheduler_output.num_proposed_spec_tokens or {}
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
@@ -2367,7 +2367,7 @@ class Scheduler(SchedulerInterface):
                     spec_decoding_stats,
                     num_draft_tokens=num_proposed,
                     num_accepted_tokens=num_accepted,
-                    num_verified_draft_tokens=num_verified,
+                    num_verified_tokens=num_verified,
                 )
                 if request.spec_decode_metrics is not None:
                     request.spec_decode_metrics.observe(
@@ -3276,7 +3276,7 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: SpecDecodingStats | None,
         num_draft_tokens: int,
         num_accepted_tokens: int,
-        num_verified_draft_tokens: int | None = None,
+        num_verified_tokens: int | None = None,
     ) -> SpecDecodingStats | None:
         if not self.log_stats or not num_draft_tokens:
             return None
@@ -3285,7 +3285,7 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats.observe_draft_stats_per_req(
             num_draft_tokens=num_draft_tokens,
             num_accepted_tokens=num_accepted_tokens,
-            num_verified_draft_tokens=num_verified_draft_tokens,
+            num_verified_tokens=num_verified_tokens,
         )
         return spec_decoding_stats
 
