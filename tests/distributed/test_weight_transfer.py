@@ -7,6 +7,7 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
 import builtins
+import dataclasses
 import importlib.util
 import math
 import pickle
@@ -72,7 +73,7 @@ from vllm.distributed.weight_transfer.sparse_nccl_engine import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.nccl import _nccl_has_no_cache
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_open_port, get_open_ports_list
 
 
 def _init_ray_for_weight_transfer() -> None:
@@ -433,14 +434,28 @@ def trainer_broadcast_tensor(
     world_size: int,
     tensor_shape: list[int],
     tensor_dtype: str,
+    stale_master_port: int | None = None,
 ) -> bool:
-    """Trainer task that broadcasts a tensor via NCCL."""
+    """Trainer task that broadcasts a tensor via NCCL.
+
+    With `stale_master_port`, it first connects there and abandons that
+    connection without shutdown, like a trainer that crashed and reconnected.
+    """
     import torch
 
     device = _set_ray_assigned_device()
 
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
+
+    if stale_master_port is not None:
+        stale_pg = StatelessProcessGroup.create(
+            host=master_address,
+            port=stale_master_port,
+            rank=0,
+            world_size=world_size,
+        )
+        PyNcclCommunicator(stale_pg, device=device.index)
 
     # Create process group as rank 0 (trainer)
     pg = StatelessProcessGroup.create(
@@ -469,8 +484,13 @@ def inference_receive_tensor(
     tensor_shape: list[int],
     tensor_dtype: str,
     batch_invariant: bool = False,
+    stale_master_port: int | None = None,
 ) -> dict:
-    """Inference task that receives tensor via NCCLWeightTransferEngine."""
+    """Inference task that receives tensor via NCCLWeightTransferEngine.
+
+    With `stale_master_port`, the engine is first initialized there and then
+    initialized again without shutdown.
+    """
     import contextlib
     from unittest.mock import MagicMock
 
@@ -541,6 +561,12 @@ def inference_receive_tensor(
         world_size=world_size,
         packed=False,
     )
+    stale_group = None
+    if stale_master_port is not None:
+        engine.init_transfer_engine(
+            dataclasses.replace(init_info, master_port=stale_master_port)
+        )
+        stale_group = engine.model_update_group
     engine.init_transfer_engine(init_info)
 
     update_info = NCCLWeightTransferUpdateInfo(
@@ -571,6 +597,7 @@ def inference_receive_tensor(
         "success": success,
         "received_shape": received_shape,
         "received_sum": received_sum,
+        "stale_group_destroyed": stale_group is not None and stale_group.disabled,
     }
 
 
@@ -628,6 +655,44 @@ def test_nccl_weight_transfer_between_processes(batch_invariant):
         f"Received shape: {result['received_shape']}, "
         f"Received sum: {result['received_sum']}"
     )
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2,
+    reason="Need at least 2 GPUs to run NCCL weight transfer test.",
+)
+def test_nccl_weight_transfer_reinit_without_shutdown():
+    """Re-initializing without shutdown, as a trainer that crashed and reconnected
+    does, must destroy the previous communicator and still transfer."""
+    _init_ray_for_weight_transfer()
+
+    master_address = "127.0.0.1"
+    stale_master_port, master_port = get_open_ports_list(2)
+    world_size = 2
+    tensor_shape = [100, 100]
+    tensor_dtype = "float32"
+
+    inference_future = inference_receive_tensor.remote(
+        master_address,
+        master_port,
+        world_size,
+        tensor_shape,
+        tensor_dtype,
+        stale_master_port=stale_master_port,
+    )
+    trainer_future = trainer_broadcast_tensor.remote(
+        master_address,
+        master_port,
+        world_size,
+        tensor_shape,
+        tensor_dtype,
+        stale_master_port=stale_master_port,
+    )
+    trainer_result, result = ray.get([trainer_future, inference_future], timeout=300)
+
+    assert trainer_result
+    assert result["success"], result
+    assert result["stale_group_destroyed"], "previous communicator is still alive"
 
 
 @ray.remote(num_gpus=1)

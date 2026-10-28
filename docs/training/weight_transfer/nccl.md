@@ -38,6 +38,10 @@ Nothing else is required: `init_weight_transfer_engine`, `start_weight_update`,
 `update_weights`, and `finish_weight_update` are all driven remotely by the
 trainer engine.
 
+A new `init_weight_transfer_engine` call, such as one from a trainer that
+restarted without calling `shutdown_weight_transfer_engine`, first destroys the
+worker's previous communicator.
+
 ## Trainer Side
 
 ```python

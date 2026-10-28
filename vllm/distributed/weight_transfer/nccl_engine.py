@@ -155,6 +155,7 @@ class NCCLWeightTransferEngine(
                       rank offset, world size, and the packed wire params
 
         """
+        self.shutdown()
         self.rank_offset = init_info.rank_offset
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
