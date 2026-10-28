@@ -16,7 +16,10 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
-from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.completion.serving import (
+    OpenAIServingCompletion,
+    _prompt_logprob_rows,
+)
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
@@ -1122,6 +1125,65 @@ def test_completion_logprobs_missing_sampled_token_falls_back():
     assert logprobs.tokens == ["tok10"]
     assert logprobs.token_logprobs == [None]
     assert logprobs.top_logprobs == [None]
+
+
+def test_completion_logprobs_missing_step_falls_back():
+    """A step list shorter than the token ids must not raise IndexError.
+
+    A request resumed after `reset_prefix_cache` can carry prompt token ids
+    whose prompt logprobs were dropped (#61490). The echo branch concatenates
+    prompt tokens and sampled tokens, so when the prompt rows are missing the
+    step index runs past the end of `top_logprobs` and the streamed response
+    dies with `IndexError: list index out of range` instead of serving the same
+    placeholder the chat path uses for a missing step.
+    """
+    tokenizer = MagicMock()
+    tokenizer.decode = lambda token_id: f"tok{token_id}"
+    step_logprobs = {
+        10: Logprob(logprob=-0.2, decoded_token="a"),
+    }
+
+    logprobs = _minimal_serving_completion()._create_completion_logprobs(
+        token_ids=[10, 11],
+        top_logprobs=[step_logprobs],  # no step for the second token
+        num_output_top_logprobs=1,
+        tokenizer=tokenizer,
+    )
+
+    assert logprobs.tokens == ["a", "tok11"]
+    assert logprobs.token_logprobs == [-0.2, None]
+    assert logprobs.top_logprobs == [{"a": -0.2}, None]
+
+
+def test_echoed_prompt_rows_align_when_prompt_logprobs_dropped():
+    """Prompt rows stay aligned with prompt tokens when their logprobs are gone.
+
+    Dropping the prompt logprobs must not shift the sampled rows onto prompt
+    positions. Missing prompt rows become explicit `None` placeholders so the
+    sampled tokens keep their own logprobs.
+    """
+    rows = _prompt_logprob_rows(
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=[
+            {1: Logprob(logprob=-0.1, decoded_token="p")},
+        ],
+    )
+
+    assert len(rows) == 3
+    assert rows[0] == {1: Logprob(logprob=-0.1, decoded_token="p")}
+    assert rows[1] is None
+    assert rows[2] is None
+
+
+def test_echoed_prompt_rows_never_shrink_below_the_prompt_length():
+    """More prompt logprobs than tokens must not produce a negative pad."""
+    rows = _prompt_logprob_rows(
+        prompt_token_ids=[1],
+        prompt_logprobs=[{1: Logprob(logprob=-0.1, decoded_token="p")}] * 3,
+    )
+
+    assert len(rows) >= 1
+    assert rows[0] == {1: Logprob(logprob=-0.1, decoded_token="p")}
 
 
 def test_logprobs_below_minus_one_rejected():
