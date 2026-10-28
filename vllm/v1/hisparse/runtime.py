@@ -39,6 +39,9 @@ if TYPE_CHECKING:
 # fp8_ds_mla KV row: 512 B quantized NoPE + 16 B scales + 128 B RoPE.
 FP8_DS_MLA_ROW_BYTES = 656
 HiSparseTopKResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+# trtllm-gen sparse MLA reads up to ~250 rows from the start of its KV cache
+# whatever the cache's size: https://github.com/flashinfer-ai/flashinfer/issues/6484
+_MIN_STAGED_PREFILL_KV_ROWS = 256
 
 
 def is_hisparse_decode_batch(attn_metadata: Any | None) -> bool:
@@ -854,15 +857,13 @@ class HiSparseRuntime:
             )
         row_width = kv_cache.shape[-1]
 
+        num_blocks = plan.row_ids.shape[1] // plan.block_size
+        min_blocks = cdiv(_MIN_STAGED_PREFILL_KV_ROWS, plan.block_size)
         staged = torch.empty(
-            (
-                plan.row_ids.shape[1] // plan.block_size,
-                plan.block_size,
-                row_width,
-            ),
+            (max(num_blocks, min_blocks), plan.block_size, row_width),
             dtype=kv_cache.dtype,
             device=plan.block_table.device,
-        )
+        )[:num_blocks]
         if plan.gpu_row_ids is not None and resident_cache is not None:
             self.backend.gather_resident_rows(
                 resident_cache, staged.view(-1, row_width), plan.gpu_row_ids[0]
