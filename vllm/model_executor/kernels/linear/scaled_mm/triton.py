@@ -42,7 +42,10 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             get_w8a8_per_token_fp8_configs,
         )
-        from vllm.utils.platform_utils import get_device_name_as_file_name
+        from vllm.utils.platform_utils import (
+            cuda_get_device_properties,
+            get_device_name_as_file_name,
+        )
 
         n, k = c.weight_shape
         self.has_tuned_configs = bool(
@@ -50,6 +53,28 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
                 n, k, get_device_name_as_file_name(), self.fp8_dtype, c.out_dtype
             )
         )
+        self.use_gfx1201_heuristic = False
+        if current_platform.is_rocm():
+            arch, processors = cuda_get_device_properties(
+                torch.accelerator.current_device_index(),
+                ("gcnArchName", "multi_processor_count"),
+                init_cuda=True,
+            )
+            self.use_gfx1201_heuristic = (
+                arch.split(":")[0] == "gfx1201" and processors == 32
+            )
+        if self.use_gfx1201_heuristic and not self.has_tuned_configs:
+            from vllm.config import get_current_vllm_config
+            from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
+                fp8_per_token_warmup,
+            )
+
+            fp8_per_token_warmup.register_warmup(
+                n=n,
+                k=k,
+                out_dtype=c.out_dtype,
+                max_tokens=get_current_vllm_config().scheduler_config.max_num_batched_tokens,
+            )
 
     @classmethod
     def is_supported(
@@ -84,8 +109,19 @@ class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
+        if self.use_gfx1201_heuristic and not torch.compiler.is_compiling():
+            return _w8a8_triton_per_token_scaled_mm_func(
+                A, B, As, Bs, out_dtype, bias, self.has_tuned_configs, True
+            ).view(*output_shape)
         return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
-            A, B, As, Bs, out_dtype, bias, self.has_tuned_configs
+            A,
+            B,
+            As,
+            Bs,
+            out_dtype,
+            bias,
+            self.has_tuned_configs,
+            self.use_gfx1201_heuristic,
         ).view(*output_shape)
 
 
@@ -253,6 +289,7 @@ def _w8a8_triton_per_token_scaled_mm_func(
     output_dtype: torch.dtype,
     bias: torch.Tensor | None,
     has_tuned_configs: bool,
+    use_gfx1201_heuristic: bool = False,
 ) -> torch.Tensor:
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         get_w8a8_per_token_fp8_config,
@@ -263,6 +300,33 @@ def _w8a8_triton_per_token_scaled_mm_func(
         config = get_w8a8_per_token_fp8_config(
             qx.size(0), weight.size(1), qx.size(1), qx.dtype, output_dtype
         )
+    if use_gfx1201_heuristic and current_platform.is_rocm():
+        from vllm.model_executor.layers.quantization.utils import (
+            fp8_per_token_heuristic as heuristic,
+        )
+
+        if heuristic.can_use_fp8_per_token_heuristic(
+            qx, weight, x_scale, weight_scale, output_dtype, bias
+        ):
+            if config is None:
+                choice = heuristic.get_heuristic_config(
+                    qx.size(0), weight.size(1), qx.size(1)
+                )
+            else:
+                choice = {
+                    "engine": "shared",
+                    "block_size_m": config["BLOCK_SIZE_M"],
+                    "block_size_n": config["BLOCK_SIZE_N"],
+                    "block_size_k": config["BLOCK_SIZE_K"],
+                    "num_warps": config["num_warps"],
+                    "num_stages": config["num_stages"],
+                    "group_m": config.get("GROUP_M", 1),
+                    "n_stripe": config.get("N_STRIPE", 0),
+                    "unmasked_loads": bool(config.get("UNMASKED_LOADS", False)),
+                }
+            return heuristic.launch_fp8_per_token(
+                qx, weight, x_scale, weight_scale, output_dtype, bias, choice
+            )
     if config is None:
         return triton_scaled_mm(qx, weight, x_scale, weight_scale, output_dtype, bias)
 
@@ -306,6 +370,7 @@ def _w8a8_triton_per_token_scaled_mm_fake(
     output_dtype: torch.dtype,
     bias: torch.Tensor | None,
     has_tuned_configs: bool,
+    use_gfx1201_heuristic: bool = False,
 ) -> torch.Tensor:
     return torch.empty(
         (qx.size(0), weight.size(1)), dtype=output_dtype, device=qx.device

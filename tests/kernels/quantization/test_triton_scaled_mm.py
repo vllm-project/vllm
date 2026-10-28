@@ -248,8 +248,9 @@ def test_triton_fp8_per_token_backend_preserves_linear_shape(
     reason="Requires FP8 and CUDA/ROCm graph support",
 )
 @pytest.mark.parametrize("tuned", [False, True])
+@pytest.mark.parametrize("use_gfx1201_heuristic", [False, True])
 def test_triton_fp8_per_token_dynamic_shapes_and_graph_replay(
-    per_token_fp8_configs, tuned
+    per_token_fp8_configs, tuned, use_gfx1201_heuristic
 ):
     """Compiled prefill/decode and graph replay must preserve current inputs."""
     importlib.import_module("vllm.model_executor.kernels.linear.scaled_mm.triton")
@@ -270,7 +271,7 @@ def test_triton_fp8_per_token_dynamic_shapes_and_graph_replay(
 
     def run(a, sa):
         return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
-            a, b, sa, sb, torch.bfloat16, None, tuned
+            a, b, sa, sb, torch.bfloat16, None, tuned, use_gfx1201_heuristic
         )
 
     compiled = torch.compile(run, fullgraph=True, dynamic=True)
@@ -292,6 +293,99 @@ def test_triton_fp8_per_token_dynamic_shapes_and_graph_replay(
         torch.accelerator.synchronize()
         expected = torch_scaled_mm(a, b, sa, sb, torch.bfloat16)
         torch.testing.assert_close(captured, expected, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not current_platform.supports_fp8(),
+    reason="Requires ROCm FP8",
+)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+def test_triton_fp8_per_token_new_inputs_and_offset_storage(
+    per_token_fp8_configs, out_dtype
+):
+    """Reused launches must read new allocations and unaligned tensor views."""
+    importlib.import_module("vllm.model_executor.kernels.linear.scaled_mm.triton")
+    m, n, k = 33, 256, 128
+    for offset in (0, 1, 0, 1):
+        a_store = (0.2 * torch.randn(m * k + offset, device=device)).to(
+            current_platform.fp8_dtype()
+        )
+        w_store = (0.2 * torch.randn(n * k + offset, device=device)).to(a_store.dtype)
+        a, b = a_store[offset:].view(m, k), w_store[offset:].view(n, k).t()
+        sa = torch.rand(m + offset, device=device)[offset:].view(m, 1) + 0.5
+        sb = torch.rand(n + offset, device=device)[offset:].view(n, 1) + 0.5
+        bias = torch.randn(n, device=device, dtype=out_dtype)
+        actual = torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
+            a, b, sa, sb, out_dtype, bias, False, True
+        )
+        expected = torch_scaled_mm(a, b, sa, sb, out_dtype, bias)
+        torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not current_platform.supports_fp8(),
+    reason="Requires ROCm FP8",
+)
+def test_triton_fp8_per_token_large_parent_storage(per_token_fp8_configs):
+    """A narrow view of a large allocation must preserve launch correctness."""
+    if torch.accelerator.get_memory_info()[0] < 6 * 1024**3:
+        pytest.skip("Requires room for a storage larger than 2 GiB")
+    importlib.import_module("vllm.model_executor.kernels.linear.scaled_mm.triton")
+    m, n, k = 33, 256, 128
+    b = (0.2 * torch.randn(n, k, device=device)).to(current_platform.fp8_dtype()).t()
+    sa, sb = torch.rand(m, 1, device=device), torch.rand(n, 1, device=device)
+    for large_storage in (False, True, False):
+        allocation = torch.empty(
+            2**31 + m * k if large_storage else m * k,
+            device=device,
+            dtype=current_platform.fp8_dtype(),
+        )
+        a = allocation[-m * k :].view(m, k)
+        a.copy_((0.2 * torch.randn(m, k, device=device)).to(a.dtype))
+        actual = torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
+            a, b, sa, sb, torch.bfloat16, None, False, True
+        )
+        torch.testing.assert_close(
+            actual, torch_scaled_mm(a, b, sa, sb, torch.bfloat16), rtol=1e-2, atol=1e-2
+        )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not current_platform.supports_fp8(),
+    reason="Requires ROCm FP8",
+)
+def test_triton_fp8_per_token_preserves_launch_hooks(per_token_fp8_configs):
+    """Instrumentation added after warmup must still observe launches."""
+    from vllm.triton_utils import triton
+
+    knobs = triton.knobs
+
+    importlib.import_module("vllm.model_executor.kernels.linear.scaled_mm.triton")
+    m, n, k = 33, 256, 128
+    a = (0.2 * torch.randn(m, k, device=device)).to(current_platform.fp8_dtype())
+    b = (0.2 * torch.randn(n, k, device=device)).to(a.dtype).t()
+    sa, sb = torch.rand(m, 1, device=device), torch.rand(n, 1, device=device)
+
+    def run():
+        return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
+            a, b, sa, sb, torch.bfloat16, None, False, True
+        )
+
+    run()
+    observed = []
+
+    def observe(*_args, **_kwargs):
+        observed.append(True)
+
+    knobs.runtime.launch_enter_hook.add(observe)
+    try:
+        actual = run()
+    finally:
+        knobs.runtime.launch_enter_hook.remove(observe)
+    assert observed
+    torch.testing.assert_close(
+        actual, torch_scaled_mm(a, b, sa, sb, torch.bfloat16), rtol=1e-2, atol=1e-2
+    )
 
 
 @pytest.mark.parametrize("in_dtype", get_8bit_types())
@@ -377,3 +471,51 @@ def test_scaled_mm_launch_policy_handles_tile_and_layout_boundaries(variant):
     )
     expected = torch_scaled_mm(a, b, sa, sb, torch.bfloat16)
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not current_platform.supports_fp8(),
+    reason="Requires ROCm FP8",
+)
+@pytest.mark.parametrize("n,k", [(256, 8192), (3840, 2048)])
+def test_triton_fp8_per_token_warmup_covers_unseen_token_counts(n, k, monkeypatch):
+    """Startup compilation must cover odd and aligned serving token counts."""
+    from vllm.model_executor.layers.quantization.utils import (
+        fp8_per_token_heuristic as heuristic,
+    )
+    from vllm.triton_utils import triton
+
+    heuristic.fp8_per_token_warmup.warmup(
+        n=n, k=k, out_dtype=torch.bfloat16, max_tokens=257
+    )
+    misses = []
+    monkeypatch.setattr(
+        triton.knobs.runtime,
+        "jit_cache_hook",
+        lambda **kwargs: misses.append(kwargs),
+    )
+    monkeypatch.setattr(
+        triton.knobs.runtime,
+        "kernel_load_end_hook",
+        lambda *args: misses.append(args),
+    )
+    for m in (1, 3, 15, 17, 33, 63, 65, 127, 129, 255, 257):
+        a = (0.2 * torch.randn(m, k, device=device)).to(current_platform.fp8_dtype())
+        b = (0.2 * torch.randn(n, k, device=device)).to(a.dtype).t()
+        sa, sb = torch.rand(m, 1, device=device), torch.rand(n, 1, device=device)
+        out = heuristic.launch_fp8_per_token(
+            a,
+            b,
+            sa,
+            sb,
+            torch.bfloat16,
+            None,
+            heuristic.get_heuristic_config(m, n, k),
+        )
+        torch.testing.assert_close(
+            out,
+            torch_scaled_mm(a, b, sa, sb, torch.bfloat16),
+            rtol=1e-2,
+            atol=1e-2,
+        )
+    assert not misses
