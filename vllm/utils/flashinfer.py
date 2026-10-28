@@ -10,6 +10,7 @@ import functools
 import importlib
 import importlib.metadata
 import importlib.util
+import inspect
 import os
 import shutil
 from collections.abc import Callable
@@ -161,6 +162,15 @@ def has_flashinfer_bf16_gemm() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and callable(getattr(mod, "mm_bf16", None))
+
+
+@functools.cache
+def has_flashinfer_concat_mla_kv_quant_fp8() -> bool:
+    """Return whether FlashInfer exposes the MLA K/V pack + fp8 cast API."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer")
+    return mod is not None and callable(getattr(mod, "concat_mla_kv_quant_fp8", None))
 
 
 @functools.cache
@@ -409,10 +419,24 @@ def has_flashinfer_nvlink_two_sided() -> bool:
 
 @functools.cache
 def has_flashinfer_nvlink_one_sided() -> bool:
-    """Return `True` if FlashInfer trtllm_moe_alltoall module is available."""
+    """Return whether FlashInfer exposes the NVLink MoE EP wrapper."""
     if not has_flashinfer_comm():
         return False
-    return importlib.util.find_spec("flashinfer.comm.trtllm_moe_alltoall") is not None
+    mod = _get_submodule("flashinfer.moe_ep")
+    return (
+        mod is not None
+        and all(
+            hasattr(mod, name)
+            for name in (
+                "BootstrapConfig",
+                "MoEEpCommParams",
+                "NVLinkOneSidedAlltoAll",
+                "NVLinkOneSidedConfig",
+                "create_communication",
+            )
+        )
+        and hasattr(mod.MoEEpCommParams, "dispatch_format")
+    )
 
 
 @functools.cache
@@ -594,6 +618,33 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
+
+
+@functools.cache
+def has_flashinfer_localized_moe() -> bool:
+    """Return ``True`` if cute_dsl_fused_moe_nvfp4 accepts the ``localized_*`` args.
+
+    Locality-domain execution landed in flashinfer-ai/flashinfer#5276 and was
+    adapted to ``torch.cuda.execute_on_streams`` in #6488. Neither is in a
+    FlashInfer 0.7.x release, so probe the signature rather than the version.
+    """
+    if not has_flashinfer_cutedsl_moe_nvfp4():
+        return False
+    mod = _get_submodule("flashinfer")
+    if mod is None:
+        return False
+    try:
+        params = inspect.signature(mod.cute_dsl_fused_moe_nvfp4).parameters
+    except (TypeError, ValueError):
+        return False
+    required = {
+        "localized_weights",
+        "localized_streams",
+        "localized_sm_count",
+        "localized_memset_stream",
+        "localized_allow_nonlocalized",
+    }
+    return required <= params.keys()
 
 
 @functools.cache
@@ -1260,6 +1311,7 @@ __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
     "has_flashinfer_bf16_gemm",
+    "has_flashinfer_concat_mla_kv_quant_fp8",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",
     "flashinfer_trtllm_fp8_block_scale_moe",
@@ -1271,6 +1323,7 @@ __all__ = [
     "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
+    "has_flashinfer_localized_moe",
     "flashinfer_b12x_fused_moe",
     "flashinfer_get_hybrid_num_tokens_buckets",
     "flashinfer_convert_sf_to_mma_layout",
