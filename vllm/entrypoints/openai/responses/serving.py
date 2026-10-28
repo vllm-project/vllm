@@ -56,7 +56,6 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
-    StreamingParsedOutput,
     StreamingState,
     _StateType,
     emit_content_delta_events,
@@ -1284,8 +1283,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor(tools=request.tools)
-        parsed_output = StreamingParsedOutput()
-        context.streaming_parsed_output = parsed_output
 
         hide_stream_metadata = (
             not request.include_reasoning and context.response_parser is not None
@@ -1331,7 +1328,6 @@ class OpenAIServingResponses(GenerateBaseServing):
             delta_message = maybe_filter_parallel_tool_calls(delta_message, request)
 
             for dm in split_delta(delta_message):
-                parsed_output.update(dm)
                 target_state, tool_call = processor.resolve_target_state(dm)
                 if target_state == _StateType.NONE:
                     continue

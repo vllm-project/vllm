@@ -29,7 +29,6 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseRawMessageAndToken,
     ResponsesRequest,
 )
-from vllm.entrypoints.openai.responses.streaming_events import StreamingParsedOutput
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_builtin_and_mcp_tool_dicts,
@@ -173,9 +172,6 @@ class ConversationContext(ABC):
     # the stored engine timestamps cover only one turn, while token usage is
     # accumulated across all turns.
     request_metrics_cover_all_generation_turns: bool = True
-    # Set by the streaming layer when delta parsing accumulates results;
-    # currently only populated on the Simple (non-harmony) streaming path.
-    streaming_parsed_output: StreamingParsedOutput | None = None
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
