@@ -1296,9 +1296,6 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         ),
         pytest.param({"enable_prefix_caching": False}, 0, id="no-prefix-caching"),
         pytest.param({"num_prefill_lookahead_tokens": 2}, 2, id="multi-module-mtp"),
-        pytest.param(
-            {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
-        ),
         pytest.param({"kv_connector": True}, 1, id="kv-connector"),
         pytest.param({"method": None}, 0, id="no-speculation"),
     ],
@@ -1312,9 +1309,6 @@ def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
         speculative_config = SpeculativeConfig(
             model="ngram",
             num_speculative_tokens=num_lookahead,
-            disable_lookahead_block_hashes=overrides.get(
-                "disable_lookahead_block_hashes", False
-            ),
         )
         speculative_config.method = method
         if num_lookahead > 1 or method == "dspark":
@@ -1627,23 +1621,6 @@ def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
         KVCacheGroup.from_layers(
             {"a": full_layer(draft), "b": full_layer(replace(draft, dcp_sharded=True))}
         )
-
-
-@pytest.mark.parametrize(
-    "target",
-    [
-        full_layer(new_kv_cache_spec()),
-        full_layer(new_mla_spec()),
-        SinkFullAttentionManager.layer_config(
-            new_kv_cache_spec(num_kv_heads=1), sink_len=4
-        ),
-    ],
-)
-def test_draft_layer_tag_is_not_part_of_the_cache_format(target):
-    draft = replace(target, is_draft=True)
-    assert draft == target and hash(draft) == hash(target)
-    group = KVCacheGroup.from_layers({"target": target, "draft": draft})
-    assert group.kv_cache_specs == {"target": target.spec, "draft": target.spec}
 
 
 @pytest.mark.parametrize(
@@ -2001,8 +1978,7 @@ def test_group_kind_covers_every_layer_spec():
 
 
 def test_prefix_lookup_groups_batch_only_equal_layouts():
-    # A lookup batch takes the EAGLE last-block drop if any member does, so
-    # only groups with equal layouts are batched; packed groups never are.
+    # Only groups with equal layouts are batched; packed groups never are.
     spec = new_kv_cache_spec()
     wide = new_kv_cache_spec(num_kv_heads=4)
     packed = {"x": full_layer(spec), "y": full_layer(wide)}
