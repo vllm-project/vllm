@@ -308,6 +308,17 @@ impl EngineCoreClient {
     /// sockets and waits for the expected engine registration frames.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
         config.validate()?;
+        let runtime = build_zmq_runtime();
+        let handle = runtime.handle().clone();
+        let connect_task =
+            AbortOnDropHandle::new(handle.spawn(Self::connect_on_runtime(config, runtime)));
+        connect_task.await?
+    }
+
+    async fn connect_on_runtime(
+        config: EngineCoreClientConfig,
+        runtime: BackgroundShutdownRuntime,
+    ) -> Result<Self> {
         let connected = match &config.transport_mode {
             TransportMode::HandshakeOwner {
                 handshake_address,
@@ -360,7 +371,7 @@ impl EngineCoreClient {
             }
         };
 
-        Self::from_connected(config, connected).await
+        Self::from_connected(config, connected, runtime).await
     }
 
     /// Create a new client instance from the connected transport state after
@@ -368,12 +379,12 @@ impl EngineCoreClient {
     async fn from_connected(
         config: EngineCoreClientConfig,
         connected: transport::ConnectedTransport,
+        runtime: BackgroundShutdownRuntime,
     ) -> Result<Self> {
         validate_lora_capabilities(&connected.engines)?;
         let (output_tx, output_rx) = mpsc::channel(64);
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let engines = connected.engines;
-        let runtime = build_zmq_runtime();
         let inner = Arc::new(ClientInner::new(
             connected.input_send,
             runtime.handle().clone(),

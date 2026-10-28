@@ -14,6 +14,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use rmpv::Value;
 use thiserror_ext::AsReport as _;
+use tokio::runtime::Builder;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
@@ -417,6 +418,67 @@ fn client_config_validates_bootstrapped_dp_range() {
         "invalid engine-core client configuration: connected engine range [1, 3) exceeds data parallel size (2)"
     ]]
     .assert_eq(&error.to_string());
+}
+
+#[test]
+fn client_transport_outlives_connecting_runtime() {
+    init_tracing();
+    let caller = Builder::new_current_thread().enable_all().build().unwrap();
+    let independent = Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (shutdown_tx, engine_task) = independent.block_on(async {
+        spawn_mock_engine_task(
+            handshake_address.clone(),
+            vec![0x00, 0x00],
+            |dealer, push| {
+                Box::pin(async move {
+                    let _request = recv_engine_message(dealer).await;
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![request_output(
+                                "req-1",
+                                vec![42],
+                                Some(EngineCoreFinishReason::Length),
+                            )],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                })
+            },
+        )
+    });
+    let client = caller.block_on(connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    ));
+
+    caller.shutdown_timeout(Duration::from_secs(1));
+
+    let mut stream = independent
+        .block_on(client.call(sample_request()))
+        .expect("the client owns its transport runtime")
+        .into_outputs();
+    let output = independent
+        .block_on(async { timeout(Duration::from_secs(2), stream.next()).await })
+        .expect("engine output timed out")
+        .expect("engine output stream ended")
+        .expect("engine output failed");
+    assert_eq!(output.new_token_ids, [42]);
+
+    let _ = shutdown_tx.send(());
+    independent.block_on(engine_task).unwrap();
+    independent.block_on(client.shutdown()).unwrap();
 }
 
 async fn recv_xpub_message(xpub: &mut XPubSocket) -> Vec<bytes::Bytes> {
