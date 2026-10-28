@@ -514,8 +514,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         atexit.register(self.close)
         signal.signal(signal.SIGINT, lambda sig, frame: self.close())
         signal.signal(signal.SIGTERM, lambda sig, frame: self.close())
-        if hasattr(signal, "SIGQUIT"):
-            signal.signal(signal.SIGQUIT, lambda sig, frame: self.close())
+        signal.signal(signal.SIGQUIT, lambda sig, frame: self.close())
 
         logger.info(
             "HF3FSKVConnector initialized: path=%s, role=%s",
