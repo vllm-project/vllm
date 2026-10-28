@@ -81,6 +81,7 @@ tests/quantization/test_configs.py  # CI jobs disabled pending locked torchao tr
 tests/quantization/test_cpu_offload.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_experts_int8.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_fp8.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_fp8_dequant.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_gptq_dynamic.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_humming_compile.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_humming_ignore.py  # CI jobs disabled pending locked torchao transitive dependencies

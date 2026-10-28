@@ -2096,25 +2096,6 @@ def _glm5_mixed_precision_config() -> QuarkConfig:
     )
 
 
-class _GLM5RecordingParam:
-    """Stand-in for a BF16 target param that records what gets loaded."""
-
-    def __init__(self):
-        self.loaded_weight: torch.Tensor | None = None
-        self.loaded_shard: object = "unset"
-
-    def weight_loader(self, param, loaded_weight, shard_id=None):
-        self.loaded_weight = loaded_weight
-        self.loaded_shard = shard_id
-
-
-def _glm5_block_fp8(out_dim: int, in_dim: int, block: int = 128):
-    """Return a (fp8 weight, f32 per-block scale) pair."""
-    weight = (torch.randn(out_dim, in_dim) * 0.1).to(torch.float8_e4m3fn)
-    scale = torch.rand(out_dim // block, in_dim // block, dtype=torch.float32) + 0.5
-    return weight, scale
-
-
 def test_glm5next_gate_up_proj_mapping_is_genuine_fusion():
     from vllm.models.glm5next.common.model import Glm5NextForConditionalGeneration
 
@@ -2131,74 +2112,65 @@ def test_glm5next_genuine_fusion_resolves_gate_up_to_block_fp8():
     assert scheme_cls is QuarkW8A8Fp8PerBlock
 
 
-def test_glm5next_attn_loader_accepts_quark_weight_scale():
-    # Regression for KeyError on '...kv_a_proj_with_mqa.weight_scale': the fused
-    # q_a/kv_a projection is kept BF16 and dequantized on load; the Quark scale
-    # name must be recognized and routed to the correct fused shard.
-    from vllm.models.glm5next.common.model import (
-        _dequant_fp8_block,
-        _try_load_fp8_attn_proj,
-    )
-
+def _glm5_mla_params(block_n: int = 128) -> dict:
+    """Params of a GLM5-next MLA layer whose projections load a block-FP8
+    checkpoint (see `Fp8DequantConfig`): only the scales matter here."""
     prefix = "layers.3.self_attn"
-    target = _GLM5RecordingParam()
-    params_dict = {f"{prefix}.fused_qkv_a_proj.weight": target}
-    buf: dict = {}
-    loaded: set = set()
-
-    weight, scale = _glm5_block_fp8(256, 256)
-    # fp8 weight arrives first -> buffered, nothing loaded yet.
-    assert (
-        _try_load_fp8_attn_proj(
-            f"{prefix}.kv_a_proj_with_mqa.weight", weight, buf, params_dict, loaded, 0
-        )
-        is True
-    )
-    assert target.loaded_weight is None
-    # Quark-named scale completes the pair -> dequantize + load.
-    assert (
-        _try_load_fp8_attn_proj(
-            f"{prefix}.kv_a_proj_with_mqa.weight_scale",
-            scale,
-            buf,
-            params_dict,
-            loaded,
-            0,
-        )
-        is True
-    )
-    assert target.loaded_weight is not None
-    assert target.loaded_weight.dtype == torch.bfloat16
-    assert target.loaded_shard == 1  # kv_a is shard 1 of fused_qkv_a_proj
-    assert torch.equal(target.loaded_weight, _dequant_fp8_block(weight, scale, 128))
-    assert f"{prefix}.fused_qkv_a_proj.weight" in loaded
+    params = {}
+    for target in ("fused_qkv_a_proj", "q_b_proj", "o_proj"):
+        scale = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        scale.weight_block_size = [block_n, block_n]
+        params[f"{prefix}.{target}.weight_scale_inv"] = scale
+    return params
 
 
-def test_glm5next_attn_loader_accepts_deepseek_weight_scale_inv():
-    # DeepSeek scale name keeps working unchanged.
-    from vllm.models.glm5next.common.model import (
-        _dequant_fp8_block,
-        _try_load_fp8_attn_proj,
-    )
+def test_glm5next_attn_loader_accepts_quark_weight_scale():
+    # Quark names the block scale ``weight_scale``; the projection's scale
+    # parameter is ``weight_scale_inv``.
+    from transformers import Glm5NextTextConfig
 
-    prefix = "layers.7.self_attn"
-    target = _GLM5RecordingParam()
-    params_dict = {f"{prefix}.o_proj.weight": target}
-    buf: dict = {}
-    loaded: set = set()
+    from vllm.models.glm5next.common.model import _mla_proj_checkpoint_tensor
 
-    weight, scale = _glm5_block_fp8(128, 256)
-    _try_load_fp8_attn_proj(
-        f"{prefix}.o_proj.weight", weight, buf, params_dict, loaded, 0
+    config = Glm5NextTextConfig(kv_lora_rank=512)
+    scale = torch.rand(4, 2)
+    name, tensor = _mla_proj_checkpoint_tensor(
+        "layers.3.self_attn.kv_a_proj_with_mqa.weight_scale",
+        scale,
+        _glm5_mla_params(),
+        config,
+        0,
     )
-    assert (
-        _try_load_fp8_attn_proj(
-            f"{prefix}.o_proj.weight_scale_inv", scale, buf, params_dict, loaded, 0
-        )
-        is True
+    assert name == "layers.3.self_attn.kv_a_proj_with_mqa.weight_scale_inv"
+    assert tensor is scale
+    # a projection the model does not load from block-FP8 keeps its name
+    name, _ = _mla_proj_checkpoint_tensor(
+        "layers.0.self_attn.o_proj.weight_scale", scale, {}, config, 0
     )
-    assert target.loaded_shard is None  # o_proj is a direct (non-fused) proj
-    assert torch.equal(target.loaded_weight, _dequant_fp8_block(weight, scale, 128))
+    assert name == "layers.0.self_attn.o_proj.weight_scale"
+
+
+def test_glm5next_nope_kv_a_padding_per_tensor():
+    # NoPE checkpoints omit kv_a's RoPE rows: the weight gets zero rows and the
+    # scale its extra blocks, each on its own (no weight/scale pairing).
+    from transformers import Glm5NextTextConfig
+
+    from vllm.models.glm5next.common.model import _mla_proj_checkpoint_tensor
+
+    config = Glm5NextTextConfig(kv_lora_rank=512)
+    prefix = "layers.3.self_attn.kv_a_proj_with_mqa"
+    weight = torch.randn(512, 256).to(torch.float8_e4m3fn)
+    _, padded = _mla_proj_checkpoint_tensor(
+        f"{prefix}.weight", weight, _glm5_mla_params(), config, 64
+    )
+    assert padded.shape == (576, 256) and padded.dtype == torch.float8_e4m3fn
+    assert torch.equal(padded[:512].view(torch.uint8), weight.view(torch.uint8))
+    assert not padded[512:].float().any()
+    scale = torch.rand(4, 2)
+    _, padded = _mla_proj_checkpoint_tensor(
+        f"{prefix}.weight_scale_inv", scale, _glm5_mla_params(), config, 64
+    )
+    assert padded.shape == (5, 2)  # ceil(576 / 128) blocks
+    assert torch.equal(padded[:4], scale)
 
 
 _REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]

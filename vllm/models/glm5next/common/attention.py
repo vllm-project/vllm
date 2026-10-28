@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8_dequant import Fp8DequantConfig
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
@@ -424,11 +425,17 @@ class Glm5NextMLAAttention(nn.Module):
         # otherwise default to hidden_size (used in Eagle3 Deepseek with MLA)
         proj_input_size = input_size if input_size is not None else self.hidden_size
 
+        # The model runs these projections in BF16; an FP8 checkpoint stores
+        # them as block-FP8, dequantized after loading.
+        proj_quant_config = quant_config or Fp8DequantConfig.for_checkpoint(
+            vllm_config.quant_config
+        )
+
         if self.q_lora_rank is not None:
             self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
                 proj_input_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                quant_config=quant_config,
+                quant_config=proj_quant_config,
                 prefix=f"{prefix}.fused_qkv_a_proj",
             )
         else:
@@ -436,7 +443,7 @@ class Glm5NextMLAAttention(nn.Module):
                 proj_input_size,
                 self.kv_lora_rank + self.qk_rope_head_dim,
                 bias=False,
-                quant_config=quant_config,
+                quant_config=proj_quant_config,
                 prefix=f"{prefix}.kv_a_proj_with_mqa",
             )
 
@@ -446,7 +453,7 @@ class Glm5NextMLAAttention(nn.Module):
                 self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
-                quant_config=quant_config,
+                quant_config=proj_quant_config,
                 prefix=f"{prefix}.q_b_proj",
             )
         else:
@@ -469,7 +476,7 @@ class Glm5NextMLAAttention(nn.Module):
             self.num_heads * self.v_head_dim,
             self.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            quant_config=proj_quant_config,
             prefix=f"{prefix}.o_proj",
         )
 
