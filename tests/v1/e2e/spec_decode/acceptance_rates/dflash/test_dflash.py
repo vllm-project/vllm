@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -112,6 +112,11 @@ def test_dflash_reference_acceptance_lengths(
             QWEN3_DFLASH,
             True,
             id="qwen3-mrv2",
+        ),
+        pytest.param(
+            replace(QWEN3_DFLASH, draft_model="AdaFlash/Qwen3-8B-AdaFlash"),
+            True,
+            id="qwen3-adaflash-mrv2",
         ),
         pytest.param(
             LAGUNA_DFLASH_NVFP4,

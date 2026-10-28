@@ -861,6 +861,10 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             )
             if "t2d" in name:
                 continue
+            # AdaFlash drafters reuse the DFlash architecture; their
+            # verification-length head is not used.
+            if name.startswith("thresh_head"):
+                continue
             if "d2t" in name:
                 name = name.replace("d2t", "draft_id_to_target_id")
                 includes_draft_id_mapping = True
