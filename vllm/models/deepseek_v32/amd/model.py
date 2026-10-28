@@ -41,6 +41,12 @@ from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_
 from vllm.sequence import IntermediateTensors
 
 from .rocm import DeepseekV32MLAAttention
+from .specialized_decode.runtime import specialized_decode_config
+
+if typing.TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+    from .specialized_decode.runtime.decode import SpecializedDecode, Step
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
@@ -200,6 +206,7 @@ class DeepseekV32Model(torch.nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        step: "Step | None" = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -220,7 +227,11 @@ class DeepseekV32Model(torch.nn.Module):
         ):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            kernel = step.layer(idx) if step is not None else None
+            if kernel is not None:
+                hidden_states, residual = kernel(positions, hidden_states, residual)
+            else:
+                hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -388,6 +399,54 @@ class DeepseekV32Model(torch.nn.Module):
 
 class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     model_cls = DeepseekV32Model
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # decode_backend=latency_specialized: a specialized decode executor over
+        # self.model, built by the model state once the weights are loaded. The config
+        # check raises before the modules allocate their weights.
+        decode_config = specialized_decode_config(vllm_config)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.specialized_decode_config = decode_config
+        self.specialized_decode: SpecializedDecode | None = None
+
+    def build_specialized_decode(self) -> None:
+        from .specialized_decode.runtime.decode import SpecializedDecode
+
+        assert self.specialized_decode_config is not None
+        self.specialized_decode = SpecializedDecode(
+            self.model, self.specialized_decode_config
+        )
+
+    def get_model_state_cls(self) -> "type[ModelState]":
+        from .model_state import DeepseekV32ModelState
+
+        return DeepseekV32ModelState
+
+    def process_weights_after_loading(self) -> None:
+        if self.specialized_decode is not None:
+            raise RuntimeError(
+                "GLM-5.2 specialized decode: reloading or updating weights is not "
+                "supported (the kernels read the loaded weights in place); restart the "
+                "engine"
+            )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        decode = self.specialized_decode
+        step = None if decode is None else decode.plan(positions, intermediate_tensors)
+        return self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, step=step
+        )
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        if self.specialized_decode is not None:
+            self.specialized_decode.after_step()  # poll-error fail-stop, once per step
+        return super().compute_logits(hidden_states)
 
     def set_moe_parameters(self):
         self.num_expert_groups = getattr(self.config, "n_group", 1)
