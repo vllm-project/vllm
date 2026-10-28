@@ -949,8 +949,12 @@ def test_batched_decode_indices_match_per_group_builds(mix_prefill):
         for b in builders
     ]
 
+    # The decode-phase launch clears index rows only within the decode
+    # tokens; past that boundary the rows belong to the prefill phase, so
+    # the poison must stop where the launch's writes stop.
+    num_decode_tokens = sum(q for q in query_lens if q == 1)
     for b in builders:
-        b.decode_swa_indices[:num_tokens].fill_(-12345)
+        b.decode_swa_indices[:num_decode_tokens].fill_(-12345)
         b.decode_swa_lens[:num_tokens].fill_(-7)
         b.is_valid_token[:num_tokens].fill_(True)
 

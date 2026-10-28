@@ -80,61 +80,32 @@ def test_dspark_context_kv_matches_query_insert(
     scale = torch.tensor([0.7], device="cuda")
     # Only what _insert_context_kv actually reads: the record width comes off
     # the cache tensor, so no per-record width attribute is stubbed here.
+    norm_weight = torch.randn(512, dtype=torch.bfloat16, device="cuda")
     attn = SimpleNamespace(
         swa_cache_layer=SimpleNamespace(kv_cache=cache, block_size=block_size),
         kv_mxfp8=kv_mxfp8,
         rotary_emb=SimpleNamespace(cos_sin_cache=cos_sin),
         _flashinfer_fp8_kv_scale=scale,
+        kv_norm=SimpleNamespace(weight=norm_weight, variance_epsilon=1e-6),
     )
 
     def legacy_insert():
         from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
-            fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert,
-            fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert,
-            fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+            fused_deepseek_v4_kv_rope_insert,
         )
 
-        q = torch.zeros(kv.shape[0], 8, 512, dtype=kv.dtype, device="cuda")
-        if cache_dtype == torch.uint8:
-            fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-                q,
-                kv,
-                reference.view(num_blocks, -1),
-                slots,
-                positions,
-                cos_sin,
-                8,
-                1e-20,
-                block_size,
-                True,
-                kv_mxfp8,
-            )
-        elif cache_dtype == torch.bfloat16:
-            fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
-                q,
-                kv,
-                reference,
-                slots,
-                positions,
-                cos_sin,
-                1e-20,
-                block_size,
-            )
-        else:
-            q_fp8 = torch.empty_like(q, dtype=cache_dtype)
-            fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
-                q,
-                kv,
-                q_fp8,
-                reference,
-                slots,
-                positions,
-                cos_sin,
-                scale,
-                scale,
-                1e-20,
-                block_size,
-            )
+        fused_deepseek_v4_kv_rope_insert(
+            kv,
+            reference,
+            slots,
+            positions,
+            cos_sin,
+            block_size,
+            scale if cache_dtype == torch.float8_e4m3fn else None,
+            kv_mxfp8,
+            kv_norm_weight=norm_weight,
+            kv_norm_eps=1e-6,
+        )
 
     def insert():
         _insert_context_kv(attn, kv, positions, slots)

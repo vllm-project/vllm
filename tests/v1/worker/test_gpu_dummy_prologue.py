@@ -61,7 +61,7 @@ def test_a_staged_dummy_batch_build_matches_the_direct_kernel():
     prologue.begin(decode_only=True)
     # A second row forces the batched launch; a lone row would take the
     # direct fallback path.
-    scratch = torch.full(6, -11, dtype=torch.int64, device=device)
+    scratch = torch.full((6,), -11, dtype=torch.int64, device=device)
     prologue.stage_fill_i64(fuse=True, tensor=scratch, value=-1)
     staged = InputBatch.make_dummy(
         num_reqs, num_tokens, staged_buffers, prologue=prologue
