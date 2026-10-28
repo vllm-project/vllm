@@ -27,7 +27,6 @@ from vllm.v1.core.kv_cache_coordinator import (
 from vllm.v1.core.kv_cache_utils import (
     BlockHashWithGroupId,
     ExternalBlockHash,
-    generate_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
     make_block_hash_with_group_id,
@@ -80,6 +79,7 @@ class BlockStoreMeta:
     lora_name: str | None
     extra_keys: tuple[Any, ...] | None
     block_size: int | None = None
+    lookahead_token_ids: list[int] | None = None
 
 
 @dataclass
@@ -205,8 +205,11 @@ class SimpleCPUOffloadScheduler:
         )
 
         spec_config = vllm_config.speculative_config
+        num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         use_eagle_block_drop = (
-            spec_config is not None and spec_config.use_eagle_block_drop()
+            spec_config is not None
+            and spec_config.use_eagle_block_drop()
+            and not num_hash_lookahead_tokens
         )
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
@@ -221,6 +224,7 @@ class SimpleCPUOffloadScheduler:
             hash_block_size=self.hash_block_size,
             allow_partial_hash_hits=not lazy_offload,
             num_prefill_lookahead=vllm_config.num_prefill_lookahead_tokens,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
         self.group_block_sizes = self.cpu_coordinator.group_block_sizes
         # FA group's own resolved block_size; divides scheduler_block_size (the
@@ -891,6 +895,9 @@ class SimpleCPUOffloadScheduler:
             cacheable_tokens = self.cpu_coordinator.get_num_cacheable_tokens(
                 confirmed_tokens, g
             )
+            cacheable_tokens = min(
+                cacheable_tokens, len(request.block_hashes) * self.hash_block_size
+            )
             ready = min(len(group_gpu_ids), cacheable_tokens // group_size)
             resolved_hashes = resolve_block_hashes(
                 request.block_hashes, self.hash_block_size, group_size
@@ -932,8 +939,10 @@ class SimpleCPUOffloadScheduler:
                         else maybe_convert_block_hash(resolved_hashes[i - 1])
                     )
                     lora_req = request.lora_request
-                    extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                        request, token_start, token_end, curr_mm_idx
+                    extra_keys, curr_mm_idx = (
+                        self.cpu_block_pool._generate_event_extra_keys(
+                            request, token_start, token_end, curr_mm_idx
+                        )
                     )
                     meta_by_hash = {
                         primary_block_hash: BlockStoreMeta(
@@ -944,6 +953,13 @@ class SimpleCPUOffloadScheduler:
                             lora_id=lora_req.adapter_id if lora_req else None,
                             lora_name=lora_req.name if lora_req else None,
                             extra_keys=extra_keys,
+                            lookahead_token_ids=(
+                                self.cpu_block_pool._lookahead_token_ids(
+                                    request, token_end
+                                )
+                                if self.cpu_block_pool.num_hash_lookahead_tokens
+                                else None
+                            ),
                         )
                     }
                     first_hash_idx = token_start // self.hash_block_size
@@ -957,7 +973,7 @@ class SimpleCPUOffloadScheduler:
                         hash_start = hash_idx * self.hash_block_size
                         hash_end = hash_start + self.hash_block_size
                         secondary_extra_keys, secondary_mm_idx = (
-                            generate_block_hash_extra_keys(
+                            self.cpu_block_pool._generate_event_extra_keys(
                                 request,
                                 hash_start,
                                 hash_end,
@@ -977,6 +993,13 @@ class SimpleCPUOffloadScheduler:
                             lora_name=lora_req.name if lora_req else None,
                             extra_keys=secondary_extra_keys,
                             block_size=self.hash_block_size,
+                            lookahead_token_ids=(
+                                self.cpu_block_pool._lookahead_token_ids(
+                                    request, hash_end
+                                )
+                                if self.cpu_block_pool.num_hash_lookahead_tokens
+                                else None
+                            ),
                         )
                     block_meta.append(meta_by_hash)
 
@@ -1187,6 +1210,13 @@ class SimpleCPUOffloadScheduler:
                                 get_kv_cache_spec_sliding_window(spec)
                             ),
                             locality="LOCAL",
+                            lookahead_token_ids=(
+                                [meta.lookahead_token_ids]
+                                if token_ids
+                                and meta is not None
+                                and meta.lookahead_token_ids is not None
+                                else None
+                            ),
                         )
                     )
 
@@ -1306,8 +1336,15 @@ class SimpleCPUOffloadScheduler:
         if not self.cpu_coordinator.enable_partial_hash_hits:
             return None
         assert self._gpu_block_pool is not None
+        manager = self.cpu_coordinator.single_type_managers[self.fa_gidx]
+        token_limit = (
+            request.num_prompt_tokens
+            if manager.use_eagle
+            else request.num_prompt_tokens - 1
+        )
         boundary_tokens = (
-            request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+            min(token_limit // self.hash_block_size, len(request.block_hashes))
+            * self.hash_block_size
         )
         if boundary_tokens == 0 or boundary_tokens > request.num_computed_tokens:
             return None

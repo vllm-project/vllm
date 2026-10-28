@@ -264,8 +264,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
         assert ktcs is not None
         ret: list[tuple[type[KVConnectorBaseType], VllmConfig]] = []
+        num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         for ktc in ktcs:
             temp_config = copy.copy(vllm_config)
+            if not num_hash_lookahead_tokens and vllm_config.speculative_config:
+                temp_config.speculative_config = copy.copy(
+                    vllm_config.speculative_config
+                )
+                temp_config.speculative_config.disable_lookahead_block_hashes = True
             engine_id = ktc.get("engine_id", vllm_config.kv_transfer_config.engine_id)
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id

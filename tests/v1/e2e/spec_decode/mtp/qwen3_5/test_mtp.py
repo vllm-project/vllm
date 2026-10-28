@@ -46,10 +46,14 @@ def test_mtp_correctness(
     )
 
 
+@pytest.mark.parametrize(
+    "connector", ["OffloadingConnector", "SimpleCPUOffloadConnector"]
+)
 @single_gpu_only
 def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner,
+    connector,
 ):
     """Enabling a connector preserves MTP local-cache hits and model outputs."""
     aligned_page_size = 544
@@ -72,7 +76,7 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
             "max_model_len": 2048,
         },
         kv_transfer_config={
-            "kv_connector": "OffloadingConnector",
+            "kv_connector": connector,
             "kv_role": "kv_both",
             "kv_connector_extra_config": {
                 "cpu_bytes_to_use": 512 << 20,
