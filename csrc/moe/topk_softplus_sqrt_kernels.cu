@@ -739,6 +739,209 @@ void topkGatingSoftplusSqrtLauncherHelper(
     }
 #endif
 
+#ifdef USE_ROCM
+  #if defined(__HIPCC__) && \
+      (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+    #define VLLM_TOPK_SOFTPLUS_SQRT_DPP
+  #endif
+
+// One step of a wave64 argmax over (order-preserving score bits, ~expert).
+// The larger pair wins, so the lower expert id wins ties. After the sixth
+// step lane 63 holds the wave maximum.
+template <int DPP_CTRL, int XOR_MASK>
+__device__ __forceinline__ void wave64ArgmaxStep(unsigned& hi, unsigned& lo) {
+  #ifdef VLLM_TOPK_SOFTPLUS_SQRT_DPP
+  const unsigned other_hi =
+      __builtin_amdgcn_update_dpp(0u, hi, DPP_CTRL, 0xF, 0xF, false);
+  const unsigned other_lo =
+      __builtin_amdgcn_update_dpp(0u, lo, DPP_CTRL, 0xF, 0xF, false);
+  #else
+  const unsigned other_hi = __shfl_xor(hi, XOR_MASK);
+  const unsigned other_lo = __shfl_xor(lo, XOR_MASK);
+  #endif
+  const bool take = other_hi > hi || (other_hi == hi && other_lo > lo);
+  hi = take ? other_hi : hi;
+  lo = take ? other_lo : lo;
+}
+
+__device__ __forceinline__ float softplusSqrt(float x) {
+  float v = x > 20.f ? x : __logf(1.f + __expf(x));
+  v = sqrtf(v);
+  return isnan(v) ? 0.f : v;
+}
+
+// Same contract as topkGatingSoftplusSqrt for fp32 input and a compile-time
+// k, except that the weights are the raw scores rather than (score + bias) -
+// bias. The generic kernel keeps its row in a dynamically indexed private
+// array (scratch on ROCm) and reduces through LDS shuffles; here one wave
+// owns one row, the k loop is unrolled, and the argmax reduces in DPP with a
+// wave-uniform winner.
+template <int NUM_EXPERTS, int K, bool USE_HASH, typename IndType,
+          typename HashIndType>
+__launch_bounds__(64) __global__
+    void topkSoftplusSqrtWave64(const float* __restrict__ input,
+                                float* __restrict__ output,
+                                IndType* __restrict__ indices,
+                                int* __restrict__ source_rows,
+                                const int num_rows, const bool renormalize,
+                                const float routed_scaling_factor,
+                                const float* __restrict__ correction_bias,
+                                const HashIndType* __restrict__ input_ids,
+                                const HashIndType* __restrict__ tid2eid,
+                                const bool* __restrict__ is_padding,
+                                const float* __restrict__ bias_vl,
+                                const int64_t image_sentinel_lo) {
+  constexpr int VEC = 2;
+  constexpr int NUM_VEC = NUM_EXPERTS / (64 * VEC);
+  constexpr int VPT = NUM_VEC * VEC;
+  static_assert(NUM_EXPERTS % (64 * VEC) == 0 && K <= 64, "");
+  const int lane = threadIdx.x;
+  const int row = blockIdx.x;
+  const bool is_pad_row = is_padding != nullptr && is_padding[row];
+  const int64_t token_id =
+      input_ids != nullptr ? load_index_as_int64(input_ids, row) : 0;
+  const bool use_vl_bias = bias_vl != nullptr && image_sentinel_lo > 0 &&
+                           token_id >= image_sentinel_lo &&
+                           token_id < image_sentinel_lo + 5;
+  const float* row_bias = use_vl_bias ? bias_vl : correction_bias;
+  const float* row_ptr = input + static_cast<int64_t>(row) * NUM_EXPERTS;
+  const int64_t out_offset = static_cast<int64_t>(row) * K + lane;
+
+  if (USE_HASH && !use_vl_bias) {
+    int expert = 0;
+    float weight = 0.f;
+    if (lane < K) {
+      expert =
+          static_cast<int>(load_index_as_int64(tid2eid, token_id * K + lane));
+      weight = is_pad_row ? 0.f : softplusSqrt(row_ptr[expert]);
+    }
+    float scale = routed_scaling_factor;
+    if (renormalize) {
+      float selected_sum = 0.f;
+  #pragma unroll
+      for (int k = 0; k < K; ++k) {
+        selected_sum += __int_as_float(
+            __builtin_amdgcn_readlane(__float_as_int(weight), k));
+      }
+      scale /= selected_sum > 0.f ? selected_sum : 1.f;
+    }
+    if (lane < K) {
+      output[out_offset] = weight * scale;
+      indices[out_offset] =
+          !is_pad_row ? static_cast<IndType>(expert) : static_cast<IndType>(-1);
+    }
+    return;
+  }
+
+  // Pad rows score 0 everywhere and skip the bias, like the generic kernel.
+  float score[VPT], raw[VPT];
+  #pragma unroll
+  for (int v = 0; v < NUM_VEC; ++v) {
+    const int col = v * 64 * VEC + lane * VEC;
+    float2 x = make_float2(0.f, 0.f), b = make_float2(0.f, 0.f);
+    if (!is_pad_row) {
+      x = *reinterpret_cast<const float2*>(row_ptr + col);
+      if (row_bias != nullptr) {
+        b = *reinterpret_cast<const float2*>(row_bias + col);
+      }
+    }
+    raw[v * VEC] = is_pad_row ? 0.f : softplusSqrt(x.x);
+    raw[v * VEC + 1] = is_pad_row ? 0.f : softplusSqrt(x.y);
+    score[v * VEC] = raw[v * VEC] + b.x;
+    score[v * VEC + 1] = raw[v * VEC + 1] + b.y;
+  }
+
+  int selected[K];
+  float selected_raw[K];
+  float selected_sum = 0.f;
+  #pragma unroll
+  for (int k = 0; k < K; ++k) {
+    unsigned hi = 0, lo = 0;
+  #pragma unroll
+    for (int i = 0; i < VPT; ++i) {
+      const int col = (i / VEC) * 64 * VEC + lane * VEC + i % VEC;
+      const unsigned bits = __float_as_uint(score[i]);
+      const unsigned h = (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+      const unsigned l = ~static_cast<unsigned>(col);
+      const bool take = h > hi || (h == hi && l > lo);
+      hi = take ? h : hi;
+      lo = take ? l : lo;
+    }
+    wave64ArgmaxStep<0xB1, 1>(hi, lo);    // quad_perm [1,0,3,2]
+    wave64ArgmaxStep<0x4E, 2>(hi, lo);    // quad_perm [2,3,0,1]
+    wave64ArgmaxStep<0x141, 4>(hi, lo);   // row_half_mirror
+    wave64ArgmaxStep<0x140, 8>(hi, lo);   // row_mirror
+    wave64ArgmaxStep<0x142, 16>(hi, lo);  // row_bcast:15
+    wave64ArgmaxStep<0x143, 32>(hi, lo);  // row_bcast:31
+    const int expert = ~__builtin_amdgcn_readlane(static_cast<int>(lo), 63);
+    selected[k] = expert;
+    const int slot = (expert / (64 * VEC)) * VEC + expert % VEC;
+    float mine = raw[0];
+  #pragma unroll
+    for (int i = 1; i < VPT; ++i) {
+      mine = slot == i ? raw[i] : mine;
+    }
+    selected_raw[k] = __int_as_float(__builtin_amdgcn_readlane(
+        __float_as_int(mine), (expert % (64 * VEC)) / VEC));
+    selected_sum += selected_raw[k];
+  #pragma unroll
+    for (int i = 0; i < VPT; ++i) {
+      const int col = (i / VEC) * 64 * VEC + lane * VEC + i % VEC;
+      score[i] = col == expert ? -INFINITY : score[i];
+    }
+  }
+
+  if (lane < K) {
+    float scale = routed_scaling_factor;
+    if (renormalize) {
+      scale /= selected_sum > 0.f ? selected_sum : 1.f;
+    }
+    float weight = selected_raw[0];
+    int expert = selected[0];
+  #pragma unroll
+    for (int k = 1; k < K; ++k) {
+      weight = lane == k ? selected_raw[k] : weight;
+      expert = lane == k ? selected[k] : expert;
+    }
+    output[out_offset] = weight * scale;
+    indices[out_offset] =
+        !is_pad_row ? static_cast<IndType>(expert) : static_cast<IndType>(-1);
+    source_rows[out_offset] = lane * num_rows + row;
+  }
+}
+
+template <typename IndType, typename HashIndType>
+void launchTopkSoftplusSqrtWave64(
+    const float* input, float* output, IndType* indices, int* source_rows,
+    const int num_rows, const int num_experts, const bool renormalize,
+    double routed_scaling_factor, const float* correction_bias,
+    const bool use_hash, const HashIndType* input_ids,
+    const HashIndType* tid2eid, cudaStream_t stream, const bool* is_padding,
+    const float* bias_vl, int64_t image_sentinel_lo) {
+  if (num_rows == 0) return;
+  const float scale = static_cast<float>(routed_scaling_factor);
+  #define LAUNCH_TOPK_WAVE64(NUM_EXPERTS)                                      \
+    DISPATCH_HASH(use_hash, USE_HASH, {                                        \
+      topkSoftplusSqrtWave64<NUM_EXPERTS, 6, USE_HASH, IndType, HashIndType>   \
+          <<<num_rows, 64, 0, stream>>>(                                       \
+              input, output, indices, source_rows, num_rows, renormalize,      \
+              scale, correction_bias, input_ids, tid2eid, is_padding, bias_vl, \
+              image_sentinel_lo);                                              \
+    })
+  switch (num_experts) {
+    case 256:
+      LAUNCH_TOPK_WAVE64(256);
+      break;
+    case 384:
+      LAUNCH_TOPK_WAVE64(384);
+      break;
+    default:
+      LAUNCH_TOPK_WAVE64(512);
+  }
+  #undef LAUNCH_TOPK_WAVE64
+}
+#endif
+
 template <typename IndType, typename InputType, typename HashIndType = IndType>
 void topkGatingSoftplusSqrtKernelLauncher(
     const InputType* gating_output, float* topk_weights, IndType* topk_indices,
@@ -755,6 +958,18 @@ void topkGatingSoftplusSqrtKernelLauncher(
       launchDsv4HashTopk<IndType, HashIndType>(
           gating_output, topk_weights, topk_indices, num_tokens, num_experts,
           routed_scaling_factor, input_ids, tid2eid, stream, is_padding,
+          bias_vl, image_sentinel_lo);
+      return;
+    }
+  }
+#else
+  if constexpr (std::is_same_v<InputType, float>) {
+    if (WARP_SIZE == 64 && topk == 6 &&
+        (num_experts == 256 || num_experts == 384 || num_experts == 512)) {
+      launchTopkSoftplusSqrtWave64<IndType, HashIndType>(
+          gating_output, topk_weights, topk_indices, token_expert_indices,
+          num_tokens, num_experts, renormalize, routed_scaling_factor,
+          correction_bias, use_hash, input_ids, tid2eid, stream, is_padding,
           bias_vl, image_sentinel_lo);
       return;
     }
