@@ -4,7 +4,7 @@
 from dataclasses import fields
 from types import SimpleNamespace
 from typing import TypeVar
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 import pytest
 import torch
@@ -104,7 +104,6 @@ def _make_builder(
     mamba_block_size: int = BLOCK_SIZE,
     prefix_match_unit: int | None = None,
     use_eagle: bool = False,
-    disable_eagle_block_drop: bool = False,
     cache_hit_alignment_tokens: int | None = None,
     hash_block_size: int | None = None,
     num_hash_lookahead_tokens: int = 0,
@@ -120,9 +119,6 @@ def _make_builder(
         )
         if use_eagle:
             vllm_config.speculative_config.method = "eagle3"
-            vllm_config.speculative_config.disable_eagle_block_drop = (
-                disable_eagle_block_drop
-            )
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
@@ -135,27 +131,31 @@ def _make_builder(
     vllm_config.cache_config.cache_hit_alignment_tokens = (
         cache_hit_alignment_tokens or hash_block_size
     )
-    if vllm_config.speculative_config is not None:
-        vllm_config.speculative_config.disable_lookahead_block_hashes = (
-            not num_hash_lookahead_tokens
-        )
-    assert vllm_config.num_hash_lookahead_tokens == num_hash_lookahead_tokens
-    builder = builder_cls(
-        kv_cache_spec=MambaSpec(
-            block_size=mamba_block_size,
-            shapes=((16, 64),),
-            dtypes=(torch.float16,),
-            mamba_cache_mode=mamba_cache_mode,
-            num_speculative_blocks=(0 if use_recoverssm else num_speculative_tokens),
-            num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
-            prefill_checkpoint_alignment=(
-                16 if num_prefill_checkpoint_blocks > 0 else None
+    # Builders read the hash lookahead at construction; pin it for this test.
+    with patch.object(
+        type(vllm_config),
+        "num_hash_lookahead_tokens",
+        new_callable=PropertyMock,
+        return_value=num_hash_lookahead_tokens,
+    ):
+        builder = builder_cls(
+            kv_cache_spec=MambaSpec(
+                block_size=mamba_block_size,
+                shapes=((16, 64),),
+                dtypes=(torch.float16,),
+                mamba_cache_mode=mamba_cache_mode,
+                num_speculative_blocks=(
+                    0 if use_recoverssm else num_speculative_tokens
+                ),
+                num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
+                prefill_checkpoint_alignment=(
+                    16 if num_prefill_checkpoint_blocks > 0 else None
+                ),
             ),
-        ),
-        layer_names=["layer.0"],
-        vllm_config=vllm_config,
-        device=device,
-    )
+            layer_names=["layer.0"],
+            vllm_config=vllm_config,
+            device=device,
+        )
     if use_recoverssm:
         assert isinstance(builder, KimiK3KDAMetadataBuilder)
         builder.recoverssm_context = Mock()
@@ -225,7 +225,6 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
             parallel_drafting=False,
             max_num_new_slots_for_drafting=0,
             enable_adaptive_verification=False,
-            use_eagle_block_drop=Mock(return_value=False),
         ),
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.NONE,
@@ -378,24 +377,20 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
 @pytest.mark.parametrize(
     (
         "seq_len",
-        "disable_eagle_block_drop",
         "num_hash_lookahead_tokens",
         "prefix_match_unit",
         "expected_offset",
     ),
     [
-        (100, False, 0, 16, 80),
-        (100, True, 0, 16, 96),
-        (100, False, 1, 16, 96),
-        (100, False, 0, 8, None),
-        (96, False, 0, 16, 80),
-        (96, True, 0, 16, 80),
+        (100, 4, 16, 96),
+        (100, 5, 16, 80),
+        (92, 1, 8, None),
+        (96, 1, 16, 80),
     ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     seq_len: int,
-    disable_eagle_block_drop: bool,
     num_hash_lookahead_tokens: int,
     prefix_match_unit: int,
     expected_offset: int | None,
@@ -419,7 +414,6 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         mamba_block_size=64,
         prefix_match_unit=prefix_match_unit,
         use_eagle=True,
-        disable_eagle_block_drop=disable_eagle_block_drop,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         device=device,
     )

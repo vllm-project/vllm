@@ -1193,9 +1193,6 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         ),
         pytest.param({"enable_prefix_caching": False}, 0, id="no-prefix-caching"),
         pytest.param({"num_prefill_lookahead_tokens": 2}, 2, id="multi-module-mtp"),
-        pytest.param(
-            {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
-        ),
         pytest.param({"kv_connector": True}, 1, id="kv-connector"),
         pytest.param({"method": None}, 0, id="no-speculation"),
     ],
@@ -1213,9 +1210,6 @@ def test_num_hash_lookahead_tokens(
         speculative_config = SpeculativeConfig(
             model="ngram",
             num_speculative_tokens=num_lookahead,
-            disable_lookahead_block_hashes=overrides.get(
-                "disable_lookahead_block_hashes", False
-            ),
         )
         speculative_config.method = method
         if num_lookahead > 1 or method == "dspark":
@@ -1494,22 +1488,6 @@ def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
     assert kv_cache_utils.resolve_dcp_kv_block_size(merged, 4) == 16
     with pytest.raises(AssertionError):
         type(draft).merge([draft, replace(draft, dcp_sharded=True)])
-
-
-@pytest.mark.parametrize(
-    "target",
-    [
-        new_kv_cache_spec(),
-        new_mla_spec(),
-        SinkFullAttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32, sink_len=4
-        ),
-    ],
-)
-def test_draft_layer_tag_is_not_part_of_the_cache_format(target):
-    draft = replace(target, is_draft=True)
-    assert draft == target and hash(draft) == hash(target)
-    assert type(target).merge([target, draft]) == target
 
 
 @pytest.mark.parametrize(

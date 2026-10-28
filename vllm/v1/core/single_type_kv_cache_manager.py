@@ -37,7 +37,7 @@ from vllm.v1.kv_cache_interface import (
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
-    get_mamba_prefill_checkpoint_position,
+    get_reusable_prefix_length,
     is_mamba_prefill_checkpoint_valid,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -138,12 +138,6 @@ class SingleTypeKVCacheManager(ABC):
 
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
-
-        # Whether this group's prefix-cache hits drop the EAGLE/MTP lookahead
-        # block. Only consulted by managers whose hit logic is sparse within an
-        # aligned segment (SWA). Initialized lazily by the coordinator after
-        # determining the attention groups.
-        self.use_eagle = False
         # ``CacheConfig.enable_mamba_shared_prefix_checkpoint``, narrowed and set
         # by ``KVCacheManager``; only an EAGLE Mamba "align" group ever gets it.
         self.shared_prefix_checkpoint = False
@@ -516,20 +510,12 @@ class SingleTypeKVCacheManager(ABC):
         reachable_boundaries = [*replay_boundaries]
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
-            if self.use_eagle:
-                # A sibling that diverges right after the junction cannot use
-                # the block past it as the EAGLE peek, so its hit lands one
-                # block lower.
-                reachable_boundaries.append(
-                    request.shared_prefix_boundary - self.block_size
-                )
 
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
             end_block=num_full_blocks,
             alignment_tokens=self.cache_hit_alignment_tokens,
             kv_cache_spec=self.kv_cache_spec,
-            use_eagle=self.use_eagle,
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
             dcp_world_size=self.dcp_world_size,
@@ -553,7 +539,6 @@ class SingleTypeKVCacheManager(ABC):
         end_block: int,
         alignment_tokens: int | None,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
@@ -568,7 +553,7 @@ class SingleTypeKVCacheManager(ABC):
         retained; the base (dense) policy ignores them.
         ``final_segment_end_block`` is the exclusive end of the request's final
         segment. It may be later than ``end_block`` while prefill is still in
-        progress. Non-EAGLE sparse managers may keep its reachable tail. The
+        progress. Sparse managers may keep its reachable tail. The
         base policy already keeps every block, so it ignores this value.
         """
         return None
@@ -612,7 +597,6 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -621,14 +605,6 @@ class SingleTypeKVCacheManager(ABC):
         `max_length`. The prefix should be a common prefix hit for all the
         kv cache groups in `kv_cache_group_ids`. If no cache hit is found,
         return an empty list.
-        If eagle is enabled, drop the last matched block to force recompute the
-        last block to get the required hidden states for eagle drafting head.
-        For multi-module MTP, this recompute also rewrites the dropped block's
-        draft-layer KVs, which depend on up to num_speculative_tokens - 1
-        tokens past the matched prefix (i.e. on the cache writer's
-        continuation, which the block hash does not cover); the coordinator
-        asserts the block size covers that window.
-        Need to be customized for each attention type.
 
         Args:
             block_hashes: The block hashes of the request.
@@ -636,10 +612,6 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
-            drop_eagle_block: Whether to drop the last matched block for EAGLE/MTP.
-                Always False for non-EAGLE/MTP groups, but can be False for EAGLE/MTP
-                groups too if the last block is already dropped (e.g., in a
-                convergence loop in `find_longest_cache_hit`).
             alignment_tokens: The returned cache hit length (in tokens) should
                 be a multiple of this value (in tokens). By default, it should
                 be set to the block_size.
@@ -752,7 +724,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -827,15 +798,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                 hit_length = (fine_idx + 1) * alignment_tokens
                 break
 
-        # Eagle needs the tokens right before the generation point recomputed:
-        # drop one hash unit when fine-grained (the tail block's KV is
-        # append-only, so it still covers the reduced length), else one cache
-        # block.
-        if drop_eagle_block and hit_length > 0:
-            hit_length -= min(alignment_tokens, block_size)
-        # Round down to the alignment; a no-op when fine-grained (hits land on
-        # hash boundaries by construction) and when alignment_tokens ==
-        # block_size. Then trim blocks past the new tail.
         hit_length -= hit_length % alignment_tokens
         num_blocks = cdiv(hit_length, block_size)
         for computed in computed_blocks:
@@ -873,18 +835,15 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block are intentionally skipped.
         """
         hash_block_size = self.block_pool.hash_block_size
-        # A resend matches at most `prompt_len - 1` tokens, but EAGLE lookups
-        # read the whole prompt before dropping a hash unit.
-        token_limit = (
-            request.num_prompt_tokens
-            if self.use_eagle
-            else request.num_prompt_tokens - 1
+        boundary_tokens = min(
+            get_reusable_prefix_length(
+                request.num_prompt_tokens,
+                hash_block_size,
+                num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+            ),
+            len(request.block_hashes) * hash_block_size,
         )
-        boundary_tokens = (
-            min(token_limit // hash_block_size, len(request.block_hashes))
-            * hash_block_size
-        )
-        if boundary_tokens == 0 or boundary_tokens > num_tokens:
+        if boundary_tokens <= 0 or boundary_tokens > num_tokens:
             return
         if boundary_tokens % self.block_size == 0:
             return
@@ -958,19 +917,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         self.extra_retained_tokens = kv_cache_spec.extra_retained_tokens
 
     @classmethod
-    def _contiguous_blocks_for_hit(
-        cls, window_size: int, block_size: int, use_eagle: bool
-    ) -> int:
-        blocks = cdiv(window_size - 1, block_size)
-        if use_eagle:
-            # Need to drop the last matched block if eagle is enabled. For
-            # sliding window layer, we achieve this by increasing the number of
-            # contiguous blocks needed for prefix cache hit by one and dropping
-            # the last matched block.
-            blocks += 1
-        return blocks
-
-    @classmethod
     def find_longest_cache_hit(
         cls,
         block_hashes: BlockHashList,
@@ -978,7 +924,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -1000,8 +945,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
 
         # The number of contiguous blocks needed for a prefix cache hit.
-        sliding_window_contiguous_blocks = cls._contiguous_blocks_for_hit(
-            kv_cache_spec.sliding_window, kv_cache_spec.block_size, drop_eagle_block
+        sliding_window_contiguous_blocks = cdiv(
+            kv_cache_spec.sliding_window - 1,
+            kv_cache_spec.block_size,
         )
 
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
@@ -1024,10 +970,12 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             ):
                 # Skip prefix matching check if the block is not aligned with
                 # `alignment_tokens`.
-                if num_contiguous_blocks == 0 and block_size != alignment_tokens:
-                    post_pop_blocks = i if drop_eagle_block else i + 1
-                    if (post_pop_blocks * block_size) % alignment_tokens != 0:
-                        continue
+                if (
+                    num_contiguous_blocks == 0
+                    and block_size != alignment_tokens
+                    and ((i + 1) * block_size) % alignment_tokens != 0
+                ):
+                    continue
                 # Add the cached block to the computed blocks.
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed[i] = cached
@@ -1053,18 +1001,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             ):
                 for computed in computed_blocks:
                     computed.pop()
-        if drop_eagle_block and computed_blocks[0]:
-            for computed in computed_blocks:
-                computed.pop()
-            # Re-align after eagle pop: the pop may break the alignment
-            # when block_size != alignment_tokens (hybrid models with
-            # different page sizes, e.g. Gemma4).
-            while (
-                block_size != alignment_tokens
-                and len(computed_blocks[0]) * block_size % alignment_tokens != 0
-            ):
-                for computed in computed_blocks:
-                    computed.pop()
         hit_length = len(computed_blocks[0]) * block_size
         return computed_blocks, hit_length
 
@@ -1075,7 +1011,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         end_block: int,
         alignment_tokens: int | None,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
@@ -1095,16 +1030,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # drops a block that could serve a hit.
             return None
 
-        # Contiguous blocks a hit needs at a boundary (incl. the EAGLE peek).
-        need = cls._contiguous_blocks_for_hit(
-            window_size=kv_cache_spec.sliding_window,
-            block_size=block_size,
-            use_eagle=use_eagle,
-        )
-        # The matched run's right edge sits on the aligned boundary block when
-        # EAGLE peeks one block past it (shift=1), otherwise on the last block
-        # before the boundary (shift=0).
-        shift = 1 if use_eagle else 0
+        need = cdiv(kv_cache_spec.sliding_window - 1, block_size)
 
         mask = [False] * (end_block - start_block)
 
@@ -1123,10 +1049,10 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 # Every block is reachable; cache them all.
                 return None
             for i in range(start_block, end_block):
-                if i >= shift and (i - shift) % per_segment >= per_segment - need:
+                if i % per_segment >= per_segment - need:
                     mask[i - start_block] = True
 
-            if final_segment_end_block is not None and not use_eagle:
+            if final_segment_end_block is not None:
                 final_segment_size = final_segment_end_block % per_segment
                 if final_segment_size:
                     final_segment_start = final_segment_end_block - final_segment_size
@@ -1144,7 +1070,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         if retention_interval is not None:
             for boundary_tokens in reachable_boundaries:
                 aligned = boundary_tokens // alignment_tokens * alignment_tokens
-                end = aligned // block_size + shift
+                end = aligned // block_size
                 for j in range(max(start_block, end - need), min(end_block, end)):
                     mask[j - start_block] = True
 
@@ -1240,7 +1166,6 @@ class CircularBufferManager(FullAttentionManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -1291,7 +1216,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -1321,7 +1245,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
-            drop_eagle_block: Whether to drop the last matched block for EAGLE/MTP.
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
             alignment_tokens: The returned cache hit length (in tokens) should
@@ -1334,9 +1257,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
             "ChunkedLocalAttentionManager can only be used for "
             "chunked local attention groups"
-        )
-        assert drop_eagle_block is False, (
-            "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
         assert pcp_world_size == 1, "PCP not support chunked local attn now."
@@ -1452,8 +1372,6 @@ class MambaManager(SingleTypeKVCacheManager):
             self.mamba_cache_mode == "align"
             and kv_cache_spec.num_prefill_checkpoint_blocks > 0
         )
-        # Mamba checkpoints follow Eagle's global replay boundary.
-        self.drop_eagle_checkpoint_block = False
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
         if self.mamba_cache_mode == "align":
             # Mapping from request ID to the index of the block
@@ -1479,7 +1397,6 @@ class MambaManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -1557,7 +1474,6 @@ class MambaManager(SingleTypeKVCacheManager):
         end_block: int,
         alignment_tokens: int | None,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
         dcp_world_size: int = 1,
@@ -1582,9 +1498,7 @@ class MambaManager(SingleTypeKVCacheManager):
         block_size = kv_cache_spec.block_size
         mask = [False] * (end_block - start_block)
 
-        # (1) Segment-boundary states. A Mamba hit needs exactly the single
-        # state block ending on the boundary (no window, and draft models have
-        # no mamba layers, so no eagle shift). Block ``i`` ends at token
+        # (1) Segment-boundary states. Block ``i`` ends at token
         # ``(i + 1) * block_size``.
         segment_tokens = None if retention_interval == 0 else retention_interval
         if segment_tokens is not None:
@@ -1763,10 +1677,9 @@ class MambaManager(SingleTypeKVCacheManager):
             # The helper returns a boundary strictly below its input, so every
             # chunk has one; under sparse retention only the prefill-end chunk's
             # is kept, so `prefill_end` skips reserving blocks for the others.
-            checkpoint_position = get_mamba_prefill_checkpoint_position(
+            checkpoint_position = get_reusable_prefix_length(
                 num_tokens,
                 self.cache_hit_alignment_tokens,
-                self.drop_eagle_checkpoint_block,
                 num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
             )
             if not self._needs_internal_checkpoint(
@@ -2047,14 +1960,10 @@ class MambaManager(SingleTypeKVCacheManager):
             # The prompt's final chunk caches only up to its last full block,
             # so ``num_tokens < num_prompt_tokens`` holds there too; its
             # checkpoint is the prompt's reusable boundary, not a transient one.
-            is_prompt_checkpoint = (
-                checkpoint_position
-                == get_mamba_prefill_checkpoint_position(
-                    request.num_prompt_tokens,
-                    self.cache_hit_alignment_tokens,
-                    self.drop_eagle_checkpoint_block,
-                    num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
-                )
+            is_prompt_checkpoint = checkpoint_position == get_reusable_prefix_length(
+                request.num_prompt_tokens,
+                self.cache_hit_alignment_tokens,
+                num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
             )
             is_retained_checkpoint = False
             if checkpoint_position % self.block_size == 0:
@@ -2064,7 +1973,6 @@ class MambaManager(SingleTypeKVCacheManager):
                     block_idx + 1,
                     self.cache_hit_alignment_tokens,
                     self.kv_cache_spec,
-                    self.drop_eagle_checkpoint_block,
                     retention_interval=retention_interval,
                 )
                 is_retained_checkpoint = retained is None or retained[0]
@@ -2089,10 +1997,9 @@ class MambaManager(SingleTypeKVCacheManager):
             )
         if num_tokens <= 0 or num_tokens % hash_block_size != 0:
             return None
-        latest_prompt_hash_boundary = get_mamba_prefill_checkpoint_position(
+        latest_prompt_hash_boundary = get_reusable_prefix_length(
             request.num_prompt_tokens,
             hash_block_size,
-            self.drop_eagle_checkpoint_block,
             num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
         )
         # The junction is the other position a sibling resumes at: where one was
@@ -2184,7 +2091,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -2403,7 +2309,6 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,

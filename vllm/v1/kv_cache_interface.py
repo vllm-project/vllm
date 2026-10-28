@@ -1185,24 +1185,17 @@ class MambaSpec(KVCacheSpec):
         )
 
 
-def get_mamba_prefill_checkpoint_position(
+def get_reusable_prefix_length(
     num_tokens: int,
-    hash_block_size: int,
-    drop_eagle_block: bool,
+    alignment_tokens: int = 1,
     num_hash_lookahead_tokens: int = 0,
 ) -> int:
-    """Return the reusable Mamba checkpoint boundary for a prefill."""
-    # Leave tokens for logits recomputation and the checkpoint's hash.
-    # EAGLE's block drop already leaves tokens to recompute.
-    proof_limit = (
-        num_tokens
-        if drop_eagle_block
-        else num_tokens - max(1, num_hash_lookahead_tokens)
-    )
-    checkpoint_position = proof_limit // hash_block_size * hash_block_size
-    if drop_eagle_block:
-        checkpoint_position -= hash_block_size
-    return max(checkpoint_position, 0)
+    """Bound prefix reuse by known tokens, reserving logits and hash lookahead.
+
+    This does not establish that the corresponding KV has been computed or cached.
+    """
+    token_limit = max(0, num_tokens - max(1, num_hash_lookahead_tokens))
+    return token_limit // alignment_tokens * alignment_tokens
 
 
 def is_mamba_prefill_checkpoint_valid(
