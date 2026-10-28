@@ -105,6 +105,19 @@ vllm serve google/gemma-4-31B-it \
     --attention-backend TRITON_FLASHINFER
 ```
 
+### Triton/FlashInfer DiffKV Composite
+
+On SM12x (RTX 50 series, RTX PRO 6000, DGX Spark), where FA3/FA4 are not
+available, MiMo-V2 full-attention layers (K/V head sizes 192/128) select
+`TRITON_FLASHINFER_DIFFKV`. Batches containing a prefill run FlashInfer's
+paged prefill directly on the `TRITON_ATTN_DIFFKV` packed cache. Decode-only
+and verification-only batches, and CUDA graph capture, stay on Triton, so full
+CUDA graphs cover uniform batches only. Sliding-window layers, attention sinks, and FP8 KV cache
+keep `TRITON_ATTN_DIFFKV`.
+
+Set `VLLM_DIFFKV_FLASHINFER_PREFILL=0` to use `TRITON_ATTN_DIFFKV` for all
+layers.
+
 ### Manual Selection
 
 When you explicitly set a backend via `--attention-backend` or `AttentionConfig`:
