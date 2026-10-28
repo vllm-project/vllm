@@ -1089,10 +1089,15 @@ def test_preschedule_respects_request_cache_read_limit(cache_limit):
         request = Request(
             "bounded",
             [1] * 48,
-            SamplingParams(prompt_logprobs=1, prompt_logprob_start=cache_limit),
+            SamplingParams(
+                prompt_logprobs=1,
+                prompt_logprob_start=cache_limit,
+                skip_reading_prefix_cache=False,
+            ),
             None,
         )
         request.block_hashes = [b"h0", b"h1", b"h2"]
+        assert request.prefix_cache_hit_limit == cache_limit
         assert request.skip_reading_external_kv
         assert connector.on_preschedule_request(request) is None
         assert all(sock.send_multipart.call_count == 0 for sock in sockets)
