@@ -50,12 +50,6 @@ def _r3_capture_state(worker):
     )
 
 
-def _profile_r3_again(worker):
-    before = _r3_capture_state(worker)
-    worker.model_runner.profile_run()
-    assert _r3_capture_state(worker) == before
-
-
 def _has_r3_graphs(worker):
     return bool(worker.model_runner.cudagraph_manager.graphs)
 
@@ -73,7 +67,7 @@ def _has_r3_graphs(worker):
 def test_routed_experts_capture_survives_sleep_and_reload(
     monkeypatch, tmp_path, eager, tp, kv_bytes
 ):
-    """R3 buffers and callbacks survive profiling, sleep/wake and weight reload."""
+    """R3 buffers and callbacks survive sleep/wake and weight reload."""
     from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
@@ -116,7 +110,6 @@ def test_routed_experts_capture_survives_sleep_and_reload(
         },
     )
     state = llm.collective_rpc(_r3_capture_state)
-    llm.collective_rpc(_profile_r3_again)
     if not eager:
         assert all(llm.collective_rpc(_has_r3_graphs))
     prompt = {"prompt_token_ids": [1, 2, 3, 4]}

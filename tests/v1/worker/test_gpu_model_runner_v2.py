@@ -75,12 +75,12 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
 @pytest.mark.parametrize(
     "enabled,expected_events",
     [
-        (True, ["allocate", "bind", "dummy_run", "dummy_run"]),
-        (False, ["dummy_run", "dummy_run"]),
+        (True, ["allocate", "bind", "dummy_run"]),
+        (False, ["dummy_run"]),
     ],
     ids=["aux-output-enabled", "aux-output-disabled"],
 )
-def test_profile_run_reuses_aux_output_connector_before_forward(
+def test_profile_run_creates_aux_output_connector_before_forward(
     monkeypatch, enabled, expected_events
 ):
     events = []
@@ -107,8 +107,6 @@ def test_profile_run_reuses_aux_output_connector_before_forward(
 
     monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", allocate)
     monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", bind)
-    constructor = Mock(wraps=aux_output_worker.AuxOutputWorkerConnector)
-    monkeypatch.setattr(aux_output_worker, "AuxOutputWorkerConnector", constructor)
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.vllm_config = vllm_config
@@ -122,18 +120,13 @@ def test_profile_run_reuses_aux_output_connector_before_forward(
     monkeypatch.setattr(runner, "_dummy_run", dummy_run)
 
     runner.profile_run()
-    connector = runner.aux_output_connector
-    runner.profile_run()
 
     assert events == expected_events
-    assert runner.aux_output_connector is connector
+    connector = runner.aux_output_connector
     if enabled:
         assert connector is not None and connector._capturer is capturer
-        constructor.assert_called_once_with(model=model, vllm_config=vllm_config)
-        assert connector._store is None and connector._buffer is None
     else:
         assert connector is None
-        constructor.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -200,10 +193,10 @@ def test_initialize_kv_cache_defers_aux_output_storage(
     runner.initialize_kv_cache(kv_config, is_profiling=is_profiling)
 
     if is_profiling:
-        connector.bind_kv_cache.assert_not_called()
+        connector.initialize_output_storage.assert_not_called()
         assert runner.aux_output_connector is connector
     else:
-        connector.bind_kv_cache.assert_called_once_with(kv_config)
+        connector.initialize_output_storage.assert_called_once_with(kv_config)
         assert runner.aux_output_connector is connector
     if prepared:
         factory.assert_not_called()

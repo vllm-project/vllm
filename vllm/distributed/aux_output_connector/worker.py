@@ -108,7 +108,7 @@ class AuxOutputWorkerConnector:
         self._lock = Lock()
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
 
-    def bind_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_output_storage(self, kv_cache_config: KVCacheConfig) -> None:
         """Create the output data plane once the KV cache layout is resolved."""
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.

@@ -846,7 +846,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.aux_output_connector = get_aux_output_connector(
                         self.model, self.vllm_config
                     )
-                self.aux_output_connector.bind_kv_cache(kv_cache_config)
+                self.aux_output_connector.initialize_output_storage(kv_cache_config)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1044,10 +1044,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self, randomize_inputs: bool = False) -> None:
-        if (
-            self.vllm_config.aux_output_config.enabled
-            and self.aux_output_connector is None
-        ):
+        if self.vllm_config.aux_output_config.enabled:
             self.aux_output_connector = get_aux_output_connector(
                 self.model, self.vllm_config
             )

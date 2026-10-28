@@ -691,7 +691,7 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     connector = aux_output_worker.AuxOutputWorkerConnector(
         vllm_config=config, model=model
     )
-    connector.bind_kv_cache(
+    connector.initialize_output_storage(
         SimpleNamespace(kv_cache_groups=[_full_attention_kv_group()])
     )
 
@@ -743,7 +743,7 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
     store_constructor.assert_not_called()
     buffer_constructor.assert_not_called()
 
-    connector.bind_kv_cache(
+    connector.initialize_output_storage(
         SimpleNamespace(
             num_blocks=10,
             kv_cache_groups=[_full_attention_kv_group(MLAAttentionSpec)],
