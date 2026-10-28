@@ -3677,7 +3677,10 @@ def test_hisparse_staged_prefill_cache_backs_min_attention_rows():
     )
     host_cache = torch.zeros(4, block_size, row_width).pin_memory()
 
-    staged = HiSparseRuntime.gather_prefill_cache(None, host_cache, plan)
+    runtime = object.__new__(HiSparseRuntime)
+    runtime.cache_ops = get_hisparse_backend().create_cache_ops(runtime)
+
+    staged = runtime.gather_prefill_cache(host_cache, plan)
 
     assert staged.shape[0] * block_size < 256
     backing_rows = staged.untyped_storage().nbytes() // (
