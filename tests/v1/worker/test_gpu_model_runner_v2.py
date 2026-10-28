@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+import vllm.distributed.aux_output_connector.worker as aux_output_worker
 import vllm.v1.worker.gpu.model_runner as model_runner_module
 from vllm.config import CacheConfig, LoRAConfig, ParallelConfig
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
@@ -69,6 +70,63 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
     postprocess_num_computed_tokens.assert_called_once_with(global_batch)
     postprocess_state.assert_called_once_with(global_batch.idx_mapping, 0)
     restore_for_sampling.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "enabled,expected_events",
+    [
+        (True, ["allocate", "bind", "dummy_run"]),
+        (False, ["dummy_run"]),
+    ],
+    ids=["aux-output-enabled", "aux-output-disabled"],
+)
+def test_profile_run_creates_aux_output_connector_before_forward(
+    monkeypatch, enabled, expected_events
+):
+    events = []
+    capturer = object()
+    model = torch.nn.Module()
+    vllm_config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(enabled=enabled),
+        max_concurrent_batches=1,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+    )
+
+    def allocate(**kwargs):
+        assert kwargs == {"max_num_batched_tokens": 8, "vllm_config": vllm_config}
+        events.append("allocate")
+        return capturer
+
+    def bind(bind_model, bind_capturer):
+        assert bind_model is model and bind_capturer is capturer
+        events.append("bind")
+
+    def dummy_run(*args, **kwargs):
+        events.append("dummy_run")
+        return None, None
+
+    monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", allocate)
+    monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", bind)
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = vllm_config
+    runner.model = model
+    runner.aux_output_connector = None
+    runner.supports_mm_inputs = False
+    runner.is_last_pp_rank = False
+    runner.max_num_tokens = 8
+    runner.encoder_cache = None
+    runner.pooling_runner = None
+    monkeypatch.setattr(runner, "_dummy_run", dummy_run)
+
+    runner.profile_run()
+
+    assert events == expected_events
+    connector = runner.aux_output_connector
+    if enabled:
+        assert connector is not None and connector._capturer is capturer
+    else:
+        assert connector is None
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
@@ -283,23 +341,24 @@ def _make_capture_runner(
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.model_state = SimpleNamespace(
-        supports_mm_inputs=False, capture_inner_cudagraphs=lambda *args: None
+        supports_mm_inputs=False, capture_inner_cudagraphs=Mock()
     )
     runner.cudagraph_manager = SimpleNamespace(
         needs_capture=lambda: captured,
         capture=lambda *args, **kwargs: None,
+        capture_stream=object(),
     )
     runner.lora_config = None
     monkeypatch.setattr(runner, "maybe_setup_dummy_loras", _no_dummy_loras)
     runner.speculator = None
     runner.adaptive_verification = None
     runner.model = None
-    runner.input_buffers = None
+    runner.input_buffers = object()
     runner.pcp_manager = None
     runner.intermediate_tensors = None
-    runner.block_tables = None
-    runner.attn_groups = None
-    runner.kv_cache_config = None
+    runner.block_tables = object()
+    runner.attn_groups = object()
+    runner.kv_cache_config = object()
     runner.use_aux_hidden_state_outputs = False
     runner.kv_connector = model_runner_module.NO_OP_KV_CONNECTOR
     return runner
@@ -325,6 +384,16 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
     runner.capture_model()
 
     assert lock_calls == ["lock"]
+    assert runner.cudagraph_manager is not None
+    capture_inner_cudagraphs = runner.model_state.capture_inner_cudagraphs
+    assert isinstance(capture_inner_cudagraphs, Mock)
+    capture_inner_cudagraphs.assert_called_once_with(
+        runner.input_buffers,
+        runner.block_tables,
+        runner.attn_groups,
+        runner.kv_cache_config,
+        runner.cudagraph_manager.capture_stream,
+    )
 
 
 def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):
@@ -369,7 +438,8 @@ def test_capture_model_excludes_adaptive_verification_profiling_cache(
     """Adaptive verification's cost-profiling dummy runs execute inside
     capture_model's free-memory window. The activations they leave in the
     allocator cache must not be counted as CUDA graph memory, which is taken
-    from the KV cache."""
+    from the KV cache. The memory-profiling pass skips them entirely: it runs
+    on a throwaway KV cache and the real capture recalibrates."""
     runner = _make_capture_runner(monkeypatch, captured=True)
     monkeypatch.setattr(
         runner.cudagraph_manager, "captured_token_counts", lambda: [1, 2], raising=False
@@ -398,7 +468,7 @@ def test_capture_model_excludes_adaptive_verification_profiling_cache(
     monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
 
     assert runner.capture_model(profile_only=profile_only) == 0
-    assert curves == [[]]
+    assert curves == ([] if profile_only else [[]])
 
 
 @pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
@@ -433,7 +503,10 @@ def test_async_copy_to_np_does_not_alias_reused_buffer():
     ("draft_dtype", "expected_dtype"),
     [("auto", "auto"), ("bfloat16", "bfloat16"), (None, "fp8_e4m3")],
 )
-def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_dtype):
+@pytest.mark.parametrize("data_parallel_index", [0, 3])
+def test_standalone_draft_kv_dtype_override(
+    monkeypatch, draft_dtype, expected_dtype, data_parallel_index
+):
     @dataclass
     class Config:
         cache_config: CacheConfig
@@ -442,6 +515,7 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
         quant_config: object | None = None
 
     target = Config(CacheConfig(cache_dtype="fp8_e4m3"), ParallelConfig(), object())
+    target.parallel_config.data_parallel_index = data_parallel_index
     speculator = object.__new__(ar_module.StandaloneARSpeculator)
     speculator.vllm_config = target
     speculator.draft_model_config = object()
@@ -458,3 +532,5 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
     assert draft_config.cache_config.cache_dtype == expected_dtype
     assert speculator.attn_vllm_config.cache_config.cache_dtype == expected_dtype
     assert target.cache_config.cache_dtype == "fp8_e4m3"
+    assert draft_config.parallel_config.data_parallel_index == data_parallel_index
+    assert target.parallel_config.data_parallel_index == data_parallel_index

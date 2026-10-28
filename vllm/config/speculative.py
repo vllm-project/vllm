@@ -45,6 +45,7 @@ MTPModelTypes = Literal[
     "glm_ocr_mtp",
     "ernie_mtp",
     "nemotron_h_mtp",
+    "nemotron3_5_transcribe_mtp",
     "exaone_moe_mtp",
     "exaone4_5_mtp",
     "qwen3_next_mtp",
@@ -475,6 +476,12 @@ class SpeculativeConfig:
     speculative methods. This is an experimental option for measuring the
     acceptance-rate impact of reusing that block. It does not disable the
     speculative drafter itself."""
+    disable_lookahead_block_hashes: bool = False
+    """Disable lookahead block hashes for EAGLE-like speculative methods and
+    fall back to dropping the trailing prefix-cache block. Lookahead hashes
+    also cover the tokens the drafter reads after each block, so engines
+    sharing a KV store and external consumers of KV cache events must use the
+    same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
     MTP). "fp8" uses per-row weight and per-token activation scales on the
@@ -877,6 +884,25 @@ class SpeculativeConfig:
         ):
             # Promote VLM's text_config so MTP detection below fires correctly
             hf_config = hf_config.text_config
+
+        if (
+            hf_config.architectures[0]
+            == "Nemotron3_5TranscribeForConditionalGeneration"
+        ):
+            # Its MTP head reads NeMo checkpoint names and takes the audio
+            # embeddings, so it has its own draft class.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = hf_config.text_config
+            if quantization_config is not None:
+                # The FP8 and NVFP4 checkpoints quantize the MTP head too.
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+            hf_config.model_type = "nemotron3_5_transcribe_mtp"
+            hf_config.update(
+                {
+                    "n_predict": hf_config.num_nextn_predict_layers,
+                    "architectures": ["Nemotron3_5TranscribeMTPModel"],
+                }
+            )
 
         if (
             hf_config.model_type in {"nemotron_h", "nemotron_h_puzzle"}
