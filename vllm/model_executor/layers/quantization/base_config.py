@@ -181,6 +181,35 @@ class QuantizationConfig(ABC):
         """
         return None
 
+    @classmethod
+    def from_draft_checkpoint(
+        cls,
+        model_name: str,
+        hf_config: PreTrainedConfig | None = None,
+        revision: str | None = None,
+    ) -> "QuantizationConfig | None":
+        """Promotion hook for speculative-decoding draft checkpoints that lack
+        a HF ``quantization_config`` block.
+
+        Draft checkpoints do not always ship a ``quantization_config``.
+        Backends that can recognize their own format directly from the
+        checkpoint files (for example Exl3 ``*.trellis`` sidecars) override
+        this hook and return a config instance; ``get_draft_quant_config``
+        then promotes the draft to that backend. The default implementation
+        recognizes nothing, so unquantized drafts stay unquantized.
+
+        Args:
+            model_name: The name or local path of the draft model.
+            hf_config: The Hugging Face config of the draft model, if any.
+            revision: The revision of the draft model, if any.
+
+        Returns:
+            A quantization config for the draft checkpoint, or None when this
+            backend does not recognize the checkpoint.
+
+        """
+        return None
+
     @staticmethod
     def get_from_keys(config: dict[str, Any], keys: list[str]) -> Any:
         """Get a value from the model's quantization config."""

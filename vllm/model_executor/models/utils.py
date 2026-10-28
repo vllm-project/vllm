@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from transformers import PreTrainedConfig
     from transformers.conversion_mapping import WeightRenaming
 
+    from vllm.config import ModelConfig
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
@@ -1061,6 +1062,14 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
     Draft models should use their own quantization config instead of the verifier/target
     model's config. This helper retrieves the draft model's quantization config.
 
+    When the draft checkpoint carries a HF ``quantization_config``, that config
+    is returned as before. When it does not, every registered quantization
+    backend gets one chance to claim the checkpoint through its
+    ``QuantizationConfig.from_draft_checkpoint`` hook (for example an Exl3
+    plugin recognizing ``*.trellis`` sidecars). The first non-None result
+    wins; when no backend claims the draft it stays unquantized and None is
+    returned.
+
     Args:
         vllm_config: The vLLM configuration object.
 
@@ -1073,11 +1082,68 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
     draft_model_config = speculative_config.draft_model_config
     draft_load_config = vllm_config.load_config
 
-    return (
-        VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
-        if draft_model_config
-        else None
+    if draft_model_config is None:
+        return None
+
+    quant_config = VllmConfig.get_quantization_config(
+        draft_model_config, draft_load_config
     )
+    if quant_config is not None:
+        return quant_config
+
+    return _promote_draft_quant_config(draft_model_config)
+
+
+def _promote_draft_quant_config(
+    draft_model_config: "ModelConfig",
+) -> "QuantizationConfig | None":
+    """Ask registered quantization backends to claim a draft checkpoint.
+
+    Runs only when the draft has no HF ``quantization_config``. Each backend's
+    ``from_draft_checkpoint`` classmethod inspects the checkpoint and returns a
+    config when it recognizes its own format. Backends that do not recognize
+    the checkpoint return None, so unquantized drafts stay unquantized.
+    """
+    from vllm.model_executor.layers.quantization import (
+        QUANTIZATION_METHODS,
+        get_quantization_config,
+    )
+
+    tried: set[type[QuantizationConfig]] = set()
+    for method in QUANTIZATION_METHODS:
+        try:
+            config_cls = get_quantization_config(method)
+        except Exception:
+            logger.debug(
+                "Skipping quantization method %r while promoting the draft "
+                "quant config",
+                method,
+                exc_info=True,
+            )
+            continue
+        if config_cls in tried:
+            continue
+        tried.add(config_cls)
+        if not hasattr(config_cls, "from_draft_checkpoint"):
+            continue
+        try:
+            quant_config = config_cls.from_draft_checkpoint(
+                draft_model_config.model,
+                hf_config=draft_model_config.hf_config,
+                revision=draft_model_config.revision,
+            )
+        except Exception:
+            logger.warning(
+                "Quantization method %r failed to inspect draft checkpoint %r "
+                "for promotion",
+                method,
+                draft_model_config.model,
+                exc_info=True,
+            )
+            continue
+        if quant_config is not None:
+            return quant_config
+    return None
 
 
 def map_draft_quant_config(
