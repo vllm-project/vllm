@@ -107,7 +107,9 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.profiler.graph_capture import (
     graph_capture_profiler,
+    graph_capture_shape,
     graph_capture_step,
+    graph_capture_warmup,
     skip_graph_capture_tracing,
 )
 from vllm.sampling_params import SamplingType
@@ -6499,37 +6501,42 @@ class GPUModelRunner(
         allow_microbatching: bool = False,
         num_warmups: int | None = None,
     ):
-        if num_warmups is None:
-            num_warmups = self.compilation_config.cudagraph_num_of_warmups
-        force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
-        for _ in range(num_warmups):
-            self._dummy_run(
-                desc.num_tokens,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                force_attention=force_attention,
-                uniform_decode=desc.uniform,
-                allow_microbatching=allow_microbatching,
-                skip_eplb=True,
-                remove_lora=False,
-                num_active_loras=desc.num_active_loras,
-                profile_seq_lens=profile_seq_lens,
-            )
-        if num_warmups > 0:
-            # Warmups may use auxiliary streams. Ensure all of their work has
-            # completed before beginning CUDA graph capture.
-            torch.accelerator.synchronize()
-        with graph_capture_step(desc.num_tokens, cudagraph_runtime_mode.name):
-            self._dummy_run(
-                desc.num_tokens,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-                uniform_decode=desc.uniform,
-                allow_microbatching=allow_microbatching,
-                skip_eplb=True,
-                remove_lora=False,
-                num_active_loras=desc.num_active_loras,
-                is_graph_capturing=True,
-                profile_seq_lens=profile_seq_lens,
-            )
+        with graph_capture_shape():
+            if num_warmups is None:
+                num_warmups = self.compilation_config.cudagraph_num_of_warmups
+            force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+            for _ in range(num_warmups):
+                # Profiled into the same trace as the capture: the warm-up runs
+                # eagerly what the capture records, so its kernels name the
+                # launches the capture records.
+                with graph_capture_warmup(desc.num_tokens, cudagraph_runtime_mode.name):
+                    self._dummy_run(
+                        desc.num_tokens,
+                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                        force_attention=force_attention,
+                        uniform_decode=desc.uniform,
+                        allow_microbatching=allow_microbatching,
+                        skip_eplb=True,
+                        remove_lora=False,
+                        num_active_loras=desc.num_active_loras,
+                        profile_seq_lens=profile_seq_lens,
+                    )
+            if num_warmups > 0:
+                # Warmups may use auxiliary streams. Ensure all of their work has
+                # completed before beginning CUDA graph capture.
+                torch.accelerator.synchronize()
+            with graph_capture_step(desc.num_tokens, cudagraph_runtime_mode.name):
+                self._dummy_run(
+                    desc.num_tokens,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    uniform_decode=desc.uniform,
+                    allow_microbatching=allow_microbatching,
+                    skip_eplb=True,
+                    remove_lora=False,
+                    num_active_loras=desc.num_active_loras,
+                    is_graph_capturing=True,
+                    profile_seq_lens=profile_seq_lens,
+                )
 
     def _capture_cudagraphs(
         self,
