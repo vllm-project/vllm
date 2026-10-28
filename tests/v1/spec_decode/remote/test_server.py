@@ -1932,6 +1932,72 @@ def test_acceptor_start_failure_rolls_back_unix_listener(
         server.stop()
 
 
+@pytest.mark.parametrize("failure", ["capabilities", "methods", "fingerprint", "log"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_readiness_failure_rolls_back_started_listener(
+    monkeypatch, tmp_path, failure, cleanup_fails
+):
+    original = MemoryError("injected readiness publication failure")
+    cleanup_error = OSError(errno.EIO, "injected listener cleanup failure")
+    owners = []
+    failing = True
+
+    def publish(stage):
+        if failing and failure == stage:
+            owners.append(server._acceptor)
+            raise original
+
+    class FailingAdapter(FakeDraftAdapter):
+        def capabilities(self):
+            publish("capabilities")
+            return super().capabilities()
+
+        def supported_methods(self):
+            publish("methods")
+            return super().supported_methods()
+
+        def draft_checkpoint_fingerprint(self):
+            publish("fingerprint")
+            return super().draft_checkpoint_fingerprint()
+
+    class FailingSocket(socket.socket):
+        def close(self):
+            nonlocal cleanup_fails
+            super().close()
+            if cleanup_fails:
+                cleanup_fails = False
+                raise cleanup_error
+
+    if cleanup_fails:
+        monkeypatch.setattr(socket, "socket", FailingSocket)
+    if failure == "log":
+        monkeypatch.setattr(server_module.logger, "info", lambda *args: publish("log"))
+    server = RemoteDraftServer(FailingAdapter())
+    path = tmp_path / "readiness.sock"
+    endpoint = f"unix://{path}"
+    try:
+        with pytest.raises(MemoryError) as caught:
+            server.start(endpoint)
+        assert caught.value is original
+        assert not path.exists()
+        assert len(owners) == 1 and not owners[0].is_alive()
+        if original.__cause__ is not None:
+            shutdown_error = original.__cause__.exceptions[0]
+            assert cleanup_error in shutdown_error.__cause__.exceptions
+            assert server._shutdown_failed
+            with pytest.raises(server_module.ServerShutdownTimeout):
+                server.start(endpoint)
+        else:
+            assert not server._shutdown_failed
+            failing = False
+            server.start(endpoint)
+    finally:
+        try:
+            server.stop()
+        except server_module.ServerShutdownTimeout:
+            server.stop()
+
+
 def test_normal_stop_racing_accept_closure_does_not_fence_server(adapter, monkeypatch):
     entered, release = threading.Event(), threading.Event()
 
