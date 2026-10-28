@@ -245,8 +245,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for ktc in ktcs:
             temp_config = copy.copy(vllm_config)
             engine_id = ktc.get("engine_id", vllm_config.kv_transfer_config.engine_id)
-            # Early receive is enabled for the whole engine, so children
-            # never decide it on their own.
+            # Children follow the engine-level early receive setting.
             temp_config.kv_transfer_config = KVTransferConfig(
                 **{**ktc, "enable_early_recv": enable_early_recv},
                 engine_id=engine_id,

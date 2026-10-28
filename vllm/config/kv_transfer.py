@@ -86,10 +86,8 @@ class KVTransferConfig:
     """Experiment feature flag to enable HND to NHD KV Transfer"""
 
     enable_early_recv: bool = False
-    """Report completed NIXL pulls before the next model output. Supported with
-    the uni executor and the multiprocessing executor with same-node workers,
-    with async or synchronous scheduling, and for NIXL pull children of
-    MultiConnector."""
+    """Report completed NIXL pulls before the next model output.
+    See the NIXL connector usage guide for supported configurations."""
 
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail"
     """Policy for handling KV cache load failures.

@@ -132,9 +132,7 @@ class NixlBaseConnectorWorker:
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
-    # With early receive the worker loop polls receives through
-    # poll_finished_recving(); get_transfer_results() then only reports
-    # failures, so successes never wait for a step output.
+    # Route successes through early polling; keep failures on the normal path.
     _worker_polls_recving: bool = False
 
     # Layer-name routing is supported only by NixlPushConnector for HMA or
@@ -3277,12 +3275,7 @@ class NixlBaseConnectorWorker:
         )
 
     def poll_finished_recving(self) -> set[str]:
-        """Pop and post-process the receives that completed successfully.
-
-        They are not reported by `get_transfer_results()` again. A failed
-        request stays in `_recv_failures` for the regular path to report and
-        is not polled here again.
-        """
+        """Pop and post-process successful receives; defer failures to normal output."""
         if not self.has_pending_recving():
             return set()
         done_recving, newly_failed = self._pop_done_transfers(

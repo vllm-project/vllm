@@ -435,14 +435,10 @@ class KVConnectorBase_V1(ABC):
     def poll_finished_recving(self) -> set[str]:
         """Pop receives that completed successfully since the last poll.
 
-        With ``enable_early_recv`` this is called after each step's
-        ``execute_model`` and ``sample_tokens`` and, with the mp executor,
-        while the worker waits for the next RPC, so the
-        scheduler learns about them before its next schedule() instead of from
-        the output of a step still running on the GPU. A request returned here
-        must not be returned by `get_transfer_results()`, and must be ready to
-        run: its KV is in place and any post-processing is queued on the
-        current stream. Failed receives stay on the regular path.
+        Called on the worker thread before scheduling, including between RPCs
+        with mp. Returned requests must have KV in place and post-processing
+        queued on the current stream. Do not report them again through
+        `get_transfer_results()`. Failed receives stay on the regular path.
         """
         return set()
 
