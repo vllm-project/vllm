@@ -39,6 +39,7 @@ from vllm.v1.kv_offload.tiering.manager import (
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _RECONNECT_MAX_BACKOFF_S,
+    _RETAINED_HOLD_CAP_S,
     _UNBOUND_STORE_TIMEOUT_S,
     P2PSecondaryTierManager,
     _annotate_req_context,
@@ -139,6 +140,8 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._reaped_stores = {}
     mgr._unbound_store_timeout_s = _UNBOUND_STORE_TIMEOUT_S
     mgr._failed_serve_ctxs = []
+    mgr._retained = {}
+    mgr._retained_force_released = 0
     return mgr
 
 
@@ -727,6 +730,7 @@ class _FakeSession:
         close_stores: list[int] | None = None,
         close_failed_serves: list[ReqContext] | None = None,
         last_activity_at: float | None = None,
+        close_retained: dict[int, frozenset[int]] | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -741,6 +745,7 @@ class _FakeSession:
         self._close_req_ids = close_req_ids or []
         self._close_stores = close_stores or []
         self._close_failed_serves = close_failed_serves or []
+        self._close_retained = close_retained or {}
         self.requests: list[tuple[int, str]] = []
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
@@ -788,6 +793,7 @@ class _FakeSession:
             failed_req_ids=self._close_req_ids,
             failed_stores=self._close_stores,
             failed_serves=self._close_failed_serves,
+            retained=self._close_retained,
         )
 
 
@@ -1441,9 +1447,11 @@ class TestBidirectionalManager:
         The producer drops parked blocks once unbound_store_timeout_s
         expires. A consumer whose fetch arrives after that must learn on the
         next tick via TransferDoneMsg(success=False) — not stall for
-        _LOAD_TIMEOUT_S and then take the abort path.
+        _PD_LOAD_TIMEOUT_S and then take the abort path.
         """
-        from vllm.v1.kv_offload.tiering.p2p.session.client import _LOAD_TIMEOUT_S
+        from vllm.v1.kv_offload.tiering.p2p.session.client import (
+            _PD_LOAD_TIMEOUT_S,
+        )
 
         mgr_a, mgr_b = _build_paired_managers()
         kv_id = "req-late"
@@ -1504,7 +1512,7 @@ class TestBidirectionalManager:
         assert JobResult(job_id=101, success=False) in all_a, all_a
         assert kv_id in mgr_a._failed_req_ids
         assert "abort_fetch" not in sent_from_a, sent_from_a
-        assert elapsed < _LOAD_TIMEOUT_S
+        assert elapsed < _PD_LOAD_TIMEOUT_S
 
 
 # ---------------------------------------------------------------------------
@@ -2321,6 +2329,171 @@ class TestIdleSessionEviction:
 # ---------------------------------------------------------------------------
 # Reconnect backoff after a data-plane fault
 # ---------------------------------------------------------------------------
+
+
+class _RetiringFakeData:
+    """Fake DataTransport whose retired transfers stop on demand."""
+
+    def __init__(self) -> None:
+        self.stopped: list[int] = []
+        self.force_released: list[int] = []
+        self.removed: list[str] = []
+
+    def remove_remote_peer(self, pid) -> None:
+        self.removed.append(pid)
+
+    def poll_retired(self) -> list[int]:
+        stopped, self.stopped = self.stopped, []
+        return stopped
+
+    def force_release_retired(self, transfer_ids) -> None:
+        self.force_released.extend(transfer_ids)
+
+
+class TestRetainedTransfers:
+    """A reaped session's still-running transfers keep their source pins
+    until the transport reports them stopped, or the hold cap expires."""
+
+    PEER = "10.0.0.1:8000"
+
+    def _reap(self, retained, close_stores=None):
+        mgr = _make_manager()
+        data = _RetiringFakeData()
+        mgr._data = data  # type: ignore[assignment]
+        mgr._sessions[self.PEER] = _FakeSession(  # type: ignore[assignment]
+            peer_id=self.PEER,
+            alive=False,
+            connected=True,
+            close_stores=close_stores,
+            close_retained=retained,
+        )
+        mgr._reap_dead_sessions()
+        return mgr, data
+
+    def test_reap_holds_pins_until_transfer_stops(self):
+        mgr, data = self._reap({7: frozenset({1})}, close_stores=[2])
+        assert mgr._finished_jobs == [JobResult(job_id=2, success=False)]
+        assert data.removed == [self.PEER]
+
+        mgr._poll_retained()
+        assert mgr._finished_jobs == [JobResult(job_id=2, success=False)]
+
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert mgr._finished_jobs[-1] == JobResult(job_id=1, success=False)
+        assert mgr._retained == {}
+
+    def test_shared_job_held_until_last_transfer_stops(self):
+        mgr, data = self._reap({7: frozenset({1}), 8: frozenset({1})})
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert mgr._finished_jobs == []
+        data.stopped = [8]
+        mgr._poll_retained()
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+
+    def test_hold_cap_force_releases(self, monkeypatch):
+        now = [1000.0]
+        monkeypatch.setattr(manager_module.time, "monotonic", lambda: now[0])
+        mgr, data = self._reap({7: frozenset({1})})
+
+        now[0] += _RETAINED_HOLD_CAP_S - 1
+        mgr._poll_retained()
+        assert data.force_released == []
+
+        now[0] += 1
+        mgr._poll_retained()
+        assert data.force_released == [7]
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+        assert mgr._retained_force_released == 1
+        assert mgr._retained == {}
+
+    def test_idle_eviction_retains_too(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+        mgr = _make_manager()
+        mgr._data = _RetiringFakeData()  # type: ignore[assignment]
+        mgr._sessions[self.PEER] = _FakeSession(  # type: ignore[assignment]
+            peer_id=self.PEER,
+            last_activity_at=time.monotonic() - 20,
+            close_retained={7: frozenset({1})},
+        )
+        mgr._reap_idle_sessions()
+        assert self.PEER not in mgr._sessions
+        assert mgr._retained[7][:2] == (self.PEER, frozenset({1}))
+        assert mgr._finished_jobs == []
+
+    def test_shutdown_fails_retained_jobs(self):
+        mgr, _ = self._reap({7: frozenset({1})})
+        mgr._data = _ShutdownFakeData()  # type: ignore[assignment]
+        mgr._control = _ShutdownFakeControl()  # type: ignore[assignment]
+        mgr.shutdown()
+        assert JobResult(job_id=1, success=False) in mgr._finished_jobs
+        assert mgr._retained == {}
+
+    def test_outbound_waits_for_retained_transfers(self):
+        """A new session would load the peer's NIXL agent under the same
+        name while the reaped one's registration still holds it."""
+        mgr, data = self._reap({7: frozenset({1})})
+
+        class NoConnect:
+            def connect(self, peer_id):
+                raise AssertionError("connect() while transfers are retained")
+
+        mgr._control = NoConnect()  # type: ignore[assignment]
+        assert mgr._get_or_create_session(self.PEER) is None
+
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert not mgr._retained_peer(self.PEER)
+
+    def test_inbound_is_told_to_disconnect_while_retained(self):
+        mgr, data = self._reap({7: frozenset({1})})
+
+        class Conn(_RecordingConn):
+            def __init__(self, peer_id: str) -> None:
+                super().__init__(peer_id)
+                self.sent: list[dict] = []
+
+            def send(self, msg: dict) -> None:
+                self.sent.append(msg)
+
+        conn = Conn(self.PEER)
+        mgr._accept_new_peers([conn])  # type: ignore[list-item]
+        assert conn.sent == [{TYPE_KEY: DisconnectMsg.TYPE}]
+        assert conn.close_calls == 1
+        assert self.PEER not in mgr._sessions
+
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert not mgr._retained_peer(self.PEER)
+
+    def test_other_peers_are_not_held(self):
+        mgr, _ = self._reap({7: frozenset({1})})
+        assert not mgr._retained_peer("10.0.0.2:8000")
+
+    def test_drain_jobs_waits_for_retained_transfers(self, monkeypatch):
+        """reset_cache() asserts every job finished once drain_jobs()
+        returns, so a retained transfer's store jobs must be settled."""
+        mgr, data = self._reap({7: frozenset({1})})
+        mgr._control = _DrainCtrl()  # type: ignore[assignment]
+        polls = [0]
+
+        def poll_retired():
+            polls[0] += 1
+            return [7] if polls[0] == 3 else []
+
+        data.poll_retired = poll_retired  # type: ignore[method-assign]
+        monkeypatch.setattr(manager_module.time, "sleep", lambda s: None)
+        mgr.drain_jobs()
+
+        assert polls[0] == 3
+        assert mgr._retained == {}
+        assert JobResult(job_id=1, success=False) in mgr._finished_jobs
 
 
 class TestReconnectBackoff:
