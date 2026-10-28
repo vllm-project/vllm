@@ -2585,6 +2585,85 @@ async fn readiness_follows_engine_answers_around_weight_update() {
     shutdown_readiness_engine(client, stop, engine_task).await;
 }
 
+/// Receive the next utility call, which must be `method`, and return its id.
+async fn recv_utility_call(dealer: &mut DealerSocket, method: &str) -> u64 {
+    let utility = recv_engine_message(dealer).await;
+    assert_eq!(utility[0].as_ref(), &[0x03]);
+    let payload = decode_value(&utility[1]);
+    let array = payload.as_array().expect("utility payload array");
+    assert_eq!(array[2], Value::from(method));
+    array[1].as_u64().expect("call_id")
+}
+
+async fn reply_utility(push: &mut PushSocket, call_id: u64, result: UtilityResultEnvelope) {
+    send_outputs(
+        push,
+        UtilityCallOutput {
+            engine_index: 0,
+            timestamp: 0.0,
+            output: UtilityOutput {
+                call_id: call_id.into(),
+                failure_message: None,
+                result: Some(result),
+            },
+        }
+        .into(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_pause_rechecks_only_after_the_engine_replies() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (pause_seen_tx, pause_seen_rx) = oneshot::channel();
+    let (reply_tx, reply_rx) = oneshot::channel::<()>();
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-readiness-cancel".to_vec(),
+        move |dealer, push| {
+            Box::pin(async move {
+                let pause = recv_utility_call(dealer, "pause_generation").await;
+                pause_seen_tx.send(()).unwrap();
+                reply_rx.await.unwrap();
+                reply_utility(push, pause, utility_result_value(())).await;
+                let ask = recv_utility_call(dealer, "is_inference_ready").await;
+                reply_utility(push, ask, utility_result_value(false)).await;
+            })
+        },
+    );
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+    let readiness = client.subscribe_readiness();
+
+    tokio::select! {
+        _ = client.pause_generation(PauseMode::Wait, false) => {
+            panic!("the pause returned before the engine replied")
+        }
+        _ = pause_seen_rx => {}
+    }
+    // The caller is gone, but the call still waits for the engine.
+    assert!(!client.readiness_recheck_pending());
+    assert!(!*readiness.borrow());
+    reply_tx.send(()).unwrap();
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    assert!(!*readiness.borrow());
+    client.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn readiness_starts_from_engine_answer_with_sleep_mode() {
     // Prepared for a checkpoint on startup.

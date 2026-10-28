@@ -15,7 +15,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
-use crate::client::readiness::run_readiness_loop;
+use crate::client::readiness::{RecheckGuard, run_readiness_loop};
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::metrics::EngineSleepState;
@@ -489,6 +489,11 @@ impl EngineCoreClient {
         self.inner.pending_utility_call_count()
     }
 
+    #[cfg(test)]
+    pub(crate) fn readiness_recheck_pending(&self) -> bool {
+        self.inner.readiness().pending_ask().is_some()
+    }
+
     /// Return the engine-side indices connected to this client, as stamped on
     /// request output streams: an engine identity that does not encode an
     /// index maps to 0, as in [`Self::call`].
@@ -744,7 +749,7 @@ impl EngineCoreClient {
         T: serde::de::DeserializeOwned,
         A: serde::Serialize + std::fmt::Debug,
     {
-        self.inner.call_utility(method, args).await
+        self.inner.call_utility(method, args, None).await
     }
 
     /// Call a utility method on all connected engines and return the shared
@@ -782,9 +787,30 @@ impl EngineCoreClient {
         K: serde::Serialize + std::fmt::Debug,
     {
         // Worker methods can change readiness, as a weight update does.
-        let _recheck = self.inner.readiness().recheck_after_call();
+        let recheck = self.inner.readiness().recheck_after_call();
+        self.collective_rpc_with(recheck, method, timeout, args, kwargs).await
+    }
+
+    /// [`Self::collective_rpc`] as a control call that passes `recheck`.
+    async fn collective_rpc_with<A, K>(
+        &self,
+        recheck: RecheckGuard,
+        method: &str,
+        timeout: Option<f64>,
+        args: A,
+        kwargs: K,
+    ) -> Result<Vec<rmpv::Value>>
+    where
+        A: serde::Serialize + std::fmt::Debug,
+        K: serde::Serialize + std::fmt::Debug,
+    {
         let results = self
-            .call_utility::<rmpv::Value, _>("collective_rpc", (method, timeout, args, kwargs))
+            .inner
+            .call_utility::<rmpv::Value, _>(
+                "collective_rpc",
+                (method, timeout, args, kwargs),
+                Some(recheck),
+            )
             .await?;
 
         Ok(results
@@ -823,8 +849,8 @@ impl EngineCoreClient {
 
     /// Start a weight update for the base model.
     pub async fn start_weight_update(&self) -> Result<()> {
-        let _recheck = self.inner.readiness().withdraw_until_recheck();
-        self.collective_rpc(
+        self.collective_rpc_with(
+            self.inner.readiness().withdraw_until_recheck(),
             "start_weight_update",
             None,
             Vec::<JsonValue>::new(),
@@ -836,8 +862,8 @@ impl EngineCoreClient {
 
     /// Start a weight update for the speculative draft model.
     pub async fn start_draft_weight_update(&self) -> Result<()> {
-        let _recheck = self.inner.readiness().withdraw_until_recheck();
-        self.collective_rpc(
+        self.collective_rpc_with(
+            self.inner.readiness().withdraw_until_recheck(),
             "start_draft_weight_update",
             None,
             Vec::<JsonValue>::new(),
@@ -938,8 +964,8 @@ impl EngineCoreClient {
 
     /// Put the engine to sleep.
     pub async fn sleep(&self, level: SleepLevel, mode: PauseMode) -> Result<()> {
-        let _recheck = self.inner.readiness().withdraw_until_recheck();
-        self.call_utility::<(), _>("sleep", (level, mode)).await?;
+        let recheck = self.inner.readiness().withdraw_until_recheck();
+        self.inner.call_utility::<(), _>("sleep", (level, mode), Some(recheck)).await?;
         self.inner.record_sleep_state(EngineSleepState::Asleep(level));
         Ok(())
     }
@@ -954,9 +980,10 @@ impl EngineCoreClient {
     /// Wake the engine from sleep, optionally limiting the wake-up to specific
     /// tags, and return whether every engine is fully awake.
     pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<bool> {
-        let _recheck = self.inner.readiness().recheck_after_call();
+        let recheck = self.inner.readiness().recheck_after_call();
         let fully_awake = self
-            .call_utility::<bool, _>("wake_up", (tags,))
+            .inner
+            .call_utility::<bool, _>("wake_up", (tags,), Some(recheck))
             .await?
             .into_iter()
             .all(|fully_awake| fully_awake);
@@ -970,15 +997,17 @@ impl EngineCoreClient {
     /// Pause generation (e.g. for weight updates). In `abort` and `wait` mode
     /// the engine rejects new requests with a retryable error until resume.
     pub async fn pause_generation(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
-        let _recheck = self.inner.readiness().withdraw_until_recheck();
-        self.call_utility::<(), _>("pause_generation", (mode, clear_cache)).await?;
+        let recheck = self.inner.readiness().withdraw_until_recheck();
+        self.inner
+            .call_utility::<(), _>("pause_generation", (mode, clear_cache), Some(recheck))
+            .await?;
         Ok(())
     }
 
     /// Resume the scheduler after a pause
     pub async fn resume_scheduler(&self) -> Result<()> {
-        let _recheck = self.inner.readiness().recheck_after_call();
-        self.call_utility::<(), _>("resume_scheduler", ()).await?;
+        let recheck = self.inner.readiness().recheck_after_call();
+        self.inner.call_utility::<(), _>("resume_scheduler", (), Some(recheck)).await?;
         Ok(())
     }
 
@@ -987,16 +1016,18 @@ impl EngineCoreClient {
     /// Returns the first refusal from any engine. An engine that refuses
     /// changes nothing, but with data parallelism the others may have started.
     pub async fn checkpoint_prepare(&self, mode: PauseMode) -> Result<Option<String>> {
-        let _recheck = self.inner.readiness().withdraw_until_recheck();
+        let recheck = self.inner.readiness().withdraw_until_recheck();
         let refusals: Vec<Option<String>> =
-            self.call_utility("checkpoint_prepare", (mode,)).await?;
+            self.inner.call_utility("checkpoint_prepare", (mode,), Some(recheck)).await?;
         Ok(refusals.into_iter().flatten().next())
     }
 
     /// Bring back what `checkpoint_prepare` released and serve again.
     pub async fn checkpoint_restore(&self) -> Result<()> {
-        let _recheck = self.inner.readiness().recheck_after_call();
-        self.call_utility::<(), _>("checkpoint_restore", ()).await?;
+        let recheck = self.inner.readiness().recheck_after_call();
+        self.inner
+            .call_utility::<(), _>("checkpoint_restore", (), Some(recheck))
+            .await?;
         Ok(())
     }
 

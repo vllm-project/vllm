@@ -88,24 +88,24 @@ impl Readiness {
     }
 
     /// For a control call that may change readiness, such as a resume: leave
-    /// readiness unchanged during the call and recheck after it ends. Hold the
-    /// guard until the call ends.
-    pub fn recheck_after_call(&self) -> RecheckGuard<'_> {
+    /// readiness unchanged during the call and recheck after it ends. Pass the
+    /// guard to the call's [`ClientInner::call_utility`].
+    pub fn recheck_after_call(self: &Arc<Self>) -> RecheckGuard {
         RecheckGuard {
-            readiness: self,
+            readiness: self.clone(),
             withdraws: false,
         }
     }
 
     /// For a control call that stops serving, such as a pause: withdraw
     /// readiness from before the call is sent until the recheck after it ends.
-    /// Hold the guard until the call ends.
-    pub fn withdraw_until_recheck(&self) -> RecheckGuard<'_> {
+    /// Pass the guard to the call's [`ClientInner::call_utility`].
+    pub fn withdraw_until_recheck(self: &Arc<Self>) -> RecheckGuard {
         let mut state = self.state.lock();
         state.withdrawals += 1;
         self.publish(&state);
         RecheckGuard {
-            readiness: self,
+            readiness: self.clone(),
             withdraws: true,
         }
     }
@@ -129,7 +129,7 @@ impl Readiness {
 
     /// Return the epoch to ask at while the engines' answer is unknown and
     /// someone subscribes.
-    fn pending_ask(&self) -> Option<u64> {
+    pub(super) fn pending_ask(&self) -> Option<u64> {
         let state = self.state.lock();
         (state.engines_ready.is_none() && self.tx.receiver_count() > 0).then_some(state.epoch)
     }
@@ -152,15 +152,16 @@ impl Readiness {
     }
 }
 
-/// A control call in flight. Dropping it, whether the call succeeded, failed,
-/// or was cancelled, rechecks: the client asks the engines again.
-pub(crate) struct RecheckGuard<'a> {
-    readiness: &'a Readiness,
+/// A control call in flight. Dropping it, whether the call succeeded or failed,
+/// rechecks: the client asks the engines again. [`ClientInner::call_utility`]
+/// holds it until the engines reply, even if the caller is cancelled.
+pub(crate) struct RecheckGuard {
+    readiness: Arc<Readiness>,
     /// Whether readiness is withdrawn until the recheck.
     withdraws: bool,
 }
 
-impl Drop for RecheckGuard<'_> {
+impl Drop for RecheckGuard {
     fn drop(&mut self) {
         self.readiness.end(self.withdraws);
     }
@@ -196,7 +197,7 @@ mod tests {
 
     #[test]
     fn answer_that_predates_a_control_call_is_discarded() {
-        let readiness = Readiness::new();
+        let readiness = Arc::new(Readiness::new());
         let published = readiness.subscribe();
 
         drop(readiness.recheck_after_call()); // resume
@@ -216,7 +217,7 @@ mod tests {
 
     #[test]
     fn withdrawal_in_flight_hides_engine_answers() {
-        let readiness = Readiness::new();
+        let readiness = Arc::new(Readiness::new());
         let published = readiness.subscribe();
 
         let pause = readiness.withdraw_until_recheck();
@@ -236,7 +237,7 @@ mod tests {
 
     #[test]
     fn asks_only_while_subscribed() {
-        let readiness = Readiness::new();
+        let readiness = Arc::new(Readiness::new());
         drop(readiness.recheck_after_call());
         assert_eq!(readiness.pending_ask(), None);
 
