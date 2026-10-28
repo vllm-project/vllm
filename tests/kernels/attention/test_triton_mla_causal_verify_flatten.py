@@ -14,17 +14,22 @@ and ``seq_lens`` the backend actually submits and need no GPU or Triton runtime.
 """
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
-from vllm.model_executor.layers.attention.mla_attention import QueryLenSupport
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonMetadataBuilder,
+    QueryLenSupport,
+)
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.triton_mla import (
     TritonMLAImpl,
     TritonMLAMetadataBuilder,
+    _compute_num_kv_splits,
 )
+from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
 
 NUM_HEADS = 16
 KV_LORA_RANK = 512
@@ -49,6 +54,7 @@ def _make_impl(dcp_world_size: int = 1) -> TritonMLAImpl:
     impl.scale = HEAD_SIZE**-0.5
     impl._sm_count = 304
     impl.dcp_world_size = dcp_world_size
+    impl.decode_sliding_window = None
     return impl
 
 
@@ -213,3 +219,51 @@ def test_causal_multi_token_decode_is_rejected_under_dcp():
 
     # Non-causal rows all take the same extent, which stays correct when local.
     _run_forward_mqa(_seq_lens(4), query_len=4, causal=False, dcp_world_size=2)
+
+
+def test_workspace_reservation_is_sized_by_the_sliding_window():
+    """The builder reserves after memory profiling, so reserving max_model_len's
+    splits for a windowed layer would grow the workspace past what the KV cache
+    was sized around. Both reservations must match forward_mqa's split count."""
+    sm_count, window, max_model_len = 132, 2048, 1 << 20
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=max_model_len),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+    )
+    spec = SlidingWindowMLASpec(
+        block_size=PAGE_SIZE,
+        num_kv_heads=1,
+        head_size=HEAD_SIZE,
+        dtype=torch.bfloat16,
+        sliding_window=window,
+    )
+
+    def builder_init(self, *args):
+        self.dcp_world_size = 1
+        self.reorder_batch_threshold = 1
+        self.num_heads = NUM_HEADS
+        self.mla_dims = SimpleNamespace(kv_lora_rank=KV_LORA_RANK)
+
+    impl = _make_impl()
+    impl.num_heads = NUM_HEADS
+    impl.decode_sliding_window = window
+    impl._vllm_config = vllm_config
+
+    workspace = MagicMock()
+    triton_mla = "vllm.v1.attention.backends.mla.triton_mla"
+    with (
+        patch(f"{triton_mla}.is_workspace_manager_initialized", return_value=True),
+        patch(f"{triton_mla}.current_workspace_manager", return_value=workspace),
+        patch(f"{triton_mla}.max_decode_query_len", return_value=1),
+        patch(
+            f"{triton_mla}.current_platform.num_compute_units", return_value=sm_count
+        ),
+        patch.object(MLACommonMetadataBuilder, "__init__", builder_init),
+    ):
+        TritonMLAMetadataBuilder(spec, ["layer0"], vllm_config, "cpu")
+        impl.reserve_workspace()
+
+    expected = _compute_num_kv_splits(window, sm_count)
+    assert expected < _compute_num_kv_splits(max_model_len, sm_count)
+    reserved = [call.args[0][0][2] for call in workspace.get_simultaneous.mock_calls]
+    assert reserved == [expected, expected]
