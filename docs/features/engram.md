@@ -104,7 +104,7 @@ an experimental remote-table reader. The module must expose `get_reader()` and
 separately installed provider and its transport dependencies are required;
 vLLM does not ship a standalone RDMA transport or table owner.
 An [experimental adapter example](../../examples/disaggregated/engram_rdma/README.md)
-illustrates the contract and documents its unavailable research dependencies.
+illustrates the contract and documents its experimental research dependencies.
 
 The prototype supports DeepSeek V4.1 on CUDA, CPU-offload mode and data parallel
 size 1.
