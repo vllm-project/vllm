@@ -3835,3 +3835,13 @@ Cycle précédé d'un travail user-dirigé intensif (~18:20→20:10Z), tout comm
 **Compteurs d'absorption (engagement claudish)** : marginal since-boot **83,0 %** (hits 303,3M / queries 365,4M) ; `external_prefix_cache_hits` **43,2M** (+19,8M en ~1,2 h, hit rate externe 69,6 % sur 62,1M queries) = **les tiers portent toujours la charge du working set** ; **préemptions 11** (+5 en 1,2 h ; graphe `request_num_preemptions` : 10/5 737 requêtes = **0,03 %**). **2 timeouts condensation 90 s** (mes appends dashboard 21:0xZ et 22:0xZ, fallback cloud sauvé, log RSM `21:41:15 Fallback chat client built`) = les petits callers synchrones restent LA première victime, avant tout wedge. Verdict feu : **🟡** (densité 2×, préemptions lentes) — pas 🟠 (aucun 2/2, tout servi).
 
 **Sécurité** : aucune IP inconnue en 200. `?` 1 138 (1 129×200, trafic local sans XFF), hairpin 90.65.170.144 **1 036 (1 026×200)**, **poste Paris 82.66.89.184 6×200** (carte connue, trafic arrêté depuis le 01/10 → a repris, pas une alerte). **nbaudit ok 22:05:45Z** (5 séries, `19451:Image/`). Commit hôte **80,7 %** (marge 74,4 Go). G: 85 % plein / 592 G libres, **probe écriture OK**. Condensation RSM nominale.
+
+## Cycle 00:11Z (28/10) — nuit calme, feu 🟢 : le pic haiku de 21h est soldé
+
+**Prod** : 22 h sans restart (StartedAt 02:15:05Z), health 200 @3,8 ms, OOM 0, 3 conteneurs, shm 24G/63G (39 %). VRAM GPU 0 **22 654** (marge 346 MiB), GPU 1 21 650, GPU 2 45. Q41 non rouverte (rappel cron périmé — répondue 19:05Z la veille, VRAM dans la bande).
+
+**Le pic de 21h est soldé, chiffres à l'appui** : **préemptions 11 → 11 sur 49 min** (et aucune depuis ~22:2xZ, soit ~1,8 h ; elles étaient 0 pendant les 24 h précédentes) ; **aucun WEDGE depuis 22:21:26Z** (~1 h 50, contre 6 dans l'heure 21h) ; 3 881 sondes OK ; file `running 1 / waiting 0` ; génération 69 tok/s agrégés (trafic nocturne).
+
+**Amortissement** : marginal **94,8 %** sur la fenêtre (hits +19,15 M / queries +20,19 M) ; **`external_prefix_cache_hits` +352 736 seulement en 49 min** — à comparer au +12,5 M/45 min du pic : le working set haiku est reparti, le GPU ne déborde plus et les tiers sont au repos. Confirme que le débordement tiers était bien un symptôme de working-set, pas un défaut de cache. Deux sondes petits callers réelles à 22:2xZ : 200 en 0,33 s et 0,48 s.
+
+**Annexes** : nbaudit ok 00:05:45Z ; commit hôte 80,0 % (marge 76,8 Go) ; G: 85 % / 592 G libres, probe OK ; condensation RSM sans événement ; census 7 h = hairpin 986×200, `?` 715×200, **poste Paris 14×200** (carte connue, +8 depuis 22:2xZ), **aucune IP inconnue en 200**. Registre : Q43 seule ouverte (tier RAM 24→32 GiB).
