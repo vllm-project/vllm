@@ -88,11 +88,14 @@ def _walk_grid(limit: int, step: Callable[[int], float]) -> list[int]:
 
 
 def prefill_cudagraph_capture_grid(max_tokens: int, dense_head: bool = False):
-    """The token-count grid up to `max_tokens`: powers of two up to 256 (every
-    count up to 32 with `dense_head`), then every 256 tokens, and every 512 once
-    7% of the size exceeds 512. PIECEWISE step time is flat below about 1-4K
-    tokens and grows linearly above: 39 sizes at 8192."""
-    grid = _walk_grid(max_tokens, lambda t: min(t, 0.07 * max(t, 4096)))
+    """The token-count grid up to `max_tokens`: 1, 2, 4, every 8 up to 64, four
+    sizes per doubling up to 1024 (every count up to 32 with `dense_head`), then
+    every 256 tokens, and every 512 once 7% of the size exceeds 512. PIECEWISE
+    step time is flat below about 1-4K tokens and grows linearly above, but a
+    padded size can cross a model's own shape threshold (e.g. DeepSeek-V4.1's
+    decoder-replay trim at 768 tokens), so small sizes pad by at most 25%: 54
+    sizes at 8192."""
+    grid = _walk_grid(max_tokens, lambda t: min(t, max(8, t / 4), 0.07 * max(t, 4096)))
     if dense_head:
         grid = sorted({*grid, *(t for t in range(1, 33) if t < max_tokens)})
     return grid

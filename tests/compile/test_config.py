@@ -914,8 +914,9 @@ def test_default_grids_capture_fewer_graphs_than_main():
     finer where it grows with the batch."""
     prefill = prefill_cudagraph_capture_grid(8192)
     decode = decode_cudagraph_capture_grid(1024)
-    assert (len(prefill), len(decode)) == (39, 64)
-    assert prefill[:11] == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 768]
+    assert (len(prefill), len(decode)) == (54, 64)
+    assert prefill[:11] == [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64]
+    assert prefill[22:28] == [512, 640, 768, 896, 1024, 1280]
     assert decode[:8] == [1, 2, 3, 4, 5, 6, 8, 10]
     assert decode[-3:] == [960, 992, 1024]
 
