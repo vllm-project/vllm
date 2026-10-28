@@ -259,6 +259,56 @@ def test_rocm_mxfp8_block32_split_k_first_use_in_capture(packed):
     assert _rel_err(out, expected) < 5e-3
 
 
+def _quant_x_matches_separate_quant(n, k, num_tokens, cfg):
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_block32_gemm as g
+
+    layer = _make_block32_layer(n, k, "cuda")
+    weight_scale = layer.weight_scale.data[::32].contiguous()
+    # Slicing a wider buffer gives x a row stride other than K.
+    x = torch.randn(num_tokens, k + 64, device="cuda", dtype=torch.bfloat16)[:, :k]
+    x[0, :64] = 0.0  # all-zero blocks clamp the scale byte to 0
+    x[-1, 32:64] = 300.0
+    expected = torch.empty(num_tokens, n, device="cuda", dtype=torch.bfloat16)
+    g._launch(*mxfp8_e4m3_quantize(x), layer.weight, weight_scale, expected, cfg)
+    out = torch.full_like(expected, float("nan"))
+    g._launch(x, None, layer.weight, weight_scale, out, cfg)
+    assert torch.equal(out, expected)
+
+
+@pytest.mark.parametrize("name,n,k", V41_BLOCK32_SHAPES, ids=lambda v: str(v))
+@pytest.mark.parametrize("num_tokens", [1, 3, 8, 19, 64])
+@torch.inference_mode()
+def test_rocm_mxfp8_block32_quant_x_matches_separate_quant(name, n, k, num_tokens):
+    """Quantizing inside the GEMM is bit-identical to quantizing first, for
+    the configs the linear routes each shape to."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_block32_gemm as g
+
+    torch.manual_seed(num_tokens)
+    cfg = g._quant_x_config(num_tokens, n, k) or g._config(num_tokens, n, k)
+    _quant_x_matches_separate_quant(n, k, num_tokens, cfg)
+
+
+@pytest.mark.parametrize(
+    "cfg_args",
+    [
+        ("packed", 4, 32, 128, 4, 4, 3, 16, 0),
+        ("packed", 16, 32, 128, 1, 2, 2, 16, 0, 3),
+        ("tiled", 32, 64, 128, 1, True, 4, 2, 16, 0, 3),
+        ("tiled", 32, 64, 128, 2, False, 4, 2, 16, 0),
+    ],
+    ids=["packed", "packed_split_k", "tiled_split_k", "tiled_split_k_reduce"],
+)
+@torch.inference_mode()
+def test_rocm_mxfp8_block32_quant_x_split_k(cfg_args):
+    """In-kernel quantization stays exact across K splits and the K tail."""
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_block32_gemm as g
+
+    torch.manual_seed(0)
+    kind, *args = cfg_args
+    cfg = g._packed(*args) if kind == "packed" else g._tiled(*args)
+    _quant_x_matches_separate_quant(5120, 576, 19, cfg)
+
+
 @pytest.mark.parametrize("num_rows", [1, 64, 65])
 @torch.inference_mode()
 def test_rocm_mxfp8_quantizer_matches_torch_on_degenerate_blocks(num_rows):
