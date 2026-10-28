@@ -4,7 +4,7 @@
 import torch
 
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, tldevice, triton
 
 _TOPK = 6
 
@@ -82,7 +82,9 @@ if current_platform.is_cuda():
             mask=expert_mask,
             other=0.0,
         ).to(tl.float32)
-        weights = tl.sqrt(tl.where(logits > 20.0, logits, tl.log(1.0 + tl.exp(logits))))
+        weights = tl.sqrt(
+            tl.where(logits > 20.0, logits, tldevice.log1p(tl.exp(logits)))
+        )
         current = tl.where(expert_mask, weights + bias, -float("inf"))
         current = tl.where(current == current, current, -1e30)
 

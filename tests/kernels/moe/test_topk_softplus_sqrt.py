@@ -436,6 +436,82 @@ def test_dsv4_fast_topk(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize(
+    ("num_experts", "topk", "routing"),
+    [
+        (256, 6, "bias"),  # DeepSeek-V4 Triton top-k
+        (256, 6, "hash"),  # DeepSeek-V4 hash top-k
+        (256, 6, "hash_image"),  # its image-sentinel rows
+        (128, 3, "bias"),
+        (128, 3, "hash"),
+    ],
+)
+def test_topk_softplus_sqrt_very_negative_logits(
+    num_experts: int, topk: int, routing: str
+):
+    """sqrt(softplus(x)) is about exp(x / 2) far below zero, not 0, so a token
+    whose selected logits are all very negative (row 0: all <= -17) keeps
+    nonzero routing weights."""
+    torch.manual_seed(0)
+    num_tokens = 32
+    gating_output = torch.empty(num_tokens, num_experts, device="cuda")
+    gating_output.uniform_(-25.0, -10.0)
+    gating_output[0].uniform_(-25.0, -17.0)
+    correction_bias = input_tokens = hash_indices_table = bias_vl = None
+    image_sentinel_lo = 0
+    if routing == "bias":
+        correction_bias = torch.zeros(num_experts, device="cuda")
+    else:
+        input_tokens = torch.arange(1, num_tokens + 1, device="cuda")
+        hash_indices_table = torch.stack(
+            [torch.randperm(num_experts)[:topk] for _ in range(num_tokens + 1)]
+        ).cuda()
+    if routing == "hash_image":
+        # Token ids 1-5, i.e. rows 0-4, are image rows.
+        bias_vl = torch.zeros(num_experts, device="cuda")
+        image_sentinel_lo = 1
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output,
+        topk,
+        renormalize=True,
+        routed_scaling_factor=1.5,
+        e_score_correction_bias=correction_bias,
+        input_ids=input_tokens,
+        hash_indices_table=hash_indices_table,
+        bias_vl=bias_vl,
+        image_sentinel_lo=image_sentinel_lo,
+    )
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=gating_output,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=correction_bias,
+        topk=topk,
+        renormalize=True,
+        input_tokens=input_tokens,
+        hash_indices_table=hash_indices_table,
+        routed_scaling_factor=1.5,
+        bias_vl=bias_vl,
+        image_sentinel_lo=image_sentinel_lo,
+    )
+
+    assert topk_weights[0].sum().item() == pytest.approx(1.5)
+    sorted_ref_ids, idx_ref = topk_ids_ref.sort(dim=-1)
+    sorted_ids, idx_ops = topk_ids.sort(dim=-1)
+    torch.testing.assert_close(sorted_ids, sorted_ref_ids, atol=0, rtol=0)
+    torch.testing.assert_close(
+        topk_weights.gather(1, idx_ops),
+        topk_weights_ref.gather(1, idx_ref),
+        atol=0,
+        rtol=1e-5,
+    )
+
+
+@pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="This test is skipped on non-CUDA platform.",
 )

@@ -31,7 +31,7 @@ three kernels; :class:`RoutedExpertFront` replaces them with one launch:
 
 1. the DSv4 top-k (vLLM's Triton ``_dsv4_topk_kernel``, ``dsv4_topk.py``):
    per row, ``score = sqrt(softplus(logit))`` (softplus(x) = x above 20, else
-   log(1 + exp(x))), ``biased = score + bias`` (``bias_vl`` for image sentinel
+   log1p(exp(x))), ``biased = score + bias`` (``bias_vl`` for image sentinel
    tokens), the six largest biased scores (lowest expert id on exact ties, NaN
    ranked as -1e30), and ``weights`` = the unbiased scores times scale / sum
    (sum replaced by 1 unless positive);
@@ -46,10 +46,9 @@ the Triton kernel's exp is ``ex2.approx.f32`` of x * log2(e), its sqrt
 ``sqrt.approx.ftz.f32``, its division ``div.full.f32``, its weight sum the
 butterfly order of a one-warp eight-lane reduction; the quantization is
 FlashInfer's instruction sequence. The one exception is the log: like the
-Triton kernel, the kernel calls the toolchain's ``logf`` (libdevice, through
-``cute.math.log``), whose argument 1 + exp(x) is at least 1. No other
-floating-point operation is left to the compiler, which could contract or
-flush it.
+Triton kernel, the kernel calls the toolchain's ``log1pf`` (libdevice, through
+``cute.math.log1p``) on exp(x). No other floating-point operation is left to
+the compiler, which could contract or flush it.
 
 Work split (grid ``1 + ceil(rows / 3)``, 1024 threads):
 
@@ -129,15 +128,14 @@ def _u32(value, loc, ip):
 
 # ---- top-k
 
-# 1 + exp(logit), the softplus logarithm's argument.
+# exp(logit), the argument of the softplus log1p.
 _SOFTPLUS_ARGUMENT = """{
 .reg .f32 a;
 mul.f32 a, $1, 0f3FB8AA3B;
-ex2.approx.f32 a, a;
-add.f32 $0, a, 0f3F800000;
+ex2.approx.f32 $0, a;
 }"""
 
-# score = sqrt(softplus(logit)) from the logarithm ($3) of that argument, then
+# score = sqrt(softplus(logit)) from the log1p ($3) of that argument, then
 # the selection key of score + bias: an order-preserving unsigned key (larger
 # value, larger key; -0 keys as +0; NaN as -1e30).
 _SCORE_KEY = """{
@@ -167,8 +165,8 @@ def score_and_key(logit, bias, *, loc=None, ip=None):
     argument = Float32(
         _asm(T.f32(), [_f32(logit, loc, ip)], _SOFTPLUS_ARGUMENT, "=f,f", loc, ip)
     )
-    # The toolchain's logf (libdevice), as in the Triton kernel.
-    log_argument = cute.math.log(argument, fastmath=False)
+    # The toolchain's log1pf (libdevice), as in the Triton kernel.
+    log_argument = cute.math.log1p(argument, fastmath=False)
     result = _asm(
         llvm.StructType.get_literal([T.f32(), T.i32()]),
         [_f32(logit, loc, ip), _f32(log_argument, loc, ip), _f32(bias, loc, ip)],
