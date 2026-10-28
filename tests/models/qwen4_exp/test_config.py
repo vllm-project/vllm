@@ -164,13 +164,15 @@ def test_qwen4_exp_mtp_remaps_mixed_precision_layer_indices(backend: str) -> Non
 
 
 @spawn_new_process_for_each_test
-def test_qwen4_exp_amd_mtp_remaps_quark_layer_names() -> None:
+@pytest.mark.parametrize("backend", ["amd", "nvidia"])
+def test_qwen4_exp_mtp_remaps_quark_layer_names(backend: str) -> None:
     from vllm.model_executor.layers.fused_moe import (
         RoutedExperts,
         UnquantizedFusedMoEMethod,
     )
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
-    from vllm.models.qwen4_exp.amd import mtp as mtp_module
+
+    mtp_module = import_module(f"vllm.models.qwen4_exp.{backend}.mtp")
 
     # `re:mtp\.fc_hidden`, not a catch-all `re:mtp\..*`: a broad regex would
     # already exclude layer 48's experts on its own (`re:` entries are never
