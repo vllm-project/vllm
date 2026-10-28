@@ -416,12 +416,12 @@ Set `"enable_early_recv": true` in the decoder's `--kv-transfer-config` to repor
 completed NIXL pulls before the next step output. Disabled by default; benchmark
 latency and polling overhead on your workload before enabling it.
 
-Supported: single-node `mp`, with synchronous or asynchronous scheduling, TP,
-and NIXL pull inside MultiConnector. Decoder PP must be 1. Set
-`--distributed-executor-backend mp` explicitly, including for TP=1.
+Supported: `uni` or single-node `mp`, with synchronous or asynchronous scheduling,
+TP, and NIXL pull inside MultiConnector. Decoder PP must be 1.
 All ranks must finish receiving before the request can run. Earlier scheduling is
 best effort. Transfer failures retain the configured recovery policy; unexpected
-poll or notification-channel errors terminate the engine, including while paused.
+poll or notification-channel errors are fatal. With `mp`, the worker monitor
+wakes even a paused engine; `uni` polls directly on the engine thread.
 Workers sleep between polls and yield to queued RPCs; the wait can add up to one
 polling interval (0.2 ms, subject to OS scheduling) before handling a new RPC.
 Receive post-processing stays on the worker's current stream, before subsequent

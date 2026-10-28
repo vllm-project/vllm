@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
@@ -144,9 +145,18 @@ class UniProcExecutor(Executor):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.collective_rpc("take_draft_token_ids", single_value=True)
 
+    def take_early_finished_recving(self) -> set[str]:
+        try:
+            with torch.inference_mode():
+                return get_kv_transfer_group().poll_finished_recving()
+        except Exception:
+            # Partial receive post-processing cannot be retried by fault tolerance.
+            self.is_failed = True
+            raise
+
     def check_health(self) -> None:
-        # UniProcExecutor will always be healthy as long as
-        # it's running.
+        if getattr(self, "is_failed", False):
+            raise RuntimeError("Executor failed.")
         return
 
     def shutdown(self) -> None:
