@@ -3974,3 +3974,79 @@ En lisant le log RSM, la conséquence de la famine des petits callers est **quan
 | 07:33:32 | `HALF-OPEN` après ~34 min |
 
 **Chaque épisode ouvre le disjoncteur et le laisse ouvert ~35-40 min**, pendant lesquels toute condensation part en cloud (`deepseek-v4-flash`) — c'est-à-dire en PAYG, pour un travail que le moteur local devrait faire gratuitement. Pendant mon propre post de clôture, la condensation a littéralement timeouté à 90 s sur `localhost:5002` avant de basculer. **C'est le prix mesurable des épisodes**, et c'est ce qui devra être mis en balance avec le coût d'un repli de siège si les épisodes se multiplient. À surveiller : la fréquence d'ouverture du disjoncteur est un meilleur indicateur de gêne réelle que la VRAM.
+
+## Cycle 10:1xZ (28/10) — le critère de persistance FONCTIONNE : pas de 🟠 malgré KV 95 % et +8 préemptions
+
+**Le cycle où le critère ajouté à 08:4xZ a servi la première fois.** Toutes les conditions « de surface » d'un 🟠 réunies — et pourtant la mesure dit non.
+
+### Mesures
+
+| Indicateur | Valeur | Lecture |
+|---|---|---|
+| health | 200 en **13,5 ms** | sain |
+| uptime / RC / OOM | **32 h** (StartedAt 27/10 02:15:05Z) / 0 / **0** | stable |
+| **KV GPU** | **95,4 %** | proche saturation |
+| **préemptions** | **35** (vs 27 à 08:4xZ) = **+8/2 h** | **jambe 1 du 🟠 : FRANCHIE** |
+| **sondes 6 petits callers** | **0,14 / 0,23 / 0,23 / 0,29 / 1,63 / 0,22 s** — médiane **0,23 s**, **0/6 > 9 s** | **jambe 2 : NON franchie** |
+| WEDGE | 1 seul `fail 1/2` (09:27:12Z), **zéro 2/2** | comportement attendu |
+| prefix cache | 533 955 360 / 715 592 893 = **74,6 %** | croisière |
+| file | 3 running / 1 deferred / **0 capacity** | pas de refus d'admission |
+
+**Verdict : 🟢 avec réserve.** Les deux jambes du 🟠 ne sont pas réunies — la première l'est, la seconde non, et c'est la seconde qui décrit la gêne client. Conformément au critère du 08:4xZ, **aucun repli de siège demandé, aucun barreau monté**. C'est exactement le cas d'usage pour lequel le critère a été écrit.
+
+### Découverte : `Deferred` est un état CHRONIQUE, pas un symptôme
+
+Le moteur expose `Deferred: N reqs` — état distinct de `Waiting` (dont les `capacity` et `deferred` sont des sous-motifs). Sur 28/10 de 00:00:03 à 10:16:19 (**3 684 ticks**), **1 128 ticks ont `Deferred ≥ 1`, soit 30,6 % du temps**. Pendant ces ticks, mes sondes répondent en **0,14-1,63 s**. **Conclusion mesurée : `Deferred ≥ 1` n'est PAS corrélé à la gêne des petits callers.** À ne pas lire comme un signal d'alerte — c'est un régime de fonctionnement.
+
+### Le 90 s de 07:41Z n'était PAS le double-bind du port 5002
+
+roo-extensions a demandé (dashboard 07:44Z) si la complétion via `localhost` (→ `::1` → `wslrelay`) se fige alors que `127.0.0.1` répond, parce que RSM a tenu 90 s sans réponse à 07:41Z. **Testé, réponse : non.**
+
+| Chemin | 4 complétions réelles |
+|---|---|
+| `127.0.0.1:5002` | 0,24 / 0,16 / 0,16 / 0,16 s |
+| `[::1]:5002` (wslrelay) | 0,16 / 0,14 / 0,16 / 0,14 s |
+| `localhost:5002` (→ ::1) | 15,7 / 0,46 / 0,16 / 0,15 s, puis **10/10 OK** médiane **0,32 s** (1 outlier 4,20 s) |
+
+**`[::1]` en direct est aussi rapide que `127.0.0.1`** ⇒ le relais `wslrelay` n'est pas en cause, et le double-bind n'explique pas le gel. Sur 14 appels `localhost`, **2 outliers (15,7 s et 4,2 s)** = mise en file derrière un prefill, pas un défaut de chemin.
+
+**Ce que le moteur faisait à 07:41:23Z** (log, filtre de date explicite) : `Running: 3, Waiting: 1, Deferred: 1, GPU KV cache usage: 27,6 %`, **prompt throughput 0,0 tok/s**, generation 120,1 tok/s. **KV à 27,6 % — le moteur n'était donc PAS saturé en capacité au moment du gel.** Et l'access log montre que les requêtes du condenseur de 07:41:58 (16 917 o) et 07:42:04 (54 664 o) ont reçu **200**. Le serveur a répondu ; le gel est côté client RSM (timeout avant lecture complète), pas côté moteur. **Ne pas ouvrir de dossier « double-bind » : le mécanisme n'est pas démontré, et la mesure l'exclut comme cause première.**
+
+⚠ **Piège d'instrument rencontré (à consigner)** : `docker logs --tail 40000 | grep '07:4[0-9]:' | head -25` a rendu les lignes du **27/10** 07:40 — le tail de 40 000 lignes couvre ~26 h, donc le motif d'heure matche deux jours et `head` prend le plus ancien. **Toujours inclure la date dans le motif** (`'10-28 07:4[0-9]:'`) et se méfier de `head` sur un grep multi-jours.
+
+### VRAM : la ligne 23 000 est franchie de façon TENUE ⇒ Q41 ré-ouverte
+
+GPU 0 = **23 121 / 23 092 / 23 101 / 23 101 / 23 114 MiB** sur 5 échantillons à 12 s — **min 23 092, jamais sous la ligne pendant la minute**. Aux cycles précédents la valeur redescendait seule (23 034 → 22 871) ; **cette fois non**.
+
+Discriminant re-mesuré, net : **GPU 1 (même moteur, sans desktop) est plat à 21 650 MiB**, GPU 2 à 45 MiB, et `--query-compute-apps` liste **18 entrées, toutes sur GPU 0, aucune sur GPU 1** ⇒ surcoût desktop = **~1 450 MiB**. **Le moteur n'a pas grossi** ; marge vers 24 564 = **1 454 MiB**.
+
+**Q41 ré-ouverte au registre** parce que le critère que j'avais moi-même écrit est franchi — mais avec un cadrage neuf : ce n'est plus « prévention gratuite ». Le rollback achèterait **+737 MiB de marge** contre **−81 000 tokens de KV** sur un moteur à **95,4 %** d'occupation. **Les deux métriques se dégradent en même temps** ⇒ arbitrage marge-de-boot contre capacité-de-concurrence. Recommandation : **traiter les deux ensemble dans la fenêtre du recreate Q43** (un seul geste, une seule indisponibilité).
+
+### `400 window+1` : 6 en 12 h — ce n'est plus un accident
+
+| Heure (Z) | `body_bytes` | UA | Message |
+|---|---|---|---|
+| 27/10 22:32:59 | 916 612 | Bun/1.3.14 | 262 145 input tokens |
+| 28/10 00:16:09 | 939 454 | Bun/1.3.14 | idem |
+| 28/10 02:21:18 | 899 159 | Bun/1.3.14 | idem |
+| 28/10 04:04:46 | 924 137 | Bun/1.3.14 | idem |
+| 28/10 07:49:42 | 904 195 | Bun/1.3.14 | idem |
+| 28/10 08:01:47 | 944 022 | Bun/1.3.14 | idem |
+
+**Toutes `fp=be312daf7c1c`** (clé MEDIUM = le hub claudish), **toutes via `Bun`**, **toutes à exactement 262 145 = fenêtre + 1**. Cadence ~1 toutes les 2 h. Le `body_head` porte l'injection d'identité claudish ⇒ ce sont des sessions **Claude Code** qui franchissent la fenêtre avant leur propre auto-compact. **La règle #431 (router vers le cloud sur 400 « maximum context length », jamais de retry local) n'absorbe donc pas ces 6 cas** — soit elle n'est pas armée, soit son motif ne couvre pas ce chemin. À rendre à claudish ; ce n'est pas un défaut du moteur, qui refuse correctement et sans rogner.
+
+### Sécurité
+
+**Aucune IP inconnue avec des 200.** Carte : `90.65.170.144` (hairpin) 1 301/1 297×200 · `?` 695/693 · web1 14/14 · **`92.184.141.58` 4/4** (condensation RSM, attribuée par son contenu) · web2 2/2 · poste user Paris 2/2.
+
+**Nouvelle empreinte `64a6d7ec06fd`** = `UA ZOLTRAAK/0.2.0 (security-resea…)`, IP **31.77.203.199**, **3 requêtes sur `/v1/models`, toutes 401, zéro 200**. Scanner d'auth, aucune tentative d'inférence. **Pas d'alerte** (la règle exige des 200) ; consigné. Autres 401 : `1f7f6080cb65` ×123 (clé morte connue), `NONE` ×12, `246a3f382534` ×2 + `68eefcf5ff3f` ×2 (401 navigateur Mac/Win connues).
+
+### Annexes
+
+nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le `subpath` est passé à **`19451:Image/`** ⇒ **vague 2 armée**, le fanion posé le 10/10 est levé. · G: **écriture OK**, 82 % (701 G libres). · commit hôte **78,1 %** (marge 84,3 Go, seuil 85 % non franchi). · `/dev/shm` **24G/63G = 39 %**, zéro orphelin. · condensation **nominale**, disjoncteur refermé depuis 07:33:32, aucune nouvelle ouverture. · prouveur #1453 : aucune passe armée.
+
+### Coordination
+
+**po-2023:claudish (DM 00:56Z, lue)** — précision d'instrument majeure pour ma méthode de repli : **leur relais est structurellement aveugle à leur propre charge**, parce que le client du siège pointe `ANTHROPIC_BASE_URL=http://192.168.0.50:3000` = **le hub en direct**. Leur trafic arrive chez moi en hairpin anonyme sans jamais toucher leur conteneur. **Conséquence : « replier po-2023 » mesuré via leur relais affichera toujours zéro, quel que soit le trafic réel — un zéro n'est pas une preuve de légèreté.** Le seul levier côté eux est leur `ANTHROPIC_BASE_URL`, qui est une question user ouverte chez eux depuis le 19/10. À intégrer : **l'échelle de repli doit se décider sur mes compteurs moteur, jamais sur le zéro d'un relais aveugle.**
+
+**po-2023:vllm a fermé #10** (commentaire `6465869325`, `not planned`) avec les preuves : PR #44053 mergée le 02/08, #40308 fermée non mergée, #41123 stale, Genesis retiré, KV nvfp4 ⇒ TurboQuant plus utilisé. **Ma relance du 07:40Z est soldée** ; dossier retiré du watch.
