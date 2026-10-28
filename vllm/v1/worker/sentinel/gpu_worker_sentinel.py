@@ -53,12 +53,16 @@ def _reinit_cpu_group(
     group: "GroupCoordinator",
     store: TCPStore,
     key: str,
-    host: str,
     rank: int,
     size: int,
     timeout: timedelta | None = None,
 ) -> None:
     """Rebuild a group's Gloo cpu_group over a port coordinated via ``store``"""
+    # Rendezvous recovery groups on their actual leader hosts: DP replicas and
+    # pipeline stages can span nodes independently of the deployment master.
+    if rank == 0:
+        store.set(f"{key}_host", get_ip())
+    host = store.get(f"{key}_host").decode()
     if rank == 0:
         ports, socks = allocate_group_ports(store, key, host, 1)
         port, listen_socket = ports[0], socks[0]
@@ -152,7 +156,6 @@ class WorkerSentinel:
                 get_dp_group(),
                 store,
                 f"ft_dp_port_{round_key}_{dp_index}",
-                master_ip,
                 dp_group_rank,
                 dp_group_size,
                 timeout=self.worker.parallel_config.cpu_distributed_timeout,
@@ -172,24 +175,17 @@ class WorkerSentinel:
                 self.worker.parallel_config.enable_eplb
                 and not self.worker.model_runner.eep_eplb_suppressed
             ):
-                self._reinit_eplb_groups(store, master_ip, round_key)
+                self._reinit_eplb_groups(store, round_key)
         if self.worker.parallel_config.tensor_parallel_size > 1:
             # The per-step TP barrier (dp_utils) leaves the group in a
             # timed-out state on fault; rebuild it for a clean slate.
             tp_group = get_tp_group()
             # Pipeline-stage recovery ports: each stage owns a distinct TP group.
             pp_rank = get_pp_group().rank_in_group
-            # Rendezvous on the TP leader host: later pipeline stages can live
-            # on a different node from the deployment-wide master address.
-            host_key = f"ft_tp_host_{round_key}_{dp_group_rank}_{pp_rank}"
-            if tp_group.rank_in_group == 0:
-                store.set(host_key, get_ip())
-            tp_host = store.get(host_key).decode()
             _reinit_cpu_group(
                 tp_group,
                 store,
                 f"ft_tp_port_{round_key}_{dp_group_rank}_{pp_rank}",
-                tp_host,
                 tp_group.rank_in_group,
                 tp_group.world_size,
                 timeout=self.worker.parallel_config.cpu_distributed_timeout,
@@ -228,9 +224,7 @@ class WorkerSentinel:
             mask = get_ep_all2all_manager().query_active_mask()
             return {"mask": mask.tolist()}
 
-    def _reinit_eplb_groups(
-        self, store: TCPStore, master_ip: str, round_key: str
-    ) -> None:
+    def _reinit_eplb_groups(self, store: TCPStore, round_key: str) -> None:
         """Reinit the EP/EPLB Gloo groups and refresh the EPLB
         communicator's cpu_group reference."""
         # Pipeline-stage recovery ports: EP/EPLB leaders must not share keys.
@@ -244,7 +238,6 @@ class WorkerSentinel:
                 group,
                 store,
                 f"ft_{key_suffix}_port_{round_key}_{pp_rank}",
-                master_ip,
                 group.rank_in_group,
                 group.world_size,
                 timeout=self.worker.parallel_config.cpu_distributed_timeout,
