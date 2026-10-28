@@ -54,6 +54,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine import (
+    TransferEvent,
+    TransferState,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -514,7 +518,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         identity = b"consumer-layer-align"
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=[]
         ) as mock_send_blocks:
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
 
@@ -1246,7 +1250,7 @@ def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
         with patch.object(
-            worker.engine, "batch_register_memory", return_value=0
+            worker.transfer.engine, "batch_register_memory", return_value=0
         ) as reg:
             yield worker, reg
 
@@ -1364,7 +1368,7 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
             sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
             with (
                 patch.object(worker, "sender_loop", asyncio.get_running_loop()),
-                patch.object(worker, "_send_blocks", return_value=0) as send,
+                patch.object(worker, "_send_blocks", return_value=[]) as send,
             ):
                 for pp_rank in range(2):
                     metadata = _xfer_meta(
@@ -1459,7 +1463,7 @@ async def test_kv_producer(monkeypatch):
         identity = b"consumer-id"
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=[]
         ) as mock_send_blocks:
 
             def expected_transfers(src_base, dst_base, src_blocks, dst_blocks):
@@ -1549,7 +1553,15 @@ async def test_kv_producer(monkeypatch):
 
         # Transfer error
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=123
+            prefill_worker,
+            "_send_blocks",
+            return_value=[
+                TransferEvent(
+                    range_id=0,
+                    state=TransferState.FAILED,
+                    error="Mooncake transfer engine returned 123",
+                )
+            ],
         ) as mock_send_blocks:
             mock_socket.send_multipart.reset_mock()
             prefill_worker.reqs_need_send[transfer_id] = send_meta
@@ -2785,7 +2797,7 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     worker.is_kv_consumer = True
     # The first register built a producer. Its thread patch is already gone,
     # so stay on the consumer path and return before the sender thread starts.
-    with patch.object(worker.engine, "batch_register_memory", return_value=0):
+    with patch.object(worker.transfer.engine, "batch_register_memory", return_value=0):
         worker.register_kv_caches(kv_caches)
     assert worker._prepared_transfer_regions == {}
     worker._prepare_transfer_regions(meta)
@@ -3298,7 +3310,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         }
 
         with patch.object(
-            prefill_worker, "_send_blocks", return_value=0
+            prefill_worker, "_send_blocks", return_value=[]
         ) as mock_send_blocks:
             for d_rank in target_d_ranks:
                 remote_block_ids = d_rank_remote_blocks[d_rank]
@@ -3396,7 +3408,7 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.register_kv_caches(dict(zip(layer_names, views)))
         reg.reset_mock()
         with patch.object(
-            worker.engine, "batch_unregister_memory", return_value=0
+            worker.transfer.engine, "batch_unregister_memory", return_value=0
         ) as unreg:
             worker.unregister_kv_caches()
             worker.unregister_kv_caches()

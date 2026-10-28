@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import itertools
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -20,6 +21,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine import (
+    TransferEvent,
+    TransferOp,
+    TransferState,
 )
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 
@@ -215,7 +221,8 @@ def _bare_worker() -> MooncakeConnectorWorker:
     path a no-op."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.xfer_stats = MooncakeKVConnectorStats()
-    worker.engine = MagicMock()
+    worker.transfer = MagicMock()
+    worker._range_ids = itertools.count()
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
@@ -224,16 +231,23 @@ def _bare_worker() -> MooncakeConnectorWorker:
 
 def test_send_blocks_records_success():
     worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 0
+    worker.transfer.poll.return_value = [
+        TransferEvent(
+            range_id=0, state=TransferState.COMPLETED, transferred_bytes=1024
+        ),
+        TransferEvent(
+            range_id=1, state=TransferState.COMPLETED, transferred_bytes=2048
+        ),
+    ]
 
-    ret = worker._send_blocks(
+    events = worker._send_blocks(
         "host:1234",
         src_ptrs=[0x1000, 0x2000],
         dst_ptrs=[0x3000, 0x4000],
         lengths=[1024, 2048],
     )
 
-    assert ret == 0
+    assert [event.state for event in events] == [TransferState.COMPLETED] * 2
     assert worker.xfer_stats.num_successful_transfers == 1
     data = worker.xfer_stats.data
     assert data["bytes_transferred"] == [1024 + 2048]
@@ -243,13 +257,35 @@ def test_send_blocks_records_success():
 
 def test_send_blocks_records_failure():
     worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 1  # non-zero = fail
+    worker.transfer.poll.return_value = [
+        TransferEvent(
+            range_id=0,
+            state=TransferState.FAILED,
+            error="Mooncake transfer engine returned 1",
+        )
+    ]
 
-    ret = worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
+    events = worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
 
-    assert ret == 1
+    assert [event.state for event in events] == [TransferState.FAILED]
     assert worker.xfer_stats.num_successful_transfers == 0
     assert worker.xfer_stats.data["num_failed_transfers"] == [1]
+
+
+def test_send_blocks_submits_one_range_per_descriptor():
+    worker = _bare_worker()
+    worker.transfer.poll.return_value = []
+
+    worker._send_blocks("host:1234", [0x1000, 0x2000], [0x3000, 0x4000], [8, 16])
+
+    _, op, ranges = worker.transfer.submit.call_args.args
+    assert op is TransferOp.WRITE
+    assert [
+        (request.local_addr, request.remote_addr, request.length) for request in ranges
+    ] == [
+        (0x1000, 0x3000, 8),
+        (0x2000, 0x4000, 16),
+    ]
 
 
 def test_get_kv_connector_stats_returns_none_when_empty():
@@ -260,7 +296,9 @@ def test_get_kv_connector_stats_returns_none_when_empty():
 
 def test_get_kv_connector_stats_returns_and_resets():
     worker = _bare_worker()
-    worker.engine.batch_transfer_sync_write.return_value = 0
+    worker.transfer.poll.return_value = [
+        TransferEvent(range_id=0, state=TransferState.COMPLETED, transferred_bytes=4096)
+    ]
     worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
 
     snapshot = worker.get_kv_connector_stats()
