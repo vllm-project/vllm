@@ -475,12 +475,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 f"Currently do not support diarized_json for {request.model}"
             )
 
-        if (
-            request.response_format in {"verbose_json", "diarized_json"}
-            and request.stream
-        ):
+        if request.response_format == "verbose_json" and request.stream:
             return self.create_error_response(
-                f"{request.response_format} format doesn't support streaming case"
+                "verbose_json format doesn't support streaming case"
             )
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 

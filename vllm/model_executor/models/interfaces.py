@@ -122,6 +122,34 @@ class StreamingTranscriptionPostProcessor:
         return text_delta
 
 
+class StreamingDiarizedTranscriptParser:
+    """Stateful parser for streamed `diarized_json` output.
+
+    This default parses the output once generation has finished.
+    """
+
+    def __init__(self, model_cls: type["SupportsTranscription"]) -> None:
+        self.model_cls = model_cls
+        self._text = ""
+
+    def process_delta(
+        self, text_delta: str, finished: bool
+    ) -> list[DiarizedTranscriptionSegment]:
+        """Return the segments that this delta completes.
+
+        Raises:
+            ValueError: If the output is not a valid diarized transcript.
+
+        """
+        self._text += text_delta
+        if not finished:
+            return []
+        segments = self.model_cls.parse_diarized_transcript(self._text)
+        if not segments:
+            raise ValueError("Model output did not contain a valid diarized transcript")
+        return segments
+
+
 def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     """A helper function to be used in the context of
     [vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids][]
@@ -1466,6 +1494,18 @@ class SupportsTranscription(Protocol):
         this method.
         """
         raise NotImplementedError
+
+    @classmethod
+    def get_streaming_diarized_parser_cls(
+        cls,
+    ) -> type[StreamingDiarizedTranscriptParser]:
+        """Return a stateful parser class for streamed `diarized_json` output.
+
+        The default sends all segments once the output is complete. Models
+        whose output marks where each segment ends can return a parser that
+        sends each segment as soon as it is final.
+        """
+        return StreamingDiarizedTranscriptParser
 
     @classmethod
     def get_streaming_post_processor_cls(
