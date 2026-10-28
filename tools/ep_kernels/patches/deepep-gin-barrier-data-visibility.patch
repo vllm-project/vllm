@@ -1,24 +1,26 @@
---- a/deep_ep/include/deep_ep/common/comm.cuh	2026-10-02 22:49:43
-+++ b/deep_ep/include/deep_ep/common/comm.cuh	2026-10-03 10:00:00
-@@ -145,21 +145,50 @@
+--- a/deep_ep/include/deep_ep/common/comm.cuh
++++ b/deep_ep/include/deep_ep/common/comm.cuh
+@@ -139,27 +139,47 @@
+     const auto global_warp_idx = sm_idx * kNumWarps + (thread_idx / 32);
+     const int& rank_idx = (std::is_same_v<team_t, ncclTeamTagWorld>) ? scaleup_rank_idx : scaleout_rank_idx;
+     const int num_qps = kNumQPs == kFlushAllAllocatedQPs ? nccl_dev_comm.ginContextCount : kNumQPs;
+-
+-    // Flush all QPs by all SMs (only needed for release semantics)
+-    if constexpr (kFlushStores) {
++    constexpr bool kDeferFlush = std::is_same_v<team_t, ncclTeamTagWorld>;
++    const auto barrier_sharing = (not kDeferFlush or not kFlushStores or kNumSMs == 1 or num_qps <= kNumWarps) ?
++        NCCL_GIN_RESOURCE_SHARING_CTA : NCCL_GIN_RESOURCE_SHARING_GPU;
++
++    if constexpr (kFlushStores and not kDeferFlush) {
          for (int i = global_warp_idx; i < num_qps; i += kNumSMs * kNumWarps) {
              ncclGin(nccl_dev_comm, i, NCCL_GIN_RESOURCE_SHARING_CTA).flush(ncclCoopWarp());
          }
-+
-+        // World-team barriers may mix direct NVLink writes with GIN signals, so a system-scope
-+        // threadfence is required to make the NVLink writes visible before publishing the
-+        // barrier (mirrors upstream DeepEP #715). In dispatch/combine, same-node (NVLink-
-+        // accessible) peers receive their data via TMA stores to LSA symmetric memory, while
-+        // the barrier completion signal is a GIN atomic on a different fabric with no ordering
-+        // between them; without this fence the signal can be performed at the receiver while
-+        // the NVLink data stores are still in flight.
-+        if constexpr (std::is_same_v<team_t, ncclTeamTagWorld>)
-+            ptx::fence_acq_rel_sys();
-+
-         // NOTES: we can not use `kNumSMs` to judge, as maybe only part of the SMs will call this function
+-        // NOTES: we can not use `kNumSMs` to judge, as maybe only part of the SMs will call this function
          (gridDim.x > 1) ? cooperative_groups::this_grid().sync() : __syncthreads();
      }
  
++    const int num_signal_qps = (kFlushStores or not kDeferFlush) ? static_cast<int>(nccl_dev_comm.ginContextCount) : 1;
++
      if (sm_idx == 0) {
 -        // Use QP 0 to do barrier
          const auto team = (std::is_same_v<team_t, ncclTeamTagWorld>) ?
@@ -26,38 +28,38 @@
 -        const ncclGin gin(nccl_dev_comm, 0, NCCL_GIN_RESOURCE_SHARING_CTA);
 -        for (int i = thread_idx; i < kNumRanks; i += kNumThreads)
 -            gin.signal(team, i, ncclGin_SignalInc{static_cast<ncclGinSignal_t>(rank_idx)});
- 
-+        // Signal on every context, not just context 0. Signals and puts on different QPs are
-+        // not ordered at the receiving NIC, so a context-0-only signal could become visible to
-+        // the receiver while data puts issued on other contexts are still in flight (`flush`
-+        // only guarantees local source-buffer reuse, not remote settlement). A signal posted
-+        // on context `c` is SQ-FIFO-ordered behind all WQEs previously reserved on context
-+        // `c`, so per-context signals cover the data puts. This mirrors NCCL's
-+        // `ncclGinBarrierSession` with `ncclGinAllContexts` (nccl_device/impl/gin_barrier__funcs.h).
-+        // NOTES: (1) each context has its own signal memory and shadow slot for the same
-+        // signal id, so no extra slot allocation is needed; (2) always use the runtime
-+        // context count (not the per-call-site `kNumQPs` or `num_qps`), so that every
-+        // invocation of this barrier signals and waits on the same set of contexts and the
-+        // per-(context, signal id) shadow counters stay consistent across call sites.
-+        const int num_signal_qps = static_cast<int>(nccl_dev_comm.ginContextCount);
+-
++
++        // Signal on every context, not just context 0, when publishing data.
++        // An arrival-only world barrier publishes no data and needs only context 0.
++        // Each (context, sender) shadow counts only barriers using that context.
 +        for (int i = thread_idx; i < num_signal_qps * kNumRanks; i += kNumThreads) {
 +            const int context_idx = i / kNumRanks;
 +            const int peer_idx = i - context_idx * kNumRanks;
-+            const ncclGin gin(nccl_dev_comm, context_idx, NCCL_GIN_RESOURCE_SHARING_CTA);
++            const ncclGin gin(nccl_dev_comm, context_idx, barrier_sharing);
 +            gin.signal(team, peer_idx, ncclGin_SignalInc{static_cast<ncclGinSignal_t>(rank_idx)});
 +        }
 +
++    }
++    // Incoming arrivals do not guarantee our outgoing sources are reusable.
++    if constexpr (kFlushStores and kDeferFlush) {
++        for (int i = global_warp_idx; i < num_qps; i += kNumSMs * kNumWarps) {
++            ncclGin(nccl_dev_comm, i, barrier_sharing).flush(ncclCoopWarp());
++        }
++    }
++
++    if (sm_idx == 0) {
          // TODO(NCCL): Using the official NCCL wait signal API, after they added timeout check.
 -        for (int i = thread_idx; i < kNumRanks; i += kNumThreads) {
 -            const auto signal_idx = static_cast<ncclGinSignal_t>(i);
 +        for (int i = thread_idx; i < num_signal_qps * kNumRanks; i += kNumThreads) {
 +            const int context_idx = i / kNumRanks;
 +            const auto signal_idx = static_cast<ncclGinSignal_t>(i - context_idx * kNumRanks);
-+            const ncclGin gin(nccl_dev_comm, context_idx, NCCL_GIN_RESOURCE_SHARING_CTA);
++            const ncclGin gin(nccl_dev_comm, context_idx, barrier_sharing);
              const auto shadow_ptr = gin.getSignalShadowPtr(signal_idx);
              const auto target = ++(*shadow_ptr);
  
-@@ -171,8 +200,8 @@
+@@ -171,13 +191,14 @@
                      return true;
  
                  if (is_last_check) {
@@ -68,3 +70,18 @@
                  }
                  return false;
              });
+         }
+     }
++
+ }
+ 
+ template <bool kIsScaleupNVLink, int kNumRanks, int kNumSMs, int kNumThreads, int kNumQPs,
+@@ -220,6 +241,8 @@
+         ptx::tma_store_commit();
+         ptx::tma_store_wait();
+         __syncwarp();
++        if constexpr (not kIsScaleupNVLink)
++            ptx::fence_acq_rel_sys();
+     }
+ 
+     // All the SMs should wait

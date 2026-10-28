@@ -195,8 +195,8 @@ do_build() {
         deepep_head=$(git rev-parse HEAD)
         if [[ "$deepep_head" != d4f41e4e* ]]; then
             echo "WARNING: Skipping DeepEP GIN barrier data-visibility patch: HEAD is $deepep_head, expected d4f41e4e." >&2
-        elif grep -q "Signal on every context, not just context 0" \
-            deep_ep/include/deep_ep/common/comm.cuh; then
+        elif patch --batch --force --reverse --dry-run -p1 \
+            < "${PATCHES_DIR}/deepep-gin-barrier-data-visibility.patch" > /dev/null 2>&1; then
             echo "DeepEP GIN barrier data-visibility patch is already applied."
         elif ! patch --batch -p1 < "${PATCHES_DIR}/deepep-gin-barrier-data-visibility.patch"; then
             echo "ERROR: Failed to apply DeepEP GIN barrier data-visibility patch; aborting build." >&2
