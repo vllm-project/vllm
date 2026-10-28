@@ -760,6 +760,43 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     return core
 
 
+def test_sleep_wait_completes_before_caller_wakes():
+    """The caller waits for draining and worker sleep before issuing wake."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.has_requests.return_value = True
+    core._reset_caches = MagicMock()
+    future = core.sleep(mode="wait")
+    assert future is not None and not future.done()
+
+    core.model_executor.sleep.assert_not_called()
+    core.model_executor.wake_up.assert_not_called()
+
+    core.scheduler.has_requests.return_value = False
+    core._notify_idle_state_callbacks()
+    future.result()
+    core.model_executor.sleep.assert_called_once_with(1)
+    core.wake_up()
+    core.model_executor.wake_up.assert_called_once_with(None)
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_sleep_failure_propagates_to_caller(deferred):
+    core = _pausable_engine_core_proc()
+    core.scheduler.has_requests.return_value = deferred
+    core._reset_caches = MagicMock()
+    core.model_executor.sleep.side_effect = RuntimeError("injected sleep failure")
+    with pytest.raises(RuntimeError, match="injected sleep failure"):
+        future = core.sleep(mode="wait")
+        if deferred:
+            core.scheduler.has_requests.return_value = False
+            core._notify_idle_state_callbacks()
+            future.result()
+    # The injected failure precedes worker mutation, so this retry is safe.
+    core.model_executor.sleep.side_effect = None
+    core.sleep(mode="wait")
+    assert core.model_executor.sleep.call_count == 2
+
+
 @pytest.mark.parametrize(
     "mode,user_pause,kind,rejected",
     [
