@@ -202,7 +202,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         tokenizer,
                         chat_template_kwargs,
                         prompt_token_ids,
-                    )
+                    ),
                 )
             )
 

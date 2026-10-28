@@ -435,7 +435,7 @@ class OpenAIServingChat(GenerateBaseServing):
                         tokenizer,
                         chat_template_kwargs,
                         prompt_token_ids,
-                    )
+                    ),
                 )
 
             generators.append(generator)

@@ -526,7 +526,7 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
             model=MOCK_MODEL_NAME,
             messages=conversation,
             chat_template_kwargs=chat_template_kwargs,
-            stop=["</block>"]
+            stop=["</block>"],
         )
     )
     single_call = single_engine.generate.call_args_list[-1]
