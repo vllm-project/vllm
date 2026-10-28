@@ -161,7 +161,7 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(index_topk=128), max_model_len=64 * 4
+            hf_text_config=SimpleNamespace(index_topk=128), max_model_len=64 * 4
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1),
         cache_config=SimpleNamespace(num_gpu_blocks_override=7),
@@ -234,7 +234,7 @@ def test_hisparse_rejects_deepseek_v4():
     }
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=512)),
         cache_config=SimpleNamespace(num_gpu_blocks_override=7),
     )
 

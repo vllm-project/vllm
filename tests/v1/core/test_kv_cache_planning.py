@@ -93,7 +93,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(index_topk=128),
+            hf_text_config=SimpleNamespace(index_topk=128),
             max_model_len=gpu_block_size,
         ),
         parallel_config=SimpleNamespace(
