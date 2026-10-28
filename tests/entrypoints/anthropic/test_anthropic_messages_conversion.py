@@ -1517,6 +1517,25 @@ class TestDetectMergeInlineSystem:
             is expected
         )
 
+    def test_non_jinja_probe_uses_server_chat_template(self):
+        """Renderers that honor --chat-template (e.g. Cohere) probe with it."""
+        renderer = MagicMock()
+        renderer.render_messages.side_effect = ValueError
+        online_renderer = SimpleNamespace(
+            renderer=renderer,
+            chat_template="custom",
+            chat_template_content_format="string",
+            default_chat_template_kwargs={"thinking": False},
+        )
+        AnthropicServingMessages._should_merge_inline_system(online_renderer)
+        params = renderer.render_messages.call_args.args[1]
+        assert params.chat_template == "custom"
+        assert params.chat_template_content_format == "string"
+        assert params.chat_template_kwargs == {
+            "thinking": False,
+            "add_generation_prompt": True,
+        }
+
 
 # ======================================================================
 # Full (non-streaming) response conversion: messages_full_converter

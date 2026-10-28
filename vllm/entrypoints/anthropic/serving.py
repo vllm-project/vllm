@@ -54,7 +54,6 @@ from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse, Usa
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
-from vllm.renderers.base import BaseRenderer
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.inputs.preprocess import (
@@ -281,7 +280,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         if renderer.tokenizer is None:
             merge = True
         elif not isinstance(renderer, HfRenderer):
-            merge = not cls._renderer_keeps_inline_system(renderer)
+            merge = not cls._renderer_keeps_inline_system(online_renderer)
         else:
             merge = any(
                 cls._detect_merge_inline_system(
@@ -335,7 +334,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             return True
 
     @staticmethod
-    def _renderer_keeps_inline_system(renderer: BaseRenderer) -> bool:
+    def _renderer_keeps_inline_system(online_renderer: OnlineRenderer) -> bool:
         """Probe a non-jinja renderer (e.g. DeepSeek V4.1's encoder).
 
         Inline system messages must render in order as distinct system turns,
@@ -348,7 +347,12 @@ class AnthropicServingMessages(OpenAIServingChat):
             {"role": role, "content": marker}
             for role, marker in zip(("system", "user") * 2, markers)
         ]
-        params = ChatParams(chat_template_kwargs={"add_generation_prompt": True})
+        renderer = online_renderer.renderer
+        params = ChatParams(
+            chat_template=online_renderer.chat_template,
+            chat_template_content_format=online_renderer.chat_template_content_format,
+            chat_template_kwargs={"add_generation_prompt": True},
+        ).with_defaults(online_renderer.default_chat_template_kwargs)
 
         def render(msgs: list[Any]) -> str:
             _, prompt = renderer.render_messages(msgs, params)
