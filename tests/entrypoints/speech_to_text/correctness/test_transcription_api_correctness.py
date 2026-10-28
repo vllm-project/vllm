@@ -318,6 +318,7 @@ def run_longform_evaluation(
         ("openai/whisper-large-v3", 12.744980),
         # CohereASR is used to test the variable encoder length code paths
         ("CohereLabs/cohere-transcribe-03-2026", 11.92),
+        ("nvidia/canary-1b-v2", 12.34),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.

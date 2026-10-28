@@ -637,6 +637,7 @@ _MULTIMODAL_MODELS = {
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),
     # [Encoder-decoder]
+    "CanaryForConditionalGeneration": ("canary", "CanaryForConditionalGeneration"),
     "CohereAsrForConditionalGeneration": (
         "cohere_asr",
         "CohereAsrForConditionalGeneration",
