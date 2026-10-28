@@ -295,6 +295,19 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":computer: (CPU) NIXL Lifecycle"
+  key: nixl-lifecycle-cpu
+  depends_on:
+    - image-build-cpu
+  timeout_in_minutes: 10
+  device: cpu-small
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - tests/v1/kv_connector/unit/test_nixl_connector.py
+    - tests/v1/kv_connector/unit/utils.py
+  commands:
+    - pytest -v -s -m 'cpu_test' v1/kv_connector/unit/test_nixl_connector.py -k ttl_cleanup
+
 - label: ":computer: (CPU) V1 Others"
   key: v1-others-cpu
   depends_on:

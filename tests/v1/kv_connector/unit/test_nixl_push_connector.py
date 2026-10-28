@@ -385,6 +385,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._failed_remote_engines = set()
         w._invalid_remote_engines = set()
         w._handshake_lock = threading.RLock()
+        w._handshake_futures = {}
         w._physical_blocks_per_logical_kv_block = 1
         w._uses_region_group_mapping = False
         w.region_group_ids = [0]

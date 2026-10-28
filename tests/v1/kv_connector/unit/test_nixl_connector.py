@@ -5132,3 +5132,98 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
         )
+
+
+@pytest.fixture
+def lifecycle_worker(default_vllm_config, dist_init):
+    """Use the normal worker constructor and existing external NIXL fake."""
+    config = create_vllm_config(kv_connector_extra_config={"engine_ttl": 0.05})
+    config.kv_transfer_config.kv_buffer_device = current_platform.device_type
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    ):
+        worker = FakeNixlConnectorWorker(config, "local", hand_shake_latency=0)
+        try:
+            future = worker._ensure_handshake("remote_engine", "localhost", 1234, 1)
+            assert future is not None
+            future.result(timeout=5)
+            deadline = time.monotonic() + 5
+            while "remote_engine" not in worker._remote_agents:
+                assert time.monotonic() < deadline, "handshake was not published"
+                threading.Event().wait(0.001)
+            yield worker
+        finally:
+            worker.shutdown()
+
+
+@pytest.mark.cpu_test
+def test_ttl_cleanup_is_idempotent(lifecycle_worker):
+    worker = lifecycle_worker
+    worker._cleanup_remote_engine("remote_engine")
+    worker._cleanup_remote_engine("remote_engine")
+    assert "remote_engine" not in worker._remote_agents
+    assert "remote_engine" not in worker.dst_xfer_side_handles
+    assert "remote_engine" not in worker._engine_last_active
+    future = worker._ensure_handshake("remote_engine", "localhost", 1234, 1)
+    assert future is not None
+    assert future.result(timeout=5)[0]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("second_operation", ["evict", "handshake"])
+def test_ttl_cleanup_concurrent_lookup(lifecycle_worker, second_operation):
+    """A teardown cannot invalidate another lookup or its new descriptors."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+    worker = lifecycle_worker
+    deadline = time.monotonic() + 5
+    while (
+        time.perf_counter() - worker._engine_last_active["remote_engine"]
+        <= worker._engine_ttl
+    ):
+        assert time.monotonic() < deadline, "peer did not expire"
+        threading.Event().wait(0.001)
+
+    removing = threading.Event()
+    release = threading.Event()
+    second_started = threading.Event()
+    native_remove = worker.nixl_wrapper.remove_remote_agent
+
+    def paused_remove(name):
+        removing.set()
+        assert release.wait(5), "test teardown barrier timed out"
+        return native_remove(name)
+
+    def second_lookup():
+        second_started.set()
+        if second_operation == "evict":
+            return worker._evict_stale_engines()
+        return worker._ensure_handshake("remote_engine", "localhost", 1234, 1)
+
+    with (
+        patch.object(worker.nixl_wrapper, "remove_remote_agent", paused_remove),
+        ThreadPoolExecutor(2) as pool,
+    ):
+        first = pool.submit(worker._evict_stale_engines)
+        try:
+            assert removing.wait(5)
+            second = pool.submit(second_lookup)
+            assert second_started.wait(5)
+            with pytest.raises(TimeoutError):
+                second.result(timeout=0.1)
+        finally:
+            release.set()
+        first.result(timeout=5)
+        pending = second.result(timeout=5)
+        if pending is not None:
+            assert pending.result(timeout=5)[0]
+
+    pending = worker._ensure_handshake("remote_engine", "localhost", 1234, 1)
+    if pending is not None:
+        assert pending.result(timeout=5)[0]
+    deadline = time.monotonic() + 5
+    while "remote_engine" not in worker._remote_agents:
+        assert time.monotonic() < deadline, "reconnection was not published"
+        threading.Event().wait(0.001)
+    assert worker.dst_xfer_side_handles["remote_engine"]

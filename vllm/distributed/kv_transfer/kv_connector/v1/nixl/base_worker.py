@@ -1416,9 +1416,10 @@ class NixlBaseConnectorWorker:
         returned future.
         Failures to handshake are logged and the request is marked as failed.
         """
-        self._evict_stale_engines()
         with self._handshake_lock:
+            self._evict_stale_engines()
             if engine_id in self._remote_agents:
+                self._engine_last_active[engine_id] = time.perf_counter()
                 return None
             fut = self._handshake_futures.get(engine_id)
             if fut is not None:
@@ -3533,28 +3534,30 @@ class NixlBaseConnectorWorker:
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """Send heartbeats to remote engines, extending the lease on KV blocks."""
         for engine_id, hb_info in metadata.heartbeat_by_engine.items():
-            # Proactive handshake (this request may still be in waiting queue) so
-            # the **next** heartbeat for this remote can go through.
-            if (
-                self._ensure_handshake(
-                    engine_id,
-                    hb_info.host,
-                    hb_info.port,
-                    hb_info.tp_size,
-                    hb_info.dcp_size,
-                    hb_info.pp_size,
-                    self._hb_handshake_notif_only and hb_info.pp_size > 1,
-                )
-                is not None
-            ):
-                continue  # handshake is still pending
+            with self._handshake_lock:
+                # Proactive handshake (this request may still be in waiting queue) so
+                # the **next** heartbeat for this remote can go through.
+                if (
+                    self._ensure_handshake(
+                        engine_id,
+                        hb_info.host,
+                        hb_info.port,
+                        hb_info.tp_size,
+                        hb_info.dcp_size,
+                        hb_info.pp_size,
+                        self._hb_handshake_notif_only and hb_info.pp_size > 1,
+                    )
+                    is not None
+                ):
+                    continue  # handshake is still pending
 
-            # Refresh the TTL: a heartbeat means the router still paired this P-D,
-            # so requests are still waiting on this engine
-            self._engine_last_active[engine_id] = time.perf_counter()
-            # Build the heartbeat message: "HB:req1,req2,..."
-            hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
-            for agent_name in self._remote_agents[engine_id].values():
+                # Refresh the TTL: a heartbeat means the router still paired this P-D,
+                # so requests are still waiting on this engine
+                self._engine_last_active[engine_id] = time.perf_counter()
+                # Build the heartbeat message: "HB:req1,req2,..."
+                hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
+                agents = tuple(self._remote_agents[engine_id].values())
+            for agent_name in agents:
                 try:
                     self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
                 except Exception:
@@ -3894,7 +3897,7 @@ class NixlBaseConnectorWorker:
     def _evict_stale_engines(self) -> None:
         """Scan for and evict remote engines that have exceeded their TTL.
 
-        Called from the main thread in when a new remote engine appears.
+        Called before a handshake lookup, from the engine or push writer thread.
         We can only go OOM as we discover and register a new remote, therefore we make
         sure we clean up stale engine data structures before then. This invariant
         prevents us from using background threads, though memory usage is not guaranteed
@@ -3916,11 +3919,16 @@ class NixlBaseConnectorWorker:
         if self._engine_ttl <= 0:
             return
 
-        now = time.perf_counter()
-        busy = self._engines_with_inflight_transfers()
-        for eid, last_active in list(self._engine_last_active.items()):
-            if now - last_active > self._engine_ttl and eid not in busy:
-                self._cleanup_remote_engine(eid)
+        # Push calls this from both the engine and writer threads. Serialize the
+        # scan with teardown and handshake publication, not just the final pop.
+        with self._handshake_lock:
+            if self._handshake_futures:
+                return
+            now = time.perf_counter()
+            busy = self._engines_with_inflight_transfers()
+            for eid, last_active in list(self._engine_last_active.items()):
+                if now - last_active > self._engine_ttl and eid not in busy:
+                    self._cleanup_remote_engine(eid)
 
     def _engines_with_inflight_transfers(self) -> set[EngineId]:
         """Remote engines a transfer is still reading from.
@@ -3931,7 +3939,7 @@ class NixlBaseConnectorWorker:
         """
         return {
             meta.remote.engine_id
-            for req_id in self._recving_transfers
+            for req_id in tuple(self._recving_transfers)
             if (meta := self._recving_metadata.get(req_id)) is not None
             and meta.remote is not None
         }
@@ -4040,45 +4048,47 @@ class NixlBaseConnectorWorker:
         all per-engine data structures. Used by TTL eviction, replaced/invalid
         peer cleanup and shutdown.
         """
-        assert engine_id in self._remote_agents
-
-        # Notif-only engines (push-mode D side) have no descriptor state.
-        for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
-            self.nixl_wrapper.release_dlist_handle(handle)
-        # Pop under the handshake lock; NIXL teardown stays outside it.
+        # Hold through native teardown: a second cleanup must not release the
+        # same handles, or remove metadata from a concurrent re-handshake.
         with self._handshake_lock:
-            agents = self._remote_agents.pop(engine_id)
+            if engine_id in self._handshake_futures:
+                return
+
+            # Notif-only engines (push-mode D side) have no descriptor state.
+            for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
+                self.nixl_wrapper.release_dlist_handle(handle)
+            agents = self._remote_agents.pop(engine_id, {})
             for address, eid in list(self._engine_by_address.items()):
                 if eid == engine_id:
                     del self._engine_by_address[address]
-        for agent_name in agents.values():
-            self.nixl_wrapper.remove_remote_agent(agent_name)
+            for agent_name in agents.values():
+                self.nixl_wrapper.remove_remote_agent(agent_name)
 
-        self._failed_remote_engines.discard(engine_id)
-        self._invalid_remote_engines.discard(engine_id)
+            self._failed_remote_engines.discard(engine_id)
+            self._invalid_remote_engines.discard(engine_id)
 
-        self.kv_caches_base_addr.pop(engine_id, None)
-        self.dst_num_blocks.pop(engine_id, None)
-        self.dst_region_num_blocks.pop(engine_id, None)
-        self.dst_region_group_ids.pop(engine_id, None)
-        self.dst_uses_region_group_mapping.pop(engine_id, None)
-        self.dst_region_mem_types.pop(engine_id, None)
-        self.tp_mappings.pop(engine_id, None)
-        self.draft_tp_mappings.pop(engine_id, None)
-        if self.transfer_topo is not None:
-            self.transfer_topo.unregister_remote_engine(engine_id)
+            self.kv_caches_base_addr.pop(engine_id, None)
+            self.dst_num_blocks.pop(engine_id, None)
+            self.dst_region_num_blocks.pop(engine_id, None)
+            self.dst_region_group_ids.pop(engine_id, None)
+            self.dst_uses_region_group_mapping.pop(engine_id, None)
+            self.dst_region_mem_types.pop(engine_id, None)
+            self.tp_mappings.pop(engine_id, None)
+            self.draft_tp_mappings.pop(engine_id, None)
+            if self.transfer_topo is not None:
+                self.transfer_topo.unregister_remote_engine(engine_id)
 
-        # Drop the cached clock offset; it is re-measured on the next handshake.
-        self._engine_clock_offset.pop(engine_id, None)
-        # A just-completed handshake may not have recorded activity yet, so
-        # tolerate a missing entry.
-        last_active = self._engine_last_active.pop(engine_id, None)
-        if log_eviction and last_active is not None:
-            logger.info(
-                "Evicted stale remote engine %s (inactive for %.1fs).",
-                engine_id,
-                time.perf_counter() - last_active,
-            )
+            # Drop the cached clock offset; it is re-measured on the next handshake.
+            self._engine_clock_offset.pop(engine_id, None)
+            # A just-completed handshake may not have recorded activity yet, so
+            # tolerate a missing entry.
+            last_active = self._engine_last_active.pop(engine_id, None)
+            if log_eviction and last_active is not None:
+                logger.info(
+                    "Evicted stale remote engine %s (inactive for %.1fs).",
+                    engine_id,
+                    time.perf_counter() - last_active,
+                )
 
     def __del__(self):
         with contextlib.suppress(Exception):

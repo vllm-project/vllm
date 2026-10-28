@@ -203,8 +203,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # Update last activity from this remote (same as pull), but only for
             # an already-connected engine so we never leave an _engine_last_active
             # entry without a _remote_agents entry (breaks _cleanup_remote_engine).
-            if remote_engine_id in self._remote_agents:
-                self._engine_last_active[remote_engine_id] = time.perf_counter()
+            with self._handshake_lock:
+                if remote_engine_id in self._remote_agents:
+                    self._engine_last_active[remote_engine_id] = time.perf_counter()
 
             logger.debug(
                 "start_load_kv (push) for request %s from remote engine %s. "
@@ -501,7 +502,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return
         # Keep the engine alive while it is actively receiving pushes, mirroring
         # how pull-mode transfers touch _engine_last_active in start_load_kv.
-        self._engine_last_active[decode_engine_id] = time.perf_counter()
+        # _ensure_handshake refreshed activity under the lifecycle lock.
 
         logical_local = self._as_grouped_block_ids(local_block_ids)
         logical_remote = self._as_grouped_block_ids(remote_block_ids)
