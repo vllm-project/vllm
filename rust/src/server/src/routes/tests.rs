@@ -3372,6 +3372,121 @@ async fn chat_structured_outputs_use_configured_backend() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn openai_return_weight_versions_reports_spans_on_final_choice() {
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        for stream in [false, true] {
+            for opt_in in [false, true] {
+                let ipc = IpcNamespace::new().expect("create ipc namespace");
+                let handshake_address = ipc.handshake_endpoint();
+                let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+                    handshake_address.clone(),
+                    b"engine-openai-weight-versions".to_vec(),
+                    |dealer, push| {
+                        boxed_test_future(async move {
+                            let add = recv_engine_message(dealer).await;
+                            let request: EngineCoreRequest =
+                                rmp_serde::from_slice(&add[1]).expect("decode request");
+                            // The weights change from `v1` to `v2` before the last token.
+                            for (token_id, version, finish_reason) in [
+                                (b'h', "v1", None),
+                                (b'i', "v1", None),
+                                (b'!', "v2", Some(EngineCoreFinishReason::Length)),
+                            ] {
+                                send_outputs(
+                                    push,
+                                    RequestBatchOutputs {
+                                        outputs: vec![request_output(
+                                            &request.request_id,
+                                            vec![token_id as u32],
+                                            finish_reason,
+                                        )],
+                                        weight_version: Some(version.into()),
+                                        ..Default::default()
+                                    }
+                                    .into(),
+                                )
+                                .await;
+                            }
+                        })
+                    },
+                ));
+                let client = EngineCoreClient::connect(
+                    EngineCoreClientConfig::new_single(handshake_address)
+                        .with_model_name("test-model")
+                        .with_local_input_output_addresses(
+                            Some(ipc.input_endpoint()),
+                            Some(ipc.output_endpoint()),
+                        ),
+                )
+                .await
+                .expect("connect client");
+                let chat = ChatLlm::from_shared_backend(
+                    test_llm(client),
+                    Arc::new(FakeChatBackend::new()),
+                );
+                let mut app = build_router(Arc::new(AppState::new(
+                    vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                    chat,
+                )));
+
+                let mut body = json!({
+                    "stream": stream,
+                    "max_tokens": 3,
+                    "return_weight_versions": opt_in,
+                });
+                if endpoint == "/v1/chat/completions" {
+                    body["messages"] = json!([{"role": "user", "content": "hi"}]);
+                } else {
+                    body["prompt"] = json!("hi");
+                }
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri(endpoint)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("call app");
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+                engine_task.await.expect("mock engine task");
+                let text = String::from_utf8(bytes.to_vec()).expect("utf8 body");
+
+                let expected = json!([
+                    {"version": "v1", "start": 0, "end": 2},
+                    {"version": "v2", "start": 2, "end": 3},
+                ]);
+                let case = format!("{endpoint} stream={stream} opt_in={opt_in}: {text}");
+                if stream {
+                    // Only the final chunk carries the spans, covering the whole output.
+                    let choices: Vec<_> = sse_json_payloads(&text)
+                        .into_iter()
+                        .flat_map(|chunk| chunk["choices"].as_array().cloned().unwrap_or_default())
+                        .collect();
+                    let (finished, unfinished): (Vec<_>, Vec<_>) =
+                        choices.iter().partition(|choice| !choice["finish_reason"].is_null());
+                    assert_eq!(finished.len(), 1, "{case}");
+                    let expected = opt_in.then_some(&expected);
+                    assert_eq!(finished[0].get("weight_versions"), expected, "{case}");
+                    for choice in unfinished {
+                        assert_eq!(choice.get("weight_versions"), None, "{case}");
+                    }
+                } else {
+                    let json: serde_json::Value = serde_json::from_str(&text).expect("json body");
+                    let spans = &json["choices"][0]["weight_versions"];
+                    let expected = if opt_in { expected } else { json!(null) };
+                    assert_eq!(spans, &expected, "{case}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_image_url_reaches_engine_mm_features() {
     let (app, engine_task) = test_app_with_backend_and_engine_request_check(
         Arc::new(FakeChatBackend::with_multimodal_model_info(

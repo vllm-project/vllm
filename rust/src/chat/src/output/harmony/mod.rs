@@ -441,6 +441,7 @@ async fn harmony_assistant_event_stream(
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,
+                        weight_versions: finished.weight_versions,
                     })
                     .await;
                 }

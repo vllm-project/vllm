@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use trait_set::trait_set;
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
-use vllm_llm::RequestTimestamps;
+use vllm_llm::{RequestTimestamps, WeightVersionSpan};
 use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs};
 
 use crate::FinishReason;
@@ -33,6 +33,8 @@ pub struct CollectedAssistantMessage {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Weight-version spans over all generated token positions.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Per-request stream of chat events.
@@ -91,6 +93,7 @@ impl ChatEventStream {
                     finish_reason,
                     kv_transfer_params,
                     ec_transfer_params,
+                    weight_versions,
                 } => {
                     return Ok(CollectedAssistantMessage {
                         message: done,
@@ -106,6 +109,7 @@ impl ChatEventStream {
                         finish_reason,
                         kv_transfer_params: kv_transfer_params.map(|value| *value),
                         ec_transfer_params: ec_transfer_params.map(|value| *value),
+                        weight_versions,
                     });
                 }
                 ChatEvent::ToolCallEnd { call, .. } => {
@@ -220,6 +224,7 @@ mod tests {
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    weight_versions: None,
                 }),
             ]),
         );
@@ -268,6 +273,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }
         );
     }

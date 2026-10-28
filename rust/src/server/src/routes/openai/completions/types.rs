@@ -206,7 +206,7 @@ pub struct CompletionRequest {
     pub return_token_ids: Option<bool>,
 
     /// Include the weight-version spans that sampled each choice's output
-    /// tokens. Not supported yet.
+    /// tokens.
     pub return_weight_versions: Option<bool>,
 
     /// Salt for prefix cache isolation in multi-user environments
@@ -274,7 +274,7 @@ pub(super) struct CompletionChoice {
     /// Always `None`.
     /// TODO: return routed experts when `--enable-return-routed-experts` is set.
     pub routed_experts: Option<String>,
-    /// Always `None` until `return_weight_versions` is supported.
+    /// Contiguous weight-version spans over output-token indexes.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
@@ -315,6 +315,8 @@ pub(super) struct CompletionStreamChoice {
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// Set on the final chunk only; covers the whole output.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
