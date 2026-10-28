@@ -34,6 +34,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import Qwen2MoeConfig
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -44,12 +45,17 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
 )
+from vllm.model_executor.layers.fused_moe.bf16_decode_fusions import (
+    bf16_shared_expert_gate,
+    supports_bf16_decode_fusion,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -116,6 +122,25 @@ class Qwen2MoeMLP(nn.Module):
         gate_up, _ = self.gate_up_proj(x)
         out = self.act_fn(gate_up)
         out, _ = self.down_proj(out)
+
+        if (
+            envs.VLLM_FUSE_BF16_SHARED_GATE
+            and not envs.VLLM_BATCH_INVARIANT
+            and type(self.expert_gate) is ReplicatedLinear
+            and isinstance(self.expert_gate.quant_method, UnquantizedLinearMethod)
+            and self.expert_gate.bias is None
+        ):
+            weight = self.expert_gate.weight
+            if (
+                supports_bf16_decode_fusion(x)
+                and out.shape == x.shape
+                and out.dtype == weight.dtype == x.dtype
+                and out.device == weight.device == x.device
+                and out.is_contiguous()
+                and weight.is_contiguous()
+                and weight.shape == (1, x.shape[1])
+            ):
+                return bf16_shared_expert_gate(x, weight, out)
 
         if self.expert_gate is not None:
             out = F.sigmoid(self.expert_gate(x)[0]) * out
