@@ -1178,6 +1178,26 @@ def map_draft_quant_config(
         quant_config.apply_vllm_mapper(WeightsMapper(orig_to_new_regex=runtime_names))
         return
 
+    # Exl3 (and other storage-dict backends) keep per-module bit widths in a
+    # ``storage`` mapping keyed by runtime module path. Remap those keys the
+    # same way ModelOpt remaps its layer indices, but only for multi-layer
+    # drafts: single-layer drafts (e.g. DFlash) already use runtime indices
+    # (``layers.0``) and must not be shifted.
+    if hasattr(quant_config, "storage") and isinstance(quant_config.storage, dict):
+        if start_layer_id and quant_config.storage and num_hidden_layers > 1:
+            new_storage = {}
+            for key, value in quant_config.storage.items():
+                new_key = re.sub(
+                    r"(?<![A-Za-z0-9_.])layers\.(\d+)",
+                    lambda m: f"layers.{int(m.group(1)) + start_layer_id}"
+                    if int(m.group(1)) < num_hidden_layers
+                    else m.group(0),
+                    key,
+                )
+                new_storage[new_key] = value
+            quant_config.storage = new_storage
+        return
+
     # Other backends may use semantic keys or suffix rules rather than module
     # names. Preserve their settings and only add the existing layer aliases.
     if start_layer_id == 0:
