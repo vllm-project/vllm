@@ -297,12 +297,18 @@ steps:
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   device: h200_35gb
   source_file_dependencies:
   - vllm/models/glm5next/
   - tests/models/glm5next/
-  - vllm/model_executor/layers/mamba/checkpoint.py
+  - vllm/model_executor/layers/mamba/
+  - vllm/model_executor/models/qwen3_dflash.py
+  - vllm/model_executor/models/qwen3_dflash2.py
+  - vllm/v1/core/
+  - vllm/v1/attention/backends/gdn_attn.py
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/worker/gpu/
   commands:
     - pytest -v -s models/glm5next
   mirror:
