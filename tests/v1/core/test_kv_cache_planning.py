@@ -1387,6 +1387,9 @@ def _grouping_config():
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
         cache_config=cache_config,
+        model_config=SimpleNamespace(max_model_len=16),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        max_in_flight_tokens=16,
     )
 
 
