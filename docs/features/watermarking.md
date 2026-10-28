@@ -74,7 +74,8 @@ When `watermark_config` is set, the Prometheus counter
 Each finished request has exactly one status, so the sum over `status` equals
 `vllm:request_success_total` on the same instance. Requests that the client
 aborts are in neither counter. The counter does not exist without
-`watermark_config`. With `n > 1`, each sequence counts once. In a
+`watermark_config`. The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) does not
+export this counter yet. With `n > 1`, each sequence counts once. In a
 disaggregated prefill/decode deployment, both instances count a request: sum
 over decode instances only. For streaming input, the first input chunk sets
 the status.
