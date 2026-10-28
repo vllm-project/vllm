@@ -136,5 +136,7 @@ class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: int | None = 0
-    prompt_tokens_details: PromptTokenUsageInfo | None = None
+    prompt_tokens_details: PromptTokenUsageInfo | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     completion_tokens_details: CompletionTokenUsageInfo | None = None

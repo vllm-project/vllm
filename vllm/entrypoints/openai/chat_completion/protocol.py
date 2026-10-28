@@ -77,7 +77,9 @@ class ChatMessage(OpenAIBaseModel):
     role: str
     content: str | None = None
     refusal: str | None = None
-    annotations: OpenAIAnnotation | None = None
+    annotations: list[OpenAIAnnotation] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     audio: OpenAIChatCompletionAudio | None = None
     function_call: FunctionCall | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
