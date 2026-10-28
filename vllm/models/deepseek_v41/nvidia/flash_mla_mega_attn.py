@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
@@ -102,6 +103,10 @@ def is_flashmla_mega_attn_supported() -> tuple[bool, str | None]:
     if not hasattr(torch.ops._flashmla_C, "permute_q_b_proj"):
         return False, "vllm._flashmla_C predates the mega attention weight permutes."
     return True, None
+
+
+# Per wo_a weight shape, the largest M whose fp8_einsum kernels are compiled.
+_EINSUM_WARMED_M: dict[torch.Size, int] = {}
 
 
 def alloc_mega_attn_output(
@@ -225,6 +230,8 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         groups = self.n_local_groups
         num_tokens = attn_out.data.shape[0]
         quantize = self._can_quantize_o_proj
+        if envs.VLLM_BATCH_INVARIANT:
+            self._compile_einsum_configs(attn_out.data.shape[0])
         z = torch.empty(
             (num_tokens, groups, self.o_lora_rank),
             dtype=torch.float8_e4m3fn if quantize else torch.bfloat16,
@@ -263,6 +270,31 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             and self.gemm_rs is None
             and can_fuse_query_quant([self.wo_b])
         )
+
+    def _compile_einsum_configs(self, num_tokens: int) -> None:
+        """DeepGEMM's grouped einsum picks a tile config from M and
+        JIT-compiles each new one (~2 s, a serving stall); under batch
+        invariance it meets M values the startup sweep misses, so run every
+        smaller M once when ``wo_a`` first sees a larger batch."""
+        key = self.wo_a.weight.shape
+        done = _EINSUM_WARMED_M.get(key, 0)
+        if num_tokens <= done or torch.cuda.is_current_stream_capturing():
+            return
+        _EINSUM_WARMED_M[key] = num_tokens
+        groups = self.n_local_groups
+        device = self.wo_a.weight.device
+        z = torch.empty(
+            (num_tokens, groups, self.o_lora_rank), dtype=torch.bfloat16, device=device
+        )
+        for m in range(done + 1, num_tokens):
+            out = alloc_mega_attn_output(m, self.n_wv_group, device)
+            fp8_einsum(
+                "bhr,hdr->bhd",
+                (out.data[:, :groups], out.scale[:, :groups]),
+                (self.wo_a.weight, self.wo_a.weight_scale),
+                z[:m],
+                recipe=self._einsum_recipe,
+            )
 
     # ---- forward -----------------------------------------------------------
 
@@ -357,6 +389,29 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             flashmla_metadata.block_size // self.compress_ratio,
             swa_metadata.is_valid_token[:num_decode_tokens],
         )
+        # Under batch invariance a causal decode row takes its top-k length
+        # from its position, as the prefill rows it must match do, so -1 holes
+        # and entries past that length are masked alike. DSpark draft rows are
+        # non-causal proposals the target checks.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and swa_metadata.decode_swa_width == self.window_size
+        ):
+            from vllm.model_executor.kernels.batch_invariant import (
+                topk_lens_by_position,
+            )
+
+            assert swa_metadata.query_start_loc is not None
+            assert swa_metadata.seq_lens is not None
+            topk_lens_by_position(
+                swa_metadata.token_to_req_indices,
+                swa_metadata.is_valid_token,
+                swa_metadata.query_start_loc,
+                swa_metadata.seq_lens,
+                self.compress_ratio,
+                self.topk_indices_buffer.shape[-1],
+                lens,
+            )
         return self._compressed_kv_cache().unsqueeze(-2), indices, lens
 
     def _forward_decode_mega(
@@ -432,6 +487,14 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
         index_specs = self._prefill_index_workspace_specs(top_k)
+        combine = combine_topk_swa_indices
+        if envs.VLLM_BATCH_INVARIANT and not swa_only:
+            from vllm.model_executor.kernels.batch_invariant import (
+                combine_swa_first_indices,
+            )
+
+            # Block a row's KV as the decode kernel does.
+            combine = combine_swa_first_indices
         for chunk in chunk_plan:
             chunk_start, chunk_end, chunk_n, chunk_m = chunk
             chunk_size = chunk_end - chunk_start
@@ -478,7 +541,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             first, last = num_decodes + chunk_start, num_decodes + chunk_end
             qs = int(query_start_loc_cpu[first] - prefill_token_base)
             qe = int(query_start_loc_cpu[last] - prefill_token_base)
-            combined_indices, combined_lens = combine_topk_swa_indices(
+            combined_indices, combined_lens = combine(
                 topk_indices[qs:qe],
                 query_start_loc[first : last + 1],
                 seq_lens[chunk_start:chunk_end],

@@ -315,6 +315,16 @@ class FlashMLAMegaAttnBackend(DeepseekV4FlashMLABackend):
     def get_name() -> str:
         return "FLASHMLA_MEGA_ATTN_DSV41"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """Opt-in: shares FLASHMLA_SPARSE_DSV41's BI metadata (decode rows on
+        the prefill kernel); output rounding differs from it."""
+        from vllm import envs
+
+        return envs.VLLM_BI_MEGA_ATTN and current_platform.is_device_capability_family(
+            100
+        )
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]

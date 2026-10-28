@@ -516,13 +516,18 @@ class DeepseekV4DecoderLayer(nn.Module):
     ]:
         previous_aux: torch.Tensor | None = None
         mhc_stream = self.mhc_stream
+        # Batch invariance runs the split kernels at every M, inline outside
+        # FULL graphs, so each row's numerics never depend on the graph mode.
+        bi_overlap = envs.VLLM_BATCH_INVARIANT and mhc_stream is not None
         if mhc_stream is not None and (
             in_piecewise_cudagraph()
-            or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+            or not (bi_overlap or 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS)
             or not torch.cuda.is_current_stream_capturing()
         ):
             # Use overlap only in FULL graphs; eager warmup initializes Mega mHC.
             mhc_stream = None
+        if bi_overlap and mhc_stream is None:
+            mhc_stream = torch.cuda.current_stream()
         mhc_pre = (
             partial(mhc_pre_delayed_overlap, stream=mhc_stream)
             if mhc_stream is not None
@@ -701,6 +706,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             pre_mix=pre_mix,
             norm_weight=self.attn_norm.weight,
             norm_eps=self.attn_norm.variance_epsilon,
+            stream=(
+                torch.cuda.current_stream()
+                if envs.VLLM_BATCH_INVARIANT and self.mhc_stream is not None
+                else None
+            ),
             reduce_results=self.fuse_mhc_all_reduce,
         )
         self.attn.forward_kv(positions, x)

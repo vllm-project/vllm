@@ -673,6 +673,10 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     """Preserve carried pre-mixes and Engram ordering at every decoder entry."""
     from vllm.models.deepseek_v41.nvidia.ops.mhc import MHC_OVERLAP_MAX_TOKENS
 
+    # Under batch invariance a side stream means overlap at every M; that
+    # route has its own test.
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+
     num_tokens = MHC_OVERLAP_MAX_TOKENS + 1 if mhc_mode == "large_batch" else 3
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
@@ -980,6 +984,125 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
                 for result, ref in zip(captured, eager, strict=True):
                     torch.testing.assert_close(result, ref, atol=0, rtol=0)
         torch.cuda.current_stream().wait_stream(stream)
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM Mega mHC requires SM100-family CUDA",
+)
+def test_bi_mega_mhc_aux_capture_keeps_route(monkeypatch):
+    """Under batch invariance with Mega mHC, capturing aux hidden states for a
+    draft model must not move the layer to another mHC kernel: the target's
+    bits with DSpark on must equal those with it off."""
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import (
+        hc_stream_mean,
+        mhc_shifted_post_pre,
+    )
+
+    if not is_mega_mhc_supported(5120, 4):
+        pytest.skip("DeepGEMM Mega mHC is not available")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    set_random_seed(0)
+    tokens, hc_mult, hidden = 37, 4, 5120
+    x = torch.randn(tokens, hidden, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(tokens, hc_mult, hidden, dtype=torch.bfloat16, device=DEVICE)
+    args = (
+        x,
+        residual,
+        torch.rand(tokens, hc_mult, 1, device=DEVICE),
+        torch.rand(tokens, hc_mult, hc_mult, device=DEVICE),
+        torch.randn(24, hc_mult * hidden, device=DEVICE) * 0.01,
+        torch.randn(3, device=DEVICE) * 0.1,
+        torch.randn(24, device=DEVICE) * 0.1,
+        2e-5,
+        3e-4,
+        2e-6,
+        1.25,
+        10,
+    )
+    kwargs = dict(
+        pre_mix=torch.rand(tokens, hc_mult, device=DEVICE),
+        norm_weight=torch.empty(hidden, dtype=torch.bfloat16, device=DEVICE).uniform_(
+            0.9, 1.1
+        ),
+        norm_eps=7e-6,
+    )
+
+    def run(capture_aux):
+        return mhc_shifted_post_pre(*args, **kwargs, capture_aux=capture_aux)
+
+    monkeypatch.setenv("VLLM_BI_MEGA_MHC", "1")
+    monkeypatch.setattr(envs, "VLLM_BI_MEGA_MHC", True)
+    plain, captured = run(False), run(True)
+    for a, b in zip(plain[:5], captured[:5], strict=True):
+        assert torch.equal(a, b)
+    assert torch.equal(captured[5], hc_stream_mean(captured[0]))
+    torch.testing.assert_close(captured[5], captured[0].mean(dim=1))
+
+    # The TileLang route rounds differently, so an aux layer falling back to
+    # it would make DSpark change the target's output.
+    monkeypatch.setenv("VLLM_BI_MEGA_MHC", "0")
+    monkeypatch.setattr(envs, "VLLM_BI_MEGA_MHC", False)
+    assert not torch.equal(run(True)[3], plain[3])
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC or not current_platform.is_device_capability_family(100),
+    reason="SM100 TileLang mHC required",
+)
+def test_bi_mhc_overlap_rows_ignore_batch_and_stream(monkeypatch):
+    """VLLM_BI_MHC_OVERLAP runs the split mHC kernels at every M, on the side
+    stream in FULL graphs and inline elsewhere: a row's outputs must not depend
+    on the batch it is in or on which stream generated the coefficients."""
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_shifted_post_pre
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+    if not is_deep_gemm_supported():
+        pytest.skip("DeepGEMM required")
+    monkeypatch.setitem(vars(envs), "VLLM_BATCH_INVARIANT", True)
+    set_random_seed(0)
+    tokens, hc_mult, hidden = 2600, 4, 5120
+    x = torch.randn(tokens, hidden, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(tokens, hc_mult, hidden, dtype=torch.bfloat16, device=DEVICE)
+    post = torch.rand(tokens, hc_mult, 1, device=DEVICE)
+    comb = torch.rand(tokens, hc_mult, hc_mult, device=DEVICE)
+    pre_mix = torch.rand(tokens, hc_mult, device=DEVICE)
+    consts = (
+        torch.randn(24, hc_mult * hidden, device=DEVICE) * 0.01,
+        torch.randn(3, device=DEVICE) * 0.1,
+        torch.randn(24, device=DEVICE) * 0.1,
+        2e-5,
+        3e-4,
+        2e-6,
+        1.25,
+        10,
+    )
+    weight = torch.empty(hidden, dtype=torch.bfloat16, device=DEVICE).uniform_(0.9, 1.1)
+    side = torch.cuda.Stream()
+
+    def run(rows, stream):
+        out = mhc_shifted_post_pre(
+            x[rows],
+            residual[rows],
+            post[rows],
+            comb[rows],
+            *consts,
+            pre_mix=pre_mix[rows],
+            norm_weight=weight,
+            norm_eps=7e-6,
+            capture_aux=True,
+            stream=stream,
+        )
+        torch.cuda.current_stream().wait_stream(stream)
+        return out
+
+    full = run(slice(None), torch.cuda.current_stream())
+    for m in (1, 5, 17, 96, 2541):
+        for stream in (side, torch.cuda.current_stream()):
+            for a, b in zip(run(slice(-m, None), stream), full, strict=True):
+                assert torch.equal(a, b[-m:])
 
 
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
