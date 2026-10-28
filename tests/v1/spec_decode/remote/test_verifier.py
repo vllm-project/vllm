@@ -625,7 +625,7 @@ def test_tp_processes_share_rank_zero_tokens_and_terminal_outcomes(
 @pytest.mark.parametrize("policy", ["target_only", "error"])
 @pytest.mark.parametrize("phase", ["prefill", "dispatch"])
 def test_tp_processes_share_fatal_ipc_export_errors(
-    ipc_verifier, tmp_path, policy, phase
+    ipc_verifier, tmp_path, monkeypatch, policy, phase
 ):
     import json
 
@@ -633,6 +633,8 @@ def test_tp_processes_share_fatal_ipc_export_errors(
     instance.close()
     settings.parallel_config.tensor_parallel_size = 2
     settings.speculative_config.remote_draft.failure_policy = policy
+    monkeypatch.setenv("VLLM_TARGET_DEVICE", "cpu")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     torch.multiprocessing.spawn(
         _tp_proposal_worker,
         args=(
