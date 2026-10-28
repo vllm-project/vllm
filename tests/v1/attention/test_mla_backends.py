@@ -8,6 +8,7 @@ Known Issues:
   test_backend_correctness[small_prefill], but passes when run alone.
 """
 
+import math
 import sys
 from types import MethodType, SimpleNamespace
 from typing import Any, Literal
@@ -1710,6 +1711,9 @@ def _run_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
+    # The inputs are random draws; seed them here so a case's inputs don't depend
+    # on which tests ran before it in the same process (CI shard layout).
+    torch.manual_seed(42)
     # Filter backends to those that support the requested kv_cache_dtype
     backends_to_test = [
         b
@@ -2137,6 +2141,19 @@ def _run_backend_correctness(
 
         # Use backend_idx to get the correct SDPA output for this backend
         expected_output = sdpa_outputs[backend_name]
+        backend_atol = atol
+        if (
+            current_platform.is_rocm()
+            and kv_cache_dtype == "auto"
+            and v_head_dim == 256
+        ):
+            # ROCm bf16 with v_head_dim=256 (glm) lands up to one bf16 ULP of the
+            # largest output value off the SDPA reference: over 17 seeds the max
+            # diff was 0.03125 with |ref| max in [4, 8), i.e. exactly 1 ULP. A 1e-2
+            # atol is below that ULP, so near-zero elements fail (#55609). Allow
+            # one ULP of the largest reference value.
+            max_ref = expected_output.abs().max().item()
+            backend_atol = max(atol, 2.0 ** (math.floor(math.log2(max_ref)) - 7))
 
         # Check shape and dtype consistency
         try:
@@ -2158,7 +2175,7 @@ def _run_backend_correctness(
                 torch.abs(backend_output - expected_output) / torch.abs(expected_output)
             ).item()
             all_close = torch.allclose(
-                backend_output, expected_output, rtol=rtol, atol=atol
+                backend_output, expected_output, rtol=rtol, atol=backend_atol
             )
 
             assert all_close, (
