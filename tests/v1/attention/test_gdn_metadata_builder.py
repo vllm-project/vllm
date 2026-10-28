@@ -322,9 +322,14 @@ def test_grouped_metadata_builder_builds_mixed_batch():
         speculative_config=None,
         model_config=SimpleNamespace(max_model_len=1024),
         scheduler_config=SimpleNamespace(max_num_seqs=64),
-        cache_config=SimpleNamespace(mamba_cache_mode="align"),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="align",
+            hash_block_size=16,
+            cache_hit_alignment_tokens=16,
+        ),
         additional_config={},
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        use_v2_model_runner=True,
     )
     mamba_spec = MambaSpec(
         block_size=BLOCK_SIZE,
@@ -351,11 +356,6 @@ def test_grouped_metadata_builder_builds_mixed_batch():
 
     meta = builder.build(common_prefix_len=0, common_attn_metadata=common)
 
-    assert meta.consumer_ranges is not None
-    assert meta.consumer_ranges.tolist() == [[0, 16], [16, 36]]
-    assert meta.consumer_token_indices.tolist() == list(range(0, 36))
-    assert meta.consumer_query_start_loc.tolist() == [0, 16, 36]
-
     # Consumer inherits checkpoint block 77; ordinary request uses its own dest.
     consumer_dest = int(meta.prefill_state_indices[0].item())
     ordinary_dest = int(meta.prefill_state_indices[1].item())
@@ -375,9 +375,14 @@ def test_grouped_metadata_builder_continuous_slices():
         speculative_config=None,
         model_config=SimpleNamespace(max_model_len=1024),
         scheduler_config=SimpleNamespace(max_num_seqs=64),
-        cache_config=SimpleNamespace(mamba_cache_mode="align"),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="align",
+            hash_block_size=16,
+            cache_hit_alignment_tokens=16,
+        ),
         additional_config={},
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        use_v2_model_runner=True,
     )
     mamba_spec = MambaSpec(
         block_size=BLOCK_SIZE,

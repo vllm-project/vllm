@@ -1036,6 +1036,9 @@ class Scheduler(SchedulerInterface):
                                 new_computed_blocks, checkpoint_position
                             )
                         )
+                        self.kv_cache_manager.prepare_same_step_mamba_consumer(
+                            request_id, new_computed_blocks
+                        )
                     else:
                         (
                             new_computed_blocks,
@@ -1374,7 +1377,9 @@ class Scheduler(SchedulerInterface):
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
-
+                    self.kv_cache_manager.cleanup_same_step_mamba_consumer(
+                        request_id
+                    )
                     # NOTE: we need to untouch the request from the encode cache
                     # manager
                     if request.has_encoder_inputs:
@@ -1596,7 +1601,7 @@ class Scheduler(SchedulerInterface):
         kv_cache_block_copies, cow_retained_blocks = (
             self.kv_cache_manager.take_kv_cache_block_copies()
         )
-        if kv_cache_block_copies:
+        if cow_retained_blocks:
             # The copies run with this step's execution; the first non-empty
             # step at or after it gets seq `sched_step_seq + 1` (0-token steps
             # do not advance the seq), and its completion implies the copies
