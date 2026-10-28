@@ -51,6 +51,9 @@ class Olmo3PythonicToolParser(ToolParser):
         re.DOTALL,
     )
 
+    # How many "</function_calls>" tags to try as the real closing tag.
+    MAX_CLOSING_TAG_CANDIDATES = 16
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
@@ -80,7 +83,8 @@ class Olmo3PythonicToolParser(ToolParser):
         A string argument may itself contain "</function_calls>", so the
         first closing tag is not necessarily the real one. Use the first
         closing tag whose body parses as Python, and fall back to the first
-        closing tag otherwise.
+        closing tag otherwise. Only the first few closing tags are tried,
+        since each try parses the whole body.
         """
         start = model_output.find("<function_calls>")
         if start == -1:
@@ -90,7 +94,9 @@ class Olmo3PythonicToolParser(ToolParser):
         if first_end == -1:
             return model_output
         end = first_end
-        while end != -1:
+        for _ in range(cls.MAX_CLOSING_TAG_CANDIDATES):
+            if end == -1:
+                break
             body = model_output[body_start:end]
             try:
                 ast.parse(cls._to_call_list(body))

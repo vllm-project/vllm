@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -292,6 +293,29 @@ def test_deeply_nested_tool_call_falls_back_to_content(
 
     assert content == model_output
     assert len(tool_calls) == 0
+
+
+def test_many_closing_tags_in_string_parse_count_is_bounded(
+    default_tokenizer: TokenizerLike,
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    # An unterminated string full of fake closing tags. Trying each one
+    # would parse the body thousands of times.
+    model_output = "<function_calls>f(a='" + "x</function_calls>" * 5000
+
+    with patch(
+        "vllm.tool_parsers.olmo3_tool_parser.ast.parse", wraps=ast.parse
+    ) as mock_parse:
+        content, tool_calls = run_tool_extraction(
+            tool_parser, model_output, streaming=False
+        )
+
+    assert content == model_output
+    assert len(tool_calls) == 0
+    # The candidate search, plus at most one parse in extract_tool_calls.
+    assert mock_parse.call_count <= tool_parser.MAX_CLOSING_TAG_CANDIDATES + 1
 
 
 @pytest.mark.parametrize("streaming", [False])
