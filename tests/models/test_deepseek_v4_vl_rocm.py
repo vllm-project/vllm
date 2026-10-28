@@ -249,19 +249,71 @@ def test_rocm_moe_wires_vision_routing_on_hash_and_regular_layers(
 def test_rocm_fse_rejects_data_parallel_deployment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from vllm.models.deepseek_v4.amd.model import _fuse_shared_experts_enabled
-
-    config = SimpleNamespace(n_shared_experts=1)
-
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "1")
-    with pytest.raises(ValueError, match="data parallelism"):
-        _fuse_shared_experts_enabled(config, ParallelConfig(data_parallel_size=2))
-
-    # Expert parallelism already disables FSE: no raise, FSE stays off.
-    assert not _fuse_shared_experts_enabled(
-        config, ParallelConfig(data_parallel_size=2, enable_expert_parallel=True)
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe.utils import (
+        resolve_layer_fused_shared_expert,
     )
-    assert _fuse_shared_experts_enabled(config, ParallelConfig())
+    from vllm.models.deepseek_v4.amd import model as rocm_model
+
+    class FakeGate(nn.Module):
+        def __init__(self, **kwargs) -> None:
+            super().__init__()
+
+    monkeypatch.setattr(rocm_model, "GateLinear", FakeGate)
+    monkeypatch.setattr(rocm_model, "FusedMoEFactory", lambda **kwargs: nn.Identity())
+    monkeypatch.setattr(rocm_model, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(rocm_model, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        rocm_model.rocm_aiter_ops,
+        "is_fusion_moe_shared_experts_enabled",
+        lambda: True,
+    )
+
+    config = SimpleNamespace(
+        hidden_size=16,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=8,
+        swiglu_limit=None,
+        norm_topk_prob=True,
+        scoring_func="sqrtsoftplus",
+        num_hash_layers=0,
+        vocab_size=32,
+        topk_method="noaux_tc",
+        vision_n_layers=0,
+        n_shared_experts=1,
+    )
+
+    def build_vllm_config(parallel_config: ParallelConfig) -> SimpleNamespace:
+        return SimpleNamespace(
+            model_config=SimpleNamespace(hf_config=config),
+            quant_config=None,
+            parallel_config=parallel_config,
+            kernel_config=KernelConfig(),
+        )
+
+    # Data parallelism without expert parallelism fails fast at MoE construction.
+    with pytest.raises(ValueError, match="not supported with data parallelism"):
+        rocm_model.DeepseekV4MoE(
+            build_vllm_config(ParallelConfig(data_parallel_size=2)),
+            prefix="model.layers.0.ffn",
+        )
+
+    # Under expert parallelism the resolver disables FSE instead of raising.
+    with set_current_vllm_config(
+        build_vllm_config(
+            ParallelConfig(data_parallel_size=2, enable_expert_parallel=True)
+        )
+    ):
+        assert not resolve_layer_fused_shared_expert(
+            None, "model.layers.0.ffn", disable_under_ep=True
+        )
+
+    # Nothing blocks FSE once expert parallelism is off.
+    with set_current_vllm_config(build_vllm_config(ParallelConfig())):
+        assert resolve_layer_fused_shared_expert(
+            None, "model.layers.0.ffn", disable_under_ep=True
+        )
 
 
 def test_rocm_mtp_forwards_input_ids_for_vision_routing(

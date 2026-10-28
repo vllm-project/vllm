@@ -34,6 +34,7 @@ from torch import nn
 if TYPE_CHECKING:
     from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -42,9 +43,6 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
-)
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -76,6 +74,8 @@ from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    extract_layer_index,
+    get_fused_shared_expert_layers,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_layers,
@@ -276,10 +276,10 @@ class Glm4MoeLiteModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             Glm4MoeLite,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -364,12 +364,9 @@ class Glm4MoeLiteModel(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if self.is_fused_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
         )
 
         params_dict = dict(self.named_parameters())
@@ -382,8 +379,11 @@ class Glm4MoeLiteModel(nn.Module):
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
-                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
+                "mlp.shared_experts" in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in self.fused_shared_expert_layers
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
