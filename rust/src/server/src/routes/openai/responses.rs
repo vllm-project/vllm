@@ -5,7 +5,7 @@
 //!
 //! Implements the stateless subset of the Python frontend's
 //! `vllm/entrypoints/openai/responses/serving.py`: single-turn generation
-//! from full conversation replays, streaming only for now, with
+//! from full conversation replays, streaming and non-streaming, with
 //! reasoning items and function tool calls. Store-dependent features
 //! (`background`, `previous_response_id`, response retrieval/cancellation)
 //! require a server-side response store that this frontend does not have;
@@ -21,21 +21,25 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use asynk_strim_attr::{TryYielder, try_stream};
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
-use tracing::{error, trace};
+use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
-use vllm_chat::{ChatEvent, ChatEventStreamTrait, ChatTokenUsage, FinishReason};
-use vllm_text::EffectiveSampling;
+use vllm_chat::{ChatEvent, ChatEventStream, ChatEventStreamTrait, ChatTokenUsage, FinishReason};
 
-use self::convert::{ResponseMeta, build_response, build_usage, prepare_responses_request};
+use self::convert::{build_response, build_usage, prepare_responses_request};
 use self::streaming::{OutputItemStreamer, ResponseStreamEvent, SequencedEvent};
-use self::types::{ResponseError, ResponseItemStatus, ResponsesRequest, ResponsesResponse};
-use crate::error::{ApiError, chat_submit_error, invalid_request};
+use self::types::{
+    IncompleteDetails, ResponseError, ResponseItemStatus, ResponseOutputItem, ResponsesRequest,
+    ResponsesResponse,
+};
+use crate::config::ApiServerOptions;
+use crate::error::{ApiError, chat_submit_error, engine_error, server_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
@@ -56,14 +60,6 @@ pub async fn create_responses(
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
-    // TODO: Add non-streaming Responses support.
-    if !stream_requested {
-        return invalid_request!(
-            param = "stream",
-            "non-streaming Responses are not supported yet"
-        )
-        .into_response();
-    }
     let request_span = tracing::info_span!(
         "responses",
         request_id = %prepared.request_id,
@@ -82,17 +78,32 @@ pub async fn create_responses(
             }
         };
     // Echo the values the engine uses, as Python does, rather than the request's.
-    let sampling = chat_stream.sampling();
-
-    let event_stream = responses_event_stream(
-        chat_stream,
+    let response = build_response(
         prepared.meta,
-        sampling,
+        chat_stream.sampling(),
         prepared.request_id,
         created_at,
     );
-    let sse_stream = responses_sse_stream(event_stream).instrument(request_span);
-    sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
+
+    if stream_requested {
+        let event_stream =
+            responses_event_stream(chat_stream, response, prepared.include_reasoning);
+        let sse_stream = responses_sse_stream(event_stream).instrument(request_span);
+        sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
+    } else {
+        match collect_responses(
+            chat_stream,
+            response,
+            prepared.include_reasoning,
+            &api_server_options,
+        )
+        .instrument(request_span)
+        .await
+        {
+            Ok(response) => Json(response).into_response(),
+            Err(error) => error.into_response(),
+        }
+    }
 }
 
 /// Retrieve one response (`GET /v1/responses/{response_id}`).
@@ -114,6 +125,64 @@ fn response_not_found(response_id: &str) -> ApiError {
     ApiError::not_found(format!("Response with id '{response_id}' not found."))
 }
 
+/// Collect one non-streaming response by driving the streaming state machine
+/// and keeping its terminal response.
+///
+/// Unlike Chat Completions, which folds through `collect_message`, the
+/// Responses terminal event carries the complete response, so `output` comes
+/// from the same item rules in both modes. Errors still map to HTTP statuses
+/// instead of a `failed` response.
+async fn collect_responses(
+    mut stream: ChatEventStream,
+    response: ResponsesResponse,
+    include_reasoning: bool,
+    ApiServerOptions {
+        enable_log_requests,
+        ..
+    }: &ApiServerOptions,
+) -> Result<ResponsesResponse, ApiError> {
+    let mut items = OutputItemStreamer::new(include_reasoning);
+    let terminal = loop {
+        let Some(event) = stream.next().await else {
+            return Err(server_error!(
+                "responses stream ended before generation completed"
+            ));
+        };
+        let event = event.map_err(|error| {
+            server_error!(
+                "failed to collect responses result: {}",
+                error.to_report_string()
+            )
+        })?;
+        // Only the final output matters here; the item events are discarded.
+        items.on_event(&event);
+        if let Some(terminal) = TerminalOutput::from_event(event) {
+            break terminal;
+        }
+    };
+
+    if let FinishReason::Error(error) = &terminal.finish_reason {
+        return Err(engine_error(error.as_deref()));
+    }
+    items.on_stream_end(Some(&terminal.finish_reason));
+
+    if *enable_log_requests {
+        info!(
+            model = %response.model,
+            prompt_tokens = terminal.usage.prompt_token_count,
+            output_tokens = terminal.usage.output_token_count,
+            finish_reason = terminal.finish_reason.as_str(),
+            "responses finished"
+        );
+    }
+
+    Ok(completed_response(
+        response,
+        items.into_output_items(),
+        terminal,
+    ))
+}
+
 /// Map the internal finish reason onto the response status.
 fn response_status(finish_reason: &FinishReason) -> ResponseItemStatus {
     match finish_reason {
@@ -132,6 +201,73 @@ struct TerminalOutput {
     ec_transfer_params: Option<serde_json::Value>,
 }
 
+impl TerminalOutput {
+    /// Take the terminal metadata from a `Done` event.
+    fn from_event(event: ChatEvent) -> Option<Self> {
+        match event {
+            ChatEvent::Done {
+                // The output items already carry the parser's final blocks.
+                message: _,
+                usage,
+                finish_reason,
+                kv_transfer_params,
+                ec_transfer_params,
+                ..
+            } => Some(Self {
+                usage,
+                finish_reason,
+                kv_transfer_params: kv_transfer_params.map(|params| *params),
+                ec_transfer_params: ec_transfer_params.map(|params| *params),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Finish the in-progress response of a generation that ended normally.
+fn completed_response(
+    response: ResponsesResponse,
+    output: Vec<ResponseOutputItem>,
+    TerminalOutput {
+        usage,
+        finish_reason,
+        kv_transfer_params,
+        ec_transfer_params,
+    }: TerminalOutput,
+) -> ResponsesResponse {
+    let status = response_status(&finish_reason);
+    ResponsesResponse {
+        status,
+        incomplete_details: (status == ResponseItemStatus::Incomplete).then(|| IncompleteDetails {
+            reason: "max_output_tokens".to_string(),
+        }),
+        output,
+        usage: Some(build_usage(&usage)),
+        kv_transfer_params,
+        ec_transfer_params,
+        ..response
+    }
+}
+
+/// Fail the in-progress response with a server error.
+fn failed_response(
+    response: ResponsesResponse,
+    output: Vec<ResponseOutputItem>,
+    message: &str,
+    usage: Option<&ChatTokenUsage>,
+) -> ResponsesResponse {
+    ResponsesResponse {
+        status: ResponseItemStatus::Failed,
+        error: Some(ResponseError {
+            code: "server_error".to_string(),
+            message: message.to_string(),
+        }),
+        output,
+        usage: usage.map(build_usage),
+        ..response
+    }
+}
+
 /// Convert one chat event stream into Responses API SSE events.
 ///
 /// Emits `response.created`/`response.in_progress` upfront, item events as
@@ -144,54 +280,33 @@ struct TerminalOutput {
 #[try_stream]
 async fn responses_event_stream(
     mut stream: impl ChatEventStreamTrait + Unpin,
-    meta: ResponseMeta,
-    sampling: EffectiveSampling,
-    request_id: String,
-    created_at: u64,
+    response: ResponsesResponse,
+    include_reasoning: bool,
     mut y: TryYielder<ResponseStreamEvent, Infallible>,
 ) -> Result<(), Infallible> {
-    let mut items = OutputItemStreamer::new(meta.include_reasoning);
+    let mut items = OutputItemStreamer::new(include_reasoning);
 
-    let initial = Arc::new(build_response(
-        &meta,
-        sampling,
-        &request_id,
-        created_at,
-        vec![],
-        ResponseItemStatus::InProgress,
-        None,
-        None,
-        None,
-    ));
+    let initial = Arc::new(response);
     y.yield_ok(ResponseStreamEvent::Created {
         response: Arc::clone(&initial),
     })
     .await;
-    y.yield_ok(ResponseStreamEvent::InProgress { response: initial }).await;
+    y.yield_ok(ResponseStreamEvent::InProgress {
+        response: Arc::clone(&initial),
+    })
+    .await;
+    let response = Arc::unwrap_or_clone(initial);
 
-    let mut terminal: Option<TerminalOutput> = None;
+    let mut terminal = None;
     while let Some(next) = stream.next().await {
         match next {
-            Ok(ChatEvent::Done {
-                // The output items already carry the parser's final blocks.
-                message: _,
-                usage,
-                finish_reason,
-                kv_transfer_params,
-                ec_transfer_params,
-                ..
-            }) => {
-                terminal = Some(TerminalOutput {
-                    usage,
-                    finish_reason,
-                    kv_transfer_params: kv_transfer_params.map(|params| *params),
-                    ec_transfer_params: ec_transfer_params.map(|params| *params),
-                });
-                break;
-            }
             Ok(event) => {
                 for event in items.on_event(&event) {
                     y.yield_ok(event).await;
+                }
+                if let Some(output) = TerminalOutput::from_event(event) {
+                    terminal = Some(output);
+                    break;
                 }
             }
             Err(error) => {
@@ -199,16 +314,15 @@ async fn responses_event_stream(
                 for event in items.on_stream_end(None) {
                     y.yield_ok(event).await;
                 }
-                emit_failed(
-                    &mut y,
-                    &meta,
-                    sampling,
-                    &request_id,
-                    created_at,
+                let failed = failed_response(
+                    response,
                     items.into_output_items(),
                     "The response stream failed before generation completed.",
                     None,
-                )
+                );
+                y.yield_ok(ResponseStreamEvent::Failed {
+                    response: Arc::new(failed),
+                })
                 .await;
                 return Ok(());
             }
@@ -218,106 +332,48 @@ async fn responses_event_stream(
     for event in items.on_stream_end(terminal.as_ref().map(|output| &output.finish_reason)) {
         y.yield_ok(event).await;
     }
+    let output = items.into_output_items();
 
-    let Some(terminal) = terminal else {
-        error!("responses stream ended before the terminal done event");
-        emit_failed(
-            &mut y,
-            &meta,
-            sampling,
-            &request_id,
-            created_at,
-            items.into_output_items(),
-            "The response stream ended before generation completed.",
-            None,
-        )
-        .await;
-        return Ok(());
+    let final_response = match terminal {
+        None => {
+            error!("responses stream ended before the terminal done event");
+            failed_response(
+                response,
+                output,
+                "The response stream ended before generation completed.",
+                None,
+            )
+        }
+        Some(terminal) if matches!(terminal.finish_reason, FinishReason::Error(_)) => {
+            failed_response(
+                response,
+                output,
+                "The model failed to generate a response.",
+                Some(&terminal.usage),
+            )
+        }
+        Some(terminal) => completed_response(response, output, terminal),
     };
-    let TerminalOutput {
-        usage,
-        finish_reason,
-        kv_transfer_params,
-        ec_transfer_params,
-    } = terminal;
-
-    if matches!(finish_reason, FinishReason::Error(_)) {
-        emit_failed(
-            &mut y,
-            &meta,
-            sampling,
-            &request_id,
-            created_at,
-            items.into_output_items(),
-            "The model failed to generate a response.",
-            Some(&usage),
-        )
-        .await;
-        return Ok(());
-    }
-
-    let final_response = build_response(
-        &meta,
-        sampling,
-        &request_id,
-        created_at,
-        items.into_output_items(),
-        response_status(&finish_reason),
-        Some(build_usage(&usage)),
-        kv_transfer_params,
-        ec_transfer_params,
-    );
-    y.yield_ok(terminal_event(&finish_reason, Arc::new(final_response))).await;
+    y.yield_ok(terminal_event(Arc::new(final_response))).await;
     Ok(())
 }
 
-/// Build the Responses lifecycle event associated with a terminal finish.
-fn terminal_event(
-    finish_reason: &FinishReason,
-    response: Arc<ResponsesResponse>,
-) -> ResponseStreamEvent {
-    match finish_reason {
-        FinishReason::Length => ResponseStreamEvent::Incomplete { response },
+/// Build the Responses lifecycle event that carries one terminal response.
+fn terminal_event(response: Arc<ResponsesResponse>) -> ResponseStreamEvent {
+    match response.status {
+        ResponseItemStatus::Incomplete => ResponseStreamEvent::Incomplete { response },
+        ResponseItemStatus::Failed => ResponseStreamEvent::Failed { response },
         // The Responses streaming API exposes no `response.cancelled` event.
         // Preserve the cancellation outcome on the response object itself.
-        FinishReason::Abort | FinishReason::Stop(_) | FinishReason::Repetition(_) => {
+        ResponseItemStatus::Completed | ResponseItemStatus::Cancelled => {
             ResponseStreamEvent::Completed { response }
         }
-        // Error finishes are emitted above with an error payload.
-        FinishReason::Error(_) => ResponseStreamEvent::Failed { response },
+        ResponseItemStatus::Queued
+        | ResponseItemStatus::InProgress
+        | ResponseItemStatus::Cancelling => {
+            unreachable!("terminal responses are completed or failed")
+        }
     }
-}
-
-/// Emit one terminal `response.failed` event.
-async fn emit_failed(
-    y: &mut TryYielder<ResponseStreamEvent, Infallible>,
-    meta: &ResponseMeta,
-    sampling: EffectiveSampling,
-    request_id: &str,
-    created_at: u64,
-    output: Vec<self::types::ResponseOutputItem>,
-    message: &str,
-    usage: Option<&ChatTokenUsage>,
-) {
-    let mut failed = build_response(
-        meta,
-        sampling,
-        request_id,
-        created_at,
-        output,
-        ResponseItemStatus::Failed,
-        usage.map(build_usage),
-        None,
-        None,
-    );
-    failed.error = Some(ResponseError {
-        code: "server_error".to_string(),
-        message: message.to_string(),
-    });
-    y.yield_ok(ResponseStreamEvent::Failed {
-        response: Arc::new(failed),
-    })
-    .await;
 }
 
 /// Convert Responses API SSE events into transport-level SSE events,

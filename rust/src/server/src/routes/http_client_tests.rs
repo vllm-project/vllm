@@ -15,7 +15,7 @@ use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
 };
-use async_openai::types::responses::{CreateResponseArgs, ResponseStreamEvent};
+use async_openai::types::responses::{CreateResponseArgs, ResponseStreamEvent, Status};
 use futures::StreamExt as _;
 use serial_test::serial;
 use vllm_chat::{
@@ -353,6 +353,29 @@ async fn streaming_chat_via_http_client() {
     assert!(saw_role, "expected an assistant role chunk");
     assert!(saw_finish_reason, "expected a terminal finish reason");
     assert_eq!(full_text, "hi");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_streaming_responses_via_http_client() {
+    let (client, server_task, engine_task) =
+        http_test_server(b"engine-http-responses", default_stream_output_specs()).await;
+
+    let request = CreateResponseArgs::default()
+        .model("test-model")
+        .input("hello")
+        .max_output_tokens(10u32)
+        .build()
+        .expect("build request");
+
+    let response = client.responses().create(request).await.expect("create response");
+
+    assert_eq!(response.model, "test-model");
+    assert_eq!(response.status, Status::Completed);
+    assert_eq!(response.output_text().as_deref(), Some("hi"));
 
     engine_task.await.expect("mock engine task");
     server_task.abort();

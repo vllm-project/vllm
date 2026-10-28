@@ -12,7 +12,6 @@
 //! tool-response messages.
 
 use itertools::Itertools as _;
-use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_chat::{
@@ -24,12 +23,11 @@ use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
 
 use super::types::{
-    IncompleteDetails, InputTokensDetails, OutputTokensDetails, ResponseInputContentPart,
-    ResponseInputItem, ResponseInputReasoning, ResponseInputRole, ResponseItemStatus,
-    ResponseMessageContent, ResponseObject, ResponseOutputItem, ResponseTextConfig,
-    ResponseTextFormat, ResponseToolChoice, ResponseToolChoiceObject, ResponseTruncation,
-    ResponseUsage, ResponsesInput, ResponsesReasoning, ResponsesRequest, ResponsesResponse,
-    ResponsesTool, ServiceTier,
+    InputTokensDetails, OutputTokensDetails, ResponseInputContentPart, ResponseInputItem,
+    ResponseInputReasoning, ResponseInputRole, ResponseItemStatus, ResponseMessageContent,
+    ResponseObject, ResponseTextConfig, ResponseTextFormat, ResponseToolChoice,
+    ResponseToolChoiceObject, ResponseTruncation, ResponseUsage, ResponsesInput,
+    ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesTool, ServiceTier,
 };
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
@@ -62,7 +60,6 @@ pub(crate) struct ResponseMeta {
     pub text: Option<ResponseTextConfig>,
     pub truncation: ResponseTruncation,
     pub user: Option<String>,
-    pub include_reasoning: bool,
 }
 
 /// Lowered responses request plus the response metadata carried by every SSE
@@ -71,6 +68,8 @@ pub(crate) struct ResponseMeta {
 pub(crate) struct PreparedResponsesRequest {
     pub request_id: String,
     pub meta: ResponseMeta,
+    /// Whether reasoning items appear in the output.
+    pub include_reasoning: bool,
     pub chat_request: ChatRequest,
 }
 
@@ -292,12 +291,12 @@ pub(crate) fn prepare_responses_request(
         text,
         truncation,
         user,
-        include_reasoning,
     };
 
     Ok(PreparedResponsesRequest {
         request_id,
         meta,
+        include_reasoning,
         chat_request,
     })
 }
@@ -677,57 +676,61 @@ pub(crate) fn build_usage(usage: &vllm_chat::ChatTokenUsage) -> ResponseUsage {
     }
 }
 
-/// Build the top-level response object for non-streaming responses and the
-/// terminal streaming event.
+/// Build the in-progress response object of one request. The lifecycle
+/// events and the final response all start from it.
 pub(crate) fn build_response(
-    meta: &ResponseMeta,
+    ResponseMeta {
+        model,
+        instructions,
+        metadata,
+        tools,
+        tool_choice,
+        parallel_tool_calls,
+        max_tool_calls,
+        previous_response_id,
+        reasoning,
+        service_tier,
+        top_logprobs,
+        text,
+        truncation,
+        user,
+    }: ResponseMeta,
     sampling: EffectiveSampling,
-    request_id: &str,
+    request_id: String,
     created_at: u64,
-    output: Vec<ResponseOutputItem>,
-    status: ResponseItemStatus,
-    usage: Option<ResponseUsage>,
-    kv_transfer_params: Option<Value>,
-    ec_transfer_params: Option<Value>,
 ) -> ResponsesResponse {
-    let incomplete_details = match status {
-        ResponseItemStatus::Incomplete => Some(IncompleteDetails {
-            reason: "max_output_tokens".to_string(),
-        }),
-        _ => None,
-    };
     ResponsesResponse {
-        id: request_id.to_string(),
+        id: request_id,
         object: ResponseObject,
         created_at,
-        status,
+        status: ResponseItemStatus::InProgress,
         error: None,
         background: false,
-        incomplete_details,
-        instructions: meta.instructions.clone(),
+        incomplete_details: None,
+        instructions,
         max_output_tokens: sampling.max_tokens,
-        max_tool_calls: meta.max_tool_calls,
-        metadata: meta.metadata.clone(),
-        model: meta.model.clone(),
-        output,
-        parallel_tool_calls: meta.parallel_tool_calls,
-        previous_response_id: meta.previous_response_id.clone(),
+        max_tool_calls,
+        metadata,
+        model,
+        output: vec![],
+        parallel_tool_calls,
+        previous_response_id,
         prompt: None,
-        reasoning: meta.reasoning.clone(),
-        service_tier: meta.service_tier,
+        reasoning,
+        service_tier,
         temperature: sampling.temperature,
-        text: meta.text.clone(),
-        tool_choice: meta.tool_choice.clone(),
-        tools: meta.tools.clone(),
+        text,
+        tool_choice,
+        tools,
         top_p: sampling.top_p,
-        top_logprobs: meta.top_logprobs,
-        truncation: meta.truncation,
-        usage,
-        user: meta.user.clone(),
+        top_logprobs,
+        truncation,
+        usage: None,
+        user,
         presence_penalty: sampling.presence_penalty,
         frequency_penalty: sampling.frequency_penalty,
-        kv_transfer_params,
-        ec_transfer_params,
+        kv_transfer_params: None,
+        ec_transfer_params: None,
     }
 }
 
@@ -765,7 +768,7 @@ fn should_continue_final_message(items: &[ResponseInputItem]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
     use vllm_chat::ChatTokenUsage;
     use vllm_llm::TokenUsage;
 
