@@ -97,7 +97,14 @@ def resolve_revision(
         (local path, ModelScope, or any Hub error).
 
     """
-    if Path(repo_id).exists() or envs.VLLM_USE_MODELSCOPE:
+    from vllm.model_hub import parse_model_source
+
+    reference = parse_model_source(repo_id)
+    if reference is not None:
+        source, repo_id = reference
+        if source == "modelscope":
+            return revision
+    elif Path(repo_id).exists() or envs.VLLM_USE_MODELSCOPE:
         return revision
 
     try:
@@ -175,7 +182,7 @@ def list_repo_files(
 
     def lookup_files() -> list[str]:
         # directly list files if model is local
-        if (local_path := Path(repo_id)).exists():
+        if reference is None and (local_path := Path(repo_id)).exists():
             return [
                 str(file.relative_to(local_path))
                 for file in local_path.rglob("*")

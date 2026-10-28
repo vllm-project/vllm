@@ -477,6 +477,7 @@ class MistralConfigParser(ConfigParserBase):
         code_revision: str | None = None,
         **kwargs,
     ) -> tuple[dict, PreTrainedConfig]:
+        weight_source = kwargs.pop("weight_source", None) or str(model)
         # This function loads a params.json config which
         # should be used when loading models in mistral format
         config_dict = _download_mistral_config_file(model, revision)
@@ -503,8 +504,9 @@ class MistralConfigParser(ConfigParserBase):
 
         if config_dict.get("dtype") is None:
             with _mistral_patch_hf_hub_constants():
-                model_str = model if isinstance(model, str) else model.as_posix()
-                param_mt = get_safetensors_params_metadata(model_str, revision=revision)
+                param_mt = get_safetensors_params_metadata(
+                    weight_source, revision=revision
+                )
             if param_mt:
                 param_dtypes: set[torch.dtype] = {
                     _SAFETENSORS_TO_TORCH_DTYPE[dtype]
@@ -884,6 +886,7 @@ def get_config(
     config_format: str | ConfigFormat = "auto",
     hf_overrides_kw: dict[str, Any] | None = None,
     hf_overrides_fn: Callable[[PreTrainedConfig], PreTrainedConfig] | None = None,
+    weight_source: str | None = None,
     **kwargs,
 ) -> PreTrainedConfig:
     if config_format == "auto":
@@ -891,7 +894,7 @@ def get_config(
             # First check for Mistral to avoid defaulting to
             # Transformers implementation.
             if is_mistral_model_repo(
-                model_name_or_path=str(model), revision=revision
+                model_name_or_path=weight_source or str(model), revision=revision
             ) and file_or_path_exists(
                 model=model, config_name=MISTRAL_CONFIG_NAME, revision=revision
             ):
@@ -923,6 +926,8 @@ def get_config(
             raise ValueError(error_message) from e
 
     config_parser = get_config_parser(config_format)
+    if config_format == "mistral" and weight_source:
+        kwargs["weight_source"] = weight_source
     # Retry to tolerate a concurrent HF cache refresh briefly hiding config.json.
     config_dict, config = with_retry(
         lambda: config_parser.parse(
@@ -1488,7 +1493,17 @@ def get_safetensors_params_metadata(
     revision: str | None = None,
 ) -> dict[str, Any]:
     """Get the safetensors parameters metadata for remote/local model repository."""
-    if (model_path := Path(model)).exists():
+    from vllm.model_hub import parse_model_source
+
+    reference = parse_model_source(model)
+    if reference is not None:
+        source, repo_id = reference
+        if source == "modelscope":
+            from vllm.model_hub import get_modelscope_weight_metadata
+
+            return get_modelscope_weight_metadata(repo_id, revision=revision)
+        model = repo_id
+    if reference is None and (model_path := Path(model)).exists():
         return _read_safetensors_metadata_in_dir(model_path)
 
     repo_mt = try_get_safetensors_metadata(model, revision=revision)

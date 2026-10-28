@@ -1234,43 +1234,23 @@ class SpeculativeConfig:
             self.method = "mtp"
 
         if self.model is None and self.num_speculative_tokens is not None:
-            from vllm.model_hub import parse_model_source
+            if self.method in ("mtp", "dspark"):
+                from vllm.model_hub import parse_model_source
 
-            if (
-                self.method in ("mtp", "dspark")
-                and self.target_model_config is not None
-                and parse_model_source(self.target_model_config.model_weights)
-            ):
-                self.revision = self.revision or self.target_model_config.revision
-                self.code_revision = (
-                    self.code_revision or self.target_model_config.code_revision
-                )
-            if self.method == "mtp":
-                if self.target_model_config is None:
-                    raise ValueError("target_model_config must be present for mtp")
-                # use the draft model from the same model:
-                # Use model_weights if set (e.g. runai_streamer replaces
-                # model with a local cache dir but keeps the original path
-                # in model_weights), so the draft model can load weights
-                # from the same source as the target model.
-                self.model = (
-                    self.target_model_config.model_weights
-                    or self.target_model_config.model
-                )
+                target = self.target_model_config
+                if target is None:
+                    raise ValueError(
+                        f"target_model_config must be present for {self.method}"
+                    )
+                # Built-in draft weights share the target's original source.
+                self.model = target.model_weights or target.model
+                if parse_model_source(self.model):
+                    self.revision = self.revision or target.revision
+                    self.code_revision = self.code_revision or target.code_revision
                 # Align the quantization of draft model for cases such as
                 # --quantization fp8 with a bf16 checkpoint.
                 if not self.quantization:
-                    self.quantization = self.target_model_config.quantization
-            elif self.method == "dspark":
-                # DeepSeek DSpark can ship the weights inside the target checkpoint
-                if self.target_model_config is None:
-                    raise ValueError("target_model_config must be present for dspark")
-                self.model = (
-                    self.target_model_config.model_weights
-                    or self.target_model_config.model
-                )
-                if not self.quantization:
-                    self.quantization = self.target_model_config.quantization
+                    self.quantization = target.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
             elif self.method == "ngram_gpu":
@@ -1382,8 +1362,13 @@ class SpeculativeConfig:
                     self.target_model_config.hf_overrides
                 )
                 from vllm.model_hub import parse_model_source, resolve_model_source
+                from vllm.transformers_utils.repo_utils import resolve_revision
 
                 model_weights = self.model if parse_model_source(self.model) else ""
+                if model_weights:
+                    self.revision = resolve_revision(
+                        self.model, self.revision, self.target_model_config.hf_token
+                    )
                 self.model = resolve_model_source(
                     self.model,
                     revision=self.revision,

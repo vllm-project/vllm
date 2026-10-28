@@ -24,6 +24,7 @@ from ..utils import (
     ],
     ids=["llama3_eagle3_speculator", "qwen3_eagle3_speculator"],
 )
+@pytest.mark.parametrize("source_prefix", ["", "hf://"])
 @single_gpu_only
 def test_speculators_model_integration(
     monkeypatch: pytest.MonkeyPatch,
@@ -31,6 +32,7 @@ def test_speculators_model_integration(
     model_path: str,
     expected_accuracy_threshold: float,
     vllm_runner,
+    source_prefix,
 ):
     """Test that speculators models work with the simplified integration.
 
@@ -53,7 +55,7 @@ def test_speculators_model_integration(
 
     # First run: Direct speculator model (simplified integration)
     with vllm_runner(
-        model_path,
+        source_prefix + model_path,
         block_size=None,
         trust_remote_code=False,
         enable_chunked_prefill=None,
@@ -78,12 +80,17 @@ def test_speculators_model_integration(
         )
 
         # Verify draft model is set to the speculator model
-        assert spec_config.model == model_path, (
-            f"Draft model should be {model_path}, got {spec_config.model}"
+        draft_source = (
+            spec_config.draft_model_config.weight_source
+            if source_prefix
+            else spec_config.model
         )
+        assert draft_source == source_prefix + model_path
 
         # Extract verifier model for reference run
-        verifier_model = spec_runner.llm.llm_engine.vllm_config.model_config.model
+        verifier_model = (
+            spec_runner.llm.llm_engine.vllm_config.model_config.weight_source
+        )
 
     # Second run: Reference without speculative decoding
     with vllm_runner(

@@ -124,7 +124,7 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.transformers_utils.config import maybe_override_with_speculators
-from vllm.transformers_utils.repo_utils import get_model_path
+from vllm.transformers_utils.repo_utils import get_model_path, resolve_revision
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
     FlexibleArgumentParser,
@@ -940,24 +940,48 @@ class EngineArgs:
         model = self.model
         reference = parse_model_source(model)
         if reference is not None:
+            self.revision = resolve_revision(model, self.revision, self.hf_token)
             self.model = resolve_source(
                 model,
                 revision=self.revision,
                 code_revision=self.code_revision,
             )
+            verifier, _, spec = maybe_override_with_speculators(
+                self.model,
+                self.tokenizer,
+                trust_remote_code=self.trust_remote_code,
+                vllm_speculative_config=self.speculative_config,
+                hf_token=self.hf_token,
+            )
+            if verifier != self.model:
+                assert spec is not None
+                spec["model"] = model
+                spec.setdefault("revision", self.revision)
+                spec.setdefault("code_revision", self.code_revision)
+                self.speculative_config = spec
+                model = f"{reference[0]}://{verifier}"
+                reference = (reference[0], verifier)
+                self.revision = resolve_revision(model, token=self.hf_token)
+                self.code_revision = None
+                self.model = resolve_source(model, revision=self.revision)
+                self.tokenizer = model
+                self.tokenizer_revision = self.revision
             self.model_weights = model
             if not self.served_model_name:
                 self.served_model_name = [reference[1]]
             if self.tokenizer is None:
                 self.tokenizer = model
-        if self.tokenizer is not None:
+        if self.tokenizer is not None and parse_model_source(self.tokenizer):
             tokenizer_revision = self.tokenizer_revision or self.revision
             if self.tokenizer == model and tokenizer_revision == self.revision:
                 self.tokenizer = self.model
             else:
+                self.tokenizer_revision = resolve_revision(
+                    self.tokenizer, tokenizer_revision, self.hf_token
+                )
                 self.tokenizer = resolve_source(
                     self.tokenizer,
-                    revision=tokenizer_revision,
+                    revision=self.tokenizer_revision,
                     code_revision=self.code_revision
                     if self.tokenizer == model
                     else None,

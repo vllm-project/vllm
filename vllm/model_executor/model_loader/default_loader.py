@@ -394,9 +394,7 @@ class DefaultModelLoader(BaseModelLoader):
         model: nn.Module,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         primary_weights = DefaultModelLoader.Source(
-            model_config.model_weights
-            if parse_model_source(model_config.model_weights)
-            else model_config.model,
+            model_config.weight_source,
             model_config.revision,
             prefix="",
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
@@ -411,15 +409,19 @@ class DefaultModelLoader(BaseModelLoader):
             getattr(model, "secondary_weights", ()),
         )
         for source in secondary_weights:
+            if source.model_or_path == model_config.model and parse_model_source(
+                model_config.model_weights
+            ):
+                source = dataclasses.replace(
+                    source,
+                    model_or_path=model_config.weight_source,
+                    hf_token=model_config.hf_token,
+                )
             yield from self._get_weights_iterator(source)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(
-            model_name_or_path=(
-                model_config.model_weights
-                if parse_model_source(model_config.model_weights)
-                else model_config.model
-            ),
+            model_name_or_path=model_config.weight_source,
             subfolder=None,
             revision=model_config.revision,
             fall_back_to_pt=True,

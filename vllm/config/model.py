@@ -694,6 +694,7 @@ class ModelConfig:
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
             token=self.hf_token,
+            weight_source=self.weight_source,
         )
         self.hf_config = hf_config
         if dict_overrides:
@@ -812,7 +813,7 @@ class ModelConfig:
             self._pooler_config_sources = pooler_config_sources
 
         self.dtype: torch.dtype = _get_and_verify_dtype(
-            self.model,
+            self.weight_source,
             self.hf_config,
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
@@ -1260,6 +1261,14 @@ class ModelConfig:
     def _get_encoder_config(self) -> dict[str, Any] | None:
         return get_sentence_transformer_tokenizer_config(self.model, self.revision)
 
+    @property
+    def weight_source(self) -> str:
+        from vllm.model_hub import parse_model_source
+
+        return (
+            self.model_weights if parse_model_source(self.model_weights) else self.model
+        )
+
     def maybe_untie_word_embeddings(self) -> None:
         """Stop trusting `tie_word_embeddings` when the checkpoint disagrees.
 
@@ -1274,7 +1283,7 @@ class ModelConfig:
         """
         if not getattr(self.hf_config, "tie_word_embeddings", False):
             return
-        if not checkpoint_has_lm_head(self.model, revision=self.revision):
+        if not checkpoint_has_lm_head(self.weight_source, revision=self.revision):
             return
 
         logger.debug(

@@ -4,8 +4,8 @@
 
 import hashlib
 import json
+import os
 import tempfile
-from copy import deepcopy
 from pathlib import Path
 
 from filelock import FileLock
@@ -27,6 +27,56 @@ def parse_model_source(model: str) -> tuple[str, str] | None:
 def strip_model_source(model: str) -> str:
     reference = parse_model_source(model)
     return reference[1] if reference is not None else model
+
+
+def get_modelscope_weight_metadata(repo_id: str, *, revision: str | None) -> dict:
+    """Read safetensors headers without downloading the tensor data."""
+    import struct
+
+    import huggingface_hub
+    import requests
+    from modelscope.hub.api import HubApi, ModelScopeConfig
+    from modelscope.hub.file_download import get_file_download_url
+
+    if huggingface_hub.constants.HF_HUB_OFFLINE:
+        from vllm.transformers_utils.config import _read_safetensors_metadata_in_dir
+
+        path = download_model_source(
+            f"modelscope://{repo_id}", revision=revision, local_files_only=True
+        )
+        return _read_safetensors_metadata_in_dir(Path(path))
+
+    api = HubApi()
+    metadata = {}
+    with requests.Session() as session:
+        session.headers.update(api.headers)
+        if token := os.getenv("MODELSCOPE_API_TOKEN") or ModelScopeConfig.get_token():
+            session.headers["Authorization"] = f"Bearer {token}"
+        if cookies := ModelScopeConfig.get_cookies():
+            session.cookies.update(cookies)
+        for file in api.get_model_files(repo_id, revision=revision):
+            name = file["Path"]
+            if "/" in name or not name.endswith(".safetensors"):
+                continue
+            url = get_file_download_url(
+                repo_id, name, revision or "master", endpoint=api.endpoint
+            )
+            # Stream even if the server ignores Range, so weights stay unread.
+            with session.get(
+                url, headers={"Range": "bytes=0-7"}, stream=True, timeout=30
+            ) as response:
+                response.raise_for_status()
+                size = struct.unpack("<Q", response.raw.read(8))[0]
+            if not 0 < size <= 100_000_000:
+                raise ValueError(f"Invalid safetensors header size in {repo_id}/{name}")
+            with session.get(
+                url, headers={"Range": f"bytes=0-{size + 7}"}, stream=True, timeout=30
+            ) as response:
+                response.raise_for_status()
+                header = json.loads(response.raw.read(size + 8)[8:])
+            header.pop("__metadata__", None)
+            metadata.update(header)
+    return metadata
 
 
 def download_model_weights(
@@ -111,31 +161,24 @@ def resolve_model_source(
                 return value
             code_repo, class_name = repo_id, value
         validate_repo_id(code_repo)
-        if code_repo not in code_paths:
-            rev = code_revision or (revision if code_repo == repo_id else None)
-            code_paths[code_repo] = download(code_repo, rev, code_only=True)
         namespace = "hub_code_" + hashlib.sha256(code_repo.encode()).hexdigest()[:16]
+        if namespace not in code_paths:
+            rev = code_revision or (revision if code_repo == repo_id else None)
+            code_paths[namespace] = download(code_repo, rev, code_only=True)
         return f"{namespace}/{class_name}"
 
-    def localize(value):
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if key == "auto_map" and isinstance(item, dict):
-                    value[key] = {
-                        name: local_reference(ref) for name, ref in item.items()
-                    }
-                else:
-                    localize(item)
-        elif isinstance(value, list):
-            for item in value:
-                localize(item)
+    def localize(config):
+        if isinstance(config.get("auto_map"), dict):
+            config["auto_map"] = {
+                name: local_reference(ref) for name, ref in config["auto_map"].items()
+            }
+        return config
 
     configs = {}
     for path in snapshot.glob("*config*.json"):
-        original = json.loads(path.read_text())
-        updated = deepcopy(original)
-        localize(updated)
-        if updated != original:
+        content = path.read_text()
+        updated = json.loads(content, object_hook=localize)
+        if updated != json.loads(content):
             configs[path.name] = updated
     if not configs:
         return str(snapshot)
@@ -163,10 +206,7 @@ def resolve_model_source(
                         (staging / path.name).symlink_to(path.resolve())
                 for name, config in configs.items():
                     (staging / name).write_text(json.dumps(config))
-                for repo, code_path in code_paths.items():
-                    namespace = (
-                        "hub_code_" + hashlib.sha256(repo.encode()).hexdigest()[:16]
-                    )
+                for namespace, code_path in code_paths.items():
                     (staging / namespace).symlink_to(Path(code_path).resolve())
                 staging.rename(overlay)
     return str(overlay)

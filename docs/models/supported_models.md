@@ -366,6 +366,8 @@ For specialized loaders, download the repository first and use its local path.
 Cross-repository `auto_map` code uses the same Hub as its model or tokenizer,
 with the existing `code_revision` option. Executing custom code still requires
 `trust_remote_code`.
+Auto-detected speculators keep the chosen Hub for both the verifier and draft.
+Hugging Face revisions are resolved before downloading configuration and weights.
 
 ## Feature Status Legend
 
