@@ -92,7 +92,11 @@ class KVOutputAggregator:
                 remaining.pop(req_id, None)
 
     def add_finished_recving(self, req_ids: set[str]) -> set[str]:
-        """Count one worker's early receives against the normal output quorum."""
+        """Count one worker's early receives against the normal output quorum.
+
+        Callers must report each worker/load once across early and normal
+        outputs; this counter does not deduplicate worker identities.
+        """
         finished: set[str] = set()
         self._update_finished_set(req_ids, self._recv_remaining_count, finished)
         # Failures must reach the scheduler through its normal recovery path.

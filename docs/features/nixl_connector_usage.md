@@ -423,6 +423,9 @@ best effort. Transfer failures retain the configured recovery policy; unexpected
 poll or notification-channel errors terminate the engine, including while paused.
 Workers sleep between polls and yield to queued RPCs; the wait can add up to one
 polling interval (0.2 ms, subject to OS scheduling) before handling a new RPC.
+Receive post-processing stays on the worker's current stream, before subsequent
+forward submissions. Transfer latency may be observed earlier; statistics still
+reach the engine through ordinary step outputs.
 
 ## Metrics Reference
 

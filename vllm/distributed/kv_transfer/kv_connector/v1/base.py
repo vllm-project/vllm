@@ -416,7 +416,12 @@ class KVConnectorBase_V1(ABC):
     def get_transfer_results(
         self, finished_req_ids: set[str]
     ) -> KVConnectorTransferResults:
-        """Return completed sends, receives, and receive failures together."""
+        """Return completed sends, receives, and receive failures together.
+
+        Each worker must report a receive at most once per load, across this
+        method and `poll_finished_recving()`. Only the connector selected to
+        load the request may report its receive completion.
+        """
         finished_sending, finished_recving = self.get_finished(finished_req_ids)
         return KVConnectorTransferResults(
             finished_sending=set(finished_sending or ()),
