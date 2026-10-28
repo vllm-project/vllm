@@ -77,7 +77,10 @@ def test_rocm_aiter_static_attention_output_correctness(caplog_mp_spawn):
             env1=env,
             env2=env,
             method="generate",
-            force_v1_runner=True,
+            # Fusing output quant drops a bf16 round-trip, so the two settings
+            # agree on the argmax but not on the exact distribution. Greedy
+            # decoding survives that, sampling at temperature 1.0 does not.
+            include_seeded_sampling=False,
         )
     matches = [
         int(count) for count in re.findall(r"'attn_quant_fusion': (\d+)", logs.text)

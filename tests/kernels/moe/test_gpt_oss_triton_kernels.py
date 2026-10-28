@@ -32,8 +32,12 @@ from triton_kernels.testing import assert_close
 
 from vllm.model_executor.layers.fused_moe.config import mxfp4_w4a16_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
+    _sm12x_block_m,
     triton_kernel_moe_forward,
 )
+from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.model_executor.layers.quantization.utils import mxfp4_utils
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mx_scale_kwargs
 from vllm.utils.math_utils import round_up
 
@@ -314,9 +318,14 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
         pc2,
     ) = init_compute_data(M, K, N, E, a_dtype, w_dtype, num_warps=8)
 
-    if current_platform.is_device_capability_family(100):
+    if any(
+        current_platform.is_device_capability_family(family)
+        for family in (100, 110, 120)
+    ):
+        # Mirrors `_swizzle_mxfp4`.
         constraints = {
             "is_persistent": True,
+            "epilogue_subtile": 1,
         }
         opt_flags.update_opt_flags_constraints(constraints)
 
@@ -356,6 +365,65 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
     assert_close(ref=out_ref, tri=out_triton_monolithic, maxtol=0.025, rmstol=0.005)
 
 
+@pytest.mark.parametrize(
+    ("num_rows", "num_experts", "expected"),
+    [
+        (4, 32, 16),  # bs=1 decode: below the 16-row floor
+        (32 * 20, 32, 32),  # 20 tokens/expert rounds up to 32
+        (32 * 33, 32, 32),  # heuristic would pick 64; capped for 99KB smem
+        (12000, 32, 32),  # prefill: heuristic would pick 128
+    ],
+)
+def test_sm12x_block_m(num_rows, num_experts, expected):
+    assert _sm12x_block_m(num_rows, num_experts) == expected
+
+
+@pytest.mark.parametrize(
+    ("family", "marlin_first"), [(None, False), (100, False), (110, True), (120, True)]
+)
+def test_gpt_oss_priority_triton_vs_marlin(
+    monkeypatch: pytest.MonkeyPatch, family: int | None, marlin_first: bool
+):
+    """MARLIN stays the default on SM110 (unbenchmarked) and SM12x (small tiles
+    only) while TRITON remains selectable explicitly."""
+    monkeypatch.setattr(mxfp4_oracle.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        mxfp4_oracle.current_platform,
+        "is_device_capability_family",
+        lambda f: f == family,
+    )
+    order = mxfp4_oracle._get_priority_backends_for_gpt_oss()
+    triton_first = order.index(Mxfp4MoeBackend.TRITON) < order.index(
+        Mxfp4MoeBackend.MARLIN
+    )
+    assert triton_first is not marlin_first
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only constraints")
+@pytest.mark.parametrize("family", [110, 120])
+def test_swizzle_mxfp4_pins_epilogue_subtile(
+    monkeypatch: pytest.MonkeyPatch, family: int
+):
+    """Without epilogue_subtile=1 the opt_flags heuristic picks a subtiled
+    epilogue with SWAP_XW, which fails to compile in matmul_ogs (#61374)."""
+    monkeypatch.setattr(
+        mxfp4_utils.current_platform, "is_device_capability", lambda cap: False
+    )
+    monkeypatch.setattr(
+        mxfp4_utils.current_platform,
+        "is_device_capability_family",
+        lambda f: f == family,
+    )
+    monkeypatch.setattr(opt_flags, "_opt_flags_constraints", {})
+    w = torch.zeros(1, 256, 128, dtype=torch.uint8, device="cuda")
+    scale = torch.zeros(1, 256, 8, dtype=torch.uint8, device="cuda")
+    mxfp4_utils._swizzle_mxfp4(w, scale)
+    assert opt_flags._opt_flags_constraints == {
+        "is_persistent": True,
+        "epilogue_subtile": 1,
+    }
+
+
 def test_unit_shuffle():
     N = ModelConfig.intermediate_size
     K = ModelConfig.hidden_size
@@ -392,11 +460,6 @@ def test_routing_data_from_sparse_topk_parity(n_tokens, n_experts, topk):
 
     if gptoss_moe.triton_kernels_version == "3.5.1":
         pytest.skip("SparseMatrix path requires triton_kernels v3.6.0+")
-    if gptoss_moe.triton_kernels_version == "3.8":
-        pytest.skip(
-            "3.8 rebuilds routing from raw ids, so routing_data_from_sparse_topk "
-            "just forwards to make_routing_data and the comparison is vacuous"
-        )
 
     from triton_kernels.topk import topk as topk_fn
 
@@ -428,11 +491,52 @@ def test_routing_data_from_sparse_topk_parity(n_tokens, n_experts, topk):
         elif hasattr(ref, "__dict__"):
             for k, v in vars(ref).items():
                 assert_equivalent(getattr(new, k), v, f"{path}.{k}")
+        elif hasattr(type(ref), "__slots__"):
+            for k in type(ref).__slots__:
+                assert_equivalent(getattr(new, k), getattr(ref, k), f"{path}.{k}")
         else:
             assert type(new) is type(ref), f"{path}: {type(new)} vs {type(ref)}"
 
     assert_equivalent(rd_new, rd_ref)
+    if isinstance(gather_ref, torch.Tensor):
+        torch.testing.assert_close(gather_new, gather_ref)
+        torch.testing.assert_close(scatter_new, scatter_ref)
+        return
     torch.testing.assert_close(gather_new.src_indx, gather_ref.src_indx)
     torch.testing.assert_close(gather_new.dst_indx, gather_ref.dst_indx)
     torch.testing.assert_close(scatter_new.src_indx, scatter_ref.src_indx)
     torch.testing.assert_close(scatter_new.dst_indx, scatter_ref.dst_indx)
+
+
+@pytest.mark.parametrize("n_tokens", [1, 33, 4099])
+@pytest.mark.parametrize("n_experts,topk", [(128, 4), (256, 6)])
+def test_make_routing_data_tk38_matches_reference(n_tokens, n_experts, topk):
+    from vllm.model_executor.layers.fused_moe.experts import (
+        gpt_oss_triton_kernels_moe as gptoss_moe,
+    )
+
+    if gptoss_moe.triton_kernels_version != "3.8":
+        pytest.skip("requires triton_kernels 3.8")
+
+    torch.manual_seed(0)
+    topk_ids = torch.stack(
+        [torch.randperm(n_experts, device="cuda")[:topk] for _ in range(n_tokens)]
+    ).to(torch.int32)
+    topk_ids[torch.rand(topk_ids.shape, device="cuda") < 0.5] = -1
+    topk_weights = torch.rand(topk_ids.shape, device="cuda")
+
+    routing, gather_tok, scatter_tok = gptoss_moe.make_routing_data(
+        topk_ids, topk_weights, n_experts
+    )
+
+    flat = topk_ids.reshape(-1).to(torch.int64)
+    order = torch.argsort(flat.clamp(min=0), stable=True)
+    counts = torch.bincount(flat.clamp(min=0), minlength=n_experts).to(torch.int32)
+    weights = topk_weights.reshape(-1) * (flat >= 0).to(torch.float32)
+
+    assert torch.equal(routing.ragged.slice_sizes, counts)
+    assert torch.equal(gather_tok, (order // topk).to(torch.int32))
+    assert torch.equal(scatter_tok, gather_tok)
+    assert torch.equal(routing.gate_scal, weights[order])
+    assert routing.n_expts_act == topk
+    assert routing.n_valid == flat.numel()

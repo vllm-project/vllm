@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 
 import regex as re
 
@@ -51,6 +51,8 @@ class WheelFileInfo:
     platform_tag: str
     variant: str | None
     filename: str
+    # Absolute URL for files hosted elsewhere (see --external-links)
+    url: str | None = None
 
 
 def parse_from_filename(file: str) -> WheelFileInfo:
@@ -110,6 +112,29 @@ def parse_from_filename(file: str) -> WheelFileInfo:
     )
 
 
+def parse_external_url(url: str) -> WheelFileInfo:
+    """Parse an absolute wheel or sdist URL hosted on another index."""
+    filename = unquote(urlparse(url).path.rsplit("/", 1)[-1])
+    if filename.endswith(".whl"):
+        info = parse_from_filename(filename)
+    else:
+        match = re.match(r"^(?P<name>.+)-(?P<version>[^-]+)\.(tar\.gz|zip)$", filename)
+        if not match:
+            raise ValueError(f"Unsupported external file: {filename}")
+        info = WheelFileInfo(
+            package_name=match.group("name"),
+            version=match.group("version"),
+            build_tag=None,
+            python_tag="source",
+            abi_tag="none",
+            platform_tag="any",
+            variant=None,
+            filename=filename,
+        )
+    info.url = url
+    return info
+
+
 def generate_project_list(subdir_names: list[str], comment: str = "") -> str:
     """Generate project list HTML content linking to each project & variant subdirectory."""
     href_tags = []
@@ -129,14 +154,19 @@ def generate_package_index_and_metadata(
     href_tags = []
     metadata = []
     for file in sorted(wheel_files, key=lambda x: x.filename):
-        relative_path = (
-            wheel_base_dir.relative_to(index_base_dir, walk_up=True) / file.filename
-        )
-        # handle with '+' in URL, and avoid double-encoding '/' and already-encoded '%2B'
-        # NOTE: this is AWS S3 specific behavior!
-        file_path_quoted = quote(relative_path.as_posix(), safe=":%/")
+        if file.url:
+            file_path_quoted = file.url
+        else:
+            relative_path = (
+                wheel_base_dir.relative_to(index_base_dir, walk_up=True) / file.filename
+            )
+            # handle with '+' in URL, and avoid double-encoding '/' and already-encoded '%2B'
+            # NOTE: this is AWS S3 specific behavior!
+            file_path_quoted = quote(relative_path.as_posix(), safe=":%/")
         href_tags.append(f'    <a href="{file_path_quoted}">{file.filename}</a><br/>')
         file_meta = asdict(file)
+        if file_meta["url"] is None:
+            del file_meta["url"]
         file_meta["path"] = file_path_quoted
         metadata.append(file_meta)
     index_str = INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags), comment=comment)
@@ -151,6 +181,7 @@ def generate_index_and_metadata(
     default_variant: str | None = None,
     alias_to_default: str | None = None,
     comment: str = "",
+    external_urls: list[str] | None = None,
 ):
     """Generate index for all wheel files.
 
@@ -160,6 +191,8 @@ def generate_index_and_metadata(
         index_base_dir (Path): Base directory to store index files.
         default_variant (str | None): The default variant name, if any.
         alias_to_default (str | None): Alias variant name for the default variant, if any.
+        external_urls (list[str] | None): Absolute URLs of files hosted on another index,
+            listed in the generated indices without being copied.
         comment (str | None): Optional comment to include in the generated HTML files.
 
     First, parse all wheel files to extract metadata.
@@ -214,6 +247,7 @@ def generate_index_and_metadata(
 
     """
     parsed_files = [parse_from_filename(f) for f in whl_files]
+    parsed_files += [parse_external_url(u) for u in external_urls or []]
 
     if not parsed_files:
         print("No wheel files found, skipping index generation.")
@@ -232,10 +266,14 @@ def generate_index_and_metadata(
             print(f"Detected ROCm variant from vllm: {rocm_variant}")
             break
 
-    # Apply ROCm variant to all wheels without a variant
+    # Apply ROCm variant to all wheels without a variant. Dependencies with their
+    # own ROCm local version (e.g. TheRock's torch-2.12.0+rocm10.0.0) belong to
+    # the same variant rather than one of their own.
     if rocm_variant:
         for file in parsed_files:
-            if file.variant is None:
+            if file.variant is None or (
+                file.variant.startswith("rocm") and file.variant != rocm_variant
+            ):
                 file.variant = rocm_variant
                 print(f"Inherited variant '{rocm_variant}' for {file.filename}")
 
@@ -367,6 +405,13 @@ if __name__ == "__main__":
         help="Alias variant name for the default variant",
     )
     parser.add_argument(
+        "--external-links",
+        type=str,
+        default=None,
+        help="Optional file with one absolute URL per line for packages hosted on "
+        "another index (listed alongside, but not copied into, this index)",
+    )
+    parser.add_argument(
         "--comment",
         type=str,
         default="",
@@ -463,5 +508,14 @@ if __name__ == "__main__":
         default_variant=None,
         alias_to_default=args.alias_to_default,
         comment=args.comment.strip(),
+        external_urls=(
+            [
+                line.strip()
+                for line in Path(args.external_links).read_text().splitlines()
+                if line.strip() and not line.startswith("#")
+            ]
+            if args.external_links
+            else None
+        ),
     )
     print(f"Successfully generated index and metadata in {output_dir}")
