@@ -64,6 +64,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "ultraquant_4bit": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
+    "mxfp4": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -548,6 +549,15 @@ def set_random_seed(seed: int | None, data_parallel_index: int = 0) -> None:
 def nvfp4_kv_cache_full_dim(head_size: int) -> int:
     """Packed last dim for NVFP4 KV cache: fp4 data + fp8 block scales."""
     return head_size // 2 + head_size // 16
+
+
+def mxfp4_kv_cache_full_dim(head_size: int) -> int:
+    """Packed last dim for MXFP4 KV cache: fp4 data + one E8M0 scale per block."""
+    from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+        OCP_MX_BLOCK_SIZE,
+    )
+
+    return head_size // 2 + head_size // OCP_MX_BLOCK_SIZE
 
 
 def nvfp4_split_data_scale(

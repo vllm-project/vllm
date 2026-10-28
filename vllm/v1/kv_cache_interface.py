@@ -61,6 +61,7 @@ class KVQuantMode(IntEnum):
     OCTAVE_K3V4 = 12
     OCTAVE_K3V3 = 13
     OCTAVE_K3V3_COMPACT = 14
+    MXFP4 = 15  # packed E2M1 data + E8M0 scales per 32 elements
 
     # Backend self-manages kernel dispatch. Reads as quantized but matches no
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
@@ -81,6 +82,11 @@ class KVQuantMode(IntEnum):
     def is_nvfp4(self) -> bool:
         """True for NVFP4 packed quantization mode."""
         return self == KVQuantMode.NVFP4
+
+    @property
+    def is_mxfp4(self) -> bool:
+        """True for MXFP4 packed quantization mode."""
+        return self == KVQuantMode.MXFP4
 
     @property
     def is_octave(self) -> bool:
@@ -138,6 +144,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.NVFP4_DS_MLA
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
+    if kv_cache_dtype == "mxfp4":
+        return KVQuantMode.MXFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
         return KVQuantMode[kv_cache_dtype.upper()]
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("octave_"):
