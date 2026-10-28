@@ -272,9 +272,8 @@ def fused_topk_bias(
                 num_expert_group=num_expert_group,
                 topk_group=num_expert_group,
                 need_renorm=renormalize,
+                routed_scaling_factor=routed_scaling_factor,
             )
-            if routed_scaling_factor != 1.0:
-                topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
 
     if scoring_func == "sqrtsoftplus":
