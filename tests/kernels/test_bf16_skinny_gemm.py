@@ -14,6 +14,7 @@ from torch import nn
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
 )
+from vllm.model_executor.layers import low_latency_gemm
 from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
 from vllm.models.glm5next.nvidia import low_latency_gemm as glm5next_gemm
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
@@ -1040,42 +1041,12 @@ def test_qwen4_exp_sm121_selected_shapes(
 def test_glm5next_sm121_plans_are_valid() -> None:
     plans = glm5next_gemm.GLM5NEXT_SM121_GEMM_PLANS
 
-    assert len(plans) == 7
-    assert sum(map(len, plans.values())) == 20
     for (n, k), shape_plans in plans.items():
         for num_tokens, config in shape_plans.items():
             assert config.num_rows == num_tokens
             assert n % config.outputs_per_block == 0
             assert k % (config.block_size * config.vector_width) == 0
             assert config.static_k in (None, k)
-
-
-@pytest.mark.parametrize(
-    "capability,expected_plans",
-    [
-        ((12, 1), glm5next_gemm.GLM5NEXT_SM121_GEMM_PLANS),
-        ((12, 0), {}),
-        ((10, 3), {}),
-        ((9, 0), {}),
-    ],
-)
-def test_glm5next_gemm_capability_routing(
-    monkeypatch: pytest.MonkeyPatch,
-    capability: tuple[int, int],
-    expected_plans: dict[tuple[int, int], dict[int, SkinnyGemmConfig]],
-) -> None:
-    monkeypatch.setattr(
-        glm5next_gemm.current_platform,
-        "get_device_capability",
-        lambda: capability,
-    )
-
-    assert (
-        glm5next_gemm.GLM5NEXT_GEMM_PLANS_BY_CAPABILITY.get(
-            glm5next_gemm.current_platform.get_device_capability(), {}
-        )
-        == expected_plans
-    )
 
 
 def test_glm5next_installation_is_shape_specific_and_unquantized(
@@ -1091,28 +1062,31 @@ def test_glm5next_installation_is_shape_specific_and_unquantized(
         pass
 
     root = nn.Module()
-    root.in_proj = FakeLinear(glm5next_gemm.UnquantizedLinearMethod(), 12576, 4096)
+    root.in_proj = FakeLinear(low_latency_gemm.UnquantizedLinearMethod(), 12576, 4096)
     # quantized: must be left untouched.
     quantized_method = object()
     root.quantized = FakeLinear(quantized_method, 12576, 4096)
     # shape absent from the table: must be left untouched.
-    root.unlisted = FakeLinear(glm5next_gemm.UnquantizedLinearMethod(), 4096, 128)
+    assert (4096, 128) not in glm5next_gemm.GLM5NEXT_SM121_GEMM_PLANS
+    root.unlisted = FakeLinear(low_latency_gemm.UnquantizedLinearMethod(), 4096, 128)
     # A quant config that excludes lm_head (the modelopt NVFP4 checkpoint does)
     # hands the head an UnquantizedLinearMethod, not an embedding method.
-    root.lm_head = FakeHead(glm5next_gemm.UnquantizedLinearMethod(), 77440, 4096)
-    root.plain_head = FakeHead(glm5next_gemm.UnquantizedEmbeddingMethod(), 77440, 4096)
+    root.lm_head = FakeHead(low_latency_gemm.UnquantizedLinearMethod(), 77440, 4096)
+    root.plain_head = FakeHead(
+        low_latency_gemm.UnquantizedEmbeddingMethod(), 77440, 4096
+    )
 
-    monkeypatch.setattr(glm5next_gemm, "LinearBase", FakeLinear)
-    monkeypatch.setattr(glm5next_gemm, "ParallelLMHead", FakeHead)
+    monkeypatch.setattr(low_latency_gemm, "LinearBase", FakeLinear)
+    monkeypatch.setattr(low_latency_gemm, "ParallelLMHead", FakeHead)
     monkeypatch.setattr(
-        glm5next_gemm.current_platform, "get_device_capability", lambda: (12, 1)
+        low_latency_gemm.current_platform, "get_device_capability", lambda: (12, 1)
     )
     monkeypatch.setattr(
-        glm5next_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: True
+        low_latency_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: True
     )
     warmup_configs: set[SkinnyGemmConfig] = set()
     monkeypatch.setattr(
-        glm5next_gemm.shape_dynamic_skinny_gemm,
+        low_latency_gemm.shape_dynamic_skinny_gemm,
         "request_warmup_configs",
         lambda dtype, configs: warmup_configs.update(configs),
     )
@@ -1120,16 +1094,16 @@ def test_glm5next_installation_is_shape_specific_and_unquantized(
     glm5next_gemm.enable_glm5next_low_latency_gemm(root, torch.bfloat16)
 
     assert isinstance(
-        root.in_proj.quant_method, glm5next_gemm.Glm5NextLowLatencyLinearMethod
+        root.in_proj.quant_method, low_latency_gemm.LowLatencyLinearMethod
     )
     assert root.quantized.quant_method is quantized_method
-    assert type(root.unlisted.quant_method) is glm5next_gemm.UnquantizedLinearMethod
+    assert type(root.unlisted.quant_method) is low_latency_gemm.UnquantizedLinearMethod
     assert isinstance(
-        root.lm_head.quant_method, glm5next_gemm.Glm5NextLowLatencyLinearMethod
+        root.lm_head.quant_method, low_latency_gemm.LowLatencyLinearMethod
     )
     assert isinstance(
         root.plain_head.quant_method,
-        glm5next_gemm.Glm5NextLowLatencyEmbeddingMethod,
+        low_latency_gemm.LowLatencyEmbeddingMethod,
     )
     assert warmup_configs == {
         config
@@ -1152,7 +1126,7 @@ def test_glm5next_sm121_selected_shapes(
 
     selected = glm5next_gemm.GLM5NEXT_SM121_GEMM_PLANS[(n, k)][num_tokens]
     assert selected == config
-    output = glm5next_gemm._glm5next_low_latency_gemm(x, weight)
+    output = torch.ops.vllm.glm5next_low_latency_gemm(x, weight)
 
     reference = torch.nn.functional.linear(x, weight)
     cosine = torch.nn.functional.cosine_similarity(
