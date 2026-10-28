@@ -12,6 +12,8 @@ import torch
 import torch.distributed as dist
 from aiter.ops.flydsl.quick_allreduce_int4_ipc import UncachedIpcHeap
 
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
 
 # ---------------------------------------------------------------- TP agreement
 class MonoUnsupported(Exception):
@@ -90,7 +92,8 @@ class PeerBuffer:
                     f"{'this' if failure else 'another'}"
                     " TP rank"
                 ) from failure
-        self.addresses = torch.tensor(addresses, dtype=torch.int64, device=device)
+        with gpu_sync_allowed():
+            self.addresses = torch.tensor(addresses, dtype=torch.int64, device=device)
 
     def close(self) -> None:
         """Close the peer mappings and free the local buffer; idempotent. Only once no

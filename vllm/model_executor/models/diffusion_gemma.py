@@ -58,6 +58,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
@@ -1595,72 +1596,76 @@ class DiffusionSampler:
                         num_sampled[decode_idx[sel]] > 0
                     )
                     just_converged = converged_mask & ~is_committing[sel]
-                    if just_converged.any():
-                        assert scaled is not None
-                        flat_logits = scaled.reshape(-1, scaled.shape[-1])
-                        argmax_tokens = scaled.argmax(dim=-1)
-                        raw_flat: torch.Tensor | None = None
-                        for local_idx in just_converged.nonzero(as_tuple=True)[0]:
-                            li = local_idx.item()
-                            slot = tile_slots[local_idx].item()
-                            # Stash only the real canvas positions; padded tail
-                            # positions are never emitted.
-                            k_i = int(tile_valid_np[li])
-                            pos = li * W
-                            src = flat_logits
-                            if slot in states.read_only_slots:
-                                # Read-only slots report logprobs at temperature 1.
-                                # The schedule-tempered logits share the argmax.
-                                if raw_flat is None:
-                                    raw_flat = tile_logits.float()
-                                src = raw_flat
-                            if allowed is not None:
-                                # Column j of the K-space logits is allowed[j]:
-                                # report every allowed id, renormalized over
-                                # the set, with the argmax in column 0.
-                                rows = src[pos : pos + k_i]
-                                lp = rows.log_softmax(dim=-1)
-                                am = argmax_tokens[local_idx][:k_i]
-                                sel_lp = lp.gather(1, am.unsqueeze(1))
-                                # Same convention as _ranks_kernel: 1-based,
-                                # ties count, so the rank is the number of
-                                # columns at or above the selected one. Out
-                                # of set ids have zero probability, so the
-                                # rank within the set is the real rank.
-                                ranks = (lp >= sel_lp).sum(dim=1)
-                                self._pending_logprobs[slot] = LogprobsTensors(
-                                    logprob_token_ids=torch.cat(
-                                        (
-                                            allowed[am].unsqueeze(1),
-                                            allowed.unsqueeze(0).expand(k_i, -1),
+                    with gpu_sync_allowed():
+                        if just_converged.any():
+                            assert scaled is not None
+                            flat_logits = scaled.reshape(-1, scaled.shape[-1])
+                            argmax_tokens = scaled.argmax(dim=-1)
+                            raw_flat: torch.Tensor | None = None
+                            for local_idx in just_converged.nonzero(as_tuple=True)[0]:
+                                li = local_idx.item()
+                                slot = tile_slots[local_idx].item()
+                                # Stash only the real canvas positions; padded tail
+                                # positions are never emitted.
+                                k_i = int(tile_valid_np[li])
+                                pos = li * W
+                                src = flat_logits
+                                if slot in states.read_only_slots:
+                                    # Read-only slots report logprobs at temperature 1.
+                                    # The schedule-tempered logits share the argmax.
+                                    if raw_flat is None:
+                                        raw_flat = tile_logits.float()
+                                    src = raw_flat
+                                if allowed is not None:
+                                    # Column j of the K-space logits is allowed[j]:
+                                    # report every allowed id, renormalized over
+                                    # the set, with the argmax in column 0.
+                                    rows = src[pos : pos + k_i]
+                                    lp = rows.log_softmax(dim=-1)
+                                    am = argmax_tokens[local_idx][:k_i]
+                                    sel_lp = lp.gather(1, am.unsqueeze(1))
+                                    # Same convention as _ranks_kernel: 1-based,
+                                    # ties count, so the rank is the number of
+                                    # columns at or above the selected one. Out
+                                    # of set ids have zero probability, so the
+                                    # rank within the set is the real rank.
+                                    ranks = (lp >= sel_lp).sum(dim=1)
+                                    self._pending_logprobs[slot] = LogprobsTensors(
+                                        logprob_token_ids=torch.cat(
+                                            (
+                                                allowed[am].unsqueeze(1),
+                                                allowed.unsqueeze(0).expand(k_i, -1),
+                                            ),
+                                            dim=1,
                                         ),
-                                        dim=1,
-                                    ),
-                                    logprobs=torch.cat((sel_lp, lp), dim=1),
-                                    selected_token_ranks=ranks.to(torch.int64),
-                                )
-                                continue
-                            per_req_ids = max_token_ids > 0
-                            self._pending_logprobs[slot] = compute_topk_scores(
-                                src[pos : pos + k_i],
-                                num_logprobs,
-                                argmax_tokens[local_idx][:k_i],
-                                logprob_token_ids_state=(
-                                    self.logprob_token_ids_state
-                                    if per_req_ids
-                                    else None
-                                ),
-                                # every row of this stash belongs to one slot
-                                expanded_idx_mapping=(
-                                    torch.full(
-                                        (k_i,), slot, dtype=torch.int32, device=device
+                                        logprobs=torch.cat((sel_lp, lp), dim=1),
+                                        selected_token_ranks=ranks.to(torch.int64),
                                     )
-                                    if per_req_ids
-                                    else None
-                                ),
-                                max_per_req_token_ids=max_token_ids,
-                                logits_mode=self.logits_mode,
-                            )
+                                    continue
+                                per_req_ids = max_token_ids > 0
+                                self._pending_logprobs[slot] = compute_topk_scores(
+                                    src[pos : pos + k_i],
+                                    num_logprobs,
+                                    argmax_tokens[local_idx][:k_i],
+                                    logprob_token_ids_state=(
+                                        self.logprob_token_ids_state
+                                        if per_req_ids
+                                        else None
+                                    ),
+                                    # every row of this stash belongs to one slot
+                                    expanded_idx_mapping=(
+                                        torch.full(
+                                            (k_i,),
+                                            slot,
+                                            dtype=torch.int32,
+                                            device=device,
+                                        )
+                                        if per_req_ids
+                                        else None
+                                    ),
+                                    max_per_req_token_ids=max_token_ids,
+                                    logits_mode=self.logits_mode,
+                                )
             run_start = run_end
 
         # Only emitting requests consume their stashed logprobs.
