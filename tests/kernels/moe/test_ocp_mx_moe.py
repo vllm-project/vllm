@@ -2216,6 +2216,126 @@ def test_select_mxfp4_moe_backend_respects_checkpoint_activation(
     assert backend.name == expected
 
 
+def _dsv4_moe_config(monkeypatch, default_vllm_config, has_hash_routing, backend):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
+    from vllm.platforms import rocm
+
+    # Exercise both native MX and monolithic AITER selection on any ROCm device.
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: True)
+    monkeypatch.setattr(rocm, "on_gfx1250", lambda: False)
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "is_fused_moe_enabled", lambda: True)
+    default_vllm_config.kernel_config.moe_backend = "triton"
+    layer = FusedMoEFactory(
+        num_experts=8,
+        top_k=2,
+        hidden_size=256,
+        intermediate_size=256,
+        params_dtype=torch.bfloat16,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=torch.zeros(8),
+        hash_indices_table=(
+            torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+            if has_hash_routing
+            else None
+        ),
+        prefix="hash_routing_selection",
+    )
+    return layer, replace(layer.routed_experts.moe_config, moe_backend=backend)
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm backend selection")
+@pytest.mark.parametrize("has_hash_routing", [False, True])
+@pytest.mark.parametrize(
+    "backend,expected_experts",
+    [
+        ("aiter_triton_mxfp4_bf16", "AiterW4A16ExpertsMonolithic"),
+        ("aiter", "AiterMxfp4Experts"),
+        ("triton_unfused", "UnfusedOAITritonExperts"),
+    ],
+)
+def test_hash_routing_backend_selection(
+    dist_init,
+    default_vllm_config,
+    monkeypatch,
+    has_hash_routing,
+    backend,
+    expected_experts,
+):
+    """Hash tables reach backend selection and hash-capable kernels."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        select_deepseek_v4_mxfp4_moe_backend,
+    )
+
+    layer, config = _dsv4_moe_config(
+        monkeypatch, default_vllm_config, has_hash_routing, backend
+    )
+    _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    assert experts_cls is not None
+    assert experts_cls.__name__ == expected_experts
+    # Monolithic kernels route internally, so they read the table from the layer.
+    assert (layer.routed_experts.hash_indices_table is not None) == has_hash_routing
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm backend selection")
+def test_hash_routing_rejects_monolithic_without_support(
+    dist_init, default_vllm_config, monkeypatch
+):
+    """A monolithic kernel that does not implement hash routing is rejected."""
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
+        AiterW4A16ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        select_deepseek_v4_mxfp4_moe_backend,
+    )
+
+    monkeypatch.setattr(
+        AiterW4A16ExpertsMonolithic,
+        "_supports_hash_routing",
+        staticmethod(lambda: False),
+    )
+    _, config = _dsv4_moe_config(
+        monkeypatch, default_vllm_config, True, "aiter_triton_mxfp4_bf16"
+    )
+    with pytest.raises(ValueError, match="hash routing"):
+        select_deepseek_v4_mxfp4_moe_backend(config)
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm backend selection")
+@pytest.mark.parametrize(
+    "ep_config,supported",
+    [
+        ({"use_ep": True, "ep_size": 8}, True),
+        ({"use_ep": True, "ep_size": 8, "enable_eplb": True}, False),
+        ({"use_ep": True, "ep_size": 8, "dp_size": 2}, False),
+    ],
+    ids=["naive_ep", "eplb", "all2all"],
+)
+def test_aiter_w4a16_expert_parallel_selection(
+    dist_init, default_vllm_config, monkeypatch, ep_config, supported
+):
+    """Naive EP (no all2all, no EPLB) selects the AITER W4A16 monolithic kernel,
+    including on hash-routed layers."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        select_deepseek_v4_mxfp4_moe_backend,
+    )
+
+    _, config = _dsv4_moe_config(
+        monkeypatch, default_vllm_config, True, "aiter_triton_mxfp4_bf16"
+    )
+    config = replace(
+        config, moe_parallel_config=replace(config.moe_parallel_config, **ep_config)
+    )
+    if supported:
+        _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "AiterW4A16ExpertsMonolithic"
+    else:
+        with pytest.raises(ValueError, match="parallel config"):
+            select_deepseek_v4_mxfp4_moe_backend(config)
+
+
 @pytest.mark.parametrize("backend_name", ["AITER_TRITON_MXFP4_BF16", "AITER_MXFP4_FP8"])
 @pytest.mark.parametrize("use_ep", [False, True])
 def test_aiter_mxfp4_monolithic_expert_parallel_support(
