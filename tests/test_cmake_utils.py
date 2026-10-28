@@ -77,7 +77,32 @@ def test_family_arch_fallback_never_picks_lower_minor(
 
 @pytest.mark.parametrize("src_archs", ["10.0f;10.7f", "10.7f;10.0f"])
 def test_family_arch_fallback_runs_after_name_matches(tmp_path: Path, src_archs: str):
-    _check_loose_intersection(tmp_path, src_archs, "10.7a;10.3a", "10.7a;10.3a")
+    _check_loose_intersection(tmp_path, src_archs, "10.7a;10.3a", "10.3a;10.7a")
+
+
+def test_plain_arch_kept_when_source_has_suffixed_variant(tmp_path: Path):
+    """A plain arch that is explicitly listed in the source must not be
+    dropped in favour of its arch-specific variant. Dropping it narrows the
+    build to the exact minor version of the suffixed target, e.g. only
+    `sm_100a` cubins are built, which do not run on a CC 10.3 device."""
+    _check_loose_intersection(
+        tmp_path, "7.5;8.0;8.6;9.0;9.0a", "8.0;8.9;9.0", "8.0;8.6;9.0;9.0a"
+    )
+
+
+@pytest.mark.parametrize(
+    ("src_archs", "tgt_archs", "expected"),
+    [
+        pytest.param("12.0f", "12.0", "12.0f", id="family-target-kept"),
+        pytest.param("8.0+PTX", "9.0", "8.0+PTX", id="ptx-covers-newer-major"),
+    ],
+)
+def test_family_and_ptx_arch_targets(
+    tmp_path: Path, src_archs: str, tgt_archs: str, expected: str
+):
+    """Family (`f`) targets and PTX sources are resolved to the arch that is
+    actually built."""
+    _check_loose_intersection(tmp_path, src_archs, tgt_archs, expected)
 
 
 def test_extract_archs_prefers_sass_target_over_corrupted_virtual_arch(
