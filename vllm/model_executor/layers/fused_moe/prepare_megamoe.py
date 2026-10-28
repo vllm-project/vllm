@@ -17,6 +17,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.triton_utils import tl, triton
 
 _E8M0_SCALE_DTYPES = (torch.uint8, torch.float8_e8m0fnu)
+# Inverse of the FP8 E4M3 range.
+_INV_FP8_MAX = tl.constexpr(1.0 / 448.0)
 # Inverse of the NVFP4 range: E2M1 max (6) times E4M3 max (448).
 _INV_NVFP4_MAX = tl.constexpr(1.0 / 2688.0)
 
@@ -35,7 +37,8 @@ def _quantize_fp8_groups(
     amax = tl.max(hidden_groups, axis=2)
     amax = tl.maximum(amax, 1.0e-4)
 
-    scale = amax / 448.0
+    # Multiply by 1/448 like DeepGEMM's cast, so FP32 scales match bit for bit.
+    scale = amax * _INV_FP8_MAX
     if USE_UE8M0:
         scale_bits = scale.to(tl.uint32, bitcast=True)
         scale_exp = ((scale_bits >> 23) & 0xFF) + ((scale_bits & 0x7FFFFF) != 0).to(
@@ -48,7 +51,7 @@ def _quantize_fp8_groups(
         quant_scale = scale
 
     hidden_groups = tl.reshape(hidden, [BLOCK_M, num_groups, GROUP_K])
-    scaled = hidden_groups * (1.0 / quant_scale)[:, :, None]
+    scaled = hidden_groups * tl.math.div_rn(1.0, quant_scale)[:, :, None]
     scaled = tl.reshape(scaled, [BLOCK_M, BLOCK_K])
     return scaled.to(tl.float8e4nv), quant_scale, scale_exp
 
@@ -216,27 +219,34 @@ def _prepare_megamoe_inputs_kernel(
                 mask=token_mask,
             )
         else:
+            # FP32 scales as raw bits (int32 buffer on DeepGEMM SM90)
             sf_offset = tl.arange(0, num_groups)
             tl.store(
                 x_sf
                 + token_id[:, None] * x_sf_stride_m
                 + k_block_id * x_sf_stride_k
                 + sf_offset[None, :],
-                quant_scale,
+                quant_scale.to(x_sf.dtype.element_ty, bitcast=True),
                 mask=token_mask[:, None],
             )
 
-        # DeepGEMM's SM100 shared-expert TMA loads require the activation scales
+        # DeepGEMM's shared-expert TMA loads require the activation scales
         # in an MN-major layout whose row permutation depends on the MegaMoE
-        # scheduler's runtime BLOCK_M. Write that view while the packed UE8M0 scale
-        # is already resident, avoiding another kernel and temporary tensor.
-        if USE_UE8M0 and shared_x_sf is not None:
+        # scheduler's runtime BLOCK_M. Write that view while the scale is
+        # already resident, avoiding another kernel and temporary tensor.
+        if shared_x_sf is not None:
+            if USE_UE8M0:
+                shared_scale = packed_scale
+            else:
+                shared_scale = tl.reshape(quant_scale, [BLOCK_M]).to(
+                    shared_x_sf.dtype.element_ty, bitcast=True
+                )
             shared_row = _shared_sf_row(token_id, SHARED_BLOCK_M)
             tl.store(
                 shared_x_sf
                 + shared_row * shared_x_sf_stride_m
                 + k_block_id * shared_x_sf_stride_k,
-                packed_scale,
+                shared_scale,
                 mask=token_mask,
             )
 
@@ -465,7 +475,7 @@ def prepare_megamoe_inputs(
             Must be given together with ``shared_block_m``.
         shared_block_m: Block M used to lay out ``shared_x_sf``.
         hidden_quant: Hidden-state quantization scheme. E8M0 scales are packed
-            four per int32 into ``x_sf``; fp32 scales are stored directly.
+            four per int32 into ``x_sf``; fp32 scales are stored as their bits.
             ``None`` copies the hidden states into ``x`` unquantized.
 
     """
@@ -495,10 +505,10 @@ def prepare_megamoe_inputs(
         raise ValueError(
             "MegaMoE shared input staging requires both shared_x_sf and shared_block_m."
         )
-    if shared_x_sf is not None and not use_ue8m0:
+    if shared_x_sf is not None and not use_ue8m0 and group_k != block_k:
         raise ValueError(
             "MegaMoE shared input staging currently requires "
-            "UE8M0-packed hidden scales."
+            f"UE8M0-packed or per-{block_k} fp32 hidden scales."
         )
     if shared_x_sf is not None:
         assert shared_block_m is not None

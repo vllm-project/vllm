@@ -59,7 +59,7 @@ requires_sm90_or_sm100 = pytest.mark.skipif(
 FP8_HIDDEN_QUANTS = pytest.mark.parametrize(
     "hidden_quant",
     [kMxfp8Dynamic, MEGA_MOE_MXFP4_SM90.hidden_quant],
-    ids=["mxfp8", "fp8_128_ue8m0"],
+    ids=["mxfp8", "fp8_128_fp32"],
 )
 
 
@@ -733,14 +733,13 @@ def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
 
 
 def _reference_fp8_cast(x: torch.Tensor, hidden_quant):
-    """DeepGEMM's UE8M0 cast, with the exponents of each 128 K in one int32."""
+    """DeepGEMM's cast: packed UE8M0 per 32 K, or the bits of FP32 scales per 128 K."""
     from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
 
-    group_k = hidden_quant.scale.group_shape.col
-    x_fp8, sf = per_token_cast_to_fp8(x, use_ue8m0=True, gran_k=group_k)
-    exps = (sf.view(torch.int32) >> 23).to(torch.uint8)
-    exps = F.pad(exps.view(x.shape[0], -1, 128 // group_k), (0, 4 - 128 // group_k))
-    return x_fp8, exps.view(x.shape[0], -1).view(torch.int32)
+    if hidden_quant.scale.dtype == torch.float32:
+        x_fp8, sf = per_token_cast_to_fp8(x, use_ue8m0=False, gran_k=128)
+        return x_fp8, sf.contiguous().view(torch.int32)
+    return per_token_cast_to_fp8(x, use_ue8m0=True, gran_k=32, use_packed_ue8m0=True)
 
 
 @requires_sm90_or_sm100
@@ -1134,8 +1133,9 @@ def _round_trip(x: torch.Tensor, quant, nvfp4_scale: float | None = None):
         scales = x.abs().amax(-1, keepdim=True).clamp_min(1e-12) / 2688
         return cast_back_from_nvfp4(*per_token_cast_to_nvfp4(x / scales)) * scales
     group_k = quant.scale.group_shape.col
+    use_ue8m0 = quant.scale.dtype != torch.float32
     return cast_back_from_fp8(
-        *per_token_cast_to_fp8(x.bfloat16(), use_ue8m0=True, gran_k=group_k),
+        *per_token_cast_to_fp8(x.bfloat16(), use_ue8m0=use_ue8m0, gran_k=group_k),
         gran_k=group_k,
     )
 

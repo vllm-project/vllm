@@ -3,8 +3,8 @@
 """DeepGEMM MegaMoE experts: fused EP dispatch, expert GEMMs and combine.
 
 Each ``MEGA_MOE_*`` format is one row of the feature matrix. MX weights and
-activations carry one UE8M0 scale per 1x32 block (1x128 for
-``MEGA_MOE_MXFP4_SM90`` activations). NVFP4 weights carry one
+activations carry one UE8M0 scale per 1x32 block (``MEGA_MOE_MXFP4_SM90``
+activations one FP32 scale per 1x128 block). NVFP4 weights carry one
 E4M3 scale per 1x16 block plus a per-expert FP32 global scale; NVFP4 dispatch
 scales each token by its own FP32 scale.
 """
@@ -192,7 +192,7 @@ MEGA_MOE_MXFP4_SM90 = replace(
     MEGA_MOE_MXFP4,
     hidden_quant=QuantKey(
         FP8_DTYPE,
-        ScaleDesc(torch.float8_e8m0fnu, False, GroupShape(1, 128)),
+        ScaleDesc(torch.float32, False, GroupShape(1, 128)),
         symmetric=True,
     ),
     activations=frozenset({"swiglu"}),
