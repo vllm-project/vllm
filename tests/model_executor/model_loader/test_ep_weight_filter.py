@@ -312,6 +312,44 @@ class TestEpFilterOnSyntheticMoeWeights:
         loaded = dict(safetensors_weights_iterator(files, False))
         assert set(loaded.keys()) == set(expected.keys())
 
+    def test_lazy_unused_weight_is_never_materialized(self, tmp_path, monkeypatch):
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+
+        from vllm.model_executor.model_loader import weight_utils
+
+        path = str(tmp_path / "mixed.safetensors")
+        save_file({"table": torch.ones(8), "projection": torch.zeros(4)}, path)
+        read_names = []
+
+        class Reader:
+            def __init__(self, filename, framework):
+                self.inner = safe_open(filename, framework=framework)
+
+            def __enter__(self):
+                self.inner.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.inner.__exit__(*args)
+
+            def keys(self):
+                return self.inner.keys()
+
+            def get_tensor(self, name):
+                read_names.append(name)
+                return self.inner.get_tensor(name)
+
+        monkeypatch.setattr(weight_utils, "safe_open", Reader)
+        loaded = dict(
+            safetensors_weights_iterator(
+                [path], False, "lazy", is_unused_weight=lambda name: name == "table"
+            )
+        )
+        assert list(loaded) == ["projection"]
+        assert read_names == ["projection"]
+        assert torch.equal(loaded["projection"], torch.zeros(4))
+
     def test_ep2_rank0_gets_half_experts(self, synthetic_moe_files):
         files, expected = synthetic_moe_files
         # EP=2, rank=0 → experts 0-3

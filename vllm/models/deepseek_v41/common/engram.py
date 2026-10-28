@@ -970,6 +970,8 @@ class ParallelEngramEmbedding(nn.Module):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         use_thp: bool = False,
+        rdma_provider: str | None = None,
+        rdma_layer_id: int | None = None,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
@@ -977,6 +979,9 @@ class ParallelEngramEmbedding(nn.Module):
         self.cpu_offload = cpu_offload
         self.dp_shared_memory = dp_shared_memory
         self.use_thp = use_thp
+        self.rdma_provider = rdma_provider
+        self.rdma_layer_id = rdma_layer_id
+        self._rdma_reader = None
         self.dp_size = get_engram_dp_size()
         if dp_shared_memory:
             if not cpu_offload:
@@ -1058,6 +1063,8 @@ class ParallelEngramEmbedding(nn.Module):
                     "engram_vocab_start": row_start,
                 },
             )
+            if rdma_provider:
+                set_weight_attrs(param, {"engram_external": True})
         if cpu_offload and not self.weight.is_meta:
             # Constant dummy values avoid randomizing huge CPU lookup tables.
             set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
@@ -1079,6 +1086,21 @@ class ParallelEngramEmbedding(nn.Module):
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
         scale_dim = self.dim // self.block_size
+        if self.rdma_provider:
+            return (
+                torch.empty(
+                    self.part_num_embeddings,
+                    self.dim,
+                    dtype=torch.float8_e4m3fn,
+                    device="meta",
+                ),
+                torch.empty(
+                    self.part_num_embeddings,
+                    scale_dim,
+                    dtype=torch.uint8,
+                    device="meta",
+                ),
+            )
         if torch.get_default_device().type == "meta" or not (
             self.cpu_offload or self.peer_rows
         ):
@@ -1186,6 +1208,14 @@ class ParallelEngramEmbedding(nn.Module):
         """
         rows = indices.shape[0] * self.part_n_hash_cols
         if not rows:
+            return
+        if self.rdma_provider:
+            if self._rdma_reader is None:
+                import importlib
+
+                provider = importlib.import_module(self.rdma_provider)
+                self._rdma_reader = provider.get_reader()
+            self._rdma_reader.lookup(self, indices, out, background)
             return
         weight, scales = self._storage()
         ids_stride_t, ids_stride_h = indices.stride()
@@ -1651,8 +1681,21 @@ class Engram(nn.Module):
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
     ) -> ParallelEngramEmbedding:
-        engram_config = get_current_vllm_config().engram_config
+        vllm_config = get_current_vllm_config()
+        engram_config = vllm_config.engram_config
         assert engram_config is not None
+        if engram_config.rdma_provider:
+            load_config = vllm_config.load_config
+            if not vllm_config.model_config.enforce_eager:
+                raise ValueError("rdma_provider currently requires enforce_eager")
+            if (
+                load_config.safetensors_load_strategy != "lazy"
+                or load_config.load_format != "safetensors"
+                or load_config.model_loader_extra_config.get("enable_multithread_load")
+            ):
+                raise ValueError(
+                    "rdma_provider requires single-threaded lazy safetensors loading"
+                )
         return ParallelEngramEmbedding(
             layout.num_embeddings[layer_hash_index],
             layout.head_dim,
@@ -1660,6 +1703,12 @@ class Engram(nn.Module):
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
+            rdma_provider=engram_config.rdma_provider,
+            rdma_layer_id=(
+                layout.layer_ids[layer_hash_index]
+                if engram_config.rdma_provider
+                else None
+            ),
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:

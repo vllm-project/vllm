@@ -1763,6 +1763,22 @@ class DeepseekV41LLMForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self.model.vllm_config.engram_config and (
+            self.model.vllm_config.engram_config.rdma_provider
+        ):
+            import importlib
+
+            provider = importlib.import_module(
+                self.model.vllm_config.engram_config.rdma_provider
+            )
+            # Validate the owner and establish the registered reader before
+            # accepting externally backed parameters as loaded.
+            provider.get_reader()
+            loaded_params.update(
+                name
+                for name, param in self.named_parameters()
+                if getattr(param, "engram_external", False)
+            )
         self.process_weights_after_loading()
         config = self.model.vllm_config
         if config.engram_config and config.engram_config.use_thp:
@@ -1779,6 +1795,23 @@ class DeepseekV41LLMForCausalLM(
                 if layer.engram is not None:
                     layer.engram.embed_tokens.collapse_huge_pages()
         return loaded_params
+
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        engram = self.model.vllm_config.engram_config
+        if engram is None or not engram.rdma_provider:
+            return False
+        layout = self.model.engram_layout
+        assert layout is not None
+        return any(
+            name == f"layers.{layer}.engram.embed.{suffix}"
+            for layer in layout.layer_ids
+            for suffix in ("weight", "scale")
+        )
+
+    @property
+    def filter_unused_checkpoint_weights(self) -> bool:
+        engram = self.model.vllm_config.engram_config
+        return bool(engram and engram.rdma_provider)
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mhc_broadcast_weights()
