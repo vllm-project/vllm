@@ -125,11 +125,16 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
             # Packed NVFP4 pages scored by the MSA Q8KV4 indexer with e4m3 Q.
             cache_dtype, query_dtype = torch.uint8, torch.float8_e4m3fn
             self.head_size = head_dim // 2 + head_dim // 16
+        elif indexer_kv_dtype == "mxfp4":
+            # Packed MXFP4 pages (e2m1 + e8m0 per 32) scored by AITER's FlyDSL
+            # scorers on ROCm gfx950; bf16 Q.
+            cache_dtype, query_dtype = torch.uint8, torch.bfloat16
+            self.head_size = head_dim // 2 + head_dim // 32
         else:
             raise NotImplementedError(
                 f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
-                "MiniMax M3 indexer cache (only 'bf16', 'fp8'/'fp8_e4m3' or "
-                "'nvfp4')."
+                "MiniMax M3 indexer cache (only 'bf16', 'fp8'/'fp8_e4m3', "
+                "'nvfp4' or 'mxfp4')."
             )
         self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
@@ -548,7 +553,8 @@ def select_indexer_impl_cls(
         return MiniMaxM3IndexerTritonCPImpl
     if indexer_kv_dtype == "mxfp4":
         raise NotImplementedError(
-            "indexer_kv_dtype='mxfp4' is not supported by the MiniMax M3 indexer."
+            "indexer_kv_dtype='mxfp4' is only supported by the ROCm gfx950 "
+            "MiniMax M3 model, together with --kv-cache-dtype mxfp4."
         )
     is_cuda = current_platform.is_cuda()
     is_fp8 = indexer_kv_dtype in ("fp8", "fp8_e4m3")

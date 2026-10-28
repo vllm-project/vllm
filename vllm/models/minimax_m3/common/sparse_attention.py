@@ -543,9 +543,26 @@ def select_main_backend_and_impl_cls(
     Blackwell (SM100) uses the MSA attend for supported top-k block counts
     when the KV cache is BF16, FP8 E4M3 or NVFP4; MI355 uses AITER sparse PA
     with shuffle KV cache layout; Other platforms and FP8 E5M2 fall
-    back to Triton. NVFP4 is MSA-only. The MSA modules are imported lazily to
-    avoid import errors on unsupported platforms.
+    back to Triton. NVFP4 is MSA-only on CUDA, and MI355 serves NVFP4 and
+    MXFP4 with its own FlyDSL / AITER attends. The MSA modules are imported
+    lazily to avoid import errors on unsupported platforms.
     """
+    if get_kv_quant_mode(kv_cache_dtype).is_mxfp4:
+        if not current_platform.is_rocm():
+            raise ValueError(
+                "MiniMax M3 sparse attention supports an MXFP4 KV cache only on "
+                "ROCm gfx950"
+            )
+        from vllm.models.minimax_m3.amd.sparse_attention_mxfp4 import (
+            MiniMaxM3SparseRocmMxfp4Backend,
+            MiniMaxM3SparseRocmMxfp4Impl,
+        )
+
+        logger.info_once(
+            "MiniMax M3 sparse attention selected ROCm MXFP4 (topk_blocks=%s)",
+            topk_blocks,
+        )
+        return MiniMaxM3SparseRocmMxfp4Backend, MiniMaxM3SparseRocmMxfp4Impl
     use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
         num_kv_heads, emits_sparse_block_table=emits_sparse_block_table
     )
