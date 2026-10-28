@@ -45,11 +45,58 @@ the archive hashes.
 
 ## Reviewing an update
 
+After compilation, the workflow runs `tools/review_compiled_requirements.py`
+against the recorded base commit. It checks every pin in all five locks against
+the [OSV advisory API](https://google.github.io/osv.dev/post-v1-querybatch/),
+including unchanged dependencies and all environment markers, without installing
+or importing the target packages. For local vendor versions such as `+xpu`, it
+also queries the upstream public version to catch inherited advisories.
+
+**Vulnerability blocking is disabled by default.** Both existing and newly
+introduced vulnerabilities are included for human review and do not block the
+refresh or patch publication. Network/service errors, malformed or incomplete
+responses, and paginated results are reported as incomplete checks and also do
+not block publication. Unsupported pins, missing hashes, and empty locks are
+reported as coverage errors rather than silently treated as safe. The workflow's
+reporting step uses `continue-on-error: true`, so even a reporting-tool failure
+does not prevent publication of the compiled patch.
+
+The job summary shows the available review. Artifacts include
+`dependency-review.md` and `dependency-review.json` alongside the patch and base
+SHA when report generation succeeds. The report lists added/removed dependencies,
+version changes, and added/removed hash counts, highlighting hash changes at the
+same version. The JSON contains the complete before/after hashes for each change,
+per-lock parsing counts, every completed package/version query with its advisory
+IDs, and any coverage errors. Check the JSON `complete` field and the job logs
+before interpreting a report without findings; missing or incomplete reports do
+not indicate that the dependencies have no known vulnerabilities.
+
+To generate the same informational report locally after regenerating locks:
+
+```bash
+uv run --no-project --exclude-newer '7 days' --with packaging==25.0 \
+  --with regex==2026.2.28 --python 3.12 \
+  python tools/review_compiled_requirements.py \
+  --base <commit-before-refresh> --output-dir /tmp/dependency-review
+```
+
+The helper's optional `--enforce` flag returns a failing exit status for findings
+or incomplete checks. The scheduled workflow does not pass this flag. Enforcing
+it in that workflow would require deliberately adding the flag and removing
+`continue-on-error: true` from the reporting step.
+
+The report checks known advisories by package name and version; it cannot detect
+undisclosed malicious code or establish publisher provenance. Vendor forks may
+differ from upstream, and an empty advisory result does not certify a package.
+The locks do not record artifact sources, so this report cannot detect source
+changes. Review configured indexes and upstream provenance separately.
+
 Automatic publishing is disabled by default. Download the patch artifact and
 its recorded base SHA, check out that base, and apply the patch with
-`git apply --index requirements.patch`. Review package versions and hashes
-together before opening the update PR and running the normal compatibility
-checks. The artifact only contains changes to the five compiled locks.
+`git apply --index requirements.patch`. Read both review reports, inspect new
+dependencies and same-version hash changes, and review package versions and
+hashes together before opening the update PR and running the normal compatibility
+checks. The patch only contains changes to the five compiled locks.
 
 The compile job has read-only repository access and no persisted checkout
 credentials. Enabling automatic publishing later requires configuring the

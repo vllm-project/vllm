@@ -32,6 +32,26 @@ jobs:
         run: >-
           uv run --no-project --exclude-newer '7 days' --with pyyaml --python 3.12
           python tools/refresh_compiled_requirements.py
+      - name: Review changes and check known vulnerabilities
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.sha }}
+        run: >-
+          uv run --no-project --exclude-newer '7 days' --with packaging==25.0
+          --with regex==2026.2.28
+          --python 3.12 python tools/review_compiled_requirements.py
+          --base "${BASE_SHA}" --output-dir "${RUNNER_TEMP}/compiled-requirements"
+      - name: Show dependency review
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          report="${RUNNER_TEMP}/compiled-requirements/dependency-review.md"
+          if [ -f "${report}" ]; then
+            cat "${report}" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo 'Dependency review unavailable; see the reporting step logs. Reporting does not block publication.' >> "${GITHUB_STEP_SUMMARY}"
+          fi
       - name: Prepare review artifact
         env:
           BASE_SHA: ${{ github.sha }}
@@ -61,6 +81,8 @@ jobs:
             echo 'This artifact refreshes five compiled locks within their source constraints.'
             echo 'Package versions and SHA-256 archive hashes are pinned together.'
             echo 'Python dependency archives have a seven-day cooldown in both compile passes.'
+            echo 'Vulnerability checks are informational; findings and reporting failures do not block publication.'
+            echo 'Review advisory results and version/hash changes in dependency-review.md and dependency-review.json when available.'
             echo 'Cooldown reduces exposure to fresh releases; review package sources and provenance before approval.'
             echo 'uv verifies these hashes on download; separate build/source installs and excluded ROCm packages are outside these locks.'
             echo 'Handwritten requirements, build pins, and connector pins are not upgraded here.'
@@ -160,10 +182,12 @@ jobs:
           - Regenerates requirements/test/{cuda,cpu,rocm,xpu}.txt and requirements/docs.txt with the pre-commit uv pip compile commands plus --upgrade, pinning versions and SHA-256 archive hashes.
           - Only regular-file modifications to these five locks passed publisher validation.
           - Both compile passes applied a seven-day archive-upload cooldown.
+          - Vulnerability reporting is informational and does not block publication. Review version/hash changes and advisory results in the artifact when available.
 
           ## Test plan
           - [ ] Review dependency changes before merging.
           - [ ] Review archive hash changes alongside package versions.
+          - [ ] Review new dependencies and same-version hash changes in dependency-review.md and dependency-review.json.
           - [ ] CI pre-commit pip-compile hooks leave these locks unchanged.
           EOF
           gh pr create \

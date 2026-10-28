@@ -10,12 +10,23 @@ import threading
 import zipfile
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import (
+    BaseHTTPRequestHandler,
+    SimpleHTTPRequestHandler,
+    ThreadingHTTPServer,
+)
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+LOCKFILES = [
+    "requirements/docs.txt",
+    "requirements/test/cpu.txt",
+    "requirements/test/cuda.txt",
+    "requirements/test/rocm.txt",
+    "requirements/test/xpu.txt",
+]
 
 
 @pytest.mark.parametrize("timestamps", [True, False])
@@ -124,3 +135,179 @@ def test_refresh_excludes_recent_or_undated_archives(tmp_path, timestamps):
         assert hashes[1] not in text
         assert hashes[2] not in text
         assert "--upgrade" not in text
+
+
+@pytest.fixture
+def review_repo(tmp_path):
+    """A real Git base and refreshed locks, without installing any target packages."""
+    (tmp_path / "tools").mkdir()
+    shutil.copyfile(
+        ROOT / "tools/review_compiled_requirements.py",
+        tmp_path / "tools/review_compiled_requirements.py",
+    )
+    before = ["shared", "changed", "removed-cuda", "same-hash", "xpu-only"]
+    for path, name in zip(LOCKFILES, before):
+        lock = tmp_path / path
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(f"{name}==1.0 --hash=sha256:{'a' * 64}\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "requirements"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Dependency test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "Base locks",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    after = [
+        "shared==1.0",
+        "changed==2.0",
+        "new-cuda==1.0",
+        "same-hash==1.0",
+        'xpu-only==1.0+vendor; sys_platform == "win32"',
+    ]
+    for path, requirement in zip(LOCKFILES, after):
+        digest = "b" if "same-hash" in requirement else "a"
+        (tmp_path / path).write_text(
+            f"{requirement} \\\n    --hash=sha256:{digest * 64}\n"
+        )
+    # Cross the API batch boundary; the XPU-only finding is in the second batch.
+    with (tmp_path / LOCKFILES[0]).open("a") as file:
+        for i in range(101):
+            file.write(f"batch-{i}==1.0 --hash=sha256:{'a' * 64}\n")
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    ("response_kind", "enforce"),
+    [
+        ("clean", False),
+        ("vulnerable", False),
+        ("vulnerable", True),
+        ("unavailable", False),
+        ("unavailable", True),
+        ("incomplete", False),
+        ("paginated", False),
+        ("malformed", False),
+    ],
+)
+def test_review_is_informational_by_default(review_repo, response_kind, enforce):
+    """Report all platforms/markers without blocking on findings or service errors."""
+    queries = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            batch = payload["queries"]
+            queries.extend(batch)
+            results: list[dict] = [
+                {"vulns": [{"id": "GHSA-test-advisory"}]}
+                if response_kind == "vulnerable"
+                and query["package"]["name"] == "xpu-only"
+                and query["version"] == "1.0"
+                else {}
+                for query in batch
+            ]
+            if response_kind == "incomplete":
+                results.pop()
+            elif response_kind == "paginated":
+                results[0] = {"next_page_token": "more"}
+            elif response_kind == "malformed":
+                results[0] = {"vulns": "invalid"}
+            self.send_response(503 if response_kind == "unavailable" else 200)
+            self.end_headers()
+            self.wfile.write(json.dumps({"results": results}).encode())
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "tools/review_compiled_requirements.py",
+                    "--base",
+                    "HEAD",
+                    "--output-dir",
+                    "review",
+                    "--osv-url",
+                    f"http://127.0.0.1:{server.server_port}/v1/querybatch",
+                    *(["--enforce"] if enforce else []),
+                ],
+                cwd=review_repo,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            server.shutdown()
+            thread.join()
+
+    assert result.returncode == int(enforce and response_kind != "clean"), result.stderr
+    report = (review_repo / "review/dependency-review.md").read_text()
+    data = json.loads((review_repo / "review/dependency-review.json").read_text())
+    assert set(data["locks"]) == set(LOCKFILES)
+    assert data["enforced"] == enforce
+    assert "**New dependency**" in report
+    assert "Removed dependency" in report
+    assert "Version changed" in report
+    assert "**Same-version hash change**" in report
+    change = data["locks"][LOCKFILES[3]]["changes"][0]
+    assert change["before"]["hashes"] == ["a" * 64]
+    assert change["after"]["hashes"] == ["b" * 64]
+    if response_kind in {"clean", "vulnerable"}:
+        pairs = {(q["package"]["name"], q["version"]) for q in queries}
+        assert len(pairs) == 107
+        assert ("shared", "1.0") in pairs
+        assert ("xpu-only", "1.0+vendor") in pairs
+        assert ("xpu-only", "1.0") in pairs
+        assert ("removed-cuda", "1.0") not in pairs
+        assert len(data["audit"]) == 107
+    if response_kind == "vulnerable":
+        assert "GHSA-test-advisory" in report
+        assert data["complete"] is True
+    elif response_kind != "clean":
+        assert data["errors"]
+        assert data["complete"] is False
+        assert "**Advisory check incomplete:**" in report
+    if not enforce:
+        assert "**disabled (report only)**" in report
+        assert "do not block publication" in report
+
+
+@pytest.mark.parametrize(
+    "requirement", ["unhashed==1.0", "unpinned>=1.0", "url @ https://example.com/a.whl"]
+)
+def test_review_reports_unscannable_lock_without_blocking(review_repo, requirement):
+    """A parsing failure must be visible without blocking the default workflow."""
+    (review_repo / LOCKFILES[-1]).write_text(requirement + "\n")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/review_compiled_requirements.py",
+            "--base",
+            "HEAD",
+            "--output-dir",
+            "review",
+            "--osv-url",
+            "http://127.0.0.1:0/v1/querybatch",
+        ],
+        cwd=review_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    report = (review_repo / "review/dependency-review.md").read_text()
+    data = json.loads((review_repo / "review/dependency-review.json").read_text())
+    assert "Expected an exact hashed registry pin" in report
+    assert "**Report incomplete:**" in report
+    assert data["complete"] is False
+    assert "error" in data["locks"][LOCKFILES[-1]]
