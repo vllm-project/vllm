@@ -10,6 +10,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
+  - benchmarks/kernels/benchmark_moe.py
   - rust/src/bench/tests/python_serve_flags.txt
   - tests/benchmarks/
   commands:
