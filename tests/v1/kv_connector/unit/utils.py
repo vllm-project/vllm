@@ -187,19 +187,13 @@ def create_vllm_config(
     )
 
 
-def set_mtp_config(
-    config: VllmConfig,
-    num_lookahead: int = 1,
-    *,
-    disable_lookahead_block_hashes: bool = False,
-) -> None:
+def set_mtp_config(config: VllmConfig, num_lookahead: int = 1) -> None:
     """Configure test MTP without loading a separate draft model."""
     assert config.model_config is not None
     config.model_config.hf_config.n_predict = num_lookahead
     spec = SpeculativeConfig(
         model="ngram",
         num_speculative_tokens=num_lookahead,
-        disable_lookahead_block_hashes=disable_lookahead_block_hashes,
     )
     spec.method = "mtp"
     spec.draft_model_config = config.model_config

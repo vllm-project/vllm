@@ -639,11 +639,7 @@ class VllmConfig:
     def num_hash_lookahead_tokens(self) -> int:
         """Tokens after each block covered by its hash; zero keeps legacy hashes."""
         speculative_config = self.speculative_config
-        if (
-            speculative_config is None
-            or not speculative_config.use_eagle_block_drop()
-            or speculative_config.disable_lookahead_block_hashes
-        ):
+        if speculative_config is None or not speculative_config.use_hash_lookahead():
             return 0
         # A KV connector uses block hashes even without core prefix caching.
         if (
@@ -651,7 +647,6 @@ class VllmConfig:
             and not self.cache_config.enable_prefix_caching
         ):
             return 0
-        # The drafter's KV at a block's last position reads this far ahead.
         return self.num_prefill_lookahead_tokens
 
     @property

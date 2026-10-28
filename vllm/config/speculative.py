@@ -525,17 +525,6 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
-    disable_eagle_block_drop: bool = False
-    """Disable dropping the trailing prefix-cache block for EAGLE-like
-    speculative methods. This is an experimental option for measuring the
-    acceptance-rate impact of reusing that block. It does not disable the
-    speculative drafter itself."""
-    disable_lookahead_block_hashes: bool = False
-    """Disable lookahead block hashes for EAGLE-like speculative methods and
-    fall back to dropping the trailing prefix-cache block. Lookahead hashes
-    also cover the tokens the drafter reads after each block, so engines
-    sharing a KV store and external consumers of KV cache events must use the
-    same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
     and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
@@ -748,8 +737,6 @@ class SpeculativeConfig:
             "code_revision",
             "index_share_for_mtp_iteration",
             "disable_padded_drafter_batch",
-            "disable_eagle_block_drop",
-            "disable_lookahead_block_hashes",
             "draft_lm_head_quantization",
             "use_local_argmax_reduction",
             "use_heterogeneous_vocab",
@@ -1808,18 +1795,16 @@ class SpeculativeConfig:
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
-    def needs_eagle_block_drop(self) -> bool:
+    def use_hash_lookahead(self) -> bool:
         """Whether draft KV at a position depends on the next token.
 
         EAGLE-style drafters build a position's draft KV from its hidden state
         and the next token. DFlash/DSpark build it from the target hidden state
-        alone, so only EAGLE/EAGLE3/MTP require the trailing-block drop.
+        alone, and Gemma4 MTP's Q-only drafter reads the target's KV without
+        writing its own, so only EAGLE/EAGLE3/MTP require lookahead-aware KV
+        hashes.
         """
-        return self.use_eagle() and not (self.use_dflash() or self.use_dspark())
-
-    def use_eagle_block_drop(self) -> bool:
-        """Whether the volatile trailing prefix-cache block should be dropped."""
-        return self.needs_eagle_block_drop() and not self.disable_eagle_block_drop
+        return self.method in ("eagle", "eagle3", "mtp") and not self.use_gemma4_mtp()
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"

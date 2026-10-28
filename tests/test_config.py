@@ -4146,28 +4146,35 @@ def test_draft_sample_method_probabilistic_is_accepted():
 
 
 @pytest.mark.parametrize(
-    ("method", "drops_block"),
-    [("eagle3", True), ("mtp", True), ("dflash", False), ("dspark", False)],
+    ("method", "draft_model_type", "needs_lookahead"),
+    [
+        ("eagle", None, True),
+        ("eagle3", None, True),
+        ("mtp", None, True),
+        ("mtp", "gemma4_mtp", False),
+        ("dflash", None, False),
+        ("dspark", None, False),
+    ],
 )
-@pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
-def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
+def test_draft_kv_lookahead_dependency(
     method: str,
-    drops_block: bool,
-    disable_eagle_block_drop: bool,
+    draft_model_type: str | None,
+    needs_lookahead: bool,
 ):
     # Start from an ngram config to avoid loading model metadata: these predicates
-    # depend only on the speculative method and the new switch.
+    # depend only on the speculative method and the draft model type.
     speculative_config = SpeculativeConfig(
         method="ngram",
         num_speculative_tokens=3,
-        disable_eagle_block_drop=disable_eagle_block_drop,
     )
     speculative_config.method = method
+    if draft_model_type is not None:
+        speculative_config.draft_model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(model_type=draft_model_type)
+        )
 
     assert speculative_config.use_eagle()
-    assert speculative_config.use_eagle_block_drop() is (
-        drops_block and not disable_eagle_block_drop
-    )
+    assert speculative_config.use_hash_lookahead() is needs_lookahead
 
 
 def test_draft_sample_method_gumbel_is_rejected():
@@ -4819,6 +4826,14 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+@pytest.mark.parametrize(
+    "option", ["disable_eagle_block_drop", "disable_lookahead_block_hashes"]
+)
+def test_removed_eagle_hash_options_are_rejected(option):
+    with pytest.raises(ValidationError, match="Unexpected keyword argument"):
+        SpeculativeConfig(method="ngram", num_speculative_tokens=1, **{option: True})
 
 
 def test_layer_range_with_prefill_context_parallel(monkeypatch):
