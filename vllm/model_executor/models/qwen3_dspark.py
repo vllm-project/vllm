@@ -189,6 +189,25 @@ class DSparkConfidenceHead(nn.Module):
         return self.proj(x).squeeze(-1)
 
 
+def resolve_confidence_head_config(config) -> tuple[bool, bool]:
+    """Return (enabled, with_markov) for the DSpark confidence head.
+
+    Speculators-format checkpoints set the fields at the top level. NVIDIA's
+    legacy checkpoints nest them in dflash_config, under either
+    enable_confidence_head or use_confidence_head.
+    """
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    enabled = getattr(config, "enable_confidence_head", None)
+    if enabled is None:
+        enabled = dflash_config.get(
+            "enable_confidence_head", dflash_config.get("use_confidence_head", False)
+        )
+    with_markov = getattr(config, "confidence_head_with_markov", None)
+    if with_markov is None:
+        with_markov = dflash_config.get("confidence_head_with_markov", False)
+    return bool(enabled), bool(with_markov)
+
+
 class Qwen3DSparkModel(DFlashQwen3Model):
     """DFlash Qwen3 backbone + DSpark Markov / confidence heads."""
 
@@ -217,20 +236,8 @@ class Qwen3DSparkModel(DFlashQwen3Model):
             ),
         )
         self.confidence_head: DSparkConfidenceHead | None = None
-        # Legacy NVIDIA checkpoints store these fields in dflash_config.
-        # Prefer the speculators-format top-level fields when they are present.
-        dflash_config = getattr(config, "dflash_config", None) or {}
-        enable_confidence_head = getattr(
-            config,
-            "enable_confidence_head",
-            dflash_config.get("use_confidence_head", False),
-        )
+        enable_confidence_head, with_markov = resolve_confidence_head_config(config)
         if enable_confidence_head:
-            with_markov = getattr(
-                config,
-                "confidence_head_with_markov",
-                dflash_config.get("confidence_head_with_markov", False),
-            )
             input_dim = config.hidden_size
             if with_markov:
                 input_dim += config.markov_rank
@@ -375,6 +382,12 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             orig_to_new_substr["lm_head"] = None
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
+        if self.model.confidence_head is not None and not includes_confidence_head:
+            logger.warning(
+                "The DSpark config enables a confidence head, but the checkpoint "
+                "has no confidence_head weights; dropping the head. Adaptive "
+                "verification falls back to the online acceptance estimator."
+            )
         if self.model.confidence_head is None or not includes_confidence_head:
             self.model.confidence_head = None
             orig_to_new_substr["confidence_head"] = None

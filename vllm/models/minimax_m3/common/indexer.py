@@ -49,6 +49,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
@@ -223,7 +224,8 @@ class MiniMaxM3IndexerMetadataBuilder(
 
     @classmethod
     def supports_varlen_decode(cls) -> bool:
-        return current_platform.is_rocm()
+        # Subclasses whose build() handles ragged decode query lengths opt in.
+        return False
 
     @classmethod
     def _use_varlen_decode(cls, vllm_config: VllmConfig) -> bool:
@@ -235,14 +237,19 @@ class MiniMaxM3IndexerMetadataBuilder(
         )
 
     @classmethod
-    def get_cudagraph_support(
+    def get_varlen_cudagraph_max_query_len(
         cls,
         vllm_config: VllmConfig,
         kv_cache_spec: KVCacheSpec,
-    ) -> AttentionCGSupport:
-        if cls._use_varlen_decode(vllm_config):
-            return AttentionCGSupport.ALWAYS
-        return cls._cudagraph_support
+    ) -> int | None:
+        # Varlen decode replays decode-only batches of 1 to 1 + K tokens per
+        # request; mixed prefill+decode batches never replay FULL graphs.
+        if not cls._use_varlen_decode(vllm_config) or (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            != AttentionCGSupport.UNIFORM_BATCH
+        ):
+            return None
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
@@ -290,6 +297,10 @@ class MiniMaxM3IndexerMetadataBuilder(
 
 class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
     """Triton indexer metadata: no SM100 fmha_sm100 plan."""
+
+    @classmethod
+    def supports_varlen_decode(cls) -> bool:
+        return current_platform.is_rocm()
 
     def build(
         self,
@@ -573,6 +584,15 @@ def select_indexer_impl_cls(
             raise ValueError(
                 "attention_config.minimax_m3_indexer_cp requires a bf16 index "
                 f"cache, got indexer_kv_dtype={indexer_kv_dtype!r}"
+            )
+        # The CP impl reuses the Triton builder, which emits ragged decode
+        # metadata under adaptive verification; CP decode scores uniform rows.
+        spec_config = get_current_vllm_config().speculative_config
+        if spec_config is not None and spec_config.enable_adaptive_verification:
+            raise ValueError(
+                "attention_config.minimax_m3_indexer_cp does not support adaptive "
+                "verification. Pass enable_adaptive_verification=false in the "
+                "speculative config, or disable minimax_m3_indexer_cp."
             )
         from vllm.models.minimax_m3.amd.indexer_context_parallel import (
             MiniMaxM3IndexerTritonCPImpl,

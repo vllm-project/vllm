@@ -325,3 +325,21 @@ def test_indexer_cp_config_rejects_fp8():
 
     with pytest.raises(ValueError, match="minimax_m3_indexer_cp requires a bf16"):
         AttentionConfig(minimax_m3_indexer_cp=True, indexer_kv_dtype="fp8")
+
+
+def test_indexer_cp_rejects_adaptive_verification(monkeypatch):
+    """CP decode scores uniform rows; adaptive verification makes them ragged."""
+    from types import SimpleNamespace
+
+    from vllm.models.minimax_m3.common import indexer
+
+    vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(minimax_m3_indexer_cp=True),
+        speculative_config=SimpleNamespace(enable_adaptive_verification=True),
+    )
+    monkeypatch.setattr(indexer, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(indexer, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(indexer.current_platform, "is_rocm", lambda: True)
+
+    with pytest.raises(ValueError, match="does not support adaptive verification"):
+        indexer.select_indexer_impl_cls(topk_blocks=16, indexer_kv_dtype="bf16")

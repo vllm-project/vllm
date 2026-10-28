@@ -49,6 +49,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
@@ -270,14 +271,19 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         )
 
     @classmethod
-    def get_cudagraph_support(
+    def get_varlen_cudagraph_max_query_len(
         cls,
         vllm_config: VllmConfig,
         kv_cache_spec: KVCacheSpec,
-    ) -> AttentionCGSupport:
-        if cls._use_varlen_decode(vllm_config):
-            return AttentionCGSupport.ALWAYS
-        return cls._cudagraph_support
+    ) -> int | None:
+        # Varlen decode replays decode-only batches of 1 to 1 + K tokens per
+        # request; mixed prefill+decode batches never replay FULL graphs.
+        if not cls._use_varlen_decode(vllm_config) or (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            != AttentionCGSupport.UNIFORM_BATCH
+        ):
+            return None
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
