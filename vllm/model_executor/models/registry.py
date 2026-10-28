@@ -478,11 +478,6 @@ _MULTIMODAL_MODELS = {
     ),
     "IsaacForConditionalGeneration": ("isaac", "IsaacForConditionalGeneration"),
     "KananaVForConditionalGeneration": ("kanana_v", "KananaVForConditionalGeneration"),
-    "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
-    "KeyeVL1_5ForConditionalGeneration": (
-        "keye_vl1_5",
-        "KeyeVL1_5ForConditionalGeneration",
-    ),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),
     "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),
     "KimiK3ForConditionalGeneration": (
@@ -889,6 +884,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "StableLMEpochForCausalLM": "0.28.0",
     # Superseded by the generic "Terratorch" architecture
     "PrithviGeoSpatialMAE": "0.28.0",
+    "KeyeForConditionalGeneration": "0.33.0",
+    "KeyeVL1_5ForConditionalGeneration": "0.33.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
