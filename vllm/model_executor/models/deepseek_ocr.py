@@ -499,7 +499,7 @@ class DeepseekOCRForCausalLM(
     def _encode_local_features(
         self, patches: torch.Tensor, crop_shape: torch.Tensor
     ) -> torch.Tensor | None:
-        if torch.sum(patches).item() == 0:
+        if patches.numel() == 0:
             return None
 
         local_features_1 = self.sam_model(patches)
