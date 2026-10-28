@@ -2401,7 +2401,7 @@ async fn control_sleep_rejects_unknown_level() {
         setup_grpc_service_with_engine_script(
             b"engine-grpc-sleep-level".to_vec(),
             ready,
-            Arc::new(FakeTextBackend),
+            Arc::new(FakeTextBackend::default()),
             None,
             |_, _| boxed_test_future(async move {}),
         )
