@@ -206,6 +206,12 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_transfer_config.is_kv_producer
 
+    @property
+    def requires_block_hashes(self) -> bool:
+        """Whether this connector reads ``Request.block_hashes``. Without prefix
+        caching, the engine hashes prompts only for connectors that do."""
+        return True
+
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         """Whether the connector can follow the KV cache remap of sleep mode."""

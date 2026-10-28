@@ -647,6 +647,50 @@ def test_encoder_instance_zero_kv_cache(
         )
 
 
+@create_new_process_for_each_test()
+@pytest.mark.parametrize(
+    ("kv_connector", "extra_config", "hashed"),
+    [
+        ("DecodeBenchConnector", {}, False),
+        (
+            "MultiConnector",
+            {
+                "connectors": [
+                    {"kv_connector": "DecodeBenchConnector", "kv_role": "kv_both"}
+                ]
+            },
+            False,
+        ),
+        # Connectors hash prompts unless they opt out.
+        ("ExampleConnector", {"shared_storage_path": "local_storage"}, True),
+    ],
+)
+def test_prompt_hashing_without_prefix_caching(
+    kv_connector: str, extra_config: dict, hashed: bool
+):
+    """Without prefix caching, only connectors that read Request.block_hashes
+    pay for hashing every prompt block."""
+    vllm_config = EngineArgs(
+        model=MODEL_NAME,
+        enable_prefix_caching=False,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector=kv_connector,
+            kv_role="kv_both",
+            kv_connector_extra_config=extra_config,
+        ),
+    ).create_engine_config()
+    with set_default_torch_num_threads(1):
+        engine_core = EngineCore(
+            vllm_config=vllm_config,
+            executor_class=Executor.get_class(vllm_config),
+            log_stats=False,
+        )
+    engine_request = make_request()
+    engine_request.prompt_token_ids = PROMPT_TOKENS * 2
+    request, _ = engine_core.preprocess_add_request(engine_request)
+    assert bool(request.block_hashes) is hashed
+
+
 def _cadenced_dp_engine_core(
     monkeypatch, results: list[tuple[bool, bool]], dp_sync_interval: int = 32
 ):

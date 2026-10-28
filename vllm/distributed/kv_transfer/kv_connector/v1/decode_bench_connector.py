@@ -143,6 +143,10 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
     decoder with larger input sequence lengths.
     """
 
+    @property
+    def requires_block_hashes(self) -> bool:
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
