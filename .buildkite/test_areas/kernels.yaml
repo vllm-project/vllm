@@ -169,10 +169,15 @@ steps:
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
   - tests/kernels/moe/test_deep_gemm_mega_moe.py
   - tests/models/test_deepseek_v4_mega_moe.py
+  - vllm/model_executor/kernels/attention/dsa/
+  - vllm/model_executor/layers/sparse_mqa_indexer.py
+  - tests/model_executor/layers/test_mla_short_prefill_indexer.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
     - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py
     - pytest -v -s models/test_deepseek_v4_mega_moe.py
+    # DeepSeek V4.1 sparse MQA logits (MXFP4 and FP8 indexer cache); SM100 only.
+    - pytest -v -s model_executor/layers/test_mla_short_prefill_indexer.py -k sparse_mqa_logits
   mirror:
     amd:
       label: ":amd: (MI355) DeepSeek V4 MoE Integration"
@@ -888,6 +893,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] DeepEP FP8 MoE Kernels"
   key: kernels-fp8-moe-test-2xh100
+  automatic_shard: true
   timeout_in_minutes: 45
   device: h100
   num_devices: 2
@@ -898,6 +904,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) DeepEP FP8 MoE Kernels"
+      automatic_shard: true
       dind: false
       device: mi355_2
       timeout_in_minutes: 55

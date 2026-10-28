@@ -1897,8 +1897,8 @@ class VllmConfig:
             self.attention_config.hisparse_config = HiSparseConfig()
 
         if self.attention_config.hisparse_config is not None:
-            if not current_platform.is_cuda():
-                raise ValueError("HiSparse currently requires NVIDIA CUDA.")
+            if current_platform.get_hisparse_backend_cls() is None:
+                raise ValueError("The current platform does not support HiSparse.")
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError("HiSparse does not support pipeline parallelism.")
             if self.parallel_config.decode_context_parallel_size > 1:
@@ -3436,6 +3436,16 @@ class VllmConfig:
 
     @model_validator(mode="after")
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
+        if (
+            self.cache_config.cache_dtype == "nvfp4_ds_mla"
+            and self.parallel_config.decode_context_parallel_size > 1
+        ):
+            raise ValueError(
+                "nvfp4_ds_mla KV cache is not supported with decode context "
+                "parallelism: the chunked-context prefill gather is not "
+                "validated under DCP. Use decode_context_parallel_size=1 or a "
+                "different --kv-cache-dtype."
+            )
         if self.model_config is None:
             return self
         # The ds_mla layouts are MLA-only by construction; the plain nvfp4

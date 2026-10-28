@@ -26,6 +26,7 @@ from tests.v1.attention.utils import (
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -502,7 +503,10 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
     pool = attn_utils_module.get_hisparse_host_pool(vllm_config, kv_cache_config)
     backing = pool.allocate(8)
     runtime = SimpleNamespace(
-        _host_cache=backing, registered_host_pool=pinned, hot_backing=object()
+        _host_cache=backing,
+        registered_host_pool=pinned,
+        hot_backing=object(),
+        host_pool=pool,
     )
     forward_context = {
         "layer": SimpleNamespace(hisparse_cache=SimpleNamespace(runtime=runtime))
@@ -511,6 +515,7 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
     attn_utils_module.release_hisparse_profiling_cache(forward_context)
 
     assert not hasattr(runtime, "_host_cache")
+    assert runtime.host_pool is None
     reused = attn_utils_module.get_hisparse_host_pool(vllm_config, kv_cache_config)
     assert reused is pool
     assert reused.allocate(8) is backing
@@ -518,10 +523,21 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
     hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
 
 
-@pytest.mark.parametrize("failure_phase", ["allocation", "binding", "buffers"])
+@pytest.mark.parametrize("failure_phase", ["allocation", "views", "binding", "buffers"])
 @pytest.mark.parametrize("shared", [False, True])
 def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
     """Failed initialization must release shared or private registrations."""
+
+    class Backend(CUDAHiSparseBackend):
+        def prepare_kv_cache_views(self, *args):
+            if failure_phase == "views":
+                raise RuntimeError("initialization failed")
+
+    backend = Backend()
+    monkeypatch.setattr(attn_utils_module, "get_hisparse_backend", lambda: backend)
+    monkeypatch.setattr(
+        hisparse_runtime_module, "get_hisparse_backend", lambda: backend
+    )
     region = _FakeSharedHostRegion()
     registered = torch.empty(4096, dtype=torch.int8)
     cudart = MagicMock()
@@ -544,6 +560,7 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
         else:
             args[-1].registered = registered
             args[-1].backing = registered[:8]
+        args[-1].pinned = [registered]
         if failure_phase == "allocation":
             raise RuntimeError("initialization failed")
         return {}
@@ -571,10 +588,7 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
             SimpleNamespace(),
         )
     assert region.cleanup_calls == int(shared)
-    if shared:
-        cudart.cudaHostUnregister.assert_not_called()
-    else:
-        cudart.cudaHostUnregister.assert_called_once_with(registered.data_ptr())
+    cudart.cudaHostUnregister.assert_called_once_with(registered.data_ptr())
     assert attn_utils_module.get_hisparse_host_pool(vllm_config, None) is not pools[0]
     hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
 
