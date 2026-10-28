@@ -1200,9 +1200,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return cuda_graph_size
 
     def _remove_request(self, req_id: str) -> bool:
-        # Call model_state.remove_request *before* req_states.remove_request
-        # so the model_state can still look up the slot index.
+        # Call model_state.remove_request and speculator.remove_request *before*
+        # req_states.remove_request so they can still look up the slot index.
         self.model_state.remove_request(req_id)
+        if self.speculator is not None and req_id in self.req_states.req_id_to_index:
+            self.speculator.remove_request(req_id)
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
@@ -1294,6 +1296,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.prompt_logprobs_worker.add_request(
                     req_id, req_index, new_req_data.sampling_params
                 )
+
+            if self.speculator is not None:
+                self.speculator.add_request(req_index, new_req_data)
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
@@ -2462,6 +2467,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # models; the model objects can outlive this runner.
         speculator = getattr(self, "speculator", None)
         if speculator is not None:
+            speculator.shutdown()
             if draft_model := getattr(speculator, "model", None):
                 clear_layer_kv_caches(draft_model.modules())
             self.speculator = None

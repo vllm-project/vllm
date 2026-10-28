@@ -538,3 +538,79 @@ def test_standalone_draft_kv_dtype_override(
     assert target.cache_config.cache_dtype == "fp8_e4m3"
     assert draft_config.parallel_config.data_parallel_index == data_parallel_index
     assert target.parallel_config.data_parallel_index == data_parallel_index
+
+
+class _FakeReqStates:
+    def __init__(self) -> None:
+        self.req_id_to_index: dict[str, int] = {}
+        self.free_indices = [0, 1]
+
+    def add_request(self, req_id: str, **kwargs) -> None:
+        self.req_id_to_index[req_id] = self.free_indices.pop()
+
+    def remove_request(self, req_id: str) -> int | None:
+        req_idx = self.req_id_to_index.pop(req_id, None)
+        if req_idx is not None:
+            self.free_indices.append(req_idx)
+        return req_idx
+
+    def apply_staged_writes(self) -> None:
+        pass
+
+
+class _RecordingSpeculator:
+    def __init__(self, req_states: _FakeReqStates) -> None:
+        self.req_states = req_states
+        self.events: list[tuple] = []
+
+    def add_request(self, req_index, new_req_data) -> None:
+        self.events.append(("add", new_req_data.req_id, req_index))
+
+    def remove_request(self, req_id) -> None:
+        # Looking up the slot fails if it was already freed.
+        self.events.append(("remove", req_id, self.req_states.req_id_to_index[req_id]))
+
+
+def test_speculator_request_hooks():
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.req_states = _FakeReqStates()
+    runner.speculator = speculator = _RecordingSpeculator(runner.req_states)
+    runner.model_state = SimpleNamespace(
+        add_request=noop, remove_request=noop, apply_staged_writes=noop
+    )
+    runner.block_tables = SimpleNamespace(append_block_ids=noop)
+    runner.lora_state = SimpleNamespace(add_request=noop, remove_request=noop)
+    runner.adaptive_verification = runner.pooling_runner = runner.pp_handler = None
+    runner.encoder_cache = runner.prompt_logprobs_worker = runner.sampler = None
+    runner.is_last_pp_rank = False
+
+    def add_requests(*req_ids: str) -> None:
+        new_reqs = [
+            SimpleNamespace(
+                req_id=req_id,
+                prefill_token_ids=[1],
+                prompt_len=1,
+                num_computed_tokens=0,
+                sampling_params=None,
+                mm_features=[],
+                block_ids=([0],),
+                lora_request=None,
+            )
+            for req_id in req_ids
+        ]
+        runner.add_requests(SimpleNamespace(scheduled_new_reqs=new_reqs))
+
+    # add_requests first removes each new id; unknown ids must not reach the
+    # speculator. Re-adding "a" (a streaming input update) removes it first.
+    add_requests("a", "b")
+    add_requests("a")
+    runner._remove_request("b")
+
+    assert speculator.events == [
+        ("add", "a", 1),
+        ("add", "b", 0),
+        ("remove", "a", 1),
+        ("add", "a", 1),
+        ("remove", "b", 0),
+    ]
