@@ -136,9 +136,9 @@ class LogitsProcessor(ABC):
     def apply_staged_writes(self) -> None:  # noqa: B027
         """Flush any host-side writes staged by ``add_request()`` to the device.
 
-        Called once per step before the forward pass, after the model runner
-        has flushed ``req_states``, so a processor that stages writes here can
-        read the request's tokens back on device.
+        Called before the forward pass of every step that admits new requests,
+        after the model runner has flushed ``req_states``, so a processor that
+        stages writes here can read the request's tokens back on device.
         """
 
     @abstractmethod
