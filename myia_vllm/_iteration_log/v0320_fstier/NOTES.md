@@ -4132,3 +4132,21 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Annexes** : nbaudit **ok** 16:05:51Z (`Image/` servie). G: OK. Condensation : **zéro nouvel épisode disjoncteur depuis 07:43Z** (5 cycles consécutifs).
 
 **Registre** : Q41 ouverte — VRAM 3ᵉ cycle sous la ligne, high-water confirmé. Q43 armée, recreate en attente.
+
+## Cycle 18:1xZ (28/10) — 🟢 ; préchauffe reproduite (1/2) ; GPU 0 repasse au-dessus de 23 000 ; marge commit 86,4 % = seuil 85 % franchi
+
+**Prod** : health 200 en 3,7 ms, RC=0, StartedAt inchangé (up 40 h), OOM 0, 3/3 Up. **VRAM GPU 0 = 23 139 MiB — repasse au-dessus de la ligne 23 000** après 3 cycles dessous (22 888 / 22 902 / 22 875) ; GPU 1 plat 21 650. 4ᵉ excursion au-dessus de la ligne (23 092-23 121 à 10:1xZ, pic 23 600, aujourd'hui 23 139) — la bande de high-water en charge **touche** 23,1 K ; Q41 ouverte, aucun fait nouveau majeur (boot jamais raté à 0.73). /dev/shm 25G = 39 %. Préemptions **40→40 (Δ=0, 2ᵉ cycle plat consécutif)**, KV **44,0 %** (la charge de fin de journée retombe), file 0/2, prefix hits **73,5 %** (681,0M/926,4M). WEDGE 2 `fail 1/2` dans la fenêtre (16:16, 17:44), zéro 2/2.
+
+**Préchauffe — reproduction 1/2.** Même protocole (préchauffe exclue du verdict, 5 s d'écart, 6 sondes à 20 s) : préchauffe 0,32 s, **1ʳᵉ sonde 0,38 s**, puis 0,16/0,17/**7,99**/0,16/0,20 — **0/6 >9 s**. Bilan sur 4 cycles : sans préchauffe, la 1ʳᵉ sonde = 23,6 s / 30,7 s (2×) ; avec, 0,16 s / 0,38 s (2×). **L'hypothèse « le premier appel paie un coût que la préchauffe absorbe » est soutenue 2×/2×** — une dernière reproduction pour la tenir acquise. ★ Nuance nouvelle : la sonde 4 à **7,99 s** (sous le seuil 9 s) montre que la file peut frapper **en milieu de batterie** : le coût du premier appel et la contention sporadique du trafic de fond sont **deux phénomènes distincts** — la préchauffe n'élimine que le premier.
+
+**400 window+1 : 4 dans la fenêtre** (16:26, 17:02, 17:37, 17:42 ; corps 891 K-1 030 K, Bun) — même niveau que le pic de 14:1xZ, cumul **~18/22 h**. Cadence 2→4→2→4 : toujours non monotone, mais le niveau 4 revient ; 3 des 4 en 40 min (17:02→17:42) = grappes. Re-signalement claudish déjà fait 14:15Z, pas de nouveau DM sur une cadence plate.
+
+**Sécurité — la boucle de 401 localisée** : nouvelle IP `108.165.33.236`, **70 requêtes 401 sur `/v1/models`**, UA `Go-http-client/1.1`, intervalle ~6 min, 11:19Z→18:09Z, **toutes avec la clé morte connue `1f7f6080cb65`**, zéro 200. C'est la **source du « bruit stable 20×401/2 h »** : un **poller Go de la flotte avec une clé périmée** qui s'interroge sur notre santé et prend 401 à chaque fois. Pas une alerte (règle = IP avec 200), mais un process flotte aveugle — son propriétaire devrait corriger la clé ou l'arrêter. Census : 505 req/2 h (4,2/min), 481×200 / 20×401 / 4×400.
+
+**★ Marge commit hôte : 86,4 %** (331,9/384,4 Go, 52,5 Go libres) — **seuil 85 % franchi**, 4ᵉ hausse consécutive (79,8 → 80,2 → 84,2 → 86,4). **Aucun travail lourd** ; vmmemWSL reste le premier consommateur. À 90 %+ = signal user, on ne bricole pas. À noter pour Q41+Q43 : un recreate vide le KV GPU mais aussi une partie du tmpfs du tier (pages comptées au commit) — la marge peut y gagner quelques Go.
+
+**Annexes** : nbaudit **ok** 18:05:48Z (`Image/` vague 2). G: OK. Condensation : **zéro épisode disjoncteur depuis 07:43Z** (6 cycles). WARN `[BaselineManager] NonNominativeBaselineService non disponible` (846 lignes/jour) = **race d'init du process RSM** (le service s'initialise avec succès à la ligne suivante) — cosmétique, périmètre RSM, pas relayé comme incident.
+
+**Coordination** : ACK envoyé à po-2027:CoursIA (section 7.7 du carnet 11b livrée, boucle fermée). [INFO] attribution po-2023 marqué lu.
+
+**Registre** : Q41 ouverte — GPU 0 23 139 (4ᵉ excursion, bande de high-water). Q43 armée, recreate en attente de creux (à coupler avec Q41). Rien de nouveau à arbitrer.
