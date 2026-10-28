@@ -76,15 +76,16 @@ async fn responses_empty_model_uses_served_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn responses_sampling_metadata_matches_engine_defaults_and_overrides() {
-    for (overrides, temperature, top_p) in [
-        (json!({}), 0.6, 0.95),
+    for (overrides, temperature, top_p, min_p) in [
+        (json!({}), 0.6, 0.95, 0.0),
         (
             json!({
-                "temperature": 0.2, "top_p": 0.8, "max_output_tokens": 7,
+                "temperature": 0.2, "top_p": 0.8, "min_p": 0.1, "max_output_tokens": 7,
                 "presence_penalty": 0.5, "frequency_penalty": -0.5
             }),
             0.2,
             0.8,
+            0.1,
         ),
     ] {
         // The engine resolves `max_tokens` against the context, so echo what
@@ -105,6 +106,7 @@ async fn responses_sampling_metadata_matches_engine_defaults_and_overrides() {
                     let params = request.sampling_params.as_ref().unwrap();
                     assert_eq!(params.temperature, temperature);
                     assert_eq!(params.top_p, top_p);
+                    assert_eq!(params.min_p, min_p);
                     *engine_values.lock().unwrap() = Some((
                         params.max_tokens,
                         params.presence_penalty,
@@ -155,6 +157,10 @@ async fn responses_rejects_invalid_controls_before_inference() {
         ("top_logprobs", json!(1)),
         ("reasoning", json!({"summary": "unknown"})),
         ("text", json!({"verbosity": "unknown"})),
+        ("spaces_between_special_tokens", json!(false)),
+        ("media_io_kwargs", json!({"image": {}})),
+        ("mm_processor_kwargs", json!({})),
+        ("enable_response_messages", json!(true)),
     ] {
         let response = responses_call(&app, json!({"input": "hello", field: value})).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");

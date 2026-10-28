@@ -74,6 +74,34 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         );
     }
 
+    if !request.spaces_between_special_tokens {
+        bail_invalid_request!(
+            param = "spaces_between_special_tokens",
+            "spaces_between_special_tokens is not supported."
+        );
+    }
+
+    if request.media_io_kwargs.is_some() {
+        bail_invalid_request!(
+            param = "media_io_kwargs",
+            "media_io_kwargs is not supported."
+        );
+    }
+
+    if request.mm_processor_kwargs.is_some() {
+        bail_invalid_request!(
+            param = "mm_processor_kwargs",
+            "mm_processor_kwargs is not supported."
+        );
+    }
+
+    if request.enable_response_messages {
+        bail_invalid_request!(
+            param = "enable_response_messages",
+            "enable_response_messages is not supported by this frontend."
+        );
+    }
+
     Ok(())
 }
 

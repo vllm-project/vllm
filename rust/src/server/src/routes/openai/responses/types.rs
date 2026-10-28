@@ -263,6 +263,8 @@ pub struct ResponsesRequest {
     #[serde(default, deserialize_with = "deserialize_request_top_k")]
     pub top_k: Option<u32>,
     #[serde(default)]
+    pub min_p: Option<f32>,
+    #[serde(default)]
     pub top_logprobs: Option<i32>,
     #[serde(default)]
     pub text: Option<ResponseTextConfig>,
@@ -286,6 +288,8 @@ pub struct ResponsesRequest {
     pub ignore_eos: bool,
     #[serde(default = "default_true")]
     pub skip_special_tokens: bool,
+    #[serde(default = "default_true")]
+    pub spaces_between_special_tokens: bool,
     #[serde(default)]
     pub include_stop_str_in_output: bool,
     #[serde(default)]
@@ -308,6 +312,13 @@ pub struct ResponsesRequest {
     pub cache_salt: Option<String>,
     #[serde(default)]
     pub chat_template_kwargs: Option<HashMap<String, Value>>,
+    #[serde(default)]
+    pub media_io_kwargs: Option<HashMap<String, Value>>,
+    #[serde(default)]
+    pub mm_processor_kwargs: Option<HashMap<String, Value>>,
+    /// Return the model's input and output messages on the response.
+    #[serde(default)]
+    pub enable_response_messages: bool,
     #[serde(default)]
     pub structured_outputs: Option<Value>,
     #[serde(default)]
