@@ -482,7 +482,7 @@ class UBatchRunner:
 
         attn_metadata = []
         slot_mappings_by_layer = []
-        is_padding = []
+        is_padding: list[torch.Tensor | None] = []
         start = 0
         for i, ubatch_slice in enumerate(ubatch_slices):
             source_slice = ubatch_slice

@@ -294,6 +294,7 @@ def _sync_dp(
     uniform_token_count_per_rank: list[int] | None = None,
     allow_ubatching: bool = True,
     cudagraph_manager: Any = None,
+    staging_per_rank: list[bool] | None = None,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -312,6 +313,7 @@ def _sync_dp(
     reduced[4] = int(allow_ubatching)
     reduced[5] = 8  # num_reqs
     reduced[6] = 0  # allow_skip_drafts
+    reduced[7] = torch.tensor(staging_per_rank or [False] * dp_size, dtype=torch.int32)
 
     dp_group = SimpleNamespace(cpu_all_reduce_=lambda t: t.copy_(reduced))
     with patch.object(dp_utils, "get_dp_group", lambda: dp_group):
@@ -1059,7 +1061,6 @@ def staging_runner(tmp_path, dist_init, request):
         hidden_size=256,
         num_attention_heads=4,
         num_key_value_heads=2,
-        head_dim=64,
         num_hidden_layers=1,
         moe_intermediate_size=256,
         num_experts=8,
