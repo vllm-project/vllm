@@ -15,7 +15,8 @@ cover run vLLM's stock path.
   no PP / DP / DCP / PCP, Quark OCP-MXFP4 W4A4 experts on `AITER_MXFP4_MXFP4`
   (shuffled weights and scales), the fused QK-norm / RoPE / KV insert,
   `ROCM_AITER_FA` with a bf16 KV cache in the LBHNC layout (block size 16),
-  DSpark with 7 draft tokens, no LoRA, no KV connector or offloading.
+  DSpark with 7 draft tokens, no LoRA, sleep mode or weight transfer, no KV
+  connector or offloading.
 - Steps (checked every forward; anything else runs stock): uniform decode
   verify batches of 1-16 requests x 8 tokens, FULL CUDA graph or eager.
   8 / 16 rows run K3 (S = 8 / 16); 24-128 rows run HA + HM + HB with the rows

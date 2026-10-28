@@ -28,6 +28,7 @@ from vllm.config import (
     ParallelConfig,
     SpeculativeConfig,
     VllmConfig,
+    WeightTransferConfig,
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.attention.attention import get_attention_context
@@ -324,9 +325,13 @@ def test_deployment_guard_accepts_only_tep8_with_dspark(checkpoints) -> None:
 
     no_draft = _vllm_config(tiny, tp=8, cache_dtype="fp8")
     no_draft.lora_config = LoRAConfig()
+    no_draft.model_config.enable_sleep_mode = True
+    no_draft.weight_transfer_config = WeightTransferConfig()
     assert deployment_refusals(no_draft, 3, 8, _moe_parallel()) == [
         "needs speculative decoding with 7 draft tokens",
         "LoRA on",
+        "sleep mode on",
+        "weight transfer on",
         "kv_cache_dtype=fp8 (kernel: bf16)",
     ]
 

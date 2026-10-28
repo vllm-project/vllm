@@ -265,6 +265,10 @@ def deployment_refusals(
         )
     if vllm_config.lora_config is not None:
         reasons.append("LoRA on")
+    if vllm_config.model_config.enable_sleep_mode:
+        reasons.append("sleep mode on")
+    if vllm_config.weight_transfer_config is not None:
+        reasons.append("weight transfer on")
     if vllm_config.kv_transfer_config is not None:
         reasons.append("KV connector on")
     cache = vllm_config.cache_config
