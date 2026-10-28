@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Language Models (Standard)"
   key: language-models-tests-standard
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -17,6 +18,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Language Models (Standard)"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
