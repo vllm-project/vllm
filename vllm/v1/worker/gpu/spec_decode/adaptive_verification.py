@@ -304,6 +304,8 @@ class AdaptiveVerificationManager:
 
     def warmup_budget_kernel(self) -> None:
         """JIT the draft-budget kernel so the first binding step doesn't compile."""
+        if self.use_draft_lengths:
+            return
         capacities = self._batch_draft_capacity[:1].fill_(self.num_speculative_steps)
         idx_mapping = torch.zeros(1, dtype=torch.int64, device=capacities.device)
         assign_draft_token_budget(

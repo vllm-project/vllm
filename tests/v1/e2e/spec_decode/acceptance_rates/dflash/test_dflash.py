@@ -48,6 +48,7 @@ def test_adaflash_checkpoint_generation(monkeypatch, vllm_runner, adaptive):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
         "Qwen/Qwen3-8B",
+        revision="b968826d9c46dd6066d109eabc6255188de91218",
         speculative_config={
             "method": "dflash",
             "model": "AdaFlash/Qwen3-8B-AdaFlash",
@@ -74,8 +75,12 @@ def test_adaflash_checkpoint_generation(monkeypatch, vllm_runner, adaptive):
             add_generation_prompt=True,
             enable_thinking=False,
         )
-        result = llm.generate([prompt], SamplingParams(temperature=0, max_tokens=32))
-        assert "4" in result[0].outputs[0].text
+        result = llm.generate([prompt], SamplingParams(temperature=0, max_tokens=64))
+        output = result[0].outputs[0]
+        assert "4" in output.text and output.finish_reason == "stop"
+        # Leave a full draft block available, so scheduler clipping cannot
+        # masquerade as adaptive verification in the layout assertion below.
+        assert len(output.token_ids) + 15 < 64
         metrics = llm.get_metrics()
         drafts = get_spec_decode_metric_value(metrics, "vllm:spec_decode_num_drafts")
         proposed = get_spec_decode_metric_value(
@@ -86,15 +91,22 @@ def test_adaflash_checkpoint_generation(monkeypatch, vllm_runner, adaptive):
         )
         assert drafts > 0 and accepted > 0
 
-        def get_draft_lengths(worker):
+        def get_verification_lengths(worker):
             lengths = worker.model_runner.speculator.draft_token_lengths
-            return None if lengths is None else lengths[:1].tolist()
+            manager = worker.model_runner.adaptive_verification
+            return (
+                None if lengths is None else lengths[:1].tolist(),
+                None if manager is None else manager.query_start_loc[:2].tolist(),
+            )
 
-        lengths = llm.collective_rpc(get_draft_lengths)[0]
+        lengths, query_offsets = llm.collective_rpc(get_verification_lengths)[0]
         if adaptive:
             assert lengths is not None and 0 <= lengths[0] < 15
+            assert query_offsets is not None
+            # Check the target's actual query layout, not only the next prediction.
+            assert 1 <= query_offsets[1] - query_offsets[0] < 16
         else:
-            assert lengths is None
+            assert lengths is None and query_offsets is None
             assert proposed == 15 * drafts
 
 
