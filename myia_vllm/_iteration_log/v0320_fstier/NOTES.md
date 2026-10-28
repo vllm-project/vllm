@@ -4168,3 +4168,21 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Le tier fs a survécu au recreate** (disque intact, blocs content-addressed) — les replays long-contexte restent servis depuis le disque comme prouvé au restart du 20/10.
 
 **Report de protocole** : la reproduction n°2 de la préchauffe (1ʳᵉ sonde) attendra un moteur installé — pas au cycle 20:11Z (encore en settle post-boot) ; la jouer à 22:11Z ou plus tard.
+
+## Cycle 20:1xZ (28/10) — 🟢 avec réserve : premier cycle sur le tier 32 GiB ; file active derrière les prefills mais AUCUNE saturation
+
+**Prod (post-recreate, ~2 h)** : health 200, RC=0, StartedAt **stable à 18:20:28Z** (aucun restart depuis le recreate), OOM 0, 3/3 Up. `/dev/shm` **33G = 51 %** — plancher du tier 32 G tenu, **zéro orphelin repoussé**. VRAM GPU 0 **23 120** (ligne 23 000 refranchie — desktop + high-water, Q41 close « tenir en l'état ») ; **GPU 1 = 21 786 (+136 vs le plat 21 650 de 7 jours)** — premier mouvement moteur-side ; un point ne fait pas une tendance, à relever aux cycles suivants (le discriminateur fuite-moteur de Q41 était « GPU 1 qui monte »).
+
+**Le tier travaille dès la 1ʳᵉ heure** (compteurs moteur, reset 18:20Z) : **75 Go écrits GPU→CPU, 282 Go relus CPU→GPU en 2 h** (ratio 3,75:1 — l'économie de replay paie), lecture ~4,3 Go/s effective. Préemptions **2** depuis le boot (Δ=0 pendant le cycle — régime calme). KV 42-51 %, file 0, running 3-4. Prefix hits **51,6 %** (19,3M/37,4M) — le cache a été vidé au recreate, il se reconstruit ; la barre de référence reste ~73 %.
+
+**Batterie (observation, PAS la reproduction n°2 — moteur à 2 h)** : préchauffe elle-même **lente (9,79 s)**, sonde 1 **0,17 s** — le coût du premier appel a bien été absorbé par la préchauffe, ce qui **corrobore encore l'hypothèse** sans compter pour la reproduction. Puis la file frappe en milieu de batterie : sondes 2-3 à **15,1/14,2 s**, sonde 6 à 6,55 s (**3/6 >9 s**). **Contexte : zéro saturation** — préemptions Δ=0, KV 42 %, file 0, watchdog 6/6 sondes OK sans un seul WEDGE. Ce sont les prefills long-contexte en vol (4 running, 55 % des corps 100K-1M) qui font attendre les petits appelants — le comportement documenté du dense 27B, jambe 1 du critère 🟠 non franchie (AND) et épisode borné à la fenêtre de batterie. Verdict 🟢, aucun barreau.
+
+**400 window+1 : 2/2 h** (18:38Z — 18 min post-recreate, et 20:05Z ; Bun ~0,9-1,0 Mo). Cumul **~20/24 h** ; cadence 2→4→2→4→2 : le niveau 2 est le mode, les 4 sont des grappes.
+
+**Sécurité** : scanner **ZOLTRAAK/0.2.0** (déjà connu, claudish#718) depuis `31.77.203.199` à 18:49Z — 3 essais `/v1/models`, 2 empreintes nouvelles (`64a6d7ec06fd`, `ccd500f719e4`), **zéro 200** ⇒ bruit d'auth, pas d'alerte. Le poller Go `108.165.33.236` continue (19×401/2 h, clé morte `1f7f6080cb65`). IP user Paris `82.66.89.184` active (2×200, connue).
+
+**★ Marge commit : 89,2 %** (343,1/384,4, **41,3 Go libres**) — 3ᵉ hausse consécutive (86,4 → 87,8 → 89,2), **à 1 pt de la ligne 90**. Deux moteurs : le tier 32 GiB se remplit réellement (75 Go écrits = pages engagées au toucher) et la tendance ambiante (vmmemWSL premier consommateur). À ≥90 % : signal user, aucun travail lourd, pas de bricolage. Le levier structurel (plafond .wslconfig non tenu, blocage structurel connu du dashboard) est hors périmètre vllm.
+
+**Annexes** : nbaudit **ok** 20:05Z (`Image/` vague 2, 5 séries). G: OK (695 Go libres). Condensation : **zéro épisode disjoncteur depuis 07:43Z** (7 cycles).
+
+**Registre** : aucune question ouverte (Q41 close 2ᵉ fois, Q43 exécutée). À relever aux prochains cycles : GPU 1 (21 786 vs plat 21 650), commit (89,2 %), reconstruction du hit-rate prefix.
