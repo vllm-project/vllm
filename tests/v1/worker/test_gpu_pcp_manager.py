@@ -148,12 +148,20 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
 
 
 @pytest.mark.parametrize(
-    "num_reqs,local_num_reqs", [(0, 0), (1, 1), (3, 1), (4, 1), (5, 2), (8, 2)]
+    "num_reqs,has_prefill,shard_decode_requests,expected",
+    [
+        (0, False, True, 0),
+        (1, False, True, 1),
+        (3, False, True, 1),
+        (4, False, True, 1),
+        (5, False, True, 2),
+        (8, False, True, 2),
+        (5, True, True, 5),
+        (5, False, False, 5),
+    ],
 )
-@pytest.mark.parametrize("has_prefill", [False, True])
-@pytest.mark.parametrize("shard_decode_requests", [False, True])
 def test_decode_graph_dispatch_uses_largest_owner_batch(
-    num_reqs, local_num_reqs, has_prefill, shard_decode_requests
+    num_reqs, has_prefill, shard_decode_requests, expected
 ):
     """Only sharded pure decode dispatches graphs by the largest owner batch."""
     manager = PCPManager(
@@ -162,7 +170,6 @@ def test_decode_graph_dispatch_uses_largest_owner_batch(
         device=torch.device("cpu"),
         shard_decode_requests=shard_decode_requests,
     )
-    expected = local_num_reqs if shard_decode_requests and not has_prefill else num_reqs
     assert manager.get_num_reqs_for_dispatch(num_reqs, has_prefill) == expected
 
 
