@@ -52,8 +52,9 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
 from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptMoEMethod,
     ModelOptNvFp4Config,
-    ModelOptNvFp4FusedMoE,
+    resolve,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
@@ -559,7 +560,7 @@ class MuseSparkTrtLlmNvFp4ExpertsModular(
     """Modular NVFP4 experts for the all2all backends (DeepEP, FlashInfer)."""
 
 
-class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
+class MuseSparkModelOptNvFp4FusedMoE(ModelOptMoEMethod):
     """ModelOpt NVFP4 MoE preserving separate w1/w3 global weight scales.
 
     The name must contain "ModelOpt": ``RoutedExperts.weight_loader`` matches it.
@@ -572,7 +573,8 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
         quant_config: ModelOptNvFp4Config,
         moe_config: FusedMoEConfig,
     ) -> None:
-        super().__init__(quant_config, moe_config)
+        spec, ctx, _ = resolve(quant_config.quant_method, quant_config, "")
+        super().__init__(spec, ctx, moe_config, quant_config)
         self.use_route_major = (
             self.nvfp4_backend == NvFp4MoeBackend.MARLIN
             and current_platform.is_device_capability_family(90)
@@ -660,6 +662,7 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
         self.moe_quant_config = MuseSparkNvFp4MoEQuantConfig(
             **vars(base_config), g1_scale_c=g1_scale_c
         )
+        assert self.experts_cls is not None
         self.moe_kernel = make_nvfp4_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,

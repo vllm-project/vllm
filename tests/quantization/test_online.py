@@ -65,9 +65,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptLinearMethod,
+    ModelOptMoEMethod,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
-    ModelOptNvFp4FusedMoE,
+    build_moe_method,
 )
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
@@ -633,7 +634,7 @@ def _make_nvfp4_moe_source(source_format: str, moe, monkeypatch):
         kv_cache_quant_algo=None,
         exclude_modules=[],
     )
-    return ModelOptNvFp4FusedMoE(config, moe)
+    return build_moe_method(config, "NVFP4", "", moe)
 
 
 def _nvfp4_moe_checkpoint_tensors(
@@ -1817,7 +1818,7 @@ def test_online_quantization(
         expected_source_cls = (
             CompressedTensorsW4A4Nvfp4MoEMethod
             if model_name == NVFP4_MOE_MODEL_NAME
-            else ModelOptNvFp4FusedMoE
+            else ModelOptMoEMethod
         )
 
         def assert_source_weights_released(method, layer) -> None:

@@ -322,7 +322,7 @@ def test_modelopt_nvfp4_dummy_scales(tmp_path, monkeypatch, vllm_runner):
     from vllm import SamplingParams
     from vllm.model_executor.layers.fused_moe import RoutedExperts
     from vllm.model_executor.layers.quantization.modelopt import (
-        ModelOptNvFp4FusedMoE,
+        ModelOptMoEMethod,
     )
 
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -353,7 +353,7 @@ def test_modelopt_nvfp4_dummy_scales(tmp_path, monkeypatch, vllm_runner):
         experts = [m for m in model.modules() if isinstance(m, RoutedExperts)]
         assert len(experts) == 1
         layer = experts[0]
-        assert isinstance(layer.quant_method, ModelOptNvFp4FusedMoE)
+        assert isinstance(layer.quant_method, ModelOptMoEMethod)
         assert layer.moe_config.moe_backend == "flashinfer_trtllm"
         for name, param in layer.named_parameters():
             if "scale" in name:
