@@ -18,6 +18,7 @@ from vllm.model_executor.layers.attention import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.pooler import (
@@ -577,12 +578,13 @@ class BertMLMHead(nn.Module):
         self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
         self.decoder = nn.Linear(hidden_size, vocab_size, bias=True)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def transform(self, hidden_states: torch.Tensor) -> torch.Tensor:
         x = self.dense(hidden_states)
         x = self.activation(x)
-        x = self.layer_norm(x)
-        logits = self.decoder(x)
-        return logits
+        return self.layer_norm(x)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.decoder(self.transform(hidden_states))
 
 
 class SPLADESparsePooler(Pooler):
@@ -632,6 +634,10 @@ class SPLADESparsePooler(Pooler):
         prompt_token_ids = pooling_metadata.get_prompt_token_ids_cpu()
         offset = 0
         pooled_list: list[torch.Tensor] = []
+        projection = self.mlm_head
+        if self.pooling == "max":
+            hidden_states = self.mlm_head.transform(hidden_states)
+            projection = self.mlm_head.decoder
 
         for i in range(B):
             L = int(lens[i])
@@ -658,18 +664,20 @@ class SPLADESparsePooler(Pooler):
                 offset += L
                 continue
 
-            logits_i = self.mlm_head(hs[start_idx:end_idx])
-            scores_i = torch.log1p(torch.relu(logits_i))
-
+            logits_i = projection(hs[start_idx:end_idx])
             if self.pooling == "sum":
-                pooled_i = scores_i.sum(dim=0)
+                pooled_i = torch.log1p(torch.relu(logits_i)).sum(dim=0)
             else:  # "max"
-                pooled_i = scores_i.max(dim=0).values
+                pooled_i = logits_i.amax(dim=0)
 
             pooled_list.append(pooled_i.contiguous())
             offset += L
 
-        return torch.stack(pooled_list, dim=0).contiguous()
+        pooled = torch.stack(pooled_list, dim=0)
+        if self.pooling == "max":
+            # Max commutes with these monotonic activations.
+            pooled.relu_().log1p_()
+        return pooled.contiguous()
 
 
 @default_pooling_type(seq_pooling_type="CLS")
@@ -779,7 +787,9 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
 
 
 @default_pooling_type(seq_pooling_type="CLS")
-class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQuant):
+class BertForSequenceClassification(
+    nn.Module, SupportsCrossEncoding, SupportsQuant, SupportsLoRA
+):
     """A model that uses Bert to provide embedding functionalities.
 
     This class encapsulates the BertModel and provides an interface for
@@ -793,10 +803,12 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
 
     is_pooling_model = True
     embedding_class: type[nn.Module] = BertEmbedding
+    packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        self.config = config
 
         self.num_labels = config.num_labels
         self.bert = BertPoolingModel(
@@ -804,10 +816,12 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
             prefix=maybe_prefix(prefix, "bert"),
             embedding_class=self.embedding_class,
         )
-        self.classifier = nn.Linear(
+        self.classifier = ReplicatedLinear(
             config.hidden_size,
             config.num_labels,
-            dtype=vllm_config.model_config.head_dtype,
+            params_dtype=vllm_config.model_config.head_dtype,
+            return_bias=False,
+            prefix=maybe_prefix(prefix, "classifier"),
         )
 
         pooler_config = vllm_config.model_config.pooler_config
@@ -850,13 +864,15 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
 
 @attn_type("encoder_only")
 @default_pooling_type(tok_pooling_type="ALL")
-class BertForTokenClassification(nn.Module):
+class BertForTokenClassification(nn.Module, SupportsLoRA):
     is_pooling_model = True
     embedding_class: type[nn.Module] = BertEmbedding
+    packed_modules_mapping = BertModel.packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        self.config = config
         self.head_dtype = vllm_config.model_config.head_dtype
         self.num_labels = config.num_labels
         self.bert = BertModel(
@@ -864,8 +880,12 @@ class BertForTokenClassification(nn.Module):
             prefix=maybe_prefix(prefix, "bert"),
             embedding_class=self.embedding_class,
         )
-        self.classifier = nn.Linear(
-            config.hidden_size, config.num_labels, dtype=self.head_dtype
+        self.classifier = ReplicatedLinear(
+            config.hidden_size,
+            config.num_labels,
+            params_dtype=self.head_dtype,
+            prefix=maybe_prefix(prefix, "classifier"),
+            return_bias=False,
         )
 
         pooler_config = vllm_config.model_config.pooler_config

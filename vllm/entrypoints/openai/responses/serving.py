@@ -210,6 +210,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.online_renderer.reasoning_effort_map,
             )
             .with_defaults(self.chat_template_kwargs)
             .chat_template_kwargs
@@ -448,6 +449,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 else await self._get_trace_headers(raw_request.headers)
             )
             session_id = self._get_session_id(request, raw_request)
+            data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             response_parser = self._make_response_parser(
@@ -527,7 +529,10 @@ class OpenAIServingResponses(GenerateBaseServing):
                 priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
                 session_id=session_id,
+                data_parallel_rank=data_parallel_rank,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                reasoning_ended=True if request._grammar_from_parser else None,
+                max_tool_calls=request.max_tool_calls,
             )
             generators.append(generator)
 
@@ -648,13 +653,17 @@ class OpenAIServingResponses(GenerateBaseServing):
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
+        data_parallel_rank: int | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        reasoning_ended: bool | None = None,
+        max_tool_calls: int | None = None,
     ):
         max_model_len = self.model_config.max_model_len
         cache_salt = cast(str | None, engine_input.get("cache_salt"))
 
         orig_priority = priority
         sub_request = 0
+        num_tool_calls = 0
         while True:
             # Ensure that each sub-request has a unique request id.
             sub_request_id = f"{request_id}_{sub_request}"
@@ -674,7 +683,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 trace_headers=trace_headers,
                 priority=priority,
                 session_id=session_id,
+                data_parallel_rank=data_parallel_rank,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                reasoning_ended=reasoning_ended,
             )
 
             async for res in generator:
@@ -686,10 +697,14 @@ class OpenAIServingResponses(GenerateBaseServing):
             if not context.need_builtin_tool_call():
                 # The model did not ask for a tool call, so we're done.
                 break
+            if max_tool_calls is not None and num_tool_calls >= max_tool_calls:
+                # The built-in tool call budget is spent; ignore the call.
+                break
 
             # Call the tool and update the context with the result.
             context.request_metrics_cover_all_generation_turns = False
             tool_output = await context.call_tool()
+            num_tool_calls += 1
             context.append_tool_output(tool_output)
 
             # TODO: uncomment this and enable tool output streaming

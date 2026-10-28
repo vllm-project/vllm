@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
@@ -17,6 +18,8 @@ from vllm.v1.hisparse.layout import (
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseHostPool,
+    drop_hisparse_host_pool,
+    get_hisparse_host_pool,
     initialize_hisparse_runtime_buffers,
     release_pinned_state,
 )
@@ -124,9 +127,11 @@ def init_hisparse_kv_cache(
     vllm_config: VllmConfig,
     forward_context: dict[str, Any],
     block_tables: "BlockTables",
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Any]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
-    host_pool = HiSparseHostPool(vllm_config, kv_cache_config)
+    backend = get_hisparse_backend()
+    backend.validate_kv_cache_config(kv_cache_config)
+    host_pool = get_hisparse_host_pool(vllm_config, kv_cache_config)
     try:
         kv_caches = allocate_hisparse_kv_caches(
             kv_cache_config,
@@ -135,6 +140,7 @@ def init_hisparse_kv_cache(
             kernel_block_sizes,
             host_pool,
         )
+        backend.prepare_kv_cache_views(kv_cache_config, kv_caches, forward_context)
         cache_handles = bind_hisparse_kv_caches(
             forward_context=forward_context,
             kv_cache_config=kv_cache_config,
@@ -148,8 +154,8 @@ def init_hisparse_kv_cache(
         )
         return kv_caches
     except Exception:
-        if host_pool.shared_region is not None:
-            host_pool.shared_region.cleanup()
+        release_pinned_state([], host_pool.pinned, host_pool.shared_region)
+        drop_hisparse_host_pool(vllm_config)
         raise
 
 
@@ -163,37 +169,14 @@ def _get_hisparse_cache(
 
 
 def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
-    cache_handles = [
-        cache
-        for layer in forward_context.values()
-        if (cache := getattr(layer, "hisparse_cache", None)) is not None
-    ]
+    """Detach the profiling caches but keep the host pool for the real KV cache."""
     runtimes = {
         id(cache.runtime): cache.runtime
-        for cache in cache_handles
-        if hasattr(cache.runtime, "_host_cache")
+        for layer in forward_context.values()
+        if (cache := getattr(layer, "hisparse_cache", None)) is not None
+        and hasattr(cache.runtime, "_host_cache")
     }
-    if not runtimes:
-        return
-
-    shared_regions = {
-        id(runtime.shared_host_region): runtime.shared_host_region
-        for runtime in runtimes.values()
-        if runtime.shared_host_region is not None
-    }
-    assert len(shared_regions) <= 1
-    shared_region = next(iter(shared_regions.values()), None)
-    registered_pools = (
-        []
-        if shared_region is not None
-        else list(
-            {
-                runtime.registered_host_pool.data_ptr(): runtime.registered_host_pool
-                for runtime in runtimes.values()
-            }.values()
-        )
-    )
-    release_pinned_state(list(runtimes.values()), registered_pools, shared_region)
+    release_pinned_state(list(runtimes.values()), [])
 
 
 def bind_hisparse_kv_caches(
@@ -228,7 +211,7 @@ def bind_hisparse_kv_caches(
         assert len(table_shapes) == 1
         max_num_reqs, max_num_pages = table_shapes.pop()
         residency = torch.zeros(
-            (max_num_reqs, len(resident_groups), max_num_pages),
+            (len(resident_groups), max_num_reqs, max_num_pages),
             dtype=torch.int32,
             device=block_tables.input_block_tables[resident_groups[0][0]].device,
         )
@@ -246,7 +229,7 @@ def bind_hisparse_kv_caches(
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
-                block_table=residency[:, resident_source_index],
+                block_table=residency[resident_source_index],
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
             cache_handle.residency = residency
@@ -295,7 +278,7 @@ def bind_hisparse_kv_caches(
                 host_pool.registered.untyped_storage().data_ptr()
             )
             cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
-            cache_handle.runtime.shared_host_region = host_pool.shared_region
+            cache_handle.runtime.host_pool = host_pool
             cache_handle.runtime.bind_source_cache(
                 source_cache,
                 registered_host_pool=host_pool.registered,

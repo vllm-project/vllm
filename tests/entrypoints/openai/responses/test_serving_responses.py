@@ -34,6 +34,8 @@ from openai.types.responses.tool import (
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role
+from pydantic import ValidationError
+from starlette.requests import Request
 
 import vllm.envs as envs
 from tests.entrypoints.openai.chat_completion.test_serving_chat import MockModelConfig
@@ -87,6 +89,7 @@ def _new_online_renderer() -> OnlineRenderer:
     renderer.exclude_tools_when_tool_choice_none = False
     renderer.parser = None
     renderer.trust_request_chat_template = True
+    renderer.reasoning_effort_map = {}
     return renderer
 
 
@@ -182,6 +185,117 @@ def test_extract_tool_types(monkeypatch: pytest.MonkeyPatch) -> None:
     }
 
 
+def _echoed_response(**request_fields) -> dict:
+    """Build a request with the given fields and return the response as JSON."""
+    request = ResponsesRequest(
+        model="test-model",
+        input="Alice and Bob are going to a science fair on Friday.",
+        **request_fields,
+    )
+
+    r = ResponsesResponse.from_request(
+        request=request,
+        sampling_params=request.to_sampling_params(default_max_tokens=16),
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status="completed",
+        usage=None,
+    )
+
+    return r.model_dump(mode="json")
+
+
+def test_prompt_cache_key_is_echoed() -> None:
+    response = _echoed_response(
+        prompt_cache_key="tenant-a",
+        safety_identifier="user-1234",
+        prompt_cache_retention="in_memory",
+    )
+
+    assert response["prompt_cache_key"] == "tenant-a"
+
+
+def test_safety_identifier_is_echoed() -> None:
+    response = _echoed_response(safety_identifier="user-1234")
+    assert response["safety_identifier"] == "user-1234"
+
+
+def test_safety_identifier_defaults_to_none() -> None:
+    assert _echoed_response()["safety_identifier"] is None
+
+
+@pytest.mark.parametrize(
+    "sent, echoed",
+    [("in_memory", "in_memory"), ("in-memory", "in_memory"), ("24h", "24h")],
+)
+def test_prompt_cache_retention_is_echoed(sent: str, echoed: str) -> None:
+    response = _echoed_response(prompt_cache_retention=sent)
+    assert response["prompt_cache_retention"] == echoed
+
+
+def test_prompt_cache_retention_rejects_unknown_value() -> None:
+    with pytest.raises(ValidationError):
+        ResponsesRequest(model="test-model", input="hi", prompt_cache_retention="1w")
+
+
+def test_prompt_cache_options_echo_applied_defaults() -> None:
+    response = _echoed_response(
+        prompt_cache_options={"mode": "explicit"},
+    )
+
+    assert response["prompt_cache_options"] == {
+        "mode": "explicit",
+        "ttl": "30m",
+        "comparison_response_id": None,
+    }
+
+
+def test_prompt_cache_options_rejects_unknown_ttl() -> None:
+    with pytest.raises(ValidationError):
+        ResponsesRequest(
+            model="test-model",
+            input="hi",
+            prompt_cache_options={"ttl": "1h"},
+        )
+
+
+def test_prompt_cache_options_request_accepts_prewarm() -> None:
+    request = ResponsesRequest(
+        model="test-model",
+        input="hi",
+        prompt_cache_options={"mode": "explicit", "prewarm": True},
+    )
+
+    assert request.prompt_cache_options is not None
+    assert request.prompt_cache_options.prewarm is True
+
+
+def test_prompt_cache_options_response_drops_prewarm() -> None:
+    response = _echoed_response(
+        prompt_cache_options={"mode": "explicit", "prewarm": True},
+    )
+
+    assert response["prompt_cache_options"] == {
+        "mode": "explicit",
+        "ttl": "30m",
+        "comparison_response_id": None,
+    }
+
+
+def test_created_event_carries_echoed_fields() -> None:
+    event = ResponseCreatedEvent(
+        type="response.created",
+        sequence_number=0,
+        response=_echoed_response(
+            prompt_cache_key="tenant-a", safety_identifier="user-1234"
+        ),
+    )
+
+    assert event.response.prompt_cache_key == "tenant-a"
+    assert event.response.safety_identifier == "user-1234"
+
+
 @pytest.mark.skip_global_cleanup
 def test_response_created_event_uses_public_json_schema_alias() -> None:
     schema = {
@@ -233,19 +347,22 @@ def test_response_created_event_uses_public_json_schema_alias() -> None:
 
 
 @pytest.mark.asyncio
-async def test_online_renderer_renders_non_harmony_responses_with_explicit_history():
+async def test_online_renderer_renders_non_harmony_responses_with_explicit_history(
+    monkeypatch: pytest.MonkeyPatch,
+):
     renderer = _new_online_renderer()
     renderer.use_harmony = False
     renderer.chat_template = "server-template"
     renderer.chat_template_content_format = "string"
     renderer.default_chat_template_kwargs = {"server_default": "kept"}
     renderer.parser = None
-    renderer.preprocess_chat = AsyncMock(
+    preprocess_chat = AsyncMock(
         return_value=(
             [],
             [tokens_input([11, 12, 13], cache_salt="request-salt")],
         )
     )
+    monkeypatch.setattr(renderer, "preprocess_chat", preprocess_chat)
     previous_messages = [
         {"role": "system", "content": "old instructions"},
         {"role": "user", "content": "first"},
@@ -286,12 +403,13 @@ async def test_online_renderer_renders_non_harmony_responses_with_explicit_histo
         {"role": "assistant", "content": "prior answer"},
         {"role": "user", "content": "next"},
     ]
+    assert result.engine_input["type"] == "token"
     assert result.engine_input["prompt_token_ids"] == [11, 12, 13]
     assert result.engine_input["cache_salt"] == "request-salt"
     assert previous_messages[0]["content"] == "old instructions"
     assert previous_outputs[0].content[0].text == "prior answer"
 
-    preprocess_kwargs = renderer.preprocess_chat.call_args.kwargs
+    preprocess_kwargs = preprocess_chat.call_args.kwargs
     assert preprocess_kwargs["default_template"] == "server-template"
     assert preprocess_kwargs["default_template_content_format"] == "string"
     assert preprocess_kwargs["default_template_kwargs"]["server_default"] == "kept"
@@ -306,7 +424,9 @@ _IMAGE_PART = {
 }
 
 
-async def _render_responses_with_reuse(request, previous_messages=None):
+async def _render_responses_with_reuse(
+    request, monkeypatch: pytest.MonkeyPatch, previous_messages=None
+):
     online_renderer = OnlineRenderer(
         model_config=MockModelConfig(),
         renderer=MagicMock(),
@@ -315,7 +435,7 @@ async def _render_responses_with_reuse(request, previous_messages=None):
         chat_template_content_format="auto",
     )
     render_chat = AsyncMock(return_value=([[]], [tokens_input([1, 2])]))
-    online_renderer.renderer.render_chat_async = render_chat
+    monkeypatch.setattr(online_renderer.renderer, "render_chat_async", render_chat)
 
     result = await online_renderer.render_responses(
         request, previous_messages=previous_messages
@@ -353,34 +473,40 @@ async def _render_responses_with_reuse(request, previous_messages=None):
     ids=["input_image", "tool_output_image"],
 )
 async def test_responses_kv_transfer_prompt_token_ids_ignored_with_non_text_input(
-    request_input, ids
+    request_input, ids, monkeypatch: pytest.MonkeyPatch
 ):
     request = ResponsesRequest(
         input=request_input,
         kv_transfer_params={"do_remote_prefill": True, "prompt_token_ids": ids},
     )
 
-    render_chat, _ = await _render_responses_with_reuse(request)
+    render_chat, _ = await _render_responses_with_reuse(request, monkeypatch)
 
     render_chat.assert_awaited_once()
     assert request.kv_transfer_params == {"do_remote_prefill": True}
 
 
 @pytest.mark.asyncio
-async def test_responses_kv_transfer_prompt_token_ids_ignored_with_media_in_history():
+async def test_responses_kv_transfer_prompt_token_ids_ignored_with_media_in_history(
+    monkeypatch: pytest.MonkeyPatch,
+):
     request = ResponsesRequest(
         input="next", kv_transfer_params={"prompt_token_ids": _REUSED_IDS}
     )
 
     render_chat, _ = await _render_responses_with_reuse(
-        request, previous_messages=[{"role": "user", "content": [_IMAGE_PART]}]
+        request,
+        monkeypatch,
+        previous_messages=[{"role": "user", "content": [_IMAGE_PART]}],
     )
 
     render_chat.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_responses_kv_transfer_prompt_token_ids_kept_with_text_input():
+async def test_responses_kv_transfer_prompt_token_ids_kept_with_text_input(
+    monkeypatch: pytest.MonkeyPatch,
+):
     request = ResponsesRequest(
         input=[
             {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
@@ -389,13 +515,15 @@ async def test_responses_kv_transfer_prompt_token_ids_kept_with_text_input():
         kv_transfer_params={"prompt_token_ids": _REUSED_IDS},
     )
 
-    _, engine_input = await _render_responses_with_reuse(request)
+    _, engine_input = await _render_responses_with_reuse(request, monkeypatch)
 
     assert engine_input["prompt_token_ids"] == _REUSED_IDS
 
 
 @pytest.mark.asyncio
-async def test_online_renderer_rejects_untrusted_responses_chat_template():
+async def test_online_renderer_rejects_untrusted_responses_chat_template(
+    monkeypatch: pytest.MonkeyPatch,
+):
     renderer = _new_online_renderer()
     renderer.use_harmony = False
     renderer.chat_template = "server-template"
@@ -404,9 +532,10 @@ async def test_online_renderer_rejects_untrusted_responses_chat_template():
     renderer.exclude_tools_when_tool_choice_none = False
     renderer.trust_request_chat_template = False
     renderer.parser = None
-    renderer.preprocess_chat = AsyncMock(
+    preprocess_chat = AsyncMock(
         return_value=([], [tokens_input([1])]),
     )
+    monkeypatch.setattr(renderer, "preprocess_chat", preprocess_chat)
     request = ResponsesRequest(
         input="hello",
         chat_template_kwargs={"chat_template": "{{ messages }}"},
@@ -417,7 +546,7 @@ async def test_online_renderer_rejects_untrusted_responses_chat_template():
     assert isinstance(result, ErrorResponse)
     assert result.error.code == 400
     assert "untrusted chat template" in result.error.message.lower()
-    renderer.preprocess_chat.assert_not_awaited()
+    preprocess_chat.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -492,6 +621,7 @@ async def test_online_renderer_adjusts_harmony_tool_choice(
     result = await renderer.render_responses(request)
 
     assert not isinstance(result, ErrorResponse)
+    assert result.engine_input["type"] == "token"
     assert result.engine_input["cache_salt"] == "adjusted"
 
 
@@ -518,6 +648,7 @@ async def test_online_renderer_applies_responses_token_budget_to_harmony_prompt(
     result = await renderer.render_responses(request)
 
     assert not isinstance(result, ErrorResponse)
+    assert result.engine_input["type"] == "token"
     # `max_tokens` is an output upper bound rather than a reservation off the
     # context window, so the prompt budget is the full max_model_len minus the
     # one token held back for output: 6 tokens truncate to 4, not to
@@ -579,10 +710,12 @@ async def test_online_renderer_renders_harmony_continuation_with_call_linkage(
     assert not isinstance(result, ErrorResponse)
     assert result.messages[0] is previous_messages[0]
     tool_output = result.messages[-1]
+    assert isinstance(tool_output, OpenAIHarmonyMessage)
     assert tool_output.author.role == "tool"
     assert tool_output.author.name == "functions.lookup_weather"
     assert tool_output.channel == "commentary"
     assert tool_output.recipient == "assistant"
+    assert result.engine_input["type"] == "token"
     assert result.engine_input["cache_salt"] == "request-salt"
     assert "arrival_time" in result.engine_input
     assert previous_messages == [
@@ -768,6 +901,58 @@ class TestInitializeToolSessions:
         return instance
 
     @pytest.mark.asyncio
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize(
+        "header,expected_rank", [(None, None), ("invalid", None), ("0", 0), ("3", 3)]
+    )
+    async def test_responses_data_parallel_rank(
+        self, serving_responses_instance, stream, header, expected_rank
+    ):
+        serving = serving_responses_instance
+        serving._check_model = AsyncMock(return_value=None)
+        serving._preflight = MagicMock()
+        serving._maybe_get_adapters = MagicMock(return_value=None)
+        serving._validate_generator_input = MagicMock(return_value=None)
+        serving._make_response_parser = MagicMock(return_value=None)
+        serving._get_trace_headers = AsyncMock(return_value=None)
+        serving.online_renderer.validate_chat_template.return_value = None
+        serving._render_resolved_response_inputs = AsyncMock(
+            return_value=SimpleNamespace(messages=[], engine_input=tokens_input([1, 2]))
+        )
+        serving.override_max_tokens = None
+        serving.tool_server = None
+
+        async def generate(*args, **kwargs):
+            if False:
+                yield
+
+        async def consume(request, sampling_params, result_generator, *args):
+            async for _ in result_generator:
+                pass
+            yield "done"
+
+        async def consume_full(*args):
+            return [item async for item in consume(*args)]
+
+        serving.engine_client.generate.side_effect = generate
+        serving.responses_stream_generator = consume
+        serving.responses_full_generator = consume_full
+        headers = [] if header is None else [(b"x-data-parallel-rank", header.encode())]
+        raw_request = Request({"type": "http", "headers": headers})
+        request = ResponsesRequest(input="hi", stream=stream, store=False)
+
+        result = await serving._create_responses(request, raw_request)
+        if stream:
+            result = [item async for item in result]
+        assert result == ["done"]
+        serving.engine_client.generate.assert_called_once()
+        assert (
+            serving.engine_client.generate.call_args.kwargs["data_parallel_rank"]
+            == expected_rank
+        )
+
+    @pytest.mark.asyncio
     async def test_stateful_harmony_delegates_named_tool_choice_to_renderer(
         self,
         serving_responses_instance,
@@ -839,8 +1024,13 @@ class TestInitializeToolSessions:
         assert render_request.cache_salt == "request-salt"
 
     @pytest.mark.asyncio
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize("data_parallel_rank", [None, 0, 3])
     async def test_harmony_tool_followup_preserves_render_params(
-        self, serving_responses_instance, monkeypatch: pytest.MonkeyPatch
+        self,
+        serving_responses_instance,
+        monkeypatch: pytest.MonkeyPatch,
+        data_parallel_rank,
     ):
         class ToolCallingHarmonyContext(HarmonyContext):
             def __init__(self):
@@ -883,6 +1073,7 @@ class TestInitializeToolSessions:
 
         async for _ in serving_responses_instance._generate_with_builtin_tools(
             request_id="req",
+            data_parallel_rank=data_parallel_rank,
             engine_input=tokens_input([1], cache_salt="request-salt"),
             sampling_params=MagicMock(),
             context=context,
@@ -895,6 +1086,10 @@ class TestInitializeToolSessions:
             pass
 
         assert serving_responses_instance.engine_client.generate.call_count == 2
+        assert all(
+            call.kwargs["data_parallel_rank"] == data_parallel_rank
+            for call in serving_responses_instance.engine_client.generate.call_args_list
+        )
         assert context.request_metrics_cover_all_generation_turns is False
         followup_engine_input = (
             serving_responses_instance.engine_client.generate.call_args_list[1].args[0]
@@ -948,6 +1143,58 @@ class TestInitializeToolSessions:
             pass
 
         assert max_tokens_per_turn == [10, 10]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("max_tool_calls", [0, 2])
+    async def test_builtin_tool_loop_honors_max_tool_calls(
+        self, serving_responses_instance, max_tool_calls
+    ):
+        """Built-in tool calls past max_tool_calls are ignored, per the spec."""
+
+        class AlwaysToolCallingHarmonyContext(HarmonyContext):
+            def __init__(self):
+                self._messages = []
+                self.request = None
+                self.num_tool_calls = 0
+
+            def append_output(self, output) -> None:
+                pass
+
+            def need_builtin_tool_call(self) -> bool:
+                return True
+
+            async def call_tool(self):
+                # Fail fast instead of hanging if the loop ignores the limit.
+                assert self.num_tool_calls < max_tool_calls
+                self.num_tool_calls += 1
+                return []
+
+            def append_tool_output(self, output) -> None:
+                pass
+
+        async def generate_output(*args, **kwargs):
+            yield MagicMock()
+
+        serving_responses_instance.engine_client.generate.side_effect = generate_output
+        serving_responses_instance.online_renderer.render_responses_harmony_messages = (
+            MagicMock(return_value=tokens_input([1, 2, 3]))
+        )
+        context = AlwaysToolCallingHarmonyContext()
+
+        async for _ in serving_responses_instance._generate_with_builtin_tools(
+            request_id="req",
+            engine_input=tokens_input([1]),
+            sampling_params=SamplingParams(max_tokens=10),
+            context=context,
+            max_tool_calls=max_tool_calls,
+        ):
+            pass
+
+        assert context.num_tool_calls == max_tool_calls
+        assert (
+            serving_responses_instance.engine_client.generate.call_count
+            == max_tool_calls + 1
+        )
 
     @pytest.mark.asyncio
     async def test_initialize_tool_sessions(
@@ -1535,7 +1782,9 @@ async def _make_full_metrics_response(
             finished=finished,
         )
 
-    serving.engine_client.generate.side_effect = generate
+    engine_generate = serving.engine_client.generate
+    assert isinstance(engine_generate, MagicMock)
+    engine_generate.side_effect = generate
     result_generator = serving._generate_with_builtin_tools(
         request_id=request.request_id,
         engine_input=tokens_input([7, 8]),
@@ -1629,6 +1878,7 @@ async def test_responses_stream_truncated_by_length_reports_incomplete():
     final = events[-1]
     assert isinstance(final, ResponseIncompleteEvent)
     assert final.response.status == "incomplete"
+    assert final.response.incomplete_details is not None
     assert final.response.incomplete_details.reason == "max_output_tokens"
     assert [item.status for item in final.response.output] == ["incomplete"]
 
