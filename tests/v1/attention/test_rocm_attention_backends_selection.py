@@ -938,6 +938,7 @@ def test_rocm_attn_rejects_kv_connector(mock_vllm_config, mock_get_cdna_version)
         (True, False, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
         (True, True, AttentionBackendEnum.TRITON_ATTN),
         (False, False, AttentionBackendEnum.TRITON_ATTN),
+        (False, True, AttentionBackendEnum.TRITON_ATTN),
     ],
 )
 def test_auto_selection_for_kv_connector(
