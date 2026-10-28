@@ -3,8 +3,6 @@
 
 """Tests for KV cache offloading configuration."""
 
-import contextlib
-import json
 import sys
 
 import pytest
@@ -189,44 +187,15 @@ def test_sleep_mode_refuses_unsupported_kv_connector(
         )
 
 
-@pytest.mark.parametrize("enable_sleep_mode", [False, True], ids=["awake", "sleep"])
-@pytest.mark.parametrize(
-    ("protocol", "env", "error"),
-    [
-        ("rdma", None, None),
-        ("tcp", None, None),
-        ("nvlink", None, "does not support sleep mode"),
-        ("rdma", "MC_FORCE_MNNVL=1", "does not support sleep mode"),
-        ("rdma", "MC_FORCE_MNNVL=0", "does not support sleep mode"),
-        ("tcp", "MC_INTRANODE_NVLINK=1", "does not support sleep mode"),
-        (None, None, "MOONCAKE_CONFIG_PATH"),
-    ],
-    ids=["rdma", "tcp", "nvlink", "mnnvl", "mnnvl-0", "intranode-nvlink", "no-cfg"],
-)
-def test_sleep_mode_mooncake_store_checks_configured_transport(
-    monkeypatch, tmp_path, protocol, env, error, enable_sleep_mode
-):
-    """MooncakeStoreConnector takes its transport from the Mooncake config file
-    and env, read only with sleep mode and without importing mooncake."""
+def test_mooncake_store_supports_sleep_without_loading_store_config(monkeypatch):
+    """Store setup, not the sleep capability query, resolves the transport."""
     monkeypatch.setitem(sys.modules, "mooncake", None)
     monkeypatch.delenv("MOONCAKE_CONFIG_PATH", raising=False)
-    for var in ("MC_FORCE_MNNVL", "MC_INTRANODE_NVLINK"):
-        monkeypatch.delenv(var, raising=False)
-    if protocol is not None:
-        (path := tmp_path / "mooncake.json").write_text(
-            json.dumps({"protocol": protocol})
-        )
-        monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(path))
-    if env is not None:
-        monkeypatch.setenv(*env.split("="))
-    with (
-        pytest.raises(ValueError, match=error)
-        if enable_sleep_mode and error
-        else contextlib.nullcontext()
-    ):
-        _build_config(
-            kv_connector="MooncakeStoreConnector", enable_sleep_mode=enable_sleep_mode
-        )
+    monkeypatch.setenv("MC_FORCE_MNNVL", "1")
+    monkeypatch.setenv("MC_INTRANODE_NVLINK", "1")
+    config = KVTransferConfig(kv_connector="MooncakeStoreConnector", kv_role="kv_both")
+    connector_cls = KVConnectorFactory.get_connector_class(config)
+    assert connector_cls.supports_sleep_mode(config)
 
 
 def test_kv_connector_allows_other_alloc_conf(monkeypatch):

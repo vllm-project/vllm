@@ -13,6 +13,11 @@ Key benefits:
 !!! note
     This feature is now supported on CUDA and ROCm platform.
 
+Sleep mode also supports [MooncakeStoreConnector](mooncake_store_connector_usage.md).
+The connector unregisters device KV buffers before sleep and registers them again
+after wake-up; host-resident buffers remain registered. The Mooncake transport
+must support re-registering memory after its physical backing changes.
+
 !!! note
     For more information, see this [Blog Post](https://blog.vllm.ai/2025/10/26/sleep-mode.html).
 
