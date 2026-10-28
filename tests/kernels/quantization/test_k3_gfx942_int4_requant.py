@@ -15,19 +15,25 @@ from vllm.platforms.rocm import on_gfx942  # noqa: E402
 if not on_gfx942():
     pytest.skip("requires gfx942", allow_module_level=True)
 
-pytest.importorskip("aiter.ops.quant")
+pytest.importorskip("aiter")
+
+from aiter.utility import fp4_utils  # noqa: E402
 
 from vllm.model_executor.layers.quantization import mxfp4  # noqa: E402
 
 NUM_EXPERTS, ROWS, COLS = 128, 256, 2048
+# Kimi-K3 w2 per rank under TP8. 896 experts do not split evenly into chunks.
+TP8_W2_SHAPE = (896, 3584, 384)
 
 
-def _requant(seed: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
-    gen = torch.Generator(device="cuda").manual_seed(seed)
+def _requant(
+    num_experts: int = NUM_EXPERTS, rows: int = ROWS, cols: int = COLS
+) -> tuple[torch.Tensor, torch.Tensor]:
+    gen = torch.Generator(device="cuda").manual_seed(0)
     weight = torch.randint(
         0,
         256,
-        (NUM_EXPERTS, ROWS, COLS // 2),
+        (num_experts, rows, cols // 2),
         dtype=torch.uint8,
         device="cuda",
         generator=gen,
@@ -35,7 +41,7 @@ def _requant(seed: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
     scale = torch.randint(
         118,
         132,
-        (NUM_EXPERTS, ROWS, COLS // 32),
+        (num_experts, rows, cols // 32),
         dtype=torch.uint8,
         device="cuda",
         generator=gen,
@@ -47,10 +53,22 @@ def _requant(seed: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
     return out_weight.view(torch.uint8), out_scale.view(torch.uint8)
 
 
+@pytest.fixture
+def load_model_allocator_settings():
+    original = torch._C._accelerator_getAllocatorSettings()
+    prefix = original.strip().rstrip(",")
+    settings = "max_split_size_mb:20"
+    torch._C._accelerator_setAllocatorSettings(
+        f"{prefix},{settings}" if prefix else settings
+    )
+    yield
+    torch._C._accelerator_setAllocatorSettings(original)
+
+
 @pytest.mark.parametrize(
     "experts_per_chunk",
     [1, 5, NUM_EXPERTS],
-    ids=["one_expert", "partial_last_chunk", "single_chunk"],
+    ids=["one_expert", "uneven_last_chunk", "single_chunk"],
 )
 def test_requant_is_independent_of_chunking(monkeypatch, experts_per_chunk):
     ref_weight, ref_scale = _requant()
@@ -64,16 +82,24 @@ def test_requant_is_independent_of_chunking(monkeypatch, experts_per_chunk):
     assert torch.equal(scale, ref_scale)
 
 
-def test_requant_reuses_device_memory_across_chunks(monkeypatch):
-    monkeypatch.setattr(mxfp4, "_K3_INT4_CONVERT_CHUNK_VALUES", ROWS * COLS)
-    _requant()
+def test_requant_allocates_device_memory_only_in_first_chunk(
+    monkeypatch, load_model_allocator_settings
+):
+    """Later chunks, the last one included, must reuse the first chunk's cached
+    blocks under load_model's allocator settings."""
+    _requant(*TP8_W2_SHAPE)
     torch.accelerator.empty_cache()
 
-    before = torch.accelerator.memory_stats()["num_device_alloc"]
-    _requant()
-    device_allocs = torch.accelerator.memory_stats()["num_device_alloc"] - before
+    device_allocs = []
+    mxfp4_to_f32 = fp4_utils.mxfp4_to_f32
 
-    # One expert per chunk gives NUM_EXPERTS chunks of about ten temporaries
-    # each. Later chunks must reuse the cached blocks, so device allocations
-    # stay a small constant instead of growing with the chunk count.
-    assert device_allocs <= 16
+    def recording_mxfp4_to_f32(x):
+        device_allocs.append(torch.accelerator.memory_stats()["num_device_alloc"])
+        return mxfp4_to_f32(x)
+
+    monkeypatch.setattr(fp4_utils, "mxfp4_to_f32", recording_mxfp4_to_f32)
+    _requant(*TP8_W2_SHAPE)
+    device_allocs.append(torch.accelerator.memory_stats()["num_device_alloc"])
+
+    assert len(device_allocs) > 3
+    assert device_allocs[1:] == [device_allocs[1]] * (len(device_allocs) - 1)

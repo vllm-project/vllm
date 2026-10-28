@@ -508,7 +508,7 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
 # if all experts convert at once, so it converts in chunks. Chunks are sized by
 # unpacked values rather than experts so that pure TP, which holds every expert
 # at 1/tp width, runs as many chunks as EP.
-_K3_INT4_CONVERT_CHUNK_VALUES = 1 << 28
+_K3_INT4_CONVERT_CHUNK_VALUES = 1 << 27
 
 
 def _mxfp4_experts_to_int4_gfx942(
@@ -536,7 +536,10 @@ def _mxfp4_experts_to_int4_gfx942(
     w_all = weight.data.view(fp4_dtype)
     s_all = scale.data.view(e8m0_dtype)
     num_experts, rows, packed_cols = w_all.shape
-    chunk = max(1, _K3_INT4_CONVERT_CHUNK_VALUES // (rows * packed_cols * 2))
+    chunk = min(
+        num_experts,
+        max(1, _K3_INT4_CONVERT_CHUNK_VALUES // (rows * packed_cols * 2)),
+    )
 
     # Write chunks into a preallocated output. torch.cat of a list
     # would hold the full result twice at the join.
@@ -544,7 +547,11 @@ def _mxfp4_experts_to_int4_gfx942(
     out_scale: torch.Tensor | None = None
     scale_stride = 0
     for lo in range(0, num_experts, chunk):
-        hi = min(lo + chunk, num_experts)
+        # Shift the last chunk back so every chunk has the same shapes. Under
+        # load_model's max_split_size_mb, a shorter chunk cannot reuse the
+        # cached blocks. The overlapping experts are recomputed identically.
+        lo = min(lo, num_experts - chunk)
+        hi = lo + chunk
         weight_f32 = fp4_utils.mxfp4_to_f32(w_all[lo:hi])
         scale_f32 = fp4_utils.e8m0_to_f32(s_all[lo:hi])
         chunk_experts, output_size, input_size = weight_f32.shape
