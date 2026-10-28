@@ -233,5 +233,6 @@ def xpu_sparse_decode_fp8(
         sm_scale=softmax_scale,
         d_v=q.shape[-1],
         block_dpe=0,
+        attn_sink=attn_sink[: q.shape[1]],
     )
     out.copy_(out_attn)
