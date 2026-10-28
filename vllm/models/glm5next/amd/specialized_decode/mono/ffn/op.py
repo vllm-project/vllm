@@ -169,7 +169,6 @@ class FlashFfnRuntime:
         dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
         kv_fp8: bool = False,
         kv_mxfp4: bool = False,
-        mxfp4_native: bool = False,
         trace: bool = False,
     ) -> None:
         self.width, self.rank, self.npes = width, rank, npes
@@ -191,7 +190,6 @@ class FlashFfnRuntime:
             dsa_fp8=dsa_fp8,
             kv_fp8=kv_fp8,
             kv_mxfp4=kv_mxfp4,
-            mxfp4_native=mxfp4_native,
             trace=trace,
         )
         dev = torch.device("cuda", torch.accelerator.current_device_index())
