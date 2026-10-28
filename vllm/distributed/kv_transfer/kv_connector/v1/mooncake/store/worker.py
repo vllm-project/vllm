@@ -968,17 +968,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 and checkpoint_len > replay_boundary
             ):
                 replay_boundary = checkpoint_len + 1
-            store_mask_start = (
-                0
-                if any(
-                    db.chunk_size != db.store_layout.block_size
-                    for db in self.token_databases
-                )
-                else save_start
-            )
+            # Successful saves advance by complete scheduler-aligned intervals.
             store_masks = self.coord.store_mask(
                 checkpoint_len,
-                store_mask_start,
+                save_start,
                 num_prompt_tokens=replay_boundary,
             )
 
@@ -1009,7 +1002,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     block_idx = start // db.store_layout.block_size
                     if store_mask is not None:
                         mask_idx = block_idx - cdiv(
-                            store_mask_start, db.store_layout.block_size
+                            save_start, db.store_layout.block_size
                         )
                         if (
                             not 0 <= mask_idx < len(store_mask)

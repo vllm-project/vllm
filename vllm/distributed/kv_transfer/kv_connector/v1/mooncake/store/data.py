@@ -55,15 +55,9 @@ class BlobBlockHashes(Sequence[BlockHash]):
 
 
 class _CompactChunkHashList(BlockHashListWithBlockSize):
-    """View that keys each ``block_size`` chunk by the last constituent
-    ``hash_block_size`` hash instead of concatenating all of them.
+    """Key each chunk by its final chained hash, which identifies its full prefix.
 
-    The engine chains block hashes (each hash folds in the previous one), so the
-    final sub-block hash of a chunk already uniquely identifies the whole chunk
-    and its prefix. Using it keeps a Mooncake key at a single hash digest
-    regardless of the ``block_size`` / ``hash_block_size`` ratio, instead of
-    growing the key linearly with it (e.g. 64x for ``block_size=256``,
-    ``hash_block_size=4``).
+    This keeps Store keys one digest long regardless of the chunk/hash size ratio.
     """
 
     def __init__(
@@ -72,8 +66,7 @@ class _CompactChunkHashList(BlockHashListWithBlockSize):
         hash_block_size: int,
         target_block_size: int,
     ):
-        # Accept any indexable sequence (e.g. the lazy ``BlobBlockHashes``), not
-        # just ``list``; the base only indexes/sizes it.
+        # The base class only needs sequence indexing and length.
         assert target_block_size % hash_block_size == 0
         self.block_hashes = block_hashes  # type: ignore[assignment]
         self.scale_factor = target_block_size // hash_block_size
@@ -123,31 +116,16 @@ class ChunkedTokenDatabase:
             metadata, chunk_size, self.hash_block_size
         )
 
-    @property
-    def kv_caches_base_addr(self) -> list[int]:
-        return self._rank_local_layout().kv_caches_base_addr
-
-    @property
-    def block_len(self) -> list[int]:
-        return self._rank_local_layout().block_len
-
     def _rank_local_layout(self) -> RankLocalStoreLayout:
         if not isinstance(self.store_layout, RankLocalStoreLayout):
             raise RuntimeError("This operation requires a rank-local Store layout")
         return self.store_layout
-
-    def key_for(self, chunk_hash: BlockHash) -> str:
-        return self._rank_local_layout().key_for(0, chunk_hash)
 
     def set_kv_caches_base_addr(self, kv_caches_base_addr: list[int]):
         self._rank_local_layout().set_kv_caches_base_addr(kv_caches_base_addr)
 
     def set_block_len(self, block_len: list[int]):
         self._rank_local_layout().set_block_len(block_len)
-
-    def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
-        """Return addresses and sizes for one physical block slot."""
-        return self._rank_local_layout().prepare_value_for_block(block_id)
 
     def process_tokens(
         self,

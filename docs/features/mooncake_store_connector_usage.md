@@ -180,12 +180,11 @@ four head-major layouts to one Store value order and the two token-major
 layouts to another. Physical layouts with the same value order can share
 entries.
 
-For hybrid cache allocations, a local attention block may contain several Store
-chunks, which are read and written through tensor-offset descriptors. Hybrid
-heterogeneous-TP sharing requires the same explicit `--prefix-match-unit` on
-every endpoint. The connector uses this prefix-hash boundary as the default
-Attention Store chunk size. A larger `store_chunk_size` can reduce Store object
-and metadata overhead:
+In hybrid models, local Attention block sizes can vary with TP size. Shared
+Store chunks have the same size on every endpoint; a local block can contain
+several chunks. Hybrid sharing requires the same explicit `--prefix-match-unit`
+on every endpoint, which also sets the default Attention Store chunk size.
+A larger `store_chunk_size` can reduce Store object and metadata overhead:
 
 ```json
 {
@@ -198,16 +197,17 @@ and metadata overhead:
 
 The configured size applies to Attention Store objects. It must be a multiple
 of `prefix_match_unit`, divide every local Attention page, and align with each
-layer's stored states. Mamba and GDN convolution state layouts `DS` and `SD`
-are supported; sharing endpoints use the same layout.
-Incremental offloads wait for a common reusable hybrid prefix boundary.
-Attention entries retain their TP-independent Store chunk size, while Mamba
-and GDN entries are complete state snapshots. Lookup exposes a prefix after
-all cache groups required at that boundary are present. Each Attention page
-requires every Store chunk covering its reusable tokens, across all Store
-shards. Partial-tail checkpoints use the core's exact state-block handoff and
-matching Attention KV. Store jobs hold references to their source blocks until
-all workers finish the transfer.
+layer's stored states. Sharing endpoints must use the same Store chunk size.
+
+Mamba and GDN entries contain complete state snapshots. Both `DS` and `SD`
+convolution state layouts are supported; sharing endpoints use the same layout.
+Incremental offloads save intervals aligned across all participating cache
+groups. Partial-tail checkpoints use the core's state-block handoff and matching
+Attention KV. Store jobs hold their source blocks until all workers finish.
+
+Lookup reports a reusable prefix only when every required cache group is
+present. For each Attention page, this includes every Store chunk covering its
+reusable tokens, across all Store shards.
 
 Attention groups are planned from their per-layer cache specs, including specs
 wrapped by `UniformTypeKVCacheSpecs`. The Store TP and global head-slot count

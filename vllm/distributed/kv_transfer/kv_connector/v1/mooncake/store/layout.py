@@ -267,19 +267,6 @@ class RankLocalStoreLayout(StoreLayout):
         sizes = blen[None, :] * block_counts[:, None]
         return addrs.tolist(), sizes.tolist(), bids.tolist()
 
-    def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
-        length = len(self.block_len)
-        return (
-            [
-                base_addr + block_id * self.block_len[index % length]
-                for index, base_addr in enumerate(self.kv_caches_base_addr)
-            ],
-            [
-                self.block_len[index % length]
-                for index in range(len(self.kv_caches_base_addr))
-            ],
-        )
-
 
 class TPShardedStoreLayout(StoreLayout):
     """Store layout shared by divisible TP sizes."""
@@ -527,13 +514,11 @@ class AttentionStoreLayout(TPShardedStoreLayout):
     def _state_range(
         spec: AttentionSpec, store_chunk_size: int, chunk_index: int
     ) -> tuple[int, int]:
-        start = Fraction(chunk_index * store_chunk_size, 1) / spec.tokens_per_state
-        end = Fraction((chunk_index + 1) * store_chunk_size, 1) / (
-            spec.tokens_per_state
-        )
-        if start.denominator != 1 or end.denominator != 1:
+        num_states = Fraction(store_chunk_size, 1) / spec.tokens_per_state
+        if num_states.denominator != 1:
             raise ValueError("Store chunk boundaries must align with attention states")
-        return start.numerator, end.numerator
+        start = chunk_index * num_states.numerator
+        return start, start + num_states.numerator
 
     @staticmethod
     def _cache_strides(
@@ -722,40 +707,21 @@ class MambaStoreLayout(TPShardedStoreLayout):
     ) -> tuple[tuple[int, int, int], ...]:
         conv = derive_mamba_conv_split(spec, local_tp_size, require_dim_first=False)
         segments = []
-        if is_conv_state_dim_first():
-            row_bytes = conv.conv_rows * conv.conv_dtype_size
-            for proj_index, (offset, size) in enumerate(conv.local_conv_offsets):
-                unit_size = row_bytes
+        dim_first = is_conv_state_dim_first()
+        num_rows = 1 if dim_first else conv.conv_rows
+        dim_bytes = conv.conv_dtype_size * (conv.conv_rows if dim_first else 1)
+        for row_index in range(num_rows):
+            offset = row_index * conv.local_conv_dim * conv.conv_dtype_size
+            for proj_index, proj_dim in enumerate(conv.local_proj_dims):
+                size = proj_dim * dim_bytes
+                unit_size = dim_bytes
                 if (
                     spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
                     and proj_index > 0
                 ):
                     unit_size *= spec.shapes[1][-1]
                 segments.append((offset, size, unit_size))
-        else:
-            proj_offsets = []
-            offset = 0
-            for proj_dim in conv.local_proj_dims:
-                proj_offsets.append(offset)
-                offset += proj_dim
-            for row_index in range(conv.conv_rows):
-                row_offset = row_index * conv.local_conv_dim
-                for proj_index, (proj_offset, proj_dim) in enumerate(
-                    zip(proj_offsets, conv.local_proj_dims, strict=True)
-                ):
-                    unit_size = conv.conv_dtype_size
-                    if (
-                        spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
-                        and proj_index > 0
-                    ):
-                        unit_size *= spec.shapes[1][-1]
-                    segments.append(
-                        (
-                            (row_offset + proj_offset) * conv.conv_dtype_size,
-                            proj_dim * conv.conv_dtype_size,
-                            unit_size,
-                        )
-                    )
+                offset += size
         state_offset = conv.ssm_sizes[0]
         for state_index, shape in enumerate(spec.shapes[1:], start=1):
             state_dtype: torch.dtype = spec.dtypes[state_index]

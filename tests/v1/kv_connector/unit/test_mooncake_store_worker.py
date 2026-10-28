@@ -1274,8 +1274,14 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
     )
     puts = list(zip(keys, addrs, strict=True))
     boundary_hash = BlockHash(b"a2")
-    assert (db_mamba_1.key_for(boundary_hash), [0x2000 + 7 * 256]) in puts
-    assert (db_mamba_2.key_for(boundary_hash), [0x3000 + 9 * 256]) not in puts
+    assert (
+        db_mamba_1.store_layout.key_for(0, boundary_hash),
+        [0x2000 + 7 * 256],
+    ) in puts
+    assert (
+        db_mamba_2.store_layout.key_for(0, boundary_hash),
+        [0x3000 + 9 * 256],
+    ) not in puts
 
 
 def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
@@ -1419,7 +1425,7 @@ def test_block_aligned_snapshot_offload_uses_provided_block():
     # boundary 32 is block-aligned for the mamba group (block 16): one key,
     # keyed by hs[32 // 4 - 1], read from the handed-off block 7 — not from
     # block_ids[1] and with no FA gap coverage.
-    assert keys == [thread.token_databases[1].key_for(BlockHash(hs[7]))]
+    assert keys == [thread.token_databases[1].store_layout.key_for(0, BlockHash(hs[7]))]
     assert addrs == [[0x2000 + 7 * 256]]
 
 
@@ -1447,13 +1453,13 @@ def test_mixed_snapshot_and_sub_block_offloads():
     db_full, db_mamba = thread.token_databases
     assert keys == [
         # Aligned snapshot: boundary 32 from the handed-off block 9.
-        db_mamba.key_for(BlockHash(hs[7])),
+        db_mamba.store_layout.key_for(0, BlockHash(hs[7])),
         # Sub-block boundary 44: FA gap blocks ending at 4, 8, 12.
-        db_full.key_for(BlockHash(hs[0])),
-        db_full.key_for(BlockHash(hs[1])),
-        db_full.key_for(BlockHash(hs[2])),
+        db_full.store_layout.key_for(0, BlockHash(hs[0])),
+        db_full.store_layout.key_for(0, BlockHash(hs[1])),
+        db_full.store_layout.key_for(0, BlockHash(hs[2])),
         # Mamba boundary block from the CoW hand-off (block 7).
-        db_mamba.key_for(BlockHash(hs[10])),
+        db_mamba.store_layout.key_for(0, BlockHash(hs[10])),
     ]
     assert addrs == [
         [0x2000 + 9 * 256],
@@ -1519,37 +1525,46 @@ def test_store_sending_thread_delta_start_rank_saves_second_local_chunk():
     assert store.batch_put_from_multi_buffers.call_args.args[0] == keys
 
 
-def test_store_sending_thread_delta_saves_only_new_masked_chunks():
+@pytest.mark.parametrize("chunk_size", [8, 16])
+def test_store_sending_thread_delta_saves_only_new_masked_chunks(chunk_size):
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.side_effect = (
         lambda keys, addrs, sizes, replicate_config: [256] * len(keys)
     )
-    coord = SimpleNamespace(
-        lcm_block_size=16,
-        store_mask=lambda token_len, start_token, num_prompt_tokens=None: (
+    coord = MagicMock(lcm_block_size=16)
+    coord.store_mask.side_effect = (
+        lambda token_len, start_token, num_prompt_tokens=None: (
             None,
-            [True, False],
-        ),
+            [True, False, True, False][start_token // 16 : token_len // 16],
+        )
     )
-
-    db_full = ChunkedTokenDatabase(
-        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-        chunk_size=16,
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=2, dtype=torch.float16
     )
-    db_full.set_kv_caches_base_addr([0x1000])
-    db_full.set_block_len([256])
-    db_masked = ChunkedTokenDatabase(
-        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-        chunk_size=16,
-    )
-    db_masked.set_kv_caches_base_addr([0x2000])
-    db_masked.set_block_len([256])
+    caches = torch.empty((2, 4, 1, 16, 4), dtype=torch.float16)
+    databases = []
+    for group_id in range(2):
+        metadata = KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id)
+        layout = HeadMajorStoreLayout(
+            metadata,
+            block_size=16,
+            hash_block_size=chunk_size,
+            local_tp_size=1,
+            store_tp_size=1,
+            tp_rank=0,
+            layer_specs=(spec,),
+            store_chunk_size=chunk_size,
+        )
+        layout.register_kv_caches([caches[group_id]], num_blocks=4)
+        databases.append(
+            ChunkedTokenDatabase(metadata, chunk_size, store_layout=layout)
+        )
 
     thread = _make_store_sending_thread(
         store,
         coord=coord,
-        token_databases=[db_full, db_masked],
+        token_databases=databases,
     )
 
     thread._saved_offset["req-a"] = 32
@@ -1559,7 +1574,7 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
-            block_hashes=[b"a0", b"a1", b"a2", b"a3"],
+            block_hashes=[f"a{i}".encode() for i in range(64 // chunk_size)],
             can_save=True,
         ),
     )
@@ -1568,8 +1583,13 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
     full_hashes = [k.rsplit("@", 1)[-1] for k in keys if "@group:0" in k]
     masked_hashes = [k.rsplit("@", 1)[-1] for k in keys if "@group:1" in k]
 
-    assert full_hashes == [b"a2".hex(), b"a3".hex()]
-    assert masked_hashes == [b"a2".hex()]
+    assert full_hashes == [
+        f"a{i}".encode().hex() for i in range(32 // chunk_size, 64 // chunk_size)
+    ]
+    assert masked_hashes == [
+        f"a{i}".encode().hex() for i in range(32 // chunk_size, 48 // chunk_size)
+    ]
+    coord.store_mask.assert_called_once_with(64, 32, num_prompt_tokens=None)
 
 
 def test_decode_save_marks_completed_interval_as_replay_boundary():
@@ -2754,9 +2774,9 @@ def test_hybrid_gdn_falls_back_from_incompatible_store_config(
         isinstance(db.store_layout, RankLocalStoreLayout)
         for db in store_worker.token_dbs
     )
-    assert "@store_format:rank_local_tp2" in store_worker.token_dbs[0].key_for(
-        BlockHash(b"h")
-    )
+    assert "@store_format:rank_local_tp2" in store_worker.token_dbs[
+        0
+    ].store_layout.key_for(0, BlockHash(b"h"))
 
 
 @pytest.mark.parametrize(
@@ -2887,9 +2907,9 @@ def test_lcm_store_tp_falls_back_when_topology_is_incompatible(
 
     assert store_worker.store_tp_size is None
     assert type(store_worker.token_dbs[0]) is ChunkedTokenDatabase
-    assert "@store_format:rank_local_tp" in store_worker.token_dbs[0].key_for(
-        BlockHash(b"h")
-    )
+    assert "@store_format:rank_local_tp" in store_worker.token_dbs[
+        0
+    ].store_layout.key_for(0, BlockHash(b"h"))
 
 
 @pytest.mark.parametrize("store_tp_size", [1, 3, 6])
@@ -2925,7 +2945,7 @@ def test_worker_keeps_rank_local_layout_for_unsupported_store_tp(
 
     assert w.store_tp_size is None
     assert type(w.token_dbs[0]) is ChunkedTokenDatabase
-    key = w.token_dbs[0].key_for(BlockHash(b"h"))
+    key = w.token_dbs[0].store_layout.key_for(0, BlockHash(b"h"))
     assert "@store_tp:" not in key
     assert "@store_pp:1" in key
     assert "@store_format:rank_local_tp2_layout_LBNHC" in key
@@ -5048,20 +5068,22 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     if not layout.is_block_compact:
         # Each head group is its own region, so a block spans L*H regions.
         head_cache = caches[0][:, 0]
-        assert db.kv_caches_base_addr == [
+        assert db.store_layout.kv_caches_base_addr == [
             cache[:, head_idx].data_ptr()
             for cache in caches
             for head_idx in range(cache.shape[1])
         ]
-        assert db.block_len == [head_cache.stride(0) * head_cache.element_size()] * (
-            num_layers * caches[0].shape[1]
-        )
+        assert db.store_layout.block_len == [
+            head_cache.stride(0) * head_cache.element_size()
+        ] * (num_layers * caches[0].shape[1])
     elif layout.is_layer_compact:
-        assert db.kv_caches_base_addr == [cache.data_ptr() for cache in caches]
-        assert db.block_len == [spec.page_size_bytes] * num_layers
+        assert db.store_layout.kv_caches_base_addr == [
+            cache.data_ptr() for cache in caches
+        ]
+        assert db.store_layout.block_len == [spec.page_size_bytes] * num_layers
     else:
-        assert db.kv_caches_base_addr == [raw.data_ptr()]
-        assert db.block_len == [num_layers * spec.page_size_bytes]
+        assert db.store_layout.kv_caches_base_addr == [raw.data_ptr()]
+        assert db.store_layout.block_len == [num_layers * spec.page_size_bytes]
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
 
 
@@ -5147,8 +5169,8 @@ def test_register_kv_caches_uses_transfer_group_memory_domain(extra_config):
     )
 
     db = worker.token_dbs[0]
-    assert db.kv_caches_base_addr == [source.data_ptr()]
-    assert db.block_len == [page_size]
+    assert db.store_layout.kv_caches_base_addr == [source.data_ptr()]
+    assert db.store_layout.block_len == [page_size]
     worker.store.register_buffer.assert_called_once_with(
         source.data_ptr(), source.nbytes
     )
@@ -5210,8 +5232,8 @@ def test_register_kv_caches_separate_head_groups():
         for head_idx in range(cache.shape[1])
     ]
     db = worker.token_dbs[0]
-    assert db.kv_caches_base_addr == expected_addrs
-    assert db.block_len == [head_block_bytes] * len(expected_addrs)
+    assert db.store_layout.kv_caches_base_addr == expected_addrs
+    assert db.store_layout.block_len == [head_block_bytes] * len(expected_addrs)
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
 
 

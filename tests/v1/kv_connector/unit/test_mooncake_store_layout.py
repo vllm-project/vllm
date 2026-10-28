@@ -312,7 +312,7 @@ def test_rank_local_database_api_rejects_tp_shared_layout():
     database = ChunkedTokenDatabase(metadata, 16, store_layout=layout)
 
     with pytest.raises(RuntimeError, match="rank-local"):
-        database.prepare_value_for_block(0)
+        database.set_block_len([256])
 
 
 _SHARED_LAYOUTS = [

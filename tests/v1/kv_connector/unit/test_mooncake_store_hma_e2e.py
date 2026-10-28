@@ -452,8 +452,8 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]
-    fa_key = token_dbs[0].key_for(partial_hash)
-    mamba_key = token_dbs[1].key_for(partial_hash)
+    fa_key = token_dbs[0].store_layout.key_for(0, partial_hash)
+    mamba_key = token_dbs[1].store_layout.key_for(0, partial_hash)
     assert set(store.puts) == {fa_key, mamba_key}
     # FA reads block_ids[0][0] = block 1: addr = base(0) + 1 * 512.
     assert store.puts[fa_key] == [512]
@@ -602,10 +602,10 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     # block-end hashes; mamba (block 16): the partial boundary block under
     # the boundary sub-hash, read from the CoW target.
     expected = {
-        token_dbs[0].key_for(hs[0]): [1 * 512],
-        token_dbs[0].key_for(hs[1]): [2 * 512],
-        token_dbs[0].key_for(hs[2]): [3 * 512],
-        token_dbs[1].key_for(hs[2]): [10_000 + mamba_cow_block * 512],
+        token_dbs[0].store_layout.key_for(0, hs[0]): [1 * 512],
+        token_dbs[0].store_layout.key_for(0, hs[1]): [2 * 512],
+        token_dbs[0].store_layout.key_for(0, hs[2]): [3 * 512],
+        token_dbs[1].store_layout.key_for(0, hs[2]): [10_000 + mamba_cow_block * 512],
     }
     assert store.puts == expected
 
