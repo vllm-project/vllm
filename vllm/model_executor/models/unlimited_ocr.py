@@ -87,7 +87,6 @@ from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
     IMAGE_SIZE,
-    DeepseekOCRProcessor,
     count_tiles,
 )
 
@@ -127,6 +126,7 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         from vllm.transformers_utils.processors.unlimited_ocr import (
+            UnlimitedOCR2Processor,
             UnlimitedOCRProcessor,
         )
 
@@ -136,12 +136,9 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
             crop_mode=CROP_MODE,
             strategy="v1",
             max_crops=self._get_max_crops(),
-            resize_before_padding=not getattr(
-                self.get_hf_config().text_config, "unlimited_ocr2", False
-            ),
         )
         processor_cls = (
-            DeepseekOCRProcessor
+            UnlimitedOCR2Processor
             if getattr(self.get_hf_config().text_config, "unlimited_ocr2", False)
             else UnlimitedOCRProcessor
         )

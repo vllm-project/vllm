@@ -162,13 +162,11 @@ class DeepseekOCRProcessor(ProcessorMixin):
         base_size: int = BASE_SIZE,
         strategy: Literal["v1", "v2"] = "v1",
         max_crops: int = MAX_CROPS,
-        resize_before_padding: bool = True,
         **kwargs,
     ):
         self.image_size = image_size
         self.base_size = base_size
         self.max_crops = max_crops
-        self.resize_before_padding = resize_before_padding
 
         # image token calculation strategy for
         # Deepseek-OCR and Deepseek-OCR-2
@@ -300,6 +298,15 @@ class DeepseekOCRProcessor(ProcessorMixin):
 
         return prepare
 
+    def _prepare_global_view(self, image: Image.Image, cropping: bool) -> Image.Image:
+        if not cropping:
+            image = image.resize((self.image_size, self.image_size))
+        return ImageOps.pad(
+            image,
+            (self.base_size, self.base_size),
+            color=tuple(int(x * 255) for x in self.image_transform.mean),
+        )
+
     def tokenize_with_images(
         self,
         conversation: str,
@@ -343,14 +350,7 @@ class DeepseekOCRProcessor(ProcessorMixin):
             else:
                 crop_ratio = [1, 1]
 
-            if not cropping and self.resize_before_padding:
-                image = image.resize((self.image_size, self.image_size))
-
-            global_view = ImageOps.pad(
-                image,
-                (self.base_size, self.base_size),
-                color=tuple(int(x * 255) for x in self.image_transform.mean),
-            )
+            global_view = self._prepare_global_view(image, cropping)
             images_list.append(self.image_transform(global_view))
 
             num_width_tiles, num_height_tiles = crop_ratio
