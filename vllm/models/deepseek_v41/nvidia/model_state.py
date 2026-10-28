@@ -640,6 +640,7 @@ class DeepseekV41ModelState(DefaultModelState):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
         def prepare(desc: BatchExecutionDescriptor) -> None:
             # Capture reuses the runtime path on a dummy batch, so the graph reads
@@ -659,7 +660,7 @@ class DeepseekV41ModelState(DefaultModelState):
         if self.replay_cudagraphs is not None:
             # profile_only captures use pre-KV-cache groups: drop the cache.
             self._replay_attn_groups = None
-            self.replay_cudagraphs.capture_replay_graphs(prepare)
+            self.replay_cudagraphs.capture_replay_graphs(prepare, stream)
 
     def _kept_input_batch(
         self,
