@@ -747,7 +747,7 @@ def test_swa_decode_meta_runs_on_gfx942_and_gfx950_with_the_flag(
 
     monkeypatch.setattr(ops, "current_platform", SimpleNamespace(is_rocm=lambda: True))
     monkeypatch.setattr(rocm_platform, "on_gfx942", lambda: arch == "gfx942")
-    monkeypatch.setattr(rocm_platform, "on_mi3xx", lambda: arch != "gfx90a")
+    monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: arch == "gfx950")
     monkeypatch.setattr(ops, "_monokernel", ops._monokernel)
     ops.record_monokernel(_config(monokernel=monokernel))
     launches = []
