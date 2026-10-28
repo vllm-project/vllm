@@ -29,9 +29,9 @@ quality evaluation, and serving benchmarks must pass before public submission.
   intermediate states for the native DFlash2 interface.
 - MXFP8 experts use vLLM's ModelOpt loader. The checkpoint's E8M0 scale tensor
   suffix `weight_scale_inv` maps to the native `weight_scale` parameter.
-  The current auto selector chooses Marlin W8A16 for this SiTU configuration,
-  whereas production uses custom W8A8 experts. Production parity still requires
-  optimized MoE integration and GPU qualification.
+  MXFP8 and NVFP4 reuse existing upstream quantization backends. Compatibility
+  with SiTU, the backend selected on the target GPU, and numerical and
+  performance parity with production must be qualified for each format.
 - The `raon_1` parser handles reasoning markers and XML function calls,
   including streamed arguments and request-schema type conversion.
 - `--additional-config '{"raon_fast": true}'` enables the ported mHC and RDA
