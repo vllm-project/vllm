@@ -975,7 +975,13 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
 
 
-class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
+class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
+    """Connector API shared by the Mooncake push and pull connectors.
+
+    Both modes drive the same scheduler; each supplies the worker for its
+    transfer direction.
+    """
+
     _cache_hit_source = CacheHitSource.P2P
 
     def __init__(
@@ -1005,9 +1011,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def _build_worker(
         self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig"
     ) -> "MooncakeConnectorWorker":
-        """The worker this connector drives; the pull connector swaps it."""
-        assert self.engine_id is not None
-        return MooncakeConnectorWorker(vllm_config, self.engine_id, kv_cache_config)
+        """The worker this mode drives; each connector supplies its own."""
+        raise NotImplementedError(
+            "MooncakeBaseConnector does not pick a worker; instantiate "
+            "MooncakeConnector or MooncakePullConnector."
+        )
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
@@ -1022,8 +1030,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         if vllm_config.model_config.use_mla:
             return None
         logger.info_once(
-            "MooncakeConnector setting KV cache layout to LBHNC for "
-            "heterogeneous TP-safe KV transfer."
+            "%s setting KV cache layout to LBHNC "
+            "for heterogeneous TP-safe KV transfer.",
+            cls.__name__,
         )
         return "LBHNC"
 
@@ -1133,7 +1142,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """MooncakeConnector does not do layerwise saving."""
+        """The Mooncake connectors do not do layerwise saving."""
         pass
 
     def save_kv_layer(
@@ -1143,7 +1152,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
-        """MooncakeConnector does not save explicitly."""
+        """The Mooncake connectors do not save explicitly."""
         pass
 
     def wait_for_save(self):
@@ -1152,11 +1161,12 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """Return worker-local transfer stats since the last call.
 
-        Note the P/D asymmetry: because Mooncake is P-push (P calls
-        batch_transfer_sync_write), P records successful transfer latency,
-        bytes, and descriptor counts, while D only records failures
-        (recv/ZMQ errors). Aggregated NIXL-style dashboards will find
-        successful-transfer metrics on the P worker, not D.
+        The side that issues the transfer records the successful latency,
+        bytes, and descriptor counts: the prefiller in push mode
+        (`batch_transfer_sync_write`), the decoder in pull mode
+        (`batch_transfer_sync_read`). Failures are recorded by whichever side
+        observes them, so aggregated NIXL-style dashboards read the
+        successful-transfer counters from the issuing worker.
         """
         if self.connector_worker is None:
             return None
@@ -1179,6 +1189,19 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         return MooncakePromMetrics(
             vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
+
+
+class MooncakeConnector(MooncakeBaseConnector):
+    """Mooncake P2P connector in WRITE mode.
+
+    A decoder asks the prefiller for its blocks and the prefiller writes them
+    into the decoder's registered KV cache.
+    """
+
+    def _build_worker(
+        self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig"
+    ) -> "MooncakeConnectorWorker":
+        return MooncakeConnectorWorker(vllm_config, self.engine_id, kv_cache_config)
 
 
 class MooncakeConnectorScheduler:

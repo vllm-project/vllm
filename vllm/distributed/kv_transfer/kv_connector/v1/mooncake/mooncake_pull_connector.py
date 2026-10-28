@@ -30,7 +30,7 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     BlockTransferRequest,
-    MooncakeConnector,
+    MooncakeBaseConnector,
     MooncakeConnectorMetadata,
     MooncakeConnectorWorker,
     MooncakeXferMetadata,
@@ -70,10 +70,10 @@ def _consume_task_result(task: asyncio.Task) -> None:
         task.exception()
 
 
-class MooncakePullConnector(MooncakeConnector):
+class MooncakePullConnector(MooncakeBaseConnector):
     """Mooncake P2P connector in READ mode.
 
-    Same scheduler, metadata and registered regions as `MooncakeConnector`;
+    Same scheduler, metadata and registered regions as the push connector;
     only the worker differs, because the decoder reads the prefiller's KV cache
     instead of the prefiller writing into the decoder's memory.
     """
@@ -81,7 +81,6 @@ class MooncakePullConnector(MooncakeConnector):
     def _build_worker(
         self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig"
     ) -> "MooncakePullConnectorWorker":
-        assert self.engine_id is not None
         return MooncakePullConnectorWorker(vllm_config, self.engine_id, kv_cache_config)
 
 
