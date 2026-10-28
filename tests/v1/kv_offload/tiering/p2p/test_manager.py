@@ -2678,3 +2678,112 @@ def test_held_promotions_answer_peer_lookups_with_miss(monkeypatch):
         assert [job.keys for job in promotions] == [[key]]
     finally:
         tiering.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Idleness while serving peers
+# ---------------------------------------------------------------------------
+
+
+def _producer_with_cpu_hit(
+    key: OffloadKey, tier_poll_interval_s: float | None = None
+) -> tuple[P2PSecondaryTierManager, TieringOffloadingManager]:
+    """A consumer paired with a lone-P2P producer whose CPU tier holds key."""
+    consumer, server = _build_paired_managers()
+    kwargs = {}
+    if tier_poll_interval_s is not None:
+        kwargs["tier_poll_interval_s"] = tier_poll_interval_s
+    tiering = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_chunks=4, mmap_region=_mock_mmap_region(4)
+        ),
+        secondary_tiers=[server],
+        **kwargs,
+    )
+    seed_ctx = ReqContext(req_id="seed")
+    with tiering.lock:
+        assert tiering.primary_tier.prepare_store([key], seed_ctx) is not None
+        tiering.primary_tier.complete_store([key], seed_ctx)
+    return consumer, tiering
+
+
+def _peer_hit(
+    consumer: P2PSecondaryTierManager,
+    tiering: TieringOffloadingManager,
+    key: OffloadKey,
+    step_producer: bool,
+) -> ReqContext:
+    """Drive a consumer lookup until the producer pins key as a HIT."""
+    step_end = ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+    ctx = ReqContext(
+        req_id="req-peer",
+        kv_transfer_params=_remote_kv_source_kv_params("B", 2, "req-peer"),
+    )
+    _annotate_req_context(ctx)
+    consumer.on_new_request(ctx)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        list(consumer.get_finished_jobs())
+        if step_producer:
+            with tiering.lock:
+                tiering.on_schedule_end(step_end)
+        result = consumer.lookup(key, ctx)
+        if result is LookupResult.HIT:
+            return ctx
+        assert result is LookupResult.RETRY
+        consumer.on_schedule_end(step_end)
+        time.sleep(0.001)
+    raise AssertionError("peer lookup did not reach HIT")
+
+
+class TestIdleWhileServingPeers:
+    @pytest.mark.cpu_test
+    def test_pinned_peer_hit_does_not_block_idleness(self):
+        """A lone-P2P producer with a live tier-poll thread serves a whole peer
+        request without an engine step, so its pin must not count as pending
+        work, and the fetch must still complete and release the pin."""
+        key = OffloadKey(b"cpu-resident")
+        consumer, tiering = _producer_with_cpu_hit(key)
+        try:
+            assert tiering._tier_poll_thread is not None
+            ctx = _peer_hit(consumer, tiering, key, step_producer=False)
+            with tiering.lock:
+                assert tiering._jobs
+                assert tiering.has_pending_work() is False
+
+            consumer.submit_load(
+                TransferJob(
+                    job_id=7,
+                    keys=[key],
+                    chunk_ids=np.array([0]),
+                    is_promotion=True,
+                    req_context=ctx,
+                )
+            )
+            results: list[JobResult] = []
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                results.extend(consumer.get_finished_jobs())
+                with tiering.lock:
+                    if not tiering._jobs and results:
+                        break
+                time.sleep(0.001)
+            assert JobResult(job_id=7, success=True) in results
+            with tiering.lock:
+                assert not tiering._jobs
+        finally:
+            tiering.shutdown()
+
+    @pytest.mark.cpu_test
+    def test_pinned_peer_hit_without_poll_thread_is_pending(self):
+        """With the tier-poll thread disabled only a step completes the
+        fetch, so the engine must keep stepping."""
+        key = OffloadKey(b"cpu-resident")
+        consumer, tiering = _producer_with_cpu_hit(key, tier_poll_interval_s=0)
+        try:
+            assert tiering._tier_poll_thread is None
+            _peer_hit(consumer, tiering, key, step_producer=True)
+            assert tiering._jobs
+            assert tiering.has_pending_work() is True
+        finally:
+            tiering.shutdown()

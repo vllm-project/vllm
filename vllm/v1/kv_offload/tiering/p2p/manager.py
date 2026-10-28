@@ -223,14 +223,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     to be serviced from that thread too; without it a peer's lookup or fetch
     waits for a step boundary, which on a saturated rank can be seconds.
 
-    ``has_pending_work()`` reports peer-originated work that still needs a
-    step: results waiting to be handed off, sessions with transfers in
-    flight or a registration pending, parked unbound stores and lookups
-    owing a ``parent.on_request_finished``. Idle peer polling is not included
-    -- the tier-poll thread drives it -- so a lone p2p tier lets a quiescent
-    engine report itself idle and finish a pause or a graceful shutdown. The
-    tiering manager keeps the engine ticking on this tier's behalf when that
-    thread is disabled (``tier_poll_interval_s <= 0``), and also whenever a
+    ``has_pending_work()`` reports peer-originated work that needs a step:
+    results waiting to be handed off, sessions with transfers in flight or a
+    registration pending, parked unbound stores and lookups owing a
+    ``parent.on_request_finished``. Idle peer polling is not included. While
+    the tier-poll thread is alive the tiering manager ignores this tier's
+    work entirely, since that thread completes it without a step, so an
+    engine that only serves peers can finish a pause or graceful shutdown.
+    The tiering manager keeps the engine ticking on this tier's behalf when
+    that thread is disabled (``tier_poll_interval_s <= 0``), and whenever a
     second secondary tier exists, since a peer lookup can promote out of it
     and only a step submits and completes that promotion.
     """
@@ -655,7 +656,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def has_pending_work(self) -> bool:
-        # Real, peer-originated work only. Idle peer polling is deliberately
+        # Peer-originated work that needs a step. Idle peer polling is deliberately
         # excluded: the tier-poll thread drives _control.poll()/session.poll()
         # between steps, and reporting it here would keep EngineCore.has_work()
         # permanently True, so pause and graceful shutdown could never finish.

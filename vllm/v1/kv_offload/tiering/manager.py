@@ -1238,35 +1238,44 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def has_pending_work(self) -> bool:
-        # In-flight primary<->secondary transfers (pending promotions are
-        # translated to transfer jobs in on_schedule_end), plus any work the
-        # secondary tiers themselves still have outstanding.
-        # Deferred releases keep the tiers polled until they complete.
+        """Report whether outstanding work needs an engine step to finish.
+
+        Work a live tier-poll thread can complete on its own -- a polled
+        tier's own work and its jobs and deferred releases, which
+        poll_tiers() collects -- is left out, so an engine that only serves
+        peers can still go idle and finish a pause or graceful shutdown.
+        """
+        thread = self._tier_poll_thread
+        thread_alive = thread is not None and thread.is_alive()
+        polled_idx = (
+            {self._tier_index[tier] for tier in self._polled_tiers}
+            if thread_alive
+            else set()
+        )
         if (
-            self._jobs
-            or self._deferred_releases
+            any(job.tier_idx not in polled_idx for job in self._jobs.values())
+            or any(
+                d.tier_idx not in polled_idx for d in self._deferred_releases.values()
+            )
             or any(state.pending_cascade_keys for state in self._req_state.values())
-            or any(tier.has_pending_work() for tier in self.secondary_tiers)
+            or any(
+                tier.has_pending_work()
+                for i, tier in enumerate(self.secondary_tiers)
+                if i not in polled_idx
+            )
         ):
             return True
-        # A tier-poll round can serve a peer whose lookup promotes a chunk out
-        # of another secondary tier. poll_tiers() never flushes promotions and
-        # only a scheduler step collects their completions, so with more than
-        # one secondary tier the engine must keep stepping for such a load. A
-        # lone p2p tier can only ever hit the primary on a peer lookup, so it
-        # still goes idle.
-        if self._polled_tiers and len(self.secondary_tiers) > 1:
-            return True
-        # A tier that opts into off-thread polling reports only its own work and
-        # leaves idle peer polling to the tier-poll thread. When no live thread
-        # services it -- a non-positive interval starts none -- the engine tick
-        # is the only driver, so keep the engine stepping for its lifetime. A
-        # failing thread backs off but never exits, so this is not a fallback
-        # for the backoff path.
         if not self._polled_tiers:
             return False
-        thread = self._tier_poll_thread
-        return thread is None or not thread.is_alive()
+        # A tier-poll round can serve a peer whose lookup promotes a chunk out
+        # of another secondary tier. Only a step submits that promotion and
+        # collects its completion, so keep stepping when one could exist. A
+        # lone p2p tier can only hit the primary on a peer lookup.
+        if len(self.secondary_tiers) > 1:
+            return True
+        # Without a live thread (tier_poll_interval_s <= 0) the engine tick is
+        # the only driver of the polled tiers, so keep the engine stepping.
+        return not thread_alive
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
