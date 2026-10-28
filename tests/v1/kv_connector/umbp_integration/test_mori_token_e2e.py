@@ -31,7 +31,7 @@ def _flush_gpu_cache(llm: LLM, sampling_params: SamplingParams) -> None:
         llm.generate(prompts, sampling_params, use_tqdm=False)
 
 
-def test_mori_external_kv_preserves_generated_tokens(tmp_path):
+def test_mori_external_kv_preserves_generated_tokens(socket_dir):
     model = os.environ.get("VLLM_UMBP_TEST_MODEL", "Qwen/Qwen3-0.6B")
     llm = LLM(
         model=model,
@@ -49,7 +49,7 @@ def test_mori_external_kv_preserves_generated_tokens(tmp_path):
                 "mode": "embedded",
                 # Holds the prompt and every flush request: only GPU memory evicts.
                 "capacity_bytes": 2 << 30,
-                "lookup_dir": str(tmp_path),
+                "lookup_dir": socket_dir,
                 "num_workers": 2,
                 "timeout_ms": 60000,
                 "load_async": False,

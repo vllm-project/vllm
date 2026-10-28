@@ -4,7 +4,6 @@
 import gc
 import importlib.util
 import sys
-import tempfile
 import threading
 import time
 import weakref
@@ -92,7 +91,7 @@ def test_mori_range_arguments_preserve_sparse_offsets_and_empty_objects(for_stor
 
 
 @pytest.fixture
-def bulk_worker(monkeypatch, tmp_path):
+def bulk_worker(monkeypatch, socket_dir):
     calls: list[
         tuple[list[str], list[int], list[list[int]], list[list[int]], list[list[int]]]
     ] = []
@@ -129,7 +128,7 @@ def bulk_worker(monkeypatch, tmp_path):
         client,
         "bulk",
         RankTopology(),
-        str(tmp_path),
+        socket_dir,
         1,
         5,
         planner.describe(RankTopology()),
@@ -303,12 +302,12 @@ def test_embedded_rejects_test_only_backend():
         )
 
 
-def test_mori_client_is_created_only_for_worker(monkeypatch, tmp_path):
+def test_mori_client_is_created_only_for_worker(monkeypatch, socket_dir):
     """Scheduler lookup must not allocate a second, unused DRAM store."""
     monkeypatch.setitem(sys.modules, "mori.cpp", None)
     runtime = EmbeddedRuntime.from_config(
         UMBPRuntimeConfig(
-            "embedded", {"capacity_bytes": 1024, "lookup_dir": str(tmp_path)}
+            "embedded", {"capacity_bytes": 1024, "lookup_dir": socket_dir}
         )
     )
     topology = RankTopology()
@@ -373,13 +372,13 @@ def test_embedded_connector_rejects_pipeline_parallelism():
         )
 
 
-def test_data_parallel_ranks_get_separate_lookup_sockets(tmp_path):
+def test_data_parallel_ranks_get_separate_lookup_sockets(socket_dir):
     topology = RankTopology()
     handles = [
         EmbeddedRuntime.from_config(
             replace(
                 UMBPRuntimeConfig.from_vllm(
-                    _vllm_config({"mode": "embedded", "lookup_dir": str(tmp_path)})
+                    _vllm_config({"mode": "embedded", "lookup_dir": socket_dir})
                 ),
                 dp_index=dp_index,
             )
@@ -393,10 +392,10 @@ def test_data_parallel_ranks_get_separate_lookup_sockets(tmp_path):
         handle.close()
 
 
-def test_lookup_instance_separates_engines_on_one_host(tmp_path):
+def test_lookup_instance_separates_engines_on_one_host(socket_dir):
     def path(options):
         runtime = EmbeddedRuntime.from_config(
-            UMBPRuntimeConfig("embedded", {"lookup_dir": str(tmp_path), **options})
+            UMBPRuntimeConfig("embedded", {"lookup_dir": socket_dir, **options})
         )
         handle = runtime.create_scheduler_handle("same-model", RankTopology(), None)
         return handle._paths[RankTopology().local_namespace]
@@ -405,13 +404,6 @@ def test_lookup_instance_separates_engines_on_one_host(tmp_path):
     assert path({}) == path({})
     with pytest.raises(ValueError, match="lookup_instance"):
         path({"lookup_instance": 1})
-
-
-@pytest.fixture
-def socket_dir():
-    """Keep AF_UNIX paths short regardless of CI's TMPDIR."""
-    with tempfile.TemporaryDirectory(prefix="umbp-", dir="/tmp") as directory:
-        yield directory
 
 
 def test_lookup_server_refuses_a_socket_another_engine_serves(socket_dir):
@@ -431,10 +423,10 @@ def test_lookup_server_refuses_a_socket_another_engine_serves(socket_dir):
         first.close()
 
 
-def test_lookup_server_replaces_a_stale_socket_file(tmp_path):
+def test_lookup_server_replaces_a_stale_socket_file(socket_dir):
     import socket
 
-    path = _lookup_socket_path("stale", (0, 0, 0, 0), str(tmp_path), "dp0")
+    path = _lookup_socket_path("stale", (0, 0, 0, 0), socket_dir, "dp0")
     dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     dead.bind(path)
     dead.close()
@@ -443,14 +435,14 @@ def test_lookup_server_replaces_a_stale_socket_file(tmp_path):
     )
     server.start()
     try:
-        scheduler = _MoriSchedulerHandle("stale", RankTopology(), str(tmp_path), "dp0")
+        scheduler = _MoriSchedulerHandle("stale", RankTopology(), socket_dir, "dp0")
         assert scheduler.lookup(["k"]) == [True]
     finally:
         server.close()
 
 
 @pytest.mark.parametrize("close_rank", [None, 0, 1])
-def test_mori_scheduler_routes_lookup_and_clear_to_all_ranks(tmp_path, close_rank):
+def test_mori_scheduler_routes_lookup_and_clear_to_all_ranks(socket_dir, close_rank):
     _rank_namespace_from_key_prefix.cache_clear()
 
     class _Client:
@@ -473,12 +465,12 @@ def test_mori_scheduler_routes_lookup_and_clear_to_all_ranks(tmp_path, close_ran
     clients = [_Client([key, "legacy-key"]) for key in keys]
     for rank, client in zip(topology.all_namespaces(), clients, strict=True):
         server = _MoriLookupServer(
-            _lookup_socket_path(namespace, rank, str(tmp_path)),
+            _lookup_socket_path(namespace, rank, socket_dir),
             client,
         )
         server.start()
         servers.append(server)
-    scheduler = _MoriSchedulerHandle(namespace, topology, str(tmp_path))
+    scheduler = _MoriSchedulerHandle(namespace, topology, socket_dir)
     try:
         assert scheduler.lookup(keys) == [True, True]
         assert scheduler.last_lookup_diagnostics == {
@@ -511,7 +503,9 @@ def test_mori_scheduler_routes_lookup_and_clear_to_all_ranks(tmp_path, close_ran
             server.close()
 
 
-def test_single_rank_lookup_avoids_routing_without_caching_hits(monkeypatch, tmp_path):
+def test_single_rank_lookup_avoids_routing_without_caching_hits(
+    monkeypatch, socket_dir
+):
     """The only rank also handles legacy keys; all results must stay authoritative."""
     namespace = "single-route"
     codec = BlockIdentityCodec(UMBPNamespace(namespace))
@@ -525,10 +519,10 @@ def test_single_rank_lookup_avoids_routing_without_caching_hits(monkeypatch, tmp
         return [key in resident for key in request_keys]
 
     server = _MoriLookupServer(
-        _lookup_socket_path(namespace, topology.local_namespace, str(tmp_path)),
+        _lookup_socket_path(namespace, topology.local_namespace, socket_dir),
         SimpleNamespace(batch_exists=query),
     )
-    scheduler = _MoriSchedulerHandle(namespace, topology, str(tmp_path))
+    scheduler = _MoriSchedulerHandle(namespace, topology, socket_dir)
     server.start()
     try:
 
@@ -722,7 +716,7 @@ def test_embedded_scheduler_clear_removes_published_objects():
     scheduler.close()
 
 
-def test_mori_publication_does_not_retain_historical_keys(tmp_path):
+def test_mori_publication_does_not_retain_historical_keys(socket_dir):
     class _Key(str):
         pass
 
@@ -740,7 +734,7 @@ def test_mori_publication_does_not_retain_historical_keys(tmp_path):
         _Client(),
         "eviction",
         RankTopology(),
-        str(tmp_path),
+        socket_dir,
         1,
         1,
     )
@@ -765,7 +759,7 @@ def test_mori_publication_does_not_retain_historical_keys(tmp_path):
 @pytest.mark.parametrize("timeout_first", [False, True])
 @pytest.mark.parametrize("blocked_stage", ["copy", "flush", "load"])
 def test_mori_transfer_keeps_buffers_owned_until_completion(
-    monkeypatch, tmp_path, operation, timeout_first, blocked_stage
+    monkeypatch, socket_dir, operation, timeout_first, blocked_stage
 ):
     class _Client:
         def __init__(self):
@@ -817,7 +811,7 @@ def test_mori_transfer_keeps_buffers_owned_until_completion(
         client,
         "cancel-reuse",
         RankTopology(),
-        str(tmp_path),
+        socket_dir,
         1,
         5,
         KVLayoutDescriptor((KVRegion("layer0", 0, 1024, 1024, 0),), RankTopology()),
@@ -876,7 +870,9 @@ def test_mori_transfer_keeps_buffers_owned_until_completion(
 
 
 @pytest.mark.parametrize("flush_succeeds", [False, True])
-def test_mori_publication_does_not_flush_on_the_worker_thread(tmp_path, flush_succeeds):
+def test_mori_publication_does_not_flush_on_the_worker_thread(
+    socket_dir, flush_succeeds
+):
     flush_threads = []
 
     def flush():
@@ -889,7 +885,7 @@ def test_mori_publication_does_not_flush_on_the_worker_thread(tmp_path, flush_su
         flush=flush,
         close=lambda: None,
     )
-    handle = _MoriWorkerHandle(client, "flush", RankTopology(), str(tmp_path), 1, 5)
+    handle = _MoriWorkerHandle(client, "flush", RankTopology(), socket_dir, 1, 5)
     try:
         job = handle.wait(handle.store([BlockTransferPlan("key", 0)]))
         assert len(flush_threads) == 1
@@ -905,7 +901,7 @@ def test_mori_publication_does_not_flush_on_the_worker_thread(tmp_path, flush_su
         handle.close()
 
 
-def test_store_timeout_does_not_count_time_waiting_for_a_worker(tmp_path):
+def test_store_timeout_does_not_count_time_waiting_for_a_worker(socket_dir):
     release = threading.Event()
 
     def put(keys, *args):
@@ -918,7 +914,7 @@ def test_store_timeout_does_not_count_time_waiting_for_a_worker(tmp_path):
         flush=lambda: True,
         close=lambda: None,
     )
-    handle = _MoriWorkerHandle(client, "queued", RankTopology(), str(tmp_path), 1, 5)
+    handle = _MoriWorkerHandle(client, "queued", RankTopology(), socket_dir, 1, 5)
     try:
         running = handle.store([BlockTransferPlan("running", 0)])
         handle._timeout_s = 0.05
@@ -969,7 +965,7 @@ def test_mori_completed_transfer_timeout_is_a_safe_failure():
 
 
 @pytest.fixture
-def blocked_native_load(monkeypatch, tmp_path):
+def blocked_native_load(monkeypatch, socket_dir):
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
@@ -985,7 +981,7 @@ def blocked_native_load(monkeypatch, tmp_path):
         SimpleNamespace(batch_get_ranges_into_ptr=get, close=lambda: None),
         "blocked-load",
         RankTopology(),
-        str(tmp_path),
+        socket_dir,
         1,
         1,
     )

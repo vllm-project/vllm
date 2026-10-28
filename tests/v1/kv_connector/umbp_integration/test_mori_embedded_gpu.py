@@ -99,14 +99,14 @@ def _gpu_worker(
     not torch.accelerator.is_available() or torch.accelerator.device_count() < 4,
     reason="requires four ROCm GPUs",
 )
-def test_mori_embedded_tp2_pp2_gpu_roundtrip(tmp_path):
+def test_mori_embedded_tp2_pp2_gpu_roundtrip(socket_dir):
     context = mp.get_context("spawn")
     ready = context.Queue()
     release = context.Event()
     processes = [
         context.Process(
             target=_gpu_worker,
-            args=(rank, str(tmp_path), ready, release),
+            args=(rank, socket_dir, ready, release),
         )
         for rank in range(4)
     ]
@@ -118,7 +118,7 @@ def test_mori_embedded_tp2_pp2_gpu_roundtrip(tmp_path):
             "embedded",
             {
                 "capacity_bytes": 128 * 1024 * 1024,
-                "lookup_dir": str(tmp_path),
+                "lookup_dir": socket_dir,
             },
         )
     ).create_scheduler_handle(
@@ -145,7 +145,7 @@ def test_mori_embedded_tp2_pp2_gpu_roundtrip(tmp_path):
     not torch.accelerator.is_available(),
     reason="requires a ROCm GPU",
 )
-def test_mori_store_overlaps_gpu_compute(tmp_path):
+def test_mori_store_overlaps_gpu_compute(socket_dir):
     torch.accelerator.set_device_index(0)
     size = 64 << 20
     topology = RankTopology()
@@ -158,7 +158,7 @@ def test_mori_store_overlaps_gpu_compute(tmp_path):
             "embedded",
             {
                 "capacity_bytes": 256 << 20,
-                "lookup_dir": str(tmp_path),
+                "lookup_dir": socket_dir,
                 "num_workers": 2,
                 "timeout_ms": 60000,
             },
@@ -217,7 +217,7 @@ def test_mori_store_overlaps_gpu_compute(tmp_path):
     reason="requires a ROCm GPU",
 )
 @pytest.mark.parametrize("bulk_load", [False, True])
-def test_mori_embedded_dram_eviction_and_restore(tmp_path, bulk_load):
+def test_mori_embedded_dram_eviction_and_restore(socket_dir, bulk_load):
     torch.accelerator.set_device_index(0)
     object_size = 1 << 20
     topology = RankTopology()
@@ -232,7 +232,7 @@ def test_mori_embedded_dram_eviction_and_restore(tmp_path, bulk_load):
                 "capacity_bytes": 8 << 20,
                 "dram_high_watermark": 0.75,
                 "dram_low_watermark": 0.5,
-                "lookup_dir": str(tmp_path),
+                "lookup_dir": socket_dir,
                 "timeout_ms": 60000,
             },
         )

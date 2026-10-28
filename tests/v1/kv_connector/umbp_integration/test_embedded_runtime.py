@@ -43,7 +43,7 @@ from vllm.v1.kv_cache_interface import (
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda:0"])
-def test_finished_hybrid_tail_roundtrip_restores_full_state(tmp_path, device):
+def test_finished_hybrid_tail_roundtrip_restores_full_state(socket_dir, device):
     """A hash-only tail must survive request cleanup, match, and restore every byte."""
     runtime = MemoryRuntime()
     if device != "cpu":
@@ -55,7 +55,7 @@ def test_finished_hybrid_tail_roundtrip_restores_full_state(tmp_path, device):
         runtime = EmbeddedRuntime.from_config(
             UMBPRuntimeConfig(
                 "embedded",
-                {"capacity_bytes": 16 << 20, "lookup_dir": str(tmp_path)},
+                {"capacity_bytes": 16 << 20, "lookup_dir": socket_dir},
             )
         )
     groups = [
