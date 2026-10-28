@@ -506,3 +506,32 @@ def test_plan_flashinfer_checkpoints_selects_the_state_at_each_offset():
     # Row 1: state after 128 tokens of the first prefill. Row 3: after 192
     # tokens of the third prefill, whose states start at index 3.
     assert rows == [0, 1, 0, 5]
+
+
+@pytest.mark.parametrize(
+    "seq_lens, query_lens, num_decode_draft_tokens, num_spec, expected",
+    [
+        # Leading decodes never count; only prefill rows do.
+        ([10, 10, 100, 50], [1, 1, 100, 50], None, 0, "none"),
+        ([10, 10, 140, 70], [1, 1, 100, 50], None, 0, "all"),
+        ([10, 140, 50], [1, 100, 50], None, 0, "mixed"),
+        # The spec decode row is not a prefill row.
+        ([10, 100], [3, 100], [2, -1], 2, "none"),
+        ([10, 120], [3, 100], [2, -1], 2, "all"),
+        ([10, 10], [1, 1], None, 0, "mixed"),  # no prefills
+    ],
+)
+def test_prefill_initial_state_mode(
+    seq_lens, query_lens, num_decode_draft_tokens, num_spec, expected
+):
+    """The host-side mode agrees with the device-side initial-state mask."""
+    builder = _create_gdn_builder(num_speculative_tokens=num_spec)
+    meta = _build(builder, BatchSpec(seq_lens, query_lens), num_decode_draft_tokens)
+    assert meta.prefill_initial_state_mode == expected
+    if meta.num_prefills:
+        has = meta.prefill_has_initial_state
+        assert has is not None
+        if expected == "none":
+            assert not has.any()
+        elif expected == "all":
+            assert has.all()
