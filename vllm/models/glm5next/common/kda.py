@@ -52,12 +52,12 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.third_party.kda import (
-        chunk_kda_with_fused_gate,
+        chunk_kda_with_fused_gate_paged,
         fused_recurrent_kda,
     )
 else:
     from vllm.models.glm5next.nvidia.ops.third_party.kda import (
-        chunk_kda_with_fused_gate,
+        chunk_kda_with_fused_gate_paged,
         fused_recurrent_kda,
     )
 
@@ -362,6 +362,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
         ) = None
         self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
+        if kda_prefill_checkpoint_alignment(self.kda_prefill_backend) is not None:
+            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
+                state_len=self.conv_size - 1
+            )
         if self.kda_prefill_backend == "flashkda":
             import vllm._flashkda_C  # noqa: F401
 
@@ -386,9 +390,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     (1, max_tokens, self.local_num_heads, self.head_dim),
                     vllm_config.model_config.dtype,
                 ),
-            )
-            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
-                state_len=self.conv_size - 1
             )
 
     def _flashkda_prefill(
@@ -700,10 +701,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             assert q_ns is not None
             assert non_spec_state_indices_tensor is not None
             assert has_initial_state is not None
-            initial_state = gather_initial_states(
-                recurrent_state, non_spec_state_indices_tensor, has_initial_state
-            )
+            checkpoint = attn_metadata_narrowed.checkpoint
             if self.kda_prefill_backend == "flashkda":
+                initial_state = gather_initial_states(
+                    recurrent_state, non_spec_state_indices_tensor, has_initial_state
+                )
                 # Non-spec step: write straight into the layer output buffer
                 # (dense token order, no merge copy). Step with spec-decode
                 # tokens: write to the workspace buffer and scatter below.
@@ -722,11 +724,20 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     conv_state=conv_state,
                     recurrent_state=recurrent_state,
                 )
-            else:
-                (
-                    core_attn_out_non_spec,
+                scatter_states(
+                    recurrent_state,
                     last_recurrent_state,
-                ) = chunk_kda_with_fused_gate(
+                    non_spec_state_indices_tensor,
+                )
+            else:
+                # The kernel reads and writes the prefill rows of the paged
+                # state cache and stores each checkpoint's recurrent state into
+                # its block; the exporter adds the conv window.
+                checkpoint_offsets = checkpoint_rows = None
+                if checkpoint is not None:
+                    checkpoint_offsets = checkpoint.checkpoint_offsets
+                    checkpoint_rows = checkpoint.state_indices
+                core_attn_out_non_spec = chunk_kda_with_fused_gate_paged(
                     q=_rearr(q_ns),
                     k=_rearr(k_ns),
                     v=_rearr(v_ns),
@@ -736,19 +747,24 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     beta=_cast_sigmoid(beta_ns.squeeze(0)).unsqueeze(0),
                     A_log=self.A_log,
                     g_bias=self.dt_bias,
-                    initial_state=initial_state,
-                    output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
                     cu_seqlens=non_spec_query_start_loc,
                     safe_gate=safe_gate,
                     lower_bound=lower_bound,
+                    state_cache=recurrent_state,
+                    state_indices=non_spec_state_indices_tensor,
+                    has_initial_state=has_initial_state,
+                    checkpoint_offsets=checkpoint_offsets,
+                    checkpoint_state_indices=checkpoint_rows,
                 )
-            # Init cache
-            scatter_states(
-                recurrent_state,
-                last_recurrent_state,
-                non_spec_state_indices_tensor,
-            )
+                if checkpoint is not None:
+                    assert self._checkpoint_exporter is not None
+                    self._checkpoint_exporter.export(
+                        checkpoint,
+                        raw_qkv=raw_qkv_ns,
+                        conv_state=conv_state,
+                        cu_seqlens=non_spec_query_start_loc,
+                    )
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_query_start_loc is not None
             assert non_spec_state_indices_tensor is not None

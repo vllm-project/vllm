@@ -825,6 +825,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             None
         )
         self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
+        if kda_prefill_checkpoint_alignment(self.kda_prefill_backend) is not None:
+            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
+                state_len=self.conv_size - 1
+            )
         if self.kda_prefill_backend == "flashkda":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             N = vllm_config.scheduler_config.max_num_seqs
@@ -838,7 +842,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 ((N, H, D, D), self.get_state_dtype()[1]),
                 ((workspace_size,), torch.uint8),
             )
-            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter()
         elif self.kda_prefill_backend == "flashinfer":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             H, D = self.local_num_heads, self.head_dim
@@ -1070,7 +1073,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             return
 
         from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
-            chunk_kda_with_fused_gate,
+            chunk_kda_with_fused_gate_paged,
             fused_recurrent_kda,
             fused_recurrent_kda_packed_decode,
         )
@@ -1348,11 +1351,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
                 assert non_spec_state_indices_tensor is not None
                 assert has_initial_state is not None
-                initial_state = gather_initial_states(
-                    recurrent_state,
-                    non_spec_state_indices_tensor,
-                    has_initial_state,
-                )
+                # The Triton kernel reads and writes the paged state cache.
+                prefill_on_paged_state = self.kda_prefill_backend == "triton"
+                if not prefill_on_paged_state:
+                    initial_state = gather_initial_states(
+                        recurrent_state,
+                        non_spec_state_indices_tensor,
+                        has_initial_state,
+                    )
                 if self.kda_prefill_backend == "flashkda":
                     assert self.gate_lower_bound is not None
                     assert self._flashkda_buffer_specs is not None
@@ -1452,10 +1458,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         seq_order=m.flashinfer_prefill_seq_order,
                     )
                 else:
-                    (
-                        core_attn_out_non_spec,
-                        last_recurrent_state,
-                    ) = chunk_kda_with_fused_gate(
+                    # The kernel also stores each checkpoint's recurrent state
+                    # into its block; the exporter adds the conv window.
+                    checkpoint_offsets = checkpoint_rows = None
+                    if checkpoint is not None:
+                        checkpoint_offsets = checkpoint.checkpoint_offsets
+                        checkpoint_rows = checkpoint.state_indices
+                    core_attn_out_non_spec = chunk_kda_with_fused_gate_paged(
                         q=q_ns,
                         k=k_ns,
                         v=v_ns,
@@ -1464,15 +1473,27 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         A_log=self.A_log,
                         g_bias=self.dt_bias,
                         lower_bound=self.gate_lower_bound,
-                        initial_state=initial_state,
-                        output_final_state=True,
                         use_qk_l2norm_in_kernel=True,
                         cu_seqlens=non_spec_query_start_loc,
                         out=non_spec_out,
+                        state_cache=recurrent_state,
+                        state_indices=non_spec_state_indices_tensor,
+                        has_initial_state=has_initial_state,
+                        checkpoint_offsets=checkpoint_offsets,
+                        checkpoint_state_indices=checkpoint_rows,
                     )
-                recurrent_state[non_spec_state_indices_tensor] = (
-                    last_recurrent_state.to(recurrent_state.dtype)
-                )
+                    if checkpoint is not None:
+                        assert self._checkpoint_exporter is not None
+                        self._checkpoint_exporter.export(
+                            checkpoint,
+                            raw_qkv=mixed_qkv_ns,
+                            conv_state=conv_state,
+                            cu_seqlens=non_spec_query_start_loc,
+                        )
+                if not prefill_on_paged_state:
+                    recurrent_state[non_spec_state_indices_tensor] = (
+                        last_recurrent_state.to(recurrent_state.dtype)
+                    )
             else:
                 # Pure non-speculative decode.
                 assert non_spec_state_indices_tensor is not None

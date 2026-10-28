@@ -501,6 +501,12 @@ def _chunk_kda_fwd_with_cumulative_g(
     chunk_size: int = FLA_CHUNK_SIZE,
     safe_gate: bool = False,
     out: torch.Tensor | None = None,
+    state_cache: torch.Tensor | None = None,
+    state_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
+    checkpoint_state_indices: torch.Tensor | None = None,
 ):
     # `g` must already be chunk-local cumulatively-summed AND scaled by
     # RCP_LN2 (so the downstream exp2-based kernels reproduce exp(g)).
@@ -537,6 +543,12 @@ def _chunk_kda_fwd_with_cumulative_g(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         use_exp2=True,
+        state_cache=state_cache,
+        state_indices=state_indices,
+        has_initial_state=has_initial_state,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
+        checkpoint_state_indices=checkpoint_state_indices,
     )
     del w, u, kg
     o = chunk_gla_fwd_o_gk(
@@ -610,6 +622,12 @@ def chunk_kda_with_fused_gate_fwd(
     lower_bound: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
+    state_cache: torch.Tensor | None = None,
+    state_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
+    checkpoint_state_indices: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
     chunk_indices = (
@@ -641,6 +659,12 @@ def chunk_kda_with_fused_gate_fwd(
         chunk_size=chunk_size,
         safe_gate=lower_bound is not None,
         out=out,
+        state_cache=state_cache,
+        state_indices=state_indices,
+        has_initial_state=has_initial_state,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
+        checkpoint_state_indices=checkpoint_state_indices,
     )
 
 
@@ -719,6 +743,65 @@ def chunk_kda_with_fused_gate(
         out=out,
     )
     return o, final_state
+
+
+def chunk_kda_with_fused_gate_paged(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    raw_g: torch.Tensor,
+    raw_beta: torch.Tensor,
+    A_log: torch.Tensor,
+    g_bias: torch.Tensor | None,
+    *,
+    state_cache: torch.Tensor,
+    state_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    checkpoint_offsets: torch.Tensor | None = None,
+    checkpoint_state_indices: torch.Tensor | None = None,
+    scale: float | None = None,
+    lower_bound: float | None = None,
+    use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Run chunk KDA on a paged state pool and return the attention output.
+
+    The paged-state arguments are those of `chunk_gated_delta_rule_paged`:
+    final states go back to the `state_indices` rows of `state_cache`, and
+    checkpoints to its `checkpoint_state_indices` rows.
+    """
+    if (checkpoint_offsets is None) != (checkpoint_state_indices is None):
+        raise ValueError("checkpoint_offsets and checkpoint_state_indices go together")
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+
+    if use_qk_l2norm_in_kernel:
+        q = l2norm_fwd(q.contiguous())
+        k = l2norm_fwd(k.contiguous())
+
+    o, _ = chunk_kda_with_fused_gate_fwd(
+        q=q,
+        k=k,
+        v=v.contiguous(),
+        raw_g=raw_g.contiguous(),
+        raw_beta=raw_beta,
+        A_log=A_log,
+        g_bias=g_bias,
+        scale=scale,
+        initial_state=None,
+        output_final_state=False,
+        lower_bound=lower_bound,
+        cu_seqlens=cu_seqlens,
+        out=out,
+        state_cache=state_cache,
+        state_indices=state_indices,
+        has_initial_state=has_initial_state,
+        checkpoint_state=state_cache if checkpoint_offsets is not None else None,
+        checkpoint_offsets=checkpoint_offsets,
+        checkpoint_state_indices=checkpoint_state_indices,
+    )
+    return o
 
 
 @triton.autotune(

@@ -27,6 +27,9 @@ backend and for the Triton/FLA backend on CUDA and ROCm. The Triton/FLA kernel
 reads and writes recurrent state directly in the paged cache and exports
 checkpoints on its 64-token chunk grid. Every Mamba layer in a hybrid model
 must support internal checkpoints for this optimization to take effect.
+The KDA layers of GLM-5.3-Flash and Kimi-K3 use the same kernel and grid with
+`kda_prefill_backend` set to `triton`; the FlashKDA backend exports
+checkpoints on its own 16-token grid.
 
 The checkpoint's offset from the start of the current prefill must be a
 multiple of 64; the total prompt length need not be. If the scheduler cannot
