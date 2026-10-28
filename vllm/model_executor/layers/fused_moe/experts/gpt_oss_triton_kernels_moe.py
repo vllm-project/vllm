@@ -46,10 +46,11 @@ def _triton_kernel_moe_supports_current_device() -> bool:
     p = current_platform
     if p.is_cuda():
         cap = p.get_device_capability()
-        # Hopper SM90, datacenter Blackwell SM100/103 and consumer Blackwell
-        # SM120/121. SM12x needs the opt-flag constraints applied by
-        # `_swizzle_mxfp4` and `_constrain_sm12x_block_m` to fit its 99KB of
-        # shared memory; it is still ordered after MARLIN by the selector.
+        # Hopper SM90, datacenter Blackwell SM100/103, Jetson Thor SM110 and
+        # consumer Blackwell SM120/121. SM110 and SM12x need the opt-flag
+        # constraints applied by `_swizzle_mxfp4` (SM12x also
+        # `_constrain_sm12x_block_m` to fit its 99KB of shared memory); both
+        # are still ordered after MARLIN by the selector.
         return cap is not None and (9, 0) <= (cap.major, cap.minor) < (13, 0)
     if p.is_rocm():
         from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx1250
