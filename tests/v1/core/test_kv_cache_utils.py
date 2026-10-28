@@ -222,6 +222,32 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     assert layouts[0] == layouts[1]
 
 
+def test_hisparse_packs_hot_layers_up_to_largest_device_page():
+    """Hybrid models share the device pool with larger non-MLA pages; hot
+    layers must pack up to that page, not one group per index group."""
+    mla = dict(block_size=64, num_kv_heads=1, dtype=torch.bfloat16)
+    specs: dict[str, KVCacheSpec] = {}
+    for layer in range(2):
+        specs[f"model.layers.{layer}.self_attn"] = MLAAttentionSpec(
+            head_size=576, is_index_group_leader=True, **mla
+        )
+        specs[f"model.layers.{layer}.self_attn.indexer"] = MLAAttentionSpec(
+            head_size=128, cache_role=SparseCacheRole.INDEXER, **mla
+        )
+    specs["model.layers.2.self_attn"] = FullAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=4096, dtype=torch.bfloat16
+    )
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_text_config.index_topk = 128
+
+    groups = get_hisparse_kv_cache_groups(config, specs)
+    assert groups is not None
+    hot_groups = [g for g in groups if isinstance(g.kv_cache_spec, HiSparseHotSpec)]
+    assert len(hot_groups) == 1
+    assert len(hot_groups[0].layer_names) == 2
+
+
 def test_hisparse_rejects_deepseek_v4():
     full_specs = {
         "model.layers.0.attn": MLAAttentionSpec(

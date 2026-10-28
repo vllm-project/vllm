@@ -155,7 +155,13 @@ def _lay_out_hisparse_groups(
         role=KVCacheGroupRole.HISPARSE_INDEXER,
     )
 
-    indexer_page = sum(spec.page_size_bytes for spec in indexer_specs.values())
+    regular_groups = groups[1:]
+    hot_group_page_limit = max(
+        [
+            sum(spec.page_size_bytes for spec in indexer_specs.values()),
+            *(_group_page_bytes(group) for group in regular_groups),
+        ]
+    )
     hot_blocks_per_request = cdiv(config.device_buffer_size, gpu_block_size)
     hot_units: list[list[tuple[str, MLAAttentionSpec]]] = []
     for layer_name, layer_spec in source_specs.items():
@@ -204,7 +210,7 @@ def _lay_out_hisparse_groups(
     current_page = 0
     for unit in hot_units:
         unit_page = sum(spec.page_size_bytes for _, spec in unit)
-        if current and current_page + unit_page > indexer_page:
+        if current and current_page + unit_page > hot_group_page_limit:
             append_hot_group(current)
             current = []
             current_page = 0
@@ -224,7 +230,6 @@ def _lay_out_hisparse_groups(
         host_resident=True,
         enable_kv_transfer=True,
     )
-    regular_groups = groups[1:]
     return [
         source_group,
         indexer_group,
@@ -232,6 +237,13 @@ def _lay_out_hisparse_groups(
         *hot_groups,
         *regular_groups,
     ]
+
+
+def _group_page_bytes(group: KVCacheGroupSpec) -> int:
+    spec = group.kv_cache_spec
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return sum(s.page_size_bytes for s in spec.kv_cache_specs.values())
+    return spec.page_size_bytes * len(group.layer_names)
 
 
 def create_hisparse_layout(
