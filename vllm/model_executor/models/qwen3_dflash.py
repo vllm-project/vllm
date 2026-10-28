@@ -729,6 +729,28 @@ class DFlashQwen3Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Tolerate checkpoints that mix unquantized (``.weight``) and quantized
+        # (``.trellis``/``.suh``/``.svh``) keys when the draft is quantized:
+        # an Exl3 layer exposes no ``weight`` parameter, so a stray ``.weight``
+        # entry would otherwise make AutoWeightsLoader raise. Drop entries whose
+        # mapped name is not a registered parameter, logging at DEBUG. Unquantized
+        # drafts keep strict behavior (no filtering).
+        if self.quant_config is not None:
+            valid_params = {name for name, _ in self.named_parameters()}
+            filtered = []
+            for name, tensor in weights:
+                mapped = self.hf_to_vllm_mapper.map_name(name)
+                if mapped is None:
+                    continue
+                if mapped in valid_params:
+                    filtered.append((name, tensor))
+                else:
+                    logger.debug(
+                        "Skipping weight %r (mapped to %r) not present in model",
+                        name,
+                        mapped,
+                    )
+            weights = filtered
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
