@@ -8,8 +8,8 @@ use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_server::{
-    Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogging, ParserSelection,
-    ReasoningEffort, RendererSelection,
+    Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
+    ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
 
@@ -225,6 +225,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_log_requests: false,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
+                        max_log_len: None,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
@@ -943,6 +944,7 @@ fn serve_resolves_output_logging_from_log_flags() {
         args.to_frontend_config("tcp://127.0.0.1:62100".to_string())
             .api_server_options
             .log_outputs
+            .outputs
     };
 
     assert_eq!(
@@ -971,7 +973,7 @@ fn frontend_args_json_passes_output_logging_into_config() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_log_requests":true,"enable_log_outputs":true,"enable_log_deltas":false}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_log_requests":true,"enable_log_outputs":true,"enable_log_deltas":false,"max_log_len":5}"#,
     ])
     .unwrap();
 
@@ -981,7 +983,10 @@ fn frontend_args_json_passes_output_logging_into_config() {
     let config = args.into_config();
     assert_eq!(
         config.api_server_options.log_outputs,
-        OutputLogging::Complete
+        OutputLogConfig {
+            outputs: OutputLogging::Complete,
+            max_log_len: Some(5),
+        }
     );
 }
 
@@ -1535,6 +1540,7 @@ fn frontend_args_accept_json() {
                         enable_log_requests: false,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
+                        max_log_len: None,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
@@ -2456,6 +2462,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_log_requests: false,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
+                        max_log_len: None,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
@@ -2627,7 +2634,10 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
-                log_outputs: Disabled,
+                log_outputs: OutputLogConfig {
+                    outputs: Disabled,
+                    max_log_len: None,
+                },
                 enable_prompt_tokens_details: false,
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
@@ -2741,7 +2751,10 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
-                log_outputs: Disabled,
+                log_outputs: OutputLogConfig {
+                    outputs: Disabled,
+                    max_log_len: None,
+                },
                 enable_prompt_tokens_details: false,
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
@@ -2943,7 +2956,10 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
-                log_outputs: Disabled,
+                log_outputs: OutputLogConfig {
+                    outputs: Disabled,
+                    max_log_len: None,
+                },
                 enable_prompt_tokens_details: false,
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,

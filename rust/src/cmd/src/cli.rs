@@ -36,8 +36,8 @@ use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_arg
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
     CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogging,
-    ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
+    OutputLogging, ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -424,6 +424,14 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(default = "default_enable_log_deltas")]
     pub enable_log_deltas: bool,
+
+    /// Max number of prompt characters or prompt ID numbers being printed in
+    /// log. The default of None means unlimited.
+    ///
+    /// Also bounds logged output characters and output token IDs.
+    #[arg(long)]
+    #[serde(default)]
+    pub max_log_len: Option<usize>,
 
     /// Include prompt_tokens_details in usage, including cached and newly
     /// cached prompt tokens.
@@ -863,10 +871,13 @@ impl SharedRuntimeArgs {
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
-            log_outputs: match (self.enable_log_outputs, self.enable_log_deltas) {
-                (false, _) => OutputLogging::Disabled,
-                (true, false) => OutputLogging::Complete,
-                (true, true) => OutputLogging::CompleteAndDeltas,
+            log_outputs: OutputLogConfig {
+                outputs: match (self.enable_log_outputs, self.enable_log_deltas) {
+                    (false, _) => OutputLogging::Disabled,
+                    (true, false) => OutputLogging::Complete,
+                    (true, true) => OutputLogging::CompleteAndDeltas,
+                },
+                max_log_len: self.max_log_len,
             },
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,

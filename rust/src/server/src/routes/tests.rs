@@ -9668,7 +9668,7 @@ where
 /// Send one request to a fresh app whose engine replies with `output_specs`,
 /// and return the logged outputs.
 async fn output_logs_for_request(
-    log_outputs: crate::config::OutputLogging,
+    api_server_options: ApiServerOptions,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     uri: &str,
     body: serde_json::Value,
@@ -9682,9 +9682,8 @@ async fn output_logs_for_request(
     let mut app = build_router(Arc::new(
         AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
             ApiServerOptions {
-                log_outputs,
                 enable_scale_out: true,
-                ..Default::default()
+                ..api_server_options
             },
         ),
     ));
@@ -9705,6 +9704,16 @@ async fn output_logs_for_request(
     to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     capture.lines()
+}
+
+fn log_outputs(outputs: crate::config::OutputLogging) -> ApiServerOptions {
+    ApiServerOptions {
+        log_outputs: crate::config::OutputLogConfig {
+            outputs,
+            max_log_len: None,
+        },
+        ..Default::default()
+    }
 }
 
 fn chat_body(stream: bool) -> serde_json::Value {
@@ -9729,7 +9738,7 @@ fn reasoning_then_content_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFini
 #[serial]
 async fn log_outputs_logs_chat_stream_deltas_and_complete_output() {
     let logs = output_logs_for_request(
-        crate::config::OutputLogging::CompleteAndDeltas,
+        log_outputs(crate::config::OutputLogging::CompleteAndDeltas),
         reasoning_then_content_output_specs(),
         "/v1/chat/completions",
         chat_body(true),
@@ -9757,7 +9766,7 @@ async fn log_outputs_logs_chat_text_released_at_finish_with_its_update() {
         "function": {"name": "get_weather", "parameters": {"type": "object"}}
     }]);
     let logs = output_logs_for_request(
-        crate::config::OutputLogging::CompleteAndDeltas,
+        log_outputs(crate::config::OutputLogging::CompleteAndDeltas),
         vec![(
             token_ids("Hello<tool_ca"),
             Some(EngineCoreFinishReason::Length),
@@ -9777,7 +9786,7 @@ async fn log_outputs_logs_chat_text_released_at_finish_with_its_update() {
 #[serial]
 async fn log_outputs_logs_chat_deltas_sent_before_a_stream_error() {
     let logs = output_logs_for_request(
-        crate::config::OutputLogging::CompleteAndDeltas,
+        log_outputs(crate::config::OutputLogging::CompleteAndDeltas),
         vec![
             (token_ids("Hello"), None),
             (token_ids("!"), Some(EngineCoreFinishReason::Error)),
@@ -9799,7 +9808,7 @@ async fn log_outputs_logs_chat_deltas_sent_before_a_stream_error() {
 #[serial]
 async fn log_outputs_logs_non_stream_chat_content() {
     let logs = output_logs_for_request(
-        crate::config::OutputLogging::CompleteAndDeltas,
+        log_outputs(crate::config::OutputLogging::CompleteAndDeltas),
         reasoning_then_content_output_specs(),
         "/v1/chat/completions",
         chat_body(false),
@@ -9815,7 +9824,7 @@ async fn log_outputs_logs_non_stream_chat_content() {
 #[serial]
 async fn log_outputs_logs_completion_stream_deltas_and_complete_output() {
     let logs = output_logs_for_request(
-        crate::config::OutputLogging::CompleteAndDeltas,
+        log_outputs(crate::config::OutputLogging::CompleteAndDeltas),
         default_stream_output_specs(),
         "/v1/completions",
         json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "stream": true}),
@@ -9835,7 +9844,7 @@ async fn log_outputs_logs_completion_stream_deltas_and_complete_output() {
 #[serial]
 async fn log_outputs_without_deltas_logs_only_complete_completion_stream() {
     let logs = output_logs_for_request(
-        crate::config::OutputLogging::Complete,
+        log_outputs(crate::config::OutputLogging::Complete),
         default_stream_output_specs(),
         "/v1/completions",
         json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "stream": true}),
@@ -9852,14 +9861,14 @@ async fn log_outputs_without_deltas_logs_only_complete_completion_stream() {
 #[serial]
 async fn log_outputs_logs_non_stream_completion_and_generate_token_ids() {
     let completion = output_logs_for_request(
-        crate::config::OutputLogging::CompleteAndDeltas,
+        log_outputs(crate::config::OutputLogging::CompleteAndDeltas),
         default_stream_output_specs(),
         "/v1/completions",
         json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello"}),
     )
     .await;
     let generate = output_logs_for_request(
-        crate::config::OutputLogging::CompleteAndDeltas,
+        log_outputs(crate::config::OutputLogging::CompleteAndDeltas),
         default_stream_output_specs(),
         "/inference/v1/generate",
         json!({
@@ -9879,11 +9888,74 @@ async fn log_outputs_logs_non_stream_completion_and_generate_token_ids() {
     .assert_eq(&format!("{completion}\n---\n{generate}"));
 }
 
+/// Like Python's `RequestLogger`, `--max-log-len` bounds the logged output
+/// characters and output token IDs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn max_log_len_truncates_logged_outputs_and_token_ids() {
+    let logs = output_logs_for_request(
+        ApiServerOptions {
+            log_outputs: crate::config::OutputLogConfig {
+                outputs: crate::config::OutputLogging::CompleteAndDeltas,
+                max_log_len: Some(1),
+            },
+            ..Default::default()
+        },
+        reasoning_then_content_output_specs(),
+        "/v1/chat/completions",
+        chat_body(true),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details stream="delta" token_ids=[61441]
+        INFO message=generated response stream="delta" output="["
+        DEBUG message=generated response details stream="delta" token_ids=[72]
+        INFO message=generated response stream="delta" output="H"
+        DEBUG message=generated response details stream="delta" token_ids=[33]
+        INFO message=generated response stream="delta" output="!" finish_reason="length"
+        INFO message=generated response stream="complete" output="H" finish_reason="length""#]]
+    .assert_eq(&logs);
+}
+
+/// `--max-log-len` counts characters, not bytes, like Python's `str`
+/// slicing, and 0 logs empty values.
+#[test]
+#[serial]
+fn max_log_len_counts_characters() {
+    use super::output_log::LoggedOutput;
+
+    let capture = OutputLogCapture::start();
+    tracing::info_span!("request", request_id = "test").in_scope(|| {
+        for max_log_len in [Some(2), Some(0), Some(100)] {
+            let log_outputs = crate::config::OutputLogConfig {
+                outputs: crate::config::OutputLogging::Complete,
+                max_log_len,
+            };
+            log_outputs.log(
+                LoggedOutput::Response,
+                "中😀a",
+                Some(&[1, 2, 3]),
+                Some("stop"),
+            );
+        }
+    });
+
+    expect_test::expect![[r#"
+        DEBUG message=generated response details token_ids=[1, 2]
+        INFO message=generated response output="中😀" finish_reason="stop"
+        DEBUG message=generated response details token_ids=[]
+        INFO message=generated response output="" finish_reason="stop"
+        DEBUG message=generated response details token_ids=[1, 2, 3]
+        INFO message=generated response output="中😀a" finish_reason="stop""#]]
+    .assert_eq(&capture.lines());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn log_outputs_disabled_logs_nothing() {
     let logs = output_logs_for_request(
-        crate::config::OutputLogging::Disabled,
+        log_outputs(crate::config::OutputLogging::Disabled),
         default_stream_output_specs(),
         "/v1/completions",
         json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "stream": true}),

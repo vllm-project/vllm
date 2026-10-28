@@ -45,7 +45,7 @@ use crate::routes::openai::utils::metrics::{
 };
 use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
-use crate::routes::output_log::{LoggedOutput, log_output};
+use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, sse_response};
 
@@ -352,7 +352,7 @@ fn collect_generate(
     }
     // Like Python, raw generate logs only the output token IDs.
     if log_outputs.logs_complete() && !collected.token_ids.is_empty() {
-        log_output(
+        log_outputs.log(
             LoggedOutput::Response,
             "",
             Some(&collected.token_ids),

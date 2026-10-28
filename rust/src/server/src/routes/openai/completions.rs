@@ -46,7 +46,7 @@ use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
-use crate::routes::output_log::{LoggedOutput, log_output};
+use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
@@ -215,7 +215,7 @@ async fn collect_completion(
         } else {
             (collected.text.as_str(), collected.token_ids.as_slice())
         };
-        log_output(
+        log_outputs.log(
             LoggedOutput::Response,
             output,
             Some(token_ids),
@@ -409,7 +409,7 @@ async fn completion_chunk_stream(
                             finished.kv_transfer_params.map(|value| *value),
                         )?;
                         if let Some(output_log) = output_log.take() {
-                            log_output(
+                            log_outputs.log(
                                 LoggedOutput::StreamComplete,
                                 &output_log,
                                 None,
@@ -459,7 +459,7 @@ async fn completion_chunk_stream(
                 if let Some(output_log) = output_log.as_mut() {
                     output_log.push_str(&delta);
                     if log_outputs.logs_deltas() && !delta.is_empty() {
-                        log_output(
+                        log_outputs.log(
                             LoggedOutput::StreamDelta,
                             &delta,
                             Some(&token_ids),
@@ -498,7 +498,7 @@ async fn completion_chunk_stream(
                         finished.kv_transfer_params.map(|value| *value),
                     )?;
                     if let Some(output_log) = output_log.take() {
-                        log_output(
+                        log_outputs.log(
                             LoggedOutput::StreamComplete,
                             &output_log,
                             None,
