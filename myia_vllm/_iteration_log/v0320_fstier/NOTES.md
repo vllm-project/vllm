@@ -4150,3 +4150,21 @@ nbaudit **ok 10:05:47Z**, rc 0/0, `consecutive_failures 0`, 5 séries — et le 
 **Coordination** : ACK envoyé à po-2027:CoursIA (section 7.7 du carnet 11b livrée, boucle fermée). [INFO] attribution po-2023 marqué lu.
 
 **Registre** : Q41 ouverte — GPU 0 23 139 (4ᵉ excursion, bande de high-water). Q43 armée, recreate en attente de creux (à coupler avec Q41). Rien de nouveau à arbitrer.
+
+## Fenêtre 18:20Z (28/10) — Q43 EXÉCUTÉE : recreate tier RAM 24→32 GiB (GO user 19:3xZ)
+
+**Arbitrage user reçu en cours de cycle** : « Q41 on essaie de faire tenir en l'état, si ça s'agrave on avisera » (= maintien gpu-util 0.73, ré-ouverture seulement si aggravation) et « Q43 Go pour le recreate » + « Préviens les autres des changements ». Annonce [INFO] cross-postée AVANT le geste (roo-extensions, po-2025, po-2023 — 3/3 OK) avec la fenêtre d'indispo attendue et l'instruction « pas de fallback à déclencher ».
+
+**Pre-flight** : conteneur en place bâti `kv-offloading-size 24`, rendu compose `32` (config-hash → recreate effectif). Fenêtre choisie = creux du cycle (KV 44 %, charge 505 req/2 h en baisse) — conforme à « jamais pendant une saturation ».
+
+**Geste** : `up -d --no-deps vllm-medium-swift15-27b` — recreate le 28/10 **18:20:28Z**. Boot chaud : **health 200 à T+170 s**. Bandeau vérifié : `kv_offloading_size: 32.0`, spec `TieringOffloadingSpec` + `TouchOnHitFsTier` (fs) + `kv_load_failure_policy=recompute` intacts, **KV GPU 831 723 inchangé** (le tier ne touche pas au KV GPU). VRAM à froid GPU 0 **22 363** / GPU 1 **20 978**.
+
+**Liveness** : la première génération post-boot a dépassé 120 s (warm-up CUDA graphs — monde documenté), puis **3 générations de contrôle à 0,18-0,20 s**, sortie correcte. Watchdog : BOOTING patient (5 cycles) → `OK … (warm-up grace consumed — engine is warm)` 18:23:28 → 1 `WEDGE fail 1/2` à 18:23:59 à la frontière du warm-up (toléré, zéro 2/2).
+
+**⚠ /dev/shm 57G/63G (90 %) au réveil — purgé dans la foulée** : le tier 24 GiB de la génération morte cohabitait avec le nouveau 32 GiB (24+32+psm ≈ 57G). Recette appliquée telle quelle (référence 18:21:00, séparatrice propre : ancien mort 18:20:28, nouveau né 18:22) : supprimés le `vllm_offload_752c4a12….mmap` + 4 `psm_*` + 2 `sem.mp-*` orphelins → **33G/63G = 51 %**, health 200. C'est la matérialisation documentée de la fuite « après tout down/up » ; au prochain boot, même geste.
+
+**Marge commit : 86,4 % → 87,8 %** (337,5/384,4, 46,9 Go libres) — le coût +8 GiB du tier est dedans (coût approuvé avec Q43), la tendance ambiante (79,8→80,2→84,2→86,4 avant le geste) reste le vrai moteur de la hausse. Sous la ligne 90 mais à suivre chaque cycle.
+
+**Le tier fs a survécu au recreate** (disque intact, blocs content-addressed) — les replays long-contexte restent servis depuis le disque comme prouvé au restart du 20/10.
+
+**Report de protocole** : la reproduction n°2 de la préchauffe (1ʳᵉ sonde) attendra un moteur installé — pas au cycle 20:11Z (encore en settle post-boot) ; la jouer à 22:11Z ou plus tard.
