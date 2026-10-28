@@ -1468,6 +1468,7 @@ def test_ds41_swa_bi_declaration_stays_scoped(monkeypatch, major, supported):
 @pytest.mark.parametrize("major,supported", [(9, False), (10, True), (12, False)])
 def test_ds41_cr2_indexer_bi_declaration_stays_scoped(monkeypatch, major, supported):
     """The CR2 proof must not grant BI to DS4, mega attention or sparse indexer."""
+    from vllm import envs
     from vllm.models.deepseek_v41.sparse_mla import (
         DeepseekV4FlashMLABackend,
         FlashMLAMegaAttnBackend,
@@ -1491,6 +1492,8 @@ def test_ds41_cr2_indexer_bi_declaration_stays_scoped(monkeypatch, major, suppor
     assert DeepseekV41IndexerBackend.supports_batch_invariance() == supported
     assert not DeepseekV4IndexerBackend.supports_batch_invariance()
     assert not FlashMLAMegaAttnBackend.supports_batch_invariance()
+    monkeypatch.setattr(envs, "VLLM_BI_MEGA_ATTN", True)
+    assert FlashMLAMegaAttnBackend.supports_batch_invariance() == supported
     assert not DeepseekV41SparseIndexerBackend.supports_batch_invariance()
 
 
@@ -2556,6 +2559,178 @@ def test_ds41_bi_exact_replay_matches_full_forward(monkeypatch, length):
         short[cut + 2] -= 1
         if length >= short[cut + 2] + 1:
             assert not matches(0, short)
+    finally:
+        torch.accelerator.synchronize()
+        reset_workspace_manager()
+
+
+@pytest.mark.parametrize(
+    "compress_ratio,ragged_topk", [(0, False), (2, False), (2, True)]
+)
+@pytest.mark.parametrize("heads", [64, 128])
+@pytest.mark.parametrize("length", [129, 700, 2600])
+def test_ds41_mega_attn_bi_decode_rows_match_prefill(
+    monkeypatch, length, heads, compress_ratio, ragged_topk
+):
+    """Under batch invariance a mega-attention decode row on the paged-cache
+    decode kernel returns the bits the prefill kernel gives the same query at
+    that position, whether the prompt was prefilled in one chunk or two, as
+    decode-vs-prompt_logprobs consistency needs. Both sides take a row's top-k
+    length from its position, so -1 holes and valid entries past that length
+    (ragged_topk) are masked alike."""
+    from types import SimpleNamespace
+
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        quantize_and_insert_k_cache,
+    )
+    from vllm.models.deepseek_v41.common.ops.fused_layout import WV_GROUP_SIZE
+    from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
+        DeepseekV4MegaAttnAttention,
+        alloc_mega_attn_output,
+        is_flashmla_mega_attn_supported,
+    )
+    from vllm.models.deepseek_v41.nvidia.flashmla import (
+        DeepseekSparseSWAFlashMLAMetadataBuilder,
+    )
+    from vllm.v1.worker.workspace import (
+        init_workspace_manager,
+        reset_workspace_manager,
+    )
+
+    if not torch.cuda.is_available() or not is_flashmla_mega_attn_supported()[0]:
+        pytest.skip("needs FlashMLA mega attention (SM100)")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    torch.manual_seed(2026)
+    device = torch.device("cuda")
+    window, block_size, dim = 128, 32, 512
+    config, swa = _ds41_swa_bi_config([length])
+    config.model_config.hf_config.compress_ratios = (
+        [0, 0, 2, 2] if compress_ratio else [0]
+    )
+    config.model_config.hf_config.index_topk = 512
+    builder = DeepseekSparseSWAFlashMLAMetadataBuilder(
+        swa.get_kv_cache_spec(config), [swa.prefix], config, device
+    )
+    pages = (length + block_size - 1) // block_size
+    table = torch.arange(pages, dtype=torch.int32, device=device).view(1, pages)
+    packed = torch.zeros(pages, block_size * 528, device=device, dtype=torch.uint8)
+    swa.kv_cache = packed.view(pages, block_size, 528)
+    quantize_and_insert_k_cache(
+        torch.randn(length, dim, device=device, dtype=torch.bfloat16),
+        packed,
+        torch.arange(length, device=device, dtype=torch.int64),
+        block_size=block_size,
+        bytes_per_token=528,
+    )
+    queries = torch.randn(length, heads, dim, device=device, dtype=torch.bfloat16)
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, 64, 2, device=device).float() / 64))
+    freqs = torch.outer(torch.arange(length, device=device).float(), inv_freq)
+
+    attention = DeepseekV4MegaAttnAttention.__new__(DeepseekV4MegaAttnAttention)
+    torch.nn.Module.__init__(attention)
+    attention.compress_ratio = compress_ratio
+    attention.compressed_cache_prefix = "compressed" if compress_ratio else None
+    attention.swa_cache_layer = swa
+    attention.window_size = window
+    attention.max_num_batched_tokens = length
+    attention.topk_indices_buffer = torch.full(
+        (length, 512), -1, device=device, dtype=torch.int32
+    )
+    topk = torch.full((length, 512), -1, device=device, dtype=torch.int32)
+    compressed_builder = compressed_table = None
+    if compress_ratio:
+        compressed_pages = (length + 127) // 128
+        compressed_table = torch.arange(
+            compressed_pages, device=device, dtype=torch.int32
+        ).view(1, compressed_pages)
+        compressed = torch.empty(
+            compressed_pages, 64 * 288, device=device, dtype=torch.uint8
+        )
+        # Interleaved V4.1 NVFP4 records: 256 packed bytes, then 32 scales.
+        records = compressed.view(compressed_pages, 64, 288)
+        records[..., :256] = torch.randint(
+            256, (compressed_pages, 64, 256), device=device, dtype=torch.uint8
+        )
+        records[..., 256:] = (
+            (torch.rand(compressed_pages, 64, 32, device=device) + 0.25)
+            .to(torch.float8_e4m3fn)
+            .view(torch.uint8)
+        )
+        attention.is_kv_source = True
+        attention.kv_cache = compressed.view(-1, 64, 288)
+        compressed_builder = _ds41_cr2_bi_builder(config, device)
+        # Each row's ascending compressed positions it can see, some dropped;
+        # ragged rows keep the dropped ones as interior -1 holes and add valid
+        # entries past the row's (pos + 1) // 2 length.
+        for row in range(length):
+            visible = torch.arange((row + 1) // 2, device=device, dtype=torch.int32)
+            dropped = torch.rand(visible.shape[0], device=device) >= 0.8
+            if ragged_topk:
+                kept = torch.where(dropped, -1, visible)[:512]
+                extra = min(4, 512 - kept.shape[0])
+                topk[row, kept.shape[0] : kept.shape[0] + extra] = torch.randint(
+                    max(length // 2, 1), (extra,), device=device, dtype=torch.int32
+                )
+            else:
+                kept = visible[~dropped][:512]
+            topk[row, : kept.shape[0]] = kept
+    attention.scale = dim**-0.5
+    attention.attn_sink = torch.randn(heads, device=device, dtype=torch.float32)
+    attention.padded_heads = heads
+    attention.n_wv_group = heads // WV_GROUP_SIZE
+    attention.rotary_emb = SimpleNamespace(
+        cos_sin_cache=torch.cat([freqs.cos(), freqs.sin()], -1)
+    )
+    init_workspace_manager(device)
+    # As the warmup dummy run does: the KV chunk (retained at the workspace's
+    # tail) and the index scratch (from its head) side by side.
+    attention.max_model_len = length
+    attention._reserve_prefill_workspace(queries)
+
+    def run(start, end):
+        common = CommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, end - start], device=device).int(),
+            query_start_loc_cpu=torch.tensor([0, end - start]).int(),
+            seq_lens=torch.tensor([end], device=device, dtype=torch.int32),
+            seq_lens_cpu_upper_bound=torch.tensor([end], dtype=torch.int32),
+            num_reqs=1,
+            num_actual_tokens=end - start,
+            max_query_len=end - start,
+            max_seq_len=end,
+            block_table_tensor=table,
+            slot_mapping=torch.arange(end - start, device=device, dtype=torch.int64),
+            causal=True,
+        )
+        metadata = builder.build(0, common)
+        all_metadata = {swa.prefix: metadata}
+        if compressed_builder is not None:
+            from dataclasses import replace
+
+            all_metadata["compressed"] = compressed_builder.build(
+                0, replace(common, block_table_tensor=compressed_table)
+            )
+        assert attention.topk_indices_buffer is not None
+        attention.topk_indices_buffer[: end - start] = topk[start:end]
+        out = alloc_mega_attn_output(end - start, attention.n_wv_group, device)
+        positions = torch.arange(start, end, device=device)
+        context = ForwardContext({}, all_metadata, {})
+        with override_forward_context(context):
+            attention.forward_mqa(queries[start:end], None, positions, out)
+        return metadata.num_decodes, out
+
+    try:
+        _, full = run(0, length)
+        split = length // 3
+        _, head = run(0, split)
+        _, tail = run(split, length)
+        assert torch.equal(torch.cat([head.data, tail.data]), full.data)
+        assert torch.equal(torch.cat([head.scale, tail.scale]), full.scale)
+        for position in sorted({0, 1, 127, 128, length // 2, length - 1}):
+            num_decodes, row = run(position, position + 1)
+            assert num_decodes == 1
+            assert torch.equal(row.data[0], full.data[position])
+            assert torch.equal(row.scale[0], full.scale[position])
     finally:
         torch.accelerator.synchronize()
         reset_workspace_manager()

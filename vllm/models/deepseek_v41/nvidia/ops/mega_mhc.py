@@ -36,16 +36,25 @@ def can_use_mega_mhc(
     norm_weight: torch.Tensor | None,
     capture_aux: bool,
 ) -> bool:
-    # Deterministic Mega mHC cannot be captured, so batch invariance keeps
-    # eager and graph steps on the fixed-split TileLang kernels.
+    # Batch invariance keeps the fixed-split TileLang kernels unless Mega mHC
+    # is opted in with its deterministic (fixed split-K) heuristic.
     return (
-        not envs.VLLM_BATCH_INVARIANT
+        (not envs.VLLM_BATCH_INVARIANT or envs.VLLM_BI_MEGA_MHC)
         and pre_mix is not None
         and norm_weight is not None
-        and not capture_aux
+        # Batch invariance keeps aux-capture layers on Mega mHC too, so a
+        # draft model cannot change the target's numerics.
+        and (not capture_aux or envs.VLLM_BATCH_INVARIANT)
         and x.shape[0] <= 1 << 20
         and is_mega_mhc_supported(x.shape[1], residual.shape[1])
     )
+
+
+@functools.cache
+def _use_fixed_split_k() -> None:
+    """Mega mHC picks split-K from the token count unless DeepGEMM runs
+    deterministic algorithms, which fix it at 16 for every batch size."""
+    _import_deep_gemm().use_deterministic_algorithms(True)
 
 
 def mhc_shifted_post_pre_deep_gemm(
@@ -73,6 +82,8 @@ def mhc_shifted_post_pre_deep_gemm(
     new_post_mix = torch.empty_like(post_mix)
     new_comb_res_mix = torch.empty_like(comb_res_mix)
     y_bf16 = x.new_empty(num_tokens, hidden_size, dtype=torch.bfloat16)
+    if envs.VLLM_BATCH_INVARIANT:
+        _use_fixed_split_k()
     mega_mhc(
         x=x,
         residual=residual,
