@@ -1554,6 +1554,7 @@ def test_humming_grouped_apply_forwards_valid_prefix(
         compute_config_str="",
         w13_tuning_config_str="",
         w2_tuning_config_str="",
+        _uses_post_gemm2_hook=lambda _: False,
     )
 
     hidden_states = torch.empty(3, 4)

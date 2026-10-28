@@ -48,12 +48,13 @@ def make_runner(
     hidden_size: int,
     intermediate_size: int,
     top_k: int,
+    moe_backend: str = "auto",
 ):
     """Build a MuseSpark runner, load ``ckpt`` and finalize its weights."""
     num_experts = expert_bias.numel()
     vllm_config = VllmConfig(
         parallel_config=ParallelConfig(),
-        kernel_config=KernelConfig(moe_backend="auto"),
+        kernel_config=KernelConfig(moe_backend=moe_backend),
     )
     with set_current_vllm_config(vllm_config):
         router = MuseSpark1xRouter(
