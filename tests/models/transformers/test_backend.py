@@ -721,17 +721,13 @@ def test_attention_layer_index_is_the_modules_own():
     assert all(f.validate(a, None) for f, a in zip(fusers, attentions))
 
 
-def test_attention_dispatch_is_required(monkeypatch: pytest.MonkeyPatch):
+def test_attention_dispatch_is_required():
     """Models selected by the permissive registry fail clearly without dispatch."""
-    monkeypatch.setattr(
-        "vllm.model_executor.models.transformers.base.get_pp_indices",
-        lambda *_: (0, 1),
-    )
     model = SimpleNamespace(
         text_config=SimpleNamespace(num_hidden_layers=1),
-        pp_group=SimpleNamespace(rank_in_group=0, world_size=1),
         attention_fusers={},
         _get_attn_cls=lambda: None,
+        _pp_indices=lambda: (0, 1),
     )
 
     with pytest.raises(
