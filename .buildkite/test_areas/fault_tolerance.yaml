@@ -93,6 +93,7 @@ steps:
   - tests/v1/fault_tolerance/
   - tests/v1/distributed/test_external_lb_dp.py
   commands:
+  - pytest -v -s v1/fault_tolerance/test_expert_reload.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s -rs kernels/moe/test_moe_layer.py::test_moe_layer_mori_graph
   - VLLM_TEST_ENABLE_MORI_MOE_LAYER=1 VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s -rs 'kernels/moe/test_moe_layer.py::test_moe_layer[False-mori_high_throughput-2-1-True]' --subtests='[32-512-512-8-2-bfloat16-None-False-False-False-False-mori_high_throughput-2-2-1]'
   dind: false

@@ -435,7 +435,7 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 @multi_gpu_test(num_gpus=4)
 @pytest.mark.parametrize("quantization", [None, "fp8_per_tensor"])
 def test_scale_down_removes_dead_rank_and_recovers(quantization):
-    """Runtime-format expert reload preserves serving accuracy after scale-down.
+    """Preserve physical expert IDs and reload recovered placement after scale-down.
 
     Survivors keep serving with a smaller DP group, including processed FP8
     weights whose checkpoint layout differs from their runtime layout.

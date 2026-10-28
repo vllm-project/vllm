@@ -31,7 +31,6 @@ from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.sentinel.eplb_redistribute import (
     compute_dead_ep_ranks,
     mark_dead_expert_slots_inplace,
-    rebuild_model_expert_maps,
     redistribute_expert_placement,
     reload_experts_from_disk,
     reset_eplb_async_state,
@@ -275,13 +274,15 @@ class WorkerSentinel:
         )
         # p2l was updated in place; the commit derives l2p/lrc from it.
         _commit_eplb_maps(eplb_model_state, p2l.cpu())
-        rebuild_model_expert_maps(model_runner.model, p2l, num_local_experts)
+        # Preserve physical expert IDs: slot ownership is unchanged by EPLB;
+        # only the logical expert stored in each surviving slot changes.
 
         if reassignments:
             reload_experts_from_disk(
                 model_runner.model,
                 self.worker.vllm_config,
                 reassignments,
+                p2l,
             )
 
         logger.info(

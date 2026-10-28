@@ -324,6 +324,10 @@ except Exception as e:
 
 ## Fault tolerance and scale-down recovery
 
+Scale-down reloads every surviving physical replica using the recovered EPLB
+placement. The fused GPT-OSS MXFP4 checkpoint loader is not supported for this
+reload path; recovery rejects it rather than loading weights into the wrong slots.
+
 Fault tolerance lets vLLM recover from certain distributed engine failures without
 restarting the entire deployment. An external orchestrator detects failures and
 coordinates recovery across the engines.

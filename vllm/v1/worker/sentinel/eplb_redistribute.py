@@ -12,14 +12,15 @@ recovery.
 from __future__ import annotations
 
 from collections.abc import Generator
+from inspect import signature
 from itertools import zip_longest
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
+from vllm.v1.worker.sentinel.expert_reload import _placement_weight_loader
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -143,36 +144,11 @@ def redistribute_expert_placement(
     return reassignments
 
 
-def rebuild_model_expert_maps(
-    model: torch.nn.Module,
-    physical_to_logical_map: torch.Tensor,
-    num_local_experts: int,
-) -> None:
-    """Rebuild each FusedMoE layer's model-side _expert_map from
-    physical_to_logical_map."""
-    ep_rank = get_ep_group().rank_in_group
-    for layer_idx, layer in enumerate(model.moe_layers):
-        # v2 runner wraps FusedMoE in MoERunner; the expert map lives on
-        # routed_experts there, on the layer itself otherwise.
-        routed = getattr(layer, "routed_experts", layer)
-        expert_map = getattr(routed, "_expert_map", None)
-        if expert_map is None:
-            continue
-        local_start = ep_rank * num_local_experts
-        p2l_row = physical_to_logical_map[layer_idx].cpu()
-
-        new_map = torch.full_like(expert_map, -1)
-        for local_idx in range(num_local_experts):
-            lid = int(p2l_row[local_start + local_idx].item())
-            if 0 <= lid < new_map.shape[0]:
-                new_map[lid] = local_idx
-        expert_map.copy_(new_map)
-
-
 def reload_experts_from_disk(
     model: torch.nn.Module,
     vllm_config: VllmConfig,
     reload_set: set[tuple[int, int]],
+    physical_to_logical_map: torch.Tensor,
 ) -> None:
     """Reload complete MoE layers affected by expert reassignment from disk.
 
@@ -181,6 +157,7 @@ def reload_experts_from_disk(
         vllm_config: Engine config, used for the model loader and model config.
         reload_set: {(moe_layer_idx, logical_expert_id), ...} from
             redistribute_expert_placement.
+        physical_to_logical_map: Recovered placement, including all replicas.
 
     """
     if not reload_set:
@@ -191,6 +168,7 @@ def reload_experts_from_disk(
         finalize_layerwise_reload,
         initialize_layerwise_reload,
     )
+    from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 
     moe_layers = list(model.moe_layers)
     prefix_renames = getattr(
@@ -224,8 +202,42 @@ def reload_experts_from_disk(
                     yield name, tensor
                     break
 
-    for layer in layers:
+    # Reload recovered placement: remap before the layerwise loader buffers its
+    # arguments, so deferred processing replays physical IDs against runtime maps.
+    for layer_idx, layer in zip(layer_indices, layers):
+        if getattr(layer, "quant_config", None) is not None and (
+            layer.quant_config.get_name() == "gpt_oss_mxfp4"
+        ):
+            raise NotImplementedError(
+                "Scale-down reload of fused GPT-OSS MXFP4 weights"
+            )
         initialize_layerwise_reload(layer)
+        quant_method = layer.quant_method
+        quant_method = (
+            getattr(quant_method, "requantization_source", None) or quant_method
+        )
+        local_ids: dict[int, list[int]] = {}
+        for physical_id, logical_id in enumerate(
+            physical_to_logical_map[layer_idx].cpu().tolist()
+        ):
+            if (
+                logical_id >= 0
+                and layer._map_global_expert_id_to_local_expert_id(physical_id) >= 0
+            ):
+                local_ids.setdefault(logical_id, []).append(physical_id)
+        for param in get_layer_tensors(layer).values():
+            weight_loader = getattr(param, "weight_loader", None)
+            if (
+                weight_loader is not None
+                and "expert_id" in signature(weight_loader).parameters
+            ):
+                param.weight_loader = _placement_weight_loader(
+                    weight_loader,
+                    local_ids,
+                    layer.moe_config.num_logical_experts,
+                    physical_to_logical_map.shape[1],
+                    use_global_sf=getattr(quant_method, "use_global_sf", False),
+                )
 
     logger.info("[FT] Reloading %d (layer, expert) pair(s) from disk.", len(reload_set))
 
