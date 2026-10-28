@@ -121,7 +121,9 @@ def rope_view(cache: torch.Tensor) -> torch.Tensor:
     return pool().rope_view(cache)
 
 
-@triton.jit
+# Row counts change with every mixed batch; specializing on them recompiles
+# the kernel mid-serving for each new (tokens, decode tokens) pair.
+@triton.jit(do_not_specialize=["PACK_ROWS", "INSERT_ROWS"])
 def _prepare_qk(
     Q,
     K,
@@ -140,8 +142,8 @@ def _prepare_qk(
     R0: tl.constexpr,
     BLOCK: tl.constexpr,
     HEADS: tl.constexpr,
-    PACK_ROWS: tl.constexpr,
-    INSERT_ROWS: tl.constexpr,
+    PACK_ROWS,
+    INSERT_ROWS,
 ):
     row = tl.program_id(0)
     tile = tl.program_id(1)
@@ -244,7 +246,7 @@ def insert_kv(attn, kv, positions, slots):
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS"])
 def _merge_indices(
     Mi,
     Mp,
@@ -258,7 +260,7 @@ def _merge_indices(
     EO,
     ES,
     EB: tl.constexpr,
-    ROWS: tl.constexpr,
+    ROWS,
     WIDTH: tl.constexpr,
     EXTRA: tl.constexpr,
 ):
