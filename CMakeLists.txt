@@ -478,7 +478,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/fused_qknorm_rope_cache_kernel.cu")
+      "csrc/fused_qknorm_rope_cache_kernel.cu"
+      "csrc/quantization/fused_kernels/fused_gelu_mul_per_token_quant.cu")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND

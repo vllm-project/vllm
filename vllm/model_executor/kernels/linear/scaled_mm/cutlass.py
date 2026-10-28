@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -174,10 +175,12 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
-        """Only static per-tensor activation quantization is supported for external
-        quantization."""
-        if self.config.activation_quant_key == kFp8StaticTensorSym:
-            return kFp8StaticTensorSym
+        """Accept tensor scales or contiguous per-token scales without padding."""
+        if self.config.activation_quant_key in (
+            kFp8StaticTensorSym,
+            kFp8DynamicTokenSym,
+        ):
+            return self.config.activation_quant_key
         return None
 
     @staticmethod

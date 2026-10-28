@@ -43,6 +43,7 @@ steps:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/
   - vllm/model_executor/layers/fusion/
+  - vllm/model_executor/kernels/linear/scaled_mm/cutlass.py
   - vllm/model_executor/layers/layernorm.py
   - vllm/model_executor/layers/activation.py
   - vllm/model_executor/layers/attention/attention.py

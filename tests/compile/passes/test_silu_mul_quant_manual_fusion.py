@@ -25,7 +25,7 @@ from vllm.model_executor.kernels.linear import (
     PerTensorTorchFP8ScaledMMLinearKernel,
     ROCmFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
 from vllm.model_executor.layers.fusion.fused_act_quant import (
     _FUSED_ACT_QUANT,
     maybe_fused_act_quant,
@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -71,6 +72,67 @@ CUDA_KERNELS = [
     PerTensorTorchFP8ScaledMMLinearKernel,
 ]
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="GELU per-token FP8 fusion requires CUDA SM89+",
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("compile_model", [False, True])
+@pytest.mark.parametrize("scale_ub", [None, 0.25])
+def test_gelu_per_token_fp8_cutlass(dtype, compile_model, scale_ub):
+    """The real CUTLASS consumer accepts the fused data and flattened scales."""
+    torch.manual_seed(0)
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            custom_ops=["none", "+quant_fp8", "+gelu_and_mul"]
+        ),
+    )
+    with set_current_vllm_config(config):
+        act = GeluAndMul(approximate="tanh")
+        linear = TestFP8Layer(
+            weight_shape=(128, 256),
+            activation_quant_key=kFp8DynamicTokenSym,
+            weight_quant_key=kFp8StaticTensorSym,
+            force_kernel=CutlassFP8ScaledMMLinearKernel,
+            input_dtype=dtype,
+            out_dtype=dtype,
+            device=torch.device("cuda"),
+        )
+        if scale_ub is not None:
+            linear.input_scale_ub = torch.tensor(
+                scale_ub, dtype=torch.float32, device="cuda"
+            )
+        expose_input_quant_key(linear, linear.kernel)
+        assert get_input_quant_key(linear) == kFp8DynamicTokenSym
+
+        def fused(x):
+            qa = maybe_fused_act_quant(act, x, linear)
+            assert isinstance(qa, QuantizedActivation)
+            return linear(qa)
+
+        fn = (
+            torch.compile(fused, fullgraph=True, dynamic=True)
+            if compile_model
+            else fused
+        )
+        for tokens in (17, 31):
+            x = torch.randn((2, tokens, 512), dtype=dtype, device="cuda")
+            expected = linear(act.forward_cuda(x))
+            torch.testing.assert_close(fn(x), expected, rtol=0, atol=0)
+
+        # The native GELU (fused by torch.compile instead) keeps its path.
+        native_ops = CompilationConfig(custom_ops=["none", "+quant_fp8"])
+        with set_current_vllm_config(VllmConfig(compilation_config=native_ops)):
+            native_gelu = GeluAndMul(approximate="tanh")
+        assert isinstance(maybe_fused_act_quant(native_gelu, x, linear), torch.Tensor)
+
+        # The tanh kernel must never replace exact (erf) GELU.
+        exact_gelu = GeluAndMul(approximate="none")
+        fallback = maybe_fused_act_quant(exact_gelu, x, linear)
+        assert isinstance(fallback, torch.Tensor)
+        torch.testing.assert_close(fallback, exact_gelu(x), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("num_tokens", [32, 64])
