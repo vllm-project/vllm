@@ -8,8 +8,8 @@ use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_server::{
-    Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, ParserSelection,
-    RendererSelection,
+    Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogging, ParserSelection,
+    ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
 
@@ -231,6 +231,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        reasoning_effort_map: None,
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
@@ -238,6 +239,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        enable_log_outputs: false,
+                        enable_log_deltas: true,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
@@ -250,6 +253,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        http_max_request_body_size: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -583,17 +587,40 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     let config = parse(&[]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
     assert!(!config.disable_request_id_randomization);
+    assert_eq!(
+        config.api_server_options.request_body_limit_bytes,
+        Some(32 * 1024 * 1024)
+    );
 
-    // Set through `VLLM_LOG_STATS_INTERVAL` and
-    // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`, which bind these hidden flags.
+    // Set through `VLLM_LOG_STATS_INTERVAL`,
+    // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`, and
+    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, which bind these hidden flags.
     let config = parse(&[
         "--log-stats-interval",
         "2.5",
         "--disable-request-id-randomization",
         "1",
+        "--http-max-request-body-size",
+        "1048576",
     ]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
     assert!(config.disable_request_id_randomization);
+    assert_eq!(
+        config.api_server_options.request_body_limit_bytes,
+        Some(1024 * 1024)
+    );
+    let config = parse(&["--http-max-request-body-size", "0"]);
+    assert_eq!(config.api_server_options.request_body_limit_bytes, None);
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--http-max-request-body-size",
+        "32MiB",
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
 }
 
 #[test]
@@ -609,14 +636,25 @@ fn args_json_reads_env_only_settings_from_env() {
     let args = apply(&[]).unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
     assert!(!args.disable_request_id_randomization);
+    assert_eq!(
+        args.api_server_options().request_body_limit_bytes,
+        Some(32 * 1024 * 1024)
+    );
 
     let args = apply(&[
         ("VLLM_LOG_STATS_INTERVAL", "0.5"),
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
+        ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
     ])
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
     assert!(args.disable_request_id_randomization);
+    assert_eq!(
+        args.api_server_options().request_body_limit_bytes,
+        Some(1024 * 1024)
+    );
+    let args = apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "0")]).unwrap();
+    assert_eq!(args.api_server_options().request_body_limit_bytes, None);
 
     let args = apply(&[("VLLM_LOG_STATS_INTERVAL", "inf")]).unwrap();
     assert_eq!(args.log_stats_interval(), None);
@@ -624,11 +662,15 @@ fn args_json_reads_env_only_settings_from_env() {
     let errors = [
         apply(&[("VLLM_LOG_STATS_INTERVAL", "ten")]).unwrap_err(),
         apply(&[("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "true")]).unwrap_err(),
+        apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "32MiB")]).unwrap_err(),
+        apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "-1")]).unwrap_err(),
     ];
     expect![[r#"
         [
             "invalid VLLM_LOG_STATS_INTERVAL: `ten` is not a number of seconds",
             "invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: `true` is not an integer",
+            "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `32MiB` is not a number of bytes",
+            "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `-1` is not a number of bytes",
         ]
     "#]]
     .assert_debug_eq(&errors);
@@ -891,6 +933,75 @@ fn serve_passes_return_tokens_as_token_ids_into_config() {
 }
 
 #[test]
+fn serve_rejects_log_outputs_without_log_requests() {
+    let config = |flags: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string())
+    };
+
+    let error = config(&["--enable-log-outputs"]).validate().unwrap_err();
+    assert!(format!("{error:#}").contains("--enable-log-outputs requires --enable-log-requests"));
+    assert!(config(&["--enable-log-outputs", "--enable-log-requests"]).validate().is_ok());
+}
+
+#[test]
+fn serve_resolves_output_logging_from_log_flags() {
+    let log_outputs = |flags: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string())
+            .api_server_options
+            .log_outputs
+    };
+
+    assert_eq!(
+        log_outputs(&["--enable-log-requests"]),
+        OutputLogging::Disabled
+    );
+    assert_eq!(
+        log_outputs(&["--enable-log-outputs"]),
+        OutputLogging::CompleteAndDeltas
+    );
+    assert_eq!(
+        log_outputs(&["--enable-log-outputs", "--enable-log-deltas", "false"]),
+        OutputLogging::Complete
+    );
+}
+
+#[test]
+fn frontend_args_json_passes_output_logging_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_log_requests":true,"enable_log_outputs":true,"enable_log_deltas":false}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert_eq!(
+        config.api_server_options.log_outputs,
+        OutputLogging::Complete
+    );
+}
+
+#[test]
 fn serve_passes_tls_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -1145,6 +1256,48 @@ fn frontend_args_json_passes_lora_modules_into_config() {
 }
 
 #[test]
+fn frontend_args_json_passes_reasoning_effort_map_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","reasoning_effort_map":{"medium":"low","xhigh":"max"}}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(
+        args.into_config().reasoning_effort_map,
+        [
+            (ReasoningEffort::Medium, "low".to_string()),
+            (ReasoningEffort::XHigh, "max".to_string()),
+        ]
+        .into()
+    );
+}
+
+#[test]
+fn serve_rejects_unknown_reasoning_effort_map_key() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--reasoning-effort-map",
+        r#"{"meduim":"low"}"#,
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown variant `meduim`"));
+}
+
+#[test]
 fn serve_passes_api_keys_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -1314,12 +1467,12 @@ fn serve_args_reject_unsupported_no_flag_alias() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--no-enable-log-deltas",
+        "--no-enable-force-include-usage",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'true' for '--enable-log-deltas [<ENABLE_LOG_DELTAS>]': argument is not implemented in Rust frontend yet
+        error: invalid value 'true' for '--enable-force-include-usage [<ENABLE_FORCE_INCLUDE_USAGE>]': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -1388,6 +1541,7 @@ fn frontend_args_accept_json() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        reasoning_effort_map: None,
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
@@ -1395,6 +1549,8 @@ fn frontend_args_accept_json() {
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        enable_log_outputs: false,
+                        enable_log_deltas: true,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
@@ -1407,6 +1563,7 @@ fn frontend_args_accept_json() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        http_max_request_body_size: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2305,6 +2462,7 @@ fn serve_args_accept_handshake_aliases() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        reasoning_effort_map: None,
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
@@ -2312,6 +2470,8 @@ fn serve_args_accept_handshake_aliases() {
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
+                        enable_log_outputs: false,
+                        enable_log_deltas: true,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
@@ -2324,6 +2484,7 @@ fn serve_args_accept_handshake_aliases() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        http_max_request_body_size: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2472,6 +2633,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            reasoning_effort_map: {},
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
@@ -2481,6 +2643,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
+                log_outputs: Disabled,
                 enable_prompt_tokens_details: false,
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
@@ -2488,6 +2651,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 sse_keep_alive_interval: None,
+                request_body_limit_bytes: Some(
+                    33554432,
+                ),
             },
             cors: CorsConfig {
                 allow_origins: [],
@@ -2581,6 +2747,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            reasoning_effort_map: {},
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
@@ -2590,6 +2757,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
+                log_outputs: Disabled,
                 enable_prompt_tokens_details: false,
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
@@ -2597,6 +2765,9 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 sse_keep_alive_interval: None,
+                request_body_limit_bytes: Some(
+                    33554432,
+                ),
             },
             cors: CorsConfig {
                 allow_origins: [],
@@ -2778,6 +2949,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            reasoning_effort_map: {},
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
@@ -2787,6 +2959,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
+                log_outputs: Disabled,
                 enable_prompt_tokens_details: false,
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
@@ -2794,6 +2967,9 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 sse_keep_alive_interval: None,
+                request_body_limit_bytes: Some(
+                    33554432,
+                ),
             },
             cors: CorsConfig {
                 allow_origins: [],

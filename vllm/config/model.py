@@ -393,6 +393,10 @@ class ModelConfig:
     """Enable releasing NCCL communicator memory during sleep mode
     (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
     (the default) sleep still releases weights/KV-cache memory as before."""
+    checkpoint_prepare_on_startup: bool = False
+    """Prepare each engine for a process checkpoint once it starts, as
+    `/checkpoint/prepare` does. It serves only after `/checkpoint/restore`.
+    Requires sleep mode."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -505,6 +509,7 @@ class ModelConfig:
             "interleave_mm_strings",
             "skip_mm_profiling",
             "mm_ipc_gpu_memory_gb",
+            "checkpoint_prepare_on_startup",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -668,6 +673,8 @@ class ModelConfig:
                 self.hf_token,
             )
 
+        if self.checkpoint_prepare_on_startup and not self.enable_sleep_mode:
+            raise ValueError("checkpoint_prepare_on_startup requires enable_sleep_mode")
         if self.enable_sleep_mode:
             if not current_platform.is_sleep_mode_available():
                 raise ValueError("Sleep mode is not supported on current platform.")
