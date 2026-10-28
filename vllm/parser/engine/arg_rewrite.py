@@ -313,7 +313,7 @@ class _ArgsRewriter:
                 ):
                     out.append(dumped)
                     return j
-        out.append(text[i:j])
+        out.append(literal)
         return j
 
 
@@ -441,9 +441,7 @@ class _StreamingArgs:
         # A property schema makes the rewriter parse regardless, so only the
         # schema-less fast path needs the scan.
         self._nonfinite = not properties and _document_has_non_finite_literal(args_json)
-        corrected, self.safe, self.streams = self._rewrite(
-            args_json, force_parse=self._nonfinite
-        )
+        corrected, self.safe, self.streams = self._rewrite(args_json)
         self._raw = args_json
         self._raw_boundary = 0
         self._corrected_boundary = 0
@@ -472,12 +470,10 @@ class _StreamingArgs:
         self._emitted += len(text)
         self._tail_parts.append(text)
 
-    def _rewrite(
-        self, text: str, *, force_parse: bool = False, stop_shift: int = 0
-    ) -> tuple[str, str, bool]:
+    def _rewrite(self, text: str, *, stop_shift: int = 0) -> tuple[str, str, bool]:
         """Correct *text*; fold its give-up offset, shifted by *stop_shift*."""
         rewriter = _ArgsRewriter(
-            text, self._properties, final=False, force_parse=force_parse
+            text, self._properties, final=False, force_parse=self._nonfinite
         )
         out = rewriter.rewrite()
         safe, streams = safe_arg_prefix(out, self._string_keys)
@@ -540,9 +536,7 @@ class _StreamingArgs:
         base = self._raw_boundary
         raw_tail = args_json[base:]
         tail = "{" + raw_tail if skip else args_json
-        tail_out, safe_tail, streams = self._rewrite(
-            tail, force_parse=self._nonfinite, stop_shift=base - skip
-        )
+        tail_out, safe_tail, streams = self._rewrite(tail, stop_shift=base - skip)
         body = tail_out[skip:]
         # Only the finalized prefix is known to match; if the new tail does
         # not reproduce the emitted text from the resume boundary, a full

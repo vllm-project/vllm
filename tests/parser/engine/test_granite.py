@@ -37,6 +37,15 @@ def parser(mock_tokenizer):
     return GraniteParser(mock_tokenizer)
 
 
+def _tool(name: str, properties: dict) -> ChatCompletionToolsParam:
+    return ChatCompletionToolsParam(
+        type="function",
+        function=FunctionDefinition(
+            name=name, parameters={"type": "object", "properties": properties}
+        ),
+    )
+
+
 def _tokenize(text: str) -> list[tuple[int, str]]:
     """Tokenize like the real stream: ``<|tool_call|>`` is one special token,
     plain text becomes one token per character."""
@@ -196,19 +205,13 @@ class TestNonStreaming:
         # Granite emits JSON arguments, so values arrive typed; a property
         # without ``type`` must not stringify them.
         mock_request.tools = [
-            ChatCompletionToolsParam(
-                type="function",
-                function=FunctionDefinition(
-                    name="submit",
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "count": {"description": "Any JSON value."},
-                            "flag": {"description": "Any JSON value."},
-                            "note": {"description": "Any JSON value."},
-                        },
-                    },
-                ),
+            _tool(
+                "submit",
+                {
+                    "count": {"description": "Any JSON value."},
+                    "flag": {"description": "Any JSON value."},
+                    "note": {"description": "Any JSON value."},
+                },
             )
         ]
         text = (
@@ -266,19 +269,7 @@ class TestStreaming:
         # be corrected on its own; otherwise "5" streams and the final 5 then
         # cannot extend the already-sent prefix.
         mock_request.tools = [
-            ChatCompletionToolsParam(
-                type="function",
-                function=FunctionDefinition(
-                    name="submit",
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "count": {"type": "integer"},
-                            "note": {"type": "string"},
-                        },
-                    },
-                ),
-            )
+            _tool("submit", {"count": {"type": "integer"}, "note": {"type": "string"}})
         ]
         text = (
             f'{TOOL_TOKEN} [{{"name": "submit", "arguments": '
@@ -292,18 +283,12 @@ class TestStreaming:
         # A NaN in an already-complete middle value must be sanitized before
         # it streams, or the client ends up with invalid JSON.
         mock_request.tools = [
-            ChatCompletionToolsParam(
-                type="function",
-                function=FunctionDefinition(
-                    name="submit",
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "count": {"description": "Any JSON value."},
-                            "note": {"type": "string"},
-                        },
-                    },
-                ),
+            _tool(
+                "submit",
+                {
+                    "count": {"description": "Any JSON value."},
+                    "note": {"type": "string"},
+                },
             )
         ]
         text = (
@@ -322,19 +307,7 @@ class TestStreaming:
         # re-serializing with json.dumps normalizes them, which cannot extend
         # the already-streamed prefix and truncates the call.
         mock_request.tools = [
-            ChatCompletionToolsParam(
-                type="function",
-                function=FunctionDefinition(
-                    name="submit",
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "count": {"type": "integer"},
-                            "note": {"type": "string"},
-                        },
-                    },
-                ),
-            )
+            _tool("submit", {"count": {"type": "integer"}, "note": {"type": "string"}})
         ]
         text = (
             f'{TOOL_TOKEN} [{{"name": "submit", "arguments": '

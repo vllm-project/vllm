@@ -495,9 +495,6 @@ class TestExtractTypesFromSchema:
         assert extract_types_from_schema(True, fallback=[]) == []
         assert extract_types_from_schema(True) == ["string"]
 
-    def test_false_boolean_schema_is_unknown(self):
-        assert extract_types_from_schema(False) == ["string"]
-
     def test_false_schema_honors_fallback(self):
         # ``false`` admits no value, so it contributes no type to a union;
         # the historical string default applies only when the caller wants one.

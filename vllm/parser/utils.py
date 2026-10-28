@@ -65,13 +65,13 @@ def count_history_tool_calls(
     return count_response_history_tool_calls(request_input)
 
 
-JSON_WS = " \t\r\n"
+_JSON_WS = " \t\r\n"
 
 
 def next_non_ws(text: str, i: int) -> int:
     """Offset of the first non-whitespace character at or after *i*."""
     n = len(text)
-    while i < n and text[i] in JSON_WS:
+    while i < n and text[i] in _JSON_WS:
         i += 1
     return i
 

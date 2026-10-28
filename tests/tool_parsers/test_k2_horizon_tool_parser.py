@@ -50,6 +50,7 @@ def tokenizer():
 def _request(
     tool_format: str | None = None,
     tool_choice="auto",
+    tools=TOOLS,
 ) -> ChatCompletionRequest:
     chat_template_kwargs = (
         {"tool_call_format": tool_format} if tool_format is not None else None
@@ -57,10 +58,27 @@ def _request(
     return ChatCompletionRequest(
         model="k2-horizon",
         messages=[{"role": "user", "content": "test"}],
-        tools=TOOLS,
+        tools=tools,
         tool_choice=tool_choice,
         chat_template_kwargs=chat_template_kwargs,
     )
+
+
+def _lookup_tool(properties: dict, parameters: dict | None = None) -> list:
+    """A ``lookup`` tool with *properties* after the string ``query``."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}, **properties},
+                    **(parameters or {}),
+                },
+            },
+        }
+    ]
 
 
 def _group(*calls: str, prefix: str = "", suffix: str = "") -> str:
@@ -200,27 +218,8 @@ def test_number_schema_preserves_large_integer(tokenizer, tool_format, streaming
 def test_json_untyped_param_keeps_emitted_type(tokenizer):
     # A property without ``type`` permits any value, so the model's typed
     # JSON value must not be stringified by schema coercion.
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "count": {"description": "Any JSON value."},
-                    },
-                },
-            },
-        }
-    ]
-    request = ChatCompletionRequest(
-        model="k2-horizon",
-        messages=[{"role": "user", "content": "test"}],
-        tools=tools,
-        chat_template_kwargs={"tool_call_format": "json"},
-    )
+    tools = _lookup_tool({"count": {"description": "Any JSON value."}})
+    request = _request("json", tools=tools)
     parser = K2HorizonToolParser(tokenizer, tools)
 
     result = parser.extract_tool_calls(
@@ -237,27 +236,8 @@ def test_json_untyped_param_keeps_emitted_type(tokenizer):
 def test_xml_untyped_param_keeps_emitted_type(tokenizer):
     # An untyped property carries no schema type, so the model's explicit
     # ``<arg_type>`` tag must decide, as it does when the schema is missing.
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "limit": {"description": "Any JSON value."},
-                    },
-                },
-            },
-        }
-    ]
-    request = ChatCompletionRequest(
-        model="k2-horizon",
-        messages=[{"role": "user", "content": "test"}],
-        tools=tools,
-        chat_template_kwargs={"tool_call_format": "xml_typed"},
-    )
+    tools = _lookup_tool({"limit": {"description": "Any JSON value."}})
+    request = _request("xml_typed", tools=tools)
     parser = K2HorizonToolParser(tokenizer, tools)
 
     result = parser.extract_tool_calls(
@@ -276,28 +256,10 @@ def test_xml_ref_param_keeps_emitted_type(tokenizer):
     # A property whose only constraint is an unresolved ``$ref`` resolves no
     # type, so the model's explicit ``<arg_type>`` tag must decide, as it
     # does for an untyped property.
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "limit": {"$ref": "#/$defs/Int"},
-                    },
-                    "$defs": {"Int": {"type": "integer"}},
-                },
-            },
-        }
-    ]
-    request = ChatCompletionRequest(
-        model="k2-horizon",
-        messages=[{"role": "user", "content": "test"}],
-        tools=tools,
-        chat_template_kwargs={"tool_call_format": "xml_typed"},
+    tools = _lookup_tool(
+        {"limit": {"$ref": "#/$defs/Int"}}, {"$defs": {"Int": {"type": "integer"}}}
     )
+    request = _request("xml_typed", tools=tools)
     parser = K2HorizonToolParser(tokenizer, tools)
 
     result = parser.extract_tool_calls(
@@ -315,27 +277,8 @@ def test_xml_ref_param_keeps_emitted_type(tokenizer):
 def test_xml_untyped_param_alias_type_keeps_whitespace(tokenizer):
     # ``str`` aliases ``string``; the whitespace rule must canonicalise the
     # explicit ``<arg_type>``, or an untyped property loses its spaces.
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "note": {"description": "Any JSON value."},
-                    },
-                },
-            },
-        }
-    ]
-    request = ChatCompletionRequest(
-        model="k2-horizon",
-        messages=[{"role": "user", "content": "test"}],
-        tools=tools,
-        chat_template_kwargs={"tool_call_format": "xml_typed"},
-    )
+    tools = _lookup_tool({"note": {"description": "Any JSON value."}})
+    request = _request("xml_typed", tools=tools)
     parser = K2HorizonToolParser(tokenizer, tools)
     call = (
         "<ifm|tool_call>lookup"
@@ -354,27 +297,8 @@ def test_xml_untyped_param_alias_type_keeps_whitespace(tokenizer):
 def test_json_untyped_param_keeps_containers_structured(tokenizer):
     # Dict/list values for an untyped property stay structured JSON, not
     # double-encoded JSON text a client would have to re-parse.
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "payload": {"description": "Any JSON value."},
-                    },
-                },
-            },
-        }
-    ]
-    request = ChatCompletionRequest(
-        model="k2-horizon",
-        messages=[{"role": "user", "content": "test"}],
-        tools=tools,
-        chat_template_kwargs={"tool_call_format": "json"},
-    )
+    tools = _lookup_tool({"payload": {"description": "Any JSON value."}})
+    request = _request("json", tools=tools)
     parser = K2HorizonToolParser(tokenizer, tools)
 
     result = parser.extract_tool_calls(
@@ -392,27 +316,8 @@ def test_json_untyped_param_keeps_containers_structured(tokenizer):
 def test_json_untyped_nonfinite_param_keeps_calls(tokenizer):
     # NaN has no valid JSON form. Stringify it rather than letting
     # ``json.dumps(allow_nan=False)`` raise and drop the whole call group.
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "count": {"description": "Any JSON value."},
-                    },
-                },
-            },
-        }
-    ]
-    request = ChatCompletionRequest(
-        model="k2-horizon",
-        messages=[{"role": "user", "content": "test"}],
-        tools=tools,
-        chat_template_kwargs={"tool_call_format": "json"},
-    )
+    tools = _lookup_tool({"count": {"description": "Any JSON value."}})
+    request = _request("json", tools=tools)
     parser = K2HorizonToolParser(tokenizer, tools)
 
     result = parser.extract_tool_calls(
@@ -438,27 +343,8 @@ def test_json_untyped_nonfinite_param_keeps_calls(tokenizer):
 def test_json_deeply_nested_param_keeps_calls(tokenizer):
     # Nesting can exceed the interpreter's recursion limit while remaining
     # valid JSON; sanitizing must not raise RecursionError and drop the group.
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "payload": {"description": "Any JSON value."},
-                    },
-                },
-            },
-        }
-    ]
-    request = ChatCompletionRequest(
-        model="k2-horizon",
-        messages=[{"role": "user", "content": "test"}],
-        tools=tools,
-        chat_template_kwargs={"tool_call_format": "json"},
-    )
+    tools = _lookup_tool({"payload": {"description": "Any JSON value."}})
+    request = _request("json", tools=tools)
     parser = K2HorizonToolParser(tokenizer, tools)
 
     depth = 2000

@@ -2278,6 +2278,21 @@ def _stream_arg_deltas(engine, name: str, chunks: list[str]) -> tuple[list[str],
     return per_chunk, flush
 
 
+@pytest.fixture
+def rewrite_counts(monkeypatch):
+    """Count `_ArgsRewriter` invocations and the characters they rewrite."""
+    counts = SimpleNamespace(calls=0, chars=0)
+
+    class CountingRewriter(_ArgsRewriter):
+        def rewrite(self):
+            counts.calls += 1
+            counts.chars += len(self._text)
+            return super().rewrite()
+
+    monkeypatch.setattr(arg_rewrite, "_ArgsRewriter", CountingRewriter)
+    return counts
+
+
 class TestIncrementalArgRewrite:
     """The incremental rewrite must match a full pass tick for tick.
 
@@ -2286,7 +2301,7 @@ class TestIncrementalArgRewrite:
     """
 
     @staticmethod
-    def _expected_deltas(tool, chunks: list[str]) -> list[str]:
+    def _expected_deltas(tool, chunks: list[str], convert=None) -> list[str]:
         properties = find_tool_properties([tool], "f")
         string_keys = ParserEngine._streamable_string_keys(properties)
         emitted = ""
@@ -2295,6 +2310,8 @@ class TestIncrementalArgRewrite:
         # covers the first two chunks.
         for i in range(2, len(chunks) + 1):
             current = "".join(chunks[:i])
+            if convert is not None:
+                current = convert(current, True)
             corrected = _ArgsRewriter(current, properties, final=False).rewrite()
             safe, _ = safe_arg_prefix(corrected, string_keys)
             deltas.append(safe[len(emitted) :])
@@ -2344,28 +2361,21 @@ class TestIncrementalArgRewrite:
         assert actual[1:] == expected
         assert "".join(actual) + flush == engine._fix_arg_types("".join(chunks), "f")
 
-    def test_transient_truncation_does_not_pin_resume_boundary(self, monkeypatch):
+    def test_transient_truncation_does_not_pin_resume_boundary(self, rewrite_counts):
         """An unterminated trailing value is not a give-up.
 
         Treating it as one pins the resume boundary at the first tick's tail,
         so every later delta rescans the whole document.
         """
-        rewritten = 0
-
-        class CountingRewriter(_ArgsRewriter):
-            def rewrite(self):
-                nonlocal rewritten
-                rewritten += len(self._text)
-                return super().rewrite()
-
-        monkeypatch.setattr(arg_rewrite, "_ArgsRewriter", CountingRewriter)
         fields = {f"f{i}": {"type": "string"} for i in range(80)}
         doc = "{" + ", ".join(f'"f{i}": "v{i}"' for i in range(80)) + "}"
         tool = _make_tool("f", fields)
         engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
         chunks = [doc[i : i + 4] for i in range(0, len(doc), 4)]
         assert _stream_tool_args(engine, "f", chunks) == doc
-        assert rewritten < 20 * len(doc), f"rewrote {rewritten} chars for {len(doc)}"
+        assert rewrite_counts.chars < 20 * len(doc), (
+            f"rewrote {rewrite_counts.chars} chars for {len(doc)}"
+        )
 
     def test_malformed_key_keeps_streaming(self):
         """A malformed member's non-string key must not stop a streamable
@@ -2397,18 +2407,9 @@ class TestIncrementalArgRewrite:
         assert "".join(per_chunk) == '{"s": "abc", "t": '
         assert "".join(per_chunk) + flush == '{"s": "abc", "t": 1}'
 
-    def test_long_string_is_not_rewritten_per_delta(self, monkeypatch):
+    def test_long_string_is_not_rewritten_per_delta(self, rewrite_counts):
         """An open string streams verbatim, so its deltas do not re-rewrite
         the accumulated document."""
-        calls = 0
-
-        class CountingRewriter(_ArgsRewriter):
-            def rewrite(self):
-                nonlocal calls
-                calls += 1
-                return super().rewrite()
-
-        monkeypatch.setattr(arg_rewrite, "_ArgsRewriter", CountingRewriter)
         tool = _make_tool("f", {"body": {"type": "string"}})
         engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
         body = "x" * 4000
@@ -2416,27 +2417,24 @@ class TestIncrementalArgRewrite:
         chunks.append('"}')
         args = _stream_tool_args(engine, "f", chunks)
         assert args == '{"body": "' + body + '"}'
-        assert calls < 10, f"rewrote {calls} times for {len(chunks)} deltas"
+        assert rewrite_counts.calls < 10, (
+            f"rewrote {rewrite_counts.calls} times for {len(chunks)} deltas"
+        )
 
-    def test_long_string_naming_nonfinite_is_not_rewritten_per_delta(self, monkeypatch):
+    def test_long_string_naming_nonfinite_is_not_rewritten_per_delta(
+        self, rewrite_counts
+    ):
         """A no-schema open string that names a non-finite literal is still
         string content; the fragment check must not force a full pass."""
-        calls = 0
-
-        class CountingRewriter(_ArgsRewriter):
-            def rewrite(self):
-                nonlocal calls
-                calls += 1
-                return super().rewrite()
-
-        monkeypatch.setattr(arg_rewrite, "_ArgsRewriter", CountingRewriter)
         engine = _make_engine(_converter_config(_verbatim_converter))
         body = "Infinity " * 500
         chunks = ['{"body": "'] + [body[i : i + 8] for i in range(0, len(body), 8)]
         chunks.append('"}')
         args = _stream_tool_args(engine, "f", chunks)
         assert args == '{"body": "' + body + '"}'
-        assert calls < 10, f"rewrote {calls} times for {len(chunks)} deltas"
+        assert rewrite_counts.calls < 10, (
+            f"rewrote {rewrite_counts.calls} times for {len(chunks)} deltas"
+        )
 
     def test_non_extending_text_falls_back_to_full_pass(self):
         tool = _make_tool("f", {"a": {"type": "integer"}})
@@ -2472,18 +2470,7 @@ class TestIncrementalArgRewrite:
         chunks = ["a=1", " b=he", "llo", " c=2"]
         actual, flush = _stream_arg_deltas(engine, "f", chunks)
 
-        properties = find_tool_properties([tool], "f")
-        string_keys = ParserEngine._streamable_string_keys(properties)
-        expected = []
-        emitted = ""
-        for i in range(2, len(chunks) + 1):
-            converted = _kv_converter("".join(chunks[:i]), True)
-            corrected = _ArgsRewriter(converted, properties, final=False).rewrite()
-            safe, _ = safe_arg_prefix(corrected, string_keys)
-            expected.append(safe[len(emitted) :])
-            emitted = safe
-
-        assert actual[1:] == expected
+        assert actual[1:] == self._expected_deltas(tool, chunks, _kv_converter)
         assert "".join(actual) + flush == engine._fix_arg_types(
             _kv_converter("".join(chunks), False), "f"
         )
@@ -2508,7 +2495,7 @@ class TestIncrementalArgRewrite:
         cache.extend_streamed("not-what-the-converter-emits")
         assert cache.delta('{"a": "xyz"}') is None
 
-    def test_open_string_fast_path_survives_resume_advance(self, monkeypatch):
+    def test_open_string_fast_path_survives_resume_advance(self, rewrite_counts):
         """A delta that finalizes a member advances the resume boundary and
         must leave the verbatim open-string fast path armed for the next
         tick instead of forcing a tail rewrite."""
@@ -2517,18 +2504,9 @@ class TestIncrementalArgRewrite:
         string_keys = ParserEngine._streamable_string_keys(properties)
         cache = _StreamingArgs('{"a": 1', properties, string_keys)
         assert cache.delta('{"a": 1, "b": "xx') == ('1, "b": "xx', True)
-
-        rewrites = 0
-        original = arg_rewrite._ArgsRewriter.rewrite
-
-        def counting(self):
-            nonlocal rewrites
-            rewrites += 1
-            return original(self)
-
-        monkeypatch.setattr(arg_rewrite._ArgsRewriter, "rewrite", counting)
+        rewrites = rewrite_counts.calls
         assert cache.delta('{"a": 1, "b": "xxx') == ("x", True)
-        assert rewrites == 0
+        assert rewrite_counts.calls == rewrites
 
     def test_extender_ticks_reuse_the_cached_correction(self, monkeypatch):
         """A value streamed by an argument extender must not discard the
@@ -2617,26 +2595,19 @@ class TestIncrementalArgRewrite:
         ids=["object", "array"],
     )
     def test_transient_whitespace_does_not_pin_resume_boundary(
-        self, monkeypatch, schema, doc
+        self, rewrite_counts, schema, doc
     ):
         """Whitespace between a complete value and the next comma is a wait,
         not a give-up: pinning the boundary there rescans the whole document
         for every later delta.
         """
-        rewritten = 0
-
-        class CountingRewriter(_ArgsRewriter):
-            def rewrite(self):
-                nonlocal rewritten
-                rewritten += len(self._text)
-                return super().rewrite()
-
-        monkeypatch.setattr(arg_rewrite, "_ArgsRewriter", CountingRewriter)
         tool = _make_tool("f", schema)
         engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
         chunks = [doc[i : i + 4] for i in range(0, len(doc), 4)]
         assert _stream_tool_args(engine, "f", chunks) == doc
-        assert rewritten < 20 * len(doc), f"rewrote {rewritten} chars for {len(doc)}"
+        assert rewrite_counts.chars < 20 * len(doc), (
+            f"rewrote {rewrite_counts.chars} chars for {len(doc)}"
+        )
 
     def test_nonfinite_inside_string_does_not_parse_document(self, monkeypatch):
         """Text naming a non-finite literal inside a string must keep the
