@@ -1976,7 +1976,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 block_tables,
                 slot_mappings,
-                cg_mode=batch_desc.cg_mode,
+                batch_desc,
+                dp_sync_state,
                 for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
             )
         elif not (dummy_run and skip_attn_for_dummy_run):
