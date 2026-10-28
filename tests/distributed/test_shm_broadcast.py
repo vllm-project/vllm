@@ -694,6 +694,49 @@ def test_busy_reader_consumes_write_notifications():
         writer.shutdown()
         reader.shutdown()
 
+def test_overflow_timeout_keeps_slot_for_redelivery():
+    """A timed-out overflow dequeue must not consume the ring slot.
+
+    The slot marker and the payload travel over different channels. If the
+    slot were committed before the payload arrived, a timeout would leave the
+    payload queued in the socket and every later overflow message would be
+    off by one.
+    """
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=128,
+        max_chunks=4,
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+
+        # Commit the overflow marker; the payload is deliberately not sent yet.
+        with writer.acquire_write(timeout=1) as buf:
+            buf[0] = 1
+
+        with pytest.raises(TimeoutError):
+            reader.dequeue(timeout=0.1)
+
+        # The slot still belongs to the reader after the timeout.
+        assert reader.current_idx == 0
+        with writer.buffer.get_metadata(0) as metadata_buffer:
+            assert metadata_buffer[0] == 1
+            assert metadata_buffer[1] == 0
+
+        # The late payload is delivered by the retry, not by a later message.
+        writer.local_socket.send_multipart([pickle.dumps("delayed")])
+        assert reader.dequeue(timeout=5) == "delayed"
+
+        # The stream stays in sync afterwards.
+        writer.enqueue("next")
+        assert reader.dequeue(timeout=5) == "next"
+    finally:
+        reader.shutdown()
+        writer.shutdown()
+
 
 def test_acquire_read_releases_slot_when_reader_raises():
     writer = MessageQueue(
