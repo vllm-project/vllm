@@ -242,6 +242,9 @@ class CudaPlatformBase(Platform):
 
         return CudaTPSPBackend
 
+    def get_hisparse_backend_cls(cls) -> str | None:
+        return "vllm.v1.hisparse.backend.CUDAHiSparseBackend"
+
     @classmethod
     def import_kernels(cls) -> None:
         """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
