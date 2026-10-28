@@ -295,11 +295,13 @@ def _check(rank: int, tp: int, device, separate: bool) -> None:
         # a non-finite padding row stays in its own row
         bad = parts[rank].clone()
         bad[-1] = float("nan")
-        res_bad = res.clone()
+        res_bad, post_bad, comb_bad = res.clone(), post.clone(), comb.clone()
         res_bad[-1] = float("inf")
+        post_bad[-1] = float("nan")
+        comb_bad[-1] = float("nan")
         dist.barrier(group)
         rt.advance_step()
-        y = [t.clone() for t in op.launch(bad, res_bad, post, comb)]
+        y = [t.clone() for t in op.launch(bad, res_bad, post_bad, comb_bad)]
         torch.accelerator.synchronize()
         for got, want in zip(y, (x, r, p, c)):
             assert torch.equal(got[:-1], want[:-1]), f"S={S}: a NaN row leaked"

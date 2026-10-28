@@ -136,3 +136,35 @@ def test_dsa_row_table_pads_and_follows_the_step():
     # computed once a step, shared by every sparse-attention layer
     md["mla"].slot_mapping[0] = 5
     assert w.dsa_rows(step, ("mla", "ic", "tail"))[0, ROW_SLOT] == 70
+
+
+def test_narrow_step_pads_once_then_chains_padded_outputs():
+    from vllm.models.glm5next.amd.specialized_decode.mono.config import (
+        HC_MULT,
+        HIDDEN,
+    )
+
+    ctx = _ctx(2)
+    w = layers._Width(None, 2, torch.device("cpu"))
+    a, b = (layers.FlashLayer(ctx, None, None, w, (), i) for i in range(2))
+    step = DecodeStep(1, 2, torch.zeros(1, dtype=torch.long), {})
+
+    def mhc_state(n):
+        return (
+            torch.randn(n, HIDDEN).bfloat16(),
+            torch.randn(n, HC_MULT, HIDDEN).bfloat16(),
+            torch.rand(n, HC_MULT, 1),
+            torch.rand(n, HC_MULT, HC_MULT),
+        )
+
+    # from vLLM's layer: copied into the padding buffers
+    first = mhc_state(1)
+    ins = a.inputs(step, *first)
+    assert ins is w.pad and all(torch.equal(p[:1], t) for p, t in zip(ins, first))
+    # from the previous kernel layer: its padded buffers, no copy
+    out = mhc_state(2)
+    rows = a.finish(step, out)
+    assert all(r.shape[0] == 1 for r in rows)
+    assert all(x is y for x, y in zip(b.inputs(step, *rows), out))
+    # anything else (a new step's first layer) is padded again
+    assert b.inputs(step, *mhc_state(1)) is w.pad

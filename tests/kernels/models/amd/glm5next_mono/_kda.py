@@ -267,12 +267,13 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
         assert _rel(y[:live], ref[:live]) < 5e-3, f"S={S}: MoE {_rel(y, ref)}"
 
         # a non-finite padding row stays in its own row
-        bad = x.clone()
-        bad[-1] = float("nan")
+        bad = [t.clone() for t in (x, res, post, comb)]
+        for t, v in zip(bad, ("nan", "inf", "nan", "nan")):
+            t[-1] = float(v)
         state_bad = FlashKdaState(kda.conv0.clone(), kda.rec0.clone())
         dist.barrier(group)
         rt.advance_step()
-        z = [t.clone() for t in op.launch(bad, res, post, comb, state_bad, idx)]
+        z = [t.clone() for t in op.launch(*bad, state_bad, idx)]
         torch.accelerator.synchronize()
         for got, want in zip(z, outs):
             assert torch.equal(got[:-1], want[:-1]), f"S={S}: a NaN row leaked"

@@ -360,11 +360,22 @@ class FlashLayer:
     def finish(self, step: MonoStep, out):
         for rt in self.ends:
             rt.advance_step()
-        return tuple(t[: step.tokens] for t in out)
+        rows = tuple(t[: step.tokens] for t in out)
+        self.ctx.state["chain"] = (rows, out)
+        return rows
 
     def inputs(self, step: MonoStep, hidden_states, residual, post, comb):
         if post is None:
             raise RuntimeError("a Flash kernel layer needs the previous mHC state")
+        # The previous kernel layer's outputs come back as its padded buffers, so a
+        # narrow step copies its inputs once, not every layer. Their padding rows
+        # then hold that layer's padding outputs: kernels keep a row's values,
+        # finite or not, in its own row.
+        chain = self.ctx.state.get("chain")
+        if chain and all(
+            a is b for a, b in zip(chain[0], (hidden_states, residual, post, comb))
+        ):
+            return chain[1]
         n = step.tokens
         return _pad(
             self.w, step, (hidden_states, residual, post.view(n, HC_MULT, 1), comb)

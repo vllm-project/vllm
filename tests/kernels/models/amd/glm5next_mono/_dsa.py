@@ -532,6 +532,27 @@ def _check(rank: int, tp: int, device, fp8, kv_fp8: bool = False) -> None:
         assert torch.equal(routed[:live], order[:live].int().sort(-1).values)
         assert _rel(y[:live], ref_y[:live]) < 5e-3, f"S={S}: MoE {_rel(y, ref_y)}"
 
+        # a non-finite padding row stays in its own row and writes no cache
+        bad = [t.clone() for t in (x, res, post, comb)]
+        for t, v in zip(bad, ("nan", "inf", "nan", "nan")):
+            t[-1] = float(v)
+        written = cache.clone()
+        dist.barrier(group)
+        rt.advance_step()
+        z = [
+            t.clone()
+            for t in op.launch(
+                *bad, caches=cache.caches(), rows=rows, block_table=cache.bt
+            )
+        ]
+        torch.accelerator.synchronize()
+        for got, want in zip(z, outs):
+            assert torch.equal(got[:-1], want[:-1]), f"S={S}: a NaN row leaked"
+        for name in ("kv", "idx", "tail"):
+            assert torch.equal(getattr(cache, name), getattr(written, name)), (
+                f"S={S}: a padding row wrote the {name} cache"
+            )
+
         # graph replays: the cache writes are idempotent, every replay bit-exact
         dist.barrier(group)
         graph = torch.cuda.CUDAGraph()
