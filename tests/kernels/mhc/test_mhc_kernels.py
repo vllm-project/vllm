@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.layers.mhc as mhc_layers
+from vllm import envs
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_fused_post_pre_tilelang,
     mhc_fused_post_pre_tilelang_reuse_residual,
@@ -52,6 +53,73 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE = current_platform.device_type
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_entry_split_order_for_decode_prefill_and_teacher_forcing(
+    monkeypatch, batch_invariant
+):
+    """Long teacher-forced batches retain single-token reduction in BI mode."""
+    from vllm import envs
+    from vllm.model_executor.kernels.mhc import warmup
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _: SimpleNamespace(multi_processor_count=152),
+    )
+    warmup.compute_num_split.cache_clear()
+    try:
+        actual = [
+            warmup.compute_mhc_pre_num_splits(5120, rows)
+            for rows in (1, 8, 239, 384, 4206)
+        ]
+        assert actual == ([16] * 5 if batch_invariant else [16, 16, 16, 16, 4])
+    finally:
+        warmup.compute_num_split.cache_clear()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_fused_mhc_keeps_the_same_reduction_across_dispatch_bands(
+    monkeypatch, batch_invariant
+):
+    """BI keeps the k-split and thread count (the reduction) at every size and
+    never stops fusing; only the projection tile, which groups outputs, grows."""
+    from vllm import envs
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    actual = [
+        mhc_fused_post_pre_split_config(rows, 5120, 4)
+        for rows in (1, 15, 16, 32, 33, 4206)
+    ]
+    assert actual == (
+        [(2, 8, 128)] * 2 + [(12, 8, 128)] * 4
+        if batch_invariant
+        else [(2, 8, 128), (2, 8, 128), (6, 8, 128), (6, 8, 128), None, None]
+    )
+    assert mhc_fused_post_pre_split_config(1, 5119, 4) is None
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_fused_mhc_warmup_inputs_dispatch_to_their_keys(monkeypatch, batch_invariant):
+    """Warming each fused-mHC key launches the kernel that key names."""
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+        _MHC_FUSED_TILELANG_KERNEL as kernel,
+    )
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=64)
+    )
+    keys = kernel.get_warmup_keys(config, hidden_size=5120, hc_mult=4)
+    assert len(keys) == 2
+    for key in keys:
+        rows = kernel.warmup_inputs(key)["residual_in"].shape[0]
+        assert kernel.dispatch(num_tokens=rows, hidden_size=5120, hc_mult=4) == key
+
+
 @pytest.mark.parametrize(
     "tp,ep,hidden,hc,multicast,expected",
     [
@@ -83,7 +151,11 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
         )
     )
     monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
     assert mhc.supports_mhc_all_reduce(config) is expected
+    # The fused all-reduce sums ranks in its own order.
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    assert mhc.supports_mhc_all_reduce(config) is False
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -127,6 +199,13 @@ def test_hc_collapse_preserves_weighted_residual_sum(
     expected = (pre.unsqueeze(-1) * x.float()).sum(dim=1).to(x.dtype)
     actual = hc_collapse_triton(x, pre)
     assert actual.is_contiguous()
+    if envs.VLLM_BATCH_INVARIANT:
+        cpu_expected = torch.zeros(num_tokens, hidden_size, dtype=torch.float32)
+        for source, coefficient in zip(x.cpu().float().unbind(1), pre.cpu().unbind(1)):
+            cpu_expected.add_(source * coefficient.unsqueeze(-1))
+        assert torch.equal(actual.cpu(), cpu_expected.bfloat16())
+        if num_tokens:
+            assert torch.equal(actual[:1], hc_collapse_triton(x[:1], pre[:1]))
     # BF16 rounding only: ptxas <13.1 contracts the FP32 mix into FFMA despite
     # enable_fp_fusion=False, so compare within a ULP and pin the exact cases below.
     torch.testing.assert_close(actual, expected, atol=1.6e-2, rtol=1e-2)
@@ -139,10 +218,50 @@ def test_hc_collapse_preserves_weighted_residual_sum(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+def test_bi_hc_collapse_executes_native_cuda_with_exact_cpu_reference(monkeypatch):
+    """Record the native CUDA entry, independently checking ordered FP32 mixing."""
+    from vllm.model_executor.kernels.batch_invariant import (
+        require_batch_invariant_kernel,
+    )
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    require_batch_invariant_kernel()
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(
+        "vllm_batch_invariant::hc_collapse", "CUDA"
+    )
+    calls = []
+    native = torch.ops.vllm_batch_invariant.hc_collapse
+
+    def traced(hidden, coefficients, output):
+        assert hidden.is_cuda and coefficients.is_cuda and output.is_cuda
+        calls.append(tuple(hidden.shape))
+        return native(hidden, coefficients, output)
+
+    monkeypatch.setattr(torch.ops.vllm_batch_invariant, "hc_collapse", traced)
+    x = torch.randn(33, 4, 10274, device=DEVICE, dtype=torch.bfloat16)[..., ::2]
+    pre = torch.rand(4, 33, device=DEVICE).t()
+    expected = torch.zeros(33, 5137, dtype=torch.float32)
+    for source, coefficient in zip(x.cpu().float().unbind(1), pre.cpu().unbind(1)):
+        expected.add_(source * coefficient.unsqueeze(-1))
+    actual = hc_collapse_triton(x, pre)
+    assert calls == [(33, 4, 5137)]
+    assert torch.equal(actual.cpu(), expected.bfloat16())
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 def test_hc_collapse_custom_op_supports_compile():
     x = torch.randn(2, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
     pre = torch.rand(2, 4, device=DEVICE)
     torch.library.opcheck(torch.ops.vllm.hc_collapse_triton.default, (x, pre))
+    if envs.VLLM_BATCH_INVARIANT:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = hc_collapse_triton(x, pre)
+        x.zero_()
+        output.fill_(float("nan"))
+        graph.replay()
+        assert torch.count_nonzero(output).item() == 0
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -942,6 +1061,63 @@ def hc_head_ref(
     pre_mix = torch.nn.functional.linear(residual_norm, fn)
     pre_mix = torch.sigmoid(pre_mix * hc_scale + hc_base) + hc_eps
     return torch.sum(pre_mix.unsqueeze(-1) * residual.float(), dim=-2).bfloat16()
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
+)
+def test_bi_fused_mhc_projection_tile_keeps_bits(monkeypatch):
+    """Under BI the fused post + pre-norm kernel groups outputs and tokens per
+    block by batch size; a row's outputs must be the same bits for every
+    grouping and every batch size."""
+    from vllm import envs
+    from vllm.model_executor.kernels.mhc import tilelang_kernels
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    hc, hidden, total = 4, 5120, 4101
+    n3 = hc * 2 + hc * hc
+    x = torch.randn((total, hidden), dtype=torch.bfloat16)
+    residual = torch.randn((total, hc, hidden), dtype=torch.bfloat16)
+    post = torch.randn((total, hc, 1), dtype=torch.float32)
+    comb = torch.randn((total, hc, hc), dtype=torch.float32)
+    fn = (torch.randn((n3, hc, hidden), dtype=torch.float) * 1e-4).flatten(1, 2)
+    scale = torch.randn((3,), dtype=torch.float) * 0.1
+    base = torch.randn((n3,), dtype=torch.float) * 0.1
+
+    def run(m):
+        outputs = torch.ops.vllm.mhc_fused_post_pre_tilelang(
+            x[:m],
+            residual[:m],
+            post[:m],
+            comb[:m],
+            fn,
+            scale,
+            base,
+            1e-6,
+            1e-6,
+            1e-6,
+            1.0,
+            20,
+        )
+        return [
+            t.contiguous().view(torch.int16 if t.element_size() == 2 else torch.int32)
+            for t in outputs
+        ]
+
+    def configure(tile, tok):
+        monkeypatch.setattr(tilelang_kernels, "_BI_FUSED_POST_PRE_TILE_N", tile)
+        monkeypatch.setattr(tilelang_kernels, "_BI_FUSED_POST_PRE_TOKENS", tok)
+
+    configure(2, 1)
+    reference = run(total)
+    for tile, tok in ((2, 1), (24, 1), (12, 4), (6, 8), (24, 2)):
+        configure(tile, tok)
+        for m in (1, 6, 15, 16, 17, 48, 301, total):
+            for got, want in zip(run(m), reference):
+                assert torch.equal(got, want[:m]), (tile, tok, m)
 
 
 @pytest.mark.skipif(
