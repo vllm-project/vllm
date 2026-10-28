@@ -482,8 +482,9 @@ def rocm_bf16x3_router_gemm_dispatch_impl(
 
     if bf16x3_router_gemm_rocm.is_supported(x, weight):
         return bf16x3_router_gemm_rocm.bf16x3_router_gemm(x, weight_split)
-    # Below MIN_TOKENS, hand back to the low-M gfx950 kernel this tier is
-    # checked ahead of.
+    if bf16x3_router_gemm_rocm.gemv_is_supported(x, weight_split):
+        return bf16x3_router_gemm_rocm.bf16x3_router_gemv(x, weight_split)
+    # Otherwise fall back to the low-M gfx950 kernel.
     if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
         from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
             can_use_rocm_fp32_router_gemm,

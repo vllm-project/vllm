@@ -199,3 +199,44 @@ def test_validates_layout_assumptions():
     wide = torch.empty(8192, 256, dtype=torch.float32, device="cuda")
     with pytest.raises(AssertionError):
         rocm_bf16x3.bf16x3_router_gemm(x, split, out=wide[:, :128])
+
+
+def test_gemv_is_supported_covers_the_gap_below_min_tokens():
+    meta = torch.device("meta")
+    split = torch.zeros(3, 128, 6144, dtype=torch.bfloat16, device=meta)
+    x = torch.zeros(rocm_bf16x3.MIN_TOKENS, 6144, dtype=torch.bfloat16, device=meta)
+    assert rocm_bf16x3.gemv_is_supported(x[:33], split)
+    assert rocm_bf16x3.gemv_is_supported(x[: rocm_bf16x3.MIN_TOKENS - 1], split)
+
+    assert not rocm_bf16x3.gemv_is_supported(x[:32], split)
+    assert not rocm_bf16x3.gemv_is_supported(x, split)
+    assert not rocm_bf16x3.gemv_is_supported(x[:64].float(), split)
+    assert not rocm_bf16x3.gemv_is_supported(x[:64, :3072], split)
+    assert not rocm_bf16x3.gemv_is_supported(x[:64], split[:2])
+    assert not rocm_bf16x3.gemv_is_supported(x[:64], split[:, :17])
+
+
+@pytest.mark.parametrize(("hidden_size", "num_experts"), ROUTER_SHAPES)
+@pytest.mark.parametrize("num_tokens", [33, 107, 256, 512, 1000, 2047])
+def test_gemv_matches_fp64_reference(
+    hidden_size: int, num_experts: int, num_tokens: int
+):
+    _requires_gfx950()
+    x, w = _inputs(num_tokens, hidden_size, num_experts)
+    split = rocm_bf16x3.split_bf16x3(w)
+    assert rocm_bf16x3.gemv_is_supported(x, split)
+    out = rocm_bf16x3.bf16x3_router_gemv(x, split)
+    ref = x.double() @ w.double().T
+
+    assert out.shape == (num_tokens, num_experts)
+    assert out.dtype == torch.float32
+    assert (out.double() - ref).norm() / ref.norm() < _MAX_REL_L2
+    assert int((_top_set(out) != _top_set(ref)).any(-1).sum()) == 0
+
+
+def test_gemv_is_deterministic():
+    _requires_gfx950()
+    x, w = _inputs(256, 6144, 128)
+    split = rocm_bf16x3.split_bf16x3(w)
+    out = rocm_bf16x3.bf16x3_router_gemv(x, split)
+    assert torch.equal(out, rocm_bf16x3.bf16x3_router_gemv(x, split))
