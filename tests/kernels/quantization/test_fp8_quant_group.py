@@ -9,6 +9,9 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import (
     _FP8_MIN_SCALING_FACTOR,
     QuantFP8,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.utils.torch_utils import set_random_seed
 
@@ -208,3 +211,70 @@ def test_quantfp8_group_edge_cases(default_vllm_config, seed: int) -> None:
     assert (scales_zero_ue8m0 >= _FP8_MIN_SCALING_FACTOR).all(), (
         "Clamped scales were not larger than or equal to _FP8_MIN_SCALING_FACTOR."
     )
+
+
+@pytest.mark.parametrize("batch_shape", [(2,), (2, 3)])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("group_size", [64])
+@pytest.mark.parametrize("use_ue8m0", [False, True])
+@pytest.mark.parametrize(
+    "column_major,tma_aligned", [(False, False), (True, False), (True, True)]
+)
+@torch.inference_mode()
+def test_quantfp8_group_cuda_multidimensional(
+    default_vllm_config,
+    batch_shape,
+    dtype,
+    group_size,
+    use_ue8m0,
+    column_major,
+    tma_aligned,
+):
+    """Leading dimensions and scale layouts must preserve the 2D kernel result."""
+    set_random_seed(42)
+    rows, hidden = 7, group_size * 5
+    x = torch.randn((*batch_shape, rows, hidden), dtype=dtype, device="cuda")
+    reference = QuantFP8(
+        static=False,
+        group_shape=GroupShape(1, group_size),
+        use_ue8m0=use_ue8m0,
+        compile_native=False,
+    )
+    expected_q, expected_s = reference.forward_cuda(x.view(-1, hidden))
+    quant_op = QuantFP8(
+        static=False,
+        group_shape=GroupShape(1, group_size),
+        column_major_scales=column_major,
+        tma_aligned_scales=tma_aligned,
+        use_ue8m0=use_ue8m0,
+        compile_native=False,
+    )
+    actual_q, actual_s = quant_op.forward_cuda(x)
+    assert actual_q.shape == x.shape
+    assert actual_s.shape == (*batch_shape, rows, 5)
+    torch.testing.assert_close(
+        actual_q.view(torch.uint8),
+        expected_q.view_as(actual_q).view(torch.uint8),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(actual_s, expected_s.view_as(actual_s), rtol=0, atol=0)
+    if column_major:
+        assert actual_s.stride(-2) == 1
+        assert actual_s.stride(-1) == (8 if tma_aligned else rows)
+
+
+@torch.inference_mode()
+def test_group_fp8_multidimensional_output_buffer():
+    """The ND helper must write the caller's contiguous output in place."""
+    x = torch.randn((2, 7, 320), dtype=torch.bfloat16, device="cuda")
+    expected, expected_s = per_token_group_quant_fp8(
+        x.view(-1, 320), 64, use_ue8m0=False
+    )
+    out = torch.empty(x.shape, dtype=expected.dtype, device=x.device)
+    actual, scales = per_token_group_quant_fp8(x, 64, out_q=out, use_ue8m0=False)
+    assert actual.data_ptr() == out.data_ptr()
+    assert torch.equal(
+        actual.view(torch.uint8), expected.view_as(actual).view(torch.uint8)
+    )
+    assert torch.equal(scales, expected_s.view_as(scales))
