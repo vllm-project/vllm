@@ -190,6 +190,8 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
                 reduce_results=reduce_results,
+                # No torch.compile on this path, so the aux-stream overlap is safe.
+                overlap_ba_proj=True,
             )
             # Recover the inductor gated-norm fusion with a Triton kernel that
             # also reads z strided from the packed qkvz projection.

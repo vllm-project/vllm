@@ -78,6 +78,8 @@ from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
+    aux_stream,
+    current_stream,
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import (
@@ -562,6 +564,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         prefix: str = "",
         gqa_interleaved_layout=False,
         reduce_results: bool = True,
+        overlap_ba_proj: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
@@ -625,6 +628,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_ba",
         )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
+        # Overlap in_proj_ba with in_proj_qkvz (see _in_proj_qkvz_ba). Opt-in:
+        # the stream/event calls are not torch.compile-safe, so only callers
+        # that run this layer outside torch.compile enable it. Off with
+        # micro-batching, whose threads would share this layer's events, and
+        # with LoRA, whose kernels have not been validated on the aux stream.
+        self._ba_stream = None
+        if (
+            overlap_ba_proj
+            and current_platform.is_cuda()
+            and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
+            and not vllm_config.parallel_config.use_ubatching
+            and vllm_config.lora_config is None
+        ):
+            self._ba_stream = aux_stream()
+            self._ba_events = (torch.cuda.Event(), torch.cuda.Event())
+            self._ba_stream_max_tokens = envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -1135,6 +1154,36 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             return self.forward_cuda(hidden_states)
 
+    def _in_proj_qkvz_ba(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run in_proj_ba on the aux stream, overlapped with in_proj_qkvz.
+
+        ba only needs hidden_states and its weight is tiny (~1 MB at TP1), so it
+        hides under the much larger qkvz GEMM instead of adding its own
+        (split-K) launches to the critical path. Only worth it inside a CUDA
+        graph: eagerly, the stream switch and events cost more host time than
+        the overlap saves, and above ~1.5k tokens the compute-bound qkvz GEMM
+        leaves nothing to hide behind.
+        """
+        if (
+            self._ba_stream is None
+            or hidden_states.shape[0] > self._ba_stream_max_tokens
+            or not torch.cuda.is_current_stream_capturing()
+        ):
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+            return mixed_qkvz, ba
+        input_ready, ba_ready = self._ba_events
+        input_ready.record(current_stream())
+        with torch.cuda.stream(self._ba_stream):
+            input_ready.wait(self._ba_stream)
+            ba, _ = self.in_proj_ba(hidden_states)
+            ba_ready.record(self._ba_stream)
+        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        ba_ready.wait(current_stream())
+        return mixed_qkvz, ba
+
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
@@ -1148,8 +1197,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        mixed_qkvz, ba = self._in_proj_qkvz_ba(hidden_states)
 
         use_fused_gdn_spec_decode = (
             self.enable_fused_gdn_spec_decode
