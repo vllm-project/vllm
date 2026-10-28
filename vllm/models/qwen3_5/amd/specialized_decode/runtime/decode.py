@@ -1,0 +1,246 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""The Qwen3.8 specialized decode executor (step mode): one routing decision
+per step, then the whole forward on the kernels.
+
+Built by the model state once the weights are loaded (``Qwen3_5ModelState``):
+checks the loaded model, builds the per-rank launch state (``Launcher``) and
+compiles every kernel build of every width, before memory profiling and graph
+capture. ``bind_caches`` checks the GDN states vLLM binds (the CUDA-graph
+memory-profiling cache, then the real one). Each step ``plan`` returns a
+``Step`` or None, and ``run`` runs a planned step's forward. Weight reloads are
+not supported.
+
+A planned step runs vLLM's decoder layer loop with each layer as two
+persistent launches (``mono.blocks``):
+
+    GDN layer:        input_layernorm + linear_attn   -> blocks.gdn_block
+    attention layer:  input_layernorm + self_attn     -> vLLM's, up to o_proj's
+                                                         input (``attention_core``)
+    every layer:      o_proj + post_attention_layernorm + mlp, with both
+                      all-reduces                     -> blocks.layer_block
+
+The embedding and the final norm stay vLLM's."""
+
+import os
+from collections.abc import Callable
+from typing import Any, NamedTuple
+
+import torch
+
+from vllm.distributed import get_tp_group
+from vllm.forward_context import (
+    get_forward_context,
+    in_piecewise_cudagraph,
+    is_forward_context_available,
+)
+from vllm.logger import init_logger
+from vllm.models.qwen3_5.amd.specialized_decode.mono import layout as L
+from vllm.models.qwen3_5.amd.specialized_decode.mono.abi import FAILED
+from vllm.models.qwen3_5.amd.specialized_decode.runtime import NAME, DecodeConfig
+from vllm.models.qwen3_5.amd.specialized_decode.runtime.guards import (
+    FailStop,
+    cache_reasons,
+    model_reasons,
+)
+from vllm.models.qwen3_5.amd.specialized_decode.runtime.layers import (
+    Launcher,
+    attention_core,
+    gemma_norm,
+)
+from vllm.models.qwen3_5.amd.specialized_decode.runtime.routing import step_reason
+
+logger = init_logger(__name__)
+
+
+class Step(NamedTuple):
+    """A planned step: ``width`` rows, one decode token a request."""
+
+    width: int
+    attn_metadata: dict[str, Any]  # by layer name
+
+
+def agree(reasons: list[str], group, what: str) -> None:
+    """Raises on every TP rank if any rank has ``reasons``: a rank that refused
+    alone would leave the others spinning in-kernel."""
+    from vllm.models.qwen3_5.amd.specialized_decode.runtime.peer import tp_agree
+
+    if not tp_agree(not reasons, group):
+        why = "; ".join(reasons) if reasons else "another TP rank refused"
+        raise ValueError(
+            f"{NAME} does not support {what}: {why} (without --monokernel, "
+            "vLLM's decode runs)"
+        )
+
+
+def compile_build(build, key) -> None:
+    """Compiles one launch's kernel without running it: FlyDSL's compile-only
+    mode returns before the launch. ``build``: the module's ``build``."""
+    launch = build(key)
+    # FlyDSL's compile-only switch has no FLYDSL_ prefix
+    old = os.environ.get("COMPILE_ONLY")
+    os.environ["COMPILE_ONLY"] = "1"
+    try:
+        launch(*_zeros(key), stream=torch.cuda.current_stream())
+    finally:
+        if old is None:
+            del os.environ["COMPILE_ONLY"]
+        else:
+            os.environ["COMPILE_ONLY"] = old
+
+
+def _zeros(key) -> list[int]:
+    from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+
+    abi = {
+        blocks.GdnBuild: blocks.GDN_ABI,
+        blocks.LayerBuild: blocks.LAYER_ABI,
+    }[type(key)]
+    return abi.zeros()
+
+
+class SpecializedDecode:
+    """The executor over one ``Qwen3_5Model``: builds the launch state, binds
+    it to each KV cache and plans and runs every decode step."""
+
+    def __init__(self, model, config: DecodeConfig):
+        tp = get_tp_group()
+        agree(model_reasons(model), tp.cpu_group, "the loaded model")
+        self.model, self.config = model, config
+        self.gdn_prefix = next(
+            ly.linear_attn.prefix
+            for ly in model.layers
+            if ly.layer_type == "linear_attention"
+        )
+        dev = model.embed_tokens.weight.device
+        self.launch = Launcher(config.widths, tp.rank_in_group, tp.cpu_group, dev)
+        builds = self._builds()
+        for build, key in builds:
+            compile_build(build, key)
+        self._warm_up(dev)
+        self.failstop = FailStop(
+            self.launch.health[FAILED : FAILED + 1],
+            tp.rank_in_group,
+            tp.world_size,
+            tp.cpu_group,
+        )
+        self._kv: tuple[int, int] | None = None
+        logger.info(
+            "%s: %d layers, widths 1-%d, %d builds; other steps run vLLM's decode",
+            NAME,
+            len(model.layers),
+            config.max_tokens,
+            len(builds),
+        )
+
+    def _builds(self) -> list:
+        from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+
+        la = self.launch
+        keys: set[tuple[Callable[[Any], Any], Any]] = set()
+        for s in self.config.widths:
+            for i, layer in enumerate(self.model.layers):
+                if layer.layer_type == "linear_attention":
+                    keys.add((blocks.build_gdn, la.gdn_key(layer, s, i == 0)))
+                keys.add((blocks.build_layer, la.layer_key(layer, s)))
+        return sorted(keys, key=lambda bk: repr(bk[1]))
+
+    def _warm_up(self, dev) -> None:
+        """Compiles the residual add + norm vLLM's parts of a step run, before
+        graph capture."""
+        with torch.inference_mode():
+            for s in (1, 2):
+                x = torch.zeros(s, L.HIDDEN, dtype=torch.bfloat16, device=dev)
+                gemma_norm(self.model.norm, x, x)
+
+    def _kv_key(self) -> tuple[int, int] | None:
+        layer = next(
+            ly for ly in self.model.layers if ly.layer_type == "linear_attention"
+        )
+        state = layer.linear_attn.kv_cache
+        if not isinstance(state, (list, tuple)) or len(state) != 2:
+            return None
+        if state[1].numel() == 0:
+            return None
+        return state[1].data_ptr(), state[1].numel()
+
+    def bind_caches(self) -> None:
+        """Checks the GDN states vLLM just bound (the CUDA-graph memory
+        profiling cache, then the real one)."""
+        self._kv = None
+        if self._kv_key() is None:
+            return
+        tp = get_tp_group()
+        agree(cache_reasons(self.model), tp.cpu_group, "the KV caches")
+        self._kv = self._kv_key()
+
+    def plan(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors,
+    ) -> Step | None:
+        """This step's plan, or None to run vLLM's forward.
+
+        Steps that run vLLM's forward:
+        - pipeline-parallel stage inputs, and steps before a KV cache is bound
+          (profiling, dummy runs);
+        - PIECEWISE steps: they run (or capture) the compiled stock model's
+          graphs, and taking one would leave them uncaptured for the prefills
+          of that size;
+        - more than ``max_tokens`` rows;
+        - steps that are not pure decode steps (``step_reason``).
+
+        Eager steps run the kernels too. Every predicate is the same on all TP
+        ranks: the kernels' mailboxes need every rank on one path. Under FULL
+        graphs this runs at capture only and the plan is baked in; a replay
+        with fewer requests than its graph pads rows with NULL_BLOCK_ID state
+        indices, which the GDN block skips."""
+        if intermediate_tensors is not None or self._kv is None or input_ids is None:
+            return None
+        if not is_forward_context_available() or in_piecewise_cudagraph():
+            return None
+        width = input_ids.size(0)
+        if not 1 <= width <= self.config.max_tokens:
+            return None
+        md = get_forward_context().attn_metadata
+        if step_reason(md, self.gdn_prefix, width) is not None:
+            return None
+        assert isinstance(md, dict)
+        if self._kv_key() != self._kv:
+            raise RuntimeError(
+                f"{NAME}: the KV cache was re-bound without bind_caches "
+                "(ModelState.initialize_kv_cache)"
+            )
+        logger.info_once("%s: first specialized step (%d rows)", NAME, width)
+        return Step(width, md)
+
+    def run(
+        self,
+        step: Step,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """``Qwen3_5Model.forward`` of a planned step -> the final norm's
+        hidden states [S, H]."""
+        model, la, md = self.model, self.launch, step.attn_metadata
+        la.epoch.add_(1)
+        h = model.embed_input_ids(input_ids) if inputs_embeds is None else inputs_embeds
+        residual: torch.Tensor | None = None
+        for layer in model.layers:
+            gate = None
+            if layer.layer_type == "linear_attention":
+                core, residual = la.gdn(layer, md, h, residual)
+            else:
+                x, residual = gemma_norm(layer.input_layernorm, h, residual)
+                core, gate = attention_core(layer.self_attn, x, positions)
+            h, residual = la.layer(layer, core, gate, residual)
+        h, _ = gemma_norm(model.norm, h, residual)
+        return h
+
+    def after_step(self) -> None:
+        """Once per executed step, from compute_logits (eager on every rank,
+        also under graph replay). Raises on every rank once a rank gave up an
+        in-kernel wait."""
+        self.failstop.after_step()

@@ -58,6 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.models.qwen3_5.amd.specialized_decode.hooks import SpecializedDecodeMixin
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -295,6 +296,7 @@ class Qwen3_5Model(Qwen3NextModel):
 
 class Qwen3_5ForCausalLMBase(
     nn.Module,
+    SpecializedDecodeMixin,
     HasInnerState,
     IsHybrid,
     SupportsEagle3,
@@ -337,6 +339,7 @@ class Qwen3_5ForCausalLMBase(
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
+        self.init_specialized_decode(vllm_config)
         self.model = Qwen3_5Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -364,6 +367,14 @@ class Qwen3_5ForCausalLMBase(
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
 
+    @staticmethod
+    def get_model_state_cls():
+        from vllm.models.qwen3_5.amd.specialized_decode.model_state import (
+            Qwen3_5ModelState,
+        )
+
+        return Qwen3_5ModelState
+
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
@@ -376,6 +387,11 @@ class Qwen3_5ForCausalLMBase(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
+        step = self.plan_specialized_decode(input_ids, positions, intermediate_tensors)
+        if step is not None:
+            return self.run_specialized_decode(
+                step, input_ids, positions, inputs_embeds
+            )
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -425,6 +441,7 @@ class Qwen3_5ForCausalLMBase(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        self.after_specialized_decode_step()
         return self.logits_processor(self.lm_head, hidden_states)
 
     def compute_logits_local(
