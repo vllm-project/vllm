@@ -115,7 +115,6 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
         layers[name] = SimpleNamespace(
             get_kv_cache_config=lambda _, spec=specs[name]: full_layer(spec),
             get_attn_backend=lambda backend=backend: backend,
-            is_draft_layer=False,
             kv_sharing_target_layer_name=None,
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
@@ -218,33 +217,6 @@ def test_resolve_hisparse_specs_before_kv_cache_layout():
         for name, lc in resolved.items()
         if isinstance(lc.spec, HiSparsePageSpec)
     } == planned
-
-
-def test_get_kv_cache_layer_configs_tags_draft_layers(monkeypatch):
-    layer_config = full_layer(
-        AttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
-        )
-    )
-    backend = SimpleNamespace(
-        customize_spec=AttentionBackend.customize_spec,
-        get_supported_kernel_block_sizes=lambda _=None: [16],
-        get_supported_kernel_block_sizes_for_layers=lambda *_: [16],
-    )
-    layers = {
-        name: SimpleNamespace(
-            get_kv_cache_config=lambda _: layer_config,
-            get_attn_backend=lambda: backend,
-            is_draft_layer=name == "draft",
-            kv_sharing_target_layer_name=None,
-        )
-        for name in ("target", "draft")
-    }
-    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
-    config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=None))
-
-    layer_configs = attn_utils.get_kv_cache_layer_configs(config)
-    assert layer_configs["draft"].is_draft and not layer_configs["target"].is_draft
 
 
 class _FakeMetadataBuilder:
