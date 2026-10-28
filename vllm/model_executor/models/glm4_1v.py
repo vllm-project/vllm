@@ -989,8 +989,67 @@ class Glm4vMultiModalDataParser(MultiModalDataParser):
         self._spatial_merge_size = spatial_merge_size
         super().__init__(*args, **kwargs)
 
+    def _embed_row_count(self, grid_thw: torch.Tensor) -> int:
+        grid = grid_thw
+        if grid.ndim == 1:
+            grid = grid.unsqueeze(0)
+        if grid.ndim != 2 or grid.shape[-1] != 3:
+            raise ValueError(
+                f"grid_thw must have shape (N, 3), got {tuple(grid_thw.shape)}"
+            )
+        merge = self._spatial_merge_size**2
+        return int(grid.prod().item()) // merge
+
+    def _check_supplied_embeds(
+        self,
+        data: dict,
+        *,
+        embed_key: str,
+        grid_key: str,
+        modality: str,
+    ) -> None:
+        """Reject dict embeddings whose shape cannot match this grid.
+
+        Metadata-only requests omit the embedding tensor and stay valid.
+        """
+        if embed_key not in data:
+            return
+        embeds = data[embed_key]
+        if not isinstance(embeds, torch.Tensor) or embeds.ndim != 2:
+            got = tuple(embeds.shape) if isinstance(embeds, torch.Tensor) else None
+            raise ValueError(
+                f"{modality.capitalize()} embedding must be 2D "
+                f"(num_tokens, hidden_size), got {type(embeds).__name__} "
+                f"with shape {got}"
+            )
+        if (
+            self.expected_hidden_size is not None
+            and embeds.shape[-1] != self.expected_hidden_size
+        ):
+            raise ValueError(
+                f"{modality.capitalize()} embedding hidden dimension mismatch: "
+                f"got {embeds.shape[-1]}, but model expects "
+                f"{self.expected_hidden_size}. "
+                f"Embedding shape: {tuple(embeds.shape)}"
+            )
+        if grid_key not in data:
+            return
+        expected_rows = self._embed_row_count(data[grid_key])
+        if embeds.shape[0] != expected_rows:
+            raise ValueError(
+                f"{modality.capitalize()} embedding row count mismatch: "
+                f"got {embeds.shape[0]}, but grid_thw requires {expected_rows}. "
+                f"Embedding shape: {tuple(embeds.shape)}"
+            )
+
     def _parse_image_data(self, data):
         if isinstance(data, dict):
+            self._check_supplied_embeds(
+                data,
+                embed_key="image_embeds",
+                grid_key="image_grid_thw",
+                modality="image",
+            )
             required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
                 data,
@@ -1003,6 +1062,12 @@ class Glm4vMultiModalDataParser(MultiModalDataParser):
 
     def _parse_video_data(self, data):
         if isinstance(data, dict):
+            self._check_supplied_embeds(
+                data,
+                embed_key="video_embeds",
+                grid_key="video_grid_thw",
+                modality="video",
+            )
             required, optional = self.embedding_field_sets("video")
             return DictEmbeddingItems(
                 data,
@@ -1629,6 +1694,32 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         return prepared_data, prepared_kwargs
 
+    @staticmethod
+    def _write_back_sampled_frame_indices(mm_items, video_metadata) -> None:
+        """Copy the HF processor's sampled frame indices onto the item metadata.
+
+        Input ``frames_indices`` can be the pre-sample range. The processor
+        replaces them on the ``VideoMetadata`` it was given. GLM-5.3 uses this
+        direct path, so the timestamp helper must see that replacement.
+        """
+        if not video_metadata:
+            return
+        video_items = mm_items.get("video")
+        if video_items is None:
+            return
+        for index, meta_obj in enumerate(video_metadata):
+            indices = getattr(meta_obj, "frames_indices", None)
+            if indices is None or index >= video_items.get_count():
+                continue
+            item = video_items.get(index)
+            if not (
+                isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], dict)
+            ):
+                continue
+            if hasattr(indices, "tolist"):
+                indices = indices.tolist()
+            item[1]["frames_indices"] = [int(idx) for idx in indices]
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -1661,6 +1752,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 dict(text=prompt_text, **prepared_data),
                 prepared_kwargs,
             )
+            # The processor returns a new VideoMetadata whose frames_indices
+            # are the sample it kept. The object we passed in still holds the
+            # pre-sample range.
+            sampled_metadata = (
+                processed_data.get("video_metadata")
+                if hasattr(processed_data, "get")
+                else None
+            )
+            self._write_back_sampled_frame_indices(mm_items, sampled_metadata)
             return self._with_video_timestamps(
                 self._finalize_hf_mm_data(
                     hf_data, hf_kwargs, passthrough_data, processed_data
@@ -1700,8 +1800,22 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     ),
                     video_mm_kwargs,
                 )
-                sampled_indices = getattr(video_metadata, "frames_indices", None)
+                sampled_indices = None
+                out_meta = (
+                    video_outputs.get("video_metadata")
+                    if hasattr(video_outputs, "get")
+                    else None
+                )
+                if out_meta:
+                    first = (
+                        out_meta[0][0] if isinstance(out_meta[0], list) else out_meta[0]
+                    )
+                    sampled_indices = getattr(first, "frames_indices", None)
+                if sampled_indices is None:
+                    sampled_indices = getattr(video_metadata, "frames_indices", None)
                 if sampled_indices is not None and isinstance(metadata, dict):
+                    if hasattr(sampled_indices, "tolist"):
+                        sampled_indices = sampled_indices.tolist()
                     metadata["frames_indices"] = [int(idx) for idx in sampled_indices]
                 input_ids = video_outputs.pop("input_ids")
 

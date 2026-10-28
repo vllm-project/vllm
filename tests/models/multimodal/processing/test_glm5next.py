@@ -124,6 +124,81 @@ def test_glm5_metadata_only_roundtrip(modality):
         ordinary_processor.info.parse_mm_data({modality: mm_data_remote})
 
 
+def test_glm5_raw_video_timestamps_follow_sampled_frames():
+    """Input frames_indices are the pre-sample range, not the HF sample.
+
+    32 frames at 8 fps with ``frames_indices=range(32)`` and
+    ``do_sample_frames=True`` used to emit 16 timestamps for ``grid_t=4``.
+    """
+    rng = np.random.RandomState(0)
+    num_frames = 32
+    frames = rng.randint(0, 255, size=(num_frames, 64, 64, 3), dtype=np.uint8)
+    metadata = {
+        "total_num_frames": num_frames,
+        "fps": 8.0,
+        "duration": num_frames / 8.0,
+        "frames_indices": list(range(num_frames)),
+        "do_sample_frames": True,
+    }
+    mm_data = {"video": (frames, metadata)}
+    ctx = build_model_context(
+        "zai-org/GLM-5.3-Flash",
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    mm_config = ctx.model_config.multimodal_config
+    mm_config.enable_mm_embeds = True
+    mm_config.allow_missing_mm_embeddings = True
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    prompt = processor.dummy_inputs.get_dummy_text({"video": 1})
+    raw = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
+    item = raw["mm_kwargs"]["video"][0].get_data()
+    grid = item["video_grid_thw"]
+    timestamps = item["timestamps"]
+    grid_t = int(grid.reshape(-1)[0] if hasattr(grid, "reshape") else grid[0])
+    if hasattr(timestamps, "reshape"):
+        timestamp_count = int(timestamps.reshape(-1).numel())
+    else:
+        flat = []
+        for entry in timestamps:
+            flat.extend(entry if isinstance(entry, list) else [entry])
+        timestamp_count = len(flat)
+    assert timestamp_count == grid_t
+    assert grid_t != num_frames // 2
+
+    features = [
+        MultiModalFeatureSpec(
+            data=mm_item,
+            modality="video",
+            identifier=str(index),
+            mm_position=position,
+        )
+        for index, (mm_item, position) in enumerate(
+            zip(raw["mm_kwargs"]["video"], raw["mm_placeholders"]["video"])
+        )
+    ]
+    published = collect_ec_item_metadata(
+        features, PlaceholderMetadataResolver(ctx.model_config)
+    )
+    published_metadata = json.loads(
+        json.dumps([entry["metadata"] for entry in published.values()])
+    )
+    mm_data_remote = _get_embeds_data("video", published_metadata, processor)
+    remote = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"video": mm_data_remote}),
+        hf_processor_mm_kwargs={},
+    )
+    assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
+    assert remote["mm_placeholders"] == raw["mm_placeholders"]
+
+
 @pytest.fixture(scope="module")
 def processor():
     ctx = build_model_context(
