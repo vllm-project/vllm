@@ -153,6 +153,7 @@ class RejectionSampler:
         device: torch.device,
         *,
         watermark_key: int | None = None,
+        draft_logits_num_shards: int = 1,
     ):
         self.sampler = sampler
         self.watermark_key = watermark_key
@@ -175,6 +176,9 @@ class RejectionSampler:
         self.fly_window_size = 0
         self.fly_entropy_threshold = spec_config.fly_entropy_threshold
         self.fly_entropy_top_k = spec_config.fly_entropy_top_k
+        # Above 1 when each TP rank caches only the draft logits of the
+        # requests it owns (see DraftModelSpeculator).
+        self.draft_logits_num_shards = draft_logits_num_shards
         self.synthetic_conditional_rates: torch.Tensor | None = None
         if rejection_sample_method == "synthetic":
             assert spec_config.synthetic_acceptance_rates is not None
@@ -304,6 +308,7 @@ class RejectionSampler:
             fly_window_size=self.fly_window_size,
             fly_entropy_threshold=self.fly_entropy_threshold,
             fly_entropy_top_k=self.fly_entropy_top_k,
+            draft_logits_num_shards=self.draft_logits_num_shards,
             **self._watermarking_kwargs(
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),
@@ -359,7 +364,7 @@ class RejectionSampler:
             hi = int(cu_num_logits_np[end])
             chunk_cu_num_logits_np = cu_num_logits_np[start : end + 1] - lo
             chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1] - lo
-            # draft_logits uses persistent request-state indices and stays global.
+            # draft_logits uses persistent request-state indices, not batch rows.
             processed_logits, sampled, num_sampled = self._verify(
                 logits[lo:hi],
                 draft_logits,
