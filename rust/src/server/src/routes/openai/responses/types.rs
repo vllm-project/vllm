@@ -552,12 +552,13 @@ pub enum ResponseOutputItem {
 }
 
 impl ResponseOutputItem {
-    /// Mark truncated text or function output incomplete, matching Python.
+    /// Mark a truncated output item incomplete, matching Python.
     pub(super) fn mark_incomplete(&mut self) {
         match self {
             Self::Message { status, .. } => *status = ResponseItemStatus::Incomplete,
-            Self::FunctionCall { status, .. } => *status = Some(ResponseItemStatus::Incomplete),
-            Self::Reasoning { .. } => {}
+            Self::FunctionCall { status, .. } | Self::Reasoning { status, .. } => {
+                *status = Some(ResponseItemStatus::Incomplete)
+            }
         }
     }
 }
