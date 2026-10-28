@@ -579,9 +579,10 @@ pub struct SharedRuntimeArgs {
     #[serde(default, flatten)]
     pub ssl: SslArgs,
 
-    /// FastAPI root_path when app is behind a path based routing proxy.
+    /// Path prefix for a server behind a path-based routing proxy.
     ///
-    /// Routes are served both under this prefix and at their bare paths.
+    /// Every route is served both under this prefix and at its bare path:
+    /// with `/llm`, `/llm/v1/models` and `/v1/models` reach the same route.
     #[arg(long)]
     #[serde(default)]
     pub root_path: Option<String>,
