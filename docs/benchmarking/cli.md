@@ -14,6 +14,27 @@ It's a living document, updated as new features and datasets become available.
 For exact-batch model timing, including steady-state pipeline-parallel forwards,
 see [vllm bench forward](../cli/README.md#forward).
 
+For skewed synthetic MoE expert loads, use `--routing zipf`:
+
+```bash
+vllm bench forward --model Qwen/Qwen3-30B-A3B \
+  --routing zipf --case decode=6*1@8192 --case prefill=2048
+```
+
+Each token independently selects distinct experts without replacement, weighted
+by popularity rank to the power of `-1.25`. Expert popularity is randomly
+permuted per layer to avoid systematically assigning hot experts to the lowest
+EP ranks.
+The fixture is seeded by `--seed`, fixed across timing replays, and generated
+outside the timed forward. Sequence-parallel TP ranks use their corresponding
+token rows. Zipf allows EP load imbalance; `--routing balanced` gives equal
+load per EP rank. Neither synthetic mode supports grouped top-k routing;
+Zipf also does not support prefill context parallelism.
+
+The default remains `--routing auto`: balanced with dummy weights, real routing
+otherwise. Zipf is a synthetic workload, not a fit to a particular model's
+routing or speculative-token correlations.
+
 ## Attention Kernel Benchmark
 
 Run the attention kernel smoke benchmark from the repository root using the

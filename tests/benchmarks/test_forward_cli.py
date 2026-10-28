@@ -16,6 +16,7 @@ from vllm.benchmarks.forward.capture import write_input_ids
 from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
 from vllm.benchmarks.forward.main import run_case
 from vllm.benchmarks.forward.profile import summarize
+from vllm.benchmarks.forward.routing import zipf_topk_ids
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.cpu_mla import CPUMLABackend
@@ -31,7 +32,8 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Forward graph timing requires CUDA."
 )
-def test_bench_forward_hybrid_verify(tmp_path):
+@pytest.mark.parametrize("routing", ["auto", "zipf"])
+def test_bench_forward_hybrid_verify(tmp_path, routing):
     """Repeated target verification starts from the same recurrent state."""
     config = dict(
         architectures=["Qwen3NextForCausalLM"],
@@ -72,6 +74,8 @@ def test_bench_forward_hybrid_verify(tmp_path):
             "--model",
             str(tmp_path),
             "--skip-tokenizer-init",
+            "--routing",
+            routing,
             "--exclude-drafter",
             "--speculative-config",
             '{"method":"ngram","num_speculative_tokens":5}',
@@ -107,9 +111,25 @@ def test_bench_forward_hybrid_verify(tmp_path):
     assert [row["case"] for row in rows] == ["verify", "mixed"]
     for row in rows:
         (rank,) = row["ranks"]
+        assert rank["routing"] == ("balanced" if routing == "auto" else routing)
         assert rank["finite"] and rank["graph_deterministic"]
         assert rank["timing_scope"] == "target_only"
         assert row["median_us"] > 0
+
+
+def test_zipf_expert_selection():
+    """Popularity follows Zipf, with distinct experts and reproducible rows."""
+    rng = np.random.default_rng(0)
+    ids = zipf_topk_ids(50000, 32, 1, rng)
+    frequencies = np.sort(np.bincount(ids.ravel(), minlength=32))[::-1] / len(ids)
+    expected = np.arange(1, 33, dtype=float) ** -1.25
+    expected /= expected.sum()
+    np.testing.assert_allclose(frequencies, expected, atol=0.005, rtol=0)
+
+    ids = zipf_topk_ids(2048, 384, 6, np.random.default_rng(0))
+    assert ((ids >= 0) & (ids < 384)).all()
+    assert (np.diff(np.sort(ids, axis=1), axis=1) > 0).all()
+    assert np.array_equal(ids[:6], zipf_topk_ids(6, 384, 6, np.random.default_rng(0)))
 
 
 @pytest.mark.benchmark
