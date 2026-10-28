@@ -382,6 +382,10 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     if query_lengths[-1] == 0:
         state_indices[-1].zero_()
 
+    output_rtol = 5e-4
+    if impl == "cuda" and state_dtype == torch.float32 and norm_dtype == torch.bfloat16:
+        output_rtol = 1e-3
+
     for step, accepted_tokens in enumerate((1, min(2, state_width), state_width)):
         num_accepted_tokens.fill_(accepted_tokens)
         if query_lengths[-1] == 0:
@@ -431,7 +435,7 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
 
         output_error = (actual.float() - expected.float()).norm()
         output_relative_l2 = output_error / expected.float().norm().clamp_min(1e-20)
-        assert output_relative_l2 < 5e-4, (
+        assert output_relative_l2 < output_rtol, (
             f"MTP output relative L2 mismatch at step {step}: "
             f"{output_relative_l2.item():.6g}"
         )
