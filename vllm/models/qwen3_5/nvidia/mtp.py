@@ -111,14 +111,12 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-        self.norm = Qwen3_5RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, dtype=model_config.dtype
-        )
+        self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pre_fc_norm_hidden = Qwen3_5RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, dtype=model_config.dtype
+            config.hidden_size, eps=config.rms_norm_eps
         )
         self.pre_fc_norm_embedding = Qwen3_5RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, dtype=model_config.dtype
+            config.hidden_size, eps=config.rms_norm_eps
         )
         self.use_fused_pre_fc_norms = HAS_TRITON and current_platform.is_cuda()
 

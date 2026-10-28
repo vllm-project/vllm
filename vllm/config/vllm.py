@@ -73,6 +73,17 @@ else:
 
 logger = init_logger(__name__)
 
+_QWEN3_5_ARCHITECTURES = frozenset(
+    {
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MTP",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+        "Qwen3_5MoeMTP",
+    }
+)
+
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "AliceAIForCausalLM",
@@ -100,30 +111,13 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "MiniMaxM3SparseForConditionalGeneration",
         "MuseSpark1xForCausalLM",
         "MuseSparkForConditionalGeneration",
-        "Qwen3_5ForCausalLM",
-        "Qwen3_5ForConditionalGeneration",
-        "Qwen3_5MTP",
-        "Qwen3_5MoeForCausalLM",
-        "Qwen3_5MoeForConditionalGeneration",
-        "Qwen3_5MoeMTP",
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
         "Qwen4ExpMTP",
         "Step5ForCausalLM",
         "Step5ForConditionalGeneration",
     }
-)
-
-
-_QWEN3_5_ARCHITECTURES = frozenset(
-    {
-        "Qwen3_5ForCausalLM",
-        "Qwen3_5ForConditionalGeneration",
-        "Qwen3_5MTP",
-        "Qwen3_5MoeForCausalLM",
-        "Qwen3_5MoeForConditionalGeneration",
-        "Qwen3_5MoeMTP",
-    }
+    | _QWEN3_5_ARCHITECTURES
 )
 
 

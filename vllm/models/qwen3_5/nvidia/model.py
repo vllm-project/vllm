@@ -50,7 +50,6 @@ from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
@@ -107,6 +106,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.platforms import current_platform
@@ -115,55 +115,33 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 logger = init_logger(__name__)
 
-try:
-    from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
-except ImportError:
-    gemma_rmsnorm = None
-    gemma_fused_add_rmsnorm = None
 
+class Qwen3_5RMSNorm(nn.Module):
+    """Gemma-style RMS normalization backed by flashinfer kernels.
 
-class Qwen3_5RMSNorm(GemmaRMSNorm):
-    """GemmaRMSNorm backed by flashinfer's fused Gemma norm kernels on CUDA.
-
-    The native path recomputes ``weight.float() + 1`` in eager ops on every
-    call (the fp32 weight fails the vllm_c dtype check); flashinfer folds the
-    +1 into the kernel instead. flashinfer requires the weight to share the
-    activation dtype, so the parameter is created in the model dtype —
-    checkpoint norm weights are bf16-exact, making the load-time cast
-    lossless.
+    When ``residual`` is given, the fused add + norm runs in place and the
+    updated ``(x, residual)`` pair is returned.
     """
 
-    def __init__(self, hidden_size: int, eps: float, dtype: torch.dtype) -> None:
-        super().__init__(hidden_size, eps)
-        self.weight.data = self.weight.data.to(dtype)
+    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(hidden_size))
+        set_weight_attrs(self.weight, {"dummy_weight_value": 0.0})
+        self.variance_epsilon = eps
 
-    def forward_cuda(
+    def forward(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            gemma_rmsnorm is not None
-            and x.ndim == 2
-            and x.shape[0] > 0  # the cute kernel rejects empty launches
-            and x.stride(-1) == 1
-            # flashinfer's CUDA-norm backend only supports fp16/bf16; the
-            # cute path is untested for fp32, so keep fp32 on the native path
-            and x.dtype in (torch.float16, torch.bfloat16)
-        ):
-            if residual is None:
-                return gemma_rmsnorm(x, self.weight.data, self.variance_epsilon)
-            if (
-                residual.shape == x.shape
-                and residual.dtype == x.dtype
-                and residual.stride(-1) == 1
-            ):
-                # gemma_fused_add_rmsnorm mutates x and residual in place.
-                gemma_fused_add_rmsnorm(
-                    x, residual, self.weight.data, self.variance_epsilon
-                )
-                return x, residual
-        return self.forward_native(x, residual)
+        from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
+
+        if residual is None:
+            return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
+
+        # gemma_fused_add_rmsnorm mutates x and residual in place.
+        gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
+        return x, residual
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
@@ -269,10 +247,10 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             raise ValueError(f"Invalid model_type {config.model_type}")
 
         self.input_layernorm = Qwen3_5RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, dtype=model_config.dtype
+            config.hidden_size, eps=config.rms_norm_eps
         )
         self.post_attention_layernorm = Qwen3_5RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, dtype=model_config.dtype
+            config.hidden_size, eps=config.rms_norm_eps
         )
 
         self.layer_scale = getattr(config, "layer_scale", False)
@@ -412,11 +390,7 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
         )
 
         if get_pp_group().is_last_rank:
-            self.norm = Qwen3_5RMSNorm(
-                config.hidden_size,
-                eps=config.rms_norm_eps,
-                dtype=vllm_config.model_config.dtype,
-            )
+            self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
 
