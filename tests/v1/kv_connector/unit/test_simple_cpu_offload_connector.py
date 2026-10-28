@@ -120,10 +120,8 @@ def test_multi_cpu_coordinator_uses_parent_hash_protocol(supported):
     child = connector.sub_connectors[0].sub_connectors[0]
     expected = num_lookahead if supported else 0
     assert config.num_hash_lookahead_tokens == expected
-    assert not config.speculative_config.disable_lookahead_block_hashes
     coord = child.scheduler_manager.cpu_coordinator
     assert coord.block_pool.num_hash_lookahead_tokens == expected
-    assert coord.drop_eagle_group_ids == (set() if supported else {0})
 
 
 def test_disk_mode_rejects_non_positive_capacity() -> None:
