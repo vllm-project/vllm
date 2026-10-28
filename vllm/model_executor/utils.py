@@ -87,6 +87,7 @@ def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
         or old.device != new.device
         or new.untyped_storage().data_ptr() == storage.data_ptr()
         or _extent(new) != new.numel()  # overlapping or with gaps
+        or _extent(old) != old.numel()  # its gaps may hold another tensor's data
         or offset % size
         or new.numel() * size > _extent(old) * old.element_size()
     ):

@@ -65,7 +65,9 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         replace_parameter(layer, "weight_global_scale", 1.0 / layer.weight_global_scale)
         input_quant_key = None
         if hasattr(layer, "input_global_scale"):
-            move_parameter(layer, "input_global_scale", "input_scale_2")
+            # Quark keeps its loaded (retired) `input_scale_2`: revive that one.
+            if "input_scale_2" not in layer._parameters:
+                move_parameter(layer, "input_global_scale", "input_scale_2")
             set_kernel_parameter(
                 layer, "input_scale_2", layer.input_global_scale.reshape(-1)
             )
