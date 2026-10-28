@@ -216,9 +216,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def __del__(self):
         self.shutdown()
 
-    # =====================================================
+    # ============================================================
     # Scheduler-side methods
-    # =====================================================
+    # ============================================================
 
     def on_preschedule_request(self, request: Request) -> object | None:
         assert self.connector_scheduler is not None
@@ -343,9 +343,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 self._kv_cache_events = None
             yield from events
 
-    # =====================================================
+    # ============================================================
     # Worker-side methods
-    # =====================================================
+    # ============================================================
 
     def get_mem_pool_context(self) -> AbstractContextManager | None:
         """Return a context manager for the custom MemPool, or None.
