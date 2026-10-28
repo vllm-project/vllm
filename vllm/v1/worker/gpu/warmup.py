@@ -457,8 +457,8 @@ def _warmup_kernels(
             (all_indices, [use_spec_decode] * num_reqs),
         ]
         if num_reqs >= 2:
-            # Mixed spec / non-spec: GDN and KDA reclassify the non-spec decode
-            # as a prefill and split the batch into spec/non-spec token indices.
+            # Uneven draft counts under spec decoding. GDN and KDA keep the draft-less
+            # decode on the spec path, so it does not reach their spec/prefill split.
             decode_steps.append(([0, 1], [use_spec_decode, False]))
             if use_spec_decode:
                 # Exercise the model paths that split a batch by whether each

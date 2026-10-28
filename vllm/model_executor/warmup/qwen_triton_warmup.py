@@ -49,6 +49,7 @@ class _QwenGDNWarmupConfig:
     state_stride_token: int
     state_dtype: torch.dtype
     fused_spec_decode: bool = False
+    num_spec: int = 0
 
     @property
     def conv_dim(self) -> int:
@@ -141,6 +142,7 @@ def _qwen_gdn_warmup_config(
             fused_spec_decode=bool(
                 getattr(layer, "enable_fused_gdn_spec_decode", False)
             ),
+            num_spec=int(getattr(layer, "num_spec", 0)),
         )
 
     if found_layer:
@@ -258,26 +260,39 @@ def _warm_fused_sigmoid_gating_delta_rule_update_kernel(
         device=device,
     )
     cu_seqlens = torch.tensor([0, 1], dtype=torch.int32, device=device)
-    ssm_state_indices = torch.empty((1, 1), dtype=torch.int32, device=device)
-    ssm_state_indices.zero_()
+    variants: list[tuple[torch.Tensor, torch.Tensor | None]] = [
+        (torch.zeros((1, 1), dtype=torch.int32, device=device), None)
+    ]
+    if config.num_spec > 0:
+        # Spec rows compile their own key: IS_SPEC_DECODING and
+        # stride_indices_seq = num_spec + 1. State index 0 makes the kernel
+        # return before it touches the state.
+        variants.append(
+            (
+                torch.zeros((1, config.num_spec + 1), dtype=torch.int32, device=device),
+                torch.ones(1, dtype=torch.int32, device=device),
+            )
+        )
 
-    fused_sigmoid_gating_delta_rule_update(
-        A_log=config.a_log,
-        a=a,
-        b=b,
-        dt_bias=config.dt_bias,
-        q=q,
-        k=k,
-        v=v,
-        beta=1.0,
-        threshold=20.0,
-        initial_state=state,
-        inplace_final_state=True,
-        cu_seqlens=cu_seqlens,
-        ssm_state_indices=ssm_state_indices,
-        use_qk_l2norm_in_kernel=True,
-        is_kda=False,
-    )
+    for state_indices, num_accepted_tokens in variants:
+        fused_sigmoid_gating_delta_rule_update(
+            A_log=config.a_log,
+            a=a,
+            b=b,
+            dt_bias=config.dt_bias,
+            q=q,
+            k=k,
+            v=v,
+            beta=1.0,
+            threshold=20.0,
+            initial_state=state,
+            inplace_final_state=True,
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            use_qk_l2norm_in_kernel=True,
+            is_kda=False,
+        )
 
 
 def _warm_fused_gdn_decode_post_conv_mtp_kernel(
