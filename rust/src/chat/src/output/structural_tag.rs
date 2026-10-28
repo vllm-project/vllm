@@ -35,8 +35,7 @@ pub(crate) fn answer_format(params: &StructuredOutputsParams) -> Option<Format> 
         StructuredOutputConstraint::Choice(choices) => {
             Format::or(choices.iter().map(Format::const_string).collect())
         }
-        // Lark rules use `:`; XGrammar EBNF rules use `::=`.
-        StructuredOutputConstraint::Grammar(grammar) if grammar.contains("::=") => {
+        StructuredOutputConstraint::Grammar(grammar) if !grammar_is_likely_lark(grammar) => {
             Format::Grammar(GrammarFormat {
                 grammar: grammar.clone(),
             })
@@ -44,6 +43,20 @@ pub(crate) fn answer_format(params: &StructuredOutputsParams) -> Option<Format> 
         StructuredOutputConstraint::Grammar(_) => return None,
         StructuredOutputConstraint::StructuralTag(tag) => structural_tag_format(tag)?,
     })
+}
+
+/// Check if grammar appears to use Lark syntax: no line outside a `#` or `//`
+/// comment defines an EBNF rule with `::=`.
+///
+/// Port of Python's `grammar_is_likely_lark`, which the engine's xgrammar
+/// backend also uses to pick the syntax of a grammar left on its wire field, so
+/// a grammar has the same syntax whether it is composed here or compiled there.
+fn grammar_is_likely_lark(grammar: &str) -> bool {
+    !grammar.is_empty()
+        && !grammar.split('\n').any(|line| {
+            let code_end = [line.find('#'), line.find("//")].into_iter().flatten().min();
+            line[..code_end.unwrap_or(line.len())].contains("::=")
+        })
 }
 
 /// The legacy structural tag shape: free text with JSON tags behind triggers.
@@ -153,6 +166,12 @@ mod tests {
                 }),
             ),
             (
+                StructuredOutputsParams::grammar("# Answer\nroot ::= \"a\" # or \"b\""),
+                Format::Grammar(GrammarFormat {
+                    grammar: "# Answer\nroot ::= \"a\" # or \"b\"".to_string(),
+                }),
+            ),
+            (
                 StructuredOutputsParams::structural_tag(
                     r#"{"type": "structural_tag", "format": {"type": "const_string", "value": "x"}}"#,
                 ),
@@ -193,6 +212,9 @@ mod tests {
         let cases = [
             StructuredOutputsParams::json(Value::String("{".to_string())),
             StructuredOutputsParams::grammar("start: \"a\""),
+            // Lark, whose comments mention EBNF.
+            StructuredOutputsParams::grammar("// Like `root ::= \"a\"` in EBNF.\nstart: \"a\""),
+            StructuredOutputsParams::grammar("start: \"a\" # not `root ::= \"a\"`"),
             StructuredOutputsParams::structural_tag(r#"{"structures": [{"begin": "<a>"}]}"#),
             StructuredOutputsParams::structural_tag(r#"{"format": {"type": "unknown"}}"#),
         ];
