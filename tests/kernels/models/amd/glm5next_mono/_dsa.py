@@ -198,7 +198,7 @@ class _Caches:
             self.kv = _e4m3(self.kv, self.k_scale)
         if kv_mxfp4:
             from vllm.v1.attention.ops.mxfp4_mla import row_bytes
-            from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
+            from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla
 
             bf16 = self.kv.view(-1, KV_LORA)
             self.kv = torch.zeros(
@@ -407,7 +407,7 @@ def _check(
         kv_want = _rms(kva, dsa.g_kv)
         flat_kv = cache.kv.view(-1, cache.kv.shape[-1])
         if kv_mxfp4:
-            from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
+            from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla
 
             # vLLM's store on the reference norm, which may differ from the
             # kernel's in a last bf16 bit and so move a code across a midpoint
