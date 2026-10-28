@@ -5,6 +5,7 @@ gating, idempotent sequence commands, batch ordering, and error replies."""
 
 import contextlib
 import dataclasses
+import errno
 import runpy
 import socket
 import threading
@@ -1805,6 +1806,167 @@ def test_stop_disconnects_clients(server, client):
     server.stop()
     with pytest.raises(ConnectionClosed):
         client.recv(timeout=5.0)
+
+
+@pytest.mark.parametrize("failed_owner", ["listener", 0, 1])
+def test_stop_attempts_all_owners_after_socket_close_error(
+    adapter, monkeypatch, failed_owner
+):
+    accepted = []
+    cleanup_error = OSError(errno.EIO, "injected cleanup failure")
+
+    class FailingSocket(socket.socket):
+        fail_close = False
+
+        def accept(self):
+            conn, address = super().accept()
+            accepted.append(conn)
+            return conn, address
+
+        def close(self):
+            super().close()
+            if self.fail_close:
+                self.fail_close = False
+                raise cleanup_error
+
+    monkeypatch.setattr(socket, "socket", FailingSocket)
+    server = RemoteDraftServer(adapter)
+    endpoint = server.start("tcp://127.0.0.1:0")
+    clients = [RawClient(endpoint) for _ in range(3)]
+    try:
+        for client in clients:
+            assert isinstance(client.hello(), HelloAck)
+        acceptor, workers = server._acceptor, tuple(server._workers)
+        assert len(accepted) == len(workers) == 3
+        failed_socket = (
+            server._listener._sock
+            if failed_owner == "listener"
+            else accepted[failed_owner]
+        )
+        failed_socket.fail_close = True
+        with pytest.raises(server_module.ServerShutdownTimeout) as failure:
+            server.stop()
+        assert cleanup_error in failure.value.__cause__.exceptions
+        assert server._shutdown_failed
+        assert server.wait(0)
+        assert not acceptor.is_alive()
+        assert all(not worker.is_alive() for worker in workers)
+        assert all(sock.fileno() == -1 for sock in accepted)
+        server.stop()
+        with pytest.raises(server_module.ServerShutdownTimeout, match="restart"):
+            server.start(endpoint)
+    finally:
+        for client in clients:
+            client.close()
+        server.stop()
+
+
+@pytest.mark.parametrize("error_number", [errno.EMFILE, errno.ENFILE, errno.EBADF])
+@pytest.mark.parametrize("recovers", [False, True])
+def test_accept_failure_recovers_or_notifies_server_owner(
+    adapter, monkeypatch, error_number, recovers
+):
+    failures = 0
+
+    class FailingSocket(socket.socket):
+        def accept(self):
+            nonlocal failures
+            if not recovers or failures < 2:
+                failures += 1
+                raise OSError(error_number, "injected accept failure")
+            return super().accept()
+
+    monkeypatch.setattr(socket, "socket", FailingSocket)
+    server = RemoteDraftServer(adapter)
+    endpoint = server.start("tcp://127.0.0.1:0")
+    client = None
+    try:
+        if recovers and error_number != errno.EBADF:
+            client = RawClient(endpoint)
+            assert isinstance(client.hello(), HelloAck)
+            assert failures == 2
+            assert not server._shutdown_failed
+            assert not server.wait(0)
+        else:
+            assert server.wait(2)
+            assert server._shutdown_failed
+            assert server._lifecycle_error.errno == error_number
+    finally:
+        if client is not None:
+            client.close()
+        server.stop()
+
+
+@pytest.mark.parametrize("failure", ["before", "after", "uncertain"])
+def test_acceptor_start_failure_rolls_back_unix_listener(
+    adapter, monkeypatch, tmp_path, failure
+):
+    class FailingThread(threading.Thread):
+        def start(self):
+            if self.name == "remote-draft-acceptor":
+                if failure == "after":
+                    super().start()
+                if failure == "before":
+                    raise RuntimeError("injected thread start failure")
+                raise MemoryError("injected thread start failure")
+            return super().start()
+
+    server = RemoteDraftServer(adapter, shutdown_timeout_s=0.2)
+    path = tmp_path / "draft.sock"
+    endpoint = f"unix://{path}"
+    with monkeypatch.context() as patch:
+        patch.setattr(threading, "Thread", FailingThread)
+        with pytest.raises((RuntimeError, MemoryError), match="injected"):
+            server.start(endpoint)
+    assert not path.exists()
+    if failure == "uncertain":
+        assert server._shutdown_failed
+        with pytest.raises(server_module.ServerShutdownTimeout):
+            server.stop()
+        with pytest.raises(server_module.ServerShutdownTimeout):
+            server.start(endpoint)
+    else:
+        assert server.endpoint is None
+        server.stop()
+        server.start(endpoint)
+        server.stop()
+
+
+def test_normal_stop_racing_accept_closure_does_not_fence_server(adapter, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+
+    class ClosingSocket(socket.socket):
+        def accept(self):
+            entered.set()
+            assert release.wait(2)
+            raise ConnectionClosed("listener closed before accepting")
+
+    monkeypatch.setattr(socket, "socket", ClosingSocket)
+    server = RemoteDraftServer(adapter)
+    server.start("tcp://127.0.0.1:0")
+    errors = []
+
+    def stop():
+        try:
+            server.stop()
+        except BaseException as error:
+            errors.append(error)
+
+    stopper = threading.Thread(target=stop)
+    try:
+        assert entered.wait(2)
+        stopper.start()
+        assert server.wait(2)
+        release.set()
+        stopper.join(2)
+        assert not stopper.is_alive()
+        assert not errors
+        assert not server._shutdown_failed
+    finally:
+        release.set()
+        if stopper.ident is not None:
+            stopper.join(2)
+        server.stop()
 
 
 def test_stop_closes_connection_accepted_before_registration(adapter, monkeypatch):

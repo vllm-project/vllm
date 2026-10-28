@@ -165,6 +165,67 @@ def test_parse_tcp_endpoint():
     )
 
 
+@pytest.mark.parametrize("failure", ["connect", "timeout", "tune", "framing"])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_failed_connect_releases_socket_while_traceback_is_retained(
+    monkeypatch, tmp_path, failure, close_fails
+):
+    """Ownership transfers only after connection setup has completed."""
+    sockets, errors = [], []
+    listener = listen("tcp://127.0.0.1:0")
+
+    class FailingSocket(socket.socket):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            sockets.append(self)
+
+        def connect(self, address):
+            if failure == "timeout":
+                raise TimeoutError("injected connect timeout")
+            return super().connect(address)
+
+        def setsockopt(self, *args):
+            if failure == "tune" and args[:2] == (
+                socket.IPPROTO_TCP,
+                socket.TCP_NODELAY,
+            ):
+                raise OSError(errno.ENOBUFS, "injected tuning failure")
+            return super().setsockopt(*args)
+
+        def settimeout(self, timeout):
+            if failure == "framing" and timeout is None:
+                raise MemoryError("injected framing allocation failure")
+            return super().settimeout(timeout)
+
+        def close(self):
+            super().close()
+            if close_fails:
+                raise OSError(errno.EIO, "injected cleanup failure")
+
+    monkeypatch.setattr(socket, "socket", FailingSocket)
+    endpoint = (
+        f"unix://{tmp_path / 'absent.sock'}"
+        if failure in ("connect", "timeout")
+        else listener.endpoint
+    )
+    try:
+        for _ in range(2):
+            with pytest.raises((TransportError, MemoryError)) as caught:
+                connect(endpoint, timeout=1)
+            errors.append(caught.value)
+        assert len(errors) == len(sockets) == 2
+        assert all(sock.fileno() == -1 for sock in sockets)
+        if close_fails:
+            assert all(
+                any("injected cleanup failure" in note for note in error.__notes__)
+                for error in errors
+            )
+    finally:
+        for sock in sockets:
+            socket.SocketType.close(sock)
+        listener.close()
+
+
 def test_parse_ipv6_tcp_endpoint():
     assert parse_endpoint("tcp://[::1]:5555") == (socket.AF_INET6, ("::1", 5555))
 

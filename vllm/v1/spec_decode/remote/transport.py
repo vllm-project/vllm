@@ -78,6 +78,14 @@ class ConnectionClosed(TransportError):
     """The peer closed the connection or the socket failed."""
 
 
+class ListenerAcceptError(ConnectionClosed):
+    """An accept syscall failed; retain errno for the server's retry policy."""
+
+    def __init__(self, error: OSError) -> None:
+        super().__init__(f"listener accept failed: {error}")
+        self.errno = error.errno
+
+
 class DataFrame(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     """One tensor on the data plane.
 
@@ -612,14 +620,20 @@ class Listener:
         except TimeoutError:
             raise TransportTimeout("no connection before the deadline") from None
         except OSError as e:
-            raise ConnectionClosed(f"listener closed: {e}") from e
-        _tune(conn)
-        return FramedConnection(conn)
+            raise ListenerAcceptError(e) from e
+        try:
+            _tune(conn)
+            return FramedConnection(conn)
+        except BaseException as error:
+            _close_after_failure(conn, error)
+            raise
 
     def close(self) -> None:
         unix_identity = self._unix_identity
         self._unix_identity = None
         try:
+            with contextlib.suppress(OSError):
+                self._sock.shutdown(socket.SHUT_RDWR)
             self._sock.close()
         finally:
             if self._unix_path is not None and unix_identity is not None:
@@ -629,6 +643,13 @@ class Listener:
 def _tune(sock: socket.socket) -> None:
     if sock.family in (socket.AF_INET, socket.AF_INET6):
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+
+def _close_after_failure(sock: socket.socket, error: BaseException) -> None:
+    try:
+        sock.close()
+    except BaseException as cleanup_error:
+        error.add_note(f"Socket cleanup also failed: {cleanup_error!r}")
 
 
 def _unlink_if_owned(path: str, identity: tuple[int, int]) -> None:
@@ -641,21 +662,27 @@ def _unlink_if_owned(path: str, identity: tuple[int, int]) -> None:
 def connect(endpoint: str, timeout: float | None = None) -> FramedConnection:
     """Open a client connection to ``endpoint``."""
     family, address = parse_endpoint(endpoint)
+    sock = None
     try:
-        if family in (socket.AF_INET, socket.AF_INET6):
-            assert isinstance(address, tuple)
-            sock = socket.create_connection(address, timeout=timeout)
-        else:
-            assert isinstance(address, str)
-            sock = socket.socket(family, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            sock.connect(address)
-    except TimeoutError:
-        raise TransportTimeout(f"connect to {endpoint} timed out") from None
-    except OSError as e:
-        raise ConnectionClosed(f"connect to {endpoint} failed: {e}") from e
-    _tune(sock)
-    return FramedConnection(sock)
+        try:
+            if family in (socket.AF_INET, socket.AF_INET6):
+                assert isinstance(address, tuple)
+                sock = socket.create_connection(address, timeout=timeout)
+            else:
+                assert isinstance(address, str)
+                sock = socket.socket(family, socket.SOCK_STREAM)
+                sock.settimeout(timeout)
+                sock.connect(address)
+            _tune(sock)
+            return FramedConnection(sock)
+        except TimeoutError:
+            raise TransportTimeout(f"connect to {endpoint} timed out") from None
+        except OSError as e:
+            raise ConnectionClosed(f"connect to {endpoint} failed: {e}") from e
+    except BaseException as error:
+        if sock is not None:
+            _close_after_failure(sock, error)
+        raise
 
 
 def listen(endpoint: str, backlog: int = 16) -> Listener:
@@ -681,9 +708,11 @@ def listen(endpoint: str, backlog: int = 16) -> Listener:
             unix_identity = (info.st_dev, info.st_ino)
             resolved = f"unix://{unix_path}"
         sock.listen(backlog)
-    except OSError as e:
-        sock.close()
+        return Listener(sock, resolved, unix_path, unix_identity)
+    except BaseException as error:
+        _close_after_failure(sock, error)
         if unix_path is not None and unix_identity is not None:
             _unlink_if_owned(unix_path, unix_identity)
-        raise TransportError(f"cannot listen on {endpoint}: {e}") from e
-    return Listener(sock, resolved, unix_path, unix_identity)
+        if isinstance(error, OSError):
+            raise TransportError(f"cannot listen on {endpoint}: {error}") from error
+        raise
