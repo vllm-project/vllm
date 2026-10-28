@@ -709,7 +709,15 @@ class SpeculativeConfig:
         return hash_str
 
     @staticmethod
-    def hf_config_override(hf_config: PreTrainedConfig) -> PreTrainedConfig:
+    def hf_config_override(
+        hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
+    ) -> PreTrainedConfig:
+        if transformers_mtp_overrides is not None:
+            # The Transformers modeling backend builds the MTP draft from the
+            # target's config, so it needs none of the rewrites below
+            hf_config.update(transformers_mtp_overrides)
+            return hf_config
         initial_architecture = hf_config.architectures[0]
         if initial_architecture == "RadioMBartPrefixForCausalLM" and getattr(
             getattr(hf_config, "decoder", None), "causal_vision_prefix", False
@@ -1184,13 +1192,17 @@ class SpeculativeConfig:
     def _apply_composed_hf_override(
         target_hf_overrides: Callable[[PreTrainedConfig], PreTrainedConfig],
         hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
     ) -> PreTrainedConfig:
-        hf_config = SpeculativeConfig.hf_config_override(hf_config)
+        hf_config = SpeculativeConfig.hf_config_override(
+            hf_config, transformers_mtp_overrides
+        )
         return target_hf_overrides(hf_config)
 
     @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
     ) -> Callable[[PreTrainedConfig], PreTrainedConfig]:
         """Build the ``hf_overrides`` for the draft ``ModelConfig``.
 
@@ -1208,10 +1220,15 @@ class SpeculativeConfig:
         method instead.
         """
         if not callable(target_hf_overrides):
-            return SpeculativeConfig.hf_config_override
+            return functools.partial(
+                SpeculativeConfig.hf_config_override,
+                transformers_mtp_overrides=transformers_mtp_overrides,
+            )
 
         return functools.partial(
-            SpeculativeConfig._apply_composed_hf_override, target_hf_overrides
+            SpeculativeConfig._apply_composed_hf_override,
+            target_hf_overrides,
+            transformers_mtp_overrides=transformers_mtp_overrides,
         )
 
     @staticmethod
@@ -1380,11 +1397,31 @@ class SpeculativeConfig:
             self.prompt_lookup_min = 0
 
             if self.model is not None:
+                target = self.target_model_config
+                using_transformers_mtp = (
+                    self.method == "mtp"
+                    and target is not None
+                    and target.using_transformers_backend()
+                    and getattr(target.hf_text_config, "num_mtp_layers", None)
+                    is not None
+                )
+                transformers_mtp_overrides = None
+                if using_transformers_mtp:
+                    if target.hf_config is not target.hf_text_config:
+                        raise NotImplementedError(
+                            "The Transformers modeling backend does not support "
+                            "MTP for multimodal models yet."
+                        )
+                    moe = "MoE" if target.is_moe else ""
+                    transformers_mtp_overrides = {
+                        "architectures": [f"Transformers{moe}ForMTP"],
+                        "n_predict": target.hf_text_config.num_mtp_layers,
+                    }
                 # Compose any callable hf_overrides set on the target so the
                 # draft config receives the same transform (e.g. the test
                 # shrink). Dict overrides stay target-only.
                 draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
-                    self.target_model_config.hf_overrides
+                    self.target_model_config.hf_overrides, transformers_mtp_overrides
                 )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
@@ -1449,8 +1486,9 @@ class SpeculativeConfig:
                     )
                 ):
                     self.method = "dspark"
-                elif self.draft_model_config.hf_config.model_type in get_args(
-                    MTPModelTypes
+                elif using_transformers_mtp or (
+                    self.draft_model_config.hf_config.model_type
+                    in get_args(MTPModelTypes)
                 ):
                     self.method = "mtp"
                     if (
