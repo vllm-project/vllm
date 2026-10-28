@@ -43,12 +43,13 @@ class DeepSeekV31ToolParser(ToolParser):
         self.tool_call_start_token: str = "<｜tool▁call▁begin｜>"
         self.tool_call_end_token: str = "<｜tool▁call▁end｜>"
 
+        # The arguments may be pretty-printed over several lines.
         self.tool_call_regex = re.compile(
-            r"<｜tool▁call▁begin｜>(?P<function_name>.*?)<｜tool▁sep｜>(?P<function_arguments>.*?)<｜tool▁call▁end｜>"
+            r"<｜tool▁call▁begin｜>(?P<function_name>.*?)<｜tool▁sep｜>(?P<function_arguments>[\s\S]*?)<｜tool▁call▁end｜>"
         )
 
         self.stream_tool_call_portion_regex = re.compile(
-            r"(?P<function_name>.*)<｜tool▁sep｜>(?P<function_arguments>.*)"
+            r"(?P<function_name>.*)<｜tool▁sep｜>(?P<function_arguments>[\s\S]*)"
         )
 
         self.stream_tool_call_name_regex = re.compile(

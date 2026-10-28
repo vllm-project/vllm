@@ -138,4 +138,64 @@ class B12xNvFp4LinearKernel(NvFp4LinearKernel):
         )
 
 
-__all__ = ["B12xNvFp4LinearKernel"]
+class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
+    """BF16 x NVFP4 GEMM without activation quantization."""
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        blockscaled = _import_b12x_blockscaled()
+        assert blockscaled is not None
+        layer.b12x_nvfp4_packed_weight = blockscaled.pack_weight(
+            layer.weight,
+            layer.weight_scale,
+            recipe="nvfp4",
+            global_scale=layer.weight_global_scale,
+        )
+
+    def get_b12x_warmup_unit(
+        self,
+        layer: torch.nn.Module,
+        token_counts: tuple[int, ...],
+        output_dtype: torch.dtype,
+    ) -> B12xWarmupUnit:
+        def compile() -> None:
+            for tokens in token_counts:
+                source = torch.zeros(
+                    (tokens, layer.weight.shape[1] * 2),
+                    dtype=output_dtype,
+                    device=layer.weight.device,
+                )
+                self.apply_weights(layer, source)
+
+        return B12xWarmupUnit(
+            name="NVFP4 W4A16",
+            key=(
+                type(self),
+                layer.weight.device,
+                tuple(layer.weight.shape),
+                output_dtype,
+            ),
+            compile=compile,
+        )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if x.dtype != torch.bfloat16:
+            raise ValueError(f"b12x NVFP4 W4A16 requires BF16 input, got {x.dtype}")
+        blockscaled = _import_b12x_blockscaled()
+        assert blockscaled is not None
+        output = blockscaled.mm(
+            x.reshape(-1, x.shape[-1]).contiguous(),
+            layer.b12x_nvfp4_packed_weight,
+            required_mode="a16",
+        )
+        if bias is not None:
+            output = output + bias
+        return output.view(*x.shape[:-1], layer.weight.shape[0])
+
+
+__all__ = ["B12xNvFp4LinearKernel", "B12xNvFp4W4A16LinearKernel"]
