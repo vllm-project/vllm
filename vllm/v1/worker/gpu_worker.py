@@ -121,7 +121,11 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.cudagraph_utils import has_compiled_submodule
-from .gpu.warmup import run_mixed_prefill_decode_warmup, warmup_kernels
+from .gpu.warmup import (
+    run_context_prefill_warmup,
+    run_mixed_prefill_decode_warmup,
+    warmup_kernels,
+)
 from .utils import request_memory
 
 logger = init_logger(__name__)
@@ -1166,6 +1170,22 @@ class Worker(WorkerBase):
                         self.model_config.max_model_len,
                     ),
                 )
+                if self.model_config.use_mla:
+                    from vllm.model_executor.layers.attention.mla_attention import (
+                        MLACommonMetadataBuilder,
+                    )
+
+                    # Fill one chunked-context workspace, so the measured
+                    # peak covers up-projecting a prefix cache hit's context.
+                    builder = MLACommonMetadataBuilder
+                    run_context_prefill_warmup(
+                        self._v2_model_runner(),
+                        self.execute_model,
+                        self.sample_tokens,
+                        builder.determine_chunked_prefill_workspace_size(
+                            self.vllm_config
+                        ),
+                    )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
