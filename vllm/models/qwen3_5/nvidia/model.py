@@ -25,6 +25,7 @@
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
+from functools import partial
 from itertools import islice
 from typing import ClassVar, cast
 
@@ -50,6 +51,11 @@ from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
@@ -59,6 +65,14 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    nvfp4_weight_padding_bytes,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8StaticTensorSym,
+    kNvfp4Dynamic,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -113,8 +127,47 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 from .ops.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
+from .ops.fused_norm_quant import FP8_DTYPE, gemma_add_rms_norm_quant
 
 logger = init_logger(__name__)
+
+
+def _norm_quant_key(linear: nn.Module) -> QuantKey | None:
+    """The input quant key of ``linear`` that the fused norms can produce.
+
+    Checked per call: keys are exposed after weight loading, and LoRA hides
+    them (requires_unquantized_input).
+    """
+    key = get_input_quant_key(linear)
+    if key == kFp8StaticTensorSym:
+        return key
+    # The norm writes block scales for exactly K = hidden_size.
+    if key == kNvfp4Dynamic and nvfp4_weight_padding_bytes(linear) == 0:
+        return key
+    return None
+
+
+def _fused_gdn_gated_rms_norm_quant(
+    gdn: QwenGatedDeltaNetAttention,
+    *,
+    x: torch.Tensor,
+    out: torch.Tensor,
+    **kwargs,
+) -> torch.Tensor | QuantizedActivation:
+    """GDN gated norm, quantized for out_proj when it takes static FP8."""
+    if get_input_quant_key(gdn.out_proj) != kFp8StaticTensorSym:
+        fused_gdn_gated_rms_norm(x=x, out=out, **kwargs)
+        return out
+    scale = gdn.out_proj.input_scale
+    q = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
+    fused_gdn_gated_rms_norm(x=x, out=q, scale=scale, **kwargs)
+    return QuantizedActivation(
+        data=q,
+        scale=scale,
+        orig_dtype=x.dtype,
+        orig_shape=x.shape,
+        quant_key=kFp8StaticTensorSym,
+    )
 
 
 class Qwen3_5RMSNorm(nn.Module):
@@ -143,6 +196,34 @@ class Qwen3_5RMSNorm(nn.Module):
         # gemma_fused_add_rmsnorm mutates x and residual in place.
         gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
         return x, residual
+
+    def forward_quant(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None,
+        linear: LinearBase,
+        key: QuantKey,
+        write_y: bool = False,
+    ) -> tuple[QuantizedActivation, torch.Tensor | None, torch.Tensor]:
+        """``forward`` fused with ``linear``'s input quantization ``key``.
+
+        x is not modified. Returns the quantized normed activation, the
+        normed activation in x's dtype when ``write_y`` (else None), and the
+        residual (x itself when ``residual`` is None).
+        """
+        nvfp4 = key == kNvfp4Dynamic
+        scale = linear.input_global_scale_inv if nvfp4 else linear.input_scale
+        q, block_scale, y = gemma_add_rms_norm_quant(
+            x, residual, self.weight, self.variance_epsilon, scale, nvfp4, write_y
+        )
+        qa = QuantizedActivation(
+            data=q,
+            scale=block_scale,
+            orig_dtype=x.dtype,
+            orig_shape=x.shape,
+            quant_key=key,
+        )
+        return qa, y, x if residual is None else residual
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
@@ -194,8 +275,11 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 overlap_ba_proj=True,
             )
             # Recover the inductor gated-norm fusion with a Triton kernel that
-            # also reads z strided from the packed qkvz projection.
-            self.linear_attn._fused_gdn_gated_rms_norm = fused_gdn_gated_rms_norm
+            # also reads z strided from the packed qkvz projection, and fuse
+            # the out_proj input quantization into it.
+            self.linear_attn._fused_gdn_gated_rms_norm = partial(
+                _fused_gdn_gated_rms_norm_quant, self.linear_attn
+            )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
                 config,
@@ -277,30 +361,43 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         positions: torch.Tensor,
         **kwargs: object,
     ):
-        if not self.use_fused_allreduce_norm:
+        if self.use_attn_reduce_scatter_for_moe:
             return super().forward(hidden_states, residual, positions, **kwargs)
 
-        # layer_scale is a per-channel multiply, which commutes with the
-        # deferred all-reduce.
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        elif self.mlp_output_is_partial:
+        # Each norm either absorbs the deferred all-reduce of the preceding
+        # row-parallel linear (use_fused_allreduce_norm), or quantizes its
+        # output for the linear it feeds when that linear's kernel takes a
+        # pre-quantized input. layer_scale is a per-channel multiply, which
+        # commutes with the deferred all-reduce.
+        is_gdn = self.layer_type == "linear_attention"
+        in_proj = self.linear_attn.in_proj_qkvz if is_gdn else self.self_attn.qkv_proj
+        in_proj_input = None
+        if residual is not None and self.mlp_output_is_partial:
             hidden_states, residual = fused_allreduce_gemma_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
+        elif (key := _norm_quant_key(in_proj)) is not None:
+            # GDN's in_proj_ba reads the unquantized normed activation.
+            in_proj_input, hidden_states, residual = self.input_layernorm.forward_quant(
+                hidden_states, residual, in_proj, key, write_y=is_gdn
+            )
+        elif residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if self.layer_type == "linear_attention":
-            hidden_states = self.linear_attn(hidden_states=hidden_states)
-        elif self.layer_type == "full_attention":
+        if not is_gdn:
             hidden_states = self.self_attn(
-                hidden_states=hidden_states,
+                hidden_states=hidden_states if in_proj_input is None else in_proj_input,
                 positions=positions,
             )
+        elif in_proj_input is not None:
+            hidden_states = self.linear_attn.forward_cuda(
+                hidden_states, qkvz_input=in_proj_input
+            )
         else:
-            raise ValueError("Invalid layer_type")
+            hidden_states = self.linear_attn(hidden_states=hidden_states)
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
@@ -312,9 +409,20 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                     self.attn_layer_scale.to(hidden_states.dtype) + 1
                 )
 
-        hidden_states, residual = fused_allreduce_gemma_rms_norm(
-            hidden_states, residual, self.post_attention_layernorm
-        )
+        # The MoE router needs the unquantized activation.
+        gate_up = self.mlp.gate_up_proj if isinstance(self.mlp, Qwen3NextMLP) else None
+        if self.use_fused_allreduce_norm:
+            hidden_states, residual = fused_allreduce_gemma_rms_norm(
+                hidden_states, residual, self.post_attention_layernorm
+            )
+        elif gate_up is not None and (key := _norm_quant_key(gate_up)) is not None:
+            hidden_states, _, residual = self.post_attention_layernorm.forward_quant(
+                hidden_states, residual, gate_up, key
+            )
+        else:
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
         hidden_states = self.mlp(hidden_states)
 
         if self.layer_scale:

@@ -12,11 +12,13 @@ def _fused_sigmoid_gate_mul_kernel(
     x_ptr,
     gate_ptr,
     out_ptr,
+    scale_ptr,
     hidden,
     x_stride_t,
     gate_stride_t,
     out_stride_t,
     BLOCK: tl.constexpr,
+    QUANT_FP8: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
@@ -25,6 +27,10 @@ def _fused_sigmoid_gate_mul_kernel(
     x = tl.load(x_ptr + row * x_stride_t + offs, mask=mask, other=0.0)
     g = tl.load(gate_ptr + row * gate_stride_t + offs, mask=mask, other=0.0)
     out = x.to(tl.float32) * tl.sigmoid(g.to(tl.float32))
+    if QUANT_FP8:
+        # Static FP8 from the rounded product, like scaled_fp8_quant.
+        out = out.to(x_ptr.dtype.element_ty).to(tl.float32)
+        out = tl.clamp(out * tl.math.div_rn(1.0, tl.load(scale_ptr)), -448.0, 448.0)
     tl.store(
         out_ptr + row * out_stride_t + offs,
         out.to(out_ptr.dtype.element_ty),
@@ -32,7 +38,9 @@ def _fused_sigmoid_gate_mul_kernel(
     )
 
 
-def fused_sigmoid_gate_mul(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+def fused_sigmoid_gate_mul(
+    x: torch.Tensor, gate: torch.Tensor, scale: torch.Tensor | None = None
+) -> torch.Tensor:
     """Compute ``x * sigmoid(gate)`` in a single Triton kernel.
 
     Falls back to the eager ``x * torch.sigmoid(gate)`` sequence unless both
@@ -41,9 +49,11 @@ def fused_sigmoid_gate_mul(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     Args:
         x: (num_tokens, hidden) tensor, e.g. attention output.
         gate: (num_tokens, hidden) pre-sigmoid gate.
+        scale: optional static per-tensor FP8 scale. When given, the result is
+            quantized to float8_e4m3fn (no eager fallback).
 
     Returns:
-        A fresh (num_tokens, hidden) tensor with x's dtype and device.
+        A fresh (num_tokens, hidden) tensor with x's dtype (or FP8) and device.
 
     """
     if (
@@ -54,10 +64,11 @@ def fused_sigmoid_gate_mul(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
         or not gate.is_contiguous()
         or not x.is_cuda
     ):
+        assert scale is None, "FP8 output needs contiguous 2D CUDA inputs"
         return x * torch.sigmoid(gate)
 
     num_tokens, hidden = x.shape
-    out = torch.empty_like(x)
+    out = torch.empty_like(x, dtype=x.dtype if scale is None else torch.float8_e4m3fn)
     if num_tokens == 0 or hidden == 0:
         return out
 
@@ -76,11 +87,13 @@ def fused_sigmoid_gate_mul(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
         x,
         gate,
         out,
+        scale if scale is not None else x,
         hidden,
         x.stride(0),
         gate.stride(0),
         out.stride(0),
         BLOCK=block,
+        QUANT_FP8=scale is not None,
         num_warps=num_warps,
     )
     return out

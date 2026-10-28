@@ -73,3 +73,31 @@ def test_fused_sigmoid_gate_mul_fallback_noncontiguous():
     expected = x * torch.sigmoid(gate)
 
     torch.testing.assert_close(result, expected, atol=0.0, rtol=0.0)
+
+
+@requires_cuda
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(89),
+    reason="FP8 output requires SM89+",
+)
+# o_proj input widths at TP1 (6144) and TP2 (3072) of a 24x256-head model.
+@pytest.mark.parametrize("shape", [(1, 6144), (37, 6144), (5, 3072), (300, 4096)])
+@torch.inference_mode()
+def test_fused_sigmoid_gate_mul_fp8_matches_chain(shape: tuple[int, int]):
+    """The FP8 output (fused o_proj input quant) equals the bf16 kernel
+    followed by static scaled_fp8_quant."""
+    from vllm import _custom_ops as ops
+
+    g = torch.Generator(device="cuda").manual_seed(shape[0])
+    x = torch.randn(shape, generator=g, dtype=torch.bfloat16, device="cuda") * 8
+    gate = torch.randn(shape, generator=g, dtype=torch.bfloat16, device="cuda") * 4
+    scale = torch.tensor([0.02], device="cuda")
+
+    ref_q, _ = ops.scaled_fp8_quant(
+        fused_sigmoid_gate_mul(x, gate), scale, group_shape=(-1, -1)
+    )
+    q = fused_sigmoid_gate_mul(x, gate, scale)
+
+    assert q.dtype == torch.float8_e4m3fn
+    assert ref_q.float().abs().max().item() == 448.0
+    assert torch.equal(q.view(torch.uint8), ref_q.view(torch.uint8))
