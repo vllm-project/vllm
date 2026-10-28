@@ -871,7 +871,7 @@ class TestClientFlows:
             job_id=8, kv_request_id="req-8", keys=[OffloadKey(b"j")], block_ids=[1]
         )
         _client_load(session, "req-7").submitted_at = (
-            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+            time.monotonic() - _PD_LOAD_TIMEOUT_S - 1.0
         )
         session.poll()
         assert session.alive
