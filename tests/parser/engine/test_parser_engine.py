@@ -957,6 +957,18 @@ class TestFixArgTypes:
         result = engine._fix_arg_types('{"level": 3}', "f")
         assert json.loads(result) == {"level": 3}
 
+    def test_ref_union_param_keeps_emitted_string(self):
+        """A nullable ``$ref`` union declares only ``null``, so a quoted value
+        must not be ``json.loads``-unwrapped into a type no branch declares.
+        """
+        tool = _make_tool(
+            "f",
+            {"level": {"anyOf": [{"$ref": "#/$defs/Level"}, {"type": "null"}]}},
+        )
+        engine = _make_engine(tools=[tool])
+        original = '{"level": "42"}'
+        assert engine._fix_arg_types(original, "f") == original
+
     def test_ref_with_type_sibling_keeps_declared_type(self):
         """An explicit ``type`` sibling of a ``$ref`` applies (JSON Schema
         2020-12), so the declared repair wins over the unknown-ref default.

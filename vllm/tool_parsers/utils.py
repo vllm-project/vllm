@@ -1239,12 +1239,18 @@ def canonical_schema_types(types: Iterable[str]) -> set[str]:
     return {_TYPE_ALIASES.get(t.strip().lower(), t.strip().lower()) for t in types}
 
 
+def is_undeclared_string(coerced: Any, types: Iterable[str]) -> bool:
+    """Whether *coerced* is a string that *types* does not declare."""
+    return isinstance(coerced, str) and "string" not in canonical_schema_types(types)
+
+
 def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     """Best-effort coercion of a raw string value to a JSON Schema type.
 
     Tries each type in priority order (null > integer > number > boolean >
     object > array > string) and returns the first successful coercion.
-    Falls back to the original string when no coercion succeeds.
+    If none matches, returns the original string; only when no requested
+    type name is recognized is the value parsed as JSON instead.
 
     Args:
         value: The raw string value from the model output.
@@ -1267,13 +1273,15 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         "array",
         "string",
     ]
+    has_recognized_types = False
 
     for candidate_type in type_priority:
         if candidate_type not in normalized_types:
             continue
+        has_recognized_types = True
 
         if candidate_type == "null":
-            if value.lower() == "null":
+            if value.strip().lower() == "null":
                 return None
             continue
         if candidate_type == "string":
@@ -1319,6 +1327,11 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
             # serialized back to valid JSON; preserve the raw string.
             continue
 
+    if has_recognized_types:
+        # None of the declared types matched, so no JSON type the fallback
+        # could produce is one this schema asked for.
+        return value
+
     try:
         parsed = json.loads(value)
     except (json.JSONDecodeError, ValueError, RecursionError):
@@ -1342,11 +1355,11 @@ def coerce_typed_value(
     """Coerce an already-typed value according to its property *schema*.
 
     Unlike :func:`coerce_to_schema_type`, *value* may be any JSON value;
-    non-string values are serialized before coercion. A schema admitting any
-    value (see :func:`schema_admits_any_value`) leaves the value as emitted,
-    since no branch of it justifies changing the type. *types* overrides the
-    types derived from *schema*, for callers that cache them. Returns
-    ``(value, changed)``.
+    non-string values are serialized before coercion. A value whose own type
+    no branch declares is left as emitted; a schema admitting any value (see
+    :func:`schema_admits_any_value`) declares no type at all. *types*
+    overrides the types derived from *schema*, for callers that cache them.
+    Returns ``(value, changed)``.
     """
     if types is None:
         types = schema_coercion_types(schema)
@@ -1356,6 +1369,14 @@ def coerce_typed_value(
         value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     )
     coerced = coerce_to_schema_type(raw_value, types)
+    if (
+        not isinstance(value, str)
+        and is_undeclared_string(coerced, types)
+        and _json_type_name(value) not in canonical_schema_types(types)
+    ):
+        # The fallback serialized a type no branch declares; keep the value
+        # as emitted rather than stringifying it.
+        return value, False
     return coerced, value_changed(value, coerced)
 
 

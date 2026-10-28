@@ -41,6 +41,10 @@ class TestCoerceToSchemaType:
             assert coerce_to_schema_type("NULL", "null") is None
             assert coerce_to_schema_type("Null", "null") is None
 
+        @pytest.mark.parametrize("value", [" null", "null ", " NULL "])
+        def test_null_with_surrounding_whitespace(self, value):
+            assert coerce_to_schema_type(value, "null") is None
+
         def test_none_string_never_converted(self):
             assert coerce_to_schema_type("none", "null") == "none"
             assert coerce_to_schema_type("none", "string") == "none"
@@ -84,6 +88,10 @@ class TestCoerceToSchemaType:
 
         def test_invalid_integer_fallback(self):
             assert coerce_to_schema_type("not_a_number", "integer") == "not_a_number"
+
+        def test_fractional_value_not_coerced(self):
+            # A float is not an integer; keep the emitted text.
+            assert coerce_to_schema_type("4.5", "integer") == "4.5"
 
         def test_uint32_alias(self):
             assert coerce_to_schema_type("5", "uint32") == 5
@@ -247,6 +255,19 @@ class TestCoerceToSchemaType:
         def test_unrecognized_type_falls_back_to_json(self):
             assert coerce_to_schema_type("42", "interval") == 42
 
+    class TestUndeclaredJSONType:
+        """The JSON fallback must not invent a type the caller did not declare.
+
+        Regression: under the OpenAPI nullable-ref pattern
+        ``anyOf: [{$ref: ...}, {"type": "null"}]`` the unresolved ``$ref``
+        contributes no type, so a quoted ``"42"`` was ``json.loads``-unwrapped
+        into the integer ``42`` that no branch declares.
+        """
+
+        @pytest.mark.parametrize("value", ["42", "true", "false", '{"a": 1}', "[1, 2]"])
+        def test_only_null_branch_keeps_string(self, value):
+            assert coerce_to_schema_type(value, ["null"]) == value
+
 
 class TestCoerceTypedValue:
     def test_untyped_schema_keeps_emitted_type(self):
@@ -270,6 +291,24 @@ class TestCoerceTypedValue:
         schema = {"anyOf": [{"type": "null"}, {"description": "Any JSON value."}]}
         assert coerce_typed_value("5", schema) == ("5", False)
         assert coerce_typed_value("null", schema) == ("null", False)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("42", ("42", False)),
+            ('{"a": 1}', ('{"a": 1}', False)),
+            ("null", (None, True)),
+            (5, (5, False)),
+            (True, (True, False)),
+            ({"a": 1}, ({"a": 1}, False)),
+        ],
+        ids=["string-int", "string-object", "string-null", "int", "bool", "object"],
+    )
+    def test_nullable_ref_union_keeps_emitted_value(self, value, expected):
+        # The unresolved ``$ref`` is unknown and the ``null`` branch names no
+        # type these values have, so they keep their own type.
+        schema = {"anyOf": [{"$ref": "#/$defs/Thing"}, {"type": "null"}]}
+        assert coerce_typed_value(value, schema) == expected
 
     def test_untyped_boolean_branch_keeps_emitted_type(self):
         # ``true`` is a boolean JSON Schema admitting any value.

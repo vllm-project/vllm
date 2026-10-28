@@ -17,10 +17,10 @@ import regex as re
 from vllm.parser.utils import next_non_ws
 from vllm.tool_parsers.utils import (
     MAX_NESTING_DEPTH,
-    canonical_schema_types,
     coerce_to_schema_type,
     coerce_typed_value,
     is_escaped,
+    is_undeclared_string,
     schema_coercion_types,
     value_changed,
 )
@@ -306,10 +306,7 @@ class _ArgsRewriter:
                 if (
                     dumped != literal
                     and _literal_changes_value(literal, coerced)
-                    and not (
-                        isinstance(coerced, str)
-                        and "string" not in canonical_schema_types(types)
-                    )
+                    and not is_undeclared_string(coerced, types)
                 ):
                     out.append(dumped)
                     return j
