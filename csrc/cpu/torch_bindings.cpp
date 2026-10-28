@@ -461,7 +461,8 @@ void rejection_random_sample_kernel_impl(
     const torch::Tensor& recovered_token_ids,
     const torch::Tensor& uniform_probs,
     const std::optional<torch::Tensor>& is_greedy, const int64_t max_spec_len,
-    const int64_t vocab_size, const bool no_draft_probs);
+    const int64_t vocab_size, const int64_t draft_probs_stride,
+    const int64_t draft_vocab_size, const bool no_draft_probs);
 void expand_kernel_impl(torch::Tensor& output, const torch::Tensor& input,
                         const torch::Tensor& cu_num_tokens,
                         const int64_t replace_from, const int64_t replace_to);
@@ -470,7 +471,8 @@ void sample_recovered_tokens_kernel_impl(
     const torch::Tensor& draft_token_ids,
     const std::optional<torch::Tensor>& draft_probs,
     const torch::Tensor& target_probs, const torch::Tensor& inv_q,
-    const int64_t vocab_size, const bool no_draft_probs);
+    const int64_t vocab_size, const int64_t draft_probs_stride,
+    const int64_t draft_vocab_size, const bool no_draft_probs);
 }  // namespace cpu_utils
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
@@ -1068,6 +1070,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor target_probs, Tensor bonus_token_ids, "
       "Tensor recovered_token_ids, Tensor uniform_probs, "
       "Tensor? is_greedy, SymInt max_spec_len, SymInt vocab_size, "
+      "SymInt draft_probs_stride, SymInt draft_vocab_size, "
       "bool no_draft_probs) -> ()",
       &cpu_utils::rejection_random_sample_kernel_impl);
   ops.def(
@@ -1080,6 +1083,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor(a0!) output_token_ids, Tensor cu_num_draft_tokens, "
       "Tensor draft_token_ids, Tensor? draft_probs, "
       "Tensor target_probs, Tensor inv_q, SymInt vocab_size, "
+      "SymInt draft_probs_stride, SymInt draft_vocab_size, "
       "bool no_draft_probs) -> ()",
       &cpu_utils::sample_recovered_tokens_kernel_impl);
 }

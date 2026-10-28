@@ -170,3 +170,88 @@ def test_eagle_correctness_medium(
         attn_backend,
         vllm_runner,
     )
+
+
+@pytest.mark.parametrize("use_v2", ["0", "1"])
+def test_eagle_narrow_vocabulary_preserves_target_distribution(
+    tmp_path, monkeypatch, vllm_runner, use_v2: str
+):
+    """Loaded EAGLE weights must preserve target-only mass during verification."""
+    import torch
+    from safetensors.torch import save_file
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", use_v2)
+    vocab_size, draft_vocab_size, hidden_size = 8201, 8193, 64
+    config = LlamaConfig(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=256,
+        tie_word_embeddings=False,
+    )
+    target = LlamaForCausalLM(config)
+    support = [0, 1, vocab_size - 1]
+    probabilities = [0.5, 0.3, 0.2]
+    with torch.no_grad():
+        for parameter in target.parameters():
+            parameter.zero_()
+        target.model.embed_tokens.weight.fill_(1)
+        target.model.norm.weight.fill_(1)
+        target.lm_head.weight.fill_(-1)
+        for token, probability in zip(support, probabilities):
+            target.lm_head.weight[token].fill_(
+                torch.log(torch.tensor(probability)).item() / hidden_size
+            )
+    target_path, draft_path = tmp_path / "target", tmp_path / "draft"
+    target.save_pretrained(target_path)
+    config.num_hidden_layers = 1
+    config.vocab_size = draft_vocab_size
+    config.architectures = ["EagleLlamaForCausalLM"]
+    config.save_pretrained(draft_path)
+    weights = {
+        name.removeprefix("model."): value.contiguous()
+        for name, value in target.state_dict().items()
+        if name.startswith("model.layers.0.") and "input_layernorm" not in name
+    }
+    # The EAGLE head shares target embeddings/lm_head, but truncates its logits.
+    weights["fc.weight"] = torch.cat(
+        [torch.eye(hidden_size), torch.zeros(hidden_size, hidden_size)], dim=1
+    )
+    save_file(weights, draft_path / "model.safetensors")
+
+    with vllm_runner(
+        str(target_path),
+        skip_tokenizer_init=True,
+        dtype="float32",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=32,
+        gpu_memory_utilization=0.45,
+        enable_prefix_caching=False,
+        attention_config={"backend": "TRITON_ATTN"},
+        speculative_config={
+            "method": "eagle",
+            "model": str(draft_path),
+            "num_speculative_tokens": 3,
+            "draft_sample_method": "probabilistic",
+        },
+    ) as runner:
+        outputs = runner.llm.generate(
+            [{"prompt_token_ids": [0, 1, 0]} for _ in range(512)],
+            [
+                SamplingParams(temperature=1, max_tokens=16, ignore_eos=True, seed=i)
+                for i in range(512)
+            ],
+        )
+    # Exclude the first token, which is sampled before speculative verification.
+    tokens = torch.tensor([t for o in outputs for t in o.outputs[0].token_ids[1:]])
+    assert tokens.numel() == 512 * 15
+    assert torch.isin(tokens, torch.tensor(support)).all()
+    observed = torch.stack([(tokens == token).float().mean() for token in support])
+    torch.testing.assert_close(
+        observed, torch.tensor(probabilities), atol=0.035, rtol=0
+    )

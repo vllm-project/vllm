@@ -521,7 +521,7 @@ def test_repeated_context_does_not_change_unwatermarked_or_greedy_rows():
         )
 
 
-def test_watermarked_recovery_supports_smaller_draft_vocabulary():
+def test_watermarked_recovery_uses_full_target_vocabulary():
     target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0, 100.0], device="cuda")
     draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device="cuda")
     inputs = _build_rejection_sample_inputs(
@@ -543,10 +543,39 @@ def test_watermarked_recovery_supports_smaller_draft_vocabulary():
         watermarking=torch.tensor([True], device="cuda"),
         watermarker=watermarker,
     )
-    expected = watermarker.sample(target_logits[:4].unsqueeze(0), contexts[:1])
+    expected = watermarker.sample(target_logits.unsqueeze(0), contexts[:1])
 
     assert num_sampled.item() == 1
     assert sampled[0, 0] == expected.token_ids[0]
+
+
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_recovery_uses_full_target_vocabulary(use_block_verification: bool):
+    num_trials = 32
+    target_logits = torch.tensor([float("-inf"), float("-inf"), 0.0], device="cuda")
+    draft_logits = torch.tensor([0.0, float("-inf")], device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits[:2],
+        draft_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=num_trials,
+    )
+    inputs["target_logits"] = (
+        target_logits.unsqueeze(0).expand(num_trials * 2, -1).contiguous()
+    )
+
+    sampled, num_sampled = rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        use_block_verification=use_block_verification,
+    )
+
+    assert torch.equal(num_sampled, torch.ones_like(num_sampled))
+    assert torch.equal(
+        sampled[:, 0],
+        torch.full((num_trials,), 2, dtype=torch.int64, device="cuda"),
+    )
 
 
 @pytest.mark.parametrize(
@@ -1600,4 +1629,50 @@ def test_watermarked_recovery_is_unchanged_by_fp64_gumbel():
         sampled32[rows, num_sampled32.long() - 1],
         rtol=0,
         atol=0,
+    )
+
+
+@pytest.mark.parametrize("verification", ["standard", "block", "watermarked"])
+@pytest.mark.parametrize("rejected_step", [0, 1, 2])
+@pytest.mark.parametrize("draft_vocab_size", [8191, 8193])
+def test_narrow_draft_logits_match_padding_across_vocab_blocks(
+    verification: str, rejected_step: int, draft_vocab_size: int
+):
+    """Narrow row strides preserve every prefix and cross-block recovery."""
+    num_trials, num_steps, vocab_size = 4, 3, 8201
+    draft_ids = torch.tensor([0, draft_vocab_size - 1, 1], device="cuda")
+    draft_logits = torch.full((num_steps, vocab_size), float("-inf"), device="cuda")
+    draft_logits[torch.arange(num_steps), draft_ids] = 0.0
+    target_logits = torch.cat((draft_logits, draft_logits[:1])).clone()
+    target_logits[rejected_step] = float("-inf")
+    target_logits[rejected_step, -1] = 0.0
+    inputs = _build_rejection_sample_inputs(
+        target_logits[0], draft_logits[0], num_steps, 1.0, num_trials
+    )
+    inputs["target_logits"] = target_logits.repeat(num_trials, 1)
+    inputs["draft_sampled"].view(num_trials, num_steps + 1)[:, 1:] = draft_ids
+    kwargs: dict = dict(num_speculative_steps=num_steps)
+    sample = rejection_sample
+    if verification == "watermarked":
+        sample = watermarked_rejection_sample
+        kwargs.update(
+            contexts=torch.arange(
+                num_trials * (num_steps + 1) * 2, device="cuda", dtype=torch.int64
+            ).view(-1, 2),
+            watermarking=torch.ones(num_trials, device="cuda", dtype=torch.bool),
+            watermarker=GumbelWatermarker(key=42, context_width=2),
+        )
+    else:
+        kwargs["use_block_verification"] = verification == "block"
+    outputs = []
+    for logits in (draft_logits[:, :draft_vocab_size].contiguous(), draft_logits):
+        inputs["draft_logits"] = logits.repeat(num_trials, 1, 1)
+        outputs.append(sample(**inputs, **kwargs))
+    (sampled, counts), (padded, padded_counts) = outputs
+    assert torch.equal(counts, padded_counts)
+    assert (counts == rejected_step + 1).all()
+    assert torch.equal(sampled[:, : rejected_step + 1], padded[:, : rejected_step + 1])
+    assert (sampled[:, rejected_step] == vocab_size - 1).all()
+    assert torch.equal(
+        sampled[:, :rejected_step], draft_ids[:rejected_step].expand(num_trials, -1)
     )

@@ -15,6 +15,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
     RejectionSampler,
+    rejection_sample,
     sample_recovered_tokens,
 )
 from vllm.v1.sample.sampler import Sampler, SamplerOutput
@@ -307,6 +308,43 @@ def test_parametrized_cases(rejection_sampler, spec_tokens, output_tokens, expec
 
 
 ########################### Tests for Random Sampling ###################
+def test_narrow_draft_probs_can_recover_target_only_token():
+    batch_size = 32
+    draft_probs = torch.tensor(
+        [[1.0, 0.0]], dtype=torch.float32, device=DEVICE_TYPE
+    ).repeat(batch_size, 1)
+    target_logits = torch.tensor(
+        [[float("-inf"), float("-inf"), 0.0]], device=DEVICE_TYPE
+    ).expand(batch_size, -1)
+    draft_token_ids = torch.zeros(batch_size, dtype=torch.int32, device=DEVICE_TYPE)
+    cu_num_draft_tokens = torch.arange(
+        1, batch_size + 1, dtype=torch.int32, device=DEVICE_TYPE
+    )
+    bonus_token_ids = torch.zeros(
+        (batch_size, 1), dtype=torch.int32, device=DEVICE_TYPE
+    )
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.ones(batch_size, device=DEVICE_TYPE),
+    )
+
+    output = rejection_sample(
+        draft_token_ids,
+        [1] * batch_size,
+        1,
+        cu_num_draft_tokens,
+        draft_probs,
+        target_logits,
+        bonus_token_ids,
+        sampling_metadata,
+    )
+
+    assert torch.equal(
+        output[:, 0],
+        torch.full((batch_size,), 2, dtype=torch.int32, device=DEVICE_TYPE),
+    )
+
+
 @pytest.mark.parametrize("k", [1, 3, 5])
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("batch_size", [1, 4, 8])
@@ -1372,3 +1410,48 @@ def test_placeholder_draft_token_rejected_random(rejection_sampler):
     assert sampled[0, 1].item() == vocab_size - 1
     recovered = sampled[0, 2].item()
     assert 0 <= recovered < vocab_size
+
+
+@pytest.mark.parametrize("rejected_step", [0, 1, 2])
+@pytest.mark.parametrize("draft_vocab_size", [8191, 8193])
+def test_narrow_draft_probs_match_padding_across_vocab_blocks(
+    rejected_step: int, draft_vocab_size: int
+):
+    """Recover a target-only token after an accepted multi-position prefix."""
+    batch_size, num_steps, vocab_size = 4, 3, 8201
+    draft_ids = torch.tensor([0, draft_vocab_size - 1, 1], device=DEVICE_TYPE)
+    draft_probs = torch.zeros(num_steps, draft_vocab_size, device=DEVICE_TYPE)
+    draft_probs[torch.arange(num_steps), draft_ids] = 1.0
+    target_probs = F.pad(draft_probs, (0, vocab_size - draft_vocab_size))
+    target_probs[rejected_step] = 0
+    target_probs[rejected_step, -1] = 1.0
+    draft_probs = draft_probs.repeat(batch_size, 1)
+    outputs = []
+    for probs in (draft_probs, F.pad(draft_probs, (0, vocab_size - draft_vocab_size))):
+        metadata = create_sampling_metadata(
+            all_greedy=False,
+            temperature=torch.ones(batch_size, device=DEVICE_TYPE),
+            generators={
+                i: torch.Generator(device=DEVICE_TYPE).manual_seed(i)
+                for i in range(batch_size)
+            },
+        )
+        outputs.append(
+            rejection_sample(
+                draft_ids.repeat(batch_size).to(torch.int32),
+                [num_steps] * batch_size,
+                num_steps,
+                torch.arange(1, batch_size + 1, device=DEVICE_TYPE, dtype=torch.int32)
+                * num_steps,
+                probs,
+                target_probs.log().repeat(batch_size, 1),
+                torch.zeros((batch_size, 1), device=DEVICE_TYPE, dtype=torch.int32),
+                metadata,
+            )
+        )
+    assert torch.equal(outputs[0], outputs[1])
+    assert (outputs[0][:, rejected_step] == vocab_size - 1).all()
+    assert torch.equal(
+        outputs[0][:, :rejected_step],
+        draft_ids[:rejected_step].expand(batch_size, -1),
+    )
