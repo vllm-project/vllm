@@ -18,6 +18,9 @@ The negative (non-gfx1100) tests verify at three layers:
   3. Runtime mock: patches on_gfx1100() to False and verifies that the
      Python dispatch chain rejects the RDNA3 path.
 
+The W4A8 MoE decode kernel (GFX11_OPS) supports every gfx11 GPU, so it has its
+own guard (VLLM_ROCM_HAS_GFX11 / VLLM_ROCM_GFX11) and is checked separately.
+
 Run `pytest tests/kernels/quantization/test_rdna3_compile_guards.py`.
 """
 
@@ -58,15 +61,24 @@ RDNA3_OPS = [
     "gptq_gemm_rdna3_wmma",
     "moe_gptq_gemm_rdna3",
     "mxfp4_w4a8_gemv_rdna3",
-    "moe_w4a8_decode_rdna3",
 ]
 RDNA3_CU_FILES = [
     "q_gemm_rdna3.cu",
     "q_gemm_rdna3_wmma.cu",
     "moe_q_gemm_rdna3.cu",
     "mxfp4_w4a8_gemv_rdna3.cu",
-    "moe_w4a8_decode_rdna3.cu",
 ]
+# Built whenever any gfx11 target is requested, not only gfx1100.
+GFX11_OPS = ["moe_w4a8_decode_rdna3"]
+GFX11_CU_FILES = ["moe_w4a8_decode_rdna3.cu"]
+# torch_bindings.cpp guards; an RDNA3 op may sit inside either.
+BINDINGS_GUARDS = ("#ifdef VLLM_ROCM_GFX1100", "#ifdef VLLM_ROCM_GFX11")
+
+
+def _on_gfx11() -> bool:
+    return torch.cuda.is_available() and (
+        torch.cuda.get_device_properties(0).gcnArchName.startswith("gfx11")
+    )
 
 
 def _find_repo_root() -> Path | None:
@@ -154,6 +166,17 @@ def test_all_ops_present_or_all_absent():
     assert len(values) == 1, (
         f"Guard inconsistency — some RDNA3 ops registered, others not: "
         f"{present}. Check torch_bindings.cpp #ifdef VLLM_ROCM_GFX1100 block."
+    )
+
+
+@pytest.mark.skipif(not _on_gfx11(), reason="Requires gfx11 hardware")
+@pytest.mark.parametrize("op_name", GFX11_OPS)
+def test_gfx11_op_registered_on_gfx11(op_name):
+    """On any gfx11 GPU (not only gfx1100) the gfx11 ops must be registered."""
+    assert hasattr(torch.ops, "_rocm_C"), "_rocm_C module not loaded"
+    assert hasattr(torch.ops._rocm_C, op_name), (
+        f"_rocm_C.{op_name} not registered — check CMakeLists.txt "
+        "VLLM_ROCM_HAS_GFX11 and torch_bindings.cpp #ifdef VLLM_ROCM_GFX11"
     )
 
 
@@ -249,6 +272,44 @@ class TestCMakeGuards:
                         f"would compile RDNA3 code. Line: {line.strip()}"
                     )
 
+    def test_gfx11_cu_files_inside_gfx11_conditional(self):
+        """The gfx11 .cu files must be listed inside the
+        ``if(VLLM_GPU_ARCHES MATCHES "gfx11[0-9]+")`` block, so a build that
+        targets only gfx1151 still compiles them and CDNA builds do not.
+        """
+        cmake = self._read_cmake()
+        for cu_file in GFX11_CU_FILES:
+            assert cu_file in cmake, f"{cu_file} not found in CMakeLists.txt"
+            in_gfx11_block = False
+            for line in cmake.splitlines():
+                if 'VLLM_GPU_ARCHES MATCHES "gfx11[0-9]+"' in line:
+                    in_gfx11_block = True
+                if in_gfx11_block and "endif()" in line:
+                    in_gfx11_block = False
+                if cu_file in line:
+                    assert in_gfx11_block, (
+                        f"{cu_file} is listed outside the gfx11 conditional "
+                        f"in CMakeLists.txt. Line: {line.strip()}"
+                    )
+
+    def test_gfx11_compile_definition_only_for_gfx11(self):
+        """VLLM_ROCM_GFX11 compile definition must be conditional."""
+        cmake = self._read_cmake()
+        in_gfx11_block = False
+        for line in cmake.splitlines():
+            if "VLLM_ROCM_HAS_GFX11)" in line:
+                in_gfx11_block = True
+            if in_gfx11_block and "endif()" in line:
+                in_gfx11_block = False
+            if (
+                re.search(r"\bVLLM_ROCM_GFX11\b", line)
+                and "target_compile_definitions" in line
+            ):
+                assert in_gfx11_block, (
+                    "VLLM_ROCM_GFX11 compile definition is set outside the "
+                    f"VLLM_ROCM_HAS_GFX11 conditional. Line: {line.strip()}"
+                )
+
     def test_compile_definition_only_for_gfx1100(self):
         """VLLM_ROCM_GFX1100 compile definition must be conditional."""
         cmake = self._read_cmake()
@@ -287,7 +348,7 @@ class TestTorchBindingsGuards:
         rdna3_lines_outside = []
 
         for i, line in enumerate(lines, 1):
-            if "#ifdef VLLM_ROCM_GFX1100" in line:
+            if line.strip() in BINDINGS_GUARDS:
                 inside_guard = True
             elif line.strip() == "#endif" and inside_guard:
                 inside_guard = False
@@ -305,6 +366,21 @@ class TestTorchBindingsGuards:
             + "\n".join(f"  L{n}: {s}" for n, s in rdna3_lines_outside)
         )
 
+    def test_gfx11_ops_inside_gfx11_ifdef(self):
+        """The gfx11 ops must be registered under #ifdef VLLM_ROCM_GFX11, not
+        the gfx1100 guard, so gfx1150/gfx1151-only builds register them."""
+        src = self._read_bindings()
+        guard = None
+        for i, line in enumerate(src.splitlines(), 1):
+            if line.strip() in BINDINGS_GUARDS:
+                guard = line.strip()
+            elif line.strip() == "#endif":
+                guard = None
+            if any(f'"{op}' in line for op in GFX11_OPS):
+                assert guard == "#ifdef VLLM_ROCM_GFX11", (
+                    f"L{i}: gfx11 op registered under {guard}: {line.strip()}"
+                )
+
     def test_no_unconditional_rdna3_includes(self):
         """No #include of RDNA3-specific headers outside the guard."""
         src = self._read_bindings()
@@ -312,7 +388,7 @@ class TestTorchBindingsGuards:
 
         inside_guard = False
         for i, line in enumerate(lines, 1):
-            if "#ifdef VLLM_ROCM_GFX1100" in line:
+            if line.strip() in BINDINGS_GUARDS:
                 inside_guard = True
             elif line.strip() == "#endif" and inside_guard:
                 inside_guard = False
