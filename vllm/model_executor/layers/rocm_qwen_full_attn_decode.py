@@ -117,6 +117,7 @@ def _front_kernel(
     TPH: tl.constexpr = HD // BM
     SCR: tl.constexpr = (NQH + NKV) * HD
     KVD: tl.constexpr = NKV * HD
+    dt = q_ptr.dtype.element_ty
     r0 = pid * BM
 
     dd = tl.arange(0, HD)
@@ -186,7 +187,7 @@ def _front_kernel(
             lw = tl.load(ln_w_ptr + k0 + kk)
         s = hh.to(tl.float32) + rr.to(tl.float32)
         ss_k += s * s
-        a = (s * (1.0 + lw.to(tl.float32)[None, :])).to(tl.bfloat16)
+        a = (s * (1.0 + lw.to(tl.float32)[None, :])).to(w.dtype)
         if NP == 1:
             acc_k += w.to(tl.float32) * a.to(tl.float32)
         else:
@@ -194,7 +195,7 @@ def _front_kernel(
     if NP == 1:
         acc = tl.sum(acc_k, axis=1)[:, None]
     rstd = tl.rsqrt(tl.sum(ss_k, axis=1) / HID + eps)
-    out = (acc * rstd[None, :]).to(tl.bfloat16)  # [BM, NP]
+    out = (acc * rstd[None, :]).to(dt)  # [BM, NP]
 
     slot = tl.load(slot_ptr + t, mask=tmask, other=-1).to(tl.int64)
     smask = tmask & (slot >= 0)
@@ -242,11 +243,11 @@ def _front_kernel(
             )
             vp = tl.load(base + partner[None, :], mask=rmask, other=0.0).to(tl.float32)
             r = tl.rsqrt(tl.sum(v * v, axis=1) / HD + eps)[:, None]
-            vx = (v * r * (1.0 + nw[None, :])).to(tl.bfloat16).to(tl.float32)
-            vp = (vp * r * (1.0 + nwp[None, :])).to(tl.bfloat16).to(tl.float32)
+            vx = (v * r * (1.0 + nw[None, :])).to(dt).to(tl.float32)
+            vp = (vp * r * (1.0 + nwp[None, :])).to(dt).to(tl.float32)
             sign = tl.where(dd < HALF, -1.0, 1.0)
             rot = vx * cos + sign[None, :] * vp * sin
-            res = tl.where((dd < ROT)[None, :], rot, vx).to(tl.bfloat16)
+            res = tl.where((dd < ROT)[None, :], rot, vx).to(dt)
             if head < NQH:
                 tl.store(
                     q_ptr + t[:, None] * (NQH * HD) + head * HD + dd[None, :],
