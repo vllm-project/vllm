@@ -3845,3 +3845,24 @@ Cycle précédé d'un travail user-dirigé intensif (~18:20→20:10Z), tout comm
 **Amortissement** : marginal **94,8 %** sur la fenêtre (hits +19,15 M / queries +20,19 M) ; **`external_prefix_cache_hits` +352 736 seulement en 49 min** — à comparer au +12,5 M/45 min du pic : le working set haiku est reparti, le GPU ne déborde plus et les tiers sont au repos. Confirme que le débordement tiers était bien un symptôme de working-set, pas un défaut de cache. Deux sondes petits callers réelles à 22:2xZ : 200 en 0,33 s et 0,48 s.
 
 **Annexes** : nbaudit ok 00:05:45Z ; commit hôte 80,0 % (marge 76,8 Go) ; G: 85 % / 592 G libres, probe OK ; condensation RSM sans événement ; census 7 h = hairpin 986×200, `?` 715×200, **poste Paris 14×200** (carte connue, +8 depuis 22:2xZ), **aucune IP inconnue en 200**. Registre : Q43 seule ouverte (tier RAM 24→32 GiB).
+
+## Cycle 02:2xZ (28/10) — feu 🟠 DÉCLENCHÉ : les deux jambes du seuil sont remplies, repli po-2024 demandé à claudish
+
+**Prod** : 24 h sans restart (StartedAt 02:15:05Z), health 200 @5,3 ms, OOM 0, RC=0, 3 conteneurs, shm 24G/63G (39 %). VRAM GPU 0 **22 637** (bande 22 505-22 675, marge 363 MiB), GPU 1 21 650, GPU 2 45. Seulement **1 WEDGE `fail 1/2` nouveau depuis 22:21Z** (00:46:56Z), zéro 2/2, 3 908 sondes OK.
+
+**Les deux jambes du seuil 🟠 posté à claudish (27/10 22:0xZ) sont remplies** :
+
+1. **Préemptions 11 → 19 (+8/2 h)** (Δ≥5 = jambe 1). Elles étaient 0 pendant les 24 h précédant 21h, 11 au pic de 21h, stabilisées 11 à 00:11Z — la reprise +8 en régime nocturne léger (3,9 req/min, 467 req/2 h dont 60 % de corps 100K-1M) montre que le working set haiku dépasse désormais le KV GPU **même la nuit**.
+2. **Petits appelants >10 s récurrents** (jambe 2) : 7 sondes réelles ce cycle = **35,62 s · 0,18 · 0,20 · 0,88 · 28,87 · 0,26 · 9,47 s** — 3/7 dégradées, dont 2 > 28 s. Le moteur loggue en parallèle **KV GPU oscillant 71 % → 95,5 % → 97 % → 98 % sous seulement 3-5 req running** (02:16-02:17Z), génération 38-141 tok/s, hit rate préfixe (fenêtre moteur) 56,6 %, externe 79,7 %. La file reste saine (running 3-5 / waiting 0) : tout est servi, mais les petits callers synchrones patientent derrière les prefills de 165 K — la première victime documentée, mesurée cette fois en direct.
+
+**Action (mandat user 22:26Z 27/10 « en fonction de tes findings mandater le repli d'un siège à claudish »)** : [ASK] claudish = **repli po-2024** (1ᵉʳ barreau de l'échelle user), agents principaux haiku → Minimax, sous-agents restent sur Swift ; mesure 2 h sur mes compteurs moteur ; barreaux suivants po-2023/po-2027 si toujours 🟠, po-2028 seulement si 🔴 (WEDGE 2/2 ou effondrement de file).
+
+**Leçon d'instrument** : le feu 🟢 de 00:11Z était une **photo inter-crons** — entre deux passes haiku le moteur récupère complètement (marginal 94,8 %), et la mesure instantanée (2 sondes à 0,33/0,48 s) a manqué la starvation. La batterie de 7 sondes étalées sur ~3 min l'a capturée. Un verdict de charge sous pilote se prend sur batterie, pas sur instantané.
+
+**400 window+1 (#431)** : **10 occurrences/12 h** (14:17Z→00:16Z, ~0,8/h, corps 882 K-1 043 K, tous UA `Bun/1.3.14` hairpin) — récurrence stable, le remède (routage cloud sur 400) reste côté hub.
+
+**Attribution (réponse po-2023:claudish 00:56Z)** : le siège po-2023 pointe `ANTHROPIC_BASE_URL=http://192.168.0.50:3000` = **hub en direct, jamais le relais local** → tout repli po-2023 sera invisible côté relais (« mesurera toujours zéro ») ; instrument = mes compteurs moteur (c'est déjà le cas). La seule voie d'attribution par siège reste les en-têtes hub (#41). ACK renvoyé avec l'échelle.
+
+**Sécurité** : aucune IP inconnue en 200 (hairpin 1 007/1 002×200, `?` 621/617×200, poste Paris 16×200, web1 2×200). **2 empreintes nouvelles** `ccd500f719e4`/`64a6d7ec06fd` = UA `ZOLTRAAK/0.2.0 (security-research)` 2×401 `/v1/models` 01:12Z, zéro accès — famille connue (identifiée 27/10 claudish#718), bruit consigné. **nbaudit ok 02:05:55Z** (`19451:Image/` = vague 2 active). Condensation : burst fallback cloud 01:40Z (4 lignes, #2719) puis « Condensation completed » = dégradation gracieuse nominale, cohérente avec la starvation petits appelants du créneau ; WARNs RSM (IdentityManager heartbeat, NonNominativeBaselineService, STALE-FILE #3230) = périmètre RSM, relayés au propriétaire sans action ici. Commit hôte **72,9 %** (marge 104,3 Go, en nette baisse depuis 80,0 %). G: 85 % / 592 G libres, probe OK.
+
+**Structurel** : Q43 (tier RAM 24→32 GiB, plafond ~13→~20 sessions) reste le vrai levier de plafond — GO user en attente, s'applique au prochain restart naturel.
