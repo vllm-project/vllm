@@ -91,13 +91,17 @@ class SessionCloseResult(NamedTuple):
     server stores) the manager must mark failed. `failed_req_ids` is every
     client-side kv_request_id whose lookup() must fail (in-flight loads plus
     unresolved probes); `failed_serves` is the server-side lookup state the
-    dead peer can no longer resolve.
+    dead peer can no longer resolve. `retained` maps each server transfer
+    that may still be writing to the store jobs it reads: they are not in
+    `failed_stores`, and stay pinned until the transport reports it stopped.
     """
 
     failed_jobs: list[int]  # client load job_ids
     failed_req_ids: list[str]  # client kv_request_ids (loads + probes)
     failed_stores: list[int]  # server store job_ids
     failed_serves: list[ReqContext]  # server-side lookup ctxs needing release
+    # transfer_id → store job_ids it still reads
+    retained: dict[int, frozenset[int]]
 
 
 class P2PSession:
@@ -384,6 +388,8 @@ class P2PSession:
         failed_serves: synthetic lookup ctxs still owing
             ``parent.on_request_finished`` (the manager flushes these on
             its next ``serve_external_requests``).
+        retained: server transfers that may still be writing, with the
+            store jobs they read (held until they stop).
         """
         # Abandon any in-flight registration: nothing will ack this peer
         # now. The manager's remove_remote_peer bumps the transport's
@@ -394,7 +400,7 @@ class P2PSession:
             self._pending_registration = None
 
         client_result = self._client.close()
-        failed_stores, failed_serves = self._server.close()
+        failed_stores, failed_serves, retained = self._server.close()
 
         if self._conn is not None:
             with contextlib.suppress(Exception):
@@ -407,6 +413,7 @@ class P2PSession:
             failed_req_ids=client_result.failed_req_ids,
             failed_stores=failed_stores,
             failed_serves=failed_serves,
+            retained=retained,
         )
 
     # ------------------------------------------------------------------

@@ -2984,6 +2984,43 @@ class TestDisconnect:
         assert set(result.failed_stores) == {10}
         assert result.failed_serves == []
 
+    def test_close_retains_running_transfer(self):
+        """close() must not release a WRITE that may still be landing.
+
+        It cancels in wait mode; a transfer still running is reported as
+        retained with its store job, which stays pinned, and only the jobs
+        no transfer reads are returned as failed.
+        """
+        session, conn, data = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req", [OffloadKey(b"key")], [0], job_id=1)
+        session.add_stored_blocks("idle", [OffloadKey(b"other")], [1], job_id=2)
+        _fetch(conn, "req", [b"key"], [5])
+        session.poll()
+        (tid,) = data._transfers
+        data._cancel_still_inflight.add(tid)
+
+        result = session.close()
+
+        assert data._cancel_calls == [([tid], "wait")]
+        assert tid in data._transfers
+        assert result.retained == {tid: frozenset({1})}
+        assert result.failed_stores == [2]
+
+    def test_close_releases_stopped_transfer(self):
+        """A transfer that has already stopped is released, not retained."""
+        session, conn, data = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req", [OffloadKey(b"key")], [0], job_id=1)
+        _fetch(conn, "req", [b"key"], [5])
+        session.poll()
+
+        result = session.close()
+
+        assert data._transfers == {}
+        assert result.retained == {}
+        assert result.failed_stores == [1]
+
     def test_send_failure_marks_connection_dead(self):
         """A raising send must mark the connection dead, not silently drop
         the message — otherwise the session lingers alive, is never reaped,
