@@ -162,12 +162,26 @@ def _select_cfg(M, N, K):
     (the K-loop is unmasked), so every BLOCK_K below is guarded to be K-divisible
     (served K: 384/768/1024/2048/6144).
     """
+    if 16 < M <= 64 and (N >= 2048 or M > 32):
+        # A BLOCK_M=16 grid re-streams the weight once per 16 rows; cover M with one
+        # tile row instead. Tuned with the weight read from HBM (a MALL-resident
+        # weight hides the re-reads). Narrow N (< 2048) has too few N-tiles for 64.
+        BLOCK_M = 32 if M <= 32 or N < 2048 else 64
+        if BLOCK_M == 32 and K % 1024 == 0:
+            BLOCK_K = 1024
+        elif K % 512 == 0:
+            BLOCK_K = 512
+        else:
+            BLOCK_K = 256 if K % 256 == 0 else 128
+        BLOCK_N = 32 if N >= 4096 else 16
+        return BLOCK_M, BLOCK_N, BLOCK_K, 4 if BLOCK_M == 64 and BLOCK_N == 16 else 2, 2
     if M <= 64:
-        # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
-        # lever is NARROW BLOCK_N=16 (maximize N-tiles so more CUs stream the weight in
-        # parallel) + LARGE BLOCK_K (fewer K-iters, bigger coalesced weight loads).
-        # Tuned by CUDA-graph replay latency. Optimal at both TP=4 and TP=8.
-        if K % 1024 == 0:  # K=2048, 6144 -> graph-best 16x16x1024 (all M)
+        # decode (M <= 16, or M <= 32 at N < 2048): tiny-M GEMV is weight-BW +
+        # GPU-OCCUPANCY bound. The lever is NARROW BLOCK_N=16 (maximize N-tiles so more
+        # CUs stream the weight in parallel) + LARGE BLOCK_K (fewer K-iters, bigger
+        # coalesced weight loads). Tuned by CUDA-graph replay latency. Optimal at both
+        # TP=4 and TP=8.
+        if K % 1024 == 0:  # K=2048, 6144 -> graph-best 16x16x1024
             return 16, 16, 1024, 2, 2
         if K % 512 == 0:
             return 16, 16, 512, 2, 3
