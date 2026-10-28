@@ -9,16 +9,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.config import CompilationMode, CUDAGraphMode, KernelConfig
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterMxfp4Experts,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.models.minimax_m3.amd.specialized_decode.runtime import decode as runtime
 from vllm.models.minimax_m3.amd.specialized_decode.runtime.caches import CacheBinding
-from vllm.models.minimax_m3.amd.specialized_decode.runtime.executor import (
-    FfnExecutor,
-)
 from vllm.models.minimax_m3.amd.specialized_decode.runtime.routing import decide_step
 from vllm.models.minimax_m3.amd.specialized_decode.runtime.spec import (
     DECODE_CONFIG,
@@ -63,6 +60,47 @@ def _metadata(rows, *, decode_tokens=None, prefills=0, query_len=1, padded=0):
 
 
 NONE, FULL = CUDAGraphMode.NONE, CUDAGraphMode.FULL
+
+
+@pytest.mark.parametrize("rows", [1, 4, 16])
+def test_layer_handoffs_match_stage_order(monkeypatch, rows):
+    """Trace the actual kernel without a launch: every mailbox consumer must
+    follow its declared writer, including the fused projection stages.
+    """
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.kernels.post_attn import (  # noqa: E501
+        K4_ABI,
+        build_post_attn_kernel,
+    )
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.layout import (
+        mailbox_regions,
+    )
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.support.plan.check import (  # noqa: E501
+        check,
+    )
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.support.plan.trace import (  # noqa: E501
+        recording,
+    )
+
+    monkeypatch.setenv("ARCH", "gfx950")
+    monkeypatch.setenv("COMPILE_ONLY", "1")
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    launch = build_post_attn_kernel(
+        4,
+        128**-0.5,
+        1e-6,
+        2.0,
+        1.0,
+        7.0,
+        0,
+        1,
+        tokens=rows,
+        fuse_k1=True,
+        debug=True,
+    )
+    with recording() as record:
+        launch(*K4_ABI.zeros())
+    assert record.stages, "a cached compilation would bypass the contract check"
+    check(record, mailbox_regions(rows, 1, True))
 
 
 @pytest.mark.parametrize(
@@ -116,7 +154,7 @@ def _vllm_config(layers=60, **parallel):
             resolve_indexer_kv_dtype=lambda _default: "fp8"
         ),
         compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
-        kernel_config=SimpleNamespace(moe_backend="aiter", monokernel=True),
+        kernel_config=KernelConfig(moe_backend="aiter", monokernel=True),
         lora_config=None,
         kv_transfer_config=SimpleNamespace(kv_connector=None),
         aux_output_config=SimpleNamespace(enable_return_routed_experts=False),
@@ -245,9 +283,13 @@ def test_weight_views_are_zero_copy():
     layer = _layer()
     moe = layer.block_sparse_moe
     moe.gate.weight = _parameter((128, HIDDEN), torch.float32, meta=False)
+    layer.post_attention_layernorm.weight = _parameter(
+        (HIDDEN,), torch.bfloat16, meta=False
+    )
     weights = MonoLayerWeights.from_layer(layer, require_cuda=False)
-    assert weights.qkv.data_ptr() == layer.self_attn.qkv_proj.weight.data_ptr()
-    assert weights.output.data_ptr() == layer.self_attn.o_proj.weight.data_ptr()
+    assert (
+        weights.post_norm.data_ptr() == layer.post_attention_layernorm.weight.data_ptr()
+    )
     assert weights.router.data_ptr() == moe.gate.weight.data_ptr()
     assert weights.router.dtype == torch.float32
     assert weights.w13.dtype == torch.float4_e2m1fn_x2
@@ -282,8 +324,6 @@ def test_weight_refusals(match):
 
 
 class _Executor:
-    uses_caches = True
-
     def __init__(self):
         self.fault_word = torch.zeros(4, dtype=torch.int32)
         self.slots: torch.Tensor | None = None
@@ -302,9 +342,6 @@ class _Executor:
     def begin_step(self, slots):
         self.slots = slots
 
-    def after_step(self):
-        self.calls["after"] += 1
-
     def abort(self):
         self.calls["abort"] += 1
 
@@ -314,9 +351,6 @@ class _Executor:
 
 def _no_checks(monkeypatch, refusals=()):
     monkeypatch.setattr(runtime, "model_refusals", lambda model, config: list(refusals))
-    monkeypatch.setattr(
-        runtime, "MonoLayerWeights", SimpleNamespace(from_layer=lambda layer: layer)
-    )
     monkeypatch.setattr(runtime, "tp_agree", lambda ok: ok)
 
 
@@ -415,7 +449,6 @@ def test_every_forward_asserts_the_error_word_is_clear(step):
     executor = _Executor()
     decode = _bare_decode(executor)
     decode.after_step(step)
-    assert executor.calls["after"] == (step is LAUNCHED)
     executor.fault_word[0] = 1
     with pytest.raises(RuntimeError, match="error word set"):
         decode.after_step(step)
@@ -438,17 +471,3 @@ def test_close_is_idempotent_and_stops_reading_the_word():
     assert executor.calls == Counter(close=1)
     executor.fault_word[0] = 1
     decode.after_step(None)
-
-
-def test_abort_never_raises():
-    executor = object.__new__(FfnExecutor)
-    executor.rank = 1
-
-    def broken():
-        raise RuntimeError("peer view")
-
-    executor.peer = SimpleNamespace(
-        bytes=torch.zeros(16, dtype=torch.uint8),
-        addresses=SimpleNamespace(tolist=broken),
-    )
-    executor.abort()

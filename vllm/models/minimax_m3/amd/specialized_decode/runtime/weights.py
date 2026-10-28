@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Checked zero-copy views of MiniMax-M3 post-load tensors."""
+"""Checked zero-copy views of the tensors read by the fused MiniMax-M3 FFN."""
 
 from __future__ import annotations
 
@@ -15,8 +15,6 @@ from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 
 HIDDEN = 6144
-QKV_ROWS = 2560
-O_K = 2048
 EXPERTS = 129
 INTER = 768
 
@@ -79,13 +77,6 @@ def _bf16_vector(
 
 @dataclass(frozen=True)
 class MonoLayerWeights:
-    input_norm: torch.Tensor
-    qkv: torch.Tensor
-    q_norm: torch.Tensor
-    k_norm: torch.Tensor
-    index_q_norm: torch.Tensor
-    index_k_norm: torch.Tensor
-    output: torch.Tensor
     post_norm: torch.Tensor
     router: torch.Tensor
     router_bias: torch.Tensor
@@ -93,13 +84,10 @@ class MonoLayerWeights:
     s13: torch.Tensor
     w2: torch.Tensor
     s2: torch.Tensor
-    routed_scale: float
-    shared_weight: float
 
     @classmethod
     def from_layer(cls, layer, *, require_cuda: bool = True) -> MonoLayerWeights:
         layer_id = layer.layer_id
-        attn = layer.self_attn
         moe = layer.block_sparse_moe
         runner = moe.experts
         experts = getattr(runner, "routed_experts", runner)
@@ -146,19 +134,11 @@ class MonoLayerWeights:
             f"layer {layer_id} requires one shared expert at slot 128",
         )
         _require(
-            type(attn.qkv_proj).__name__ == "MinimaxM3QKVParallelLinearWithIndexer"
-            and type(attn.o_proj).__name__ == "RowParallelLinear",
-            f"layer {layer_id} projection module/order is unsupported",
-        )
-        _require(
-            type(layer.input_layernorm).__name__ == "MiniMAXGemmaRMSNorm"
-            and type(layer.post_attention_layernorm).__name__ == "MiniMAXGemmaRMSNorm",
+            type(layer.post_attention_layernorm).__name__ == "MiniMAXGemmaRMSNorm",
             f"layer {layer_id} requires Gemma normalization",
         )
         _require(
-            layer.input_layernorm.variance_epsilon
-            == layer.post_attention_layernorm.variance_epsilon
-            == 1e-6,
+            layer.post_attention_layernorm.variance_epsilon == 1e-6,
             f"layer {layer_id} requires Gemma norm epsilon 1e-6",
         )
 
@@ -206,44 +186,6 @@ class MonoLayerWeights:
             f"layer {layer_id} expert tensors must be on GPU",
         )
         return cls(
-            input_norm=_bf16_vector(
-                layer.input_layernorm.weight,
-                HIDDEN,
-                f"layer {layer_id} input norm",
-                require_cuda,
-            ),
-            qkv=_tensor(
-                attn.qkv_proj.weight,
-                shape=(QKV_ROWS, HIDDEN),
-                dtype=torch.bfloat16,
-                name=f"layer {layer_id} QKV/index projection",
-                require_cuda=require_cuda,
-            ),
-            q_norm=_bf16_vector(
-                attn.q_norm.weight, 128, f"layer {layer_id} Q norm", require_cuda
-            ),
-            k_norm=_bf16_vector(
-                attn.k_norm.weight, 128, f"layer {layer_id} K norm", require_cuda
-            ),
-            index_q_norm=_bf16_vector(
-                attn.index_q_norm.weight,
-                128,
-                f"layer {layer_id} index Q norm",
-                require_cuda,
-            ),
-            index_k_norm=_bf16_vector(
-                attn.index_k_norm.weight,
-                128,
-                f"layer {layer_id} index K norm",
-                require_cuda,
-            ),
-            output=_tensor(
-                attn.o_proj.weight,
-                shape=(HIDDEN, O_K),
-                dtype=torch.bfloat16,
-                name=f"layer {layer_id} output projection",
-                require_cuda=require_cuda,
-            ),
             post_norm=_bf16_vector(
                 layer.post_attention_layernorm.weight,
                 HIDDEN,
@@ -268,6 +210,4 @@ class MonoLayerWeights:
             s13=s13.detach(),
             w2=w2.detach(),
             s2=s2.detach(),
-            routed_scale=2.0,
-            shared_weight=1.0,
         )

@@ -13,8 +13,7 @@ from vllm.config import CompilationMode, VllmConfig
 class DecodeConfig:
     tp_size: int = 4
     blocks: int = 256
-    max_rows: int = 16
-    # every physical row count up to max_rows: eager steps and FULL capture sizes
+    # Every supported physical row count: eager steps and FULL capture sizes.
     widths: tuple[int, ...] = tuple(range(1, 17))
     first_layer: int = 3
     last_layer: int = 59
@@ -103,7 +102,10 @@ def specialized_decode_config(config: VllmConfig) -> DecodeConfig | None:
     if not config.kernel_config.monokernel:
         return None
     layers = config.model_config.hf_text_config.num_hidden_layers
-    spec = replace(DECODE_CONFIG, last_layer=layers - 1)
+    spec = replace(
+        DECODE_CONFIG,
+        last_layer=layers - 1,
+    )
     reasons = spec.refusal_reasons(config)
     if reasons:
         raise ValueError(

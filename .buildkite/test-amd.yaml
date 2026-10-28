@@ -1423,17 +1423,20 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/config/kernel.py
+  - vllm/v1/attention/backends/triton_attn.py
   - vllm/models/minimax_m3/amd/
+  - vllm/models/minimax_m3/common/
   - vllm/models/deepseek_v41/amd/mono/common/
   - tests/models/minimax_m3/amd_specialized_decode/
   - tests/models/minimax_m3/test_index_cache_overrides.py
   - vllm/model_executor/models/config.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s models/minimax_m3/amd_specialized_decode
+  - pytest -v -s models/minimax_m3/amd_specialized_decode/test_decode.py
+  - pytest -v -s models/minimax_m3/amd_specialized_decode/test_numerics.py
+  - pytest -v -s models/minimax_m3/amd_specialized_decode/test_layers.py
   - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
-  # the long TP4 hand-off stress
-  - pytest -v -s --optional -m optional models/minimax_m3/amd_specialized_decode
 
 - label: ":amd: (MI300) Mamba Kernels" # TBD
   timeout_in_minutes: 55
