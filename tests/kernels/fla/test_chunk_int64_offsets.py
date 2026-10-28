@@ -73,6 +73,8 @@ def test_chunk_delta_h_int64_seq_offset():
         output_final_state=True,
         cu_seqlens=torch.tensor([0, L2], dtype=torch.int32, device=device),
     )
+    assert v_new is not None and ht is not None
+    assert v_new_ref is not None and ht_ref is not None
     torch.testing.assert_close(h[:, L1 // BT :], h_ref, atol=0, rtol=0)
     torch.testing.assert_close(v_new[:, L1:], v_new_ref, atol=0, rtol=0)
     torch.testing.assert_close(ht[1:], ht_ref, atol=0, rtol=0)
