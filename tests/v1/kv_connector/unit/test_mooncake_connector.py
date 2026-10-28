@@ -185,6 +185,17 @@ def _make_worker_vllm_config(kv_role: str):
     )
 
 
+def _make_compressed_kv_cache_config() -> KVCacheConfig:
+    spec = MLAAttentionSpec(
+        block_size=384,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.uint8,
+        tokens_per_state=8,
+    )
+    return KVCacheConfig(2, [], [KVCacheGroupSpec(["summary"], spec)])
+
+
 def _make_packed_mla_kv_cache_config(
     num_blocks: int, *, num_groups: int = 1
 ) -> KVCacheConfig:
@@ -1323,6 +1334,29 @@ def test_resolve_need_send_accounts_for_remote_tp_fanout():
     worker.resolve_need_send(send_meta, remote_tp_ranks=[0, 1])
 
     assert send_meta.need_send == 2
+
+
+@pytest.mark.parametrize("kernel_block_size,raises", [(384, False), (64, True)])
+def test_mooncake_compressed_kernel_split(kernel_block_size, raises):
+    """Mooncake keeps compressed pages whole or rejects a layer-outer split."""
+    config = _make_worker_vllm_config("kv_both")
+    config.cache_config.block_size = 384
+    config.cache_config.kv_cache_layout = "LBHNC"
+    ctx = pytest.raises(NotImplementedError) if raises else contextlib.nullcontext()
+    with (
+        set_current_vllm_config(config),
+        patch_worker_dependencies(),
+        patch.object(
+            mooncake_connector,
+            "select_common_block_size",
+            return_value=kernel_block_size,
+        ),
+        ctx,
+    ):
+        worker = MooncakeConnector(
+            config, KVConnectorRole.WORKER, _make_compressed_kv_cache_config()
+        ).connector_worker
+        worker.shutdown()
 
 
 @pytest.mark.asyncio

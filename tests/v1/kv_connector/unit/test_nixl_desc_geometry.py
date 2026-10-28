@@ -742,22 +742,34 @@ def test_nixl_keeps_packed_sparse_mla_manager_block():
         (KVCacheLayout.BLHNC, 64, False),
     ],
 )
-def test_compressed_kernel_split(layout, kernel_block_size, raises):
-    """Layer-outer layouts keep compressed pages whole or reject the split."""
-    from vllm.distributed.kv_transfer.kv_connector.utils import (
-        check_compressed_kernel_split,
+def test_nixl_compressed_kernel_split(layout, kernel_block_size, raises):
+    """NIXL keeps compressed pages whole or rejects a layer-outer split."""
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
     )
 
     spec = MLAAttentionSpec(
         384, num_kv_heads=1, head_size=128, dtype=torch.uint8, tokens_per_state=8
     )
-    vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
-    )
     kv_cache_config = KVCacheConfig(2, [], [KVCacheGroupSpec(["summary"], spec)])
+    vllm_config = create_vllm_config(block_size=384)
+    vllm_config.cache_config.kv_cache_layout = layout.name
+    vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
+    backend = MagicMock()
+    backend.get_name.return_value = "TEST"
     ctx = pytest.raises(NotImplementedError) if raises else contextlib.nullcontext()
-    with ctx:
-        check_compressed_kernel_split(vllm_config, kv_cache_config, kernel_block_size)
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[backend]),
+        patch.object(bw, "select_common_block_size", return_value=kernel_block_size),
+        set_current_vllm_config(vllm_config),
+        ctx,
+    ):
+        worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
+        worker.shutdown()
 
 
 def _make_remote_meta(
