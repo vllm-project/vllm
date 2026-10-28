@@ -1,21 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import nullcontext
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
+import threading
+from dataclasses import dataclass, field
 
 import pytest
 import torch
 
-from vllm.config.parallel import EPLBConfig, ParallelConfig
-from vllm.distributed.eplb.async_worker import run_rebalance_experts
+import vllm.config.parallel as parallel_config_module
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config.parallel import EPLBConfig
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
+from vllm.distributed.eplb.eplb_communicator import TorchDistGlooStagedEplbCommunicator
 from vllm.distributed.eplb.eplb_state import (
     EplbLayerState,
+    EplbModelState,
     EplbState,
     _move_to_workspace,
-    _node_count_with_rank_mapping,
+    compute_logical_maps,
 )
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.distributed.eplb.policy import (
     DefaultEplbPolicy,
     EplbPlan,
@@ -23,591 +31,386 @@ from vllm.distributed.eplb.policy import (
     EplbRebalanceContext,
     EplbTopology,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import (
-    eplb_map_to_physical_and_record,
-)
+from vllm.distributed.eplb.rebalance_execute import AsyncEplbLayerResult, transfer_layer
+from vllm.distributed.parallel_state import get_ep_group
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     FusedTopKRouter,
 )
-from vllm.platforms import current_platform
-from vllm.platforms.interface import Platform
+from vllm.platforms.interface import Platform, PlatformEnum
 
 
-@pytest.mark.parametrize("communicator", [None, "torch_gloo"])
-def test_parallel_config_delegates_eplb_config_to_platform(communicator):
-    def configure(config):
-        if config.eplb_config.communicator is None:
-            config.eplb_config.communicator = "torch_gloo"
+class _Platform(Platform):
+    _enum = PlatformEnum.OOT
 
-    with patch("vllm.config.parallel.current_platform") as platform:
-        platform.supports_eplb.return_value = True
-        platform.is_cuda_alike.return_value = False
-        platform.check_and_update_eplb_config.side_effect = configure
-        config = ParallelConfig(
-            enable_eplb=True,
-            enable_expert_parallel=True,
-            tensor_parallel_size=2,
-            distributed_executor_backend="uni",
-            eplb_config=EPLBConfig(communicator=communicator),
-        )
-    assert config.eplb_config.communicator == "torch_gloo"
-    platform.check_and_update_eplb_config.assert_called_once_with(config)
+    @classmethod
+    def supports_eplb(cls):
+        return True
+
+    @classmethod
+    def check_and_update_eplb_config(cls, parallel_config):
+        config = parallel_config.eplb_config
+        if config.policy != "custom" or config.communicator not in (
+            None,
+            "custom_comm",
+        ):
+            raise ValueError("unsupported custom EPLB configuration")
+        config.communicator = "custom_comm"
 
 
-def test_platform_eplb_capability_is_authoritative():
-    with (
-        patch("vllm.config.parallel.current_platform") as platform,
-        pytest.raises(ValueError, match="not supported on this platform"),
-    ):
-        platform.supports_eplb.return_value = False
-        platform.is_cuda_alike.return_value = True
-        ParallelConfig(
-            enable_eplb=True,
-            enable_expert_parallel=True,
-            tensor_parallel_size=2,
-            distributed_executor_backend="uni",
-        )
+@pytest.mark.parametrize("communicator", [None, "custom_comm"])
+def test_platform_can_validate_out_of_tree_names(monkeypatch, communicator):
+    monkeypatch.setattr(parallel_config_module, "current_platform", _Platform())
+    config = ParallelConfig(
+        enable_eplb=True,
+        enable_expert_parallel=True,
+        tensor_parallel_size=2,
+        distributed_executor_backend="uni",
+        eplb_config=EPLBConfig(policy="custom", communicator=communicator),
+    )
+    assert config.eplb_config.policy == "custom"
+    assert config.eplb_config.communicator == "custom_comm"
+
+
+@pytest.mark.parametrize("field_name", ["policy", "communicator"])
+def test_builtin_platform_rejects_unknown_names(field_name):
+    config = ParallelConfig(eplb_config=EPLBConfig(**{field_name: "unknown"}))
+    with pytest.raises(ValueError, match=f"Unknown EPLB {field_name}"):
+        Platform.check_and_update_eplb_config(config)
 
 
 @pytest.mark.parametrize(
-    ("nixl_available", "elastic", "expected"),
-    [(True, False, "nixl"), (False, False, "torch_gloo"), (False, True, "pynccl")],
+    "platform_enum", [PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU]
 )
-def test_platform_preserves_default_communicator_selection(
-    nixl_available, elastic, expected
-):
-    config = SimpleNamespace(
-        eplb_config=EPLBConfig(use_async=False),
-        enable_elastic_ep=elastic,
-    )
-    with patch(
-        "vllm.distributed.nixl_utils.is_nixl_available",
-        return_value=nixl_available,
-    ):
-        Platform.check_and_update_eplb_config(config)
-    assert config.eplb_config.communicator == expected
+def test_builtin_accelerator_eplb_capability(platform_enum):
+    class BuiltinPlatform(Platform):
+        _enum = platform_enum
+
+    assert BuiltinPlatform.supports_eplb()
 
 
-def test_platform_rejects_async_pynccl_fallback():
-    config = SimpleNamespace(
-        eplb_config=EPLBConfig(use_async=True),
-        enable_elastic_ep=True,
-    )
-    with (
-        patch("vllm.distributed.nixl_utils.is_nixl_available", return_value=False),
-        pytest.raises(ValueError, match="incompatible with async EPLB"),
-    ):
-        Platform.check_and_update_eplb_config(config)
+def test_platform_can_reject_eplb_even_on_cuda(monkeypatch):
+    class UnsupportedCuda(Platform):
+        _enum = PlatformEnum.CUDA
 
+        @classmethod
+        def supports_eplb(cls):
+            return False
 
-def test_platform_rejects_unknown_communicator():
-    config = SimpleNamespace(
-        eplb_config=SimpleNamespace(communicator="unknown", use_async=False),
-    )
-    with pytest.raises(ValueError, match="Unknown EPLB communicator"):
-        Platform.check_and_update_eplb_config(config)
-
-
-def test_async_rebalance_uses_state_entry_point():
-    load_window = torch.tensor([[[3, 1]]])
-    old_map = torch.tensor([[0, 1]])
-    new_map = torch.tensor([[1, 0]])
-    plan = EplbPlan(new_map)
-    state = SimpleNamespace(rebalance_experts=Mock(return_value=plan))
-    model_state = SimpleNamespace(
-        eplb_stats=SimpleNamespace(
-            global_expert_load_window=load_window,
-            num_replicas=2,
-            num_groups=1,
-            num_nodes=1,
-            num_gpus=2,
+    monkeypatch.setattr(parallel_config_module, "current_platform", UnsupportedCuda())
+    with pytest.raises(ValueError, match="not supported on this platform"):
+        ParallelConfig(
+            enable_eplb=True,
+            tensor_parallel_size=2,
+            distributed_executor_backend="uni",
         )
+
+
+def test_xpu_preserves_eplb_and_xccl_auto_selection():
+    class XpuPlatform(Platform):
+        _enum = PlatformEnum.XPU
+
+    config = ParallelConfig()
+    assert XpuPlatform.supports_eplb()
+    XpuPlatform.check_and_update_eplb_config(config)
+    assert config.eplb_config.communicator == "torch_xccl"
+
+
+@pytest.mark.parametrize("communicator", ["torch_gloo", "torch_xccl", "nixl"])
+def test_explicit_builtin_communicator_is_preserved(communicator):
+    config = ParallelConfig(eplb_config=EPLBConfig(communicator=communicator))
+    Platform.check_and_update_eplb_config(config)
+    assert config.eplb_config.communicator == communicator
+
+
+@pytest.mark.parametrize("communicator", ["torch_nccl", "pynccl"])
+def test_async_nccl_restrictions_remain(communicator):
+    with pytest.raises(ValueError, match="incompatible with async EPLB"):
+        EPLBConfig(communicator=communicator)
+
+
+@pytest.fixture
+def cpu_group(tmp_path):
+    with set_current_vllm_config(VllmConfig()):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=f"file://{tmp_path}/store",
+            backend="gloo",
+        )
+        initialize_model_parallel(backend="gloo")
+        try:
+            yield get_ep_group().cpu_group
+        finally:
+            cleanup_dist_env_and_memory()
+
+
+class _ExpertModel(torch.nn.Module):
+    """Small real expert weight owner for control-plane and transfer checks."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(
+            torch.arange(16).reshape(4, 2, 2).float(), False
+        )
+        self.expert_weights = [[self.weight]]
+        self.num_moe_layers = 1
+
+    def forward(self, x, expert_id):
+        return x @ self.weight[expert_id]
+
+
+@dataclass
+class _PolicyState(EplbPolicyState):
+    committed_layers: list[int] = field(default_factory=list)
+
+
+class _Policy(DefaultEplbPolicy):
+    def __init__(self, target=None, fail_commit=False):
+        self.target = target
+        self.fail_commit = fail_commit
+
+    def create_state(self, num_moe_layers):
+        return _PolicyState()
+
+    def rebalance_experts(self, context, policy_state):
+        if self.target is not None:
+            return EplbPlan(self.target)
+        return super().rebalance_experts(context, policy_state)
+
+    def on_layer_committed(self, policy_state, plan, layer_idx):
+        if self.fail_commit:
+            raise RuntimeError("policy commit failed")
+        policy_state.committed_layers.append(layer_idx)
+
+
+class _State(EplbState):
+    def __init__(self, policy=None, fail_commit=False):
+        self.selected_policy = policy or _Policy()
+        self.fail_commit = fail_commit
+        self.committed_layers = []
+        super().__init__(ParallelConfig(), torch.device("cpu"))
+
+    def create_policy(self):
+        return self.selected_policy
+
+    def on_layer_committed(self, model_state, layer_idx):
+        if self.fail_commit:
+            raise RuntimeError("device commit failed")
+        self.committed_layers.append(layer_idx)
+
+
+@pytest.fixture
+def model_state(cpu_group):
+    model = _ExpertModel()
+    mapping = torch.arange(4).reshape(1, 4)
+    logical, replicas = compute_logical_maps(mapping, 4)
+    loads = torch.zeros(1, 4, dtype=torch.int64)
+    return EplbModelState(
+        physical_to_logical_map=mapping,
+        physical_to_logical_map_buffer=mapping,
+        logical_to_physical_map=logical,
+        logical_replica_count=replicas,
+        expert_load_pass=loads,
+        expert_load_pass_buffer=loads,
+        expert_load_window=torch.zeros(4, 1, 4, dtype=torch.int64),
+        last_expert_load=torch.ones(1, 4, dtype=torch.int64),
+        model_name="expert-test",
+        model=model,
+        expert_buffer=[torch.empty_like(model.weight)],
+        rebalanced=False,
+        eplb_stats=None,
+        device_index=None,
+        communicator=TorchDistGlooStagedEplbCommunicator(cpu_group),
+        policy_state=_PolicyState(),
     )
-    stream = object()
-    cpu_group = object()
-
-    with (
-        patch("torch.cuda.stream", return_value=nullcontext()),
-        patch(
-            "vllm.distributed.eplb.async_worker.get_eplb_group",
-            return_value=SimpleNamespace(cpu_group=cpu_group),
-        ),
-    ):
-        assert run_rebalance_experts(model_state, state, old_map, stream) is plan
-
-    assert state.rebalance_experts.call_args.args[0] is model_state
-    context = state.rebalance_experts.call_args.args[1]
-    assert isinstance(context, EplbRebalanceContext)
-    assert context.load_window_cpu is load_window
-    assert context.physical_to_logical_map_cpu is old_map
-    assert context.num_replicas == 2
-    assert context.topology.num_groups == 1
-    assert context.topology.num_nodes == 1
-    assert context.topology.num_ranks == 2
-    assert context.cpu_group is cpu_group
 
 
-def test_default_policy_rebalances_from_temporal_window():
+def test_default_policy_preserves_aggregate_result(cpu_group):
     context = EplbRebalanceContext(
-        load_window_cpu=torch.tensor([[[3, 1]], [[4, 2]]]),
-        physical_to_logical_map_cpu=torch.tensor([[0, 1]]),
+        load_window_cpu=torch.tensor([[[9, 1, 3, 2]], [[4, 2, 1, 1]]]),
+        physical_to_logical_map_cpu=torch.tensor([[0, 1, 2, 3, 0, 1]]),
         topology=EplbTopology(num_groups=1, num_nodes=1, num_ranks=2),
-        num_replicas=2,
-        cpu_group=Mock(),
+        num_replicas=6,
+        cpu_group=cpu_group,
     )
-
     policy = DefaultEplbPolicy()
-    with patch.object(
-        policy,
-        "_rebalance_from_weights",
-        return_value=torch.tensor([[1, 0]]),
-    ) as rebalance_from_weights:
-        plan = policy.rebalance_experts(context, EplbPolicyState())
-
-    weight, num_replicas, num_groups, num_nodes, num_ranks, old_map = (
-        rebalance_from_weights.call_args.args
+    result = policy.rebalance_experts(context, policy.create_state(1))
+    expected = policy._rebalance_from_weights(
+        torch.tensor([[13, 3, 4, 3]]),
+        6,
+        1,
+        1,
+        2,
+        context.physical_to_logical_map_cpu,
     )
-    torch.testing.assert_close(weight, torch.tensor([[7, 3]]))
-    assert (num_replicas, num_groups, num_nodes, num_ranks) == (2, 1, 1, 2)
-    torch.testing.assert_close(old_map, context.physical_to_logical_map_cpu)
-    torch.testing.assert_close(plan.physical_to_logical_map, torch.tensor([[1, 0]]))
+    torch.testing.assert_close(result.physical_to_logical_map, expected, rtol=0, atol=0)
 
 
-def test_policy_creates_independent_model_states():
-    policy = DefaultEplbPolicy()
+@pytest.mark.parametrize("dtype", [torch.float32, torch.int32, torch.int64])
+def test_policy_target_requires_cpu_integer(model_state, cpu_group, dtype):
+    target = torch.zeros(1, 4, dtype=dtype)
+    state = _State(_Policy(target))
+    context = EplbRebalanceContext(
+        torch.ones(1, 1, 4),
+        torch.arange(4).reshape(1, 4),
+        EplbTopology(1, 1, 1),
+        4,
+        cpu_group,
+    )
+    if dtype == torch.float32:
+        with pytest.raises(ValueError, match="CPU int32 or int64"):
+            state.rebalance_experts(model_state, context)
+    else:
+        assert (
+            state.rebalance_experts(model_state, context).physical_to_logical_map
+            is target
+        )
 
-    first = policy.create_state(num_moe_layers=2)
-    second = policy.create_state(num_moe_layers=2)
 
-    assert isinstance(first, EplbPolicyState)
-    assert first is not second
-
-
-def test_eplb_state_creates_one_shared_policy():
-    policy = DefaultEplbPolicy()
-    with (
-        patch.object(EplbState, "create_policy", return_value=policy) as factory,
-        patch("vllm.distributed.eplb.eplb_state.CpuGpuEvent"),
-    ):
-        state = EplbState(SimpleNamespace(), torch.device("cpu"))
-
-    factory.assert_called_once_with()
+def test_shared_policy_keeps_model_state_independent(model_state, cpu_group):
+    policy = _Policy()
+    first, second = policy.create_state(1), policy.create_state(1)
+    plan = EplbPlan(torch.arange(4).reshape(1, 4))
+    policy.on_layer_committed(first, plan, 0)
+    assert first.committed_layers == [0]
+    assert second.committed_layers == []
+    state = _State(policy)
     assert state.policy is policy
 
 
-@pytest.mark.parametrize(
-    "target",
-    [torch.zeros(1, 1), torch.zeros(1, 1, dtype=torch.int64, device="meta")],
-)
-def test_state_rejects_invalid_policy_target(target):
-    state = EplbState.__new__(EplbState)
-    plan = EplbPlan(target)
-    state.policy = SimpleNamespace(rebalance_experts=Mock(return_value=plan))
-    model_state = SimpleNamespace(policy_state=object())
-
-    with pytest.raises(ValueError, match="CPU int32 or int64"):
-        state.rebalance_experts(model_state, Mock())
+def test_aggregate_allreduce_keeps_original_payload_shape(model_state):
+    state = _State()
+    first = torch.arange(8).reshape(2, 4)
+    second = torch.arange(12).reshape(3, 4)
+    reduced = state._allreduce_list([first, second])
+    assert [tensor.shape for tensor in reduced] == [(2, 4), (3, 4)]
+    torch.testing.assert_close(reduced[0], first, rtol=0, atol=0)
+    torch.testing.assert_close(reduced[1], second, rtol=0, atol=0)
 
 
-def test_state_accepts_cpu_integer_policy_target():
-    state = EplbState.__new__(EplbState)
-    plan = EplbPlan(torch.zeros(1, 1, dtype=torch.int32))
-    state.policy = SimpleNamespace(rebalance_experts=Mock(return_value=plan))
-    model_state = SimpleNamespace(policy_state=object())
-
-    assert state.rebalance_experts(model_state, Mock()) is plan
-
-
-def test_shared_policy_receives_each_models_own_state():
-    state = EplbState.__new__(EplbState)
-    plan = EplbPlan(torch.zeros(1, 1, dtype=torch.int64))
-    state.policy = SimpleNamespace(rebalance_experts=Mock(return_value=plan))
-    first_state = object()
-    second_state = object()
-    first_context = Mock()
-    second_context = Mock()
-
-    state.rebalance_experts(SimpleNamespace(policy_state=first_state), first_context)
-    state.rebalance_experts(SimpleNamespace(policy_state=second_state), second_context)
-
-    assert [call.args for call in state.policy.rebalance_experts.call_args_list] == [
-        (first_context, first_state),
-        (second_context, second_state),
-    ]
-
-
-def test_state_allreduces_temporal_windows_for_multiple_models():
-    state = EplbState.__new__(EplbState)
-    first = torch.arange(6).reshape(2, 1, 3)
-    second = torch.arange(12).reshape(2, 2, 3)
-    device_group = object()
-
-    with (
-        patch(
-            "vllm.distributed.eplb.eplb_state.get_ep_group",
-            return_value=SimpleNamespace(device_group=device_group),
-        ),
-        patch(
-            "vllm.distributed.eplb.eplb_state.all_reduce",
-            side_effect=lambda tensor, **_: tensor.add_(10),
-        ) as all_reduce,
-    ):
-        reduced = state._allreduce_list([first, second])
-
-    assert all_reduce.call_args.kwargs["group"] is device_group
-    torch.testing.assert_close(reduced[0], first + 10)
-    torch.testing.assert_close(reduced[1], second + 10)
-
-
-@pytest.mark.parametrize(
-    ("load_window", "next_step", "expected"),
-    [
-        ([1, 2, 0, 0], 2, [0, 0, 1, 2]),
-        ([3, 4, 1, 2], 2, [1, 2, 3, 4]),
-    ],
-)
-def test_state_orders_load_slots(load_window, next_step, expected):
-    state = EplbState.__new__(EplbState)
-    state.expert_load_window_size = 4
-    state.expert_load_window_step = next_step
-    ordered = state._ordered_load_window(torch.tensor(load_window))
-
-    torch.testing.assert_close(ordered, torch.tensor(expected))
-
-
-def test_dummy_step_advances_load_window_with_zero_sample():
-    state = EplbState.__new__(EplbState)
-    model_state = SimpleNamespace(
-        expert_load_pass=torch.tensor([[7]]),
-        expert_load_window=torch.full((4, 1, 1), -1),
+@pytest.mark.parametrize("failure", ["device", "policy"])
+def test_commit_failure_keeps_buffer_unacknowledged(model_state, failure):
+    state = _State(_Policy(fail_commit=failure == "policy"), failure == "device")
+    plan = EplbPlan(torch.tensor([[1, 0, 3, 2]]))
+    original = model_state.model.weight.detach().clone()
+    metadata = transfer_layer(
+        old_layer_indices=model_state.physical_to_logical_map[0],
+        new_layer_indices=plan.physical_to_logical_map[0],
+        expert_weights=model_state.model.expert_weights[0],
+        expert_weights_buffer=model_state.expert_buffer,
+        communicator=model_state.communicator,
+        ep_group=get_ep_group().device_group,
+        stream=None,
+        is_profile=False,
     )
-    state.model_states = {"model": model_state}
-    state.expert_load_window_size = 4
-    state.expert_load_window_step = 0
-    state.expert_rearrangement_step = 0
-    state.expert_rearrangement_step_interval = 10
-    state.is_async = False
-    state._should_record_current_step = Mock(return_value=True)
-    state._update_layer_should_record = Mock()
-
-    with patch(
-        "vllm.distributed.eplb.eplb_state.get_ep_group",
-        return_value=SimpleNamespace(device_group=Mock()),
-    ):
-        state.step(is_dummy=True)
-
-    torch.testing.assert_close(
-        model_state.expert_load_window[0], torch.zeros(1, 1, dtype=torch.int64)
-    )
-    assert state.expert_load_window_step == 1
-
-
-def test_reconfigure_resets_load_timeline_for_scale_up():
-    state = EplbState.__new__(EplbState)
-    map_buffer = torch.zeros(1, 4, dtype=torch.int64)
-    load_buffer = torch.ones(1, 4, dtype=torch.int64)
-    model_state = SimpleNamespace(
-        model=SimpleNamespace(num_physical_experts=2, num_moe_layers=1),
-        physical_to_logical_map_buffer=map_buffer,
-        physical_to_logical_map=map_buffer[:, :2],
-        expert_load_pass_buffer=load_buffer,
-        expert_load_pass=load_buffer[:, :2],
-        expert_load_window=torch.ones(4, 1, 2, dtype=torch.int64),
-        policy_state=object(),
-    )
-    draft_state = SimpleNamespace(
-        expert_load_window=torch.ones(4, 1, 2, dtype=torch.int64),
-        model=SimpleNamespace(num_moe_layers=1),
-        policy_state=object(),
-    )
-    state.model_states = {"model": model_state, "draft": draft_state}
-    state.expert_load_window_step = 2
-    new_policy_state = object()
-    new_draft_policy_state = object()
-    state.policy = SimpleNamespace(
-        create_state=Mock(side_effect=[new_policy_state, new_draft_policy_state])
-    )
-
-    state.reconfigure_physical_expert_slots(
-        SimpleNamespace(compute_hash=Mock(return_value="model")), 3
-    )
-
-    assert model_state.expert_load_window.shape == (4, 1, 3)
-    assert not model_state.expert_load_window.any()
-    assert model_state.policy_state is new_policy_state
-    assert not draft_state.expert_load_window.any()
-    assert draft_state.policy_state is new_draft_policy_state
-    assert state.expert_load_window_step == 0
-
-
-def test_empty_load_window_keeps_one_zero_sample():
-    empty = torch.zeros(4, 2, 3, dtype=torch.int64)
-
-    filtered = EplbState._nonempty_load_window(empty)
-
-    assert filtered.shape == (1, 2, 3)
-    assert not filtered.any()
-
-
-@pytest.mark.parametrize(
-    ("node_ids", "rank_mapping", "expected"),
-    [
-        ([0, 0, 0, 0, 1, 1], None, 1),
-        ([0, 0, 0, 0, 1, 1, 1, 1], None, 2),
-        ([0, 0, 0, 0, 1, 1, 1, 1], {i: i if i < 6 else -1 for i in range(8)}, 1),
-        (
-            [0, 0, 0, 0, 1, 1, 1, 1],
-            {0: 0, 1: 1, 2: -1, 3: -1, 4: 2, 5: 3, 6: -1, 7: -1},
-            2,
-        ),
-        ([0, 0, 1, 1], {0: 0, 2: 1, 1: 2, 3: 3}, 1),
-    ],
-)
-def test_node_count_requires_uniform_contiguous_active_ranks(
-    node_ids, rank_mapping, expected
-):
-    world_size = len(node_ids)
-    mapping = rank_mapping or {rank: rank for rank in range(world_size)}
-
-    def same_node(_group, source_rank):
-        return [node == node_ids[source_rank] for node in node_ids]
-
-    with patch(
-        "vllm.distributed.eplb.eplb_state.in_the_same_node_as",
-        side_effect=same_node,
-    ):
-        count = _node_count_with_rank_mapping(
-            SimpleNamespace(world_size=world_size), mapping
-        )
-
-    assert count == expected
-
-
-def test_state_creates_device_specific_layer_state():
-    class CustomLayerState(EplbLayerState):
-        pass
-
-    class CustomEplbState(EplbState):
-        def create_layer_state(self):
-            return CustomLayerState()
-
-    layer = SimpleNamespace(eplb_state=EplbLayerState())
-    state = CustomEplbState.__new__(CustomEplbState)
-    state._create_model_layer_states(SimpleNamespace(moe_layers=[layer]))
-    assert isinstance(layer.eplb_state, CustomLayerState)
-
-
-def test_model_communicator_uses_state_hook():
-    state = EplbState.__new__(EplbState)
-    state.parallel_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(communicator="torch_gloo")
-    )
-    model = SimpleNamespace(expert_weights=[torch.empty(1)])
-    buffer = [torch.empty(1)]
-    group = object()
-    communicator = object()
-    with patch(
-        "vllm.distributed.eplb.eplb_state.create_eplb_communicator",
-        return_value=communicator,
-    ) as factory:
-        assert state.create_model_communicator(model, buffer, group) is communicator
-    factory.assert_called_once_with(group, "torch_gloo", model.expert_weights, buffer)
-
-
-def test_layer_commit_hook_runs_before_worker_ack():
-    calls = []
-    event = SimpleNamespace(record=lambda: calls.append("ack"))
-    plan = EplbPlan(torch.tensor([[1, 0]]))
-    result = SimpleNamespace(
-        layer_idx=0,
-        plan=plan,
-        transfer_metadata=object(),
-        consumed_event=event,
-    )
-    model_state = SimpleNamespace(
-        pending_result=result,
-        model=SimpleNamespace(expert_weights=[[torch.empty(1)]], num_moe_layers=1),
-        expert_buffer=[torch.empty(1)],
-        rebalanced=True,
-        policy_state=object(),
-    )
-    state = EplbState.__new__(EplbState)
-    state.on_layer_committed = lambda _state, _layer: calls.append("hook")
-    state.policy = SimpleNamespace(on_layer_committed=Mock())
-    with (
-        patch(
-            "vllm.distributed.eplb.eplb_state.move_from_buffer",
-            side_effect=lambda **_: calls.append("weights"),
-        ),
-        patch(
-            "vllm.distributed.eplb.eplb_state._commit_eplb_maps_for_layer",
-            side_effect=lambda *_args, **_kwargs: calls.append("maps"),
-        ),
-    ):
-        _move_to_workspace(
-            model_state,
-            ep_rank=0,
-            commit_rebalance=state._commit_rebalance,
-        )
-    assert calls == ["weights", "maps", "hook", "ack"]
-    state.policy.on_layer_committed.assert_called_once_with(
-        model_state.policy_state, plan, 0
-    )
-    assert model_state.pending_result is None
-    assert not model_state.rebalanced
-
-
-def test_failed_device_commit_hook_does_not_ack_buffer():
-    event = SimpleNamespace(record=Mock())
-    plan = EplbPlan(torch.tensor([[1, 0]]))
-    result = SimpleNamespace(
-        layer_idx=0,
-        plan=plan,
-        transfer_metadata=object(),
-        consumed_event=event,
-    )
-    model_state = SimpleNamespace(
-        pending_result=result,
-        model=SimpleNamespace(expert_weights=[[torch.empty(1)]], num_moe_layers=1),
-        expert_buffer=[torch.empty(1)],
-        rebalanced=True,
-        policy_state=object(),
-    )
-
-    def fail_refresh(_state, _layer):
-        raise RuntimeError("refresh failed")
-
-    state = EplbState.__new__(EplbState)
-    state.on_layer_committed = fail_refresh
-    state.policy = SimpleNamespace(on_layer_committed=Mock())
-    with (
-        patch("vllm.distributed.eplb.eplb_state.move_from_buffer"),
-        patch("vllm.distributed.eplb.eplb_state._commit_eplb_maps_for_layer"),
-        pytest.raises(RuntimeError, match="refresh failed"),
-    ):
-        _move_to_workspace(
-            model_state,
-            ep_rank=0,
-            commit_rebalance=state._commit_rebalance,
-        )
-    assert model_state.pending_result is result
-    state.policy.on_layer_committed.assert_not_called()
-    event.record.assert_not_called()
-
-
-def test_failed_policy_commit_does_not_ack_buffer():
-    event = SimpleNamespace(record=Mock())
-    plan = EplbPlan(torch.tensor([[1, 0]]))
-    result = SimpleNamespace(
-        layer_idx=0,
-        plan=plan,
-        transfer_metadata=object(),
-        consumed_event=event,
-    )
-    model_state = SimpleNamespace(
-        pending_result=result,
-        model=SimpleNamespace(expert_weights=[[torch.empty(1)]], num_moe_layers=1),
-        expert_buffer=[torch.empty(1)],
-        rebalanced=True,
-        policy_state=object(),
-    )
-    state = EplbState.__new__(EplbState)
-    state.on_layer_committed = Mock()
-    state.policy = SimpleNamespace(
-        on_layer_committed=Mock(side_effect=RuntimeError("commit failed"))
-    )
-
-    with (
-        patch("vllm.distributed.eplb.eplb_state.move_from_buffer"),
-        patch("vllm.distributed.eplb.eplb_state._commit_eplb_maps_for_layer"),
-        pytest.raises(RuntimeError, match="commit failed"),
-    ):
+    result = AsyncEplbLayerResult(0, plan, metadata, CpuGpuEvent())
+    model_state.pending_result = result
+    model_state.rebalanced = True
+    with pytest.raises(RuntimeError, match="commit failed"):
         _move_to_workspace(model_state, 0, state._commit_rebalance)
-
+    torch.testing.assert_close(model_state.model.weight, original[[1, 0, 3, 2]])
+    torch.testing.assert_close(
+        model_state.physical_to_logical_map, plan.physical_to_logical_map
+    )
+    assert model_state.policy_state.committed_layers == []
     assert model_state.pending_result is result
-    event.record.assert_not_called()
+    assert not result.consumed_event.wait(timeout=0)
 
 
-def test_sync_commit_uses_layer_commit_hook():
-    calls = []
-    model_state = SimpleNamespace(
-        model=SimpleNamespace(num_moe_layers=2), policy_state=object()
+def test_sync_commit_updates_maps_then_policy_state(model_state):
+    state = _State()
+    plan = EplbPlan(torch.tensor([[1, 0, 3, 2]]))
+    state._commit_rebalance(model_state, plan)
+    assert state.committed_layers == [0]
+    assert model_state.policy_state.committed_layers == [0]
+    torch.testing.assert_close(
+        model_state.logical_to_physical_map[0, :, 0], torch.tensor([1, 0, 3, 2])
     )
-    state = EplbState.__new__(EplbState)
-    state.on_layer_committed = lambda _state, layer: calls.append(f"hook-{layer}")
-    policy_commit = Mock()
-    state.policy = SimpleNamespace(on_layer_committed=policy_commit)
-    plan = EplbPlan(torch.tensor([[0], [0]]))
-
-    with patch(
-        "vllm.distributed.eplb.eplb_state._commit_eplb_maps",
-        side_effect=lambda *_args: calls.append("maps"),
-    ):
-        state._commit_rebalance(model_state, plan)
-
-    assert calls == ["maps", "hook-0", "hook-1"]
-    assert [commit.args for commit in policy_commit.call_args_list] == [
-        (model_state.policy_state, plan, 0),
-        (model_state.policy_state, plan, 1),
-    ]
 
 
-def test_router_uses_device_specific_mapping_hook():
-    mapped_ids = torch.tensor([[1]])
-    callback = Mock(return_value=mapped_ids)
-    state = EplbLayerState(
+def test_router_calls_layer_mapping_with_live_padding_metadata():
+    observed = []
+
+    def map_and_record(ids, num_tokens):
+        observed.append(num_tokens)
+        return ids + 1
+
+    layer = EplbLayerState(
         expert_load_view=torch.zeros(2),
         logical_to_physical_map=torch.arange(2).unsqueeze(-1),
         logical_replica_count=torch.ones(2),
         should_record_tensor=torch.ones((), dtype=torch.bool),
         num_unpadded_tokens_tensors=[torch.tensor(1)],
-        map_and_record=callback,
+        map_and_record=map_and_record,
     )
-    router = FusedTopKRouter(top_k=1, global_num_experts=2, eplb_state=state)
-    logical_ids = torch.tensor([[0]])
-    with patch(
-        "vllm.model_executor.layers.fused_moe.router.base_router.dbo_current_ubatch_id",
-        return_value=0,
-    ):
-        assert router._apply_eplb_mapping(logical_ids) is mapped_ids
-    callback.assert_called_once_with(logical_ids, state.num_unpadded_tokens_tensors[0])
-
-
-def test_router_uses_default_mapping_without_platform_gate():
-    mapped_ids = torch.tensor([[1]])
-    state = EplbLayerState(
-        expert_load_view=torch.zeros(2),
-        logical_to_physical_map=torch.arange(2).unsqueeze(-1),
-        logical_replica_count=torch.ones(2),
-        should_record_tensor=torch.ones((), dtype=torch.bool),
-        num_unpadded_tokens_tensors=[torch.tensor(1)],
+    router = FusedTopKRouter(top_k=1, global_num_experts=2, eplb_state=layer)
+    torch.testing.assert_close(
+        router._apply_eplb_mapping(torch.tensor([[0]])), torch.tensor([[1]])
     )
-    router = FusedTopKRouter(top_k=1, global_num_experts=2, eplb_state=state)
-    with (
-        patch(
-            "vllm.model_executor.layers.fused_moe.router.base_router.dbo_current_ubatch_id",
-            return_value=0,
-        ),
-        patch(
-            "vllm.model_executor.layers.fused_moe.router.base_router.current_platform.is_cuda_alike",
-            return_value=False,
-        ),
-        patch(
-            "vllm.model_executor.layers.fused_moe.router.base_router.eplb_map_to_physical_and_record",
-            return_value=mapped_ids,
-        ) as default_mapping,
-    ):
-        assert router._apply_eplb_mapping(torch.tensor([[0]])) is mapped_ids
-    default_mapping.assert_called_once()
+    assert observed == layer.num_unpadded_tokens_tensors
 
 
-@pytest.mark.skipif(current_platform.is_cuda_alike(), reason="Non-CUDA fallback only")
-def test_non_cuda_default_mapping_fails_closed():
-    with pytest.raises(RuntimeError, match="device-specific map_and_record hook"):
-        eplb_map_to_physical_and_record(
-            topk_ids=torch.tensor([[0]]),
-            expert_load_view=torch.zeros(1),
-            logical_to_physical_map=torch.tensor([[0]]),
-            logical_replica_count=torch.ones(1),
-            record_enabled=torch.ones((), dtype=torch.bool),
-        )
+def test_idle_wait_can_stop_without_fabricating_device_event():
+    state = _State()
+    entered = threading.Event()
+    stopped = threading.Event()
+
+    def wait():
+        entered.set()
+        assert not state.wait_for_rearrangement(None)
+        stopped.set()
+
+    state.async_worker = threading.Thread(target=wait, daemon=True)
+    state.async_worker.start()
+    assert entered.wait(timeout=5)
+    state.stop_async_loop(timeout=5)
+    assert stopped.is_set()
+    assert state.async_worker is None
+    assert not state.rearrange_event.wait(timeout=0)
+    state.stop_async_loop()
+
+
+def test_stop_rejects_unconsumed_transfers(model_state):
+    state = _State()
+    entered = threading.Event()
+
+    def wait():
+        entered.set()
+        state.wait_for_rearrangement(None)
+
+    state.async_worker = threading.Thread(target=wait, daemon=True)
+    state.model_states["model"] = model_state
+    model_state.rebalanced = True
+    state.async_worker.start()
+    assert entered.wait(timeout=5)
+    try:
+        with pytest.raises(RuntimeError, match="Drain outstanding"):
+            state.stop_async_loop()
+        assert state.async_worker.is_alive()
+    finally:
+        model_state.rebalanced = False
+        state.stop_async_loop(timeout=5)
+
+
+def test_stop_timeout_keeps_worker_until_it_exits():
+    state = _State()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_worker():
+        entered.set()
+        release.wait()
+
+    worker = threading.Thread(target=blocked_worker, daemon=True)
+    state.async_worker = worker
+    worker.start()
+    assert entered.wait(timeout=5)
+    try:
+        with pytest.raises(TimeoutError, match="did not stop"):
+            state.stop_async_loop(timeout=0)
+        assert state.async_worker is worker
+    finally:
+        release.set()
+        state.stop_async_loop(timeout=5)
+    assert state.async_worker is None

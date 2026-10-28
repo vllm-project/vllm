@@ -106,6 +106,12 @@ Every plugin has three parts:
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
 
+    For out-of-tree EPLB, implement `supports_eplb()` and `check_and_update_eplb_config(parallel_config)` to select and validate policy and communicator names. Built-in names retain their existing defaults and async communicator restrictions; a platform override owns validation of its custom names.
+
+    An `EplbState` subclass can implement `create_policy()`, `create_model_communicator()`, and `create_layer_state()`. The layer state may provide `map_and_record` for device-specific expert mapping and load recording. Policies receive a CPU `EplbRebalanceContext` containing one aggregate load bin, and return an `EplbPlan`. Per-model `EplbPolicyState` advances only through `on_layer_committed()`, after weights and maps are installed and before an async buffer is acknowledged.
+
+    Async workers wait through `wait_for_rearrangement()`. After every rank drains outstanding transfers, call `stop_async_loop()` before releasing communicator resources. It rejects unconsumed transfers and reports a join timeout; it does not cancel in-flight device communication.
+
 4. Implement the worker class `MyDummyWorker` in `my_dummy_worker.py`. The worker class should inherit from [WorkerBase][vllm.v1.worker.worker_base.WorkerBase]. Please follow the interface to implement the functions one by one. Basically, all interfaces in the base class should be implemented, since they are called here and there in vLLM. To make sure a model can be executed, the basic functions should be implemented are:
 
     - `init_device`: This function is called to set up the device for the worker.

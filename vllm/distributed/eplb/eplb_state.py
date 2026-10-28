@@ -84,9 +84,7 @@ class EplbStats:
 
     global_expert_load_window: torch.Tensor
     """
-    Experts load window.
-    Shape: (num_samples, num_moe_layers, num_logical_experts), oldest-to-newest.
-    An all-empty window is represented by one zero sample.
+    Aggregate logical-expert loads, shape (num_moe_layers, num_logical_experts).
     """
     num_replicas: int
     """
@@ -253,7 +251,8 @@ class EplbState:
         """
         Current step in the sliding window.
 
-        All EP ranks advance this cursor together, including on dummy steps.
+        Different from `expert_rearrangement_step`, each EP rank may have its
+        own `expert_load_window_step`.
         """
         self.expert_load_window_size: int = 0
         """
@@ -294,11 +293,12 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
+        self._stop_async = threading.Event()
         self.device_index: int | None = None
         """
         Device index for the async EPLB worker thread.
         """
-        if self.device.type in ("cuda", "xpu"):
+        if self.device.type != "cpu":
             self.device_index = self.device.index
             if self.device_index is None and torch.accelerator.is_available():
                 self.device_index = torch.accelerator.current_device_index()
@@ -407,15 +407,6 @@ class EplbState:
         if target.device.type != "cpu" or not valid_dtype:
             raise ValueError("EPLB policy target must be a CPU int32 or int64 tensor")
         return plan
-
-    def _ordered_load_window(self, load_window: torch.Tensor) -> torch.Tensor:
-        return load_window.roll(-self.expert_load_window_step, dims=0)
-
-    @staticmethod
-    def _nonempty_load_window(load_window: torch.Tensor) -> torch.Tensor:
-        active = load_window.sum(dim=(1, 2)) != 0
-        active[0] |= ~active.any()
-        return load_window[active]
 
     def _commit_rebalance(
         self,
@@ -719,19 +710,20 @@ class EplbState:
                         - self.expert_rearrangement_step,
                     )
 
-        # Dummy ranks record zero so every rank keeps the same time axis.
-        should_record = self._should_record_current_step(log_stats=log_stats)
-        for eplb_model_state in self.model_states.values():
-            if should_record:
-                eplb_model_state.expert_load_window[self.expert_load_window_step].copy_(
-                    eplb_model_state.expert_load_pass
-                )
-                eplb_model_state.expert_load_pass.zero_()
+        # Update the expert load sliding window
+        if not is_dummy:
+            should_record = self._should_record_current_step(log_stats=log_stats)
+            for eplb_model_state in self.model_states.values():
+                if should_record:
+                    eplb_model_state.expert_load_window[
+                        self.expert_load_window_step
+                    ].copy_(eplb_model_state.expert_load_pass)
+                    eplb_model_state.expert_load_pass.zero_()
 
-        if should_record:
-            self.expert_load_window_step += 1
-            if self.expert_load_window_step >= self.expert_load_window_size:
-                self.expert_load_window_step = 0
+            if should_record:
+                self.expert_load_window_step += 1
+                if self.expert_load_window_step >= self.expert_load_window_size:
+                    self.expert_load_window_step = 0
 
         # Step the expert rearrangement step
         # Note that even if this is a dummy step, we still increment the
@@ -877,9 +869,7 @@ class EplbState:
                     saved_load.clone() if is_main_rank else torch.zeros_like(saved_load)
                 )
                 continue
-            expert_load_window = self._ordered_load_window(
-                eplb_model_state.expert_load_window
-            )
+            expert_load_window = eplb_model_state.expert_load_window
             physical_to_logical = eplb_model_state.physical_to_logical_map
             invalid_idx = eplb_model_state.model.num_logical_experts
             logical_expert_load_window = torch.zeros(
@@ -900,13 +890,10 @@ class EplbState:
                 src=expert_load_window,
             )
 
-            global_expert_load_window = logical_expert_load_window[..., :-1]
+            global_expert_load_window = logical_expert_load_window[..., :-1].sum(dim=0)
             global_expert_load_windows.append(global_expert_load_window)
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
-        global_expert_load_windows = [
-            self._nonempty_load_window(window) for window in global_expert_load_windows
-        ]
 
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
@@ -944,7 +931,7 @@ class EplbState:
                 # host, so the load window and current map have to come back.
                 with gpu_sync_allowed():
                     context = EplbRebalanceContext(
-                        load_window_cpu=global_expert_load_window.cpu(),
+                        load_window_cpu=global_expert_load_window.cpu().unsqueeze(0),
                         physical_to_logical_map_cpu=(
                             eplb_model_state.physical_to_logical_map.cpu()
                         ),
@@ -966,7 +953,7 @@ class EplbState:
                     and rank_mapping is None
                     and bool((eplb_model_state.physical_to_logical_map >= 0).all())
                 ):
-                    logical_loads = global_expert_load_window.sum(dim=0).float()
+                    logical_loads = global_expert_load_window.float()
                     ep_size = ep_group.size()
 
                     def rank_load_imbalance(
@@ -1062,6 +1049,32 @@ class EplbState:
             self.rearrange_event.record()
         return None
 
+    def wait_for_rearrangement(self, stream: torch.Stream | None) -> bool:
+        """Wait for a cycle while allowing an idle worker to stop."""
+        while not self._stop_async.is_set():
+            if self.rearrange_event.wait(stream=stream, timeout=0.1):
+                return True
+        return False
+
+    def stop_async_loop(self, timeout: float = 30.0) -> None:
+        """Stop after all ranks have drained their outstanding transfers.
+
+        Communicator resources must remain alive until this method succeeds.
+        """
+        worker = self.async_worker
+        if worker is None:
+            return
+        if any(
+            model_state.rebalanced or model_state.pending_result is not None
+            for model_state in self.model_states.values()
+        ):
+            raise RuntimeError("Drain outstanding EPLB transfers before stopping.")
+        self._stop_async.set()
+        worker.join(timeout=timeout)
+        if worker.is_alive():
+            raise TimeoutError("EPLB background worker did not stop.")
+        self.async_worker = None
+
     def start_async_loop(
         self,
         rank_mapping: dict[int, int] | None = None,
@@ -1070,6 +1083,7 @@ class EplbState:
         if not self.is_async:
             return
         if self.async_worker is None:
+            self._stop_async.clear()
             self.async_worker = start_async_worker(
                 self,
                 is_profile=is_profile,
@@ -1141,13 +1155,24 @@ class EplbState:
         if len(tensor_list) == 1:
             all_reduce(tensor_list[0], group=ep_group)
             return tensor_list
-
-        layer_dim = tensor_list[0].dim() - 2
-        split_sizes = [tensor.shape[layer_dim] for tensor in tensor_list]
-        concat_tensor = torch.cat(tensor_list, dim=layer_dim)
+        assert all(t.dim() == 2 for t in tensor_list), "All tensors must be 2D."
+        assert all(t.shape[1] == tensor_list[0].shape[1] for t in tensor_list), (
+            "All tensors must have the same shape[1]."
+        )
+        # Concatenate, all_reduce, then unpack to original shapes.
+        # We assume all tensors are 2D and shape[1] (num_physical_experts)
+        # is the same across all models.
+        shapes = [t.shape for t in tensor_list]
+        concat_tensor = torch.cat(tensor_list, dim=0)
 
         all_reduce(concat_tensor, group=ep_group)
-        return list(concat_tensor.split(split_sizes, dim=layer_dim))
+
+        all_reduce_list = []
+        offset = 0
+        for shape in shapes:
+            all_reduce_list.append(concat_tensor[offset : offset + shape[0], :])
+            offset += shape[0]
+        return all_reduce_list
 
     def _sync_load_pass(self) -> list[torch.Tensor]:
         """Sync the expert load pass across all ranks for log stats.
@@ -1221,7 +1246,7 @@ class EplbState:
     ) -> None:
         """Replace physical_to_logical_map and expert_load_pass with views
         covering the new active size.
-        An EEP topology change resets every model's load history and policy state.
+        An EEP topology change resets every model's policy state.
         """
         model_state = self.model_states[model_config.compute_hash()]
         old_num_physical_experts = model_state.model.num_physical_experts
@@ -1242,11 +1267,9 @@ class EplbState:
             model_state.expert_load_window, (0, pad_size)
         )
         for model_state_to_reset in self.model_states.values():
-            model_state_to_reset.expert_load_window.zero_()
             model_state_to_reset.policy_state = self.policy.create_state(
                 model_state_to_reset.model.num_moe_layers
             )
-        self.expert_load_window_step = 0
 
     def create_communicator(
         self, model_config: ModelConfig, group_coordinator: GroupCoordinator

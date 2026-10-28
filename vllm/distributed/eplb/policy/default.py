@@ -311,8 +311,8 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
             old_physical_to_logical_map: [layers, num_replicas], the current
                 physical-to-logical map. Used to avoid unnecessary weight copying
                 for experts that remain on the same rank.
+
         Returns:
-        -------
             phy2log: [layers, num_replicas], the expert
                 index of each replica
 

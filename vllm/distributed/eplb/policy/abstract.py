@@ -19,8 +19,8 @@ class EplbTopology:
 class EplbRebalanceContext:
     """CPU inputs shared by built-in and out-of-tree EPLB policies.
 
-    Loads are a nonempty, oldest-to-newest ``[samples, layers, experts]``
-    tensor; the current placement is ``[layers, physical_experts]``.
+    Loads are ``[samples, layers, experts]``; the current collector provides
+    one aggregate sample. The placement is ``[layers, physical_experts]``.
     """
 
     load_window_cpu: torch.Tensor

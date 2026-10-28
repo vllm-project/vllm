@@ -1231,20 +1231,24 @@ class Platform:
     @classmethod
     def supports_eplb(cls) -> bool:
         """Whether this platform can run expert parallel load balancing."""
-        return cls.is_cuda_alike() or cls.is_xpu()
+        return cls._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
 
     @classmethod
     def check_and_update_eplb_config(cls, parallel_config: "ParallelConfig") -> None:
         """Choose and validate the platform's EPLB communicator.
 
-        Overrides can set a platform-specific backend, then call ``super()``.
+        Out-of-tree overrides validate their own policy and communicator names.
         """
         eplb_config = parallel_config.eplb_config
+        from vllm.distributed.eplb.policy import EPLB_POLICIES
+
+        if eplb_config.policy not in EPLB_POLICIES:
+            raise ValueError(f"Unknown EPLB policy: {eplb_config.policy}")
         if eplb_config.communicator is None:
             # Preserve the existing NIXL preference and elastic/static fallbacks.
             from vllm.distributed.nixl_utils import is_nixl_available
 
-            if cls.is_xpu():
+            if cls._enum == PlatformEnum.XPU:
                 eplb_config.communicator = "torch_xccl"
             elif is_nixl_available():
                 eplb_config.communicator = "nixl"

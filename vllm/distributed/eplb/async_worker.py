@@ -39,6 +39,7 @@ def start_async_worker(
                 stream=stream,
                 is_profile=is_profile,
             )
+            stream.synchronize()
         except Exception as exc:  # pragma: no cover - diagnostic path
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
 
@@ -56,7 +57,7 @@ def run_rebalance_experts(
     assert model_state.eplb_stats is not None
     stats = model_state.eplb_stats
     with device_stream(stream):
-        load_window_cpu = stats.global_expert_load_window.cpu()
+        load_window_cpu = stats.global_expert_load_window.cpu().unsqueeze(0)
     context = EplbRebalanceContext(
         load_window_cpu=load_window_cpu,
         physical_to_logical_map_cpu=physical_to_logical_map_cpu,
@@ -78,9 +79,7 @@ def transfer_run_periodically(
     stream: torch.Stream,
     is_profile: bool = False,
 ) -> None:
-    while True:
-        state.rearrange_event.wait(stream=stream)
-
+    while state.wait_for_rearrangement(stream):
         eplb_group = get_eplb_group().device_group
         eplb_cpu_group = get_eplb_group().cpu_group
         ep_rank = eplb_group.rank()

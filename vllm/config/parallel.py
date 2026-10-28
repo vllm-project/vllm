@@ -37,11 +37,9 @@ _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
-EPLBPolicyOption = Literal["default"]
+EPLBPolicyOption = str
 DCPCommBackend = Literal["ag_rs", "a2a"]
-EPLBCommunicatorBackend = Literal[
-    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
-]
+EPLBCommunicatorBackend = str
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -92,7 +90,7 @@ class EPLBConfig:
     """
 
     policy: EPLBPolicyOption = "default"
-    """The policy type for expert parallel load balancing (EPLB)."""
+    """Built-in or platform-defined policy name, validated by the platform."""
 
     communicator: EPLBCommunicatorBackend | None = None
     """
@@ -119,8 +117,6 @@ class EPLBConfig:
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
-        if self.use_async and self.policy != "default":
-            raise ValueError("Async EPLB is only supported with the default policy.")
         if self.use_async and self.communicator in ("torch_nccl", "pynccl"):
             raise ValueError(
                 f"{self.communicator} communicator is incompatible with "
