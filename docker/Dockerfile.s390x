@@ -95,17 +95,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/hf-xet/dist && \
     cp dist/*.whl /tmp/hf-xet/dist/
 
-# Build LLVM 20 from source for llvmlite (system repos ship LLVM 21 which
-# llvmlite v0.47 does not support; only SystemZ target is needed).
-FROM base AS llvm20-build
-ARG LLVM_VERSION=20.1.8
+# Build LLVM 22 from source for llvmlite (system repos ship LLVM 21 which
+# llvmlite v0.50 does not support; only SystemZ target is needed).
+FROM base AS llvm22-build
+ARG LLVM_VERSION=22.1.8
 WORKDIR /tmp
 RUN microdnf install -y ninja-build gcc gcc-c++ python3 xz && \
     curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/llvm-project-${LLVM_VERSION}.src.tar.xz && \
     tar -xf llvm-project-${LLVM_VERSION}.src.tar.xz && \
     cmake -G Ninja -S llvm-project-${LLVM_VERSION}.src/llvm -B build \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/opt/llvm20 \
+        -DCMAKE_INSTALL_PREFIX=/opt/llvm22 \
         -DLLVM_TARGETS_TO_BUILD="SystemZ" \
         -DLLVM_ENABLE_RTTI=ON \
         -DLLVM_BUILD_TOOLS=OFF \
@@ -122,19 +122,19 @@ RUN microdnf install -y ninja-build gcc gcc-c++ python3 xz && \
 FROM python-install AS numba-builder
 
 ARG MAX_JOBS
-ARG NUMBA_VERSION=0.65.0
+ARG NUMBA_VERSION=0.68.1
 
 WORKDIR /tmp
 
 # Clone all required dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=llvm20-build,source=/opt/llvm20,target=/opt/llvm20 \
+    --mount=type=bind,from=llvm22-build,source=/opt/llvm22,target=/opt/llvm22 \
     microdnf install ninja-build gcc gcc-c++ -y && \
-    git clone --recursive https://github.com/numba/llvmlite.git -b v0.47.0 && \
+    git clone --recursive https://github.com/numba/llvmlite.git -b v0.50.0 && \
     git clone --recursive https://github.com/numba/numba.git -b ${NUMBA_VERSION} && \
     cd llvmlite && \
     uv pip install 'cmake<4' 'setuptools<70' numpy && \
-    CMAKE_PREFIX_PATH=/opt/llvm20 LLVM_CONFIG=/opt/llvm20/bin/llvm-config \
+    CMAKE_PREFIX_PATH=/opt/llvm22 LLVM_CONFIG=/opt/llvm22/bin/llvm-config \
     python setup.py bdist_wheel && \
     cd ../numba && \
     if ! grep '#include "dynamic_annotations.h"' numba/_dispatcher.cpp; then \

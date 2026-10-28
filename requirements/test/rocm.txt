@@ -492,7 +492,7 @@ llguidance==1.7.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-llvmlite==0.47.0
+llvmlite==0.50.0
     # via numba
 lm-eval==0.4.12
     # via -r requirements/test/rocm.in
@@ -597,7 +597,7 @@ nltk==3.10.3
     #   rouge-score
 num2words==0.5.14
     # via -r requirements/test/rocm.in
-numba==0.65.0
+numba==0.68.1
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
