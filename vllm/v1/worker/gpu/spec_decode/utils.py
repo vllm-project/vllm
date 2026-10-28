@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterable
+
 import numpy as np
 import torch
 
 from vllm.config import LoadConfig, replace
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -57,6 +60,18 @@ class DraftTokensHandler:
         # pinned array (synced in get_draft_tokens), or just the draft width
         # when the scheduler doesn't need the token ids.
         self._draft_tokens_by_req: dict[str, np.ndarray | int] = {}
+        # Requests whose drafts the scheduler will fetch for the latest step's
+        # deferred grammar bitmask; None means all requests.
+        self._deferred_req_ids: Iterable[str] | None = None
+
+    def begin_step(self, scheduler_output: SchedulerOutput) -> None:
+        # get_draft_tokens is only called for the most recently executed
+        # scheduler output.
+        self._deferred_req_ids = (
+            scheduler_output.scheduled_spec_decode_tokens.keys()
+            if scheduler_output.pending_structured_output_tokens
+            else None
+        )
 
     def set_draft_tokens(
         self, input_batch: InputBatch, draft_tokens: torch.Tensor
@@ -89,14 +104,22 @@ class DraftTokensHandler:
         self._draft_tokens_by_req.pop(req_id, None)
 
     def get_draft_tokens(self) -> DraftTokenIds | None:
+        """Return the latest drafts needed for the current step's deferred
+        grammar bitmask, or for all live requests if sampling isn't deferred.
+        Requests without retained drafts are omitted."""
         if self._copy_pending:
             self.copy_event.synchronize()
             self._copy_pending = False
 
-        req_ids: list[str] = []
+        drafts_by_req = self._draft_tokens_by_req
+        req_ids = self._deferred_req_ids
+        if req_ids is None:
+            out_req_ids = list(drafts_by_req)
+        else:
+            out_req_ids = [req_id for req_id in req_ids if req_id in drafts_by_req]
         draft_token_ids: list[list[int]] = []
-        for req_id, draft_tokens in self._draft_tokens_by_req.items():
-            req_ids.append(req_id)
+        for req_id in out_req_ids:
+            draft_tokens = drafts_by_req[req_id]
             if isinstance(draft_tokens, int):
                 # Construct placeholders from draft token width
                 draft_tokens = [-1] * draft_tokens
@@ -105,7 +128,7 @@ class DraftTokensHandler:
                 draft_tokens = draft_tokens.tolist()
             draft_token_ids.append(draft_tokens)
 
-        return DraftTokenIds(req_ids, draft_token_ids)
+        return DraftTokenIds(out_req_ids, draft_token_ids)
 
 
 def get_parallel_drafting_token_id(hf_config) -> int:

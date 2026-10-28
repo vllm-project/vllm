@@ -1792,6 +1792,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
+            self.draft_tokens_handler.begin_step(scheduler_output)
             # Update the request states.
             self.update_pp_decode_requests()
             self.finish_requests(scheduler_output)
