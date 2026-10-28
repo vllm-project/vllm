@@ -1028,7 +1028,7 @@ class Step5Attention(nn.Module):
                 Step5DSAAttentionBackend.supports_compute_capability(capability)
             ):
                 raise NotImplementedError(
-                    f"Step5 DSA requires SM90 or SM103; got {capability}."
+                    f"Step5 DSA requires SM90, SM100 or SM103; got {capability}."
                 )
             if self.head_dim not in (128, 192):
                 raise ValueError(
@@ -2342,13 +2342,6 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         prefix: str = "",
     ):
         super().__init__()
-        if (
-            vllm_config.lora_config is not None
-            and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        ):
-            raise ValueError(
-                "Step5 LoRA is not supported with moe_backend='deep_gemm_mega_moe'"
-            )
         self.vllm_config = vllm_config
         model_config = vllm_config.model_config
         config = model_config.hf_config

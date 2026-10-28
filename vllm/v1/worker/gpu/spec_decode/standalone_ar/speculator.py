@@ -119,6 +119,9 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 rank=self.vllm_config.parallel_config.rank,
             ),
         )
+        draft_vllm_config.parallel_config.data_parallel_index = (
+            self.vllm_config.parallel_config.data_parallel_index
+        )
         self._draft_vllm_config = draft_vllm_config
         with set_model_tag("draft_model"):
             return get_model(
@@ -347,6 +350,10 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 self.current_draft_step,
                 self.draft_logits,
             )
+
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
 
     @torch.inference_mode()
     def propose(

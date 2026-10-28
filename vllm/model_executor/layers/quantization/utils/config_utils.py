@@ -191,12 +191,12 @@ def is_shared_expert_quant_fse_compatible(
             '\'{"*shared_experts*": "mxfp4"}\'',
         )
 
-    if isinstance(quant_config, DeepseekV4FP8Config):
+    if (
+        isinstance(quant_config, (DeepseekV4FP8Config, DeepseekV41FP8Config))
+        and quant_config.expert_dtype == "fp4"
+    ):
         from vllm.config import get_current_vllm_config
         from vllm.model_executor.models.utils import extract_layer_index
-
-        if quant_config.expert_dtype != "fp4":
-            return False, "DeepSeek-V4 routed experts are not MXFP4"
 
         hf_config = get_current_vllm_config().model_config.hf_config
 
@@ -205,10 +205,13 @@ def is_shared_expert_quant_fse_compatible(
         # logic in DeepseekV4FP8Config.
         quantization_config = getattr(hf_config, "quantization_config", None)
         if quantization_config is None:
-            return False, "DeepSeek-V4 has no quantization configuration"
+            return False, "DeepSeek-V4/V4.1 has no quantization configuration"
 
         if not quant_config._is_quark_mxfp4_ocp(quantization_config):
-            return False, "DeepSeek-v4 FSE is only implemented/tested with Quark MXFP4"
+            return (
+                False,
+                "DeepSeek-V4/V4.1 FSE is only implemented/tested with Quark MXFP4",
+            )
 
         layer_idx = extract_layer_index(shared_expert_prefix)
         if layer_idx >= hf_config.num_hidden_layers:
@@ -225,7 +228,7 @@ def is_shared_expert_quant_fse_compatible(
         ):
             return (
                 False,
-                f"DeepSeek-V4 excludes shared experts at {shared_expert_prefix}",
+                f"DeepSeek-V4/V4.1 excludes shared experts at {shared_expert_prefix}",
             )
 
         shared_expert_weight_name = f"{shared_expert_prefix}.w1"
@@ -251,7 +254,7 @@ def is_shared_expert_quant_fse_compatible(
             return True, None
         return (
             False,
-            f"DeepSeek-V4 shared experts at {shared_expert_prefix} are not MXFP4",
+            f"DeepSeek-V4/V4.1 shared experts at {shared_expert_prefix} are not MXFP4",
         )
 
     if isinstance(quant_config, QuarkConfig):

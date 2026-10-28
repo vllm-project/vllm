@@ -37,13 +37,19 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
+    MooncakePromMetrics,
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -142,6 +148,19 @@ def _block_ids_for_region(
         "Transfer region references a missing KV group."
     )
     return list(block_ids_by_group[group_index])
+
+
+def _contiguous_runs(
+    src_ids: np.ndarray, dst_ids: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Start index and length of each run that steps by +1 on both sides."""
+    assert len(src_ids) == len(dst_ids), "Source and destination ids must pair up."
+    if len(src_ids) == 0:
+        empty = np.empty(0, dtype=np.int64)
+        return empty, empty
+    breaks = np.flatnonzero((np.diff(src_ids) != 1) | (np.diff(dst_ids) != 1)) + 1
+    starts = np.concatenate(([0], breaks))
+    return starts, np.diff(np.append(starts, len(src_ids)))
 
 
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
@@ -902,6 +921,18 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorStats | None:
         return MooncakeKVConnectorStats(data=data or {})
 
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return MooncakePromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
+
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods."""
@@ -1002,9 +1033,9 @@ class MooncakeConnectorScheduler:
             params is not None
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > 1
-            # A request that skips reading the prefix cache (prompt logprobs)
-            # loads nothing on the decoder, which recomputes its whole prompt.
-            and not request.get_skip_reading_prefix_cache()
+            # A request that skips reading external KV (prompt logprobs)
+            # loads nothing on the decoder, which recomputes past its local hit.
+            and not request.skip_reading_external_kv
         ):
             if request.prompt_token_ids is not None:
                 request.prompt_token_ids.pop()
@@ -1899,6 +1930,17 @@ class MooncakeConnectorWorker:
             if not any(local_block_ids_by_group):
                 continue
 
+            # Normalize before kernel expansion so _contiguous_runs can
+            # coalesce the resulting ascending kernel runs.
+            for group_index, (local_group, remote_group) in enumerate(
+                zip(local_block_ids_by_group, remote_block_ids_by_group)
+            ):
+                if local_group:
+                    (
+                        local_block_ids_by_group[group_index],
+                        remote_block_ids_by_group[group_index],
+                    ) = _normalize_paired_block_order(local_group, remote_group)
+
             local_block_ids_by_group = self._logical_to_kernel_block_ids(
                 local_block_ids_by_group
             )
@@ -1906,28 +1948,40 @@ class MooncakeConnectorWorker:
                 remote_block_ids_by_group
             )
 
+            # Regions of the same KV group share block ids; group them once.
+            block_runs: dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]] = {}
             for local_region, remote_region in zip(local_regions, remote_regions):
                 assert local_region.group_index == remote_region.group_index, (
                     "Aligned Mooncake transfer regions must belong to the same "
                     "KV group."
                 )
-                local_block_ids = _block_ids_for_region(
-                    local_block_ids_by_group,
-                    local_region.group_index,
-                    local_region.shared_group_ids,
-                )
-                remote_block_ids = _block_ids_for_region(
-                    remote_block_ids_by_group,
-                    remote_region.group_index,
-                    local_region.shared_group_ids,
-                )
-                if not local_block_ids:
+                group_key = (local_region.group_index, local_region.shared_group_ids)
+                if group_key not in block_runs:
+                    local_ids = np.asarray(
+                        _block_ids_for_region(
+                            local_block_ids_by_group,
+                            local_region.group_index,
+                            local_region.shared_group_ids,
+                        ),
+                        dtype=np.int64,
+                    )
+                    remote_ids = np.asarray(
+                        _block_ids_for_region(
+                            remote_block_ids_by_group,
+                            remote_region.group_index,
+                            local_region.shared_group_ids,
+                        ),
+                        dtype=np.int64,
+                    )
+                    block_runs[group_key] = (
+                        local_ids,
+                        remote_ids,
+                        *_contiguous_runs(local_ids, remote_ids),
+                    )
+                local_ids, remote_ids, run_starts, run_lens = block_runs[group_key]
+                if len(local_ids) == 0:
                     continue
 
-                # Group by indices within this region's KV-cache group only.
-                group_local_block_ids, group_remote_block_ids = (
-                    group_concurrent_contiguous(local_block_ids, remote_block_ids)
-                )
                 (
                     should_transfer,
                     src_region_offset,
@@ -1963,36 +2017,24 @@ class MooncakeConnectorWorker:
                     transfer_len=transfer_len,
                 )
 
-                for group_local_block_id, group_remote_block_id in zip(
-                    group_local_block_ids, group_remote_block_ids
-                ):
-                    if can_coalesce:
-                        src_ptrs.append(
-                            local_region.base_addr
-                            + group_local_block_id[0] * local_region.block_len
-                            + src_region_offset
-                        )
-                        dst_ptrs.append(
-                            remote_region.base_addr
-                            + group_remote_block_id[0] * remote_region.block_len
-                            + dst_region_offset
-                        )
-                        lengths.append(transfer_len * len(group_local_block_id))
-                    else:
-                        for local_block_id, remote_block_id in zip(
-                            group_local_block_id, group_remote_block_id
-                        ):
-                            src_ptrs.append(
-                                local_region.base_addr
-                                + local_block_id * local_region.block_len
-                                + src_region_offset
-                            )
-                            dst_ptrs.append(
-                                remote_region.base_addr
-                                + remote_block_id * remote_region.block_len
-                                + dst_region_offset
-                            )
-                            lengths.append(transfer_len)
+                if can_coalesce:
+                    local_ids = local_ids[run_starts]
+                    remote_ids = remote_ids[run_starts]
+                    lengths.extend((run_lens * transfer_len).tolist())
+                else:
+                    lengths.extend([transfer_len] * len(local_ids))
+                src_ptrs.extend(
+                    (
+                        local_ids * local_region.block_len
+                        + (local_region.base_addr + src_region_offset)
+                    ).tolist()
+                )
+                dst_ptrs.extend(
+                    (
+                        remote_ids * remote_region.block_len
+                        + (remote_region.base_addr + dst_region_offset)
+                    ).tolist()
+                )
 
             logger.debug(
                 "Sending kv_caches for request %s (%d blocks) to %s",
@@ -3006,21 +3048,28 @@ class MooncakeConnectorWorker:
         )
 
 
-def group_concurrent_contiguous(
-    src_indices: list[int], dst_indices: list[int]
-) -> tuple[list[list[int]], list[list[int]]]:
-    """Vectorised NumPy implementation."""
-    if len(src_indices) == 0:
-        return [], []
+def _normalize_paired_block_order(
+    src_ids: list[int], dst_ids: list[int]
+) -> tuple[list[int], list[int]]:
+    """Reverse jointly descending consecutive runs without changing block pairs."""
+    if len(src_ids) < 2:
+        return src_ids, dst_ids
 
-    brk = np.where((np.diff(src_indices) != 1) | (np.diff(dst_indices) != 1))[0] + 1
-    src_groups = np.split(src_indices, brk)
-    dst_groups = np.split(dst_indices, brk)
+    descending = (np.diff(np.asarray(src_ids, dtype=np.int64)) == -1) & (
+        np.diff(np.asarray(dst_ids, dtype=np.int64)) == -1
+    )
+    if not descending.any():
+        return src_ids, dst_ids
+    if descending.all():
+        return src_ids[::-1], dst_ids[::-1]
 
-    src_groups = [g.tolist() for g in src_groups]
-    dst_groups = [g.tolist() for g in dst_groups]
-
-    return src_groups, dst_groups
+    boundaries = np.flatnonzero(np.diff(descending, prepend=False, append=False))
+    src_ids, dst_ids = src_ids.copy(), dst_ids.copy()
+    for start, stop in boundaries.reshape(-1, 2):
+        # A run of descending edges covers one more block than edges.
+        src_ids[start : stop + 1] = src_ids[start : stop + 1][::-1]
+        dst_ids[start : stop + 1] = dst_ids[start : stop + 1][::-1]
+    return src_ids, dst_ids
 
 
 def get_mooncake_side_channel_port(vllm_config: VllmConfig) -> int:

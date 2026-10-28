@@ -35,6 +35,7 @@ class ReplayBatch:
     rows: torch.Tensor
     forward_context: ForwardContext
     run_graph: Callable[..., tuple[torch.Tensor, ...]] | None = None
+    num_padded: int | None = None
 
 
 class DecoderReplayLayers:
@@ -45,6 +46,8 @@ class DecoderReplayLayers:
     every row. ``metadata_prefixes`` are the attention metadata keys the layers
     read, so the replay batch builds only those. ``first_swa_prefix`` keys the
     first replay layer's SWA metadata, built with the batch's window starts.
+    ``has_early_aux`` tells whether layers before the replay layers capture aux
+    hidden states, which the forward holds across the replay layers.
     """
 
     def __init__(
@@ -54,12 +57,14 @@ class DecoderReplayLayers:
         write_batch_kv: Callable[..., None],
         metadata_prefixes: set[str],
         first_swa_prefix: str,
+        has_early_aux: Callable[[], bool] = lambda: False,
     ) -> None:
         self.window = window
         self.run_layers = run_layers
         self.write_batch_kv = write_batch_kv
         self.metadata_prefixes = metadata_prefixes
         self.first_swa_prefix = first_swa_prefix
+        self.has_early_aux = has_early_aux
         # Set by the model state every step; None runs the layers on the batch.
         self.replay_batch: ReplayBatch | None = None
         # Set by the model state with replay graphs: PIECEWISE model graphs of
@@ -119,12 +124,23 @@ class DecoderReplayLayers:
             if replay_batch.run_graph is not None:
                 row_outputs = replay_batch.run_graph(rows, inputs)
             else:
-                row_outputs = self.run_layers(
-                    *(None if t is None else t.index_select(0, rows) for t in inputs)
-                )
+                row_inputs = [
+                    None if t is None else t.index_select(0, rows) for t in inputs
+                ]
+                if replay_batch.num_padded is not None:
+                    padding = replay_batch.num_padded - rows.numel()
+                    row_inputs = [
+                        None
+                        if t is None
+                        else torch.cat((t, t.new_zeros((padding, *t.shape[1:]))))
+                        for t in row_inputs
+                    ]
+                row_outputs = self.run_layers(*row_inputs)
         # The trimmed rows' outputs stay zero; nothing reads them.
         num_tokens = hidden_states.shape[0]
         return tuple(
-            out.new_zeros((num_tokens, *out.shape[1:])).index_copy_(0, rows, out)
+            out.new_zeros((num_tokens, *out.shape[1:])).index_copy_(
+                0, rows, out[: rows.numel()]
+            )
             for out in row_outputs
         )

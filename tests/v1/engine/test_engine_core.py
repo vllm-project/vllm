@@ -25,7 +25,12 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType, FinishReason
+from vllm.v1.engine import (
+    CheckpointState,
+    EngineCoreRequest,
+    EngineCoreRequestType,
+    FinishReason,
+)
 from vllm.v1.engine.core import (
     DPEngineCoreProc,
     EngineCore,
@@ -649,6 +654,7 @@ def _cadenced_dp_engine_core(
     returns the core and the step numbers at which the all-reduce ran."""
     core = object.__new__(DPEngineCoreProc)
     core.dp_group = object()
+    core.vllm_config = MagicMock(parallel_config=ParallelConfig())
     core.dp_sync_interval = dp_sync_interval
     core.step_counter = 0
     core.pending_pause = False
@@ -849,6 +855,65 @@ def test_wake_up_republishes_kv_connector_handshake_metadata(tags, republished):
     )
     EngineCore.wake_up(core, tags)
     assert calls == (["wake_up", "publish"] if republished else ["wake_up"])
+
+
+def _executor_calls(core: EngineCoreProc) -> list[str]:
+    """Executor calls in order, naming collective RPCs by their method."""
+    return [
+        args[0] if name == "collective_rpc" else name
+        for name, args, _ in core.model_executor.mock_calls
+    ]
+
+
+def test_checkpoint_prepare_then_restore_run_in_order():
+    """Preparing drains, then discards the KV cache and releases external
+    state. Restoring brings external state back before the KV cache wakes and
+    scheduling resumes. Repeating either is a no-op."""
+    core = _pausable_engine_core_proc()
+    core.vllm_config = MagicMock()
+    core.model_executor.is_sleeping = False
+    core._reset_caches = MagicMock()
+    core.reject_new_requests = False
+    core.scheduler.get_kv_connector.return_value = None
+
+    assert core.checkpoint_prepare("wait") is None
+    assert core.checkpoint_prepare("wait") is None
+    assert core.checkpoint_state() == (CheckpointState.PREPARED, None)
+    assert core.reject_new_requests
+    assert _executor_calls(core) == [
+        "synchronize_device",
+        "discard",
+        "checkpoint_prepare",
+        "synchronize_device",
+    ]
+
+    core.model_executor.reset_mock()
+    core.checkpoint_restore()
+    core.checkpoint_restore()
+    assert core.checkpoint_state() == (CheckpointState.RUNNING, None)
+    assert _executor_calls(core) == ["checkpoint_restore", "wake_up"]
+    core.scheduler.set_pause_state.assert_called_with(PauseState.UNPAUSED)
+    assert not core.reject_new_requests
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_checkpoint_prepare_fails_on_drain_barrier_error(deferred: bool):
+    """A failing barrier at the end of the drain leaves the engine FAILED and
+    still rejecting, whether the drain completes at once or later."""
+    core = _pausable_engine_core_proc()
+    core.vllm_config = MagicMock()
+    core.model_executor.is_sleeping = False
+    core.model_executor.collective_rpc.side_effect = RuntimeError("device lost")
+    core.reject_new_requests = False
+    core.engines_running = deferred
+
+    assert core.checkpoint_prepare("wait") is None
+    if deferred:
+        assert core.checkpoint_state() == (CheckpointState.PREPARING, None)
+        core.engines_running = False
+        core._notify_idle_state_callbacks()
+    assert core.checkpoint_state() == (CheckpointState.FAILED, "device lost")
+    assert core.reject_new_requests
 
 
 @pytest.mark.parametrize("deferred", [False, True])

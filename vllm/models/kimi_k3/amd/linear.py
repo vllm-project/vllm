@@ -1140,7 +1140,9 @@ class KimiLinearForCausalLM(
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.kda_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod
@@ -1168,6 +1170,11 @@ class KimiLinearForCausalLM(
         cls,
     ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
+
+    def process_weights_after_loading(self) -> None:
+        for module in self.modules():
+            if isinstance(module, KimiK3MultiHeadLatentAttentionWrapper):
+                module.process_weights_after_loading()
 
     def compute_logits(
         self,

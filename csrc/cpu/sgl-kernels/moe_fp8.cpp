@@ -124,11 +124,23 @@ void fused_experts_fp_kernel_impl(
     }
   });
 
-  // stage 1.5: intermediate_cache1 = silu(intermediate_cache0)
+  // stage 1.5: intermediate_cache1 = activation(intermediate_cache0)
   if (act_func == CPUActMethod::silu_and_mul) {
     at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
       for (int64_t m = begin; m < end; ++m) {
         silu_and_mul_stub(ic1 + m * N, ic0 + m * 2 * N, ic0 + m * 2 * N + N, N);
+      }
+    });
+  } else if (act_func == CPUActMethod::gelu_and_mul) {
+    at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
+      for (int64_t m = begin; m < end; ++m) {
+        gelu_and_mul_stub(ic1 + m * N, ic0 + m * 2 * N, ic0 + m * 2 * N + N, N);
+      }
+    });
+  } else if (act_func == CPUActMethod::gelu_tanh_and_mul) {
+    at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
+      for (int64_t m = begin; m < end; ++m) {
+        gelu_tanh_and_mul_stub(ic1 + m * N, ic0 + m * 2 * N, ic0 + m * 2 * N + N, N);
       }
     });
   } else if (act_func == CPUActMethod::swiglu) {

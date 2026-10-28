@@ -6,9 +6,13 @@ Each optimized kernel added for the ROCm port has a slow PyTorch reference; the
 tests assert the two agree within tolerance:
 
   * Gemma RMSNorm (plain + fused-add-residual)  -> fp32 PyTorch normalize
+  * Fused-add Gemma RMSNorm + MXFP8 epilogue     -> norm, then mxfp8_e4m3_quantize
+                                                   (bitwise)
   * SwiGLU-OAI (split layout)                    -> fp32 PyTorch elementwise
   * Fused MXFP8 activation quant (Triton)        -> _mxfp8_e4m3_quantize_torch
   * Native MXFP8 linear (dot_scaled)             -> dequant-to-bf16 @ matmul
+  * Native MXFP8 linear on the fused norm output -> norm, then the linear
+                                                   (bitwise)
   * Native MXFP8 MoE (dot_scaled grouped GEMM)   -> dequant-to-bf16 MoE math
   * Strided K/V sparse-PA cache insert           -> contiguous-copy insert
 
@@ -39,10 +43,15 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa:
     _mxfp8_e4m3_quantize_torch,
     _mxfp8_e4m3_quantize_triton,
     dequant_mxfp8_to_bf16,
+    mxfp8_e4m3_quantize,
 )
-from vllm.models.minimax_m3.amd.model import _kv_insert_operand  # noqa: E402
+from vllm.models.minimax_m3.amd.model import (  # noqa: E402
+    _can_fuse_input_norm_mxfp8,
+    _kv_insert_operand,
+)
 from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     gemma_fused_add_rmsnorm,
+    gemma_fused_add_rmsnorm_mxfp8,
     gemma_rmsnorm,
     swiglu_oai_quantize_mxfp8,
     swiglu_oai_split,
@@ -142,6 +151,61 @@ def test_gemma_rmsnorm_per_head_strided():
 
 def test_num_warps_monotonic():
     assert _num_warps(128) <= _num_warps(2048) <= _num_warps(8192)
+
+
+def _mxfp8_edge_case_inputs(n: int, dtype: torch.dtype):
+    """(x, residual, weight) whose normed output covers the MXFP8 block cases.
+
+    Through the weight, every row gets a huge block (scale above 1.0), an
+    all-zero block, and a tiny block (``1 + w == 2**-8``). Rows: 32 ordinary
+    rows with a residual, then an all-zero row, a row of tiny values, a row
+    whose first block dwarfs the rest, and a row of partly-zero blocks.
+    """
+    torch.manual_seed(0)
+    w = torch.randn(n, device=DEVICE, dtype=dtype) * 0.1
+    w[:32] = 300.0
+    w[32:64] = -1.0 + 2**-8
+    w[64:96] = -1.0
+
+    ordinary = torch.randn(32, n, device=DEVICE, dtype=dtype)
+    zero = torch.zeros(1, n, device=DEVICE, dtype=dtype)
+    tiny = torch.full((1, n), torch.finfo(dtype).tiny * 16, device=DEVICE, dtype=dtype)
+    dominated = torch.randn(1, n, device=DEVICE, dtype=dtype) * 1e-2
+    dominated[:, :32] = 1e4
+    partly_zero = torch.randn(1, n, device=DEVICE, dtype=dtype)
+    partly_zero[:, ::2] = 0.0
+    partly_zero[:, 128:192] = 0.0
+    x = torch.cat([ordinary, zero, tiny, dominated, partly_zero])
+
+    res = torch.zeros_like(x)
+    res[:32] = torch.randn(32, n, device=DEVICE, dtype=dtype)
+    return x, res, w
+
+
+@pytest.mark.parametrize("n", [2048, 3072, 6144])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_gemma_fused_add_rmsnorm_mxfp8_bitwise_eq_unfused(n, dtype):
+    """The MXFP8 epilogue writes the same values, E8M0 scales and residual as
+    ``gemma_fused_add_rmsnorm`` followed by ``mxfp8_e4m3_quantize``."""
+    x, res, w = _mxfp8_edge_case_inputs(n, dtype)
+    m = x.shape[0]
+    # A leading batch dim is flattened into the quantized rows.
+    x, res = x.unsqueeze(0), res.unsqueeze(0)
+
+    got_q, got_scale, got_res = gemma_fused_add_rmsnorm_mxfp8(x, res, w, EPS)
+    normed, ref_res = gemma_fused_add_rmsnorm(x, res, w, EPS)
+    ref_q, ref_scale = mxfp8_e4m3_quantize(normed.reshape(m, n))
+
+    assert got_q.shape == (m, n) and got_q.dtype == torch.float8_e4m3fn
+    assert got_scale.shape == (m, n // 32) and got_scale.dtype == torch.uint8
+    assert got_res.shape == x.shape
+    # Both scale clamps are reached: E8M0 0 (all-zero/tiny) and above 1.0.
+    assert (ref_scale == 0).any() and (ref_scale > 127).any()
+    assert not ref_q.float().isnan().any()
+    assert torch.equal(got_q.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(got_scale, ref_scale)
+    assert torch.equal(got_res, ref_res)
 
 
 # --------------------------------------------------------------------------- #
@@ -509,6 +573,97 @@ def test_mxfp8_rocm_native_unaligned_k_dequantizes_at_load(shape):
         rocm_native._mxfp8_dot_scaled_linear = real
     assert bool(calls) is aligned
     assert _relerr(out.float(), out_ref.float()) < tol
+
+
+# --------------------------------------------------------------------------- #
+# input_layernorm -> qkv_proj with the MXFP8 activation quant fused into the norm
+# --------------------------------------------------------------------------- #
+def _quark_mxfp8_linear(n: int, k: int, block32: bool = False):
+    """A Quark MXFP8 linear layer (weights loaded, not yet processed)."""
+    from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import (
+        QuarkOCP_MX,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+        kMxfp8Static,
+    )
+    from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+    torch.manual_seed(0)
+    w_bf16 = torch.randn(n, k, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    w_fp8, w_scale = _mxfp8_e4m3_quantize_torch(w_bf16, is_sf_swizzled_layout=False)
+    if block32:
+        w_scale = w_scale[::32].repeat_interleave(32, dim=0)
+    scheme = QuarkOCP_MX(
+        weight_quant_key=kMxfp8Static, activation_quant_key=kMxfp8Dynamic
+    )
+    with torch.device(DEVICE):
+        layer = torch.nn.Module()
+        scheme.create_weights(
+            layer=layer,
+            output_partition_sizes=[n],
+            input_size_per_partition=k,
+            params_dtype=torch.bfloat16,
+            weight_loader=default_weight_loader,
+        )
+    layer.weight.data.copy_(w_fp8)
+    layer.weight_scale.data.copy_(w_scale)
+    # As QuarkLinearMethod.create_weights does.
+    layer.scheme = scheme
+    return layer, scheme
+
+
+@requires_gfx950
+@pytest.mark.parametrize(
+    "n,k,block32",
+    [
+        (2560, 6144, False),  # MiniMax-M3.1 qkv_proj, TP4
+        (256, 2048, True),  # 32x32 block scales: the block32 GEMM
+        (5120, 576, False),  # K % 128 != 0: BF16 weight after load
+    ],
+)
+@pytest.mark.parametrize("m", [1, 37])
+@torch.inference_mode()
+def test_fused_input_norm_mxfp8_qkv_proj(dist_init, n, k, block32, m):
+    """The linear on the fused norm's MXFP8 output equals the linear on the
+    unfused norm output, wherever the producer turns the fusion on."""
+    layer, scheme = _quark_mxfp8_linear(n, k, block32)
+    fused = _can_fuse_input_norm_mxfp8(layer)
+    assert fused == (k % 128 == 0)
+    scheme.process_weights_after_loading(layer)
+
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    x = torch.randn(m, k, device=DEVICE, dtype=torch.bfloat16)
+    res = torch.randn(m, k, device=DEVICE, dtype=torch.bfloat16)
+    norm_w = torch.randn(k, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    normed, _ = gemma_fused_add_rmsnorm(x, res, norm_w, EPS)
+    x_q, x_scale, _ = gemma_fused_add_rmsnorm_mxfp8(x, res, norm_w, EPS)
+    qa = QuantizedActivation(x_q, x_scale, x.dtype, x.shape, kMxfp8Dynamic)
+
+    got = scheme.apply_weights(layer, qa)
+    ref = scheme.apply_weights(layer, normed)
+    assert got.shape == ref.shape == (m, n) and got.dtype == ref.dtype
+    if fused:
+        assert torch.equal(got, ref)
+    else:
+        # A QuantizedActivation reaching a BF16 weight is dequantized back.
+        assert _relerr(got, ref) < 5e-2
+
+
+@requires_gfx950
+def test_fused_input_norm_mxfp8_off_under_batch_invariance(dist_init, monkeypatch):
+    import vllm.envs as envs
+
+    layer, _ = _quark_mxfp8_linear(2560, 6144)
+    assert _can_fuse_input_norm_mxfp8(layer)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    assert not _can_fuse_input_norm_mxfp8(layer)
 
 
 # ── EP expert_mask handling for the FlyDSL (AITER_MXFP8) MoE ────────────────

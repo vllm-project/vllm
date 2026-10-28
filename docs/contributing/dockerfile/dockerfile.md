@@ -34,6 +34,25 @@ EP extension for the installed PyTorch, with `tools/build_nixl_with_torch215_for
 `vllm-openai-base` then replaces the NIXL packages installed from the KV-connector
 requirements with these wheels.
 
+The AWS EFA images are built separately by `docker/Dockerfile.efa` on top of a
+`vllm-openai` image built with `INSTALL_KV_CONNECTORS=true`. It adds a minimal
+AWS EFA userspace install (libfabric, aws-ofi-nccl and hwloc), the EFA Mooncake
+wheel (x86_64 only), and DeepEP built for NCCL GIN over EFA. Kernel modules and
+host limits remain host-managed.
+
+```bash
+docker build -f docker/Dockerfile.efa \
+    --build-arg BASE_IMAGE=vllm/vllm-openai:latest -t vllm:openai-efa docker/
+```
+
+The image does not change vLLM's Mooncake protocol default (`rdma`). To use
+EFA, set it per connector:
+
+- `MooncakeConnector`: `"mooncake_protocol": "efa"` in `kv_connector_extra_config`.
+- `MooncakeStoreConnector`: `"protocol": "efa"` in the JSON file at `MOONCAKE_CONFIG_PATH`.
+
+The EFA Mooncake wheel is x86_64-only, so use `tcp` on arm64.
+
   > <figure markdown="span">
   >   ![](../../assets/contributing/dockerfile-stages-dependency.png){ align="center" alt="query" width="100%" }
   > </figure>

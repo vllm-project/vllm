@@ -10,12 +10,13 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
-use vllm_engine_core_client::protocol::lora::LoraRequest;
-use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
+use vllm_engine_core_client::protocol::utility::{PauseMode as EnginePauseMode, SleepLevel};
 
 use super::{ControlServer, pb};
 use crate::config::LoraModulePath;
-use crate::lora::{LoadLoraError, LoraDisabledError, LoraPathAccessError, UnloadLoraError};
+use crate::lora::{
+    LoadLoraError, LoadedLora, LoraDisabledError, LoraPathAccessError, UnloadLoraError,
+};
 use crate::state::AppState;
 
 pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
@@ -146,7 +147,7 @@ fn weight_version(value: String) -> Result<String, Status> {
     Ok(value)
 }
 
-fn lora_to_proto(adapter: &LoraRequest) -> pb::LoraAdapter {
+fn lora_to_proto(adapter: &LoadedLora) -> pb::LoraAdapter {
     pb::LoraAdapter {
         lora_id: adapter.lora_int_id.min(i64::MAX as u64) as i64,
         lora_name: adapter.lora_name.clone(),
@@ -158,6 +159,7 @@ fn load_lora_status(error: LoadLoraError) -> Status {
     let code = match &error {
         LoadLoraError::Disabled(_) => Code::FailedPrecondition,
         LoadLoraError::InvalidAdapter { .. } => Code::InvalidArgument,
+        LoadLoraError::PathAccess(LoraPathAccessError::NotFound { .. }) => Code::NotFound,
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidPath { .. }) => Code::InvalidArgument,
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidConfiguration { .. }) => {
             Code::Internal
@@ -376,7 +378,10 @@ impl pb::control_server::Control for ControlServiceImpl {
         self.require_sleep_mode()?;
         let request = request.into_inner();
         let mode = pause_mode(request.mode)?;
-        let level = request.level.unwrap_or(1);
+        let level = match request.level {
+            Some(level) => SleepLevel::try_from(level).map_err(Status::invalid_argument)?,
+            None => SleepLevel::OffloadWeights,
+        };
         let _guard = self.rl_lock.lock().await;
         self.client()
             .sleep(level, mode)
@@ -537,4 +542,20 @@ pub(super) fn kv_event_source(response: &EngineCoreReadyResponse) -> Option<pb::
         hwm: config.hwm,
         max_queue_size: config.max_queue_size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use tonic::Code;
+
+    use super::load_lora_status;
+    use crate::lora::{LoadLoraError, LoraPathAccessError};
+
+    #[test]
+    fn load_lora_reports_missing_adapter_path_as_not_found() {
+        let status = load_lora_status(LoadLoraError::PathAccess(LoraPathAccessError::NotFound {
+            lora_path: "/not/an/adapter".to_string(),
+        }));
+        assert_eq!(status.code(), Code::NotFound);
+    }
 }

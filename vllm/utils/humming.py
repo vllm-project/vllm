@@ -109,70 +109,10 @@ def create_humming_locks(device: torch.device | str) -> torch.Tensor:
     )
 
 
-_patched = False
-
-
-def _patch_humming() -> None:
-    """Make humming's per-call ``DeviceInfo(device)`` lookups traceable.
-
-    The forward path (``LayerConfig.check_device``, PDL heuristics) builds a
-    ``DeviceInfo`` on every call, which breaks vLLM's fullgraph compile:
-    Dynamo recurses forever in ``DeviceInfo.__getattr__``
-    (vllm-project/humming#147) and, with that fixed (#148), still cannot
-    trace the extension's ``_DeviceInfo`` constructor. Hand out one cached
-    instance per device instead; ``prepare_layer_config`` creates it eagerly
-    during weight processing.
-
-    TODO: remove after bumping humming to a release with
-    vllm-project/humming#149.
-    """
-    global _patched
-    if _patched:
-        return
-    _patched = True
-
-    import humming.config.config
-    import humming.transform
-    import humming.tune
-    import humming.tune.process_input
-    import humming.utils.smem
-    from humming.device import DeviceInfo, get_device_index
-
-    def __getattr__(self, name: str) -> Any:
-        if name.startswith("_"):
-            raise AttributeError(
-                f"{type(self).__name__!r} object has no attribute {name!r}"
-            )
-        return getattr(self._get_value(), name)
-
-    DeviceInfo.__getattr__ = __getattr__
-
-    device_infos: dict[int, DeviceInfo] = {}
-
-    def cached_device_info(index: int | torch.device | None = None) -> DeviceInfo:
-        if isinstance(index, torch.device) and index.type != "cuda":
-            return DeviceInfo(index)
-        device_index = get_device_index(index)
-        if device_index not in device_infos:
-            device_infos[device_index] = DeviceInfo(device_index)
-        return device_infos[device_index]
-
-    for module in (
-        humming.config.config,
-        humming.transform,
-        humming.tune,
-        humming.tune.process_input,
-        humming.utils.smem,
-    ):
-        if getattr(module, "DeviceInfo", None) is DeviceInfo:
-            module.DeviceInfo = cached_device_info
-
-
 def __getattr__(name: str) -> Any:
     spec = _EXPORTS.get(name)
     if spec is None:
         raise AttributeError(f"module 'vllm.utils.humming' has no attribute {name!r}")
-    _patch_humming()
     if ":" in spec:
         mod_path, attr = spec.split(":", 1)
         obj = getattr(importlib.import_module(mod_path), attr)

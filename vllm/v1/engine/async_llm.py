@@ -53,7 +53,7 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import EngineCoreRequest, PauseMode
+from vllm.v1.engine import CheckpointState, EngineCoreRequest, PauseMode
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -1139,6 +1139,7 @@ class AsyncLLM(EngineClient):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         async with self._profile_lock:
             if self._profile_session_guard_enabled and self._profile_session_active:
@@ -1156,6 +1157,7 @@ class AsyncLLM(EngineClient):
                     profile_prefix,
                     delay_iterations,
                     max_iterations,
+                    profiler_kwargs=profiler_kwargs,
                 )
             except Exception:
                 self._profile_session_active = False
@@ -1216,11 +1218,18 @@ class AsyncLLM(EngineClient):
 
         return fully_awake
 
-    async def checkpoint_prepare(self) -> None:
-        await self.collective_rpc("checkpoint_prepare")
+    async def checkpoint_prepare(self, mode: PauseMode = "wait") -> str | None:
+        refusal = await self.engine_core.checkpoint_prepare_async(mode)
+        if refusal is None:
+            # Preparing resets the engine's multimodal cache.
+            await self.renderer.clear_mm_cache_async()
+        return refusal
 
     async def checkpoint_restore(self) -> None:
-        await self.collective_rpc("checkpoint_restore")
+        await self.engine_core.checkpoint_restore_async()
+
+    async def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
+        return await self.engine_core.checkpoint_state_async()
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()

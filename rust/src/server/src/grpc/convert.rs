@@ -9,9 +9,7 @@ use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_engine_core_client::protocol::structured_outputs::{
-    StructuredOutputBackend, StructuredOutputsParams,
-};
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
     PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
@@ -124,6 +122,7 @@ pub fn to_text_request(
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
+        detokenize: response.and_then(|options| options.output_text).unwrap_or(true),
     };
 
     Ok(TextRequest {
@@ -276,8 +275,6 @@ fn candidate_logprob_spec(
     }
 }
 
-/// EngineCore compiles every request with the backend of the first one it sees,
-/// so all gRPC constraints use xgrammar.
 fn convert_structured_output(
     d: &pb::DecodingParameters,
 ) -> Result<Option<StructuredOutputsParams>, Status> {
@@ -286,7 +283,7 @@ fn convert_structured_output(
         Some(so) => so,
     };
     use pb::decoding_parameters::StructuredOutput;
-    let mut params = match so {
+    let params = match so {
         StructuredOutput::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
@@ -303,7 +300,6 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
-    params.backend = StructuredOutputBackend::Xgrammar;
     Ok(Some(params))
 }
 
@@ -415,7 +411,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
         ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
-        num_cached_tokens: Some(finished.usage.cached_token_count as u32),
+        num_cached_tokens: Some(finished.usage.prompt_cache_usage.cached_token_count as u32),
     })
 }
 
@@ -574,6 +570,7 @@ mod tests {
     use prost::Message as _;
     use vllm_engine_core_client::protocol::output::{RequestError, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
     };
@@ -581,8 +578,7 @@ mod tests {
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
     use super::{
-        ResponseOpts, Status, StructuredOutputBackend, StructuredOutputsParams,
-        json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
+        ResponseOpts, json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
     };
 
     fn base_request() -> pb::GenerateRequest {
@@ -620,6 +616,7 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 &TestTokenizer::new(),
             )
             .unwrap()
@@ -684,6 +681,7 @@ mod tests {
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
+                    StructuredOutputBackend::Xgrammar,
                     &TestTokenizer::new(),
                 )
                 .expect("reasoning controls lower to engine")
@@ -764,43 +762,6 @@ mod tests {
         assert_eq!(text.sampling_params.temperature, Some(0.0));
     }
 
-    fn lower_structured_output(
-        so: super::pb::decoding_parameters::StructuredOutput,
-    ) -> Result<StructuredOutputsParams, Status> {
-        let req = pb::GenerateRequest {
-            decoding: Some(pb::DecodingParameters {
-                structured_output: Some(so),
-                ..Default::default()
-            }),
-            ..base_request()
-        };
-        Ok(to_text_request(req, false, &["test-model".to_string()])?
-            .sampling_params
-            .structured_outputs
-            .expect("structured outputs set"))
-    }
-
-    #[test]
-    fn grpc_structured_outputs_use_xgrammar() {
-        use super::pb::decoding_parameters::StructuredOutput;
-        for so in [
-            StructuredOutput::Json(r#"{"type": "object"}"#.to_string()),
-            StructuredOutput::JsonObject(true),
-            StructuredOutput::Regex("[a-z]+".to_string()),
-            StructuredOutput::Grammar(r#"root ::= "a""#.to_string()),
-            StructuredOutput::Choice(super::pb::decoding_parameters::StringChoices {
-                choices: vec!["a".to_string()],
-            }),
-            StructuredOutput::StructuralTag(
-                r#"{"type": "structural_tag", "format": {"type": "const_string", "value": "x"}}"#
-                    .to_string(),
-            ),
-        ] {
-            let params = lower_structured_output(so.clone()).expect("convert ok");
-            assert_eq!(params.backend, StructuredOutputBackend::Xgrammar, "{so:?}");
-        }
-    }
-
     #[test]
     fn absent_seed_is_none() {
         let req = pb::GenerateRequest {
@@ -878,6 +839,7 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 1,
                 &TestTokenizer::new(),
             )
@@ -926,6 +888,7 @@ mod tests {
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
+                    StructuredOutputBackend::Xgrammar,
                     &TestTokenizer::new(),
                 )
                 .unwrap()
@@ -969,12 +932,13 @@ mod tests {
             usage: vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             finish_reason: reason,
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
+            spec_decode_metrics: None,
             timestamps: Default::default(),
         }
     }
@@ -1077,7 +1041,7 @@ mod tests {
     fn to_sequence_output_threads_token_ids_into_eos_id() {
         let mut fin = finished(FinishReason::Stop(None));
         fin.usage.prompt_token_count = 8;
-        fin.usage.cached_token_count = 5;
+        fin.usage.prompt_cache_usage.cached_token_count = 5;
         let opts = ResponseOpts {
             output_text: true,
             output_token_ids: true,

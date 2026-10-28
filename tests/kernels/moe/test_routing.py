@@ -27,6 +27,8 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
 
+DEVICE = current_platform.device_type
+
 
 def _is_aiter_capable() -> bool:
     """Check if the platform supports AITER (gfx942/gfx950/gfx1250)."""
@@ -208,23 +210,23 @@ def setup_eplb_state(
     # Initialize EPLB state with proper tensors for testing
     # For testing purposes, we use a simple 1:1 mapping (no redundant experts)
     # expert_load_view: tracks load on each expert (shape: num_experts)
-    expert_load_view = torch.zeros(global_num_experts, dtype=torch.int32, device="cuda")
+    expert_load_view = torch.zeros(global_num_experts, dtype=torch.int32, device=DEVICE)
 
     # logical_to_physical_map: maps logical experts to physical experts
     # Shape: (num_logical_experts, max_slots)
     # For testing, use simple 1:1 mapping with single slot per expert
     logical_to_physical_map = torch.arange(
-        global_num_experts, dtype=torch.int64, device="cuda"
+        global_num_experts, dtype=torch.int64, device=DEVICE
     ).unsqueeze(-1)
 
     # logical_replica_count: number of replicas per logical expert
     # Shape: (num_logical_experts,)
     # For testing, each logical expert has exactly 1 replica
     logical_replica_count = torch.ones(
-        global_num_experts, dtype=torch.int64, device="cuda"
+        global_num_experts, dtype=torch.int64, device=DEVICE
     )
-    should_record_tensor = torch.ones((), dtype=torch.bool, device="cuda")
-    num_unpadded_tokens_tensors = [torch.tensor(0, dtype=torch.int32, device="cuda")]
+    should_record_tensor = torch.ones((), dtype=torch.bool, device=DEVICE)
+    num_unpadded_tokens_tensors = [torch.tensor(0, dtype=torch.int32, device=DEVICE)]
 
     return EplbLayerState(
         expert_load_view=expert_load_view,
@@ -238,8 +240,8 @@ def setup_eplb_state(
 def make_test_data(
     m: int, k: int, num_experts: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    hidden_states = torch.randn((m, k), device="cuda") / 10
-    logits = torch.randn((m, num_experts), device="cuda")
+    hidden_states = torch.randn((m, k), device=DEVICE) / 10
+    logits = torch.randn((m, num_experts), device=DEVICE)
     return hidden_states, logits
 
 
@@ -247,9 +249,9 @@ def make_e_score_correction_bias(
     e_score_correction_bias_val: float,
     num_experts: int,
 ) -> torch.Tensor:
-    # return torch.randn(num_experts, device="cuda") * e_score_correction_bias_val
+    # return torch.randn(num_experts, device=DEVICE) * e_score_correction_bias_val
     return torch.full(
-        (num_experts,), e_score_correction_bias_val, device="cuda", dtype=torch.float32
+        (num_experts,), e_score_correction_bias_val, device=DEVICE, dtype=torch.float32
     )
 
 
@@ -809,11 +811,11 @@ def test_eplb_map_no_redundancy(
     expected_out,
     expected_load,
 ):
-    l2p = torch.tensor(l2p_map, dtype=torch.int64, device="cuda")
-    rc = torch.tensor(replica_count, dtype=torch.int64, device="cuda")
-    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
-    rec = torch.tensor(record_enabled, dtype=torch.bool, device="cuda")
-    ids = torch.tensor(topk_ids, dtype=torch.int32, device="cuda")
+    l2p = torch.tensor(l2p_map, dtype=torch.int64, device=DEVICE)
+    rc = torch.tensor(replica_count, dtype=torch.int64, device=DEVICE)
+    load = torch.zeros(num_physical, dtype=torch.int32, device=DEVICE)
+    rec = torch.tensor(record_enabled, dtype=torch.bool, device=DEVICE)
+    ids = torch.tensor(topk_ids, dtype=torch.int32, device=DEVICE)
 
     out = eplb_map_to_physical_and_record(
         topk_ids=ids,
@@ -823,11 +825,11 @@ def test_eplb_map_no_redundancy(
         record_enabled=rec,
     )
 
-    exp_out = torch.tensor(expected_out, dtype=out.dtype, device="cuda")
+    exp_out = torch.tensor(expected_out, dtype=out.dtype, device=DEVICE)
     torch.testing.assert_close(out, exp_out)
 
     if record_enabled:
-        exp_load = torch.tensor(expected_load, dtype=torch.int32, device="cuda")
+        exp_load = torch.tensor(expected_load, dtype=torch.int32, device=DEVICE)
         torch.testing.assert_close(load, exp_load)
     else:
         assert load.sum().item() == 0
@@ -845,11 +847,11 @@ def test_eplb_map_hot_expert_replica_balance(top_k, R):
     num_logical = 16
     num_physical = R + (num_logical - 1)
 
-    l2p = torch.full((num_logical, R), -1, dtype=torch.int64, device="cuda")
-    l2p[0] = torch.arange(R, dtype=torch.int64, device="cuda")
+    l2p = torch.full((num_logical, R), -1, dtype=torch.int64, device=DEVICE)
+    l2p[0] = torch.arange(R, dtype=torch.int64, device=DEVICE)
     for i in range(1, num_logical):
         l2p[i, 0] = R + i - 1
-    rc = torch.tensor([R] + [1] * (num_logical - 1), dtype=torch.int64, device="cuda")
+    rc = torch.tensor([R] + [1] * (num_logical - 1), dtype=torch.int64, device=DEVICE)
 
     torch.manual_seed(0)
     topk_ids = torch.randint(
@@ -857,12 +859,12 @@ def test_eplb_map_hot_expert_replica_balance(top_k, R):
         num_logical,
         (num_tokens, top_k),
         dtype=torch.int32,
-        device="cuda",
+        device=DEVICE,
     )
     topk_ids[:, 0] = 0
 
-    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
-    rec = torch.tensor(True, dtype=torch.bool, device="cuda")
+    load = torch.zeros(num_physical, dtype=torch.int32, device=DEVICE)
+    rec = torch.tensor(True, dtype=torch.bool, device=DEVICE)
 
     eplb_map_to_physical_and_record(
         topk_ids=topk_ids,
@@ -934,11 +936,11 @@ def test_eplb_map_with_redundancy(
     expected_out,
     expected_load,
 ):
-    l2p = torch.tensor(l2p_map, dtype=torch.int64, device="cuda")
-    rc = torch.tensor(replica_count, dtype=torch.int64, device="cuda")
-    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
-    rec = torch.tensor(record_enabled, dtype=torch.bool, device="cuda")
-    ids = torch.tensor(topk_ids, dtype=torch.int32, device="cuda")
+    l2p = torch.tensor(l2p_map, dtype=torch.int64, device=DEVICE)
+    rc = torch.tensor(replica_count, dtype=torch.int64, device=DEVICE)
+    load = torch.zeros(num_physical, dtype=torch.int32, device=DEVICE)
+    rec = torch.tensor(record_enabled, dtype=torch.bool, device=DEVICE)
+    ids = torch.tensor(topk_ids, dtype=torch.int32, device=DEVICE)
 
     out = eplb_map_to_physical_and_record(
         topk_ids=ids,
@@ -948,11 +950,11 @@ def test_eplb_map_with_redundancy(
         record_enabled=rec,
     )
 
-    exp_out = torch.tensor(expected_out, dtype=out.dtype, device="cuda")
+    exp_out = torch.tensor(expected_out, dtype=out.dtype, device=DEVICE)
     torch.testing.assert_close(out, exp_out)
 
     if record_enabled:
-        exp_load = torch.tensor(expected_load, dtype=torch.int32, device="cuda")
+        exp_load = torch.tensor(expected_load, dtype=torch.int32, device=DEVICE)
         torch.testing.assert_close(load, exp_load)
     else:
         assert load.sum().item() == 0
@@ -995,13 +997,13 @@ def test_eplb_map_num_unpadded_tokens(
     expected_out,
     expected_load,
 ):
-    l2p = torch.tensor(l2p_map, dtype=torch.int64, device="cuda")
-    rc = torch.tensor(replica_count, dtype=torch.int64, device="cuda")
-    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
-    rec = torch.tensor(True, dtype=torch.bool, device="cuda")
-    ids = torch.tensor(topk_ids, dtype=torch.int32, device="cuda")
+    l2p = torch.tensor(l2p_map, dtype=torch.int64, device=DEVICE)
+    rc = torch.tensor(replica_count, dtype=torch.int64, device=DEVICE)
+    load = torch.zeros(num_physical, dtype=torch.int32, device=DEVICE)
+    rec = torch.tensor(True, dtype=torch.bool, device=DEVICE)
+    ids = torch.tensor(topk_ids, dtype=torch.int32, device=DEVICE)
     num_unpadded_t = (
-        torch.tensor(num_unpadded, dtype=torch.int32, device="cuda")
+        torch.tensor(num_unpadded, dtype=torch.int32, device=DEVICE)
         if num_unpadded is not None
         else None
     )
@@ -1015,8 +1017,8 @@ def test_eplb_map_num_unpadded_tokens(
         num_unpadded_tokens=num_unpadded_t,
     )
 
-    exp_out = torch.tensor(expected_out, dtype=out.dtype, device="cuda")
+    exp_out = torch.tensor(expected_out, dtype=out.dtype, device=DEVICE)
     torch.testing.assert_close(out, exp_out)
 
-    exp_load = torch.tensor(expected_load, dtype=torch.int32, device="cuda")
+    exp_load = torch.tensor(expected_load, dtype=torch.int32, device=DEVICE)
     torch.testing.assert_close(load, exp_load)

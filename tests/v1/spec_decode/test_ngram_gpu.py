@@ -24,16 +24,17 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
 from vllm.v1.worker.gpu.states import RequestState
 
-if not torch.cuda.is_available():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
         "CUDA required for NgramGPUSpeculator tests",
         allow_module_level=True,
     )
 
-DEVICE = torch.device("cuda")
+DEVICE = torch.device(current_platform.device_type)
 
 
 def _make_vllm_config(

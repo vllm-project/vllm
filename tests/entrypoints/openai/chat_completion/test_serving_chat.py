@@ -978,6 +978,7 @@ async def test_chat_full_generator_gives_each_choice_parser_the_prompt():
     serving.chat_template = None
     serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
     serving.default_chat_template_kwargs = {}
+    serving.online_renderer = MagicMock(reasoning_effort_map={})
     request_output = _make_metrics_request_output()
     request_output.prompt_token_ids = [7, 8]
     request_output.outputs.append(
@@ -3261,6 +3262,23 @@ def test_chat_kv_transfer_prompt_token_ids_ignored_with_non_text_content(content
     request = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": content}],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+    )
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+def test_chat_kv_transfer_prompt_token_ids_ignored_with_reasoning_embeds():
+    request = ChatCompletionRequest(
+        messages=[
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "some text"}],
+                "reasoning": {"type": "prompt_embeds", "data": "tensor"},
+            }
+        ],
         kv_transfer_params={
             "prompt_token_ids": [10, 20, 30],
             "do_remote_prefill": True,

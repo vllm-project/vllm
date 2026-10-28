@@ -20,8 +20,7 @@ API_KEY=${API_KEY:-"your-api-key"}
 
 # Enhanced pooling configuration with model-specific defaults
 POOLING_TYPE=${POOLING_TYPE:-"auto"}  # auto, MEAN, CLS, LAST
-export VLLM_ENABLE_CHUNKED_PROCESSING=true
-export CUDA_VISIBLE_DEVICES=2,3,4,5
+ENABLE_CHUNKED_PROCESSING=true
 
 echo "🚀 Starting vLLM Embedding Server with Enhanced Chunked Processing"
 echo "=================================================================="
@@ -68,7 +67,7 @@ echo "📋 Configuration:"
 echo "   - Model: $MODEL_NAME"
 echo "   - Port: $PORT"
 echo "   - GPU Count: $GPU_COUNT"
-echo "   - Enhanced Chunked Processing: ${VLLM_ENABLE_CHUNKED_PROCESSING}"
+echo "   - Enhanced Chunked Processing: ${ENABLE_CHUNKED_PROCESSING}"
 echo "   - Max Embed Length: ${MAX_EMBED_LEN} tokens"
 echo "   - Native Pooling Type: $POOLING_TYPE + Normalization"
 echo "   - Cross-chunk Aggregation: MEAN (automatic)"
@@ -96,7 +95,7 @@ echo ""
 echo "🔧 Starting server with enhanced chunked processing configuration..."
 
 # Build pooler config JSON
-POOLER_CONFIG="{\"pooling_type\": \"$POOLING_TYPE\", \"use_activation\": true, \"enable_chunked_processing\": ${VLLM_ENABLE_CHUNKED_PROCESSING}, \"max_embed_len\": ${MAX_EMBED_LEN}}"
+POOLER_CONFIG="{\"pooling_type\": \"$POOLING_TYPE\", \"use_activation\": true, \"enable_chunked_processing\": ${ENABLE_CHUNKED_PROCESSING}, \"max_embed_len\": ${MAX_EMBED_LEN}}"
 
 # Start vLLM server with enhanced chunked processing
 vllm serve "$MODEL_NAME" \

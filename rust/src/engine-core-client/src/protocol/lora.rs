@@ -3,8 +3,6 @@
 
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
-use crate::protocol::OpaqueValue;
-
 /// Request for a LoRA adapter.
 ///
 /// Mirrors Python `vllm.lora.request.LoRARequest`, which is a msgspec
@@ -16,8 +14,6 @@ pub struct LoraRequest {
     pub lora_path: String,
     #[serde(default)]
     pub base_model_name: Option<String>,
-    #[serde(default)]
-    pub tensorizer_config_dict: Option<OpaqueValue>,
     #[serde(default)]
     pub load_inplace: bool,
     #[serde(default)]

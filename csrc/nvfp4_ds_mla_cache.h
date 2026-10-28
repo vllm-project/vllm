@@ -29,9 +29,9 @@ void launch_concat_and_cache_nvfp4_ds_mla(const void* kv_c, const void* k_pe,
 // Gather an nvfp4_ds_mla cache into a bf16 [total_tokens, 576] workspace.
 void launch_cp_gather_and_upconvert_nvfp4_kv_cache(
     const uint8_t* src_cache, void* dst, const int32_t* block_table,
-    const int32_t* workspace_starts, int32_t num_reqs, int32_t block_size,
-    int32_t total_tokens, int64_t block_table_stride,
-    int64_t cache_block_stride, int64_t cache_entry_stride,
-    int64_t dst_entry_stride, cudaStream_t stream);
+    const int32_t* workspace_starts, const int32_t* seq_starts,
+    int32_t num_reqs, int32_t block_size, int32_t total_tokens,
+    int64_t block_table_stride, int64_t cache_block_stride,
+    int64_t cache_entry_stride, int64_t dst_entry_stride, cudaStream_t stream);
 
 }  // namespace vllm

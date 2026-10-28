@@ -5,10 +5,12 @@ absl-py==2.5.0
     #   -r requirements/test/xpu.in
     #   rouge-score
 accelerate==1.14.0
-    # via -r requirements/test/xpu.in
+    # via
+    #   -r requirements/test/xpu.in
+    #   peft
 aiohappyeyeballs==2.7.1
     # via aiohttp
-aiohttp==3.14.3
+aiohttp==3.14.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -318,6 +320,7 @@ huggingface-hub==1.31.0
     #   datasets
     #   evaluate
     #   open-clip-torch
+    #   peft
     #   sentence-transformers
     #   timm
     #   tokenizers
@@ -478,11 +481,11 @@ mbstrdecoder==1.1.5
     #   dataproperty
     #   pytablewriter
     #   typepy
-mcp==2.1.1
+mcp==2.3.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-mcp-types==2.1.1
+mcp-types==2.3.0
     # via mcp
 mdurl==0.1.2
     # via markdown-it-py
@@ -523,8 +526,10 @@ msgspec==0.21.1
     # via -r requirements/test/../common.txt
 mteb==2.19.4
     # via -r requirements/test/xpu.in
-multidict==6.7.1
+multidict==7.1.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   aiohttp
     #   yarl
 multiprocess==0.70.19
@@ -567,12 +572,14 @@ numpy==2.2.6
     #   numba
     #   opencv-python-headless
     #   pandas
+    #   peft
     #   pytrec-eval-terrier
     #   rouge-score
     #   runai-model-streamer
     #   sacrebleu
     #   scikit-learn
     #   scipy
+    #   sentence-transformers
     #   soundfile
     #   soxr
     #   tensorizer
@@ -685,6 +692,7 @@ packaging==26.3
     #   lm-format-enforcer
     #   matplotlib
     #   modelscope
+    #   peft
     #   pooch
     #   pytest
     #   pytest-rerunfailures
@@ -699,7 +707,9 @@ partial-json-parser==0.2.1.1.post7
     # via -r requirements/test/../common.txt
 pathvalidate==3.3.1
     # via pytablewriter
-pillow==12.3.0
+peft==0.21.2
+    # via -r requirements/test/xpu.in
+pillow==13.0.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -754,6 +764,7 @@ psutil==7.2.2
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
+    #   peft
     #   tensorizer
 py-cpuinfo==9.0.0
     # via -r requirements/test/../common.txt
@@ -883,6 +894,7 @@ pyyaml==6.0.3
     #   datasets
     #   huggingface-hub
     #   lm-format-enforcer
+    #   peft
     #   schemathesis
     #   timm
     #   transformers
@@ -970,6 +982,7 @@ safetensors==0.8.0
     #   -r requirements/test/../common.txt
     #   accelerate
     #   open-clip-torch
+    #   peft
     #   timm
     #   transformers
 schemathesis==4.24.3
@@ -988,7 +1001,7 @@ scipy==1.18.0
     #   pytrec-eval-terrier
     #   scikit-learn
     #   sentence-transformers
-sentence-transformers==5.2.0
+sentence-transformers==5.6.0
     # via
     #   -r requirements/test/xpu.in
     #   mteb
@@ -1109,6 +1122,7 @@ torch==2.14.0+xpu
     #   compressed-tensors
     #   mteb
     #   open-clip-torch
+    #   peft
     #   runai-model-streamer
     #   sentence-transformers
     #   tensorizer
@@ -1134,6 +1148,7 @@ tqdm==4.70.0
     #   nltk
     #   open-clip-torch
     #   openai
+    #   peft
     #   pqdm
     #   sentence-transformers
     #   transformers
@@ -1148,6 +1163,7 @@ transformers==5.20.2
     #   -r requirements/test/xpu.in
     #   compressed-tensors
     #   mteb
+    #   peft
     #   sentence-transformers
     #   xgrammar
 triton==3.8.0+xpu
@@ -1228,7 +1244,7 @@ umf==1.1.0
     # via
     #   intel-cmplr-lib-ur
     #   torch
-urllib3==2.7.0
+urllib3==2.8.0
     # via
     #   -r requirements/test/xpu.in
     #   blobfile
@@ -1255,7 +1271,7 @@ wcwidth==0.8.3
     # via ftfy
 websockets==17.0.1
     # via uvicorn
-werkzeug==3.1.8
+werkzeug==3.1.9
     # via
     #   -r requirements/test/xpu.in
     #   schemathesis
@@ -1269,5 +1285,5 @@ xxhash==4.0.1
     # via
     #   datasets
     #   evaluate
-yarl==1.24.5
+yarl==1.25.1
     # via aiohttp

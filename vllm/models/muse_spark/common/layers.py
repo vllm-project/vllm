@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Platform-neutral Common MuseSpark1x layers and residual connections."""
+"""Platform-neutral MuseSpark1x building blocks shared by the NVIDIA and AMD stacks."""
 
 import math
 from collections.abc import Iterable

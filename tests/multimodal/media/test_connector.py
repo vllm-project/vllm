@@ -17,6 +17,7 @@ import torch
 from PIL import Image, ImageChops
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector
@@ -167,7 +168,7 @@ async def test_fetch_image_local_files(image_url: str):
             await local_connector.fetch_image_async(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}"
             )
-        with pytest.raises(RuntimeError, match="Cannot load local files"):
+        with pytest.raises(VLLMValidationError, match="Cannot load local files"):
             await connector.fetch_image_async(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}"
             )
@@ -176,7 +177,7 @@ async def test_fetch_image_local_files(image_url: str):
             local_connector.fetch_image(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}"
             )
-        with pytest.raises(RuntimeError, match="Cannot load local files"):
+        with pytest.raises(VLLMValidationError, match="Cannot load local files"):
             connector.fetch_image(f"file://{temp_dir}/../{os.path.basename(image_url)}")
 
 
