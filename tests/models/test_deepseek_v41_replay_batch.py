@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import (
     BatchDescriptor,
@@ -179,6 +180,63 @@ def test_replay_batch_keeps_each_request_window(state):
     }
     assert torch.equal(context.slot_mapping["mla"], _slot_mappings(401)[1, rows])
     assert context.dp_metadata is None and not context.is_padding.any()
+
+
+def test_exact_replay_keeps_more_rows_than_the_window(state):
+    """Batch invariance keeps enough trailing rows for the full forward's
+    last-window outputs; their KV window starts at the first kept row."""
+    kept_rows = 200
+    state.decoder_replay_layers.kept_rows = kept_rows
+    state.decoder_replay_layers.stage_rows = [kept_rows]
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    replay, build = _prepare(state, batch, CUDAGraphMode.NONE)
+    assert replay is not None
+    rows = [0, *range(301 - kept_rows, 301), *range(301, 401)]
+    assert replay.rows.tolist() == rows
+    assert build.batch.query_start_loc_np.tolist() == [0, 1, 1 + kept_rows, 301]
+    assert build.replay_start.tolist() == [0, 300 - kept_rows, 0]
+
+
+def test_exact_replay_stages_keep_fewer_rows(monkeypatch, state):
+    """Layer-wise exact replay: each later stage keeps fewer trailing rows, picks
+    them out of the previous stage's rows, and reads no window KV below them."""
+    layers = DecoderReplayLayers(
+        WINDOW,
+        MagicMock(),
+        MagicMock(),
+        set(),
+        "swa_first",
+        kept_rows=200,
+        stage_rows=[200, WINDOW],
+        run_stage=MagicMock(),
+        stage_metadata_prefixes=[set(), set()],
+    )
+    staged = DeepseekV41ModelState(
+        state.vllm_config,
+        SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers),
+        None,
+        DEVICE,
+    )
+    staged.builds = state.builds  # type: ignore[attr-defined]
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    staged.prepare_attn(
+        batch, CUDAGraphMode.NONE, BLOCK_TABLES, _slot_mappings(401), [], GROUPS
+    )
+    replay = layers.replay_batch
+    assert replay is not None and len(replay.stages) == 1
+    rows0 = [0, *range(101, 301), *range(301, 401)]
+    rows1 = [0, *range(173, 301), *range(301, 401)]
+    stage = replay.stages[0]
+    assert replay.rows.tolist() == rows0 and stage.rows.tolist() == rows1
+    assert stage.select.tolist() == [rows0.index(row) for row in rows1]
+    # Builds: stage 0 (and its first layer's SWA), then stage 1.
+    build0, build1 = state.builds[-3], state.builds[-1]
+    assert build0.replay_start.tolist() == [0, 100, 0]
+    assert build1.replay_start.tolist() == [0, 300 - WINDOW, 0]
+    assert build1.batch.query_start_loc_np.tolist() == [0, 1, 1 + WINDOW, 229]
+    assert torch.equal(build1.batch.positions[:229], batch.positions[stage.rows])
+    assert torch.equal(build1.slot_mappings, _slot_mappings(401)[:, stage.rows])
+    assert stage.forward_context.batch_descriptor.num_tokens == 229
 
 
 def test_replay_context_restores_tp_routing_rows(state):
@@ -631,7 +689,13 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
     cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
+    layers = SimpleNamespace(
+        window=WINDOW,
+        kept_rows=WINDOW,
+        stage_rows=[WINDOW],
+        replay_batch=None,
+        metadata_prefixes=set(),
+    )
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     groups = SimpleNamespace(
         kv_cache_groups=[
@@ -666,12 +730,15 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
         groups,
     )
     assert state._replay[0] == 0
-    assert calls == {"pad_warmup": 0, "gather_warmup": 1, "pad_launch": 0}
+    # Batch invariance gathers with the CUDA op, which needs no warmup.
+    gather_warmups = 0 if envs.VLLM_BATCH_INVARIANT else 1
+    assert calls == {"pad_warmup": 0, "gather_warmup": gather_warmups, "pad_launch": 0}
     assert state._replay_start[:1].tolist() == [16]
 
 
 def test_dp_ranks_pad_to_one_replay_graph(dp_state):
-    """Every rank pads its replay batch to the graph fitting the largest rank's."""
+    """Every rank pads its replay batch to the graph fitting the largest rank's,
+    and marks the padding rows so MoE does not dispatch them."""
     dp_state.replay_cudagraphs = MagicMock()
     dp_state.replay_cudagraphs.dispatch.return_value = BatchExecutionDescriptor(
         CUDAGraphMode.PIECEWISE, 512, None
@@ -687,3 +754,7 @@ def test_dp_ranks_pad_to_one_replay_graph(dp_state):
     assert is_padding[len(REPLAY_ROWS) :].all()
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
+    num_rows = len(REPLAY_ROWS)
+    assert replay.forward_context.is_padding.tolist() == [False] * num_rows + [True] * (
+        512 - num_rows
+    )
