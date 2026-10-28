@@ -71,13 +71,14 @@ else
     trap cleanup_kernel_container EXIT
     docker create \
       --name "$kernel_container" \
+      --env "KERNEL_WHEEL=/tmp/${wheel_name}" \
       --entrypoint /bin/bash \
       "$build_image" \
       -c 'set -eo pipefail
         uv pip install --python /opt/venv/bin/python \
-          --reinstall --no-deps /tmp/kernel-wheel.whl
+          --reinstall --no-deps "$KERNEL_WHEEL"
       '
-    docker cp "${wheels[0]}" "${kernel_container}:/tmp/kernel-wheel.whl"
+    docker cp "${wheels[0]}" "${kernel_container}:/tmp/${wheel_name}"
     docker start --attach "$kernel_container"
     docker commit "$kernel_container" "$IMAGE"
     docker rm "$kernel_container"
