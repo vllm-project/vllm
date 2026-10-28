@@ -50,6 +50,7 @@ def test_mixed_warmup_disables_watermarking():
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
         max_model_len=128,
+        model_config=SimpleNamespace(get_vocab_size=lambda: 64),
         num_speculative_steps=0,
         model_state=SimpleNamespace(max_encoder_len=0),
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),

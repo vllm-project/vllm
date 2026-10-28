@@ -77,6 +77,13 @@ def _reserved_block_count(
     return cdiv(num_tokens, block_size) + num_speculative_blocks
 
 
+def _warmup_token_ids(model_runner: GPUModelRunner, num_tokens: int) -> list[int]:
+    """Distinct-looking prompt token ids that stay within the vocabulary, which
+    can be smaller than a full-budget or full-length prompt."""
+    vocab_size = model_runner.model_config.get_vocab_size()
+    return [i % vocab_size for i in range(num_tokens)]
+
+
 def _warmup_block_counter(
     model_runner: GPUModelRunner,
 ) -> Callable[[int, KVCacheSpec], int]:
@@ -118,8 +125,8 @@ def run_mixed_prefill_decode_warmup(
     decode_prompt_len = 2
     decode_scheduled_tokens = 1
     prefill_len = num_tokens - decode_scheduled_tokens
-    decode_token_ids = list(range(decode_prompt_len))
-    prefill_token_ids = list(range(prefill_len))
+    decode_token_ids = _warmup_token_ids(model_runner, decode_prompt_len)
+    prefill_token_ids = _warmup_token_ids(model_runner, prefill_len)
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
     block_count = _warmup_block_counter(model_runner)
@@ -246,8 +253,9 @@ def run_context_prefill_warmup(
     queries are kept short: the full-budget step already measured theirs.
     """
     query_len = model_runner.decode_query_len + 1
-    # Leave room for a sampled token after the prompt.
-    context_len = model_runner.max_model_len - query_len - 1
+    # Leave room for a sampled token after the prompt; and no request needs
+    # more context than the step does.
+    context_len = min(model_runner.max_model_len - query_len - 1, num_context_tokens)
     if model_runner.is_pooling_model or context_len <= 0:
         return False
 
@@ -274,7 +282,7 @@ def run_context_prefill_warmup(
         return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
 
     req_ids = [f"_context_warmup_{i}_" for i in range(num_reqs)]
-    token_ids = list(range(context_len + query_len))
+    token_ids = _warmup_token_ids(model_runner, context_len + query_len)
     sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
     prefill_output = SchedulerOutput.make_empty()
     prefill_output.num_spec_tokens_to_schedule = model_runner.num_speculative_steps

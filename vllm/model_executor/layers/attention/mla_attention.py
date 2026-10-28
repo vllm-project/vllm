@@ -2832,11 +2832,16 @@ def init_mla_context_partial(
     ``out`` tensor already know that layout and can allocate directly, pairing it
     with ``neutralize_empty_context_partials``.
     """
+    # A backend may return a view of a padded buffer; the merges need the
+    # chunk partials' head stride, so pad the running partial the same way.
+    num_heads, head_size = attn_output.shape[1:]
+    token_stride, head_stride, dim_stride = attn_output.stride()
+    padded = dim_stride == 1 and token_stride == num_heads * head_stride
     output = torch.empty(
-        (num_tokens, *attn_output.shape[1:]),
+        (num_tokens, num_heads, head_stride if padded else head_size),
         dtype=attn_output.dtype,
         device=attn_output.device,
-    )
+    )[..., :head_size]
     output_lse = torch.empty(
         (attn_softmax_lse.shape[0], num_tokens),
         dtype=attn_softmax_lse.dtype,
