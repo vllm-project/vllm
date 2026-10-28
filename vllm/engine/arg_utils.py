@@ -541,7 +541,7 @@ class EngineArgs:
     cpu_distributed_timeout_seconds: int | None = (
         ParallelConfig.cpu_distributed_timeout_seconds
     )
-    numa_bind: bool = ParallelConfig.numa_bind
+    numa_bind: bool | None = ParallelConfig.numa_bind
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
     device_ids: list[int | str] | None = None
