@@ -34,12 +34,32 @@ To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve 
 * `--dbo-decode-token-threshold` the minimum number of tokens in a decode-only batch required to enable DBO for that batch
 * `--dbo-prefill-token-threshold` the minimum number of tokens in a batch containing at least one prefill required to enable DBO for that batch
 
-Currently, DBO is only supported with DeepEP, so DeepEP must be installed and the `--all2all-backend` argument must be set to `deepep_low_latency` if your workload is primarily decode requests, or `deepep_high_throughput` if your workload is primarily prefill requests.
+DBO supports DeepEP with `--all2all-backend deepep_low_latency` for workloads dominated by decode, or `deepep_high_throughput` for workloads dominated by prefill. Install DeepEP before selecting either backend. MRV2's NIXL EP decode staging path is described below.
 
 Below is a command that will spin up a two DP rank server with expert parallelism and DBO enabled.
 EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel-size 2 --enable-expert-parallel --enable-dbo --all2all-backend deepep_low_latency`
 
 Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
+
+### MRV2 decode staging
+
+With MRV2, single-token decode batches can retain a FULL microbatched CUDA graph when DP loads are imbalanced. For example, ranks with 63 and 97 requests can both use a 128-row graph: the smaller rank spreads its real rows across the captured regions, then restores logical output order after replay. All ranks agree on staging eligibility during DP synchronization.
+
+This path uses NIXL EP with FlashAttention MLA or ordinary causal FlashAttention 3, unquantized BF16 weights and KV cache, TP1, and the default model state. Ordinary FA3 requires AOT scheduling and full attention; sliding-window, chunked, non-causal and batch-invariant configurations retain eager fallback. Prompt embeddings, EPLB, KV transfer and returned routed experts keep the existing eager fallback when a captured region would be empty. General MRV2 DBO restrictions, including LoRA, speculation, pipeline/context parallelism and multimodal models, still apply.
+
+Staging is selected automatically for eligible batches with DBO enabled; it adds temporary row copies and does not change graph buckets or backend microbatch limits. Row placement and attention metadata follow each captured region, including an uneven final region.
+
+For example, select ordinary FA3 explicitly for Qwen3 MoE on Hopper:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-30B-A3B \
+    --dtype bfloat16 --data-parallel-size 2 --enable-expert-parallel \
+    --enable-dbo --all2all-backend nixl_ep --moe-backend batched_triton \
+    --attention-backend FLASH_ATTN --attention-config.flash_attn_version=3 \
+    --compilation-config '{"mode": 0, "cudagraph_mode": "FULL"}'
+```
+
+Staging only applies if an eligible decode batch would otherwise leave a captured region empty. It does not make the attention kernel faster or guarantee a net DBO speedup. Default graph buckets may already avoid the empty-region condition.
 
 ## DBO Components
 
