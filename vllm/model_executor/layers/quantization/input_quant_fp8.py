@@ -68,14 +68,6 @@ class QuantFP8(CustomOp):
         self.use_deep_gemm_supported = is_deep_gemm_supported()
 
         self.use_aiter = rocm_aiter_ops.is_linear_fp8_enabled()
-        # aiter's group quant emits column-major scales only on gfx1250, whose
-        # Gluon block-scaled GEMM reads them; other archs keep row-major.
-        cdna_version = 0
-        if current_platform.is_rocm():
-            from vllm.platforms.rocm import get_cdna_version
-
-            cdna_version = get_cdna_version()
-        self.aiter_column_major_scales = column_major_scales and cdna_version >= 5
 
         self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
@@ -157,10 +149,16 @@ class QuantFP8(CustomOp):
         use_aiter_per_group_quant = use_aiter_quant and self.group_shape.is_per_group()
 
         if use_aiter_per_group_quant:
+            from vllm.platforms.rocm import get_cdna_version
+
+            # aiter's group quant emits column-major scales only on gfx1250,
+            # whose Gluon block-scaled GEMM reads them; other archs keep
+            # row-major.
+            column_major_scales = self.column_major_scales and get_cdna_version() >= 5
             x_q, x_s = rocm_aiter_ops.group_fp8_quant(
-                x, self.group_size, transpose_scale=self.aiter_column_major_scales
+                x, self.group_size, transpose_scale=column_major_scales
             )
-            if self.aiter_column_major_scales:
+            if column_major_scales:
                 # aiter writes the transposed scale as bytes into a contiguous
                 # buffer; re-present it with column-major strides to match
                 # forward_cuda. This is a view, not a copy.
