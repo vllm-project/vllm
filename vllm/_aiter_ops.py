@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
@@ -2663,6 +2664,34 @@ class rocm_aiter_ops:
             and cls._kda_gluon_prefill_importable()
         )
 
+    @staticmethod
+    @functools.cache
+    def _kda_flashkda_paged_prefill_importable() -> bool:
+        import inspect
+
+        try:
+            from aiter.ops.triton.kimi_delta_attn import chunk_kimi_delta_attn
+        except ImportError:
+            return False
+        # AITER releases before v0.1.23 export it without the paged
+        # state_cache / out arguments.
+        return "state_cache" in inspect.signature(chunk_kimi_delta_attn).parameters
+
+    @classmethod
+    @if_aiter_supported
+    def is_kda_flashkda_prefill_available(cls) -> bool:
+        """Whether AITER's FlashKDA prefill with paged state can run here.
+
+        Limited to gfx950, the only arch AITER's FlashKDA Gluon kernels target.
+        """
+        from vllm.platforms.rocm import on_gfx950
+
+        return (
+            cls._AITER_ENABLED
+            and on_gfx950()
+            and cls._kda_flashkda_paged_prefill_importable()
+        )
+
     @classmethod
     def get_aiter_allreduce(cls):
         """Return the TP device communicator's AITER custom-allreduce if it has
@@ -5238,6 +5267,62 @@ class rocm_aiter_ops:
             state_indices=state_indices,
             has_initial_state=has_initial_state,
         )
+
+    @staticmethod
+    def kda_flashkda_prefill(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        lower_bound: float,
+        cu_seqlens: torch.Tensor,
+        state_cache: torch.Tensor,
+        state_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        out: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run AITER FlashKDA chunked prefill over a paged recurrent state.
+
+        ``q``, ``k`` and ``v`` are ``[1, T, H, 128]`` bf16, ``g`` is the raw
+        gate of the same shape and ``beta`` the raw ``[1, T, H]`` logits; the
+        gate activation and the sigmoid run in the kernel. ``A_log`` is
+        ``[H]`` and ``dt_bias`` ``[H * 128]``, both fp32. ``state_cache`` is the
+        fp32 V-first ``[slots, H, V, K]`` pool: sequence ``n`` reads and writes
+        row ``state_indices[n]`` in place. ``out`` must be contiguous with
+        ``v``'s shape. Returns ``out``.
+        """
+        from aiter.ops.triton.kimi_delta_attn import chunk_kimi_delta_attn
+
+        logger.info_once("Dispatching AITER FlashKDA KDA prefill.")
+        # AITER reads cu_seqlens on the host to plan its chunks and segments.
+        with gpu_sync_allowed():
+            chunk_kimi_delta_attn(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                safe_gate=True,
+                lower_bound=lower_bound,
+                state_v_first=True,
+                # 32 selects the FlashKDA kernels, the only ones that take
+                # state_cache and out.
+                chunk_size=32,
+                cu_seqlens=cu_seqlens,
+                out=out,
+                state_cache=state_cache,
+                state_indices=state_indices,
+                has_initial_state=has_initial_state,
+            )
+        return out
 
 
 rocm_aiter_ops.register_ops_once()

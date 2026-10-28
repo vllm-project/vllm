@@ -284,7 +284,10 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
     from vllm.v1.worker.workspace import WorkspaceManager
 
-    if kda._resolve_kda_prefill_backend("auto", D, torch.bfloat16, -5) != "flashkda":
+    if (
+        kda._resolve_kda_prefill_backend("auto", D, torch.bfloat16, -5, torch.float32)
+        != "flashkda"
+    ):
         pytest.skip("requires FlashKDA")
     import vllm._flashkda_C  # noqa: F401
 
@@ -430,3 +433,114 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
         actual[:, : length - offset], expected[:, suffix], atol=0.003, rtol=0.03
     )
     torch.testing.assert_close(recurrent[3], expected_state, atol=0.003, rtol=0.03)
+
+
+@torch.inference_mode()
+def test_aiter_flashkda_prefill_matches_triton(monkeypatch):
+    """With ``flashkda`` on ROCm the layer's prefill runs AITER FlashKDA on
+    the paged state and output in place, and matches the Triton chunk path
+    to bf16 precision (chunk size 32 vs 64)."""
+    from types import SimpleNamespace
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.glm5next.common import kda
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+    from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
+
+    if not rocm_aiter_ops.is_kda_flashkda_prefill_available():
+        pytest.skip("requires AITER FlashKDA (VLLM_ROCM_USE_AITER=1, gfx950)")
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    # 32 local heads: the default 64 KDA heads at tensor parallel size 2.
+    heads, lengths = 32, [37, 100]
+    num_tokens, num_slots = sum(lengths), 4
+    width, state_len, slot_size = 3 * heads * D, 3, heads * D * D
+    layer = object.__new__(kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer.0"
+    layer.local_num_heads = heads
+    layer.head_dim = D
+    layer.local_projection_size = heads * D
+    layer.kda_safe_gate = True
+    layer.kda_lower_bound = LOWER_BOUND
+    layer._conv_state_dim_first = False
+    layer._merged_conv_weight = 0.5 * torch.randn(width, 4, device=device)
+    layer.q_conv1d = SimpleNamespace(bias=None)
+    layer.A_log = 0.5 * torch.randn(1, 1, heads, 1, device=device)
+    layer.dt_bias = 0.1 * torch.randn(heads * D, device=device)
+
+    # Padded slot strides, as in the hybrid KV cache.
+    conv_storage = torch.randn(
+        num_slots, width * state_len + 8, device=device, dtype=torch.bfloat16
+    )
+    recurrent_storage = 0.5 * torch.randn(num_slots, slot_size + 8, device=device)
+    projected = torch.randn(
+        num_tokens, width + heads, device=device, dtype=torch.bfloat16
+    )
+    raw_qkv, beta = projected[:, :width], projected[:, width:].unsqueeze(0)
+    gate = torch.randn(1, num_tokens, heads, D, device=device, dtype=torch.bfloat16)
+
+    cu_cpu = torch.tensor([0, lengths[0], num_tokens], dtype=torch.int32)
+    nums, batch_ptr, chunk_offsets = compute_causal_conv1d_metadata(
+        cu_cpu, device=device
+    )
+    metadata = GDNAttentionMetadata(
+        num_prefills=len(lengths),
+        num_prefill_tokens=num_tokens,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=num_tokens,
+        has_initial_state=torch.tensor([True, False], device=device),
+        non_spec_query_start_loc=cu_cpu.to(device),
+        non_spec_state_indices_tensor=torch.tensor(
+            [1, 2], dtype=torch.int32, device=device
+        ),
+        nums_dict=nums,
+        batch_ptr=batch_ptr,
+        token_chunk_offset_ptr=chunk_offsets,
+    )
+    monkeypatch.setattr(
+        kda,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={layer.prefix: metadata}),
+    )
+
+    prefill_calls = []
+    kda_flashkda_prefill = rocm_aiter_ops.kda_flashkda_prefill
+
+    def spy(**kwargs):
+        prefill_calls.append(kwargs)
+        return kda_flashkda_prefill(**kwargs)
+
+    monkeypatch.setattr(rocm_aiter_ops, "kda_flashkda_prefill", staticmethod(spy))
+
+    def run(backend: str):
+        conv_pool, recurrent_pool = conv_storage.clone(), recurrent_storage.clone()
+        conv = conv_pool[:, : width * state_len].view(num_slots, state_len, width)
+        recurrent = recurrent_pool[:, :slot_size].view(num_slots, heads, D, D)
+        layer.kv_cache = (conv, recurrent)
+        layer.kda_prefill_backend = backend
+        out = torch.full(
+            (1, num_tokens, heads, D), float("nan"), device=device, dtype=torch.bfloat16
+        )
+        layer._forward(raw_qkv, gate, beta, out)
+        return out, recurrent
+
+    triton_out, triton_recurrent = run("triton")
+    assert not prefill_calls
+    out, recurrent = run("aiter_flashkda")
+    assert len(prefill_calls) == 1
+
+    torch.testing.assert_close(out, triton_out, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(recurrent, triton_recurrent, rtol=2e-2, atol=2e-2)
+    written = slice(1, 3)
+    for actual, expected in (
+        (out, triton_out),
+        (recurrent[written], triton_recurrent[written]),
+    ):
+        actual, expected = actual.float(), expected.float()
+        error = (actual - expected).norm() / expected.norm()
+        assert error < 2e-2, f"relative L2 error {error:.2e}"

@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide
@@ -135,14 +136,45 @@ def _cast_sigmoid(x: torch.Tensor) -> torch.Tensor:
 
 
 def _resolve_kda_prefill_backend(
-    backend: str, head_dim: int, dtype: torch.dtype, lower_bound: float | None
+    backend: str,
+    head_dim: int,
+    dtype: torch.dtype,
+    lower_bound: float | None,
+    state_dtype: torch.dtype,
 ) -> str:
     """Pick the chunked-prefill kernel: FlashKDA (fused CUDA, ~2-4x faster on
     SM90/SM10x/SM12x for bf16, head_dim 128 and a bounded gate) or the Triton
     ``chunk_kda_with_fused_gate`` path. ``backend`` comes from
-    ``additional_config.kda_prefill_backend`` (auto / triton / flashkda)."""
+    ``additional_config.kda_prefill_backend`` (auto / triton / flashkda).
+
+    On ROCm, ``flashkda`` runs AITER's FlashKDA kernels and resolves to
+    ``aiter_flashkda``, which reserves no prefix-cache checkpoint blocks;
+    ``auto`` keeps Triton there."""
     if backend not in ("auto", "triton", "flashkda"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
+    if backend == "flashkda" and current_platform.is_rocm():
+        reasons = []
+        if not rocm_aiter_ops.is_kda_flashkda_prefill_available():
+            reasons.append(
+                "AITER FlashKDA with paged state is unavailable (needs "
+                "VLLM_ROCM_USE_AITER=1, gfx950 and AITER >= v0.1.23)"
+            )
+        if head_dim != 128:
+            reasons.append(f"head_dim is {head_dim}, not 128")
+        if dtype != torch.bfloat16:
+            reasons.append(f"model dtype is {dtype}, not bfloat16")
+        if lower_bound is None or not -5 <= lower_bound < 0:
+            reasons.append(f"KDA lower_bound {lower_bound} is outside [-5, 0)")
+        if state_dtype != torch.float32:
+            reasons.append(
+                f"recurrent state dtype is {state_dtype}, not float32 "
+                "(see --mamba-ssm-cache-dtype)"
+            )
+        if reasons:
+            raise RuntimeError(
+                "KDA prefill backend 'flashkda' on ROCm: " + "; ".join(reasons)
+            )
+        return "aiter_flashkda"
     capability = current_platform.get_device_capability()
     supported = (
         current_platform.is_cuda()
@@ -158,6 +190,16 @@ def _resolve_kda_prefill_backend(
             "and a bounded KDA gate."
         )
     return "flashkda" if supported and backend != "triton" else "triton"
+
+
+def _aiter_flashkda_runs_prefill(backend: str, metadata: GDNAttentionMetadata) -> bool:
+    """Whether AITER FlashKDA runs this step's chunked prefill. Steps that
+    carry speculative-decode tokens keep the Triton chunk path, as do all
+    steps of the other backends."""
+    has_spec = (
+        metadata.spec_sequence_masks is not None and metadata.num_spec_decodes > 0
+    )
+    return backend == "aiter_flashkda" and metadata.num_prefills > 0 and not has_spec
 
 
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
@@ -348,6 +390,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.head_dim,
             vllm_config.model_config.dtype,
             self.kda_lower_bound,
+            recurrent_state_dtype,
         )
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
@@ -695,7 +738,33 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # layer output buffer; the chunked prefill kernel cannot, so this
         # stays None there and the merge copy below runs as before.
         ns_out = None
-        if attn_metadata_narrowed.num_prefills > 0:
+        if _aiter_flashkda_runs_prefill(
+            self.kda_prefill_backend, attn_metadata_narrowed
+        ):
+            assert q_ns is not None
+            assert non_spec_state_indices_tensor is not None
+            assert has_initial_state is not None
+            # AITER reads and updates the paged recurrent state in place, so
+            # there is no gather or scatter, and writes straight into the layer
+            # output: without spec tokens the prefill tokens are its leading
+            # slice.
+            ns_out = core_attn_out[:, :num_actual_tokens]
+            core_attn_out_non_spec = rocm_aiter_ops.kda_flashkda_prefill(
+                q=_rearr(q_ns),
+                k=_rearr(k_ns),
+                v=_rearr(v_ns),
+                g=g1_ns,
+                beta=beta_ns,
+                A_log=self.A_log.view(-1),
+                dt_bias=self.dt_bias,
+                lower_bound=lower_bound,
+                cu_seqlens=non_spec_query_start_loc,
+                state_cache=recurrent_state,
+                state_indices=non_spec_state_indices_tensor,
+                has_initial_state=has_initial_state,
+                out=ns_out,
+            )
+        elif attn_metadata_narrowed.num_prefills > 0:
             assert q_ns is not None
             assert non_spec_state_indices_tensor is not None
             assert has_initial_state is not None
