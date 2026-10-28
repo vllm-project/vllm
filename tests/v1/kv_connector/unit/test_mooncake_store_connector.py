@@ -1114,11 +1114,10 @@ def test_lookup_prefetch_cap_bounds_in_flight_prefetches(limit):
         assert "next" in client._lookups
         if limit:
             gate.set()
-            first.future.result(timeout=5)
-            deadline = time.monotonic() + 5.0
-            while (later := client.prefetch(48, [])) is None:
-                assert time.monotonic() < deadline
-                time.sleep(0.005)
+            # The single worker runs callbacks before taking its next task.
+            client.executor.submit(lambda: None).result(timeout=5)
+            later = client.prefetch(48, [])
+            assert later is not None
             later.future.result(timeout=5)
     finally:
         gate.set()
