@@ -316,15 +316,15 @@ def test_q_path_without_qnorm_matches_rope_only_reference(num_tokens: int):
     torch.testing.assert_close(
         q_out[:, :n_heads, :NOPE_DIM], q_ref[..., :NOPE_DIM], rtol=0, atol=0
     )
-    # HIP and PyTorch can contract different FP32 products into an FMA.
-    # Allow bf16 rounding and small cancellation errors only in the RoPE region
-    # on ROCm; the unrotated dimensions and padded heads must remain exact.
-    rope_rtol, rope_atol = (1e-2, 1e-6) if current_platform.is_rocm() else (0, 0)
+    # The kernel contracts the rotation's two FP32 products into an FMA, as
+    # the CUDA kernel did; PyTorch's reference rounds each product
+    # separately. Elements on a round-to-nearest tie can land one bf16 ULP
+    # apart. The unrotated dimensions and padded heads stay exact.
     torch.testing.assert_close(
         q_out[:, :n_heads, NOPE_DIM:],
         q_ref[..., NOPE_DIM:],
-        rtol=rope_rtol,
-        atol=rope_atol,
+        rtol=1e-2,
+        atol=1e-6,
     )
     assert q_out[:, n_heads:].count_nonzero().item() == 0
 
@@ -579,7 +579,7 @@ def test_kv_insert_fused_norm_row_strided(
     k_cache_fused = torch.zeros_like(k_cache_ref)
     fused_deepseek_v4_kv_rope_insert(
         kv,
-        k_cache_fused,
+        k_cache_fused.view(num_blocks, block_size, HEAD_BYTES),
         slot_mapping,
         positions,
         cos_sin_cache,

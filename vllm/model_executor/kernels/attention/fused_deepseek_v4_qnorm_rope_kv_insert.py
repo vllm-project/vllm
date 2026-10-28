@@ -88,11 +88,16 @@ def _dummy_tensor(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     return tensor
 
 
-def _dummy_3d(device: torch.device, dtype: torch.dtype, width: int) -> torch.Tensor:
-    key = (device, dtype, "3d", width)
+def _dummy_3d(
+    device: torch.device, dtype: torch.dtype, width: int, heads: int
+) -> torch.Tensor:
+    # The JIT binds the head dim across arguments of one call, so a stand-in
+    # for an unused [rows, heads, width] output must carry the real head
+    # count; rows stay symbolic.
+    key = (device, dtype, "3d", width, heads)
     tensor = _DUMMY_TENSORS.get(key)
     if tensor is None:
-        tensor = torch.empty((1, 0, width), dtype=dtype, device=device)
+        tensor = torch.empty((1, heads, width), dtype=dtype, device=device)
         _DUMMY_TENSORS[key] = tensor
     return tensor
 
@@ -182,12 +187,11 @@ def _warp2_max_abs(val: Float32) -> Float32:
 
 @cute.jit
 def _decode_words(words: cute.Tensor, elems: cute.Tensor) -> None:
-    # bf16x2_to_fp32x2 returns (high half, low half); the low half is the
-    # even element of the pair.
+    # bf16x2_to_fp32x2 returns the low half first: (even element, odd element).
     for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-        hi, lo = bf16x2_to_fp32x2(words[w])
-        elems[2 * w] = lo
-        elems[2 * w + 1] = hi
+        even, odd = bf16x2_to_fp32x2(words[w])
+        elems[2 * w] = even
+        elems[2 * w + 1] = odd
 
 
 @cute.jit
@@ -227,9 +231,9 @@ def _apply_kv_norm(
     sum_sq = _warp_sum(sum_sq)
     inv_rms = Float32(1.0) / _sqrt_rn(sum_sq / Float32(HEAD_DIM) + eps)
     for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-        hi, lo = bf16x2_to_fp32x2(norm_w[dim_base // 2 + w])
-        elems[2 * w] = elems[2 * w] * inv_rms * lo
-        elems[2 * w + 1] = elems[2 * w + 1] * inv_rms * hi
+        even_w, odd_w = bf16x2_to_fp32x2(norm_w[dim_base // 2 + w])
+        elems[2 * w] = elems[2 * w] * inv_rms * even_w
+        elems[2 * w + 1] = elems[2 * w + 1] * inv_rms * odd_w
     _round_to_bf16(elems)
 
 
@@ -530,7 +534,11 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                                     ] = Uint8(0)
                         else:
                             _encode_words(elems, words)
-                            rope_word = V4_ROPE_WORD_BASE + (dim_base - NOPE_DIM) // 4
+                            # (dim_base - NOPE_DIM) counts elements; a word
+                            # holds two bf16s, so the word stride is half.
+                            rope_word = V4_ROPE_WORD_BASE + (
+                                dim_base - NOPE_DIM
+                            ) // 2
                             for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
                                 cache_data[block, pib, Int64(rope_word + w)] = (
                                     words[w]
@@ -1034,16 +1042,21 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
         cache_stride0 = cute.sym_int64(divisibility=1)
         cache_row = cute.sym_int64(divisibility=1)
         data_words = HEAD_DIM // 4 if compile_key.store_kv_fp8 else HEAD_DIM // 2
+        # A Q-less launch compiles with num_heads_q == 0, but a zero shape
+        # mode is not a legal CuTe layout; floor the fake at one head. The
+        # grid never dispatches a Q slot when num_heads_q == 0, so the
+        # stand-in is never read.
+        heads = max(compile_key.num_heads_q, 1)
         q = cute.runtime.make_fake_tensor(
             Uint32,
-            (qn, compile_key.num_heads_q, HEAD_DIM // 2),
-            stride=(compile_key.num_heads_q * (HEAD_DIM // 2), HEAD_DIM // 2, 1),
+            (qn, heads, HEAD_DIM // 2),
+            stride=(heads * (HEAD_DIM // 2), HEAD_DIM // 2, 1),
             assumed_align=4,
         )
         q_fp8 = cute.runtime.make_fake_tensor(
             Uint32,
-            (qfn, compile_key.num_heads_q, HEAD_DIM // 4),
-            stride=(compile_key.num_heads_q * (HEAD_DIM // 4), HEAD_DIM // 4, 1),
+            (qfn, heads, HEAD_DIM // 4),
+            stride=(heads * (HEAD_DIM // 4), HEAD_DIM // 4, 1),
             assumed_align=4,
         )
         kv = cute.runtime.make_fake_tensor(
@@ -1326,8 +1339,8 @@ def fused_deepseek_v4_kv_rope_insert(
         )
     elif k_cache.dtype == torch.float8_e4m3fn:
         _FULL_CACHE_INSERT_KERNEL(
-            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 2),
-            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 4),
+            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 2, 1),
+            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 4, 1),
             kv_u32,
             k_cache.view(torch.uint32),
             slot_mapping,
@@ -1345,8 +1358,8 @@ def fused_deepseek_v4_kv_rope_insert(
         )
     else:
         _FULL_CACHE_INSERT_KERNEL(
-            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 2),
-            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 4),
+            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 2, 1),
+            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 4, 1),
             kv_u32,
             k_cache.view(torch.uint32),
             slot_mapping,
@@ -1436,7 +1449,7 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
         return
     _FULL_CACHE_INSERT_KERNEL(
         q.view(torch.uint32),
-        _dummy_3d(q.device, torch.uint32, HEAD_DIM // 4),
+        _dummy_3d(q.device, torch.uint32, HEAD_DIM // 4, q.shape[1]),
         kv.view(torch.uint32),
         k_cache.view(torch.uint32),
         slot_mapping,
