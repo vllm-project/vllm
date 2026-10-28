@@ -133,6 +133,11 @@ This supports ragged updates with no CPU-GPU synchronization and minimal kernel 
 
 MRV2 uses Triton kernels to prepare inputs such as `input_ids`, `positions`, `query_start_loc`, and `seq_lens`.
 
+For DBO, each microbatch rebases and clamps the query offsets and truncates the
+last request's sequence length in one kernel. It reads the current GPU metadata
+and writes to the microbatch's persistent buffers before FULL graph replay, so
+the captured attention operations see updated lengths at the same addresses.
+
 Benefits:
 
 1. Better async behavior: GPU can derive values (for example with speculative decoding) that CPU may not know yet.

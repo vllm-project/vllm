@@ -37,6 +37,7 @@ steps:
   timeout_in_minutes: 45
   source_file_dependencies:
   - tests/v1/cudagraph
+  - tests/v1/worker/test_gpu_ubatch_slicing.py
   - vllm/v1/cudagraph_dispatcher.py
   - vllm/config/compilation.py
   - vllm/config/vllm.py
@@ -52,6 +53,7 @@ steps:
     - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
     - pytest -v -s v1/cudagraph/test_breakable_cudagraph.py
     - pytest -v -s v1/cudagraph/test_encoder_cudagraph.py
+    - pytest -v -s v1/worker/test_gpu_ubatch_slicing.py
   mirror:
     amd:
       label: ":amd: (MI250) CUDAGraph"
@@ -62,6 +64,8 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - tests/v1/cudagraph
+      - tests/v1/worker/test_gpu_ubatch_slicing.py
+      - vllm/v1/worker/gpu/ubatch_utils.py
       - vllm/v1/cudagraph_dispatcher.py
       - vllm/config/compilation.py
       - vllm/compilation

@@ -47,6 +47,8 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
     _slice_input_batch,
+    _slice_query_start_loc,
+    _slice_seq_lens,
     create_ubatch_slices,
     slice_model_inputs,
 )
@@ -65,20 +67,26 @@ MAX_NUM_REQS = 32
 MAX_NUM_TOKENS = 128
 
 
-def _make_buffers() -> InputBuffers:
+def _make_buffers(
+    device: str = "cpu",
+    max_num_reqs: int = MAX_NUM_REQS,
+    max_num_tokens: int = MAX_NUM_TOKENS,
+) -> InputBuffers:
     return InputBuffers(
-        max_num_reqs=MAX_NUM_REQS,
-        max_num_tokens=MAX_NUM_TOKENS,
-        device=torch.device("cpu"),
+        max_num_reqs=max_num_reqs,
+        max_num_tokens=max_num_tokens,
+        device=torch.device(device),
     )
 
 
-def _make_ubatch_buffers(num_ubatches: int = 2) -> list[tuple[torch.Tensor, ...]]:
+def _make_ubatch_buffers(
+    num_ubatches: int = 2, device: str = "cpu", max_num_reqs: int = MAX_NUM_REQS
+) -> list[tuple[torch.Tensor, ...]]:
     """The per-microbatch (query_start_loc, seq_lens) buffers UBatchRunner owns."""
     return [
         (
-            torch.zeros(MAX_NUM_REQS + 1, dtype=torch.int32),
-            torch.zeros(MAX_NUM_REQS, dtype=torch.int32),
+            torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device),
+            torch.zeros(max_num_reqs, dtype=torch.int32, device=device),
         )
         for _ in range(num_ubatches)
     ]
@@ -194,6 +202,75 @@ def test_slicing_matches_v1_split_attn_metadata(batch_name: str):
         torch.testing.assert_close(
             v2_ubatch.seq_lens_cpu_upper_bound, v1_ubatch.seq_lens_cpu_upper_bound
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+@pytest.mark.parametrize(
+    "query_lens,padded",
+    [(query_lens, None) for query_lens, _ in BATCHES.values()]
+    + [([1] * 6, 8), ([1] * 7, None), ([1] * 6, 32), ([1] * 258, None)],
+)
+@pytest.mark.parametrize("num_ubatches", [2, 3])
+def test_fused_metadata_matches_torch_after_graph_replay(
+    query_lens: list[int], padded: int | None, num_ubatches: int
+):
+    """Replay must read current device lengths and preserve each slice's storage."""
+    capacity = max(MAX_NUM_TOKENS, sum(query_lens), padded or 0)
+    buffers = _make_buffers("cuda", capacity, capacity)
+    input_batch = _make_input_batch(
+        query_lens,
+        [q + 100 for q in query_lens],
+        buffers,
+        num_reqs_padded=padded,
+        num_tokens_padded=padded,
+    )
+    # Async execution can make actual device lengths differ from the CPU bound.
+    input_batch.seq_lens[: len(query_lens)].sub_(11)
+    slices = create_ubatch_slices(input_batch, num_ubatches)
+    outputs = _make_ubatch_buffers(num_ubatches, "cuda", capacity)
+    expected = _make_ubatch_buffers(num_ubatches, "cuda", capacity)
+
+    def prepare():
+        return [
+            _slice_input_batch(input_batch, sl, *out)
+            for sl, out in zip(slices, outputs)
+        ]
+
+    # Warm Triton before capture, then capture the actual production entry point.
+    prepare()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        ubatches = prepare()
+    addresses = [(out[0].data_ptr(), out[1].data_ptr()) for out in outputs]
+    for delta in (1, 11, -5):
+        input_batch.seq_lens[: len(query_lens)].add_(delta)
+        input_batch.query_start_loc[1].add_(1 if delta != 11 else -1)
+        graph.replay()
+        for i, (sl, (q_ref, s_ref), ubatch) in enumerate(
+            zip(slices, expected, ubatches)
+        ):
+            nr = sl.request_slice.stop - sl.request_slice.start
+            _slice_query_start_loc(
+                input_batch.query_start_loc,
+                q_ref[: nr + 1],
+                sl.request_slice.start,
+                sl.request_slice.stop,
+                sl.token_slice.start,
+                sl.num_tokens,
+            )
+            _slice_seq_lens(
+                input_batch.seq_lens,
+                s_ref[:nr],
+                input_batch.query_start_loc,
+                sl.request_slice.start,
+                sl.request_slice.stop,
+                sl.token_slice.stop,
+            )
+            torch.testing.assert_close(ubatch.query_start_loc, q_ref[: nr + 1])
+            torch.testing.assert_close(ubatch.seq_lens, s_ref[:nr])
+            assert (ubatch.query_start_loc.data_ptr(), ubatch.seq_lens.data_ptr()) == (
+                addresses[i]
+            )
 
 
 def test_microbatches_do_not_share_buffers():

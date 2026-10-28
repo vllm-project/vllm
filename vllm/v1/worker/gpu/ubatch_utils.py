@@ -21,6 +21,7 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -113,28 +114,43 @@ def _slice_input_batch(
     num_reqs = max(0, min(req_stop, input_batch.num_reqs) - req_start)
     num_tokens = max(0, min(tok_stop, input_batch.num_tokens) - tok_start)
 
-    query_start_loc = _slice_query_start_loc(
-        input_batch.query_start_loc,
-        query_start_loc_buf[: num_reqs_padded + 1],
-        req_start,
-        req_stop,
-        tok_start,
-        num_tokens_padded,
-    )
+    query_start_loc = query_start_loc_buf[: num_reqs_padded + 1]
+    seq_lens = seq_lens_buf[:num_reqs_padded]
+    if query_start_loc.is_cuda:
+        _slice_query_and_seq_lens_kernel[(triton.cdiv(num_reqs_padded + 1, 128),)](
+            input_batch.query_start_loc,
+            input_batch.seq_lens,
+            query_start_loc,
+            seq_lens,
+            req_start,
+            req_stop,
+            tok_start,
+            tok_stop,
+            BLOCK_SIZE=128,
+        )
+    else:
+        _slice_query_start_loc(
+            input_batch.query_start_loc,
+            query_start_loc,
+            req_start,
+            req_stop,
+            tok_start,
+            num_tokens_padded,
+        )
+        _slice_seq_lens(
+            input_batch.seq_lens,
+            seq_lens,
+            input_batch.query_start_loc,
+            req_start,
+            req_stop,
+            tok_stop,
+        )
     query_start_loc_np = np.clip(
         input_batch.query_start_loc_np[req_start : req_stop + 1] - tok_start,
         0,
         num_tokens_padded,
     ).astype(np.int32)
 
-    seq_lens = _slice_seq_lens(
-        input_batch.seq_lens,
-        seq_lens_buf[:num_reqs_padded],
-        input_batch.query_start_loc,
-        req_start,
-        req_stop,
-        tok_stop,
-    )
     # Same truncation as `_slice_seq_lens`, on the host-side upper bound.
     seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound[
         req_start:req_stop
@@ -197,6 +213,36 @@ def _slice_input_batch(
         max_seq_len_np=None,
         fast_prefill=None,
     )
+
+
+@triton.jit
+def _slice_query_and_seq_lens_kernel(
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    query_start_loc_out_ptr,
+    seq_lens_out_ptr,
+    req_start,
+    req_stop,
+    tok_start,
+    tok_stop,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Write rebased query offsets and truncated lengths into persistent buffers."""
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    num_reqs = req_stop - req_start
+    query_start_loc = tl.load(
+        query_start_loc_ptr + req_start + offsets, offsets <= num_reqs, other=0
+    )
+    query_start_loc = tl.minimum(
+        tl.maximum(query_start_loc - tok_start, 0), tok_stop - tok_start
+    )
+    tl.store(query_start_loc_out_ptr + offsets, query_start_loc, offsets <= num_reqs)
+
+    seq_lens = tl.load(seq_lens_ptr + req_start + offsets, offsets < num_reqs, other=0)
+    # Only the last request loses tokens; earlier microbatches' tokens still count.
+    truncated = tl.maximum(tl.load(query_start_loc_ptr + req_stop) - tok_stop, 0)
+    seq_lens -= tl.where(offsets == num_reqs - 1, truncated, 0)
+    tl.store(seq_lens_out_ptr + offsets, seq_lens, offsets < num_reqs)
 
 
 def _slice_query_start_loc(
@@ -352,7 +398,7 @@ class UBatchRunner:
 
         attn_metadata = []
         slot_mappings_by_layer = []
-        is_padding = []
+        is_padding: list[torch.Tensor | None] = []
         for i, ubatch_slice in enumerate(ubatch_slices):
             ubatch = _slice_input_batch(
                 input_batch,
