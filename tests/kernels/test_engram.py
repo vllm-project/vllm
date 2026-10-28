@@ -7,16 +7,22 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed import parallel_state
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
 )
+from vllm.models.deepseek_v41.amd import engram as rocm_engram_ops
+from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.common import engram as engram_ops
 from vllm.models.deepseek_v41.common.engram import (
     Engram,
     NgramHashState,
     ParallelEngramEmbedding,
 )
+from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 def _reference_engram_post_wkv(
@@ -179,7 +185,7 @@ def test_sharded_engram_post_wkv_matches_reference(
         hidden_states, kv, q_weight, k_weight, token_mask, eps, clamp_value, 0
     )
 
-    module = Engram.__new__(Engram)
+    module = RocmEngram.__new__(RocmEngram)
     torch.nn.Module.__init__(module)
     module.dim = dim
     module.hc_mult = hc_mult
@@ -210,16 +216,123 @@ def test_sharded_engram_post_wkv_matches_reference(
         return torch.cat(sent)
 
     for gather in (record, exchange):
-        monkeypatch.setattr(engram_ops, "tensor_model_parallel_all_gather", gather)
+        monkeypatch.setattr(rocm_engram_ops, "tensor_model_parallel_all_gather", gather)
         for rank in range(tp_size):
             monkeypatch.setattr(
-                engram_ops, "get_tensor_model_parallel_rank", lambda rank=rank: rank
+                rocm_engram_ops,
+                "get_tensor_model_parallel_rank",
+                lambda rank=rank: rank,
             )
-            actual = module._forward_sharded_kv(
-                hidden_states, local_kv[rank], token_mask
+            actual = module._post_wkv(
+                hidden_states, local_kv[rank], token_mask, num_tokens
             )
             if gather is exchange:
                 assert actual.shape == hidden_states.shape
+                torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+
+
+def _checkpoint_tensor(param: torch.Tensor) -> torch.Tensor:
+    if param.dtype == torch.float8_e4m3fn:
+        return (torch.randn(param.shape) * 4).to(param.dtype)
+    if param.dtype in (torch.uint8, torch.float8_e8m0fnu):
+        return torch.randint(118, 124, param.shape, dtype=torch.uint8).view(param.dtype)
+    return (torch.randn(param.shape) * 0.05).to(param.dtype)
+
+
+@pytest.mark.skipif(
+    not rocm_engram_ops._shards_engram_gate(),
+    reason="sharded Engram gate platforms only",
+)
+@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_sharded_engram_loads_and_matches_tp1(tp_size, quantized, monkeypatch):
+    """The model's `wkv`, loaded from one fused checkpoint weight on each rank,
+    lays out the columns the gate kernels read and matches TP1."""
+    num_tokens, hc_mult, dim = 6, 4, 256
+    config = SimpleNamespace(hidden_size=dim, hc_mult=hc_mult, rms_norm_eps=1e-6)
+    layout = SimpleNamespace(max_ngram_size=3, n_heads=2, head_dim=64)
+    n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
+    quant_config = None
+    if quantized:
+        quant_config = DeepseekV4FP8Config.from_config(
+            {
+                "quant_method": "fp8",
+                "activation_scheme": "dynamic",
+                "weight_block_size": [32, 32],
+                "scale_fmt": "ue8m0",
+            }
+        )
+    monkeypatch.setattr(RocmEngram, "_create_embedding", lambda *args: None)
+    monkeypatch.setattr(RocmEngram, "_init_staging", lambda *args: None)
+
+    def set_rank(size, rank):
+        tp = SimpleNamespace(world_size=size, rank_in_group=rank)
+        monkeypatch.setattr(parallel_state, "_TP", tp)
+
+    def build(size, rank, checkpoint=None):
+        set_rank(size, rank)
+        with (
+            set_current_vllm_config(VllmConfig()),
+            set_default_torch_dtype(torch.bfloat16),
+            torch.device("cuda"),
+        ):
+            engram = RocmEngram(config, quant_config, layout, 0, False, "engram")
+        params = dict(engram.wkv.named_parameters())
+        if checkpoint is None:
+            checkpoint = {name: _checkpoint_tensor(p) for name, p in params.items()}
+        for name, param in params.items():
+            param.weight_loader(param, checkpoint[name].cuda())
+        engram.wkv.quant_method.process_weights_after_loading(engram.wkv)
+        engram.q_weight.data.copy_(q_weight)
+        engram.k_weight.data.copy_(k_weight)
+        engram.embed = lambda hash_ids: rows
+        return engram, checkpoint
+
+    torch.manual_seed(0)
+    hidden_states = torch.randn(
+        num_tokens, hc_mult, dim, dtype=torch.bfloat16, device="cuda"
+    )
+    rows = torch.randn(
+        num_tokens, n_hash_cols, layout.head_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    q_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device="cuda")
+    k_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16, device="cuda")
+    hash_ids = torch.zeros(num_tokens, n_hash_cols, dtype=torch.int32, device="cuda")
+    token_mask = torch.arange(num_tokens, device="cuda") % 3 != 1
+
+    reference, checkpoint = build(1, 0)
+    assert reference.kv_shards == 1
+    expected_kv = reference.wkv(rows.flatten(-2))
+    expected = reference(hidden_states, hash_ids, token_mask)
+
+    width = dim // tp_size
+    parts = expected_kv.view(num_tokens, hc_mult + 1, tp_size, width)
+    ranks = [build(tp_size, rank, checkpoint)[0] for rank in range(tp_size)]
+    for rank, engram in enumerate(ranks):
+        assert engram.kv_shards == tp_size
+        set_rank(tp_size, rank)
+        torch.testing.assert_close(
+            engram.wkv(rows.flatten(-2)),
+            parts[:, :, rank].flatten(1),
+            rtol=1e-2,
+            atol=1e-2,
+        )
+
+    sent: list[torch.Tensor] = []
+
+    def record(x, dim):
+        sent.append(x.clone())
+        return torch.cat([x] * tp_size)
+
+    def exchange(x, dim):
+        return torch.cat(sent)
+
+    for gather in (record, exchange):
+        monkeypatch.setattr(rocm_engram_ops, "tensor_model_parallel_all_gather", gather)
+        for rank, engram in enumerate(ranks):
+            set_rank(tp_size, rank)
+            actual = engram(hidden_states, hash_ids, token_mask)
+            if gather is exchange:
                 torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
 
