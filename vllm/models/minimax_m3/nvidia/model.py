@@ -148,8 +148,12 @@ logger = init_logger(__name__)
 
 # Largest batch whose MoE top-k finalize runs inside the next layer's fused
 # all-reduce + input norm + MXFP8 quantization. Larger batches finalize in the
-# MoE and use the regular fused all-reduce + norm.
-FUSED_MOE_FINALIZE_MAX_TOKENS = 32
+# MoE and use the regular fused all-reduce + norm. The fused kernel is a
+# one-shot multicast all-reduce, so its traffic grows with the batch: on GB300
+# at TP4 it beats the regular tail (finalize, shared add, two-shot all-reduce +
+# norm, MXFP8 quantization) through 128 tokens, ties at 256 and loses at 512.
+# 128 covers the decode steps of up to 16 requests with 7 speculative tokens.
+FUSED_MOE_FINALIZE_MAX_TOKENS = 128
 
 _QKV_FUSED_EPILOGUE_MIN_TOKENS = 512
 

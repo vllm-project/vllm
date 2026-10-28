@@ -227,6 +227,7 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         mxfp8_e4m3_quantize,
     )
+    from vllm.models.minimax_m3.nvidia.model import FUSED_MOE_FINALIZE_MAX_TOKENS
     from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
         FinalizeAllReduceGemmaRMSNormMxfp8,
     )
@@ -240,7 +241,7 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
         ensure_model_parallel_initialized(tp_size, pp_size)
         op = FinalizeAllReduceGemmaRMSNormMxfp8(
             hidden_size=hidden,
-            max_num_tokens=32,
+            max_num_tokens=FUSED_MOE_FINALIZE_MAX_TOKENS,
             top_k=top_k,
             fp32_weights=False,
             device=device,
@@ -333,8 +334,9 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
             graph.replay()
             check(captured)
 
-        # Changing shapes cover shrinking and growing batches in one mailbox.
-        for n in (1, 6, 32, 3, 17, 2, 1):
+        # Changing shapes cover shrinking and growing batches in one mailbox, up
+        # to the model's cap (decode steps of 16 requests x 8 tokens).
+        for n in (1, 6, 32, 3, 17, 64, 2, 128, 100, 1):
             run(n)
 
 
