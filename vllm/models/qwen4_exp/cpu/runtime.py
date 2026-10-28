@@ -28,6 +28,13 @@ def verify_cpu_config(vllm_config: "VllmConfig") -> None:
     """Reject runtime configurations unsupported by Qwen4Exp on CPU."""
     if current_platform.get_cpu_architecture() != CpuArchEnum.X86:
         raise NotImplementedError("Qwen4Exp CPU support currently requires x86-64.")
+    if (
+        vllm_config.model_config.hf_text_config.ple_layer_ids
+        and vllm_config.parallel_config.pipeline_parallel_size > 1
+    ):
+        raise NotImplementedError(
+            "Qwen4Exp CPU N-gram PLE embedding requires pipeline_parallel_size=1."
+        )
     if vllm_config.speculative_config is not None:
         raise NotImplementedError(
             "Qwen4Exp CPU support does not yet support speculative decoding."

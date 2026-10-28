@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ import torch
 from torch import nn
 from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
+from vllm import LLM
 from vllm.config import ParallelConfig
 from vllm.model_executor.models.config import (
     Qwen3_5ForConditionalGenerationConfig,
@@ -38,6 +40,7 @@ def _text_config() -> Qwen4ExpTextConfig:
         linear_num_value_heads=2,
         linear_key_head_dim=8,
         linear_value_head_dim=8,
+        output_gate_type="sigmoid",
         num_experts=4,
         num_experts_per_tok=2,
         eos_token_id=1,
@@ -71,6 +74,25 @@ def _vllm_config(restriction: str | None = None) -> SimpleNamespace:
     if restriction == "multimodal":
         config.model_config.multimodal_config.language_model_only = False
     return config
+
+
+def test_cpu_ple_rejects_pipeline_parallel_before_loading_weights(
+    tmp_path: Path,
+) -> None:
+    config = Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        text_config=_text_config(),
+    )
+    config.save_pretrained(tmp_path)
+    with pytest.raises(NotImplementedError, match="pipeline_parallel_size=1"):
+        LLM(
+            model=str(tmp_path),
+            pipeline_parallel_size=2,
+            language_model_only=True,
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            max_model_len=64,
+        )
 
 
 @pytest.mark.parametrize(
