@@ -35,7 +35,6 @@ def _make_tokenizer(vocab: dict[str, int], unk_token_id: int = 0):
 
 
 class TestResolveTokenIds:
-
     def test_control_token_returns_single_id(self):
         """A control token in the vocab resolves to a single ID."""
         tok = _make_tokenizer({"[THINK]": 34, "[/THINK]": 35})
@@ -45,8 +44,9 @@ class TestResolveTokenIds:
 
     def test_unknown_marker_falls_back_to_encode(self):
         """A marker not in the vocab falls back to tokenizer.encode."""
-        tok = _make_tokenizer({"<": 10, "t": 11, "h": 12, "i": 13,
-                               "n": 14, "k": 15, ">": 16})
+        tok = _make_tokenizer(
+            {"<": 10, "t": 11, "h": 12, "i": 13, "n": 14, "k": 15, ">": 16}
+        )
         ids = _resolve_token_ids(tok, "<think>")
         assert len(ids) > 1
         tok.encode.assert_called_once_with("<think>", add_special_tokens=False)
