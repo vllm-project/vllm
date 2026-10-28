@@ -3,6 +3,7 @@
 """Inline stream transport: endpoint parsing, framing, deadlines, and
 integer frame helpers."""
 
+import errno
 import socket
 import struct
 import threading
@@ -96,6 +97,65 @@ def pair():
     client.close()
     server.close()
     listener.close()
+
+
+@pytest.fixture
+def close_error_pair():
+    class CloseErrorSocket(socket.socket):
+        def close(self):
+            super().close()
+            raise OSError(errno.EIO, "injected socket cleanup failure")
+
+    left, peer = socket.socketpair()
+    conn = FramedConnection(CloseErrorSocket(fileno=left.detach()))
+    try:
+        yield conn, peer
+    finally:
+        if not conn.closed:
+            with pytest.raises(OSError, match="injected socket cleanup failure"):
+                conn.close()
+        peer.close()
+
+
+@pytest.mark.parametrize("duplex", [False, True])
+def test_send_cleanup_error_preserves_disconnect(close_error_pair, duplex):
+    conn, peer = close_error_pair
+    peer.close()
+    with pytest.raises(ConnectionClosed, match="send failed") as failure:
+        conn.send_control(b"request", drain_incoming=duplex)
+    assert isinstance(failure.value.__cause__, OSError)
+    assert failure.value.__cause__.errno != errno.EIO
+    assert conn.closed
+
+
+@pytest.mark.parametrize("duplex", [False, True])
+def test_send_cleanup_error_preserves_timeout(close_error_pair, duplex):
+    conn, _ = close_error_pair
+    conn._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    with pytest.raises(TransportTimeout, match="timed out sending"):
+        conn.send_control(
+            bytes(1 << 20),
+            deadline=time.monotonic() + 0.1,
+            drain_incoming=duplex,
+        )
+    assert conn.closed
+
+
+def test_receive_cleanup_error_preserves_frame_rejection(close_error_pair):
+    conn, peer = close_error_pair
+    peer.sendall(struct.pack("!BI", 0xFF, 0))
+    with pytest.raises(TransportError, match="unknown frame kind"):
+        conn.recv(timeout=1)
+    assert conn.closed
+
+
+def test_receive_cleanup_error_preserves_partial_frame_timeout(close_error_pair):
+    conn, peer = close_error_pair
+    conn.set_receive_limits(partial_frame_timeout=0.01)
+    peer.sendall(struct.pack("!BI", FRAME_CONTROL, 1))
+    with pytest.raises(TransportTimeout, match="started frame exceeded"):
+        conn.recv(timeout=1)
+    assert conn.closed
 
 
 def test_parse_tcp_endpoint():

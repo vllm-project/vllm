@@ -1462,3 +1462,135 @@ def test_separate_mtp_checkpoint_settings_reach_public_llm(
                 draft_config["rope_parameters"]["rope_theta"],
             )
         ]
+
+
+def test_remote_mtp_socket_cleanup_failure_preserves_target_only_and_reconnects(
+    vllm_runner, monkeypatch, tmp_path, tiny_ernie_mtp_model, record_property
+):
+    """Finish a faulted request exactly and admit fresh remote state afterward."""
+    assert current_platform.is_cuda(), "this test belongs to the NVIDIA CI step"
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    # Drive real engine steps explicitly while the draft stays process-separated.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    model = tiny_ernie_mtp_model
+    options = dict(
+        dtype="bfloat16",
+        skip_tokenizer_init=True,
+        max_model_len=128,
+        max_num_seqs=4,
+        max_num_batched_tokens=32,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        async_scheduling=False,
+        enforce_eager=True,
+        block_size=16,
+        kv_cache_memory_bytes=32 << 20,
+        gpu_memory_utilization=0.2,
+        attention_config={"backend": "TRITON_ATTN"},
+        moe_backend="triton",
+        disable_log_stats=False,
+    )
+    prompts = [
+        {"prompt_token_ids": [3 + (7 * i) % 125 for i in range(length)]}
+        for length in (17, 19)
+    ]
+    sampling = SamplingParams(
+        temperature=0, max_tokens=8, ignore_eos=True, detokenize=False
+    )
+    with vllm_runner(model, **options) as baseline:
+        expected = [
+            baseline.llm.generate(prompt, sampling, use_tqdm=False)[0]
+            .outputs[0]
+            .token_ids
+            for prompt in prompts
+        ]
+
+    def state(worker):
+        speculator = worker.model_runner.speculator
+        session = speculator._session
+        return {
+            "connected": session.connected,
+            "epoch": session.session_epoch,
+            "next_rpc": session._next_request_id,
+            "proposal_calls": speculator._stats["proposal_calls"],
+            "states": [
+                session.sequence_state(request.key).value
+                for request in speculator._requests.values()
+            ],
+            "backoff_ready": session._clock() >= session._reconnect_at,
+        }
+
+    def break_socket(worker):
+        session = worker.model_runner.speculator._session
+        assert session.connected and session._conn is not None
+        os.close(session._conn._sock.fileno())
+
+    with draft_server(
+        model,
+        tmp_path / "cleanup-draft.log",
+        revision=None,
+        attention_backend="TRITON_ATTN",
+        draft_kv_cache_gib=0.03125,
+        max_feature_tokens=32,
+        trust_remote_code=False,
+        moe_backend="triton",
+    ) as endpoint:
+        config = dict(
+            method="mtp",
+            model=model,
+            num_speculative_tokens=1,
+            draft_tensor_parallel_size=1,
+            attention_backend="TRITON_ATTN",
+            remote_draft=dict(
+                endpoint=endpoint,
+                transport="inline",
+                failure_policy="target_only",
+                request_timeout_ms=5000,
+                startup_timeout_ms=600000,
+            ),
+        )
+        with vllm_runner(model, speculative_config=config, **options) as remote:
+            llm = remote.llm
+
+            def drafts():
+                llm.llm_engine.do_log_stats()
+                return get_spec_decode_metric_value(
+                    llm.get_metrics(), "vllm:spec_decode_num_draft_tokens"
+                )
+
+            llm.enqueue(prompts[0], sampling.clone(), use_tqdm=False)
+            for _ in range(2):
+                assert not llm.llm_engine.step()
+            before = llm.collective_rpc(state)[0]
+            assert before["connected"] and before["states"] == ["ready"]
+            assert before["proposal_calls"] == 2 and drafts() > 0
+            llm.collective_rpc(break_socket)
+            assert not llm.llm_engine.step()
+            faulted = llm.collective_rpc(state)[0]
+            assert not faulted["connected"] and faulted["states"] == ["invalid"]
+            faulted_drafts = drafts()
+            [output] = llm.wait_for_completion(use_tqdm=False)
+            assert list(output.outputs[0].token_ids) == list(expected[0])
+            terminal = llm.collective_rpc(state)[0]
+            assert not terminal["connected"]
+            assert terminal["epoch"] == faulted["epoch"] == before["epoch"]
+            assert terminal["next_rpc"] == faulted["next_rpc"]
+            assert terminal["proposal_calls"] > faulted["proposal_calls"]
+            assert drafts() == faulted_drafts
+
+            deadline = time.monotonic() + 5
+            while not terminal["backoff_ready"]:
+                assert time.monotonic() < deadline, "remote reconnect stayed in backoff"
+                terminal = llm.collective_rpc(state)[0]
+            [fresh] = llm.generate(prompts[1], sampling.clone(), use_tqdm=False)
+            assert list(fresh.outputs[0].token_ids) == list(expected[1])
+            recovered = llm.collective_rpc(state)[0]
+            assert recovered["connected"] and recovered["epoch"] > before["epoch"]
+            assert drafts() > faulted_drafts
+            record_property("cleanup.before", before)
+            record_property("cleanup.faulted", faulted)
+            record_property("cleanup.terminal", terminal)
+            record_property("cleanup.recovered", recovered)
+            record_property("cleanup.drafts_before_reconnect", faulted_drafts)
+            record_property("cleanup.drafts_after_reconnect", drafts())

@@ -6,6 +6,7 @@ rounds, failure latching, stale-response discard, and shutdown recovery."""
 import contextlib
 import dataclasses
 import math
+import os
 import socket
 import threading
 import time
@@ -817,6 +818,27 @@ def test_normal_close_removes_deferred_terminal_retirement(session, clock, monke
     assert len(sent) == 1 and isinstance(sent[0], CloseSequence)
     assert session.sequence_state(a) is None
     assert not session._retiring
+
+
+def test_socket_cleanup_failure_falls_back_and_new_requests_reconnect(session):
+    key = ready(session, 1)
+    connection = session._conn
+    assert connection is not None
+    os.close(connection._sock.fileno())
+
+    failed = round_trip(session, batch(0, [key], recovery=[4]))
+    assert failed.output.valid_lengths.tolist() == [0]
+    assert failed.output.token_ids.tolist() == [[0] * NUM_SPEC_TOKENS]
+    assert session.sequence_state(key) is SequenceState.INVALID
+    assert not session.connected and session._conn is None
+
+    fresh = ready(session, 2)
+    recovered = round_trip(session, batch(0, [fresh], recovery=[5]))
+    assert recovered.output.valid_lengths.tolist() == [NUM_SPEC_TOKENS]
+    assert recovered.output.token_ids.tolist() == [expected_row(5)]
+    terminal = round_trip(session, batch(1, [key], recovery=[6]))
+    assert terminal.output.valid_lengths.tolist() == [0]
+    assert session.sequence_state(key) is SequenceState.INVALID
 
 
 # ----------------------------------------------------------------------

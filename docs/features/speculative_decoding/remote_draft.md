@@ -35,6 +35,9 @@ share the proposal deadline; expired rows do not start another forward.
 The server also checks the remaining budget after importing CUDA IPC features,
 before starting prefill or proposal computation.
 
+Socket cleanup errors encountered while handling a transport failure do not
+replace that failure or interrupt the configured fallback.
+
 Feature schema and frame byte budgets are checked before tensor serialization.
 Connections, partial frames, pending bytes and adapter waiters have server-side
 bounds. A shutdown grace timeout does not authorize freeing GPU storage whose

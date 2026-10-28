@@ -339,7 +339,8 @@ class FramedConnection:
             self._partial_started = partial_started
 
     def _receive_error(self, detail: str) -> None:
-        self.close()
+        with contextlib.suppress(OSError):
+            self.close()
         raise TransportError(detail)
 
     def _scan_buffer(self) -> None:
@@ -391,7 +392,8 @@ class FramedConnection:
             return deadline
         partial_deadline = self._partial_started + self._partial_frame_timeout
         if time.monotonic() >= partial_deadline:
-            self.close()
+            with contextlib.suppress(OSError):
+                self.close()
             raise TransportTimeout("started frame exceeded its receive timeout")
         return partial_deadline if deadline is None else min(deadline, partial_deadline)
 
@@ -464,13 +466,16 @@ class FramedConnection:
                 self.close()
             raise
         except TransportError:
-            self.close()
+            with contextlib.suppress(OSError):
+                self.close()
             raise
         except TimeoutError:
-            self.close()
+            with contextlib.suppress(OSError):
+                self.close()
             raise TransportTimeout("timed out sending a frame") from None
         except OSError as e:
-            self.close()
+            with contextlib.suppress(OSError):
+                self.close()
             raise ConnectionClosed(f"send failed: {e}") from e
 
     def _send_duplex(self, parts: tuple[bytes, bytes], deadline: float | None) -> None:
