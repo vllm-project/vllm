@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     check_and_fallback_input_schema,
     convert_to_humming_moe_kernel_format,
     get_humming_linear_compute_config,
+    get_humming_linear_tuning_config,
     get_humming_moe_quant_config,
     humming_update_schema_hadamard_block_size,
     input_schema_to_quant_key,
@@ -610,6 +611,9 @@ class HummingLinearMethod(LinearMethodBase):
             setattr(layer, name, param)
 
         self.compute_config = get_humming_linear_compute_config()
+        self.tuning_config = get_humming_linear_tuning_config(
+            self.layer_config, self.compute_config, layer.weight.device
+        )
         self.locks = _hm.create_humming_locks(layer.weight.device)
 
     def apply(
@@ -632,6 +636,7 @@ class HummingLinearMethod(LinearMethodBase):
             hadamard_block_size=self.weight_schema.hadamard_block_size,
             locks=self.locks,
             compute_config=self.compute_config,
+            tuning_config=self.tuning_config,
         )
         output = output.view(*x.shape[:-1], output.size(-1))
         return output

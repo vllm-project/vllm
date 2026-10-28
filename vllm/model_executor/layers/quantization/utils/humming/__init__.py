@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.humming.linear import (
     apply_humming_linear,
     convert_linear_layer_to_humming_standard,
     get_humming_linear_compute_config,
+    get_humming_linear_tuning_config,
     prepare_humming_linear_layer_config,
 )
 from vllm.model_executor.layers.quantization.utils.humming.moe import (
@@ -44,6 +45,7 @@ __all__ = [
     "apply_humming_linear",
     "convert_linear_layer_to_humming_standard",
     "get_humming_linear_compute_config",
+    "get_humming_linear_tuning_config",
     "prepare_humming_linear_layer_config",
     "prefers_humming",
     "prioritize_humming",

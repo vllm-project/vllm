@@ -12,6 +12,7 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.humming.schema import (
     check_and_fallback_input_schema,
 )
+from vllm.utils.math_utils import cdiv, round_up
 
 if TYPE_CHECKING:
     from vllm.utils.humming import BaseInputSchema, LayerConfig
@@ -154,6 +155,9 @@ def prepare_humming_linear_layer_config(
         param = torch.nn.Parameter(tensor, requires_grad=False)
         setattr(layer, name, param)
 
+    layer.humming_tuning_config = get_humming_linear_tuning_config(
+        config, get_humming_linear_compute_config(), layer.weight.device
+    )
     return config
 
 
@@ -165,6 +169,37 @@ def get_humming_linear_compute_config() -> str:
             "gemm_type": "dense",
         }
     )
+
+
+def get_humming_linear_tuning_config(
+    layer_config: "LayerConfig", compute_config: str, device: torch.device
+) -> str | None:
+    from vllm.utils.humming import get_heuristics_config
+
+    if layer_config.sm_version // 10 not in (10, 11):
+        return None
+
+    compute_kwargs = json.loads(compute_config)
+    configs = get_heuristics_config(layer_config, device=device, **compute_kwargs)
+    patched_configs = []
+    changed = False
+    for lower, upper, config in configs:
+        block_m = config["block_shape"][0]
+        if config.get("umma_cta_group_size", 1) == 2 and block_m % 16:
+            # Re-select for aligned tile capacity so Humming rechecks resources.
+            # Workaround for https://github.com/vllm-project/humming/pull/178.
+            shape_m = cdiv(upper, block_m) * round_up(block_m, 16)
+            config = get_heuristics_config(
+                layer_config, shape_m=shape_m, device=device, **compute_kwargs
+            )
+            if (
+                config.get("umma_cta_group_size", 1) == 2
+                and config["block_shape"][0] % 16
+            ):
+                raise ValueError("Humming generated a misaligned two-CTA M tile")
+            changed = True
+        patched_configs.append([lower, upper, config])
+    return json.dumps(patched_configs) if changed else None
 
 
 def apply_humming_linear(
@@ -197,5 +232,6 @@ def apply_humming_linear(
         hadamard_block_size=layer.weight_schema.hadamard_block_size,
         locks=locks,
         compute_config=compute_config,
+        tuning_config=layer.humming_tuning_config,
     )
     return output.view(*x.shape[:-1], output.size(-1))
